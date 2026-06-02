@@ -1,0 +1,31 @@
+{
+  "name": "@continuum/core",
+  "version": "0.1.0",
+  "description": "Vendor-agnostic memory layer for development teams",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "migrate": "node dist/storage/migrate-cli.js",
+    "migrate:dev": "tsx src/storage/migrate-cli.ts",
+    "api": "node dist/api/server.js",
+    "api:dev": "tsx src/api/server.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "express": "^5.2.1",
+    "pg": "^8.20.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.18.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
