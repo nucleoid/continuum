@@ -1,0 +1,243 @@
+# Continuum Architecture (v0)
+
+Status: design, pre-implementation. This document is the source of truth for the v0 schema, scope model, capture API, retrieval surface, and extension points.
+
+## Design principles
+
+1. **Vendor-agnostic at every layer**. No memory ever requires a specific LLM provider, IDE, or embedding model to be read.
+2. **Scopes are first-class**. Every memory belongs to exactly one scope. Read access is inherited; write access is explicit.
+3. **Capture is plugin-shaped**. Every ingestion source is interchangeable. Adding a new one does not modify core.
+4. **Audit everything**. Every read and every write is logged. The audit log is queryable.
+5. **Decay is per-type**. A decision does not decay like a context snapshot. The taxonomy drives the lifecycle.
+6. **Build for the next milestone, not the next decade**. No speculative interfaces.
+
+## Scope model
+
+Five scopes:
+
+| Scope | Cardinality | Example contents |
+|-------|-------------|------------------|
+| `org` | one per deployment | architectural decisions, security policies, naming conventions, "we use ADO not Jira" |
+| `team:{name}` | many | squad runbooks, on-call notes, sprint context |
+| `project:{name}` | many | per-codebase API quirks, deployment gotchas, business rules |
+| `user:{id}` | one per user | personal scratch, "what was I doing yesterday", preferences |
+| `role:{name}` | many | cross-cutting (security, design, ops, PM) |
+
+**Write rule**: every memory is written to exactly one scope. The writer must be a member of that scope.
+
+**Read rule**: a `user` reads its own `user` scope plus every `team`, `project`, and `role` scope it belongs to, plus `org`. Scope membership is sourced from Entra ID groups (or a configurable equivalent).
+
+**Promotion**: a memory can be promoted to a higher scope via an explicit `PromoteMemory` operation. Promotion requires an approver (lead for `user` to `team`, architect or org admin for `team` to `org`). Promotion creates a new record in the destination scope and marks the source as `promoted_to: <new_id>`.
+
+## Memory taxonomy
+
+Five types. Each type has its own decay rule and review cadence.
+
+| Type | Decay | Review |
+|------|-------|--------|
+| `fact` | re-verified every 90 days; flagged stale if verification fails | owner re-confirms |
+| `decision` | does not decay; immutable after write | owner can supersede with new decision linked by `supersedes_id` |
+| `context` | aggressive: half-life of 14 days for `user` scope, 60 days for `team`/`project` | auto-archived past threshold |
+| `playbook` | versioned; current version always live; reviewed every 180 days | owner sign-off recorded |
+| `relationship` | re-verified every 180 days against source-of-truth (org chart) | auto-flagged if mismatch |
+
+## Storage schema (PostgreSQL + pgvector)
+
+```sql
+-- Identity and scope membership come from Entra; we cache for query speed.
+CREATE TABLE principals (
+  id              UUID PRIMARY KEY,
+  external_id     TEXT NOT NULL UNIQUE,  -- Entra object id, or service-account id
+  kind            TEXT NOT NULL,         -- 'user' | 'service'
+  display_name    TEXT NOT NULL,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE scopes (
+  id              UUID PRIMARY KEY,
+  kind            TEXT NOT NULL,         -- 'org' | 'team' | 'project' | 'user' | 'role'
+  name            TEXT NOT NULL,         -- '' for org, otherwise the scope name
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (kind, name)
+);
+
+CREATE TABLE scope_memberships (
+  principal_id    UUID NOT NULL REFERENCES principals(id),
+  scope_id        UUID NOT NULL REFERENCES scopes(id),
+  role            TEXT NOT NULL,         -- 'reader' | 'writer' | 'admin'
+  added_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (principal_id, scope_id)
+);
+
+CREATE TABLE memories (
+  id              UUID PRIMARY KEY,
+  scope_id        UUID NOT NULL REFERENCES scopes(id),
+  type            TEXT NOT NULL,         -- 'fact' | 'decision' | 'context' | 'playbook' | 'relationship'
+  title           TEXT NOT NULL,
+  body            TEXT NOT NULL,
+  metadata        JSONB NOT NULL DEFAULT '{}'::jsonb,
+  tags            TEXT[] NOT NULL DEFAULT '{}',  -- controlled vocabulary, validated
+  author_id       UUID NOT NULL REFERENCES principals(id),
+  source          TEXT NOT NULL,         -- capture plugin id, e.g. 'github-pr', 'ado-workitem', 'terminal-summary', 'manual'
+  source_ref      TEXT,                  -- external identifier, e.g. PR url or work-item id
+  state           TEXT NOT NULL DEFAULT 'live',  -- 'live' | 'stale' | 'archived' | 'promoted'
+  supersedes_id   UUID REFERENCES memories(id),
+  promoted_to_id  UUID REFERENCES memories(id),
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at      TIMESTAMPTZ,           -- type-dependent
+  last_verified   TIMESTAMPTZ
+);
+
+CREATE INDEX memories_scope_state_idx ON memories (scope_id, state);
+CREATE INDEX memories_type_idx        ON memories (type);
+CREATE INDEX memories_tags_gin        ON memories USING gin (tags);
+CREATE INDEX memories_metadata_gin    ON memories USING gin (metadata);
+
+CREATE TABLE memory_embeddings (
+  memory_id       UUID PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+  provider        TEXT NOT NULL,         -- 'ollama:nomic-embed-text', 'voyage-3', etc.
+  dim             INT  NOT NULL,
+  embedding       VECTOR,                -- pgvector
+  embedded_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX memory_embeddings_ivf ON memory_embeddings USING ivfflat (embedding vector_cosine_ops);
+
+CREATE TABLE audit_log (
+  id              BIGSERIAL PRIMARY KEY,
+  at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+  principal_id    UUID NOT NULL REFERENCES principals(id),
+  action          TEXT NOT NULL,         -- 'read' | 'write' | 'promote' | 'archive' | 'verify'
+  memory_id       UUID,
+  scope_id        UUID,
+  query           TEXT,
+  metadata        JSONB
+);
+
+CREATE INDEX audit_log_principal_idx ON audit_log (principal_id, at DESC);
+CREATE INDEX audit_log_memory_idx    ON audit_log (memory_id);
+```
+
+## Capture API (v0)
+
+Single ingestion endpoint. Capture plugins call this; manual CLI calls this; terminal hooks call this.
+
+```
+POST /api/v0/capture
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "scope":      { "kind": "project", "name": "booking-engine" },
+  "type":       "context",
+  "title":      "Started branch feature/checkout-v2 off main",
+  "body":       "Working on the new checkout flow. PR #4421 in flight, blocked on Security Reviewer review.",
+  "tags":       ["branch", "in-progress"],
+  "source":     "github-branch",
+  "source_ref": "https://github.com/exampleorg/booking-engine/tree/feature/checkout-v2",
+  "metadata":   { "branch": "feature/checkout-v2", "base": "main" }
+}
+```
+
+Response:
+```
+{ "id": "01HXY...", "scope_id": "...", "expires_at": "2026-06-16T02:44:05Z" }
+```
+
+Validation rules:
+- `scope` must exist; caller must have `writer` role on it.
+- `type` must be valid; `expires_at` is computed from type + scope kind.
+- `tags` validated against the controlled vocabulary for the scope kind (org-admins manage vocabularies).
+- `source` must be a registered capture plugin id or `"manual"`.
+
+## Retrieval API (v0)
+
+```
+POST /api/v0/recall
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "query":   "where is the checkout retry policy defined",
+  "scopes":  ["project:booking-engine", "team:payments", "org"],
+  "types":   ["fact", "decision", "playbook"],
+  "limit":   10
+}
+```
+
+Response includes ranked memories with `score`, `scope`, `type`, `source_ref`, and a short `excerpt`. Reading is logged to `audit_log` per principal.
+
+Search is hybrid: vector similarity on `memory_embeddings` plus full-text on `memories.body`, fused by reciprocal rank fusion. Scope filter is applied pre-rank.
+
+## AGENTS.md generator
+
+```
+GET /api/v0/agents-md?project=booking-engine&team=payments
+```
+
+Returns a markdown document containing:
+1. The `org` section (always included).
+2. The requested `project` scope.
+3. The requested `team` scope.
+4. Any `role` scopes the requesting principal belongs to.
+
+Memory selection is tuned for "bootstrap an agent": prefers `playbook` and `decision` over `context`, prefers high-score retrievals against a configured set of "what should an agent know on day one" queries per scope.
+
+Output is plain markdown. No vendor-specific tokens. Suitable to drop at the root of any repo and have any agent read first.
+
+## Capture plugins (v0 set)
+
+Each plugin lives in `src/capture/{plugin}/`, registers an id, and posts to the internal capture API with a service-account token.
+
+1. `github-pr`: webhook on PR merged. Summarises body + review thread via configured LLM. Writes `context` to `project` scope.
+2. `ado-workitem`: webhook on work-item updated. Summarises comments and state changes. Writes `context` to `project` scope (or `decision` if a "decision" label is present).
+3. `github-branch`: webhook on branch ref created. Writes `context` to author's `user` scope.
+4. `deploy-event`: CD pipeline webhook. Writes `fact` to `project` scope ("v1.42 deployed to PROD at <time>, PR #X").
+5. `terminal-summary`: receives end-of-session summary from an agent hook. Writes `context` to author's `user` scope. The agent hook is published as a small shell helper and an MCP server method.
+6. `teams-chat` (v1.5, gated on Security Reviewer signoff + consent flow): Microsoft Graph subscription on opted-in channels. Extracts decisions and Q&A. Writes `decision` or `fact` to `team` scope.
+
+## MCP server surface
+
+Methods:
+- `continuum.capture(scope, type, title, body, ...)`
+- `continuum.recall(query, scopes?, types?, limit?)`
+- `continuum.promote(memory_id, target_scope)`
+- `continuum.verify(memory_id, still_true: bool, note?)`
+- `continuum.list_scopes()`
+
+ACLs are enforced server-side from the bearer token's principal. The MCP client never sees memories outside its caller's read set.
+
+## Extension points
+
+Five interfaces. Engram and any future system integrate through these. Continuum core has zero knowledge of Engram.
+
+1. **CapturePlugin**: implements `capture(event) -> CaptureRecord[]`. Registered at startup. Engram could write a plugin that turns its code-archaeology findings into `decision` memories.
+2. **RetrievalEnricher**: receives a `RecallResult` and may attach additional context. Engram could attach work-item linkages to results without Continuum knowing what a work item is.
+3. **PromotionWebhook**: fires on every promotion. Engram could subscribe and re-index the AGENTS.md output for affected repos.
+4. **EmbeddingProvider**: implements `embed(texts) -> vectors`. Default impls: `ollama`, `voyage`, `openai`. Sensitive scopes pin to local-only providers.
+5. **Transport**: today MCP + REST + AGENTS.md. New transports (Teams bot, Slack command) implement this and reuse all ACL/audit machinery.
+
+## Authentication
+
+- End-user auth: Entra ID SSO (OIDC). Token cached server-side, refreshed on demand.
+- Service accounts: long-lived API keys, rotated quarterly, scoped to specific capture plugins.
+- All tokens map to a `principal` row. Audit log references principals, never raw tokens.
+
+## What is explicitly out of scope for v0
+
+- A web UI. CLI + agent integration is the v0 surface.
+- Multi-region deployment.
+- Cross-tenant federation (one Continuum instance per tenant).
+- LLM-side summarisation as a built-in feature; summarisation happens in capture plugins, not in core.
+- Anything Engram does. Engram remains a separate product. Integration is via the extension points above.
+
+## Next milestones
+
+- **M0 (current)**: design (this document) reviewed and signed off.
+- **M1**: schema migrations + scope model + capture API + REST recall. No plugins yet; manual capture only.
+- **M2**: MCP server transport + AGENTS.md generator.
+- **M3**: `github-pr`, `ado-workitem`, `github-branch`, `deploy-event`, `terminal-summary` capture plugins.
+- **M4**: Entra SSO end-to-end, audit log queryable via CLI, Security Reviewer signoff on ACL/audit/PII story.
+- **M5**: Pilot rollout to one ExampleOrg squad.
+- **M6**: `teams-chat` plugin behind consent flow.
