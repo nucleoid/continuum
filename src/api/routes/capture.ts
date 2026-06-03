@@ -5,6 +5,8 @@ import { getScopeByRef } from '../../storage/scopes.js';
 import { createMemory } from '../../storage/memories.js';
 import { hasRole } from '../../storage/memberships.js';
 import { record as recordAudit } from '../../audit/log.js';
+import type { EmbeddingProvider } from '../../embeddings/provider.js';
+import { storeMemoryEmbedding } from '../../storage/embeddings.js';
 
 const captureSchema = z.object({
   scope: z.object({
@@ -20,7 +22,10 @@ const captureSchema = z.object({
   metadata: z.record(z.unknown()).optional(),
 });
 
-export function captureRouter(pool: pg.Pool): Router {
+export function captureRouter(
+  pool: pg.Pool,
+  embeddingProvider: EmbeddingProvider | null = null,
+): Router {
   const router = Router();
 
   router.post('/capture', async (req, res) => {
@@ -65,6 +70,34 @@ export function captureRouter(pool: pg.Pool): Router {
       metadata,
     });
 
+    if (embeddingProvider) {
+      try {
+        await storeMemoryEmbedding(
+          pool,
+          memory.id,
+          `${memory.title}\n\n${memory.body}`,
+          embeddingProvider,
+        );
+      } catch (err) {
+        // Embedding failures are non-fatal: the memory is still stored and
+        // recallable via FTS. Surface via audit metadata for follow-up.
+        await recordAudit(pool, {
+          principalId: principal.id,
+          action: 'write',
+          memoryId: memory.id,
+          scopeId: scope.id,
+          metadata: { source, type, embedding_error: String(err) },
+        });
+        res.status(201).json({
+          id: memory.id,
+          scopeId: memory.scopeId,
+          expiresAt: memory.expiresAt,
+          embedded: false,
+        });
+        return;
+      }
+    }
+
     await recordAudit(pool, {
       principalId: principal.id,
       action: 'write',
@@ -77,6 +110,7 @@ export function captureRouter(pool: pg.Pool): Router {
       id: memory.id,
       scopeId: memory.scopeId,
       expiresAt: memory.expiresAt,
+      embedded: Boolean(embeddingProvider),
     });
   });
 

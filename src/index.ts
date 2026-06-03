@@ -9,3 +9,5 @@ export * from './storage/memberships.js';
 export * from './storage/memories.js';
 export * from './storage/recall.js';
 export * from './embeddings/provider.js';
+export * from './embeddings/ollama.js';
+export * from './embeddings/factory.js';

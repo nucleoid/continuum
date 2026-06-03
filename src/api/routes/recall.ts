@@ -4,8 +4,9 @@ import { z } from 'zod';
 import { parseScopeString } from '../../scopes/model.js';
 import { getScopeByRef } from '../../storage/scopes.js';
 import { getScopesForPrincipal } from '../../storage/memberships.js';
-import { recallByFts } from '../../storage/recall.js';
+import { recall } from '../../storage/recall.js';
 import { record as recordAudit } from '../../audit/log.js';
+import type { EmbeddingProvider } from '../../embeddings/provider.js';
 
 const recallSchema = z.object({
   query: z.string().min(1).max(2000),
@@ -16,7 +17,10 @@ const recallSchema = z.object({
   limit: z.number().int().min(1).max(100).optional(),
 });
 
-export function recallRouter(pool: pg.Pool): Router {
+export function recallRouter(
+  pool: pg.Pool,
+  embeddingProvider: EmbeddingProvider | null = null,
+): Router {
   const router = Router();
 
   router.post('/recall', async (req, res) => {
@@ -28,7 +32,6 @@ export function recallRouter(pool: pg.Pool): Router {
     const principal = req.principal!;
     const { query, scopes: scopeStrings, types, limit } = parsed.data;
 
-    // Accessible = memberships + org always included.
     const memberships = await getScopesForPrincipal(pool, principal.id);
     const accessible = new Map<string, string>(memberships.map((s) => [s.id, `${s.kind}:${s.name}`]));
     const orgScope = await getScopeByRef(pool, { kind: 'org', name: '' });
@@ -46,8 +49,8 @@ export function recallRouter(pool: pg.Pool): Router {
           return;
         }
         const scope = await getScopeByRef(pool, ref);
-        if (!scope) continue; // silently drop scopes that don't exist
-        if (!accessible.has(scope.id)) continue; // drop unauthorised scopes
+        if (!scope) continue;
+        if (!accessible.has(scope.id)) continue;
         ids.push(scope.id);
       }
       scopeIds = ids;
@@ -55,18 +58,23 @@ export function recallRouter(pool: pg.Pool): Router {
       scopeIds = Array.from(accessible.keys());
     }
 
-    const results = await recallByFts(pool, {
+    const results = await recall(pool, {
       query,
       scopeIds,
       types,
       limit: limit ?? 10,
+      embeddingProvider,
     });
 
     await recordAudit(pool, {
       principalId: principal.id,
       action: 'read',
       query,
-      metadata: { scopes: scopeIds.length, hits: results.length },
+      metadata: {
+        scopes: scopeIds.length,
+        hits: results.length,
+        embedded: Boolean(embeddingProvider),
+      },
     });
 
     res.json({
