@@ -11,3 +11,5 @@ export * from './storage/recall.js';
 export * from './embeddings/provider.js';
 export * from './embeddings/ollama.js';
 export * from './embeddings/factory.js';
+export * from './agents-md/render.js';
+export * from './storage/promote.js';

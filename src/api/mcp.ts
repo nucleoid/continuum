@@ -9,6 +9,7 @@ import { createMemory } from '../storage/memories.js';
 import { recall } from '../storage/recall.js';
 import { storeMemoryEmbedding } from '../storage/embeddings.js';
 import { promoteMemory, verifyMemory, PromoteError } from '../storage/promote.js';
+import { renderAgentsMd } from '../agents-md/render.js';
 import { record as recordAudit } from '../audit/log.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import type { Principal, ScopeKind } from '../types.js';
@@ -279,6 +280,38 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         if (err instanceof PromoteError) return textResult(`error (${err.status}): ${err.message}`);
         throw err;
       }
+    },
+  );
+
+  server.registerTool(
+    'continuum.agents_md',
+    {
+      description:
+        'Render the AGENTS.md bootstrap bundle for the calling principal. Always includes org and any role scopes; optionally includes a specific project and/or team scope.',
+      inputSchema: {
+        project: z.string().optional(),
+        team: z.string().optional(),
+        limit: z.number().int().min(1).max(200).optional(),
+      },
+    },
+    async (args) => {
+      const md = await renderAgentsMd(pool, {
+        principalId: principal.id,
+        project: args.project,
+        team: args.team,
+        perScopeLimit: args.limit,
+      });
+      await recordAudit(pool, {
+        principalId: principal.id,
+        action: 'read',
+        metadata: {
+          view: 'agents-md',
+          project: args.project ?? null,
+          team: args.team ?? null,
+          transport: 'mcp',
+        },
+      });
+      return textResult(md);
     },
   );
 
