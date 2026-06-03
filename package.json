@@ -12,7 +12,9 @@
     "migrate": "node dist/storage/migrate-cli.js",
     "migrate:dev": "tsx src/storage/migrate-cli.ts",
     "api": "node dist/api/server.js",
-    "api:dev": "tsx src/api/server.ts"
+    "api:dev": "tsx src/api/server.ts",
+    "mcp": "node dist/api/mcp.js",
+    "mcp:dev": "tsx src/api/mcp.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
