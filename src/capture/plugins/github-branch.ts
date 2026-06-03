@@ -1,0 +1,49 @@
+import type { CaptureInput } from '../../types.js';
+import type { CapturePlugin, CaptureContext } from '../plugin.js';
+
+export interface GitHubBranchEvent {
+  ref: string;
+  ref_type: 'branch' | 'tag';
+  master_branch?: string;
+  repository: {
+    full_name: string;
+    name: string;
+    html_url: string;
+  };
+  sender: { login: string };
+}
+
+export const githubBranchPlugin: CapturePlugin<GitHubBranchEvent> = {
+  id: 'github-branch',
+
+  transform(event, ctx: CaptureContext = {}): CaptureInput[] {
+    if (event.ref_type !== 'branch') return [];
+
+    const actor = event.sender.login;
+    const userScopeName = ctx.resolveUserScope?.(actor) ?? actor;
+
+    const lines = [
+      `Branch ${event.ref} created in ${event.repository.full_name}.`,
+      `Base: ${event.master_branch ?? 'unknown'}`,
+      `Author: ${actor}`,
+    ];
+
+    return [
+      {
+        scope: { kind: 'user', name: userScopeName },
+        type: 'context',
+        title: `Started branch ${event.ref} (${event.repository.name})`,
+        body: lines.join('\n'),
+        tags: ['branch', 'github'],
+        source: 'github-branch',
+        sourceRef: `${event.repository.html_url}/tree/${event.ref}`,
+        metadata: {
+          repo: event.repository.full_name,
+          ref: event.ref,
+          base: event.master_branch ?? null,
+          actor,
+        },
+      },
+    ];
+  },
+};

@@ -13,3 +13,4 @@ export * from './embeddings/ollama.js';
 export * from './embeddings/factory.js';
 export * from './agents-md/render.js';
 export * from './storage/promote.js';
+export * from './capture/index.js';

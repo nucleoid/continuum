@@ -1,0 +1,63 @@
+import { describe, expect, it } from 'vitest';
+import { githubBranchPlugin, type GitHubBranchEvent } from './github-branch.js';
+
+function event(overrides: Partial<GitHubBranchEvent> = {}): GitHubBranchEvent {
+  return {
+    ref: 'feature/checkout-v2',
+    ref_type: 'branch',
+    master_branch: 'main',
+    repository: {
+      full_name: 'exampleorg/booking-engine',
+      name: 'booking-engine',
+      html_url: 'https://github.com/exampleorg/booking-engine',
+    },
+    sender: { login: 'cass-exampleorg' },
+    ...overrides,
+  };
+}
+
+describe('github-branch plugin', () => {
+  it('emits a user-scoped context memory for a new branch', () => {
+    const out = githubBranchPlugin.transform(event());
+    expect(out).toHaveLength(1);
+    const m = out[0];
+    expect(m.scope).toEqual({ kind: 'user', name: 'cass-exampleorg' });
+    expect(m.type).toBe('context');
+    expect(m.title).toBe('Started branch feature/checkout-v2 (booking-engine)');
+    expect(m.source).toBe('github-branch');
+    expect(m.sourceRef).toBe(
+      'https://github.com/exampleorg/booking-engine/tree/feature/checkout-v2',
+    );
+    expect(m.tags).toEqual(['branch', 'github']);
+  });
+
+  it('records repo, ref, base, and actor in metadata', () => {
+    const out = githubBranchPlugin.transform(event());
+    expect(out[0].metadata).toEqual({
+      repo: 'exampleorg/booking-engine',
+      ref: 'feature/checkout-v2',
+      base: 'main',
+      actor: 'cass-exampleorg',
+    });
+  });
+
+  it('skips tag creation events', () => {
+    const ev = event({ ref: 'v1.0.0', ref_type: 'tag' });
+    expect(githubBranchPlugin.transform(ev)).toEqual([]);
+  });
+
+  it('resolves user scope via context when supplied', () => {
+    const ev = event({ sender: { login: 'github-cass' } });
+    const out = githubBranchPlugin.transform(ev, {
+      resolveUserScope: (login) => (login === 'github-cass' ? 'entra-cass' : null),
+    });
+    expect(out[0].scope).toEqual({ kind: 'user', name: 'entra-cass' });
+  });
+
+  it('falls back to actor login when resolveUserScope returns null', () => {
+    const out = githubBranchPlugin.transform(event(), {
+      resolveUserScope: () => null,
+    });
+    expect(out[0].scope).toEqual({ kind: 'user', name: 'cass-exampleorg' });
+  });
+});
