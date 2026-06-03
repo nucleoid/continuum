@@ -6,3 +6,6 @@ export { getPool, closePool } from './storage/pool.js';
 export * from './storage/principals.js';
 export * from './storage/scopes.js';
 export * from './storage/memberships.js';
+export * from './storage/memories.js';
+export * from './storage/recall.js';
+export * from './embeddings/provider.js';

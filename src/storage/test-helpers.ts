@@ -21,4 +21,8 @@ export async function resetData(pool: pg.Pool): Promise<void> {
       principals
     RESTART IDENTITY CASCADE
   `);
+  // Re-seed the singleton org scope that the schema migration inserts.
+  await pool.query(
+    `INSERT INTO scopes (id, kind, name) VALUES (gen_random_uuid(), 'org', '')`,
+  );
 }
