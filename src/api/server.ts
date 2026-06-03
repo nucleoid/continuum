@@ -5,6 +5,7 @@ import { bearerAuth } from './auth.js';
 import { captureRouter } from './routes/capture.js';
 import { recallRouter } from './routes/recall.js';
 import { agentsMdRouter } from './routes/agents-md.js';
+import { auditRouter } from './routes/audit.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import { makeEmbeddingProviderFromEnv } from '../embeddings/factory.js';
 
@@ -26,6 +27,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   v0.use(captureRouter(pool, provider));
   v0.use(recallRouter(pool, provider));
   v0.use(agentsMdRouter(pool));
+  v0.use(auditRouter(pool));
 
   app.use('/api/v0', v0);
 

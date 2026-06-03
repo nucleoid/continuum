@@ -14,3 +14,5 @@ export * from './embeddings/factory.js';
 export * from './agents-md/render.js';
 export * from './storage/promote.js';
 export * from './capture/index.js';
+export * from './audit/log.js';
+export * from './audit/query.js';
