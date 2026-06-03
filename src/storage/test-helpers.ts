@@ -1,0 +1,24 @@
+import pg from 'pg';
+import { runMigrations } from './migrator.js';
+
+const DEFAULT_URL = 'postgres://continuum:continuum@localhost:5433/continuum';
+
+export async function makeTestPool(): Promise<pg.Pool> {
+  const url = process.env.CONTINUUM_TEST_DATABASE_URL ?? DEFAULT_URL;
+  const pool = new pg.Pool({ connectionString: url, max: 4 });
+  await runMigrations(pool);
+  return pool;
+}
+
+export async function resetData(pool: pg.Pool): Promise<void> {
+  await pool.query(`
+    TRUNCATE TABLE
+      audit_log,
+      memory_embeddings,
+      memories,
+      scope_memberships,
+      scopes,
+      principals
+    RESTART IDENTITY CASCADE
+  `);
+}
