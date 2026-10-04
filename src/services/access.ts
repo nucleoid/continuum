@@ -2,9 +2,9 @@ import type { ScopeRef } from '../types.js';
 import type { Queryable } from '../storage/queryable.js';
 import { getScopeByRef } from '../storage/scopes.js';
 import {
+  canMutateScope,
   canReadScope,
   canWriteScope,
-  hasExplicitRoleForMutation,
   listReadableScopes,
   type ReadableScope,
 } from '../scopes/access.js';
@@ -25,7 +25,7 @@ export async function canWriteScopeForMutation(
   principalId: string,
   scopeId: string,
 ): Promise<boolean> {
-  return hasExplicitRoleForMutation(queryable, principalId, scopeId, 'writer');
+  return canMutateScope(queryable, principalId, scopeId);
 }
 
 export async function resolveReadableScopeIds(

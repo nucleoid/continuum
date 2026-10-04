@@ -280,6 +280,89 @@ describe('MCP server', () => {
     expect(v.state).toBe('stale');
   });
 
+  it('denies lifecycle mutations to an implicit org reader', async () => {
+    const { client, me, org } = await connectClient();
+    const verifySource = await createMemory(pool, {
+      scopeId: org.id, scopeKind: 'org', type: 'fact', title: 'Implicit org verify',
+      body: 'Implicit access is read-only.', authorId: me.id, source: 'manual',
+    });
+    const promoteSource = await createMemory(pool, {
+      scopeId: org.id, scopeKind: 'org', type: 'decision', title: 'Implicit org promote',
+      body: 'Promotion mutates the source.', authorId: me.id, source: 'manual',
+    });
+
+    const verify = (await client.callTool({
+      name: 'continuum.verify',
+      arguments: { memory_id: verifySource.id, still_true: false },
+    })) as CallToolResult & { isError?: boolean };
+    const promote = (await client.callTool({
+      name: 'continuum.promote',
+      arguments: {
+        memory_id: promoteSource.id,
+        target_scope_kind: 'team',
+        target_scope_name: 'payments',
+      },
+    })) as CallToolResult & { isError?: boolean };
+
+    for (const result of [verify, promote]) {
+      expect(result.isError).toBe(true);
+      expect(parseJsonResult(result)).toEqual({
+        error: {
+          code: 'FORBIDDEN',
+          message: 'principal lacks writer role on source scope',
+        },
+      });
+    }
+    const { rows } = await pool.query(
+      `SELECT state, last_verified, promoted_to_id
+         FROM memories
+        WHERE id = ANY($1::uuid[])
+        ORDER BY id`,
+      [[verifySource.id, promoteSource.id]],
+    );
+    expect(rows).toEqual([
+      { state: 'live', last_verified: null, promoted_to_id: null },
+      { state: 'live', last_verified: null, promoted_to_id: null },
+    ]);
+  });
+
+  it('denies lifecycle mutations to an explicit source reader', async () => {
+    const { client, me } = await connectClient();
+    const readonly = await createScope(pool, { kind: 'project', name: 'readonly-source' });
+    await addMembership(pool, me.id, readonly.id, 'reader');
+    const verifySource = await createMemory(pool, {
+      scopeId: readonly.id, scopeKind: 'project', type: 'fact', title: 'Reader verify',
+      body: 'Reader access is not mutation access.', authorId: me.id, source: 'manual',
+    });
+    const promoteSource = await createMemory(pool, {
+      scopeId: readonly.id, scopeKind: 'project', type: 'decision', title: 'Reader promote',
+      body: 'Reader access cannot promote.', authorId: me.id, source: 'manual',
+    });
+
+    const verify = (await client.callTool({
+      name: 'continuum.verify',
+      arguments: { memory_id: verifySource.id, still_true: false },
+    })) as CallToolResult & { isError?: boolean };
+    const promote = (await client.callTool({
+      name: 'continuum.promote',
+      arguments: {
+        memory_id: promoteSource.id,
+        target_scope_kind: 'team',
+        target_scope_name: 'payments',
+      },
+    })) as CallToolResult & { isError?: boolean };
+
+    for (const result of [verify, promote]) {
+      expect(result.isError).toBe(true);
+      expect(parseJsonResult(result)).toEqual({
+        error: {
+          code: 'FORBIDDEN',
+          message: 'principal lacks writer role on source scope',
+        },
+      });
+    }
+  });
+
   it('ensure_scope creates a new scope idempotently', async () => {
     const { client } = await connectClient();
     const a = (await client.callTool({

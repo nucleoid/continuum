@@ -19,13 +19,12 @@ export async function canReadScope(
     || hasRole(queryable, principalId, scope.id, 'reader');
 }
 
-export async function canReadScopeForMutation(
+export async function canMutateScope(
   queryable: Queryable,
   principalId: string,
-  scope: AccessScope,
+  scopeId: string,
 ): Promise<boolean> {
-  return scope.kind === 'org'
-    || hasExplicitRoleForMutation(queryable, principalId, scope.id, 'reader');
+  return hasExplicitRoleForMutation(queryable, principalId, scopeId, 'writer');
 }
 
 export async function canWriteScope(

@@ -347,8 +347,8 @@ describe('shared services', () => {
     expect(rows).toEqual([{ title: 'Retry decision', state: 'live' }]);
   });
 
-  it('honors implicit org source reads for verification and promotion', async () => {
-    const { principal, team } = await seedWriter();
+  it('denies verification and promotion to implicit org readers', async () => {
+    const { principal } = await seedWriter();
     const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
     const orgMemoryToVerify = await createMemory(pool, {
       scopeId: org.id, scopeKind: 'org', type: 'fact', title: 'Org fact',
@@ -361,14 +361,62 @@ describe('shared services', () => {
       authorId: principal.id, source: 'manual',
     });
 
-    await expect(verifyForPrincipal(pool, principal, orgMemoryToVerify.id, true))
-      .resolves.toMatchObject({ id: orgMemoryToVerify.id, lastVerified: expect.any(Date) });
+    await expect(verifyForPrincipal(pool, principal, orgMemoryToVerify.id, false))
+      .rejects.toMatchObject<ServiceError>({
+        code: 'FORBIDDEN',
+        publicMessage: 'principal lacks writer role on source scope',
+      });
     await expect(promoteForPrincipal(
       pool, principal, orgMemoryToPromote.id, { kind: 'team', name: 'payments' },
-    )).resolves.toMatchObject({
-      source: { id: orgMemoryToPromote.id, state: 'promoted' },
-      destination: { scopeId: team.id },
+    )).rejects.toMatchObject<ServiceError>({
+      code: 'FORBIDDEN',
+      publicMessage: 'principal lacks writer role on source scope',
     });
+
+    const { rows } = await pool.query(
+      `SELECT id, state, last_verified, promoted_to_id
+         FROM memories
+        WHERE id = ANY($1::uuid[])
+        ORDER BY id`,
+      [[orgMemoryToVerify.id, orgMemoryToPromote.id]],
+    );
+    expect(rows).toEqual([
+      { id: orgMemoryToVerify.id, state: 'live', last_verified: null, promoted_to_id: null },
+      { id: orgMemoryToPromote.id, state: 'live', last_verified: null, promoted_to_id: null },
+    ].sort((a, b) => a.id.localeCompare(b.id)));
+  });
+
+  it('denies verification and promotion to explicit source readers', async () => {
+    const { principal } = await seedWriter();
+    const readonly = await createScope(pool, { kind: 'project', name: 'readonly-source' });
+    await addMembership(pool, principal.id, readonly.id, 'reader');
+    const memoryToVerify = await createMemory(pool, {
+      scopeId: readonly.id, scopeKind: 'project', type: 'fact', title: 'Reader verify',
+      body: 'Readers cannot change verification state.', authorId: principal.id,
+      source: 'manual',
+    });
+    const memoryToPromote = await createMemory(pool, {
+      scopeId: readonly.id, scopeKind: 'project', type: 'decision', title: 'Reader promote',
+      body: 'Readers cannot promote the source.', authorId: principal.id, source: 'manual',
+    });
+
+    await expect(verifyForPrincipal(pool, principal, memoryToVerify.id, false))
+      .rejects.toMatchObject<ServiceError>({ code: 'FORBIDDEN' });
+    await expect(promoteForPrincipal(
+      pool, principal, memoryToPromote.id, { kind: 'team', name: 'payments' },
+    )).rejects.toMatchObject<ServiceError>({ code: 'FORBIDDEN' });
+
+    const { rows } = await pool.query(
+      `SELECT id, state, last_verified, promoted_to_id
+         FROM memories
+        WHERE id = ANY($1::uuid[])
+        ORDER BY id`,
+      [[memoryToVerify.id, memoryToPromote.id]],
+    );
+    expect(rows).toEqual([
+      { id: memoryToVerify.id, state: 'live', last_verified: null, promoted_to_id: null },
+      { id: memoryToPromote.id, state: 'live', last_verified: null, promoted_to_id: null },
+    ].sort((a, b) => a.id.localeCompare(b.id)));
   });
 
   it('requires org admin, not writer, for a promotion destination', async () => {

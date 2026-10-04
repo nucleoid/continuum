@@ -4,7 +4,7 @@ import { record as recordAudit } from '../audit/log.js';
 import { createMemory } from './memories.js';
 import { getScope, getScopeByRef } from './scopes.js';
 import {
-  canReadScopeForMutation,
+  canMutateScope,
   hasExplicitRoleForMutation,
 } from '../scopes/access.js';
 import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
@@ -67,8 +67,8 @@ async function promoteOperation(
 
   const sourceScope = await getScope(client, source.scopeId);
   if (!sourceScope) throw new PromoteError('source scope missing', 500);
-  if (!(await canReadScopeForMutation(client, principalId, sourceScope))) {
-    throw new PromoteError('principal cannot read source memory', 403);
+  if (!(await canMutateScope(client, principalId, sourceScope.id))) {
+    throw new PromoteError('principal lacks writer role on source scope', 403);
   }
 
   const destinationScope = await getScopeByRef(client, targetScope);
@@ -161,8 +161,8 @@ async function verifyOperation(
   if (!memory) throw new PromoteError('memory not found', 404);
   const memoryScope = await getScope(client, memory.scopeId);
   if (!memoryScope) throw new PromoteError('source scope missing', 500);
-  if (!(await canReadScopeForMutation(client, principalId, memoryScope))) {
-    throw new PromoteError('principal cannot read memory', 403);
+  if (!(await canMutateScope(client, principalId, memoryScope.id))) {
+    throw new PromoteError('principal lacks writer role on source scope', 403);
   }
   const nextState = stillTrue ? memory.state : 'stale';
   const { rows } = await client.query(

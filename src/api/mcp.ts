@@ -179,7 +179,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     'continuum.promote',
     {
       description:
-        'Promote a memory to a higher scope. Creates a new memory in the target scope, marks the source as promoted.',
+        'Promote a memory to a higher scope. Requires writer or admin on the source; the destination requires admin for org or writer/admin otherwise. Creates a new memory in the target scope and marks the source as promoted.',
       inputSchema: {
         memory_id: z.string().uuid(),
         target_scope_kind: z.enum(SCOPE_KINDS),
@@ -210,7 +210,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     'continuum.verify',
     {
       description:
-        'Verify a memory: mark it confirmed (still_true=true) or stale (still_true=false). Requires reader role.',
+        'Verify a memory: mark it confirmed (still_true=true) or stale (still_true=false). Requires an explicit writer or admin role on the memory scope; implicit org access and reader roles are read-only.',
       inputSchema: {
         memory_id: z.string().uuid(),
         still_true: z.boolean(),
