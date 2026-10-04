@@ -211,4 +211,32 @@ describe('REST/MCP semantic parity matrix', () => {
     expect(agents.text).toContain('Payments parity marker');
     expect(agents.text).not.toContain('Secret parity marker');
   });
+
+  it('grants implicit org reads across REST, MCP, and AGENTS.md', async () => {
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await createMemory(pool, {
+      scopeId: org.id, scopeKind: 'org', type: 'fact', title: 'Implicit org marker',
+      body: 'Visible without an org membership row.', authorId: principal.id,
+      source: 'manual',
+    });
+
+    const restRecall = await request(createApp(pool))
+      .post('/api/v0/recall')
+      .set('Authorization', 'Bearer entra:user:parity')
+      .send({ query: 'implicit org marker', scopes: ['org'] });
+    const mcpRecall = toolJson((await client.callTool({
+      name: 'continuum.recall',
+      arguments: { query: 'implicit org marker', scopes: ['org'] },
+    })) as ToolResult) as Array<{ title: string }>;
+    const agents = await request(createApp(pool))
+      .get('/api/v0/agents-md')
+      .set('Authorization', 'Bearer entra:user:parity');
+
+    expect(restRecall.status).toBe(200);
+    expect(restRecall.body.results.map((item: { title: string }) => item.title))
+      .toContain('Implicit org marker');
+    expect(mcpRecall.map((item) => item.title)).toContain('Implicit org marker');
+    expect(agents.status).toBe(200);
+    expect(agents.text).toContain('Implicit org marker');
+  });
 });
