@@ -267,7 +267,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     'continuum.ensure_scope',
     {
       description:
-        'Get or create a scope. Returns the scope id. Does not grant any memberships.',
+        'Get or create a scope. Requires explicit org admin. Returns the scope id and does not grant memberships.',
       inputSchema: {
         kind: z.enum(SCOPE_KINDS),
         name: z.string(),

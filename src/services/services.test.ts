@@ -85,12 +85,51 @@ describe('shared services', () => {
     )).resolves.toBeNull();
   });
 
+  it('serializes concurrent authorized ensures through the service transaction', async () => {
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    const admins = await Promise.all(['one', 'two'].map(async (suffix) => {
+      const principal = await createPrincipal(pool, {
+        externalId: `entra:user:scope-admin-${suffix}`,
+        kind: 'user',
+        displayName: `Scope Admin ${suffix}`,
+      });
+      await addMembership(pool, principal.id, org.id, 'admin');
+      return principal;
+    }));
+
+    const results = await Promise.all(admins.map((principal) =>
+      ensureScopeForPrincipal(
+        pool,
+        principal,
+        { kind: 'project', name: 'concurrent-service' },
+        { transport: 'mcp' },
+      )));
+
+    expect(new Set(results.map((result) => result.scope.id))).toHaveLength(1);
+    expect(results.filter((result) => result.created)).toHaveLength(1);
+    const { rows } = await pool.query(
+      `SELECT principal_id, scope_id, action, metadata
+         FROM audit_log
+        WHERE metadata->>'operation' = 'create_scope'
+        ORDER BY principal_id`,
+    );
+    expect(rows).toHaveLength(2);
+    expect(new Set(rows.map((row) => row.principal_id))).toEqual(
+      new Set(admins.map((principal) => principal.id)),
+    );
+    expect(new Set(rows.map((row) => row.scope_id))).toEqual(
+      new Set([results[0].scope.id]),
+    );
+    expect(rows.every((row) => row.action === 'write')).toBe(true);
+    expect(rows.every((row) => row.metadata.transport === 'mcp')).toBe(true);
+  });
+
   it('destroys the ensure client after rollback failure and preserves the original error', async () => {
     const original = new Error('original ensure failure');
     const release = vi.fn();
     const client = {
       query: vi.fn(async (sql: string) => {
-        if (sql === 'BEGIN') return { rows: [] };
+        if (sql === 'BEGIN ISOLATION LEVEL READ COMMITTED') return { rows: [] };
         if (sql === 'ROLLBACK') throw new Error('rollback failure');
         if (sql.includes('FROM scopes')) {
           return { rows: [{ id: 'org', kind: 'org', name: '', created_at: new Date() }] };

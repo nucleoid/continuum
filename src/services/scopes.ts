@@ -38,7 +38,7 @@ export async function ensureScopeForPrincipal(
     }
     let destroyClient = false;
     try {
-      await client.query('BEGIN');
+      await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
       const org = await getScopeByRef(client, { kind: 'org', name: '' });
       if (!org) throw new ServiceError('INTERNAL', 'An internal error occurred');
       const authorized = await hasExplicitRoleForMutation(
