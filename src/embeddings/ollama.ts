@@ -27,13 +27,15 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
     this.fetchImpl = opts.fetchImpl ?? fetch;
   }
 
-  async embed(texts: string[]): Promise<number[][]> {
+  async embed(texts: string[], options: { signal?: AbortSignal } = {}): Promise<number[][]> {
     const out: number[][] = [];
     for (const text of texts) {
+      options.signal?.throwIfAborted();
       const res = await this.fetchImpl(`${this.baseUrl}/api/embeddings`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ model: this.model, prompt: text }),
+        signal: options.signal,
       });
       if (!res.ok) {
         throw new Error(

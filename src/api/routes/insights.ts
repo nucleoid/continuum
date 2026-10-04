@@ -7,6 +7,7 @@ import { getKnowledgeGaps } from '../../services/gaps.js';
 import { ServiceError } from '../../services/errors.js';
 
 const sincePattern = /^([1-9]\d{0,2})d$/;
+const unitDecimalPattern = /^(?:0(?:\.\d+)?|1(?:\.0+)?)$/;
 
 export function insightsRouter(
   pool: pg.Pool,
@@ -22,7 +23,8 @@ export function insightsRouter(
     limit: z.coerce.number().int().min(1).max(config.maxLimit).default(config.defaultLimit),
     minFrequency: z.coerce.number().int().min(1).max(config.candidateLimit)
       .default(config.defaultMinFrequency),
-    threshold: z.coerce.number().min(0).max(1).default(config.threshold),
+    threshold: z.string().regex(unitDecimalPattern).default(String(config.threshold))
+      .transform(Number),
   }).strict();
 
   router.get('/insights/gaps', async (req, res, next) => {
@@ -39,6 +41,7 @@ export function insightsRouter(
         candidateLimit: config.candidateLimit,
         scanLimit: config.scanLimit,
         maxQueryChars: config.maxQueryChars,
+        embeddingTimeoutMs: config.embeddingTimeoutMs,
         now: now(),
         transport: 'rest',
       });

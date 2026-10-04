@@ -68,6 +68,68 @@ describe('getKnowledgeGaps', () => {
     expect(JSON.stringify(report)).not.toContain('provider failed');
   });
 
+  it('bounds semantic embedding by a report deadline and aborts the provider work', async () => {
+    const me = await admin();
+    await recordRead(pool, {
+      principalId: me.id, query: 'slow semantic query', metadata: { hits: 0 }, memories: [],
+    });
+    let observedSignal: AbortSignal | undefined;
+    const provider: EmbeddingProvider = {
+      id: 'slow', dim: 2,
+      embed: vi.fn(async (_texts, options) => {
+        observedSignal = options?.signal;
+        await new Promise((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => reject(options.signal?.reason));
+        });
+        return [];
+      }),
+    };
+    const report = await getKnowledgeGaps(pool, provider, me, {
+      sinceDays: 30, limit: 10, minFrequency: 1, threshold: 0.9,
+      candidateLimit: 20, scanLimit: 100, maxQueryChars: 2_000,
+      embeddingTimeoutMs: 25, now: new Date('2026-10-04T12:00:00Z'),
+    });
+    expect(observedSignal?.aborted).toBe(true);
+    expect(report.semanticClustering).toBe(false);
+    expect(report.gaps).toHaveLength(1);
+  });
+
+  it('rejects an unsafe direct candidate cap before querying or clustering', async () => {
+    const me = await admin();
+    await expect(getKnowledgeGaps(pool, null, me, {
+      sinceDays: 30, limit: 10, minFrequency: 1, threshold: 0.9,
+      candidateLimit: 501, scanLimit: 1_000, maxQueryChars: 2_000,
+      embeddingTimeoutMs: 2_000,
+    })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+  });
+
+  it('does not split a surrogate pair when truncating the capture title', async () => {
+    const me = await admin();
+    const query = `${'a'.repeat(484)}😀tail`;
+    await recordRead(pool, { principalId: me.id, query, metadata: { hits: 0 }, memories: [] });
+    const report = await getKnowledgeGaps(pool, null, me, {
+      sinceDays: 30, limit: 10, minFrequency: 1, threshold: 0.9,
+      candidateLimit: 20, scanLimit: 100, maxQueryChars: 2_000,
+      embeddingTimeoutMs: 2_000,
+      now: new Date('2026-10-04T12:00:00Z'),
+    });
+    const title = report.gaps[0].capture.title;
+    expect(title.length).toBeLessThanOrEqual(500);
+    expect(title.charCodeAt(title.length - 1)).not.toBeGreaterThanOrEqual(0xD800);
+    expect(title).not.toMatch(/[\uD800-\uDFFF]$/u);
+  });
+
+  it('reports exact scope fidelity for an empty report', async () => {
+    const me = await admin();
+    const report = await getKnowledgeGaps(pool, null, me, {
+      sinceDays: 30, limit: 10, minFrequency: 1, threshold: 0.9,
+      candidateLimit: 20, scanLimit: 100, maxQueryChars: 2_000,
+      embeddingTimeoutMs: 2_000,
+      now: new Date('2026-10-04T12:00:00Z'),
+    });
+    expect(report.scopeFidelity).toBe('exact');
+  });
+
   it('derives resolution without returning memory content and distinguishes exact scope fidelity', async () => {
     const me = await admin();
     const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;

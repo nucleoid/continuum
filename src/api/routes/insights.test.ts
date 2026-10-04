@@ -53,6 +53,8 @@ describe('GET /api/v0/insights/gaps', () => {
     ['since', '0d'], ['since', '366d'], ['since', '30'],
     ['limit', '0'], ['limit', '101'], ['threshold', '-0.1'], ['threshold', '1.1'],
     ['minFrequency', '0'], ['format', 'markdown'],
+    ['threshold', ''], ['threshold', ' '], ['threshold', '.85'],
+    ['threshold', '+0.85'], ['threshold', '8.5e-1'],
   ])('rejects invalid or unsupported %s=%s', async (name, value) => {
     await seed('admin');
     const res = await request(createApp(pool))

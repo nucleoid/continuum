@@ -30,20 +30,6 @@ function cleanDisplay(value: string): string {
   return value.normalize('NFKC').trim().replace(/[\s\u00a0]+/gu, ' ');
 }
 
-function parseScopeMetadata(values: unknown[]): { scopeIds: string[]; fidelity: 'exact' | 'unknown' } {
-  const sets = values.map((value) => Array.isArray(value)
-    ? [...new Set(value.filter((item): item is string => typeof item === 'string'))].sort()
-    : null);
-  if (sets.some((set) => set === null)) return { scopeIds: [], fidelity: 'unknown' };
-  const distinctSets = new Map(sets.map((set) => [JSON.stringify(set), set!])).values();
-  const exactSets = [...distinctSets];
-  if (exactSets.length !== 1) return { scopeIds: [], fidelity: 'unknown' };
-  return {
-    scopeIds: exactSets[0]!,
-    fidelity: 'exact',
-  };
-}
-
 export async function selectGapCandidates(
   pool: Queryable,
   options: SelectGapCandidatesOptions,
@@ -67,12 +53,38 @@ export async function selectGapCandidates(
           AND COALESCE(metadata->>'record_kind', 'summary') = 'summary'
           AND COALESCE(metadata->>'view', '') NOT IN ('insights-gaps', 'insights-gap-probe')
         ORDER BY at DESC, id DESC
-     ), cleaned AS (
-       SELECT id, at, principal_id, metadata,
+     ), clean_input AS (
+       SELECT id, at, principal_id,
               btrim(regexp_replace(normalize(query, NFKC), '[[:space:] ]+', ' ', 'g')) AS display_query,
-              lower(btrim(regexp_replace(normalize(query, NFKC), '[[:space:] ]+', ' ', 'g'))) AS normalized
+              lower(btrim(regexp_replace(normalize(query, NFKC), '[[:space:] ]+', ' ', 'g'))) AS normalized,
+              metadata->'scope_ids' AS raw_scope_ids
          FROM bounded
         WHERE char_length(query) <= $3
+     ), cleaned AS (
+       SELECT id, at, principal_id, display_query, normalized,
+              jsonb_typeof(raw_scope_ids) = 'array'
+                AND NOT EXISTS (
+                  SELECT 1 FROM jsonb_array_elements(
+                    CASE WHEN jsonb_typeof(raw_scope_ids) = 'array'
+                      THEN raw_scope_ids ELSE '[]'::jsonb END
+                  ) AS element
+                   WHERE jsonb_typeof(element) <> 'string'
+                ) AS scope_ids_valid,
+              CASE WHEN jsonb_typeof(raw_scope_ids) = 'array'
+                AND NOT EXISTS (
+                  SELECT 1 FROM jsonb_array_elements(
+                    CASE WHEN jsonb_typeof(raw_scope_ids) = 'array'
+                      THEN raw_scope_ids ELSE '[]'::jsonb END
+                  ) AS element
+                   WHERE jsonb_typeof(element) <> 'string'
+                ) THEN (
+                  SELECT COALESCE(jsonb_agg(to_jsonb(scope_id) ORDER BY scope_id), '[]'::jsonb)
+                    FROM (
+                      SELECT DISTINCT element #>> '{}' AS scope_id
+                        FROM jsonb_array_elements(raw_scope_ids) AS element
+                    ) AS canonical_scope_ids
+                ) ELSE NULL END AS scope_ids
+         FROM clean_input
      ), grouped AS (
        SELECT normalized,
               (array_agg(display_query ORDER BY at DESC, id DESC))[1] AS representative,
@@ -82,12 +94,18 @@ export async function selectGapCandidates(
               array_agg(DISTINCT principal_id) AS principal_keys,
               min(at) AS first_seen,
               max(at) AS last_seen,
-              jsonb_agg(metadata->'scope_ids') AS scope_sets
+              bool_and(scope_ids_valid) AS all_scope_ids_valid,
+              min(scope_ids::text) AS min_scope_ids,
+              max(scope_ids::text) AS max_scope_ids
          FROM cleaned
         WHERE normalized <> ''
         GROUP BY normalized
      ), ranked AS (
-       SELECT * FROM grouped
+       SELECT normalized, representative, variants, frequency, distinct_principals,
+              principal_keys, first_seen, last_seen,
+              CASE WHEN all_scope_ids_valid AND min_scope_ids = max_scope_ids
+                THEN min_scope_ids::jsonb ELSE NULL END AS exact_scope_ids
+         FROM grouped
         ORDER BY frequency DESC, distinct_principals DESC, last_seen DESC, normalized ASC
         LIMIT $4
      )
@@ -110,7 +128,11 @@ export async function selectGapCandidates(
     scannedCount: Number(summary.scanned_count),
     truncated: totalCandidates > candidateRows.length || summary.scan_truncated === true,
     candidates: candidateRows.map((row) => {
-      const scopes = parseScopeMetadata(row.scope_sets as unknown[]);
+      const exactScopeIds = row.exact_scope_ids;
+      const scopes = Array.isArray(exactScopeIds)
+        && exactScopeIds.every((item): item is string => typeof item === 'string')
+        ? { scopeIds: exactScopeIds, fidelity: 'exact' as const }
+        : { scopeIds: [], fidelity: 'unknown' as const };
       const candidate: GapCandidate = {
         normalized: row.normalized as string,
         representative: row.representative as string,

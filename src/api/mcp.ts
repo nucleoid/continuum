@@ -363,6 +363,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           candidateLimit: gapConfig.candidateLimit,
           scanLimit: gapConfig.scanLimit,
           maxQueryChars: gapConfig.maxQueryChars,
+          embeddingTimeoutMs: gapConfig.embeddingTimeoutMs,
           now: now(),
           transport: 'mcp',
         });

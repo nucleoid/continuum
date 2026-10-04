@@ -8,7 +8,8 @@ import {
   type GapCandidate,
 } from '../storage/gaps.js';
 import { requireOrgAdmin } from './access.js';
-import { asServiceError } from './errors.js';
+import { asServiceError, ServiceError } from './errors.js';
+import { MAX_GAP_CLUSTER_CANDIDATES } from '../insights/gaps.js';
 
 export interface GapOptions {
   sinceDays: number;
@@ -18,6 +19,7 @@ export interface GapOptions {
   candidateLimit: number;
   scanLimit: number;
   maxQueryChars: number;
+  embeddingTimeoutMs?: number;
   now?: Date;
   transport?: 'rest' | 'mcp';
 }
@@ -47,6 +49,7 @@ export interface GapReport {
     candidateLimit: number;
     scanLimit: number;
     maxQueryChars: number;
+    embeddingTimeoutMs: number;
   };
   candidateCount: number;
   truncated: boolean;
@@ -63,19 +66,26 @@ function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-function cosine(a: readonly number[], b: readonly number[]): number {
+function vectorNorm(vector: readonly number[]): number {
+  let squared = 0;
+  for (const value of vector) squared += value ** 2;
+  return Math.sqrt(squared);
+}
+
+function cosine(
+  a: readonly number[], b: readonly number[], aNorm: number, bNorm: number,
+): number {
   if (a.length === 0 || a.length !== b.length) return -1;
-  let dot = 0; let an = 0; let bn = 0;
+  let dot = 0;
   for (let i = 0; i < a.length; i += 1) {
     dot += (a[i] ?? 0) * (b[i] ?? 0);
-    an += (a[i] ?? 0) ** 2;
-    bn += (b[i] ?? 0) ** 2;
   }
-  return an > 0 && bn > 0 ? dot / Math.sqrt(an * bn) : -1;
+  return aNorm > 0 && bNorm > 0 ? dot / (aNorm * bNorm) : -1;
 }
 
 function semanticClusters(candidates: GapCandidate[], vectors: number[][], threshold: number): Cluster[] {
   const parent = candidates.map((_value, index) => index);
+  const norms = vectors.map(vectorNorm);
   const find = (value: number): number => {
     let root = value;
     while (parent[root] !== root) root = parent[root]!;
@@ -88,7 +98,9 @@ function semanticClusters(candidates: GapCandidate[], vectors: number[][], thres
   };
   for (let left = 0; left < candidates.length; left += 1) {
     for (let right = left + 1; right < candidates.length; right += 1) {
-      if (cosine(vectors[left] ?? [], vectors[right] ?? []) < threshold) continue;
+      if (cosine(
+        vectors[left] ?? [], vectors[right] ?? [], norms[left] ?? 0, norms[right] ?? 0,
+      ) < threshold) continue;
       const a = find(left); const b = find(right);
       if (a !== b) parent[Math.max(a, b)] = Math.min(a, b);
     }
@@ -103,6 +115,51 @@ function semanticClusters(candidates: GapCandidate[], vectors: number[][], thres
 
 function exactClusters(candidates: GapCandidate[]): Cluster[] {
   return candidates.map((candidate) => ({ members: [candidate] }));
+}
+
+async function embedWithDeadline(
+  provider: EmbeddingProvider,
+  texts: string[],
+  timeoutMs: number,
+): Promise<number[][]> {
+  const controller = new AbortController();
+  let timeout: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      const error = new Error(`Knowledge-gap embedding exceeded ${timeoutMs} ms`);
+      controller.abort(error);
+      reject(error);
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([
+      provider.embed(texts, { signal: controller.signal }),
+      deadline,
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+function validateGapWorkBounds(options: GapOptions): void {
+  if (!Number.isSafeInteger(options.candidateLimit)
+    || options.candidateLimit < 1
+    || options.candidateLimit > MAX_GAP_CLUSTER_CANDIDATES) {
+    throw new ServiceError(
+      'INVALID_INPUT',
+      `candidateLimit must be an integer between 1 and ${MAX_GAP_CLUSTER_CANDIDATES}`,
+    );
+  }
+  const timeoutMs = options.embeddingTimeoutMs ?? 2_000;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) {
+    throw new ServiceError('INVALID_INPUT', 'embeddingTimeoutMs must be between 1 and 30000');
+  }
+}
+
+function truncateWithoutSplittingSurrogate(value: string, maxCodeUnits: number): string {
+  const truncated = value.slice(0, maxCodeUnits);
+  const last = truncated.charCodeAt(truncated.length - 1);
+  return last >= 0xD800 && last <= 0xDBFF ? truncated.slice(0, -1) : truncated;
 }
 
 function mergedCluster(cluster: Cluster) {
@@ -138,6 +195,8 @@ export async function getKnowledgeGaps(
 ): Promise<GapReport> {
   try {
     await requireOrgAdmin(pool, principal.id);
+    validateGapWorkBounds(options);
+    const embeddingTimeoutMs = options.embeddingTimeoutMs ?? 2_000;
     const now = options.now ?? new Date();
     const since = new Date(now.getTime() - options.sinceDays * 86_400_000);
     const selection = await selectGapCandidates(pool, {
@@ -151,7 +210,11 @@ export async function getKnowledgeGaps(
     let semanticClustering = false;
     if (provider && candidates.length > 0) {
       try {
-        const vectors = await provider.embed(candidates.map((item) => item.representative));
+        const vectors = await embedWithDeadline(
+          provider,
+          candidates.map((item) => item.representative),
+          embeddingTimeoutMs,
+        );
         const dimensions = vectors[0]?.length ?? 0;
         if (
           vectors.length !== candidates.length
@@ -191,7 +254,7 @@ export async function getKnowledgeGaps(
         capture: {
           scope: { kind: 'org', name: '' },
           type: 'playbook',
-          title: `Knowledge gap: ${gap.representative}`.slice(0, 500),
+          title: truncateWithoutSplittingSurrogate(`Knowledge gap: ${gap.representative}`, 500),
           body: 'Document the answer to this recurring question.',
           tags: ['knowledge-gap'],
           source: 'manual',
@@ -200,8 +263,7 @@ export async function getKnowledgeGaps(
       });
     }
 
-    const scopeFidelity = gaps.length > 0
-      && gaps.every((gap) => gap.resolution.scopeFidelity === 'exact')
+    const scopeFidelity = gaps.every((gap) => gap.resolution.scopeFidelity === 'exact')
       ? 'exact' as const : 'unknown' as const;
     const report: GapReport = {
       generatedAt: now.toISOString(),
@@ -213,6 +275,7 @@ export async function getKnowledgeGaps(
         candidateLimit: options.candidateLimit,
         scanLimit: options.scanLimit,
         maxQueryChars: options.maxQueryChars,
+        embeddingTimeoutMs,
       },
       candidateCount: candidates.length,
       truncated: selection.truncated || merged.length < clusters.length,

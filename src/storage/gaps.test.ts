@@ -114,4 +114,21 @@ describe('selectGapCandidates', () => {
       scopeIds: [], scopeFidelity: 'unknown', frequency: 2,
     });
   });
+
+  it('marks mixed non-string scope IDs as unknown', async () => {
+    const principal = await createPrincipal(pool, {
+      externalId: 'invalid-scopes', kind: 'user', displayName: 'Invalid scopes',
+    });
+    await recordRead(pool, {
+      principalId: principal.id, query: 'same question',
+      metadata: { hits: 0, scope_ids: ['valid-looking', 42] }, memories: [],
+    });
+    const selection = await selectGapCandidates(pool, {
+      since: new Date(Date.now() - 86_400_000), scanLimit: 50,
+      candidateLimit: 10, maxQueryChars: 2_000,
+    });
+    expect(selection.candidates[0]).toMatchObject({
+      scopeIds: [], scopeFidelity: 'unknown',
+    });
+  });
 });
