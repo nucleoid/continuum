@@ -1,4 +1,5 @@
 import type { Server } from 'node:http';
+import type { ServerResponse } from 'node:http';
 import type { Socket } from 'node:net';
 import type express from 'express';
 import { createReadinessState, type ReadinessState } from './readiness.js';
@@ -78,12 +79,33 @@ export async function startRuntime(
     ? app.listen(options.port)
     : app.listen(options.port, options.host);
   const sockets = new Set<Socket>();
+  const responses = new Set<ServerResponse>();
+  let shuttingDown = false;
   server.on('connection', (socket) => {
     sockets.add(socket);
     socket.once('close', () => sockets.delete(socket));
   });
-  await waitForListening(server);
-  await Promise.all(workers.map(async (worker) => worker.start?.()));
+  server.on('request', (_request, response) => {
+    responses.add(response);
+    const complete = () => {
+      responses.delete(response);
+      if (shuttingDown) server.closeIdleConnections?.();
+    };
+    response.once('finish', complete);
+    response.once('close', complete);
+  });
+  try {
+    await waitForListening(server);
+    await Promise.all(workers.map(async (worker) => worker.start?.()));
+  } catch (error) {
+    readiness.markUnready();
+    await Promise.allSettled(workers.map(async (worker) => worker.stop('startup_failed')));
+    if (server.listening) {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    await Promise.resolve(options.closePool()).catch(() => undefined);
+    throw error;
+  }
 
   let closePoolPromise: Promise<void> | undefined;
   const closePoolOnce = () => {
@@ -92,6 +114,7 @@ export async function startRuntime(
   };
   let shutdownPromise: Promise<ShutdownResult> | undefined;
   let signalPromise: Promise<void> | undefined;
+  let forceShutdown: (() => void) | undefined;
 
   const removeSignalHandlers = () => {
     runtimeProcess.off('SIGTERM', onSigterm);
@@ -101,7 +124,11 @@ export async function startRuntime(
   const shutdown = (reason: string): Promise<ShutdownResult> => {
     if (shutdownPromise) return shutdownPromise;
     shutdownPromise = (async () => {
+      shuttingDown = true;
       readiness.markUnready();
+      for (const response of responses) {
+        if (!response.headersSent) response.setHeader('Connection', 'close');
+      }
       const serverClosed = new Promise<void>((resolve, reject) => {
         if (!server.listening) {
           resolve();
@@ -118,6 +145,9 @@ export async function startRuntime(
       const deadline = new Promise<'timeout'>((resolve) => {
         timeout = setTimeout(() => resolve('timeout'), timeoutMs);
       });
+      const forced = new Promise<'forced'>((resolve) => {
+        forceShutdown = () => resolve('forced');
+      });
       const orderly = Promise.all([serverClosed, workersStopped])
         .then(closePoolOnce)
         .then(() => 'drained' as const)
@@ -125,6 +155,7 @@ export async function startRuntime(
       const outcome = await Promise.race([
         orderly,
         deadline,
+        forced,
       ]);
       if (timeout) clearTimeout(timeout);
       removeSignalHandlers();
@@ -132,7 +163,9 @@ export async function startRuntime(
       if (outcome !== 'drained') {
         logger.error(outcome === 'timeout'
           ? { event: 'shutdown_timeout', reason, timeoutMs }
-          : { event: 'shutdown_failed', reason });
+          : outcome === 'forced'
+            ? { event: 'shutdown_forced', reason }
+            : { event: 'shutdown_failed', reason });
         for (const socket of sockets) socket.destroy();
         void closePoolOnce().catch(() => {
           logger.error({ event: 'pool_close_failed', reason });
@@ -147,7 +180,12 @@ export async function startRuntime(
   };
 
   const shutdownFromSignal = (signal: NodeJS.Signals) => {
-    signalPromise ??= shutdown(signal).then(({ timedOut }) => {
+    if (signalPromise) {
+      for (const socket of sockets) socket.destroy();
+      forceShutdown?.();
+      return;
+    }
+    signalPromise = shutdown(signal).then(({ timedOut }) => {
       runtimeProcess.exit(timedOut ? 1 : 0);
     });
   };

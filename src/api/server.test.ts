@@ -8,6 +8,7 @@ import {
   createApp,
   createReadinessState,
   errorMiddleware,
+  formatOperationalError,
   mapRestError,
 } from './server.js';
 
@@ -73,6 +74,23 @@ describe('createApp operational middleware', () => {
     expect(missing.body).toEqual({
       code: 'NOT_FOUND', error: 'Not found', requestId: fixedRequestId,
     });
+  });
+
+  it.each([
+    ['post', '/api/v0/CAPTURE'],
+    ['get', '/api/v0/Agents-MD'],
+    ['get', '/api/v0/AUDIT'],
+  ] as const)('fails closed before database work for mixed-case protected %s %s', async (method, path) => {
+    const query = vi.fn();
+    const app = createApp({ query } as unknown as pg.Pool, appOptions());
+
+    const response = await request(app)[method](path).send({});
+
+    expect(response.status).toBe(401);
+    expect(response.body).toMatchObject({
+      error: 'missing or malformed bearer token', requestId: fixedRequestId,
+    });
+    expect(query).not.toHaveBeenCalled();
   });
 
   it('emits one bounded completion log without headers, query values, body, or unmatched IDs', async () => {
@@ -173,6 +191,14 @@ describe('REST error middleware', () => {
     });
     expect(JSON.stringify(response.body)).not.toContain(privateMessage);
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain(privateMessage);
+    expect(logger.error).toHaveBeenCalledWith(
+      'REST: internal service error',
+      expect.objectContaining({
+        code: 'INTERNAL',
+        requestId: fixedRequestId,
+        error: expect.objectContaining({ message: 'postgres password=[REDACTED]' }),
+      }),
+    );
   });
 
   it('delegates to Express when headers were already sent', () => {
@@ -213,7 +239,7 @@ describe('health and readiness', () => {
       database: 'ready',
       embedding: { configured: true, provider: 'ollama:nomic-embed-text' },
     });
-    expect(query).toHaveBeenCalledWith('SELECT 1');
+    expect(query).toHaveBeenCalledWith({ text: 'SELECT 1', query_timeout: 1_000 });
     expect(embed).not.toHaveBeenCalled();
   });
 
@@ -223,7 +249,7 @@ describe('health and readiness', () => {
     const notAccepting = await request(createApp(unusedPool, appOptions({ readiness: state })))
       .get('/health/ready');
     expect(notAccepting.status).toBe(503);
-    expect(notAccepting.body).toMatchObject({ ok: false, database: 'unavailable' });
+    expect(notAccepting.body).toMatchObject({ ok: false, database: 'shutting_down' });
 
     const secret = 'postgres://secret-host/private';
     const failed = await request(createApp({
@@ -234,7 +260,9 @@ describe('health and readiness', () => {
 
     vi.useFakeTimers();
     try {
-      const query = vi.fn(() => new Promise(() => {}));
+      const query = vi.fn((config: { query_timeout: number }) => new Promise((_resolve, reject) => {
+        setTimeout(() => reject(new Error('query timeout')), config.query_timeout);
+      }));
       const pending = request(createApp({
         query,
       } as unknown as pg.Pool, appOptions({ readinessTimeoutMs: 25 }))).get('/health/ready');
@@ -243,8 +271,25 @@ describe('health and readiness', () => {
       await vi.advanceTimersByTimeAsync(25);
       const timedOut = await responsePromise;
       expect(timedOut.status).toBe(503);
+      expect(query).toHaveBeenCalledWith({ text: 'SELECT 1', query_timeout: 25 });
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('operational error sanitization', () => {
+  it.each([
+    [new Error('CONTINUUM_SHUTDOWN_TIMEOUT_MS must be a positive integer'),
+      { message: 'CONTINUUM_SHUTDOWN_TIMEOUT_MS must be a positive integer' }],
+    [Object.assign(new Error('listen EADDRINUSE: address already in use 127.0.0.1:4000'), { code: 'EADDRINUSE' }),
+      { code: 'EADDRINUSE', message: 'listen EADDRINUSE: address already in use 127.0.0.1:4000' }],
+    [new Error('worker failed for postgres://admin:secret@db/private password=hunter2'),
+      { message: 'worker failed for postgres://[REDACTED]@db/private password=[REDACTED]' }],
+  ])('retains actionable configuration/listen/start detail without secrets', (error, expected) => {
+    const formatted = formatOperationalError(error);
+    expect(formatted).toMatchObject(expected);
+    expect(JSON.stringify(formatted)).not.toContain('secret');
+    expect(JSON.stringify(formatted)).not.toContain('hunter2');
   });
 });

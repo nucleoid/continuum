@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import http from 'node:http';
 import express from 'express';
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
@@ -38,7 +39,6 @@ describe.each(['SIGTERM', 'SIGINT'] as const)('runtime shutdown on %s', (signal)
 
     const responsePromise = request(runtime.server).get('/slow').then((response) => response);
     await entered.promise;
-    runtimeProcess.emit(signal);
     runtimeProcess.emit(signal);
 
     expect(readiness.isReady()).toBe(false);
@@ -89,5 +89,83 @@ describe('runtime timeout behavior', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('drains a request that becomes idle on a keep-alive socket before the deadline', async () => {
+    const entered = deferred();
+    const release = deferred();
+    const app = express();
+    app.get('/slow', async (_req, res) => {
+      entered.resolve();
+      await release.promise;
+      res.json({ ok: true });
+    });
+    const runtime = await startRuntime(app, {
+      port: 0, host: '127.0.0.1', closePool: vi.fn(), shutdownTimeoutMs: 500,
+      logger: { info: vi.fn(), error: vi.fn() },
+    });
+    const address = runtime.server.address();
+    if (!address || typeof address === 'string') throw new Error('missing server address');
+    const agent = new http.Agent({ keepAlive: true });
+    const responseDone = deferred();
+    const req = http.get({ host: '127.0.0.1', port: address.port, path: '/slow', agent }, (res) => {
+      res.resume();
+      res.once('end', responseDone.resolve);
+    });
+    req.once('error', responseDone.resolve);
+    await entered.promise;
+
+    const shutdown = runtime.shutdown('test');
+    release.resolve();
+    await responseDone.promise;
+
+    await expect(shutdown).resolves.toEqual({ timedOut: false });
+    agent.destroy();
+  });
+
+  it('forces exit on a second signal instead of waiting for the deadline', async () => {
+    const runtimeProcess = new FakeProcess();
+    const runtime = await startRuntime(express(), {
+      port: 0, host: '127.0.0.1', process: runtimeProcess,
+      workers: [{ stop: vi.fn(() => new Promise<void>(() => {})) }],
+      closePool: vi.fn(), shutdownTimeoutMs: 60_000,
+      logger: { info: vi.fn(), error: vi.fn() },
+    });
+
+    runtimeProcess.emit('SIGTERM');
+    runtimeProcess.emit('SIGINT');
+
+    await vi.waitFor(() => expect(runtimeProcess.exit).toHaveBeenCalledWith(1));
+    runtime.server.closeAllConnections?.();
+  });
+});
+
+describe('runtime startup failures', () => {
+  it('rejects invalid shutdown timeout with actionable detail', async () => {
+    await expect(startRuntime(express(), {
+      port: 0, closePool: vi.fn(), shutdownTimeoutMs: 0,
+    })).rejects.toThrow('shutdownTimeoutMs must be positive');
+  });
+
+  it('preserves listen failure code and message', async () => {
+    const occupied = http.createServer();
+    await new Promise<void>((resolve) => occupied.listen(0, '127.0.0.1', resolve));
+    const address = occupied.address();
+    if (!address || typeof address === 'string') throw new Error('missing occupied address');
+    try {
+      await expect(startRuntime(express(), {
+        port: address.port, host: '127.0.0.1', closePool: vi.fn(),
+      })).rejects.toMatchObject({ code: 'EADDRINUSE' });
+    } finally {
+      await new Promise<void>((resolve) => occupied.close(() => resolve()));
+    }
+  });
+
+  it('closes the listener and preserves a worker start failure', async () => {
+    const failure = new Error('worker bootstrap failed');
+    await expect(startRuntime(express(), {
+      port: 0, host: '127.0.0.1', closePool: vi.fn(),
+      workers: [{ start: vi.fn().mockRejectedValue(failure), stop: vi.fn() }],
+    })).rejects.toBe(failure);
   });
 });

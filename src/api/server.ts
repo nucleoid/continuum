@@ -53,6 +53,10 @@ const KNOWN_LOG_PATHS = new Set([
   '/health', '/health/live', '/health/ready',
   '/api/v0/capture', '/api/v0/recall', '/api/v0/agents-md', '/api/v0/audit',
 ]);
+const PROTECTED_V0_PATHS = new Set([
+  '/capture', '/capture/', '/recall', '/recall/', '/agents-md', '/agents-md/',
+  '/audit', '/audit/',
+]);
 
 const defaultLogger: OperationalLogger = {
   info(event) {
@@ -85,18 +89,31 @@ function embeddingStatus(provider: EmbeddingProvider | null): {
 }
 
 async function queryWithTimeout(pool: pg.Pool, timeoutMs: number): Promise<void> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    await Promise.race([
-      pool.query('SELECT 1'),
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error('readiness timeout')), timeoutMs);
-        timer.unref?.();
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
+  const query: pg.QueryConfig & { query_timeout: number } = {
+    text: 'SELECT 1',
+    query_timeout: timeoutMs,
+  };
+  await pool.query(query);
+}
+
+export function formatOperationalError(error: unknown): {
+  message: string;
+  code?: string;
+} {
+  const candidate = error as { message?: unknown; code?: unknown };
+  const rawMessage = typeof candidate?.message === 'string'
+    ? candidate.message
+    : 'Unknown error';
+  const message = rawMessage
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+:[^\s@/]+@/gi, '$1[REDACTED]@')
+    .replace(/\b(password|passwd|pwd|token|secret)\s*[=:]\s*[^\s,;]+/gi, '$1=[REDACTED]')
+    .slice(0, 512);
+  const formatted: { message: string; code?: string } = { message };
+  if (typeof candidate?.code === 'string' && /^[A-Z0-9_]{1,64}$/.test(candidate.code)) {
+    formatted.code = candidate.code;
   }
+  return formatted;
 }
 
 function requestContext(
@@ -159,10 +176,11 @@ export function errorMiddleware(logger: OperationalLogger): express.ErrorRequest
     }
     const serviceError = mapRestError(error);
     if (serviceError.code === 'INTERNAL') {
+      const cause = serviceError.cause ?? error;
       logger.error('REST: internal service error', {
         code: serviceError.code,
         requestId: req.requestId,
-        errorType: error instanceof Error ? 'Error' : 'UnknownError',
+        error: formatOperationalError(cause),
       });
     }
     res.status(serviceError.status).json({
@@ -197,7 +215,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   app.get('/health/ready', async (_req, res) => {
     const embedding = embeddingStatus(provider);
     if (!readiness.isReady()) {
-      res.status(503).json({ ok: false, database: 'unavailable', embedding });
+      res.status(503).json({ ok: false, database: 'shutting_down', embedding });
       return;
     }
     try {
@@ -209,7 +227,14 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   });
 
   const v0 = express.Router();
-  v0.use(/^\/(?:capture|recall|agents-md|audit)\/?$/, bearerAuth(pool));
+  const authenticate = bearerAuth(pool);
+  v0.use((req, res, next) => {
+    if (PROTECTED_V0_PATHS.has(req.path.toLowerCase())) {
+      void authenticate(req, res, next).catch(next);
+      return;
+    }
+    next();
+  });
   v0.use(captureRouter(pool, provider));
   v0.use(recallRouter(pool, provider));
   v0.use(agentsMdRouter(pool));
@@ -277,8 +302,11 @@ function positiveIntegerEnv(name: string, fallback: number): number {
 }
 
 if (isDirectEntrypoint(import.meta.url)) {
-  void main().catch(() => {
-    console.error('Continuum API failed to start');
+  void main().catch((error: unknown) => {
+    console.error(JSON.stringify({
+      event: 'startup_failed',
+      error: formatOperationalError(error),
+    }));
     process.exitCode = 1;
   });
 }
