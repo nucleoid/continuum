@@ -11,6 +11,7 @@ import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import { createMemory } from '../storage/memories.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
+import { RetrievalEnricherRegistry } from '../extensions/retrieval.js';
 
 interface ToolResult {
   content: Array<{ type: string; text?: string }>;
@@ -539,6 +540,51 @@ describe('REST/MCP semantic parity matrix', () => {
     expect(restAtMax.status).toBe(200);
     expect(restAtMax.body.limit).toBe(100);
     expect(mcpAtMax.limit).toBe(100);
+  });
+
+  it('returns identical namespaced enrichments through REST and MCP', async () => {
+    const scope = await createScope(pool, { kind: 'project', name: 'enriched' });
+    await addMembership(pool, principal.id, scope.id, 'writer');
+    await createMemory(pool, {
+      scopeId: scope.id, scopeKind: scope.kind, type: 'fact', title: 'Enriched marker',
+      body: 'Enriched marker content.', authorId: principal.id, source: 'manual',
+    });
+    const enrichers = new RetrievalEnricherRegistry();
+    enrichers.register({
+      id: 'links',
+      enrich: async (results, context) => results.map(() => ({
+        principal: context.principalId,
+        workItems: ['WI-26'],
+      })),
+    });
+    const enrichedServer = buildMcpServer({
+      pool, embeddingProvider: null, principal, retrievalEnrichers: enrichers,
+      enrichment: { timeoutMs: 100, maxBytes: 1024 },
+    });
+    const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
+    const enrichedClient = new Client({ name: 'enriched-parity', version: '0.0.1' });
+    await Promise.all([
+      enrichedServer.connect(serverTransport),
+      enrichedClient.connect(clientTransport),
+    ]);
+
+    const rest = await request(createApp(pool, {
+      retrievalEnrichers: enrichers,
+      enrichment: { timeoutMs: 100, maxBytes: 1024 },
+    }))
+      .post('/api/v0/recall')
+      .set('Authorization', 'Bearer entra:user:parity')
+      .send({ query: 'enriched marker', scopes: ['project:enriched'] });
+    const mcp = toolJson((await enrichedClient.callTool({
+      name: 'continuum.recall',
+      arguments: { query: 'enriched marker', scopes: ['project:enriched'] },
+    })) as ToolResult);
+
+    expect(rest.status).toBe(200);
+    expect(rest.body.results[0].enrichments).toEqual({
+      links: { principal: principal.id, workItems: ['WI-26'] },
+    });
+    expect(mcp[0].enrichments).toEqual(rest.body.results[0].enrichments);
   });
 
   it('uses the same readable access set for list_scopes, recall, and AGENTS.md', async () => {

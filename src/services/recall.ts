@@ -6,10 +6,20 @@ import { recordRead as recordReadAudit } from '../audit/log.js';
 import { resolveReadableScopeIds, type AccessibleScope } from './access.js';
 import { asServiceError } from './errors.js';
 import { parseScopeString } from './scopes.js';
+import {
+  applyRetrievalEnrichers,
+  type EnrichmentOptions,
+  type RetrievalEnricherRegistry,
+} from '../extensions/retrieval.js';
 
 export interface PrincipalRecallResult {
   results: RecallResult[];
   accessible: Map<string, AccessibleScope>;
+}
+
+export interface RecallEnrichment {
+  registry: RetrievalEnricherRegistry;
+  options: EnrichmentOptions;
 }
 
 export async function recallForPrincipal(
@@ -18,6 +28,7 @@ export async function recallForPrincipal(
   principal: Principal,
   input: RecallInput,
   auditMetadata: Record<string, unknown> = {},
+  enrichment?: RecallEnrichment,
 ): Promise<PrincipalRecallResult> {
   try {
     const refs = input.scopes?.map(parseScopeString);
@@ -93,7 +104,15 @@ export async function recallForPrincipal(
         metadata: { rank: index + 1, score: result.score },
       })),
     });
-    return { results, accessible };
+    const enrichedResults = enrichment
+      ? await applyRetrievalEnrichers(
+        results,
+        principal.id,
+        enrichment.registry,
+        enrichment.options,
+      )
+      : results;
+    return { results: enrichedResults, accessible };
   } catch (error) {
     throw asServiceError(error);
   }

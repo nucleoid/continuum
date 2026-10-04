@@ -15,6 +15,8 @@ export async function resetData(pool: pg.Pool): Promise<void> {
     TRUNCATE TABLE
       ingest_deliveries,
       principal_aliases,
+      promotion_event_deliveries,
+      promotion_events,
       audit_log,
       memory_embeddings,
       memories,

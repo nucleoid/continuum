@@ -40,11 +40,12 @@ export async function promoteForPrincipal(
   memoryId: string,
   targetScope: ScopeRef,
   auditMetadata: Record<string, unknown> = {},
+  promotionWebhookIds: readonly string[] = [],
 ): Promise<PromoteResult> {
   try {
     validateScopeRef(targetScope);
     return await promoteMemoryWithAudit(
-      pool, principal.id, memoryId, targetScope, auditMetadata,
+      pool, principal.id, memoryId, targetScope, auditMetadata, promotionWebhookIds,
     );
   } catch (error) {
     throw mapLifecycleError(error);

@@ -2,7 +2,7 @@ import { Router } from 'express';
 import type pg from 'pg';
 import { z } from 'zod';
 import type { EmbeddingRouting } from '../../embeddings/router.js';
-import { recallForPrincipal } from '../../services/recall.js';
+import { recallForPrincipal, type RecallEnrichment } from '../../services/recall.js';
 
 const recallSchema = z.object({
   query: z.string().min(1).max(2000),
@@ -16,6 +16,7 @@ const recallSchema = z.object({
 export function recallRouter(
   pool: pg.Pool,
   embeddingProvider: EmbeddingRouting = null,
+  enrichment?: RecallEnrichment,
 ): Router {
   const router = Router();
 
@@ -31,6 +32,7 @@ export function recallRouter(
       req.principal!,
       parsed.data,
       { transport: 'rest' },
+      enrichment,
     );
     res.json({
       results: results.map((r) => ({
@@ -44,6 +46,7 @@ export function recallRouter(
         sourceRef: r.memory.sourceRef,
         ...(r.memory.supersedesId ? { supersedesId: r.memory.supersedesId } : {}),
         createdAt: r.memory.createdAt,
+        ...(r.enrichments ? { enrichments: r.enrichments } : {}),
       })),
     });
   });
