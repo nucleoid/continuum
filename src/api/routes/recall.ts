@@ -42,6 +42,7 @@ export function recallRouter(
         excerpt: r.excerpt,
         bodyTruncated: r.bodyTruncated,
         sourceRef: r.memory.sourceRef,
+        ...(r.memory.supersedesId ? { supersedesId: r.memory.supersedesId } : {}),
         createdAt: r.memory.createdAt,
       })),
     });

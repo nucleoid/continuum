@@ -11,6 +11,8 @@ import { makeTestPool, resetData } from '../../storage/test-helpers.js';
 import { createApp } from '../server.js';
 import { captureMemory } from '../../services/capture.js';
 import { promoteForPrincipal } from '../../services/lifecycle.js';
+import { supersedeForPrincipal } from '../../services/supersede.js';
+import { createMemory } from '../../storage/memories.js';
 
 describe('scope-pinned embedding routing', () => {
   let pool: pg.Pool;
@@ -154,5 +156,41 @@ describe('scope-pinned embedding routing', () => {
     );
     expect(rows).toEqual([{ memory_id: source.memory.id, provider: hosted.id }]);
     expect(rows.some((row) => row.memory_id === promoted.destination.id)).toBe(false);
+  });
+
+  it('routes a superseding decision embedding by its scope policy', async () => {
+    const { principal, project } = await seedActor();
+    const localEmbed = vi.fn(async (texts: string[]) => vectors.embed(texts));
+    const hostedEmbed = vi.fn(async (texts: string[]) => vectors.embed(texts));
+    const local: EmbeddingProvider = {
+      id: 'ollama:local', dim: 768, local: true, embed: localEmbed,
+    };
+    const hosted: EmbeddingProvider = {
+      id: 'openai:hosted', dim: 768, local: false, embed: hostedEmbed,
+    };
+    const router = new ScopeEmbeddingRouter(
+      new EmbeddingRegistry([['local', local], ['hosted', hosted]]),
+      {
+        default: 'hosted',
+        rules: [{ match: { kind: 'project' }, provider: 'local-only' }],
+      },
+    );
+    const predecessor = await createMemory(pool, {
+      scopeId: project.id, scopeKind: project.kind, type: 'decision',
+      title: 'Original route', body: 'Original decision.', authorId: principal.id,
+      source: 'manual',
+    });
+
+    const result = await supersedeForPrincipal(pool, router, principal, {
+      supersededId: predecessor.id, title: 'Routed head', body: 'Replacement decision.',
+    });
+
+    expect(result.embedded).toBe(true);
+    expect(localEmbed).toHaveBeenCalledOnce();
+    expect(hostedEmbed).not.toHaveBeenCalled();
+    const { rows } = await pool.query(
+      'SELECT memory_id, provider FROM memory_embeddings ORDER BY memory_id',
+    );
+    expect(rows).toEqual([{ memory_id: result.successor.id, provider: local.id }]);
   });
 });

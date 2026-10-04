@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import type pg from 'pg';
 import type { Memory, MemoryType } from '../types.js';
 import { computeExpiry } from './expiry.js';
 import type { ScopeKind } from '../types.js';
@@ -18,6 +17,7 @@ export interface NewMemory {
   sourceRef?: string | null;
   tags?: string[];
   metadata?: Record<string, unknown>;
+  supersedesId?: string | null;
 }
 
 export async function createMemory(
@@ -28,8 +28,9 @@ export async function createMemory(
   const expiresAt = computeExpiry(input.type, input.scopeKind);
   const { rows } = await pool.query(
     `INSERT INTO memories
-       (id, scope_id, type, title, body, metadata, tags, author_id, source, source_ref, expires_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       (id, scope_id, type, title, body, metadata, tags, author_id, source, source_ref,
+        expires_at, supersedes_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
      RETURNING ${MEMORY_COLUMNS}`,
     [
       id,
@@ -43,6 +44,7 @@ export async function createMemory(
       input.source,
       input.sourceRef ?? null,
       expiresAt,
+      input.supersedesId ?? null,
     ],
   );
   return rowToMemory(rows[0]);
