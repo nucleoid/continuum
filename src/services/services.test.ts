@@ -6,7 +6,7 @@ import { createPrincipal } from '../storage/principals.js';
 import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
-import { accessibleScopes } from './access.js';
+import { accessibleScopes, canReadScope, canWriteScope } from './access.js';
 import { captureMemory } from './capture.js';
 import { recallForPrincipal } from './recall.js';
 import { ServiceError } from './errors.js';
@@ -44,6 +44,26 @@ describe('shared services', () => {
 
     expect(scopes.get(team.id)).toMatchObject({ label: 'team:payments', role: 'writer' });
     expect(scopes.get(org.id)).toMatchObject({ label: 'org', role: 'reader' });
+  });
+
+  it('deduplicates explicit org membership and preserves its role', async () => {
+    const { principal } = await seedWriter();
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await addMembership(pool, principal.id, org.id, 'admin');
+
+    const scopes = await accessibleScopes(pool, principal.id);
+
+    expect([...scopes.values()].filter((scope) => scope.kind === 'org')).toEqual([
+      expect.objectContaining({ id: org.id, label: 'org', role: 'admin' }),
+    ]);
+  });
+
+  it('grants implicit org read without granting write authority', async () => {
+    const { principal } = await seedWriter();
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+
+    await expect(canReadScope(pool, principal.id, org)).resolves.toBe(true);
+    await expect(canWriteScope(pool, principal.id, org.id)).resolves.toBe(false);
   });
 
   it('captures metadata, tags and source ref and writes the audit atomically', async () => {
@@ -327,26 +347,145 @@ describe('shared services', () => {
     expect(rows).toEqual([{ title: 'Retry decision', state: 'live' }]);
   });
 
-  it('requires explicit org membership for lifecycle mutations', async () => {
+  it('honors implicit org source reads for verification and promotion', async () => {
     const { principal, team } = await seedWriter();
     const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
-    const orgMemory = await createMemory(pool, {
+    const orgMemoryToVerify = await createMemory(pool, {
       scopeId: org.id, scopeKind: 'org', type: 'fact', title: 'Org fact',
-      body: 'Implicit reads do not authorize mutations.', authorId: principal.id,
+      body: 'Implicit reads are consistent across surfaces.', authorId: principal.id,
       source: 'manual',
     });
-    const teamMemory = await createMemory(pool, {
-      scopeId: team.id, scopeKind: 'team', type: 'fact', title: 'Team fact',
-      body: 'Cannot promote without explicit destination membership.',
+    const orgMemoryToPromote = await createMemory(pool, {
+      scopeId: org.id, scopeKind: 'org', type: 'fact', title: 'Org promotion source',
+      body: 'The destination still needs explicit authority.',
       authorId: principal.id, source: 'manual',
     });
 
-    await expect(verifyForPrincipal(
-      pool, principal, orgMemory.id, true,
-    )).rejects.toMatchObject<ServiceError>({ code: 'FORBIDDEN' });
+    await expect(verifyForPrincipal(pool, principal, orgMemoryToVerify.id, true))
+      .resolves.toMatchObject({ id: orgMemoryToVerify.id, lastVerified: expect.any(Date) });
     await expect(promoteForPrincipal(
-      pool, principal, teamMemory.id, { kind: 'org', name: '' },
+      pool, principal, orgMemoryToPromote.id, { kind: 'team', name: 'payments' },
+    )).resolves.toMatchObject({
+      source: { id: orgMemoryToPromote.id, state: 'promoted' },
+      destination: { scopeId: team.id },
+    });
+  });
+
+  it('requires org admin, not writer, for a promotion destination', async () => {
+    const { principal, team } = await seedWriter();
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    const writerSource = await createMemory(pool, {
+      scopeId: team.id, scopeKind: 'team', type: 'decision', title: 'Writer denied',
+      body: 'Org promotion requires approval.', authorId: principal.id, source: 'manual',
+    });
+    await addMembership(pool, principal.id, org.id, 'writer');
+
+    await expect(promoteForPrincipal(
+      pool, principal, writerSource.id, { kind: 'org', name: '' },
     )).rejects.toMatchObject<ServiceError>({ code: 'FORBIDDEN' });
+
+    await addMembership(pool, principal.id, org.id, 'admin');
+    await expect(promoteForPrincipal(
+      pool, principal, writerSource.id, { kind: 'org', name: '' },
+    )).resolves.toMatchObject({ destination: { scopeId: org.id } });
+  });
+
+  it('denies verification when source membership is revoked before authorization', async () => {
+    const { principal, team } = await seedWriter();
+    const source = await createMemory(pool, {
+      scopeId: team.id, scopeKind: 'team', type: 'fact', title: 'Revoked verify',
+      body: 'A concurrent revocation must take effect.', authorId: principal.id,
+      source: 'manual',
+    });
+    const authorizationReached = deferred<void>();
+    const continueAuthorization = deferred<void>();
+    const verifyPool = poolPausingBeforeMembershipCheck(
+      pool, 1, authorizationReached, continueAuthorization,
+    );
+
+    const verification = verifyForPrincipal(verifyPool, principal, source.id, true);
+    await authorizationReached.promise;
+    await pool.query(
+      'DELETE FROM scope_memberships WHERE principal_id = $1 AND scope_id = $2',
+      [principal.id, team.id],
+    );
+    continueAuthorization.resolve();
+
+    await expect(verification).rejects.toMatchObject<ServiceError>({ code: 'FORBIDDEN' });
+    const { rows } = await pool.query(
+      'SELECT last_verified FROM memories WHERE id = $1', [source.id],
+    );
+    expect(rows[0].last_verified).toBeNull();
+  });
+
+  it('denies promotion when destination membership is revoked before authorization', async () => {
+    const { principal, team } = await seedWriter();
+    const project = await createScope(pool, { kind: 'project', name: 'revoked-target' });
+    await addMembership(pool, principal.id, project.id, 'writer');
+    const source = await createMemory(pool, {
+      scopeId: team.id, scopeKind: 'team', type: 'decision', title: 'Revoked promotion',
+      body: 'No copy may be created after revocation.', authorId: principal.id,
+      source: 'manual',
+    });
+    const authorizationReached = deferred<void>();
+    const continueAuthorization = deferred<void>();
+    const promotePool = poolPausingBeforeMembershipCheck(
+      pool, 2, authorizationReached, continueAuthorization,
+    );
+
+    const promotion = promoteForPrincipal(
+      promotePool, principal, source.id, { kind: 'project', name: 'revoked-target' },
+    );
+    await authorizationReached.promise;
+    await pool.query(
+      'DELETE FROM scope_memberships WHERE principal_id = $1 AND scope_id = $2',
+      [principal.id, project.id],
+    );
+    continueAuthorization.resolve();
+
+    await expect(promotion).rejects.toMatchObject<ServiceError>({ code: 'FORBIDDEN' });
+    const { rows } = await pool.query(
+      `SELECT count(*)::int AS count FROM memories
+        WHERE metadata->>'promoted_from' = $1`,
+      [source.id],
+    );
+    expect(rows[0].count).toBe(0);
+  });
+
+  it('serializes verification before a revocation that starts after authorization', async () => {
+    const { principal, team } = await seedWriter();
+    const source = await createMemory(pool, {
+      scopeId: team.id, scopeKind: 'team', type: 'fact', title: 'Ordered revocation',
+      body: 'The locked authorization order must be stable.', authorId: principal.id,
+      source: 'manual',
+    });
+    const authorizationComplete = deferred<void>();
+    const continueVerification = deferred<void>();
+    const verifyPool = poolPausingAfterMembershipCheck(
+      pool, authorizationComplete, continueVerification,
+    );
+    const revoker = await pool.connect();
+
+    try {
+      const verification = verifyForPrincipal(verifyPool, principal, source.id, true);
+      await authorizationComplete.promise;
+      const pidResult = await revoker.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+      const revocation = revoker.query(
+        'DELETE FROM scope_memberships WHERE principal_id = $1 AND scope_id = $2',
+        [principal.id, team.id],
+      );
+      await waitForDatabaseLock(pool, pidResult.rows[0].pid);
+
+      continueVerification.resolve();
+      await verification;
+      await revocation;
+    } finally {
+      continueVerification.resolve();
+      revoker.release();
+    }
+
+    await expect(verifyForPrincipal(pool, principal, source.id, true))
+      .rejects.toMatchObject<ServiceError>({ code: 'FORBIDDEN' });
   });
 
   it('allows only one of two concurrent promotions and creates one destination', async () => {
@@ -559,6 +698,83 @@ function poolPausingAfterMemoryRead(
       });
     },
   } as unknown as pg.Pool;
+}
+
+function poolPausingBeforeMembershipCheck(
+  pool: pg.Pool,
+  targetCheck: number,
+  checkReached: ReturnType<typeof deferred<void>>,
+  releaseCheck: ReturnType<typeof deferred<void>>,
+): pg.Pool {
+  return {
+    query: pool.query.bind(pool),
+    connect: async () => {
+      const client = await pool.connect();
+      let membershipChecks = 0;
+      return new Proxy(client, {
+        get(target, property) {
+          if (property === 'query') {
+            return async (...args: unknown[]) => {
+              const sql = typeof args[0] === 'string' ? args[0] : '';
+              if (sql.includes('FROM scope_memberships') && sql.includes('FOR UPDATE')) {
+                membershipChecks += 1;
+                if (membershipChecks === targetCheck) {
+                  checkReached.resolve();
+                  await releaseCheck.promise;
+                }
+              }
+              return (target.query as (...queryArgs: unknown[]) => unknown)(...args);
+            };
+          }
+          const value = Reflect.get(target, property, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+    },
+  } as unknown as pg.Pool;
+}
+
+function poolPausingAfterMembershipCheck(
+  pool: pg.Pool,
+  checkComplete: ReturnType<typeof deferred<void>>,
+  releaseCheck: ReturnType<typeof deferred<void>>,
+): pg.Pool {
+  return {
+    query: pool.query.bind(pool),
+    connect: async () => {
+      const client = await pool.connect();
+      return new Proxy(client, {
+        get(target, property) {
+          if (property === 'query') {
+            return async (...args: unknown[]) => {
+              const result = await (target.query as (...queryArgs: unknown[]) => Promise<unknown>)(
+                ...args,
+              );
+              const sql = typeof args[0] === 'string' ? args[0] : '';
+              if (sql.includes('FROM scope_memberships') && sql.includes('FOR UPDATE')) {
+                checkComplete.resolve();
+                await releaseCheck.promise;
+              }
+              return result;
+            };
+          }
+          const value = Reflect.get(target, property, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+    },
+  } as unknown as pg.Pool;
+}
+
+async function waitForDatabaseLock(pool: pg.Pool, pid: number): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const { rows } = await pool.query(
+      'SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1', [pid],
+    );
+    if (rows[0]?.wait_event_type === 'Lock') return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('revocation did not wait for the authorization lock');
 }
 
 function poolRejecting(pool: pg.Pool, sqlFragment: string): pg.Pool {

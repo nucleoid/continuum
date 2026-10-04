@@ -3,7 +3,10 @@ import type { Memory, ScopeRef } from '../types.js';
 import { record as recordAudit } from '../audit/log.js';
 import { createMemory } from './memories.js';
 import { getScope, getScopeByRef } from './scopes.js';
-import { hasRole } from './memberships.js';
+import {
+  canReadScopeForMutation,
+  hasExplicitRoleForMutation,
+} from '../scopes/access.js';
 import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
 
 export interface PromoteResult {
@@ -64,7 +67,7 @@ async function promoteOperation(
 
   const sourceScope = await getScope(client, source.scopeId);
   if (!sourceScope) throw new PromoteError('source scope missing', 500);
-  if (!(await hasRole(client, principalId, sourceScope.id, 'reader'))) {
+  if (!(await canReadScopeForMutation(client, principalId, sourceScope))) {
     throw new PromoteError('principal cannot read source memory', 403);
   }
 
@@ -73,8 +76,15 @@ async function promoteOperation(
   if (destinationScope.id === sourceScope.id) {
     throw new PromoteError('target scope must differ from source', 400);
   }
-  if (!(await hasRole(client, principalId, destinationScope.id, 'writer'))) {
-    throw new PromoteError('principal lacks writer role on target scope', 403);
+  const destinationRole = destinationScope.kind === 'org' ? 'admin' : 'writer';
+  if (!(await hasExplicitRoleForMutation(
+    client,
+    principalId,
+    destinationScope.id,
+    destinationRole,
+  ))) {
+    const roleName = destinationScope.kind === 'org' ? 'admin' : 'writer';
+    throw new PromoteError(`principal lacks ${roleName} role on target scope`, 403);
   }
 
   const destination = await createMemory(client, {
@@ -149,7 +159,9 @@ async function verifyOperation(
 ): Promise<Memory> {
   const memory = await getMemoryForUpdate(client, memoryId);
   if (!memory) throw new PromoteError('memory not found', 404);
-  if (!(await hasRole(client, principalId, memory.scopeId, 'reader'))) {
+  const memoryScope = await getScope(client, memory.scopeId);
+  if (!memoryScope) throw new PromoteError('source scope missing', 500);
+  if (!(await canReadScopeForMutation(client, principalId, memoryScope))) {
     throw new PromoteError('principal cannot read memory', 403);
   }
   const nextState = stillTrue ? memory.state : 'stale';

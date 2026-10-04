@@ -180,6 +180,7 @@ describe('REST/MCP semantic parity matrix', () => {
     const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
     const payments = (await getScopeByRef(pool, { kind: 'team', name: 'payments' }))!;
     const secret = await createScope(pool, { kind: 'team', name: 'secret' });
+    await addMembership(pool, principal.id, org.id, 'admin');
     for (const [scope, title] of [
       [org, 'Org parity marker'],
       [payments, 'Payments parity marker'],
@@ -193,7 +194,7 @@ describe('REST/MCP semantic parity matrix', () => {
 
     const listed = toolJson((await client.callTool({
       name: 'continuum.list_scopes', arguments: {},
-    })) as ToolResult) as Array<{ scope: string }>;
+    })) as ToolResult) as Array<{ scope: string; role: string }>;
     const recalled = toolJson((await client.callTool({
       name: 'continuum.recall', arguments: { query: 'parity phrase' },
     })) as ToolResult) as Array<{ scope: string; title: string }>;
@@ -202,6 +203,9 @@ describe('REST/MCP semantic parity matrix', () => {
       .set('Authorization', 'Bearer entra:user:parity');
 
     expect(listed.map((item) => item.scope).sort()).toEqual(['org', 'team:payments']);
+    expect(listed.filter((item) => item.scope === 'org')).toEqual([
+      { scope: 'org', role: 'admin' },
+    ]);
     expect(recalled.map((item) => item.scope).sort()).toEqual(['org', 'team:payments']);
     expect(agents.text).toContain('Org parity marker');
     expect(agents.text).toContain('Payments parity marker');
