@@ -7,6 +7,8 @@ import { captureRouter } from './routes/capture.js';
 import { recallRouter } from './routes/recall.js';
 import { agentsMdRouter } from './routes/agents-md.js';
 import { auditRouter } from './routes/audit.js';
+import { insightsRouter } from './routes/insights.js';
+import { gapConfigFromEnv, type GapConfig } from '../insights/gaps.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import { makeEmbeddingProviderFromEnv } from '../embeddings/factory.js';
 import { isDirectEntrypoint } from './entrypoint.js';
@@ -48,6 +50,7 @@ export interface AppOptions {
   readiness?: ReadinessState;
   readinessTimeoutMs?: number;
   reviewHorizonDays?: number;
+  gapConfig?: GapConfig;
 }
 
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
@@ -56,6 +59,7 @@ const KNOWN_LOG_PATHS = new Set([
   '/health', '/health/live', '/health/ready',
   '/api/v0/capture', '/api/v0/recall', '/api/v0/agents-md', '/api/v0/audit',
   '/api/v0/review-queue',
+  '/api/v0/insights/gaps',
 ]);
 
 const defaultLogger: OperationalLogger = {
@@ -211,6 +215,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   const provider = opts.embeddingProvider ?? null;
   const readiness = opts.readiness ?? createReadinessState();
   const readinessTimeoutMs = opts.readinessTimeoutMs ?? 1_000;
+  const gapConfig = opts.gapConfig ?? gapConfigFromEnv();
   if (!Number.isFinite(readinessTimeoutMs) || readinessTimeoutMs <= 0) {
     throw new Error('readinessTimeoutMs must be positive');
   }
@@ -252,6 +257,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   v0.use(agentsMdRouter(pool));
   v0.use(auditRouter(pool));
   v0.use(reviewQueueRouter(pool, opts.reviewHorizonDays));
+  v0.use(insightsRouter(pool, provider, gapConfig, () => new Date((opts.clock ?? Date.now)())));
   app.use('/api/v0', v0);
 
   app.use('/api', (_req, res) => {

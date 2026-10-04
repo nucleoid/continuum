@@ -77,4 +77,22 @@ describe('OllamaEmbeddingProvider', () => {
     await p.embed(['hi']);
     expect(vi.mocked(fetchImpl).mock.calls[0][0]).toBe('http://x/api/embeddings');
   });
+
+  it('passes a report abort signal to each serial request and stops after abort', async () => {
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      return {
+        ok: true, status: 200, statusText: 'OK',
+        json: async () => ({ embedding: new Array(4).fill(0) }),
+      } as unknown as Response;
+    });
+    const provider = new OllamaEmbeddingProvider({
+      baseUrl: 'http://x', model: 'm', dim: 4, fetchImpl,
+    });
+    const controller = new AbortController();
+    controller.abort(new Error('deadline'));
+    await expect(provider.embed(['one', 'two'], { signal: controller.signal }))
+      .rejects.toThrow('deadline');
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
 });
