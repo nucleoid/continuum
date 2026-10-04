@@ -9,6 +9,19 @@ const DEFAULT_MIGRATIONS_DIR = resolve(here, '../../migrations');
 // This key coordinates every Continuum migrator connected to the same database.
 // Changing it would break coordination with replicas running an older version.
 const CONTINUUM_MIGRATION_LOCK_ID = '7215328273579717613';
+const NO_TRANSACTION_MARKER = '-- continuum:no-transaction';
+
+function nonTransactionalStatements(sql: string): string[] {
+  const body = sql.trimStart().slice(NO_TRANSACTION_MARKER.length).trim();
+  const statements = body
+    .split(/;\s*(?:\r?\n|$)/)
+    .map((statement) => statement.trim())
+    .filter(Boolean);
+  if (statements.length === 0) {
+    throw new Error('no-transaction migration must contain at least one statement');
+  }
+  return statements;
+}
 
 export interface AppliedMigration {
   name: string;
@@ -51,13 +64,26 @@ export async function runMigrations(
 
       const sql = await readFile(join(migrationsDir, file), 'utf8');
       try {
-        await client.query('BEGIN');
-        await client.query(sql);
-        await client.query(
-          'INSERT INTO _continuum_migrations (name) VALUES ($1)',
-          [file],
-        );
-        await client.query('COMMIT');
+        if (sql.trimStart().startsWith(NO_TRANSACTION_MARKER)) {
+          // CREATE INDEX CONCURRENTLY cannot run in a transaction block. Such
+          // migrations use retry-safe statements so a crash before the ledger
+          // write can rerun the file.
+          for (const statement of nonTransactionalStatements(sql)) {
+            await client.query(statement);
+          }
+          await client.query(
+            'INSERT INTO _continuum_migrations (name) VALUES ($1)',
+            [file],
+          );
+        } else {
+          await client.query('BEGIN');
+          await client.query(sql);
+          await client.query(
+            'INSERT INTO _continuum_migrations (name) VALUES ($1)',
+            [file],
+          );
+          await client.query('COMMIT');
+        }
         applied.push({ name: file, appliedAt: new Date() });
       } catch (error) {
         const migrationError = new Error(
@@ -65,7 +91,9 @@ export async function runMigrations(
           { cause: error },
         );
         try {
-          await client.query('ROLLBACK');
+          if (!sql.trimStart().startsWith(NO_TRANSACTION_MARKER)) {
+            await client.query('ROLLBACK');
+          }
         } catch (rollbackError) {
           throw new AggregateError(
             [migrationError, rollbackError],

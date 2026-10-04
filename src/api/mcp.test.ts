@@ -4,7 +4,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { buildMcpServer } from './mcp.js';
-import { createPrincipal } from '../storage/principals.js';
+import { createPrincipal, getPrincipal } from '../storage/principals.js';
 import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import { createMemory } from '../storage/memories.js';
@@ -12,6 +12,7 @@ import { StubEmbeddingProvider } from '../embeddings/stub.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import { captureSources } from '../capture/source.js';
 import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
+import { LIFECYCLE_PRINCIPAL_ID } from '../lifecycle/principal.js';
 
 interface CallToolResult {
   content: Array<{ type: string; text?: string }>;
@@ -74,6 +75,7 @@ describe('MCP server', () => {
         'continuum.list_scopes',
         'continuum.capture',
         'continuum.recall',
+        'continuum.review_queue',
         'continuum.promote',
         'continuum.verify',
         'continuum.ensure_scope',
@@ -89,6 +91,16 @@ describe('MCP server', () => {
 
     expect(description).toContain('writer or admin');
     expect(description).toContain('Authorship and read access do not grant');
+  });
+
+  it('rejects the reserved lifecycle principal as an interactive MCP identity', async () => {
+    const lifecycle = (await getPrincipal(pool, LIFECYCLE_PRINCIPAL_ID))!;
+    expect(() => buildMcpServer({
+      pool, embeddingProvider: null, principal: lifecycle,
+    })).toThrow('cannot start an MCP session');
+    expect((await pool.query(
+      'SELECT 1 FROM scope_memberships WHERE principal_id = $1', [lifecycle.id],
+    )).rowCount).toBe(0);
   });
 
   it('rejects an injected provider that is incompatible with the database schema', async () => {

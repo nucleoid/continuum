@@ -39,6 +39,38 @@ afterEach(async () => {
 });
 
 describe('runMigrations', () => {
+  it('runs marked concurrent-index migrations outside a transaction', async () => {
+    const queries: string[] = [];
+    const client = {
+      query: vi.fn(async (query: string) => {
+        queries.push(query.trim());
+        if (query.includes('SELECT 1 FROM _continuum_migrations')) {
+          return { rowCount: 0, rows: [] };
+        }
+        if (query.includes('pg_advisory_unlock')) {
+          return { rowCount: 1, rows: [{ unlocked: true }] };
+        }
+        return { rowCount: 1, rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    const directory = await migrationDirectory(
+      '-- continuum:no-transaction\nDROP INDEX CONCURRENTLY IF EXISTS test_idx;\nCREATE INDEX CONCURRENTLY test_idx ON test_table (id);',
+    );
+
+    await runMigrations({ connect: vi.fn(async () => client) } as unknown as pg.Pool, directory);
+
+    expect(queries).not.toContain('BEGIN');
+    expect(queries).not.toContain('COMMIT');
+    expect(queries).not.toContain('ROLLBACK');
+    const index = queries.findIndex((query) => query.includes('CREATE INDEX CONCURRENTLY'));
+    const drop = queries.findIndex((query) => query.includes('DROP INDEX CONCURRENTLY'));
+    const ledger = queries.findIndex((query) => query.includes('INSERT INTO _continuum_migrations'));
+    expect(drop).toBeGreaterThan(-1);
+    expect(index).toBeGreaterThan(drop);
+    expect(ledger).toBeGreaterThan(index);
+  });
+
   it('uses one dedicated client and locks before inspecting the ledger', async () => {
     const queries: string[] = [];
     const release = vi.fn();

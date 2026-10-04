@@ -14,6 +14,8 @@ import { assertEmbeddingProviderDimension } from '../storage/schema.js';
 import { asServiceError, ServiceError, type ServiceLogger } from '../services/errors.js';
 import { startRuntime } from './runtime.js';
 import { createReadinessState, type ReadinessState } from './readiness.js';
+import { reviewQueueRouter } from './routes/review-queue.js';
+import { configuredReviewHorizonDays } from '../services/review-queue.js';
 
 export { createReadinessState } from './readiness.js';
 
@@ -45,6 +47,7 @@ export interface AppOptions {
   clock?: () => number;
   readiness?: ReadinessState;
   readinessTimeoutMs?: number;
+  reviewHorizonDays?: number;
 }
 
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
@@ -52,6 +55,7 @@ const SAFE_PROVIDER_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 const KNOWN_LOG_PATHS = new Set([
   '/health', '/health/live', '/health/ready',
   '/api/v0/capture', '/api/v0/recall', '/api/v0/agents-md', '/api/v0/audit',
+  '/api/v0/review-queue',
 ]);
 
 const defaultLogger: OperationalLogger = {
@@ -247,6 +251,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   v0.use(recallRouter(pool, provider));
   v0.use(agentsMdRouter(pool));
   v0.use(auditRouter(pool));
+  v0.use(reviewQueueRouter(pool, opts.reviewHorizonDays));
   app.use('/api/v0', v0);
 
   app.use('/api', (_req, res) => {
@@ -293,6 +298,7 @@ async function main(): Promise<void> {
     embeddingProvider: makeEmbeddingProviderFromEnv(),
     readiness,
     readinessTimeoutMs,
+    reviewHorizonDays: configuredReviewHorizonDays(),
   });
   await startRuntime(app, { port, readiness, closePool, shutdownTimeoutMs });
   console.log(`Continuum API listening on :${port}`);
