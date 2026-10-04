@@ -8,6 +8,8 @@ import { createScope } from '../../storage/scopes.js';
 import { addMembership } from '../../storage/memberships.js';
 import { StubEmbeddingProvider } from '../../embeddings/stub.js';
 import type { EmbeddingProvider } from '../../embeddings/provider.js';
+import { createMemory } from '../../storage/memories.js';
+import { storeMemoryEmbeddingVector } from '../../storage/embeddings.js';
 
 class NamedStubEmbeddingProvider implements EmbeddingProvider {
   readonly dim = 768;
@@ -17,6 +19,19 @@ class NamedStubEmbeddingProvider implements EmbeddingProvider {
 
   embed(texts: string[]): Promise<number[][]> {
     return this.stub.embed(texts);
+  }
+}
+
+class ControlledEmbeddingProvider implements EmbeddingProvider {
+  readonly id = 'test:controlled';
+  readonly dim = 768;
+
+  async embed(texts: string[]): Promise<number[][]> {
+    return texts.map((text) => {
+      const vector = Array(this.dim).fill(0) as number[];
+      vector[text.includes('lower similarity') ? 1 : 0] = 1;
+      return vector;
+    });
   }
 }
 
@@ -179,5 +194,63 @@ describe('capture + recall with embeddings', () => {
     expect(ftsRecall.status).toBe(200);
     expect(ftsRecall.body.results.map((result: { id: string }) => result.id))
       .toContain(memory.rows[0].id);
+  });
+
+  it('applies type filters before vector ranking and limiting', async () => {
+    const { scope, principal } = await seedActor();
+    const controlledProvider = new ControlledEmbeddingProvider();
+    app = createApp(pool, { embeddingProvider: controlledProvider });
+    const [highSimilarityVector] = await controlledProvider.embed(['higher similarity']);
+    const [lowSimilarityVector] = await controlledProvider.embed(['lower similarity']);
+
+    for (let i = 0; i < 60; i += 1) {
+      const memory = await createMemory(pool, {
+        scopeId: scope.id,
+        scopeKind: 'team',
+        type: 'context',
+        title: `High similarity context ${i}`,
+        body: 'Ranks ahead in unfiltered vector search.',
+        authorId: principal.id,
+        source: 'manual',
+      });
+      await storeMemoryEmbeddingVector(
+        pool,
+        memory.id,
+        highSimilarityVector,
+        controlledProvider,
+      );
+    }
+
+    const decisionIds: string[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      const memory = await createMemory(pool, {
+        scopeId: scope.id,
+        scopeKind: 'team',
+        type: 'decision',
+        title: `Lower similarity decision ${i}`,
+        body: 'This candidate must survive the requested type filter.',
+        authorId: principal.id,
+        source: 'manual',
+      });
+      decisionIds.push(memory.id);
+      await storeMemoryEmbeddingVector(
+        pool,
+        memory.id,
+        lowSimilarityVector,
+        controlledProvider,
+      );
+    }
+
+    const recall = await request(app)
+      .post('/api/v0/recall')
+      .set('Authorization', 'Bearer entra:user:vec')
+      .send({ query: 'vector-only-query', types: ['decision'], limit: 5 });
+
+    expect(recall.status).toBe(200);
+    expect(recall.body.results).toHaveLength(5);
+    expect(recall.body.results.map((result: { id: string }) => result.id).sort())
+      .toEqual(decisionIds.sort());
+    expect(recall.body.results.every((result: { type: string }) => result.type === 'decision'))
+      .toBe(true);
   });
 });

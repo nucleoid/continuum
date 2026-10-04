@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
+import type { MemoryType } from '../types.js';
 import type { Queryable } from './queryable.js';
 import { assertEmbeddingVectorDimension } from './schema.js';
 
@@ -42,9 +43,23 @@ export async function vectorSearchMemoryIds(
   scopeIds: string[],
   provider: Pick<EmbeddingProvider, 'id' | 'dim'>,
   limit: number,
+  types?: MemoryType[],
 ): Promise<Array<{ id: string; distance: number }>> {
   if (scopeIds.length === 0) return [];
   assertEmbeddingVectorDimension(queryVector, provider);
+  const params: unknown[] = [
+    toPgVector(queryVector),
+    scopeIds,
+    provider.id,
+    provider.dim,
+  ];
+  let typeFilter = '';
+  if (types && types.length > 0) {
+    params.push(types);
+    typeFilter = ` AND m.type = ANY($${params.length}::text[])`;
+  }
+  params.push(limit);
+  const limitIdx = params.length;
   const { rows } = await pool.query(
     `SELECT m.id, e.embedding <=> $1::vector AS distance
        FROM memory_embeddings e
@@ -53,9 +68,10 @@ export async function vectorSearchMemoryIds(
         AND m.state = 'live'
         AND e.provider = $3
         AND e.dim = $4
+        ${typeFilter}
       ORDER BY e.embedding <=> $1::vector
-      LIMIT $5`,
-    [toPgVector(queryVector), scopeIds, provider.id, provider.dim, limit],
+      LIMIT $${limitIdx}`,
+    params,
   );
   return rows.map((r) => ({ id: r.id as string, distance: Number(r.distance) }));
 }

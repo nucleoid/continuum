@@ -141,6 +141,7 @@ export async function recall(
       opts.scopeIds,
       opts.embeddingProvider,
       overFetch,
+      opts.types,
     );
     vec = hits.map((h, i) => ({ id: h.id, rank: i + 1, distance: h.distance }));
   }

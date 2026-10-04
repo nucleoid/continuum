@@ -47,3 +47,57 @@ describe('embedding dimension compatibility', () => {
     expect(db.query).not.toHaveBeenCalled();
   });
 });
+
+describe('vector search filters', () => {
+  const vector = Array(768).fill(0) as number[];
+  const scopeIds = ['00000000-0000-0000-0000-000000000001'];
+  const provider = { id: 'hosted:model', dim: 768 };
+
+  it.each([
+    ['undefined', undefined],
+    ['empty', []],
+  ])('leaves search unfiltered for %s types', async (_label, types) => {
+    const db = queryable();
+    vi.mocked(db.query).mockResolvedValue({ rows: [] } as never);
+
+    await vectorSearchMemoryIds(db, vector, scopeIds, provider, 10, types);
+
+    const [sql, params] = vi.mocked(db.query).mock.calls[0] as [string, unknown[]];
+    expect(sql).not.toContain('m.type = ANY');
+    expect(params).toEqual([
+      expect.any(String),
+      scopeIds,
+      provider.id,
+      provider.dim,
+      10,
+    ]);
+  });
+
+  it('combines multiple requested types with provider and dimension filters', async () => {
+    const db = queryable();
+    vi.mocked(db.query).mockResolvedValue({ rows: [] } as never);
+
+    await vectorSearchMemoryIds(
+      db,
+      vector,
+      scopeIds,
+      provider,
+      7,
+      ['decision', 'playbook'],
+    );
+
+    const [sql, params] = vi.mocked(db.query).mock.calls[0] as [string, unknown[]];
+    expect(sql).toContain('m.type = ANY($5::text[])');
+    expect(sql).toContain('e.provider = $3');
+    expect(sql).toContain('e.dim = $4');
+    expect(sql).toContain('LIMIT $6');
+    expect(params).toEqual([
+      expect.any(String),
+      scopeIds,
+      provider.id,
+      provider.dim,
+      ['decision', 'playbook'],
+      7,
+    ]);
+  });
+});

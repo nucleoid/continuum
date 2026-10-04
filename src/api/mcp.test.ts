@@ -11,6 +11,7 @@ import { createMemory } from '../storage/memories.js';
 import { StubEmbeddingProvider } from '../embeddings/stub.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import { captureSources } from '../capture/source.js';
+import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
 
 interface CallToolResult {
   content: Array<{ type: string; text?: string }>;
@@ -179,6 +180,55 @@ describe('MCP server', () => {
     })) as CallToolResult;
     const hits = parseJsonResult(recall) as Array<{ id: string }>;
     expect(hits.map((h) => h.id)).toContain(created.id);
+  });
+
+  it('applies recall type filters before vector limiting over MCP', async () => {
+    const { client, me, teamPayments } = await connectClient();
+    const [highSimilarityVector] = await provider.embed(['vector-only-query']);
+
+    for (let i = 0; i < 30; i += 1) {
+      const memory = await createMemory(pool, {
+        scopeId: teamPayments.id,
+        scopeKind: 'team',
+        type: 'context',
+        title: `High similarity context ${i}`,
+        body: 'Ranks ahead of the requested decisions.',
+        authorId: me.id,
+        source: 'manual',
+      });
+      await storeMemoryEmbeddingVector(
+        pool,
+        memory.id,
+        highSimilarityVector,
+        provider,
+      );
+    }
+
+    const decisionIds: string[] = [];
+    for (let i = 0; i < 2; i += 1) {
+      const memory = await createMemory(pool, {
+        scopeId: teamPayments.id,
+        scopeKind: 'team',
+        type: 'decision',
+        title: `Requested decision ${i}`,
+        body: 'A lower-ranked vector candidate.',
+        authorId: me.id,
+        source: 'manual',
+      });
+      decisionIds.push(memory.id);
+      const [decisionVector] = await provider.embed([`lower similarity ${i}`]);
+      await storeMemoryEmbeddingVector(pool, memory.id, decisionVector, provider);
+    }
+
+    const recall = (await client.callTool({
+      name: 'continuum.recall',
+      arguments: { query: 'vector-only-query', types: ['decision'], limit: 2 },
+    })) as CallToolResult;
+    const hits = parseJsonResult(recall) as Array<{ id: string; type: string }>;
+
+    expect(hits).toHaveLength(2);
+    expect(hits.map((hit) => hit.id).sort()).toEqual(decisionIds.sort());
+    expect(hits.every((hit) => hit.type === 'decision')).toBe(true);
   });
 
   it.each(captureSources)('accepts registered capture source %s', async (source) => {
