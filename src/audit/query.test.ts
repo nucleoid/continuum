@@ -106,4 +106,26 @@ describe('queryAudit', () => {
     expect(after.every((r) => r.at.getTime() >= middleAt.getTime())).toBe(true);
     expect(before.every((r) => r.at.getTime() < middleAt.getTime())).toBe(true);
   });
+
+  it('compares offset timestamps by their UTC instants', async () => {
+    await pool.query(
+      `UPDATE audit_log
+          SET at = CASE action
+            WHEN 'read' THEN '2026-01-01T00:15:00Z'::timestamptz
+            ELSE '2026-01-01T00:45:00Z'::timestamptz
+          END
+        WHERE principal_id = $1`,
+      [alice],
+    );
+
+    const rows = await queryAudit(pool, {
+      principalId: alice,
+      since: new Date('2026-01-01T12:30:00+12:00'),
+      until: new Date('2025-12-31T22:00:00-03:00'),
+    });
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].action).toBe('write');
+    expect(rows[0].at.toISOString()).toBe('2026-01-01T00:45:00.000Z');
+  });
 });

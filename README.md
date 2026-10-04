@@ -22,6 +22,10 @@ Continuum is designed for organisations that want their developers (and the AI a
 
 v0 design in progress. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the schema, scope model, capture API, and extension points.
 
+## API contracts
+
+- [Audit query API](./docs/audit-api.md)
+
 ## License
 
 Continuum is licensed under the [MIT License](./LICENSE).

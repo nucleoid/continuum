@@ -1,4 +1,5 @@
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import express from 'express';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type pg from 'pg';
 import request from 'supertest';
 import { makeTestPool, resetData } from '../../storage/test-helpers.js';
@@ -7,6 +8,7 @@ import { createPrincipal } from '../../storage/principals.js';
 import { createScope, getScopeByRef } from '../../storage/scopes.js';
 import { addMembership } from '../../storage/memberships.js';
 import { record } from '../../audit/log.js';
+import { auditRouter } from './audit.js';
 
 describe('GET /api/v0/audit', () => {
   let pool: pg.Pool;
@@ -123,5 +125,120 @@ describe('GET /api/v0/audit', () => {
     for (const e of res.body.entries) {
       expect(e.action).toBe('write');
     }
+  });
+
+  it('accepts Z timestamps and preserves pagination', async () => {
+    const { alice } = await seed('reader');
+    await pool.query(
+      `UPDATE audit_log
+          SET at = CASE action
+            WHEN 'write' THEN '2026-01-01T00:00:00Z'::timestamptz
+            ELSE '2026-01-01T00:45:00Z'::timestamptz
+          END
+        WHERE principal_id = $1`,
+      [alice.id],
+    );
+
+    const res = await request(app)
+      .get('/api/v0/audit')
+      .query({
+        since: '2026-01-01T00:00:00Z',
+        until: '2026-01-01T01:00:00Z',
+        limit: 1,
+        offset: 1,
+      })
+      .set('Authorization', 'Bearer entra:alice');
+
+    expect(res.status).toBe(200);
+    expect(res.body.entries).toHaveLength(1);
+    expect(res.body.entries[0].at).toBe('2026-01-01T00:00:00.000Z');
+  });
+
+  it('accepts encoded positive and negative offsets and filters by their UTC instants', async () => {
+    const { alice } = await seed('reader');
+    await pool.query(
+      `UPDATE audit_log
+          SET at = CASE action
+            WHEN 'write' THEN '2026-01-01T00:15:00Z'::timestamptz
+            ELSE '2026-01-01T00:45:00Z'::timestamptz
+          END
+        WHERE principal_id = $1`,
+      [alice.id],
+    );
+
+    const since = '2026-01-01T12:30:00+12:00';
+    const until = '2025-12-31T22:00:00-03:00';
+    const res = await request(app)
+      .get(`/api/v0/audit?since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`)
+      .set('Authorization', 'Bearer entra:alice');
+
+    expect(res.status).toBe(200);
+    expect(res.body.entries).toHaveLength(1);
+    expect(res.body.entries[0].action).toBe('read');
+    expect(res.body.entries[0].at).toBe('2026-01-01T00:45:00.000Z');
+
+    const { rows } = await pool.query(
+      `SELECT metadata
+         FROM audit_log
+        WHERE principal_id = $1 AND metadata->>'view' = 'audit'`,
+      [alice.id],
+    );
+    expect(rows[0].metadata.filter.since).toBe(since);
+    expect(rows[0].metadata.filter.until).toBe(until);
+  });
+
+  it.each([
+    ['since', 'timezone-less', '2026-01-01T00:00:00'],
+    ['until', 'timezone-less', '2026-01-01T00:00:00'],
+    ['since', 'malformed', 'not-a-timestamp'],
+    ['until', 'malformed', 'not-a-timestamp'],
+  ])('rejects %s when it is %s', async (parameter, _description, value) => {
+    await seed('reader');
+    const res = await request(app)
+      .get('/api/v0/audit')
+      .query({ [parameter]: value })
+      .set('Authorization', 'Bearer entra:alice');
+    expect(res.status).toBe(400);
+  });
+
+  it.each([
+    ['equal', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'],
+    ['inverted', '2026-01-02T00:00:00Z', '2026-01-01T00:00:00Z'],
+  ])('rejects %s time ranges', async (_description, since, until) => {
+    await seed('reader');
+    const res = await request(app)
+      .get('/api/v0/audit')
+      .query({ since, until })
+      .set('Authorization', 'Bearer entra:alice');
+    expect(res.status).toBe(400);
+  });
+
+  it.each([
+    ['out-of-range offset hour', '2026-01-01T00:00:00+24:00'],
+    ['large offset hour', '2026-01-01T00:00:00+99:59'],
+    ['out-of-range offset minute', '2026-01-01T00:00:00+12:99'],
+    ['offset without a colon', '2026-01-01T00:00:00+0560'],
+    ['timestamp without seconds', '2026-01-01T00:00Z'],
+  ])('rejects %s before querying the database', async (_description, since) => {
+    const query = vi.fn();
+    const validationApp = express();
+    validationApp.use((req, _res, next) => {
+      req.principal = {
+        id: '00000000-0000-4000-8000-000000000001',
+        externalId: 'entra:alice',
+        kind: 'user',
+        displayName: 'Alice',
+        createdAt: new Date(),
+      };
+      next();
+    });
+    validationApp.use('/api/v0', auditRouter({ query } as unknown as pg.Pool));
+
+    const res = await request(validationApp)
+      .get('/api/v0/audit')
+      .query({ since });
+
+    expect(res.status).toBe(400);
+    expect(query).not.toHaveBeenCalled();
   });
 });
