@@ -9,6 +9,7 @@ import { auditRouter } from './routes/audit.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import { makeEmbeddingProviderFromEnv } from '../embeddings/factory.js';
 import { isDirectEntrypoint } from './entrypoint.js';
+import { assertEmbeddingProviderDimension } from '../storage/schema.js';
 import {
   asServiceError,
   logInternalServiceError,
@@ -31,6 +32,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   });
 
   const provider = opts.embeddingProvider ?? null;
+  if (provider) assertEmbeddingProviderDimension(provider);
   const v0 = express.Router();
   v0.use(bearerAuth(pool));
   v0.use(captureRouter(pool, provider));

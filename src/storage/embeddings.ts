@@ -1,6 +1,7 @@
 import type pg from 'pg';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import type { Queryable } from './queryable.js';
+import { assertEmbeddingVectorDimension } from './schema.js';
 
 function toPgVector(v: number[]): string {
   return `[${v.join(',')}]`;
@@ -22,6 +23,7 @@ export async function storeMemoryEmbeddingVector(
   vector: number[],
   provider: Pick<EmbeddingProvider, 'id' | 'dim'>,
 ): Promise<void> {
+  assertEmbeddingVectorDimension(vector, provider);
   await pool.query(
     `INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
      VALUES ($1, $2, $3, $4::vector)
@@ -38,18 +40,22 @@ export async function vectorSearchMemoryIds(
   pool: Queryable,
   queryVector: number[],
   scopeIds: string[],
+  provider: Pick<EmbeddingProvider, 'id' | 'dim'>,
   limit: number,
 ): Promise<Array<{ id: string; distance: number }>> {
   if (scopeIds.length === 0) return [];
+  assertEmbeddingVectorDimension(queryVector, provider);
   const { rows } = await pool.query(
     `SELECT m.id, e.embedding <=> $1::vector AS distance
        FROM memory_embeddings e
        JOIN memories m ON m.id = e.memory_id
       WHERE m.scope_id = ANY($2::uuid[])
         AND m.state = 'live'
+        AND e.provider = $3
+        AND e.dim = $4
       ORDER BY e.embedding <=> $1::vector
-      LIMIT $3`,
-    [toPgVector(queryVector), scopeIds, limit],
+      LIMIT $5`,
+    [toPgVector(queryVector), scopeIds, provider.id, provider.dim, limit],
   );
   return rows.map((r) => ({ id: r.id as string, distance: Number(r.distance) }));
 }

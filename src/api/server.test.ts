@@ -6,6 +6,16 @@ import { createApp, mapRestError } from './server.js';
 const unusedPool = {} as pg.Pool;
 
 describe('REST error middleware', () => {
+  it('rejects an injected provider that is incompatible with the database schema', () => {
+    expect(() => createApp(unusedPool, {
+      embeddingProvider: {
+        id: 'hosted:model',
+        dim: 384,
+        embed: vi.fn(),
+      },
+    })).toThrow(/provider dimension.*768.*database vector\(768\)/i);
+  });
+
   it('returns a stable safe error for malformed JSON', async () => {
     const response = await request(createApp(unusedPool))
       .post('/api/v0/capture')

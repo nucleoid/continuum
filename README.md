@@ -26,6 +26,18 @@ v0 design in progress. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the schema, 
 
 - [Audit query API](./docs/audit-api.md)
 
+## Embedding configuration
+
+The v0 PostgreSQL schema stores `vector(768)`, so
+`CONTINUUM_EMBEDDING_DIM` must be the integer `768`. Continuum rejects other
+dimensions while creating the configured provider instead of failing later
+during capture or recall.
+
+Vector recall uses only rows whose provider ID and dimension exactly match the
+active provider. Changing models therefore leaves existing embedding rows
+untouched and temporarily makes their memories full-text-only until they are
+re-embedded. Switching back to the old model makes those rows usable again.
+
 ## License
 
 Continuum is licensed under the [MIT License](./LICENSE).
