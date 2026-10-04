@@ -53,10 +53,6 @@ const KNOWN_LOG_PATHS = new Set([
   '/health', '/health/live', '/health/ready',
   '/api/v0/capture', '/api/v0/recall', '/api/v0/agents-md', '/api/v0/audit',
 ]);
-const PROTECTED_V0_PATHS = new Set([
-  '/capture', '/capture/', '/recall', '/recall/', '/agents-md', '/agents-md/',
-  '/audit', '/audit/',
-]);
 
 const defaultLogger: OperationalLogger = {
   info(event) {
@@ -93,7 +89,21 @@ async function queryWithTimeout(pool: pg.Pool, timeoutMs: number): Promise<void>
     text: 'SELECT 1',
     query_timeout: timeoutMs,
   };
-  await pool.query(query);
+  let timeout: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(
+      () => reject(new Error(`Database readiness check exceeded ${timeoutMs} ms`)),
+      timeoutMs,
+    );
+  });
+  try {
+    await Promise.race([
+      Promise.resolve().then(async () => { await pool.query(query); }),
+      deadline,
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 export function formatOperationalError(error: unknown): {
@@ -212,7 +222,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   const liveness: express.RequestHandler = (_req, res) => { res.json({ ok: true }); };
   app.get('/health', liveness);
   app.get('/health/live', liveness);
-  app.get('/health/ready', async (_req, res) => {
+  app.get('/health/ready', async (req, res) => {
     const embedding = embeddingStatus(provider);
     if (!readiness.isReady()) {
       res.status(503).json({ ok: false, database: 'shutting_down', embedding });
@@ -221,20 +231,18 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
     try {
       await queryWithTimeout(pool, readinessTimeoutMs);
       res.json({ ok: true, database: 'ready', embedding });
-    } catch {
+    } catch (error) {
+      logger.error('REST: readiness dependency unavailable', {
+        dependency: 'database',
+        requestId: req.requestId,
+        error: formatOperationalError(error),
+      });
       res.status(503).json({ ok: false, database: 'unavailable', embedding });
     }
   });
 
   const v0 = express.Router();
-  const authenticate = bearerAuth(pool);
-  v0.use((req, res, next) => {
-    if (PROTECTED_V0_PATHS.has(req.path.toLowerCase())) {
-      void authenticate(req, res, next).catch(next);
-      return;
-    }
-    next();
-  });
+  v0.use(bearerAuth(pool));
   v0.use(captureRouter(pool, provider));
   v0.use(recallRouter(pool, provider));
   v0.use(agentsMdRouter(pool));

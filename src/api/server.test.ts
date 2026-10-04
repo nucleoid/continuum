@@ -63,9 +63,21 @@ describe('createApp operational middleware', () => {
   });
 
   it('adds request identity to authentication failures and API 404s', async () => {
-    const app = createApp(unusedPool, appOptions());
+    const principal = {
+      id: '11111111-1111-4111-8111-111111111111',
+      external_id: 'known',
+      kind: 'user',
+      display_name: 'Known',
+      created_at: new Date(),
+    };
+    const pool = {
+      query: vi.fn().mockResolvedValue({ rows: [principal] }),
+    } as unknown as pg.Pool;
+    const app = createApp(pool, appOptions());
     const authFailure = await request(app).post('/api/v0/capture').send({});
-    const missing = await request(app).get('/api/v0/private-memory-id?query=secret-recall');
+    const missing = await request(app)
+      .get('/api/v0/private-memory-id?query=secret-recall')
+      .set('Authorization', 'Bearer known');
 
     expect(authFailure.headers['x-request-id']).toBe(fixedRequestId);
     expect(authFailure.body).toMatchObject({ requestId: fixedRequestId });
@@ -93,9 +105,31 @@ describe('createApp operational middleware', () => {
     expect(query).not.toHaveBeenCalled();
   });
 
+  it('fails closed for an arbitrary future mixed-case v0 route', async () => {
+    const query = vi.fn();
+    const app = createApp({ query } as unknown as pg.Pool, appOptions());
+
+    const response = await request(app).post('/api/v0/FuTuRe-RoUtE').send({});
+
+    expect(response.status).toBe(401);
+    expect(response.body).toMatchObject({
+      error: 'missing or malformed bearer token', requestId: fixedRequestId,
+    });
+    expect(query).not.toHaveBeenCalled();
+  });
+
   it('emits one bounded completion log without headers, query values, body, or unmatched IDs', async () => {
     const logger = { info: vi.fn(), error: vi.fn() };
-    const app = createApp(unusedPool, appOptions({ logger, clock: () => 1234 }));
+    const pool = {
+      query: vi.fn().mockResolvedValue({ rows: [{
+        id: '11111111-1111-4111-8111-111111111111',
+        external_id: 'private-token',
+        kind: 'user',
+        display_name: 'Known',
+        created_at: new Date(),
+      }] }),
+    } as unknown as pg.Pool;
+    const app = createApp(pool, appOptions({ logger, clock: () => 1234 }));
     const response = await request(app)
       .post('/api/v0/secret-memory-id?query=private-recall-text')
       .set('Authorization', 'Bearer private-token')
@@ -251,12 +285,22 @@ describe('health and readiness', () => {
     expect(notAccepting.status).toBe(503);
     expect(notAccepting.body).toMatchObject({ ok: false, database: 'shutting_down' });
 
-    const secret = 'postgres://secret-host/private';
+    const secret = 'postgres://admin:hunter2@private-host/private';
+    const logger = { info: vi.fn(), error: vi.fn() };
     const failed = await request(createApp({
       query: vi.fn().mockRejectedValue(new Error(secret)),
-    } as unknown as pg.Pool, appOptions())).get('/health/ready');
+    } as unknown as pg.Pool, appOptions({ logger }))).get('/health/ready');
     expect(failed.status).toBe(503);
     expect(JSON.stringify(failed.body)).not.toContain(secret);
+    expect(logger.error).toHaveBeenCalledWith(
+      'REST: readiness dependency unavailable',
+      expect.objectContaining({
+        dependency: 'database',
+        requestId: fixedRequestId,
+        error: { message: 'postgres://[REDACTED]@private-host/private' },
+      }),
+    );
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('hunter2');
 
     vi.useFakeTimers();
     try {
@@ -272,6 +316,32 @@ describe('health and readiness', () => {
       const timedOut = await responsePromise;
       expect(timedOut.status).toBe(503);
       expect(query).toHaveBeenCalledWith({ text: 'SELECT 1', query_timeout: 25 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('bounds readiness when pool acquisition never settles', async () => {
+    vi.useFakeTimers();
+    let rejectQuery!: (error: Error) => void;
+    const query = vi.fn(() => new Promise((_resolve, reject) => {
+      rejectQuery = reject;
+    }));
+    try {
+      const responsePromise = request(createApp(
+        { query } as unknown as pg.Pool,
+        appOptions({ readinessTimeoutMs: 20 }),
+      )).get('/health/ready').then((response) => response);
+      await vi.waitFor(() => expect(query).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(20);
+
+      const response = await responsePromise;
+      expect(response.status).toBe(503);
+      expect(response.body).toMatchObject({ ok: false, database: 'unavailable' });
+      expect(vi.getTimerCount()).toBe(0);
+
+      rejectQuery(new Error('late stalled query failure'));
+      await Promise.resolve();
     } finally {
       vi.useRealTimers();
     }
