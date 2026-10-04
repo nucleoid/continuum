@@ -158,7 +158,7 @@ describe('POST /api/v0/recall', () => {
   it('maps provider failures to a safe dependency error', async () => {
     const privateMessage = 'provider endpoint private-provider-host';
     const failingProvider: EmbeddingProvider = {
-      id: 'test:failing', dim: 3,
+      id: 'test:failing', dim: 768,
       async embed() { throw new Error(privateMessage); },
     };
     app = createApp(pool, { embeddingProvider: failingProvider });

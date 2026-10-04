@@ -20,6 +20,7 @@ import {
 import { promoteForPrincipal, verifyForPrincipal } from '../services/lifecycle.js';
 import { renderAgentsMdForPrincipal } from '../services/agents-md.js';
 import { ensureScopeForPrincipal, validateScopeRef } from '../services/scopes.js';
+import { assertEmbeddingProviderDimension } from '../storage/schema.js';
 
 const SCOPE_KINDS = ['org', 'team', 'project', 'user', 'role'] as const;
 const MEMORY_TYPES = ['fact', 'decision', 'context', 'playbook', 'relationship'] as const;
@@ -54,6 +55,7 @@ function serviceErrorResult(error: unknown, logger: ServiceLogger): {
 
 export function buildMcpServer(deps: McpDeps): McpServer {
   const { pool, embeddingProvider, principal } = deps;
+  if (embeddingProvider) assertEmbeddingProviderDimension(embeddingProvider);
   const logger = deps.logger ?? console;
   const errorResult = (error: unknown) => serviceErrorResult(error, logger);
 

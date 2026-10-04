@@ -7,6 +7,18 @@ import { createPrincipal } from '../../storage/principals.js';
 import { createScope } from '../../storage/scopes.js';
 import { addMembership } from '../../storage/memberships.js';
 import { StubEmbeddingProvider } from '../../embeddings/stub.js';
+import type { EmbeddingProvider } from '../../embeddings/provider.js';
+
+class NamedStubEmbeddingProvider implements EmbeddingProvider {
+  readonly dim = 768;
+  private readonly stub = new StubEmbeddingProvider(this.dim);
+
+  constructor(readonly id: string) {}
+
+  embed(texts: string[]): Promise<number[][]> {
+    return this.stub.embed(texts);
+  }
+}
 
 describe('capture + recall with embeddings', () => {
   let pool: pg.Pool;
@@ -86,5 +98,86 @@ describe('capture + recall with embeddings', () => {
     expect(
       recall.body.results.map((r: { id: string }) => r.id),
     ).toContain(plainId);
+  });
+
+  it('uses only vector candidates from the exact active provider and dimension', async () => {
+    await seedActor();
+    const providerA = new NamedStubEmbeddingProvider('stub:model-a');
+    const providerB = new NamedStubEmbeddingProvider('stub:model-b');
+    const appA = createApp(pool, { embeddingProvider: providerA });
+    const appB = createApp(pool, { embeddingProvider: providerB });
+
+    const oldProviderMemory = await request(appA)
+      .post('/api/v0/capture')
+      .set('Authorization', 'Bearer entra:user:vec')
+      .send({
+        scope: { kind: 'team', name: 'payments' },
+        type: 'fact',
+        title: 'Old provider only',
+        body: 'Material that does not contain the recall terms.',
+        source: 'manual',
+      });
+    const activeProviderMemory = await request(appB)
+      .post('/api/v0/capture')
+      .set('Authorization', 'Bearer entra:user:vec')
+      .send({
+        scope: { kind: 'team', name: 'payments' },
+        type: 'fact',
+        title: 'Active provider only',
+        body: 'Different material without the recall terms.',
+        source: 'manual',
+      });
+
+    const recall = await request(appB)
+      .post('/api/v0/recall')
+      .set('Authorization', 'Bearer entra:user:vec')
+      .send({ query: 'zyxwvu qqqqq' });
+
+    expect(recall.status).toBe(200);
+    const ids = recall.body.results.map((result: { id: string }) => result.id);
+    expect(ids).toContain(activeProviderMemory.body.id);
+    expect(ids).not.toContain(oldProviderMemory.body.id);
+
+    const stored = await pool.query(
+      'SELECT provider FROM memory_embeddings ORDER BY provider',
+    );
+    expect(stored.rows.map((row) => row.provider)).toEqual([
+      providerA.id,
+      providerB.id,
+    ]);
+  });
+
+  it('ignores wrong-dimension rows and still returns FTS results', async () => {
+    const { scope, principal } = await seedActor();
+    const memory = await pool.query(
+      `INSERT INTO memories (id, scope_id, type, title, body, author_id, source)
+       VALUES (gen_random_uuid(), $1, 'fact', 'Provider migration fallback',
+               'The migration fallback remains searchable through full text.', $2, 'manual')
+       RETURNING id`,
+      [scope.id, principal.id],
+    );
+    const [vector] = await provider.embed(['wrong dimension metadata']);
+    await pool.query(
+      `INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
+       VALUES ($1, $2, 384, $3::vector)`,
+      [memory.rows[0].id, provider.id, `[${vector.join(',')}]`],
+    );
+
+    const vectorOnlyRecall = await request(app)
+      .post('/api/v0/recall')
+      .set('Authorization', 'Bearer entra:user:vec')
+      .send({ query: 'zyxwvu qqqqq' });
+
+    expect(vectorOnlyRecall.status).toBe(200);
+    expect(vectorOnlyRecall.body.results).toEqual([]);
+
+    const ftsRecall = await request(app)
+      .post('/api/v0/recall')
+      .set('Authorization', 'Bearer entra:user:vec')
+      .send({ query: 'migration fallback' });
+
+    expect(ftsRecall.status).toBe(200);
+    expect(ftsRecall.body.results.map((result: { id: string }) => result.id))
+      .toContain(memory.rows[0].id);
   });
 });

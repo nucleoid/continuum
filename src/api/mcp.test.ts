@@ -79,6 +79,14 @@ describe('MCP server', () => {
     );
   });
 
+  it('rejects an injected provider that is incompatible with the database schema', async () => {
+    await expect(connectClient({
+      id: 'hosted:model',
+      dim: 384,
+      embed: vi.fn(),
+    })).rejects.toThrow(/provider dimension.*768.*database vector\(768\)/i);
+  });
+
   it('list_scopes returns membership plus org', async () => {
     const { client } = await connectClient();
     const res = (await client.callTool({
@@ -95,7 +103,7 @@ describe('MCP server', () => {
   it('returns capture success without exposing embedding failures and audits safely', async () => {
     const privateMessage = 'provider token private-mcp-value';
     const failingProvider: EmbeddingProvider = {
-      id: 'test:failing', dim: 3,
+      id: 'test:failing', dim: 768,
       async embed() { throw new Error(privateMessage); },
     };
     const { client } = await connectClient(failingProvider);

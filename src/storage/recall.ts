@@ -139,6 +139,7 @@ export async function recall(
       pool,
       queryVec,
       opts.scopeIds,
+      opts.embeddingProvider,
       overFetch,
     );
     vec = hits.map((h, i) => ({ id: h.id, rank: i + 1, distance: h.distance }));

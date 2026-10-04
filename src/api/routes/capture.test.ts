@@ -62,7 +62,7 @@ describe('POST /api/v0/capture', () => {
     const privateMessage = 'provider token private-provider-value';
     const provider: EmbeddingProvider = {
       id: 'test:failing',
-      dim: 3,
+      dim: 768,
       async embed() {
         throw new Error(privateMessage);
       },
