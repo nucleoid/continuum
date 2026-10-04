@@ -53,38 +53,44 @@ export async function selectGapCandidates(
           AND COALESCE(metadata->>'record_kind', 'summary') = 'summary'
           AND COALESCE(metadata->>'view', '') NOT IN ('insights-gaps', 'insights-gap-probe')
         ORDER BY at DESC, id DESC
-     ), clean_input AS (
+     ), normalized_input AS (
        SELECT id, at, principal_id,
               btrim(regexp_replace(normalize(query, NFKC), '[[:space:] ]+', ' ', 'g')) AS display_query,
               lower(btrim(regexp_replace(normalize(query, NFKC), '[[:space:] ]+', ' ', 'g'))) AS normalized,
               metadata->'scope_ids' AS raw_scope_ids
          FROM bounded
         WHERE char_length(query) <= $3
+     ), clean_input AS (
+       SELECT id, at, principal_id, display_query, normalized, raw_scope_ids
+         FROM normalized_input
+        WHERE char_length(display_query) <= $3
+          AND char_length(normalized) <= $3
+     ), validated AS (
+       SELECT id, at, principal_id, display_query, normalized, raw_scope_ids,
+              COALESCE(
+                jsonb_typeof(raw_scope_ids) = 'array'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM jsonb_array_elements(
+                      CASE WHEN jsonb_typeof(raw_scope_ids) = 'array'
+                        THEN raw_scope_ids ELSE '[]'::jsonb END
+                    ) AS element
+                     WHERE jsonb_typeof(element) <> 'string'
+                        OR (element #>> '{}') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                  ),
+                false
+              ) AS scope_ids_valid
+         FROM clean_input
      ), cleaned AS (
        SELECT id, at, principal_id, display_query, normalized,
-              jsonb_typeof(raw_scope_ids) = 'array'
-                AND NOT EXISTS (
-                  SELECT 1 FROM jsonb_array_elements(
-                    CASE WHEN jsonb_typeof(raw_scope_ids) = 'array'
-                      THEN raw_scope_ids ELSE '[]'::jsonb END
-                  ) AS element
-                   WHERE jsonb_typeof(element) <> 'string'
-                ) AS scope_ids_valid,
-              CASE WHEN jsonb_typeof(raw_scope_ids) = 'array'
-                AND NOT EXISTS (
-                  SELECT 1 FROM jsonb_array_elements(
-                    CASE WHEN jsonb_typeof(raw_scope_ids) = 'array'
-                      THEN raw_scope_ids ELSE '[]'::jsonb END
-                  ) AS element
-                   WHERE jsonb_typeof(element) <> 'string'
-                ) THEN (
+              scope_ids_valid,
+              CASE WHEN scope_ids_valid THEN (
                   SELECT COALESCE(jsonb_agg(to_jsonb(scope_id) ORDER BY scope_id), '[]'::jsonb)
                     FROM (
                       SELECT DISTINCT element #>> '{}' AS scope_id
                         FROM jsonb_array_elements(raw_scope_ids) AS element
                     ) AS canonical_scope_ids
                 ) ELSE NULL END AS scope_ids
-         FROM clean_input
+         FROM validated
      ), grouped AS (
        SELECT normalized,
               (array_agg(display_query ORDER BY at DESC, id DESC))[1] AS representative,
@@ -94,7 +100,7 @@ export async function selectGapCandidates(
               array_agg(DISTINCT principal_id) AS principal_keys,
               min(at) AS first_seen,
               max(at) AS last_seen,
-              bool_and(scope_ids_valid) AS all_scope_ids_valid,
+              bool_and(scope_ids_valid IS TRUE) AS all_scope_ids_valid,
               min(scope_ids::text) AS min_scope_ids,
               max(scope_ids::text) AS max_scope_ids
          FROM cleaned

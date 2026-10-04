@@ -115,6 +115,30 @@ describe('selectGapCandidates', () => {
     });
   });
 
+  it('marks a normalized group mixing legacy and exact scope metadata as unknown', async () => {
+    const principal = await createPrincipal(pool, {
+      externalId: 'legacy-mixed-scopes', kind: 'user', displayName: 'Legacy mixed scopes',
+    });
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await recordRead(pool, {
+      principalId: principal.id, query: 'same legacy question',
+      metadata: { hits: 0 }, memories: [],
+    });
+    await recordRead(pool, {
+      principalId: principal.id, query: 'SAME LEGACY QUESTION',
+      metadata: { hits: 0, scope_ids: [org.id] }, memories: [],
+    });
+
+    const selection = await selectGapCandidates(pool, {
+      since: new Date(Date.now() - 86_400_000), scanLimit: 50,
+      candidateLimit: 10, maxQueryChars: 2_000,
+    });
+
+    expect(selection.candidates[0]).toMatchObject({
+      scopeIds: [], scopeFidelity: 'unknown', frequency: 2,
+    });
+  });
+
   it('marks mixed non-string scope IDs as unknown', async () => {
     const principal = await createPrincipal(pool, {
       externalId: 'invalid-scopes', kind: 'user', displayName: 'Invalid scopes',
@@ -130,5 +154,40 @@ describe('selectGapCandidates', () => {
     expect(selection.candidates[0]).toMatchObject({
       scopeIds: [], scopeFidelity: 'unknown',
     });
+  });
+
+  it('marks malformed UUID scope IDs as unknown', async () => {
+    const principal = await createPrincipal(pool, {
+      externalId: 'malformed-uuid-scopes', kind: 'user', displayName: 'Malformed UUID scopes',
+    });
+    await recordRead(pool, {
+      principalId: principal.id, query: 'malformed scope question',
+      metadata: { hits: 0, scope_ids: ['not-a-uuid'] }, memories: [],
+    });
+
+    const selection = await selectGapCandidates(pool, {
+      since: new Date(Date.now() - 86_400_000), scanLimit: 50,
+      candidateLimit: 10, maxQueryChars: 2_000,
+    });
+
+    expect(selection.candidates[0]).toMatchObject({
+      scopeIds: [], scopeFidelity: 'unknown',
+    });
+  });
+
+  it('rejects a query whose NFKC display expands beyond the query bound', async () => {
+    const principal = await createPrincipal(pool, {
+      externalId: 'normalization-expansion', kind: 'user', displayName: 'Normalization expansion',
+    });
+    await recordRead(pool, {
+      principalId: principal.id, query: '\uFDFA', metadata: { hits: 0 }, memories: [],
+    });
+
+    const selection = await selectGapCandidates(pool, {
+      since: new Date(Date.now() - 86_400_000), scanLimit: 50,
+      candidateLimit: 10, maxQueryChars: 10,
+    });
+
+    expect(selection.candidates).toEqual([]);
   });
 });

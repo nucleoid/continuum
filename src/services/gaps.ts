@@ -219,6 +219,7 @@ export async function getKnowledgeGaps(
         if (
           vectors.length !== candidates.length
           || dimensions === 0
+          || dimensions !== provider.dim
           || vectors.some((vector) =>
             vector.length !== dimensions || vector.some((value) => !Number.isFinite(value)))
         ) throw new Error('invalid embedding result');

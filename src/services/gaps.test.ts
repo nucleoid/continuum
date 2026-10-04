@@ -68,6 +68,45 @@ describe('getKnowledgeGaps', () => {
     expect(JSON.stringify(report)).not.toContain('provider failed');
   });
 
+  it('falls back before clustering when provider vectors differ from provider.dim', async () => {
+    const me = await admin();
+    await recordRead(pool, {
+      principalId: me.id, query: 'dimension mismatch', metadata: { hits: 0 }, memories: [],
+    });
+    const provider: EmbeddingProvider = {
+      id: 'wrong-dimension', dim: 3,
+      async embed(texts) { return texts.map(() => [1, 0]); },
+    };
+
+    const report = await getKnowledgeGaps(pool, provider, me, {
+      sinceDays: 30, limit: 10, minFrequency: 1, threshold: 0.9,
+      candidateLimit: 20, scanLimit: 100, maxQueryChars: 2_000,
+      now: new Date('2026-10-04T12:00:00Z'),
+    });
+
+    expect(report.semanticClustering).toBe(false);
+    expect(report.gaps).toHaveLength(1);
+  });
+
+  it('fails malformed scope UUIDs closed instead of failing the report', async () => {
+    const me = await admin();
+    await recordRead(pool, {
+      principalId: me.id, query: 'malformed scope report',
+      metadata: { hits: 0, scope_ids: ['not-a-uuid'] }, memories: [],
+    });
+
+    const report = await getKnowledgeGaps(pool, null, me, {
+      sinceDays: 30, limit: 10, minFrequency: 1, threshold: 0.9,
+      candidateLimit: 20, scanLimit: 100, maxQueryChars: 2_000,
+      now: new Date('2026-10-04T12:00:00Z'),
+    });
+
+    expect(report.scopeFidelity).toBe('unknown');
+    expect(report.gaps[0].resolution).toEqual({
+      status: 'unresolved', scopeFidelity: 'unknown',
+    });
+  });
+
   it('bounds semantic embedding by a report deadline and aborts the provider work', async () => {
     const me = await admin();
     await recordRead(pool, {

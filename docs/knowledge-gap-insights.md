@@ -34,6 +34,9 @@ Only request-level `read` audit summaries with a non-null query and a numeric
 `metadata.hits` value of zero are eligible. Result-detail rows and insight
 audits are excluded. Queries are Unicode-normalized, whitespace-collapsed, and
 case-folded for exact grouping. Blank and oversized queries are excluded.
+The query-character bound is enforced both before and after normalization so
+Unicode compatibility expansion cannot enlarge report or embedding input past
+the configured limit.
 
 Exact groups are aggregated in PostgreSQL and capped before one batch embedding
 request. Scope fidelity is reduced in SQL to one canonical exact set or `unknown`,
