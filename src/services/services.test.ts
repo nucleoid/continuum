@@ -631,6 +631,36 @@ describe('shared services', () => {
     },
   );
 
+  it.each(['live', 'promoted', 'archived'] as const)(
+    'returns the same forbidden response to an unauthorized principal for a %s memory',
+    async (state) => {
+      const { team } = await seedWriter();
+      const unauthorized = await createOtherAuthor(`unauthorized-${state}`);
+      const author = await createOtherAuthor(`author-${state}`);
+      const source = await createMemory(pool, {
+        scopeId: team.id, scopeKind: team.kind, type: 'fact', title: `${state} private fact`,
+        body: 'Terminal state must not be disclosed.', authorId: author.id, source: 'manual',
+      });
+      if (state !== 'live') {
+        await pool.query('UPDATE memories SET state = $2 WHERE id = $1', [source.id, state]);
+      }
+
+      await expect(verifyForPrincipal(pool, unauthorized, source.id, true, 'no-op'))
+        .rejects.toMatchObject<ServiceError>({
+          code: 'FORBIDDEN',
+          status: 403,
+          publicMessage: 'principal lacks writer role on source scope',
+        });
+      const { rows } = await pool.query(
+        `SELECT state, last_verified,
+                (SELECT count(*)::int FROM audit_log WHERE memory_id = $1) AS audits
+           FROM memories WHERE id = $1`,
+        [source.id],
+      );
+      expect(rows[0]).toEqual({ state, last_verified: null, audits: 0 });
+    },
+  );
+
   it('rolls verification back when its required audit fails', async () => {
     const { principal, team } = await seedWriter();
     const source = await createMemory(pool, {
@@ -1062,6 +1092,30 @@ describe('shared services', () => {
 
     await expect(verifyForPrincipal(
       pool, principal, source.id, true, note,
+    )).rejects.toMatchObject<ServiceError>({
+      code: 'INVALID_INPUT',
+      status: 400,
+      publicMessage: 'Verification note contains invalid Unicode',
+    });
+
+    const { rows } = await pool.query(
+      `SELECT last_verified,
+              (SELECT count(*)::int FROM audit_log WHERE memory_id = $1) AS audits
+         FROM memories WHERE id = $1`,
+      [source.id],
+    );
+    expect(rows[0]).toEqual({ last_verified: null, audits: 0 });
+  });
+
+  it('rejects a trailing lone high surrogate without mutation or audit', async () => {
+    const { principal, team } = await seedWriter();
+    const source = await createMemory(pool, {
+      scopeId: team.id, scopeKind: team.kind, type: 'fact', title: 'Trailing surrogate note',
+      body: 'No malformed Unicode audit note.', authorId: principal.id, source: 'manual',
+    });
+
+    await expect(verifyForPrincipal(
+      pool, principal, source.id, true, 'unsafe\ud800',
     )).rejects.toMatchObject<ServiceError>({
       code: 'INVALID_INPUT',
       status: 400,

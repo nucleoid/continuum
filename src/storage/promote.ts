@@ -160,13 +160,13 @@ async function verifyOperation(
 ): Promise<Memory> {
   const memory = await getMemoryForUpdate(client, memoryId);
   if (!memory) throw new PromoteError('memory not found', 404);
-  if (memory.state === 'promoted' || memory.state === 'archived') {
-    throw new PromoteError('memory is in a terminal state', 409);
-  }
   const memoryScope = await getScope(client, memory.scopeId);
   if (!memoryScope) throw new PromoteError('source scope missing', 500);
   if (!(await canMutateScope(client, principalId, memoryScope.id))) {
     throw new PromoteError('principal lacks writer role on source scope', 403);
+  }
+  if (memory.state === 'promoted' || memory.state === 'archived') {
+    throw new PromoteError('memory is in a terminal state', 409);
   }
   const { rows: clockRows } = await client.query(
     'SELECT statement_timestamp() AS verified_at',
