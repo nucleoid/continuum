@@ -94,6 +94,12 @@ describe('capture + recall with embeddings', () => {
     expect(recall.status).toBe(200);
     const ids = recall.body.results.map((r: { id: string }) => r.id);
     expect(ids).toContain(create.body.id);
+    const { rows: readRows } = await pool.query(
+      `SELECT memory_id, metadata FROM audit_log
+        WHERE action = 'read' ORDER BY id`,
+    );
+    expect(readRows.filter((row) => row.memory_id === create.body.id)).toHaveLength(1);
+    expect(readRows[1].metadata).toMatchObject({ rank: 1, record_kind: 'result' });
   });
 
   it('falls back gracefully when no embeddings exist for some memories', async () => {

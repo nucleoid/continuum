@@ -9,6 +9,7 @@ import type { EmbeddingProvider } from '../embeddings/provider.js';
 import { accessibleScopes, canReadScope, canWriteScope } from './access.js';
 import { captureMemory } from './capture.js';
 import { recallForPrincipal } from './recall.js';
+import { renderAgentsMdForPrincipal } from './agents-md.js';
 import { ServiceError } from './errors.js';
 import { createMemory } from '../storage/memories.js';
 import { promoteForPrincipal, verifyForPrincipal } from './lifecycle.js';
@@ -421,6 +422,19 @@ describe('shared services', () => {
     await expect(recallForPrincipal(failingPool, null, principal, {
       query: 'retry',
     })).rejects.toMatchObject<ServiceError>({ code: 'INTERNAL' });
+  });
+
+  it('fails AGENTS.md delivery when its atomic read audit cannot be persisted', async () => {
+    const { principal } = await seedWriter();
+
+    await expect(renderAgentsMdForPrincipal(
+      poolRejecting(pool, 'INSERT INTO audit_log'),
+      principal,
+      { team: 'payments' },
+    )).rejects.toMatchObject<ServiceError>({ code: 'INTERNAL' });
+
+    const { rows } = await pool.query('SELECT count(*)::int AS count FROM audit_log');
+    expect(rows[0].count).toBe(0);
   });
 
   it('rolls promotion changes back when its required audit fails', async () => {

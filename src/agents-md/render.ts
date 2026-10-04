@@ -100,10 +100,22 @@ export interface RenderOptions {
   perScopeLimit?: number;
 }
 
+export interface RenderAgentsMdResult {
+  markdown: string;
+  memories: Memory[];
+}
+
 export async function renderAgentsMd(
   pool: pg.Pool,
   opts: RenderOptions,
 ): Promise<string> {
+  return (await renderAgentsMdResult(pool, opts)).markdown;
+}
+
+export async function renderAgentsMdResult(
+  pool: pg.Pool,
+  opts: RenderOptions,
+): Promise<RenderAgentsMdResult> {
   const perScopeLimit = opts.perScopeLimit ?? 20;
   const readable = await accessibleScopes(pool, opts.principalId);
   const accessible = new Map<string, ResolvedScope>();
@@ -138,6 +150,7 @@ export async function renderAgentsMd(
   }
 
   const sections: string[] = [];
+  const deliveredMemories: Memory[] = [];
   sections.push('# AGENTS.md');
   sections.push('');
   sections.push(
@@ -181,13 +194,17 @@ export async function renderAgentsMd(
       sections.push(`### ${capitalise(type)}s`);
       sections.push('');
       for (const m of list) {
+        deliveredMemories.push(m);
         sections.push(...renderMemoryEntry(m, scope.heading));
         sections.push('');
       }
     }
   }
 
-  return sections.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
+  return {
+    markdown: sections.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd() + '\n',
+    memories: deliveredMemories,
+  };
 }
 
 async function fetchSectionMemories(

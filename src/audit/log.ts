@@ -1,4 +1,4 @@
-import type pg from 'pg';
+import { randomUUID } from 'node:crypto';
 import type { AuditAction } from '../types.js';
 import type { Queryable } from '../storage/queryable.js';
 
@@ -26,5 +26,76 @@ export async function record(
       entry.query ?? null,
       entry.metadata ? JSON.stringify(entry.metadata) : null,
     ],
+  );
+}
+
+export interface ReadAuditMemory {
+  memoryId: string;
+  scopeId: string;
+  metadata?: {
+    rank: number;
+    score?: number;
+    delivery?: 'agents-md';
+  };
+}
+
+export interface ReadAuditEntry {
+  principalId: string;
+  query?: string | null;
+  metadata?: Record<string, unknown>;
+  memories: ReadAuditMemory[];
+}
+
+/**
+ * Records a read request summary and every distinct returned memory in one
+ * statement. The summary retains request-level context; identity rows carry
+ * only bounded delivery metadata so query or memory text is not duplicated.
+ */
+export async function recordRead(
+  pool: Queryable,
+  entry: ReadAuditEntry,
+): Promise<void> {
+  const requestId = randomUUID();
+  const transport = entry.metadata?.transport;
+  const seen = new Set<string>();
+  const memories = entry.memories.filter((memory) => {
+    if (seen.has(memory.memoryId)) return false;
+    seen.add(memory.memoryId);
+    return true;
+  });
+  const rows = [
+    {
+      memory_id: null,
+      scope_id: null,
+      query: entry.query ?? null,
+      metadata: {
+        ...entry.metadata,
+        request_id: requestId,
+        record_kind: 'summary',
+      },
+    },
+    ...memories.map((memory) => ({
+      memory_id: memory.memoryId,
+      scope_id: memory.scopeId,
+      query: null,
+      metadata: {
+        ...memory.metadata,
+        ...(transport === undefined ? {} : { transport }),
+        request_id: requestId,
+        record_kind: 'result',
+      },
+    })),
+  ];
+
+  await pool.query(
+    `INSERT INTO audit_log
+       (principal_id, action, memory_id, scope_id, query, metadata)
+     SELECT $1::uuid, 'read', (returned.item->>'memory_id')::uuid,
+            (returned.item->>'scope_id')::uuid,
+            returned.item->>'query', returned.item->'metadata'
+       FROM jsonb_array_elements($2::jsonb) WITH ORDINALITY
+         AS returned(item, ordinal)
+      ORDER BY returned.ordinal`,
+    [entry.principalId, JSON.stringify(rows)],
   );
 }

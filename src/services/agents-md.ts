@@ -1,7 +1,7 @@
 import type pg from 'pg';
 import type { Principal } from '../types.js';
-import { renderAgentsMd } from '../agents-md/render.js';
-import { record as recordAudit } from '../audit/log.js';
+import { renderAgentsMdResult } from '../agents-md/render.js';
+import { recordRead as recordReadAudit } from '../audit/log.js';
 import { asServiceError } from './errors.js';
 
 export interface AgentsMdInput {
@@ -17,21 +17,26 @@ export async function renderAgentsMdForPrincipal(
   auditMetadata: Record<string, unknown> = {},
 ): Promise<string> {
   try {
-    const markdown = await renderAgentsMd(pool, {
+    const { markdown, memories } = await renderAgentsMdResult(pool, {
       principalId: principal.id,
       project: input.project,
       team: input.team,
       perScopeLimit: input.limit,
     });
-    await recordAudit(pool, {
+    await recordReadAudit(pool, {
       principalId: principal.id,
-      action: 'read',
       metadata: {
         view: 'agents-md',
         project: input.project ?? null,
         team: input.team ?? null,
+        hits: memories.length,
         ...auditMetadata,
       },
+      memories: memories.map((memory, index) => ({
+        memoryId: memory.id,
+        scopeId: memory.scopeId,
+        metadata: { rank: index + 1, delivery: 'agents-md' },
+      })),
     });
     return markdown;
   } catch (error) {
