@@ -59,6 +59,41 @@ describe('ado-workitem plugin', () => {
     expect(out[0].body).not.toContain('Initial triage.');
   });
 
+  it('decodes description entities once after removing real HTML tags', () => {
+    const out = adoWorkItemPlugin.transform(
+      workItem({
+        'System.Description':
+          '<p>Use List&amp;lt;T&amp;gt; here</p><p>Single: List&lt;T&gt;<br>Real <strong>tag</strong>; encoded: &lt;strong&gt;text&lt;/strong&gt;&nbsp;&amp;</p>',
+      }),
+    );
+
+    expect(out[0].body).toContain(
+      'Use List&lt;T&gt; here\nSingle: List<T>\nReal tag; encoded: <strong>text</strong> &',
+    );
+    expect(out[0].body).not.toContain('<p>');
+    expect(out[0].body).not.toContain('<strong>tag</strong>');
+  });
+
+  it('decodes latest-comment entities once while preserving line breaks', () => {
+    const out = adoWorkItemPlugin.transform(
+      workItem({}, {
+        comments: [
+          {
+            text:
+              '<p>Use List&amp;lt;T&amp;gt; here</p><p>Single: List&lt;T&gt;<br>Real <em>tag</em>; encoded: &lt;em&gt;text&lt;/em&gt;&nbsp;&amp;</p>',
+            createdBy: { displayName: 'Mitch' },
+          },
+        ],
+      }),
+    );
+
+    expect(out[0].body).toContain(
+      'Latest comment (Mitch):\nUse List&lt;T&gt; here\nSingle: List<T>\nReal tag; encoded: <em>text</em> &',
+    );
+    expect(out[0].body).not.toContain('<p>');
+    expect(out[0].body).not.toContain('<em>tag</em>');
+  });
+
   it('falls back to defaultProjectName when AreaPath is missing', () => {
     const ev = workItem({ 'System.AreaPath': undefined });
     const out = adoWorkItemPlugin.transform(ev, { defaultProjectName: 'manual-fallback' });
