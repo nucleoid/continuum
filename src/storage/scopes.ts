@@ -112,3 +112,14 @@ export async function listScopesByKind(
   );
   return rows.map(rowToScope);
 }
+
+export async function listAllScopes(
+  pool: Queryable,
+): Promise<Scope[]> {
+  const { rows } = await pool.query(
+    `SELECT id, kind, name, created_at
+       FROM scopes
+      ORDER BY kind, name, id`,
+  );
+  return rows.map(rowToScope);
+}

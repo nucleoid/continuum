@@ -8,7 +8,7 @@ Continuum is designed for organisations that want their developers (and the AI a
 
 - Captures memory from PRs, work-item comments, branch events, deploy events, terminal session summaries, and (optionally) team chat.
 - Organises every memory under one of five scopes: `org`, `team`, `project`, `user`, `role`.
-- Serves memory back through three transports: an MCP server (works with Claude Code, Cursor, Copilot Chat, Continue, Zed), a stable HTTP REST API (for internal tooling and CI), and an `AGENTS.md` generator (drops a scope-aware context file into any repo).
+- Serves memory back through the `continuum` CLI, an MCP server (works with Claude Code, Cursor, Copilot Chat, Continue, Zed), a stable HTTP REST API (for internal tooling and CI), and an `AGENTS.md` generator (drops a scope-aware context file into any repo).
 - Enforces per-scope ACLs at the API layer and writes a full audit trail for every read and write.
 - Storage is Postgres + pgvector. Embeddings are pluggable (local Ollama for sensitive material, hosted models for the rest).
 
@@ -25,6 +25,7 @@ v0 design in progress. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the schema, 
 ## API contracts
 
 - [Webhook ingestion](./docs/webhook-ingestion.md)
+- [CLI commands, configuration, and exit codes](./docs/cli.md)
 - [Audit query API](./docs/audit-api.md)
 - [Knowledge-gap insights](./docs/knowledge-gap-insights.md)
 - [API operations, health checks, and shutdown](./docs/api-operations.md)
@@ -32,6 +33,18 @@ v0 design in progress. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the schema, 
 - [Lifecycle sweeper and review queue](./docs/lifecycle.md)
 - [Audit retention operations](./docs/audit-retention.md)
 - [Memory fetch and browse API](./docs/memory-api.md)
+
+## CLI quick start
+
+```bash
+export CONTINUUM_API_URL=http://127.0.0.1:4000
+export CONTINUUM_TOKEN='your-opaque-bearer-token'
+continuum recall "deployment rollback" --json
+```
+
+The CLI supports capture, recall, audit, scope membership administration,
+promotion, verification, and AGENTS.md generation through the same authenticated
+HTTP API used by other clients.
 
 ## Embedding configuration
 

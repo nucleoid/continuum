@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import type { Principal, PrincipalKind } from '../types.js';
+import type { Queryable } from './queryable.js';
 
 export interface NewPrincipal {
   externalId: string;
@@ -33,7 +34,7 @@ export async function createPrincipal(
 }
 
 export async function getPrincipal(
-  pool: pg.Pool,
+  pool: Queryable,
   id: string,
 ): Promise<Principal | null> {
   const { rows } = await pool.query(
@@ -45,7 +46,7 @@ export async function getPrincipal(
 }
 
 export async function getPrincipalByExternalId(
-  pool: pg.Pool,
+  pool: Queryable,
   externalId: string,
 ): Promise<Principal | null> {
   const { rows } = await pool.query(

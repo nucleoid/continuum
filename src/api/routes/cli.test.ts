@@ -1,0 +1,116 @@
+import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import type pg from 'pg';
+import request from 'supertest';
+import { makeTestPool, resetData } from '../../storage/test-helpers.js';
+import { createApp } from '../server.js';
+import { createPrincipal } from '../../storage/principals.js';
+import { createScope, getScopeByRef } from '../../storage/scopes.js';
+import { addMembership, getMembership } from '../../storage/memberships.js';
+import { createMemory } from '../../storage/memories.js';
+
+describe('CLI REST support routes', () => {
+  let pool: pg.Pool;
+
+  beforeEach(async () => {
+    pool ??= await makeTestPool();
+    await resetData(pool);
+  });
+
+  afterAll(async () => { await pool?.end(); });
+
+  async function seed() {
+    const admin = await createPrincipal(pool, {
+      externalId: 'token-admin', kind: 'user', displayName: 'Admin',
+    });
+    const member = await createPrincipal(pool, {
+      externalId: 'token-member', kind: 'user', displayName: 'Member',
+    });
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    const project = await createScope(pool, { kind: 'project', name: 'continuum' });
+    const hidden = await createScope(pool, { kind: 'team', name: 'unassigned' });
+    await addMembership(pool, admin.id, org.id, 'admin');
+    await addMembership(pool, admin.id, project.id, 'writer');
+    await addMembership(pool, member.id, project.id, 'reader');
+    const memory = await createMemory(pool, {
+      scopeId: project.id, scopeKind: 'project', type: 'fact', title: 'CLI fact',
+      body: 'The CLI uses the REST API.', authorId: admin.id, source: 'manual',
+    });
+    return { admin, member, org, project, hidden, memory };
+  }
+
+  it('lists only readable scopes with the caller role', async () => {
+    const { project } = await seed();
+    const response = await request(createApp(pool))
+      .get('/api/v0/scopes')
+      .set('Authorization', 'Bearer token-member');
+    expect(response.status).toBe(200);
+    expect(response.body.scopes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: project.id, scope: 'project:continuum', role: 'reader' }),
+      expect.objectContaining({ scope: 'org', role: 'implicit-reader' }),
+    ]));
+    expect(response.body.scopes).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ scope: 'team:unassigned' }),
+    ]));
+    const manage = await request(createApp(pool))
+      .get('/api/v0/scopes?manage=true')
+      .set('Authorization', 'Bearer token-member');
+    expect(manage.status).toBe(403);
+  });
+
+  it('exposes promote and verify through the shared lifecycle services', async () => {
+    const { memory } = await seed();
+    const verify = await request(createApp(pool))
+      .post(`/api/v0/memories/${memory.id}/verify`)
+      .set('Authorization', 'Bearer token-admin')
+      .send({ stillTrue: true, note: 'checked' });
+    expect(verify.status).toBe(200);
+    expect(verify.body).toMatchObject({ id: memory.id, state: 'live' });
+
+    const promote = await request(createApp(pool))
+      .post(`/api/v0/memories/${memory.id}/promote`)
+      .set('Authorization', 'Bearer token-admin')
+      .send({ targetScope: { kind: 'org', name: '' } });
+    expect(promote.status).toBe(201);
+    expect(promote.body.sourceId).toBe(memory.id);
+    expect(promote.body.destinationId).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it('requires org admin and audits membership grant and revoke', async () => {
+    const { admin, member, project, hidden } = await seed();
+    const app = createApp(pool);
+    const denied = await request(app)
+      .put(`/api/v0/scopes/${project.id}/members/${admin.id}`)
+      .set('Authorization', 'Bearer token-member')
+      .send({ role: 'writer' });
+    expect(denied.status).toBe(403);
+
+    const managed = await request(app)
+      .get('/api/v0/scopes?manage=true')
+      .set('Authorization', 'Bearer token-admin');
+    expect(managed.status).toBe(200);
+    expect(managed.body.scopes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: hidden.id, scope: 'team:unassigned', role: null }),
+    ]));
+
+    const grant = await request(app)
+      .put(`/api/v0/scopes/${project.id}/members/${member.id}`)
+      .set('Authorization', 'Bearer token-admin')
+      .send({ role: 'writer' });
+    expect(grant.status).toBe(200);
+    expect((await getMembership(pool, member.id, project.id))?.role).toBe('writer');
+
+    const revoke = await request(app)
+      .delete(`/api/v0/scopes/${project.id}/members/${member.id}`)
+      .set('Authorization', 'Bearer token-admin');
+    expect(revoke.status).toBe(200);
+    expect(await getMembership(pool, member.id, project.id)).toBeNull();
+
+    const audit = await pool.query(
+      `SELECT metadata FROM audit_log WHERE principal_id = $1 AND action = 'write' ORDER BY id`,
+      [admin.id],
+    );
+    expect(audit.rows.map((row) => row.metadata.operation)).toEqual([
+      'grant_membership', 'revoke_membership',
+    ]);
+  });
+});
