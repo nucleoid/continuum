@@ -5,6 +5,13 @@
   \prompt 'Scope operator external_id to retire: ' external_id
 \endif
 
+SELECT length(:'external_id') > 0 AS external_id_valid \gset
+\if :external_id_valid
+\else
+  \echo 'external_id must not be empty.'
+  SELECT 1 / 0 AS invalid_scope_operator_external_id;
+\endif
+
 BEGIN;
 
 WITH target AS (
