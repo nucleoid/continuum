@@ -7,6 +7,7 @@ import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
 import type { Queryable } from './queryable.js';
 
 export interface NewMemory {
+  id?: string;
   scopeId: string;
   scopeKind: ScopeKind;
   type: MemoryType;
@@ -23,7 +24,7 @@ export async function createMemory(
   pool: Queryable,
   input: NewMemory,
 ): Promise<Memory> {
-  const id = randomUUID();
+  const id = input.id ?? randomUUID();
   const expiresAt = computeExpiry(input.type, input.scopeKind);
   const { rows } = await pool.query(
     `INSERT INTO memories
@@ -43,6 +44,22 @@ export async function createMemory(
       input.sourceRef ?? null,
       expiresAt,
     ],
+  );
+  return rowToMemory(rows[0]);
+}
+
+export async function updateMemoryMetadata(
+  pool: Queryable,
+  id: string,
+  metadata: Record<string, unknown>,
+): Promise<Memory> {
+  const { rows } = await pool.query(
+    `UPDATE memories
+        SET metadata = $2::jsonb,
+            updated_at = now()
+      WHERE id = $1
+      RETURNING ${MEMORY_COLUMNS}`,
+    [id, JSON.stringify(metadata)],
   );
   return rowToMemory(rows[0]);
 }

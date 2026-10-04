@@ -16,6 +16,7 @@ export * from './services/errors.js';
 export * from './services/scopes.js';
 export * from './services/access.js';
 export * from './services/capture.js';
+export * from './services/relations.js';
 export * from './services/recall.js';
 export * from './services/lifecycle.js';
 export * from './services/review-queue.js';

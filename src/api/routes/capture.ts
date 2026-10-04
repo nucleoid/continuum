@@ -3,6 +3,7 @@ import type pg from 'pg';
 import { z } from 'zod';
 import type { EmbeddingProvider } from '../../embeddings/provider.js';
 import { captureMemory } from '../../services/capture.js';
+import { DEFAULT_RELATION_THRESHOLD } from '../../services/relations.js';
 
 const captureSchema = z.object({
   scope: z.object({
@@ -21,6 +22,7 @@ const captureSchema = z.object({
 export function captureRouter(
   pool: pg.Pool,
   embeddingProvider: EmbeddingProvider | null = null,
+  relationThreshold = DEFAULT_RELATION_THRESHOLD,
 ): Router {
   const router = Router();
 
@@ -31,12 +33,20 @@ export function captureRouter(
       return;
     }
     const principal = req.principal!;
-    const result = await captureMemory(pool, embeddingProvider, principal, parsed.data);
+    const result = await captureMemory(
+      pool,
+      embeddingProvider,
+      principal,
+      parsed.data,
+      {},
+      { relationThreshold },
+    );
     res.status(201).json({
       id: result.memory.id,
       scopeId: result.memory.scopeId,
       expiresAt: result.memory.expiresAt,
       embedded: result.embedded,
+      related: result.related,
     });
   });
 

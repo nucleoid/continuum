@@ -1,19 +1,33 @@
+import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import type { CaptureInput, Memory, Principal } from '../types.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
-import { createMemory } from '../storage/memories.js';
+import { createMemory, updateMemoryMetadata } from '../storage/memories.js';
 import { getScopeByRef } from '../storage/scopes.js';
 import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
+import { assertEmbeddingVectorDimension } from '../storage/schema.js';
 import { record as recordAudit } from '../audit/log.js';
 import { canWriteScope, canWriteScopeForMutation } from './access.js';
 import { asServiceError, dependencyUnavailable, ServiceError } from './errors.js';
 import { validateScopeRef } from './scopes.js';
 import { isCaptureSource } from '../capture/source.js';
+import {
+  DEFAULT_RELATION_THRESHOLD,
+  detectRelatedMemories,
+  type RelatedMemory,
+  validateRelationThreshold,
+} from './relations.js';
 
 export interface CaptureResult {
   memory: Memory;
   embedded: boolean;
+  related: RelatedMemory[];
   embedErrorCode?: 'EMBEDDING_FAILED';
+  relationErrorCode?: 'RELATION_DETECTION_FAILED';
+}
+
+export interface CaptureOptions {
+  relationThreshold?: number;
 }
 
 export async function captureMemory(
@@ -22,8 +36,12 @@ export async function captureMemory(
   principal: Principal,
   input: CaptureInput,
   auditMetadata: Record<string, unknown> = {},
+  options: CaptureOptions = {},
 ): Promise<CaptureResult> {
   try {
+    const relationThreshold = validateRelationThreshold(
+      options.relationThreshold ?? DEFAULT_RELATION_THRESHOLD,
+    );
     if (!isCaptureSource(input.source)) {
       throw new ServiceError('INVALID_INPUT', 'Unknown capture source');
     }
@@ -34,15 +52,43 @@ export async function captureMemory(
       throw new ServiceError('FORBIDDEN', 'Principal lacks writer role on scope');
     }
 
+    const memoryId = randomUUID();
     let embeddingVector: number[] | undefined;
+    let related: RelatedMemory[] = [];
     let embedErrorCode: 'EMBEDDING_FAILED' | undefined;
+    let relationErrorCode: 'RELATION_DETECTION_FAILED' | undefined;
     if (embeddingProvider) {
       try {
         [embeddingVector] = await embeddingProvider.embed([
           `${input.title}\n\n${input.body}`,
         ]);
+        assertEmbeddingVectorDimension(embeddingVector, embeddingProvider);
       } catch {
         embedErrorCode = 'EMBEDDING_FAILED';
+      }
+    }
+
+    if (embeddingProvider && embeddingVector) {
+      try {
+        const org = scope.kind === 'org'
+          ? scope
+          : await getScopeByRef(pool, { kind: 'org', name: '' });
+        const familyScopeIds = org && org.id !== scope.id
+          ? [scope.id, org.id]
+          : [scope.id];
+        related = await detectRelatedMemories(
+          pool,
+          embeddingVector,
+          familyScopeIds,
+          embeddingProvider,
+          input,
+          memoryId,
+          relationThreshold,
+        );
+      } catch {
+        embeddingVector = undefined;
+        related = [];
+        relationErrorCode = 'RELATION_DETECTION_FAILED';
       }
     }
 
@@ -61,7 +107,8 @@ export async function captureMemory(
         throw new ServiceError('FORBIDDEN', 'Principal lacks writer role on scope');
       }
 
-      const memory = await createMemory(client, {
+      let memory = await createMemory(client, {
+        id: memoryId,
         scopeId: authorizedScope.id,
         scopeKind: authorizedScope.kind,
         type: input.type,
@@ -71,7 +118,7 @@ export async function captureMemory(
         source: input.source,
         sourceRef: input.sourceRef ?? null,
         tags: input.tags,
-        metadata: input.metadata,
+        metadata: { ...input.metadata, related: [] },
       });
 
       let embedded = false;
@@ -84,6 +131,10 @@ export async function captureMemory(
             embeddingVector,
             embeddingProvider,
           );
+          memory = await updateMemoryMetadata(client, memory.id, {
+            ...memory.metadata,
+            related,
+          });
           await client.query('RELEASE SAVEPOINT capture_embedding');
           embedded = true;
         } catch {
@@ -103,11 +154,18 @@ export async function captureMemory(
           type: input.type,
           embedded,
           ...(embedErrorCode ? { embedding_error_code: embedErrorCode } : {}),
+          ...(relationErrorCode ? { relation_error_code: relationErrorCode } : {}),
           ...auditMetadata,
         },
       });
       await client.query('COMMIT');
-      return { memory, embedded, ...(embedErrorCode ? { embedErrorCode } : {}) };
+      return {
+        memory,
+        embedded,
+        related: embedded ? related : [],
+        ...(embedErrorCode ? { embedErrorCode } : {}),
+        ...(relationErrorCode ? { relationErrorCode } : {}),
+      };
     } catch (error) {
       try {
         await client.query('ROLLBACK');

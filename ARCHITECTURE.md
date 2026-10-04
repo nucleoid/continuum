@@ -142,7 +142,13 @@ Content-Type: application/json
 
 Response:
 ```
-{ "id": "01HXY...", "scope_id": "...", "expires_at": "2026-06-16T02:44:05Z" }
+{
+  "id": "01HXY...",
+  "scope_id": "...",
+  "expires_at": "2026-06-16T02:44:05Z",
+  "embedded": true,
+  "related": []
+}
 ```
 
 Validation rules:
@@ -150,6 +156,24 @@ Validation rules:
 - `type` must be valid; `expires_at` is computed from type + scope kind.
 - `tags` validated against the controlled vocabulary for the scope kind (org-admins manage vocabularies).
 - `source` must be a registered capture plugin id or `"manual"`.
+
+When embedding is configured, capture computes the new vector once and probes
+at most five live, unexpired memories from the target scope plus org using the
+same provider and dimension. The default cosine-similarity threshold is 0.92
+and can be changed with `CONTINUUM_RELATION_THRESHOLD` (0 through 1). Exact
+normalized title and body matches are `possible-duplicate`. Nonidentical
+fact/fact and decision/decision matches are `possible-conflict`; all other
+matches are `possible-duplicate`. These are similarity candidates, not claims
+that content contradicts, and capture never mutates or supersedes an existing
+memory.
+
+REST and MCP capture responses include the same safe `related` array. Each
+stored candidate contains only `id`, `similarity`, `relation`, `provider`,
+`threshold`, and `detectedAt`. Embedding or probe failure is nonblocking: the
+memory and write audit still commit, `embedded` is false, `related` is empty,
+and the audit contains only a stable failure code. With no serializing lock,
+two concurrent duplicate captures may both miss each other in v0; a later
+reconciliation sweep can address that limitation.
 
 ## Retrieval API (v0)
 

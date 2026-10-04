@@ -193,6 +193,7 @@ describe('MCP server', () => {
       scope: 'team:payments',
       expires_at: expect.any(String),
       embedded: false,
+      related: [],
     });
     expect(rawText(result)).not.toContain(privateMessage);
     const { rows } = await pool.query(
