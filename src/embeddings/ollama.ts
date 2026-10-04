@@ -15,6 +15,7 @@ interface OllamaEmbedResponse {
 export class OllamaEmbeddingProvider implements EmbeddingProvider {
   readonly id: string;
   readonly dim: number;
+  readonly local = true;
   private readonly baseUrl: string;
   private readonly model: string;
   private readonly fetchImpl: typeof fetch;

@@ -42,6 +42,55 @@ active provider. Changing models therefore leaves existing embedding rows
 untouched and temporarily makes their memories full-text-only until they are
 re-embedded. Switching back to the old model makes those rows usable again.
 
+For per-scope routing, set `CONTINUUM_EMBEDDING_CONFIG` to a JSON object with
+provider definitions and a routing policy:
+
+```json
+{
+  "providers": [
+    {
+      "alias": "local",
+      "kind": "ollama",
+      "model": "nomic-embed-text",
+      "dim": 768,
+      "endpoint": "http://localhost:11434",
+      "local": true
+    },
+    {
+      "alias": "hosted",
+      "kind": "openai",
+      "model": "text-embedding-3-small",
+      "dim": 768,
+      "local": false
+    }
+  ],
+  "routing": {
+    "default": "hosted",
+    "rules": [
+      { "match": { "kind": "user" }, "provider": "local-only" },
+      { "match": { "kind": "team", "name": "security" }, "provider": "local-only" }
+    ]
+  }
+}
+```
+
+Exact `kind` plus `name` rules take precedence over `kind` rules, then the
+default applies. `local-only` selects the single provider explicitly marked
+`local: true`. If none is configured or it is unavailable, capture and recall
+remain full-text-only for those scopes and never fall back to a hosted
+provider. Provider outages affect only their routed vector group. Full-text
+recall remains available and vector searches retain exact provider and
+dimension filters.
+
+OpenAI and Voyage credentials are read only from `OPENAI_API_KEY` and
+`VOYAGE_API_KEY`. Inline credentials are rejected. Ollama definitions must
+explicitly declare locality; a non-loopback endpoint marked local emits a
+startup warning because locality is a deployment assertion, not a URL guess.
+The legacy `CONTINUUM_EMBEDDING_PROVIDER` variables remain supported as a
+single-provider policy. Existing vectors are never automatically sent to a new
+provider. Re-embedding, especially to a hosted provider, must be an explicit
+operator action.
+
 ## License
 
 Continuum is licensed under the [MIT License](./LICENSE).

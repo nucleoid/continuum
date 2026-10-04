@@ -3,10 +3,10 @@ import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { getPrincipalByExternalId } from '../storage/principals.js';
-import type { EmbeddingProvider } from '../embeddings/provider.js';
+import { asEmbeddingRouter, type EmbeddingRouting } from '../embeddings/router.js';
 import type { Principal, ScopeKind } from '../types.js';
 import { getPool } from '../storage/pool.js';
-import { makeEmbeddingProviderFromEnv } from '../embeddings/factory.js';
+import { makeEmbeddingRouterFromEnv } from '../embeddings/factory.js';
 import { isDirectEntrypoint } from './entrypoint.js';
 import { accessibleScopes } from '../services/access.js';
 import { captureMemory } from '../services/capture.js';
@@ -48,7 +48,7 @@ const MEMORY_TYPES = ['fact', 'decision', 'context', 'playbook', 'relationship']
 
 export interface McpDeps {
   pool: pg.Pool;
-  embeddingProvider: EmbeddingProvider | null;
+  embeddingProvider: EmbeddingRouting;
   principal: Principal;
   logger?: ServiceLogger;
   reviewHorizonDays?: number;
@@ -86,7 +86,9 @@ export function buildMcpServer(deps: McpDeps): McpServer {
   if (isLifecyclePrincipal(principal)) {
     throw new Error('The internal lifecycle principal cannot start an MCP session');
   }
-  if (embeddingProvider) assertEmbeddingProviderDimension(embeddingProvider);
+  for (const provider of asEmbeddingRouter(embeddingProvider).providers()) {
+    assertEmbeddingProviderDimension(provider);
+  }
   const logger = deps.logger ?? console;
   const gapConfig = deps.gapConfig ?? gapConfigFromEnv();
   const now = deps.now ?? (() => new Date());
@@ -403,18 +405,23 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         if (sinceDays > 365) {
           throw new ServiceError('INVALID_INPUT', 'since must not exceed 365d');
         }
-        const report = await getKnowledgeGaps(pool, embeddingProvider, principal, {
-          sinceDays,
-          limit: args.limit,
-          minFrequency: args.min_frequency,
-          threshold: args.threshold,
-          candidateLimit: gapConfig.candidateLimit,
-          scanLimit: gapConfig.scanLimit,
-          maxQueryChars: gapConfig.maxQueryChars,
-          embeddingTimeoutMs: gapConfig.embeddingTimeoutMs,
-          now: now(),
-          transport: 'mcp',
-        });
+        const report = await getKnowledgeGaps(
+          pool,
+          asEmbeddingRouter(embeddingProvider).resolve({ kind: 'org', name: '' }).provider,
+          principal,
+          {
+            sinceDays,
+            limit: args.limit,
+            minFrequency: args.min_frequency,
+            threshold: args.threshold,
+            candidateLimit: gapConfig.candidateLimit,
+            scanLimit: gapConfig.scanLimit,
+            maxQueryChars: gapConfig.maxQueryChars,
+            embeddingTimeoutMs: gapConfig.embeddingTimeoutMs,
+            now: now(),
+            transport: 'mcp',
+          },
+        );
         return textResult(renderGapMarkdown(report));
       } catch (error) {
         return errorResult(error);
@@ -476,7 +483,7 @@ async function main(): Promise<void> {
     process.stderr.write('continuum-mcp: unknown principal\n');
     process.exit(1);
   }
-  const embeddingProvider = makeEmbeddingProviderFromEnv();
+  const embeddingProvider = makeEmbeddingRouterFromEnv();
   const server = buildMcpServer({
     pool,
     embeddingProvider,

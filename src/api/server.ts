@@ -9,8 +9,8 @@ import { agentsMdRouter } from './routes/agents-md.js';
 import { auditRouter } from './routes/audit.js';
 import { insightsRouter } from './routes/insights.js';
 import { gapConfigFromEnv, type GapConfig } from '../insights/gaps.js';
-import type { EmbeddingProvider } from '../embeddings/provider.js';
-import { makeEmbeddingProviderFromEnv } from '../embeddings/factory.js';
+import { makeEmbeddingRouterFromEnv } from '../embeddings/factory.js';
+import { asEmbeddingRouter, type EmbeddingRouting } from '../embeddings/router.js';
 import { isDirectEntrypoint } from './entrypoint.js';
 import { assertEmbeddingProviderDimension } from '../storage/schema.js';
 import { asServiceError, ServiceError, type ServiceLogger } from '../services/errors.js';
@@ -48,7 +48,7 @@ export interface OperationalLogger extends ServiceLogger {
 }
 
 export interface AppOptions {
-  embeddingProvider?: EmbeddingProvider | null;
+  embeddingProvider?: EmbeddingRouting;
   logger?: OperationalLogger;
   requestIdFactory?: () => string;
   clock?: () => number;
@@ -88,14 +88,16 @@ function safeLogPath(req: express.Request): string {
   return '/:unmatched';
 }
 
-function embeddingStatus(provider: EmbeddingProvider | null): {
+function embeddingStatus(routing: EmbeddingRouting): {
   configured: boolean;
   provider: string | null;
 } {
-  if (!provider) return { configured: false, provider: null };
+  const providers = asEmbeddingRouter(routing).providers();
+  if (providers.length === 0) return { configured: false, provider: null };
+  const provider = providers.length === 1 ? providers[0]! : null;
   return {
     configured: true,
-    provider: SAFE_PROVIDER_ID.test(provider.id) ? provider.id : 'configured',
+    provider: provider && SAFE_PROVIDER_ID.test(provider.id) ? provider.id : 'routed',
   };
 }
 
@@ -229,7 +231,9 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   if (!Number.isFinite(readinessTimeoutMs) || readinessTimeoutMs <= 0) {
     throw new Error('readinessTimeoutMs must be positive');
   }
-  if (provider) assertEmbeddingProviderDimension(provider);
+  for (const configuredProvider of asEmbeddingRouter(provider).providers()) {
+    assertEmbeddingProviderDimension(configuredProvider);
+  }
 
   app.use(requestContext(
     logger,
@@ -267,7 +271,8 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   v0.use(agentsMdRouter(pool));
   v0.use(auditRouter(pool));
   v0.use(reviewQueueRouter(pool, opts.reviewHorizonDays));
-  v0.use(insightsRouter(pool, provider, gapConfig, () => new Date((opts.clock ?? Date.now)())));
+  const orgProvider = asEmbeddingRouter(provider).resolve({ kind: 'org', name: '' }).provider;
+  v0.use(insightsRouter(pool, orgProvider, gapConfig, () => new Date((opts.clock ?? Date.now)())));
   app.use('/api/v0', v0);
 
   app.use('/api', (_req, res) => {
@@ -311,7 +316,7 @@ async function main(): Promise<void> {
   const pool = getPool();
   const readiness = createReadinessState();
   const app = createApp(pool, {
-    embeddingProvider: makeEmbeddingProviderFromEnv(),
+    embeddingProvider: makeEmbeddingRouterFromEnv(),
     readiness,
     readinessTimeoutMs,
     reviewHorizonDays: configuredReviewHorizonDays(),

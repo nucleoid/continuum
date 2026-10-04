@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import type pg from 'pg';
 import { z } from 'zod';
-import type { EmbeddingProvider } from '../../embeddings/provider.js';
+import type { EmbeddingRouting } from '../../embeddings/router.js';
 import { recallForPrincipal } from '../../services/recall.js';
 
 const recallSchema = z.object({
@@ -15,7 +15,7 @@ const recallSchema = z.object({
 
 export function recallRouter(
   pool: pg.Pool,
-  embeddingProvider: EmbeddingProvider | null = null,
+  embeddingProvider: EmbeddingRouting = null,
 ): Router {
   const router = Router();
 

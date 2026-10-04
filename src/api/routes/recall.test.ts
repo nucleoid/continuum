@@ -250,7 +250,7 @@ describe('POST /api/v0/recall', () => {
     });
   });
 
-  it('maps provider failures to a safe dependency error', async () => {
+  it('degrades provider failures to audited full-text recall without leaking details', async () => {
     const privateMessage = 'provider endpoint private-provider-host';
     const failingProvider: EmbeddingProvider = {
       id: 'test:failing', dim: 768,
@@ -264,12 +264,16 @@ describe('POST /api/v0/recall', () => {
       .set('Authorization', 'Bearer entra:user:recall')
       .send({ query: 'checkout' });
 
-    expect(res.status).toBe(503);
-    expect(res.body).toEqual({
-      code: 'DEPENDENCY_UNAVAILABLE',
-      error: 'A required dependency is unavailable',
-      requestId: expect.any(String),
-    });
+    expect(res.status).toBe(200);
+    expect(res.body.results.length).toBeGreaterThan(0);
     expect(JSON.stringify(res.body)).not.toContain(privateMessage);
+    const { rows } = await pool.query(
+      `SELECT metadata::text AS metadata
+         FROM audit_log
+        WHERE action = 'read' AND query = 'checkout' AND memory_id IS NULL`,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].metadata).toContain('test:failing');
+    expect(rows[0].metadata).not.toContain(privateMessage);
   });
 });
