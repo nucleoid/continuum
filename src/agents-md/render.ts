@@ -2,6 +2,7 @@ import type pg from 'pg';
 import type { Memory, MemoryType, ScopeRef } from '../types.js';
 import { getScopeByRef } from '../storage/scopes.js';
 import { getScopesForPrincipal } from '../storage/memberships.js';
+import { MEMORY_COLUMNS, rowToMemory } from '../storage/memory-row.js';
 
 const SECTION_ORDER: Array<{ key: 'org' | 'role' | 'team' | 'project'; heading: string }> = [
   { key: 'org', heading: 'Org' },
@@ -128,9 +129,7 @@ async function fetchSectionMemories(
   limit: number,
 ): Promise<Memory[]> {
   const { rows } = await pool.query(
-    `SELECT id, scope_id, type, title, body, metadata, tags, author_id,
-            source, source_ref, state, supersedes_id, promoted_to_id,
-            created_at, updated_at, expires_at, last_verified
+    `SELECT ${MEMORY_COLUMNS}
        FROM memories
       WHERE scope_id = $1
         AND state = 'live'
@@ -141,25 +140,7 @@ async function fetchSectionMemories(
       LIMIT $3`,
     [scopeId, TYPE_ORDER, limit],
   );
-  return rows.map((row) => ({
-    id: row.id,
-    scopeId: row.scope_id,
-    type: row.type,
-    title: row.title,
-    body: row.body,
-    metadata: row.metadata ?? {},
-    tags: row.tags ?? [],
-    authorId: row.author_id,
-    source: row.source,
-    sourceRef: row.source_ref ?? null,
-    state: row.state,
-    supersedesId: row.supersedes_id ?? null,
-    promotedToId: row.promoted_to_id ?? null,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    expiresAt: row.expires_at ?? null,
-    lastVerified: row.last_verified ?? null,
-  }));
+  return rows.map(rowToMemory);
 }
 
 function capitalise(s: string): string {

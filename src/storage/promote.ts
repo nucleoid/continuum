@@ -3,6 +3,7 @@ import type { Memory, ScopeRef } from '../types.js';
 import { getMemory, createMemory } from './memories.js';
 import { getScope, getScopeByRef } from './scopes.js';
 import { hasRole } from './memberships.js';
+import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
 
 export interface PromoteResult {
   source: Memory;
@@ -91,29 +92,8 @@ export async function verifyMemory(
             last_verified = now(),
             updated_at = now()
       WHERE id = $1
-      RETURNING id, scope_id, type, title, body, metadata, tags, author_id,
-                source, source_ref, state, supersedes_id, promoted_to_id,
-                created_at, updated_at, expires_at, last_verified`,
+      RETURNING ${MEMORY_COLUMNS}`,
     [memory.id, nextState],
   );
-  const r = rows[0];
-  return {
-    id: r.id,
-    scopeId: r.scope_id,
-    type: r.type,
-    title: r.title,
-    body: r.body,
-    metadata: r.metadata ?? {},
-    tags: r.tags ?? [],
-    authorId: r.author_id,
-    source: r.source,
-    sourceRef: r.source_ref ?? null,
-    state: r.state,
-    supersedesId: r.supersedes_id ?? null,
-    promotedToId: r.promoted_to_id ?? null,
-    createdAt: r.created_at,
-    updatedAt: r.updated_at,
-    expiresAt: r.expires_at ?? null,
-    lastVerified: r.last_verified ?? null,
-  };
+  return rowToMemory(rows[0]);
 }

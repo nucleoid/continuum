@@ -1,7 +1,8 @@
 import type pg from 'pg';
-import type { Memory, MemoryType, RecallResult } from '../types.js';
+import type { MemoryType, RecallResult } from '../types.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import { vectorSearchMemoryIds } from './embeddings.js';
+import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
 
 export interface RecallOptions {
   query: string;
@@ -9,28 +10,6 @@ export interface RecallOptions {
   types?: MemoryType[];
   limit: number;
   embeddingProvider?: EmbeddingProvider | null;
-}
-
-function rowToMemory(row: Record<string, unknown>): Memory {
-  return {
-    id: row.id as string,
-    scopeId: row.scope_id as string,
-    type: row.type as MemoryType,
-    title: row.title as string,
-    body: row.body as string,
-    metadata: (row.metadata as Record<string, unknown>) ?? {},
-    tags: (row.tags as string[]) ?? [],
-    authorId: row.author_id as string,
-    source: row.source as string,
-    sourceRef: (row.source_ref as string | null) ?? null,
-    state: row.state as Memory['state'],
-    supersedesId: (row.supersedes_id as string | null) ?? null,
-    promotedToId: (row.promoted_to_id as string | null) ?? null,
-    createdAt: row.created_at as Date,
-    updatedAt: row.updated_at as Date,
-    expiresAt: (row.expires_at as Date | null) ?? null,
-    lastVerified: (row.last_verified as Date | null) ?? null,
-  };
 }
 
 function buildExcerpt(body: string, query: string): string {
@@ -110,9 +89,7 @@ async function hydrate(
     typeFilter = ` AND type = ANY($${params.length}::text[])`;
   }
   const { rows } = await pool.query(
-    `SELECT id, scope_id, type, title, body, metadata, tags, author_id,
-            source, source_ref, state, supersedes_id, promoted_to_id,
-            created_at, updated_at, expires_at, last_verified
+    `SELECT ${MEMORY_COLUMNS}
        FROM memories
       WHERE id = ANY($1::uuid[])
         AND scope_id = ANY($2::uuid[])
