@@ -7,6 +7,7 @@ import { buildMcpServer } from './mcp.js';
 import { createPrincipal } from '../storage/principals.js';
 import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
+import { createMemory } from '../storage/memories.js';
 import { StubEmbeddingProvider } from '../embeddings/stub.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 
@@ -191,7 +192,7 @@ describe('MCP server', () => {
 
   it('promote moves a memory and marks source promoted', async () => {
     const { client, me, org } = await connectClient();
-    await addMembership(pool, me.id, org.id, 'writer');
+    await addMembership(pool, me.id, org.id, 'admin');
 
     const capture = (await client.callTool({
       name: 'continuum.capture',
@@ -228,6 +229,34 @@ describe('MCP server', () => {
     expect(rows[0].promoted_to_id).toBe(result.destination_id);
   });
 
+  it('denies org promotion to a writer with the stable MCP error envelope', async () => {
+    const { client, me, org, teamPayments } = await connectClient();
+    await addMembership(pool, me.id, org.id, 'writer');
+    const source = await createMemory(pool, {
+      scopeId: teamPayments.id,
+      scopeKind: 'team',
+      type: 'decision',
+      title: 'Needs org approval',
+      body: 'Writer is not enough.',
+      authorId: me.id,
+      source: 'manual',
+    });
+
+    const result = (await client.callTool({
+      name: 'continuum.promote',
+      arguments: {
+        memory_id: source.id,
+        target_scope_kind: 'org',
+        target_scope_name: '',
+      },
+    })) as CallToolResult & { isError?: boolean };
+
+    expect(result.isError).toBe(true);
+    expect(parseJsonResult(result)).toEqual({
+      error: { code: 'FORBIDDEN', message: 'principal lacks admin role on target scope' },
+    });
+  });
+
   it('verify(false) marks memory stale', async () => {
     const { client } = await connectClient();
     const capture = (await client.callTool({
@@ -249,6 +278,89 @@ describe('MCP server', () => {
     })) as CallToolResult;
     const v = parseJsonResult(verify) as { state: string };
     expect(v.state).toBe('stale');
+  });
+
+  it('denies lifecycle mutations to an implicit org reader', async () => {
+    const { client, me, org } = await connectClient();
+    const verifySource = await createMemory(pool, {
+      scopeId: org.id, scopeKind: 'org', type: 'fact', title: 'Implicit org verify',
+      body: 'Implicit access is read-only.', authorId: me.id, source: 'manual',
+    });
+    const promoteSource = await createMemory(pool, {
+      scopeId: org.id, scopeKind: 'org', type: 'decision', title: 'Implicit org promote',
+      body: 'Promotion mutates the source.', authorId: me.id, source: 'manual',
+    });
+
+    const verify = (await client.callTool({
+      name: 'continuum.verify',
+      arguments: { memory_id: verifySource.id, still_true: false },
+    })) as CallToolResult & { isError?: boolean };
+    const promote = (await client.callTool({
+      name: 'continuum.promote',
+      arguments: {
+        memory_id: promoteSource.id,
+        target_scope_kind: 'team',
+        target_scope_name: 'payments',
+      },
+    })) as CallToolResult & { isError?: boolean };
+
+    for (const result of [verify, promote]) {
+      expect(result.isError).toBe(true);
+      expect(parseJsonResult(result)).toEqual({
+        error: {
+          code: 'FORBIDDEN',
+          message: 'principal lacks writer role on source scope',
+        },
+      });
+    }
+    const { rows } = await pool.query(
+      `SELECT state, last_verified, promoted_to_id
+         FROM memories
+        WHERE id = ANY($1::uuid[])
+        ORDER BY id`,
+      [[verifySource.id, promoteSource.id]],
+    );
+    expect(rows).toEqual([
+      { state: 'live', last_verified: null, promoted_to_id: null },
+      { state: 'live', last_verified: null, promoted_to_id: null },
+    ]);
+  });
+
+  it('denies lifecycle mutations to an explicit source reader', async () => {
+    const { client, me } = await connectClient();
+    const readonly = await createScope(pool, { kind: 'project', name: 'readonly-source' });
+    await addMembership(pool, me.id, readonly.id, 'reader');
+    const verifySource = await createMemory(pool, {
+      scopeId: readonly.id, scopeKind: 'project', type: 'fact', title: 'Reader verify',
+      body: 'Reader access is not mutation access.', authorId: me.id, source: 'manual',
+    });
+    const promoteSource = await createMemory(pool, {
+      scopeId: readonly.id, scopeKind: 'project', type: 'decision', title: 'Reader promote',
+      body: 'Reader access cannot promote.', authorId: me.id, source: 'manual',
+    });
+
+    const verify = (await client.callTool({
+      name: 'continuum.verify',
+      arguments: { memory_id: verifySource.id, still_true: false },
+    })) as CallToolResult & { isError?: boolean };
+    const promote = (await client.callTool({
+      name: 'continuum.promote',
+      arguments: {
+        memory_id: promoteSource.id,
+        target_scope_kind: 'team',
+        target_scope_name: 'payments',
+      },
+    })) as CallToolResult & { isError?: boolean };
+
+    for (const result of [verify, promote]) {
+      expect(result.isError).toBe(true);
+      expect(parseJsonResult(result)).toEqual({
+        error: {
+          code: 'FORBIDDEN',
+          message: 'principal lacks writer role on source scope',
+        },
+      });
+    }
   });
 
   it('ensure_scope creates a new scope idempotently', async () => {
@@ -281,7 +393,7 @@ describe('MCP server', () => {
 
   it('preserves MCP transport metadata across audited tools', async () => {
     const { client, me, org } = await connectClient(null);
-    await addMembership(pool, me.id, org.id, 'writer');
+    await addMembership(pool, me.id, org.id, 'admin');
     const capture = (await client.callTool({
       name: 'continuum.capture',
       arguments: {
