@@ -40,7 +40,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-      - run: npm test
+      - run: npm test -- --no-file-parallelism
 
   windows:
     name: Windows build and entrypoint test

@@ -8,7 +8,11 @@ callers that previously created scopes without permission.
 
 1. Inventory every MCP client, hook, and agent that calls `ensure_scope`.
 2. List current org-admin memberships and remove any human, shared agent, or
-   capture-service identity that should not have tenant-wide administration.
+   capture-service identity that should not have tenant-wide administration:
+
+   ```sh
+   psql "$CONTINUUM_DATABASE_URL" -f scripts/list-org-admins.sql
+   ```
 3. Pre-create scopes required by non-admin callers or move provisioning into an
    operator workflow.
 4. Choose a dedicated operator principal with a high-entropy, non-enumerable
@@ -22,7 +26,8 @@ callers that previously created scopes without permission.
 6. Create a fresh high-entropy identifier on the private operator terminal with
    `openssl rand -hex 32`. Paste it only at the prompts below; do not put the
    identifier in command arguments, shell history, tickets, or logs. Create the
-   dedicated principal, then grant org admin:
+   dedicated principal, record the principal UUID printed by the create script,
+   then grant org admin:
 
    ```sh
    psql "$CONTINUUM_DATABASE_URL" -f scripts/create-scope-operator.sql
@@ -36,7 +41,9 @@ callers that previously created scopes without permission.
    deployment change-control process without placing the bearer in query text:
 
    ```sh
-   psql "$CONTINUUM_DATABASE_URL" -f scripts/verify-scope-operator.sql
+   psql "$CONTINUUM_DATABASE_URL" \
+     -v principal_id='<non-secret UUID printed by the create script>' \
+     -f scripts/verify-scope-operator.sql
    ```
 
 8. Build the reviewed checkout, then call the MCP tool through the supplied
@@ -46,6 +53,7 @@ callers that previously created scopes without permission.
 
    ```sh
    npm run build
+   export CONTINUUM_DATABASE_URL
    read -r -s -p 'Scope operator external_id: ' scope_operator_id
    CONTINUUM_PRINCIPAL_EXTERNAL_ID="$scope_operator_id" \
      node scripts/ensure-scope.mjs project booking-engine

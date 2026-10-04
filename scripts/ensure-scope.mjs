@@ -1,4 +1,6 @@
 import process from 'node:process';
+import { accessSync, constants } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
@@ -11,15 +13,26 @@ if (!kinds.has(kind) || name === undefined || (kind === 'org' ? name !== '' : na
   );
   process.exit(2);
 }
-if (!process.env.CONTINUUM_PRINCIPAL_EXTERNAL_ID) {
-  process.stderr.write('CONTINUUM_PRINCIPAL_EXTERNAL_ID is required\n');
+if (!process.env.CONTINUUM_PRINCIPAL_EXTERNAL_ID
+  || !process.env.CONTINUUM_DATABASE_URL) {
+  process.stderr.write(
+    'CONTINUUM_PRINCIPAL_EXTERNAL_ID and CONTINUUM_DATABASE_URL are required\n',
+  );
+  process.exit(2);
+}
+
+const mcpEntrypoint = fileURLToPath(new URL('../dist/api/mcp.js', import.meta.url));
+try {
+  accessSync(mcpEntrypoint, constants.R_OK);
+} catch {
+  process.stderr.write('dist/api/mcp.js is missing; run npm run build first\n');
   process.exit(2);
 }
 
 const client = new Client({ name: 'continuum-scope-operator', version: '0.1.0' });
 const transport = new StdioClientTransport({
   command: process.execPath,
-  args: ['dist/api/mcp.js'],
+  args: [mcpEntrypoint],
   env: process.env,
   stderr: 'inherit',
 });
