@@ -16,6 +16,9 @@ import { validateScopeRef } from './scopes.js';
 
 export type { PromoteResult };
 
+export const VERIFICATION_NOTE_MAX_LENGTH = 2000;
+export const VERIFICATION_NOTE_SAFE_PATTERN = /^[^\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]*$/;
+
 export async function promoteForPrincipal(
   pool: pg.Pool,
   principal: Principal,
@@ -42,8 +45,17 @@ export async function verifyForPrincipal(
   auditMetadata: Record<string, unknown> = {},
 ): Promise<Memory> {
   try {
-    if (note !== undefined && note.length > 2000) {
-      throw new ServiceError('INVALID_INPUT', 'Verification note must be 2000 characters or fewer');
+    if (note !== undefined && note.length > VERIFICATION_NOTE_MAX_LENGTH) {
+      throw new ServiceError(
+        'INVALID_INPUT',
+        `Verification note must be ${VERIFICATION_NOTE_MAX_LENGTH} characters or fewer`,
+      );
+    }
+    if (note !== undefined && !VERIFICATION_NOTE_SAFE_PATTERN.test(note)) {
+      throw new ServiceError(
+        'INVALID_INPUT',
+        'Verification note contains unsupported control characters',
+      );
     }
     return await verifyMemoryWithAudit(
       pool,

@@ -88,8 +88,7 @@ describe('MCP server', () => {
       ?.description ?? '';
 
     expect(description).toContain('writer or admin');
-    expect(description).toContain('authorship');
-    expect(description).toContain('Unrelated readers cannot verify');
+    expect(description).toContain('Authorship and read access do not grant');
   });
 
   it('rejects an injected provider that is incompatible with the database schema', async () => {
@@ -469,7 +468,7 @@ describe('MCP server', () => {
     expect(parseJsonResult(verify)).toEqual({
       error: {
         code: 'FORBIDDEN',
-        message: 'principal is not the memory author and lacks writer role on source scope',
+        message: 'principal lacks writer role on source scope',
       },
     });
     expect(promote.isError).toBe(true);
@@ -494,14 +493,11 @@ describe('MCP server', () => {
 
   it('denies lifecycle mutations to an explicit source reader', async () => {
     const { client, me } = await connectClient();
-    const author = await createPrincipal(pool, {
-      externalId: 'entra:user:reader-author', kind: 'user', displayName: 'Author',
-    });
     const readonly = await createScope(pool, { kind: 'project', name: 'readonly-source' });
     await addMembership(pool, me.id, readonly.id, 'reader');
     const verifySource = await createMemory(pool, {
       scopeId: readonly.id, scopeKind: 'project', type: 'fact', title: 'Reader verify',
-      body: 'Reader access is not mutation access.', authorId: author.id, source: 'manual',
+      body: 'Reader authorship is not mutation access.', authorId: me.id, source: 'manual',
     });
     const promoteSource = await createMemory(pool, {
       scopeId: readonly.id, scopeKind: 'project', type: 'decision', title: 'Reader promote',
@@ -525,7 +521,7 @@ describe('MCP server', () => {
     expect(parseJsonResult(verify)).toEqual({
       error: {
         code: 'FORBIDDEN',
-        message: 'principal is not the memory author and lacks writer role on source scope',
+        message: 'principal lacks writer role on source scope',
       },
     });
     expect(promote.isError).toBe(true);
@@ -535,6 +531,13 @@ describe('MCP server', () => {
         message: 'principal lacks writer role on source scope',
       },
     });
+    const { rows } = await pool.query(
+      `SELECT state, last_verified,
+              (SELECT count(*)::int FROM audit_log WHERE memory_id = $1) AS audits
+         FROM memories WHERE id = $1`,
+      [verifySource.id],
+    );
+    expect(rows[0]).toEqual({ state: 'live', last_verified: null, audits: 0 });
   });
 
   it('ensure_scope lets an org admin idempotently ensure every scope kind and audits each call', async () => {
@@ -692,7 +695,22 @@ describe('MCP server', () => {
     expect(rows.every((row) => row.metadata.transport === 'mcp')).toBe(true);
   });
 
-  it('rejects verification notes over 2000 characters as invalid input', async () => {
+  it('publishes verification note safety constraints in the MCP input schema', async () => {
+    const { client } = await connectClient(null);
+    const tools = await client.listTools();
+    const verify = tools.tools.find((tool) => tool.name === 'continuum.verify');
+    const note = (verify?.inputSchema as {
+      properties?: { note?: { maxLength?: number; pattern?: string } };
+    }).properties?.note;
+
+    expect(note?.maxLength).toBe(2000);
+    expect(note?.pattern).toBeDefined();
+  });
+
+  it.each([
+    { label: 'overlong', note: 'x'.repeat(2001) },
+    { label: 'unsafe control', note: 'unsafe\u0000note' },
+  ])('rejects $label verification notes at the MCP boundary', async ({ note }) => {
     const { client } = await connectClient(null);
     const capture = (await client.callTool({
       name: 'continuum.capture',
@@ -704,16 +722,18 @@ describe('MCP server', () => {
     const id = (parseJsonResult(capture) as { id: string }).id;
     const result = (await client.callTool({
       name: 'continuum.verify',
-      arguments: { memory_id: id, still_true: true, note: 'x'.repeat(2001) },
+      arguments: { memory_id: id, still_true: true, note },
     })) as CallToolResult & { isError?: boolean };
 
     expect(result.isError).toBe(true);
-    expect(parseJsonResult(result)).toEqual({
-      error: {
-        code: 'INVALID_INPUT',
-        message: 'Verification note must be 2000 characters or fewer',
-      },
-    });
+    expect(rawText(result)).not.toContain(note);
+    const { rows } = await pool.query(
+      `SELECT last_verified,
+              (SELECT count(*)::int FROM audit_log WHERE memory_id = $1) AS audits
+         FROM memories WHERE id = $1`,
+      [id],
+    );
+    expect(rows[0]).toEqual({ last_verified: null, audits: 1 });
   });
 });
 

@@ -17,7 +17,12 @@ import {
   serviceErrorBody,
   type ServiceLogger,
 } from '../services/errors.js';
-import { promoteForPrincipal, verifyForPrincipal } from '../services/lifecycle.js';
+import {
+  promoteForPrincipal,
+  VERIFICATION_NOTE_MAX_LENGTH,
+  VERIFICATION_NOTE_SAFE_PATTERN,
+  verifyForPrincipal,
+} from '../services/lifecycle.js';
 import { renderAgentsMdForPrincipal } from '../services/agents-md.js';
 import { ensureScopeForPrincipal, validateScopeRef } from '../services/scopes.js';
 import { assertEmbeddingProviderDimension } from '../storage/schema.js';
@@ -211,11 +216,14 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     'continuum.verify',
     {
       description:
-        'Verify a memory: mark it confirmed (still_true=true) or stale (still_true=false). Requires an explicit writer or admin role on the memory scope, or authorship of the memory. Unrelated readers cannot verify memories.',
+        'Verify a memory: mark it confirmed (still_true=true) or stale (still_true=false). Requires an explicit writer or admin role on the memory scope. Authorship and read access do not grant mutation authority.',
       inputSchema: {
         memory_id: z.string().uuid(),
         still_true: z.boolean(),
-        note: z.string().optional(),
+        note: z.string()
+          .max(VERIFICATION_NOTE_MAX_LENGTH)
+          .regex(VERIFICATION_NOTE_SAFE_PATTERN)
+          .optional(),
       },
     },
     async (args) => {

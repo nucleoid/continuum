@@ -528,6 +528,7 @@ describe('shared services', () => {
     const scope = scopeKind === 'org'
       ? (await getScopeByRef(pool, { kind: 'org', name: '' }))!
       : await createScope(pool, { kind: scopeKind, name: `ttl-${scopeKind}` });
+    await addMembership(pool, principal.id, scope.id, 'writer');
     const source = await createMemory(pool, {
       scopeId: scope.id, scopeKind, type, title: 'TTL matrix', body: 'Verify me.',
       authorId: principal.id, source: 'manual',
@@ -561,17 +562,28 @@ describe('shared services', () => {
     expect(verified.expiresAt).toEqual(originalExpiry);
   });
 
-  it('allows the memory author to verify with only reader membership', async () => {
+  it('denies a memory author with only reader membership without mutation or audit', async () => {
     const { principal } = await seedWriter();
     const readonly = await createScope(pool, { kind: 'project', name: 'author-reader' });
     await addMembership(pool, principal.id, readonly.id, 'reader');
     const source = await createMemory(pool, {
       scopeId: readonly.id, scopeKind: readonly.kind, type: 'fact', title: 'Owned fact',
-      body: 'The author may reconfirm it.', authorId: principal.id, source: 'manual',
+      body: 'Authorship does not replace current write authority.',
+      authorId: principal.id, source: 'manual',
     });
 
-    await expect(verifyForPrincipal(pool, principal, source.id, true))
-      .resolves.toMatchObject({ state: 'live', authorId: principal.id });
+    await expect(verifyForPrincipal(pool, principal, source.id, false, 'must not persist'))
+      .rejects.toMatchObject<ServiceError>({
+        code: 'FORBIDDEN',
+        publicMessage: 'principal lacks writer role on source scope',
+      });
+    const { rows } = await pool.query(
+      `SELECT state, last_verified,
+              (SELECT count(*)::int FROM audit_log WHERE memory_id = $1) AS audits
+         FROM memories WHERE id = $1`,
+      [source.id],
+    );
+    expect(rows[0]).toEqual({ state: 'live', last_verified: null, audits: 0 });
   });
 
   it.each(['writer', 'admin'] as const)(
@@ -681,7 +693,7 @@ describe('shared services', () => {
     await expect(verifyForPrincipal(pool, principal, orgMemoryToVerify.id, false))
       .rejects.toMatchObject<ServiceError>({
         code: 'FORBIDDEN',
-        publicMessage: 'principal is not the memory author and lacks writer role on source scope',
+        publicMessage: 'principal lacks writer role on source scope',
       });
     await expect(promoteForPrincipal(
       pool, principal, orgMemoryToPromote.id, { kind: 'team', name: 'payments' },
@@ -756,12 +768,11 @@ describe('shared services', () => {
     )).resolves.toMatchObject({ destination: { scopeId: org.id } });
   });
 
-  it('denies verification when source membership is revoked before authorization', async () => {
+  it('denies an author whose source membership is revoked before authorization', async () => {
     const { principal, team } = await seedWriter();
-    const author = await createOtherAuthor();
     const source = await createMemory(pool, {
       scopeId: team.id, scopeKind: 'team', type: 'fact', title: 'Revoked verify',
-      body: 'A concurrent revocation must take effect.', authorId: author.id,
+      body: 'A concurrent revocation must take effect.', authorId: principal.id,
       source: 'manual',
     });
     const authorizationReached = deferred<void>();
@@ -780,9 +791,12 @@ describe('shared services', () => {
 
     await expect(verification).rejects.toMatchObject<ServiceError>({ code: 'FORBIDDEN' });
     const { rows } = await pool.query(
-      'SELECT last_verified FROM memories WHERE id = $1', [source.id],
+      `SELECT state, last_verified,
+              (SELECT count(*)::int FROM audit_log WHERE memory_id = $1) AS audits
+         FROM memories WHERE id = $1`,
+      [source.id],
     );
-    expect(rows[0].last_verified).toBeNull();
+    expect(rows[0]).toEqual({ state: 'live', last_verified: null, audits: 0 });
   });
 
   it('denies promotion when destination membership is revoked before authorization', async () => {
@@ -995,6 +1009,57 @@ describe('shared services', () => {
     await expect(verifyForPrincipal(
       pool, principal, source.id, true, 'x'.repeat(2001),
     )).rejects.toMatchObject<ServiceError>({ code: 'INVALID_INPUT', status: 400 });
+
+    const { rows } = await pool.query(
+      `SELECT last_verified,
+              (SELECT count(*)::int FROM audit_log WHERE memory_id = $1) AS audits
+         FROM memories WHERE id = $1`,
+      [source.id],
+    );
+    expect(rows[0]).toEqual({ last_verified: null, audits: 0 });
+  });
+
+  it.each(['\u0000', '\u0007', '\u007f'])(
+    'rejects unsafe verification note control %j without mutation or audit',
+    async (control) => {
+      const { principal, team } = await seedWriter();
+      const source = await createMemory(pool, {
+        scopeId: team.id, scopeKind: team.kind, type: 'fact', title: 'Safe note',
+        body: 'No unsafe audit note.', authorId: principal.id, source: 'manual',
+      });
+
+      await expect(verifyForPrincipal(
+        pool, principal, source.id, true, `unsafe${control}note`,
+      )).rejects.toMatchObject<ServiceError>({
+        code: 'INVALID_INPUT',
+        status: 400,
+        publicMessage: 'Verification note contains unsupported control characters',
+      });
+
+      const { rows } = await pool.query(
+        `SELECT last_verified,
+                (SELECT count(*)::int FROM audit_log WHERE memory_id = $1) AS audits
+           FROM memories WHERE id = $1`,
+        [source.id],
+      );
+      expect(rows[0]).toEqual({ last_verified: null, audits: 0 });
+    },
+  );
+
+  it('accepts a 2000-character verification note and common whitespace', async () => {
+    const { principal, team } = await seedWriter();
+    const source = await createMemory(pool, {
+      scopeId: team.id, scopeKind: team.kind, type: 'fact', title: 'Exact note bound',
+      body: 'Boundary input.', authorId: principal.id, source: 'manual',
+    });
+    const note = `${'x'.repeat(1997)}\n\t\r`;
+
+    await expect(verifyForPrincipal(pool, principal, source.id, true, note))
+      .resolves.toMatchObject({ state: 'live' });
+    const { rows } = await pool.query(
+      'SELECT metadata FROM audit_log WHERE memory_id = $1', [source.id],
+    );
+    expect(rows[0].metadata.note).toBe(note);
   });
 
   it('rejects malformed recall scopes with a stable service code', async () => {

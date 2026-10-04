@@ -165,9 +165,8 @@ async function verifyOperation(
   }
   const memoryScope = await getScope(client, memory.scopeId);
   if (!memoryScope) throw new PromoteError('source scope missing', 500);
-  if (memory.authorId !== principalId
-    && !(await canMutateScope(client, principalId, memoryScope.id))) {
-    throw new PromoteError('principal is not the memory author and lacks writer role on source scope', 403);
+  if (!(await canMutateScope(client, principalId, memoryScope.id))) {
+    throw new PromoteError('principal lacks writer role on source scope', 403);
   }
   const { rows: clockRows } = await client.query(
     'SELECT statement_timestamp() AS verified_at',
