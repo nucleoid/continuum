@@ -7,11 +7,26 @@ callers that previously created scopes without permission.
 ## Before rollout
 
 1. Inventory every MCP client, hook, and agent that calls `ensure_scope`.
-2. List current org-admin memberships and remove any human, shared agent, or
-   capture-service identity that should not have tenant-wide administration:
+2. List current org-admin memberships. The inventory intentionally omits
+   `external_id` because it is the live v0 bearer credential:
 
    ```sh
    psql "$CONTINUUM_DATABASE_URL" -f scripts/list-org-admins.sql
+   ```
+
+   For each unnecessary admin, first determine whether it still writes to the
+   org scope. Demote required org writers with the checked script below; remove
+   the membership only when the principal needs no explicit org role. Both
+   scripts key on the non-secret principal UUID printed by the inventory and
+   refuse to change anything other than exactly one current org admin:
+
+   ```sh
+   psql "$CONTINUUM_DATABASE_URL" \
+     -v principal_id='<principal UUID>' -v replacement_role=writer \
+     -f scripts/demote-org-admin.sql
+   psql "$CONTINUUM_DATABASE_URL" \
+     -v principal_id='<principal UUID>' \
+     -f scripts/remove-org-admin.sql
    ```
 3. Pre-create scopes required by non-admin callers or move provisioning into an
    operator workflow.
