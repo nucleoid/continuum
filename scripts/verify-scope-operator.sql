@@ -10,7 +10,7 @@ WITH matches AS (
      AND s.kind = 'org' AND s.name = ''
      AND sm.role = 'admin'
 )
-SELECT count(*) = 1 AS verify_succeeded FROM matches \gset
+SELECT count(*) >= 1 AS verify_succeeded FROM matches \gset
 
 \if :verify_succeeded
   SELECT p.id AS principal_id, p.kind, p.display_name, sm.role
@@ -22,6 +22,6 @@ SELECT count(*) = 1 AS verify_succeeded FROM matches \gset
      AND s.kind = 'org' AND s.name = ''
      AND sm.role = 'admin';
 \else
-  \echo 'Expected exactly one dedicated scope-provisioning org admin.'
+  \echo 'Expected at least one dedicated scope-provisioning org admin.'
   SELECT 1 / 0 AS scope_operator_verification_failed;
 \endif

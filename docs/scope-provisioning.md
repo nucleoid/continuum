@@ -7,17 +7,19 @@ callers that previously created scopes without permission.
 ## Before rollout
 
 1. Inventory every MCP client, hook, and agent that calls `ensure_scope`.
-2. Pre-create scopes required by non-admin callers or move provisioning into an
+2. List current org-admin memberships and remove any human, shared agent, or
+   capture-service identity that should not have tenant-wide administration.
+3. Pre-create scopes required by non-admin callers or move provisioning into an
    operator workflow.
-3. Choose a dedicated operator principal with a high-entropy, non-enumerable
+4. Choose a dedicated operator principal with a high-entropy, non-enumerable
    `external_id`. Do not use a readable name and do not grant org admin to a
    shared agent or capture service merely to preserve the old behavior. During
    v0 the REST bearer credential is the literal `external_id`; org admin also
    permits org writes and full audit-log reads.
-4. Confirm that the REST port is limited to the trusted operator network. If a
+5. Confirm that the REST port is limited to the trusted operator network. If a
    high-entropy identity and that network restriction are not both in place,
    postpone this rollout until Entra validation ships in M4.
-5. Create a fresh high-entropy identifier on the private operator terminal with
+6. Create a fresh high-entropy identifier on the private operator terminal with
    `openssl rand -hex 32`. Paste it only at the prompts below; do not put the
    identifier in command arguments, shell history, tickets, or logs. Create the
    dedicated principal, then grant org admin:
@@ -30,27 +32,31 @@ callers that previously created scopes without permission.
    The grant script is idempotent for an existing admin and refuses to replace
    an existing reader or writer role.
 
-6. Verify the resulting membership and record the operator change through the
+7. Verify the resulting membership and record the operator change through the
    deployment change-control process without placing the bearer in query text:
 
    ```sh
    psql "$CONTINUUM_DATABASE_URL" -f scripts/verify-scope-operator.sql
    ```
 
-7. Launch the provisioning MCP process from a private terminal with a
-   short-lived child-process environment value, never a persistent MCP config:
+8. Build the reviewed checkout, then call the MCP tool through the supplied
+   one-shot client from a private terminal. This launches `node dist/api/mcp.js`
+   directly, so npm cannot write banners into the stdio protocol. Never create
+   scopes with direct SQL and never persist this credential in an MCP config:
 
    ```sh
+   npm run build
    read -r -s -p 'Scope operator external_id: ' scope_operator_id
-   CONTINUUM_PRINCIPAL_EXTERNAL_ID="$scope_operator_id" npm run mcp
+   CONTINUUM_PRINCIPAL_EXTERNAL_ID="$scope_operator_id" \
+     node scripts/ensure-scope.mjs project booking-engine
    unset scope_operator_id
    ```
 
-   Stop this process after provisioning, remove any temporary shell state, and
-   clear terminal scrollback before screen sharing. The startup error does not
-   echo an unknown credential. Upgrade and restart every ordinary stdio MCP
-   process too; old processes retain the unprotected implementation until they
-   restart.
+   Repeat the one-shot client for each approved scope, stop after provisioning,
+   remove any temporary shell state, and clear terminal scrollback before
+   screen sharing. The startup error does not echo an unknown credential.
+   Upgrade and restart every ordinary stdio MCP process too; old processes
+   retain the unprotected implementation until they restart.
 
 The v0 stdio principal and REST bearer identity are self-asserted placeholders.
 Until Entra validation ships in M4, only trusted operators may launch MCP with

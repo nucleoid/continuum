@@ -5,6 +5,13 @@
   \prompt 'New high-entropy scope operator external_id: ' external_id
 \endif
 
+SELECT :'external_id' ~ '^[0-9a-f]{64}$' AS external_id_valid \gset
+\if :external_id_valid
+\else
+  \echo 'external_id must be exactly 64 lowercase hexadecimal characters.'
+  SELECT 1 / 0 AS invalid_scope_operator_external_id;
+\endif
+
 BEGIN;
 
 WITH created AS (

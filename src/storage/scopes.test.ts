@@ -61,7 +61,7 @@ describe('scopes repository', () => {
     expect(b.scope.id).toBe(a.scope.id);
   });
 
-  it('getOrCreateScope handles concurrent creation without duplicate rows', async () => {
+  it('ensureScopeRow handles concurrent creation without duplicate rows', async () => {
     const results = await Promise.all(
       Array.from({ length: 8 }, () =>
         ensureScopeRow(pool, { kind: 'project', name: 'concurrent' })),
