@@ -3,7 +3,6 @@ import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { getPrincipalByExternalId } from '../storage/principals.js';
-import { getOrCreateScope } from '../storage/scopes.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import type { Principal, ScopeKind } from '../types.js';
 import { getPool } from '../storage/pool.js';
@@ -20,7 +19,7 @@ import {
 } from '../services/errors.js';
 import { promoteForPrincipal, verifyForPrincipal } from '../services/lifecycle.js';
 import { renderAgentsMdForPrincipal } from '../services/agents-md.js';
-import { validateScopeRef } from '../services/scopes.js';
+import { ensureScopeForPrincipal, validateScopeRef } from '../services/scopes.js';
 
 const SCOPE_KINDS = ['org', 'team', 'project', 'user', 'role'] as const;
 const MEMORY_TYPES = ['fact', 'decision', 'context', 'playbook', 'relationship'] as const;
@@ -280,10 +279,18 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           kind: args.kind as ScopeKind,
           name: args.name,
         });
-        const scope = await getOrCreateScope(pool, ref);
+        const result = await ensureScopeForPrincipal(
+          pool,
+          principal,
+          ref,
+          { transport: 'mcp' },
+        );
         return jsonResult({
-          id: scope.id,
-          scope: scope.kind === 'org' ? 'org' : `${scope.kind}:${scope.name}`,
+          id: result.scope.id,
+          scope: result.scope.kind === 'org'
+            ? 'org'
+            : `${result.scope.kind}:${result.scope.name}`,
+          created: result.created,
         });
       } catch (error) {
         return errorResult(error);

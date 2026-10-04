@@ -12,6 +12,7 @@ import { recallForPrincipal } from './recall.js';
 import { ServiceError } from './errors.js';
 import { createMemory } from '../storage/memories.js';
 import { promoteForPrincipal, verifyForPrincipal } from './lifecycle.js';
+import { ensureScopeForPrincipal } from './scopes.js';
 
 describe('shared services', () => {
   let pool: pg.Pool;
@@ -64,6 +65,69 @@ describe('shared services', () => {
 
     await expect(canReadScope(pool, principal.id, org)).resolves.toBe(true);
     await expect(canWriteScope(pool, principal.id, org.id)).resolves.toBe(false);
+  });
+
+  it('rolls scope creation back when its required audit fails', async () => {
+    const principal = await createPrincipal(pool, {
+      externalId: 'entra:user:scope-admin', kind: 'user', displayName: 'Scope Admin',
+    });
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await addMembership(pool, principal.id, org.id, 'admin');
+
+    await expect(ensureScopeForPrincipal(
+      poolRejecting(pool, 'INSERT INTO audit_log'),
+      principal,
+      { kind: 'project', name: 'must-roll-back' },
+    )).rejects.toMatchObject<ServiceError>({ code: 'INTERNAL' });
+
+    await expect(getScopeByRef(
+      pool, { kind: 'project', name: 'must-roll-back' },
+    )).resolves.toBeNull();
+  });
+
+  it('destroys the ensure client after rollback failure and preserves the original error', async () => {
+    const original = new Error('original ensure failure');
+    const release = vi.fn();
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        if (sql === 'BEGIN') return { rows: [] };
+        if (sql === 'ROLLBACK') throw new Error('rollback failure');
+        if (sql.includes('FROM scopes')) {
+          return { rows: [{ id: 'org', kind: 'org', name: '', created_at: new Date() }] };
+        }
+        if (sql.includes('FROM scope_memberships')) return { rows: [{ role: 'admin' }] };
+        if (sql.includes('INSERT INTO scopes')) throw original;
+        throw new Error(`unexpected query: ${sql}`);
+      }),
+      release,
+    };
+    const fakePool = {
+      connect: vi.fn().mockResolvedValue(client),
+    } as unknown as pg.Pool;
+
+    const failure = await ensureScopeForPrincipal(
+      fakePool,
+      { id: 'principal' } as Principal,
+      { kind: 'project', name: 'rollback-failure' },
+    ).catch((error: unknown) => error);
+
+    expect(failure).toMatchObject({ code: 'INTERNAL', cause: original });
+    expect(release).toHaveBeenCalledWith(true);
+  });
+
+  it('maps ensure pool connection failures to dependency unavailable', async () => {
+    const fakePool = {
+      connect: vi.fn().mockRejectedValue(new Error('database unavailable')),
+    } as unknown as pg.Pool;
+
+    await expect(ensureScopeForPrincipal(
+      fakePool,
+      { id: 'principal' } as Principal,
+      { kind: 'project', name: 'connection-failure' },
+    )).rejects.toMatchObject<ServiceError>({
+      code: 'DEPENDENCY_UNAVAILABLE',
+      publicMessage: 'A required dependency is unavailable',
+    });
   });
 
   it('captures metadata, tags and source ref and writes the audit atomically', async () => {

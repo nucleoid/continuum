@@ -49,7 +49,25 @@ describe('scopes repository', () => {
   it('getOrCreateScope returns existing or new', async () => {
     const a = await getOrCreateScope(pool, { kind: 'role', name: 'security' });
     const b = await getOrCreateScope(pool, { kind: 'role', name: 'security' });
-    expect(b.id).toBe(a.id);
+    expect(a.created).toBe(true);
+    expect(b.created).toBe(false);
+    expect(b.scope.id).toBe(a.scope.id);
+  });
+
+  it('getOrCreateScope handles concurrent creation without duplicate rows', async () => {
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () =>
+        getOrCreateScope(pool, { kind: 'project', name: 'concurrent' })),
+    );
+
+    expect(new Set(results.map((result) => result.scope.id))).toHaveLength(1);
+    expect(results.filter((result) => result.created)).toHaveLength(1);
+    const { rows } = await pool.query(
+      `SELECT count(*)::int AS count
+         FROM scopes
+        WHERE kind = 'project' AND name = 'concurrent'`,
+    );
+    expect(rows[0].count).toBe(1);
   });
 
   it('listScopesByKind returns sorted by name', async () => {
