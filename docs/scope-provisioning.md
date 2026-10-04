@@ -31,19 +31,26 @@ callers that previously created scopes without permission.
    an existing reader or writer role.
 
 6. Verify the resulting membership and record the operator change through the
-   deployment change-control process:
+   deployment change-control process without placing the bearer in query text:
 
-   ```sql
-   SELECT p.external_id, sm.role
-     FROM scope_memberships sm
-     JOIN principals p ON p.id = sm.principal_id
-     JOIN scopes s ON s.id = sm.scope_id
-    WHERE p.external_id = '<paste the operator external_id in this private session>'
-      AND s.kind = 'org' AND s.name = '' AND sm.role = 'admin';
+   ```sh
+   psql "$CONTINUUM_DATABASE_URL" -f scripts/verify-scope-operator.sql
    ```
 
-7. Upgrade and restart every stdio MCP process. Old processes retain the
-   unprotected implementation until they restart.
+7. Launch the provisioning MCP process from a private terminal with a
+   short-lived child-process environment value, never a persistent MCP config:
+
+   ```sh
+   read -r -s -p 'Scope operator external_id: ' scope_operator_id
+   CONTINUUM_PRINCIPAL_EXTERNAL_ID="$scope_operator_id" npm run mcp
+   unset scope_operator_id
+   ```
+
+   Stop this process after provisioning, remove any temporary shell state, and
+   clear terminal scrollback before screen sharing. The startup error does not
+   echo an unknown credential. Upgrade and restart every ordinary stdio MCP
+   process too; old processes retain the unprotected implementation until they
+   restart.
 
 The v0 stdio principal and REST bearer identity are self-asserted placeholders.
 Until Entra validation ships in M4, only trusted operators may launch MCP with
@@ -56,6 +63,10 @@ the checked script below; it removes the org membership and rotates
 ```sh
 psql "$CONTINUUM_DATABASE_URL" -f scripts/retire-scope-operator.sql
 ```
+
+The interactive prompts keep the bearer out of command arguments and shell
+history, but the value is visible while typed and may remain in terminal
+scrollback. Use a private operator session and clear it after retirement.
 
 ## Rollback
 

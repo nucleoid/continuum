@@ -3,6 +3,7 @@ import type pg from 'pg';
 import { makeTestPool, resetData } from './test-helpers.js';
 import {
   createScope,
+  ensureScopeRow,
   getOrCreateScope,
   getScope,
   getScopeByRef,
@@ -49,6 +50,12 @@ describe('scopes repository', () => {
   it('getOrCreateScope returns existing or new', async () => {
     const a = await getOrCreateScope(pool, { kind: 'role', name: 'security' });
     const b = await getOrCreateScope(pool, { kind: 'role', name: 'security' });
+    expect(b.id).toBe(a.id);
+  });
+
+  it('ensureScopeRow reports whether it created the scope', async () => {
+    const a = await ensureScopeRow(pool, { kind: 'role', name: 'compliance' });
+    const b = await ensureScopeRow(pool, { kind: 'role', name: 'compliance' });
     expect(a.created).toBe(true);
     expect(b.created).toBe(false);
     expect(b.scope.id).toBe(a.scope.id);
@@ -57,7 +64,7 @@ describe('scopes repository', () => {
   it('getOrCreateScope handles concurrent creation without duplicate rows', async () => {
     const results = await Promise.all(
       Array.from({ length: 8 }, () =>
-        getOrCreateScope(pool, { kind: 'project', name: 'concurrent' })),
+        ensureScopeRow(pool, { kind: 'project', name: 'concurrent' })),
     );
 
     expect(new Set(results.map((result) => result.scope.id))).toHaveLength(1);

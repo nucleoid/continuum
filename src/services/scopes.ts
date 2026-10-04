@@ -3,7 +3,7 @@ import type { Principal, ScopeRef } from '../types.js';
 import { parseScopeString as parseScopeModel } from '../scopes/model.js';
 import { hasExplicitRoleForMutation } from '../scopes/access.js';
 import { record } from '../audit/log.js';
-import { getOrCreateScope, getScopeByRef } from '../storage/scopes.js';
+import { ensureScopeRow, getScopeByRef } from '../storage/scopes.js';
 import { asServiceError, dependencyUnavailable, ServiceError } from './errors.js';
 
 export function validateScopeRef(ref: ScopeRef): ScopeRef {
@@ -27,7 +27,7 @@ export async function ensureScopeForPrincipal(
   principal: Principal,
   ref: ScopeRef,
   auditMetadata: Record<string, unknown> = {},
-): Promise<{ scope: Awaited<ReturnType<typeof getOrCreateScope>>['scope']; created: boolean }> {
+): Promise<Awaited<ReturnType<typeof ensureScopeRow>>> {
   try {
     validateScopeRef(ref);
     let client: pg.PoolClient;
@@ -54,7 +54,7 @@ export async function ensureScopeForPrincipal(
         );
       }
 
-      const result = await getOrCreateScope(client, ref);
+      const result = await ensureScopeRow(client, ref);
       await record(client, {
         principalId: principal.id,
         action: 'write',

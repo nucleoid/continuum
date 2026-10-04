@@ -12,6 +12,8 @@ WITH target AS (
     FROM principals p
     JOIN scopes s ON s.kind = 'org' AND s.name = ''
    WHERE p.external_id = :'external_id'
+     AND p.kind = 'service'
+     AND p.display_name = 'Scope Provisioning Operator'
 ), granted AS (
   INSERT INTO scope_memberships (principal_id, scope_id, role)
   SELECT principal_id, scope_id, 'admin'

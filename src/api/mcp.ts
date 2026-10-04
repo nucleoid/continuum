@@ -313,7 +313,7 @@ async function main(): Promise<void> {
   const pool = getPool();
   const principal = await getPrincipalByExternalId(pool, tokenEnv);
   if (!principal) {
-    process.stderr.write(`continuum-mcp: unknown principal ${tokenEnv}\n`);
+    process.stderr.write('continuum-mcp: unknown principal\n');
     process.exit(1);
   }
   const embeddingProvider = makeEmbeddingProviderFromEnv();

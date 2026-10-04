@@ -56,6 +56,13 @@ export async function getScopeByRef(
 export async function getOrCreateScope(
   pool: Queryable,
   ref: ScopeRef,
+): Promise<Scope> {
+  return (await ensureScopeRow(pool, ref)).scope;
+}
+
+export async function ensureScopeRow(
+  pool: Queryable,
+  ref: ScopeRef,
 ): Promise<{ scope: Scope; created: boolean }> {
   if (ref.kind === 'org' && ref.name !== '') {
     throw new Error('org scope cannot have a name');

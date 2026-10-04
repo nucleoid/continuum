@@ -27,4 +27,6 @@ contains `created`, `kind`, `name`, and `transport`. This includes authorized
 idempotent calls where the scope already exists (`created: false`). Audit and
 SIEM consumers that report memory writes should exclude rows whose
 `metadata.operation` is `create_scope`; scope-provisioning reports should select
-that operation explicitly.
+that operation explicitly. The v0 audit endpoint cannot filter on metadata, so
+consumers must filter each returned page client-side and must not treat a
+server-side `action=write` count as an exact memory-write count.
