@@ -81,6 +81,17 @@ describe('MCP server', () => {
     );
   });
 
+  it('documents verification authorization in the MCP tool description', async () => {
+    const { client } = await connectClient();
+    const tools = await client.listTools();
+    const description = tools.tools.find((tool) => tool.name === 'continuum.verify')
+      ?.description ?? '';
+
+    expect(description).toContain('writer or admin');
+    expect(description).toContain('authorship');
+    expect(description).toContain('Unrelated readers cannot verify');
+  });
+
   it('rejects an injected provider that is incompatible with the database schema', async () => {
     await expect(connectClient({
       id: 'hosted:model',
@@ -429,9 +440,12 @@ describe('MCP server', () => {
 
   it('denies lifecycle mutations to an implicit org reader', async () => {
     const { client, me, org } = await connectClient();
+    const author = await createPrincipal(pool, {
+      externalId: 'entra:user:implicit-author', kind: 'user', displayName: 'Author',
+    });
     const verifySource = await createMemory(pool, {
       scopeId: org.id, scopeKind: 'org', type: 'fact', title: 'Implicit org verify',
-      body: 'Implicit access is read-only.', authorId: me.id, source: 'manual',
+      body: 'Implicit access is read-only.', authorId: author.id, source: 'manual',
     });
     const promoteSource = await createMemory(pool, {
       scopeId: org.id, scopeKind: 'org', type: 'decision', title: 'Implicit org promote',
@@ -451,15 +465,20 @@ describe('MCP server', () => {
       },
     })) as CallToolResult & { isError?: boolean };
 
-    for (const result of [verify, promote]) {
-      expect(result.isError).toBe(true);
-      expect(parseJsonResult(result)).toEqual({
-        error: {
-          code: 'FORBIDDEN',
-          message: 'principal lacks writer role on source scope',
-        },
-      });
-    }
+    expect(verify.isError).toBe(true);
+    expect(parseJsonResult(verify)).toEqual({
+      error: {
+        code: 'FORBIDDEN',
+        message: 'principal is not the memory author and lacks writer role on source scope',
+      },
+    });
+    expect(promote.isError).toBe(true);
+    expect(parseJsonResult(promote)).toEqual({
+      error: {
+        code: 'FORBIDDEN',
+        message: 'principal lacks writer role on source scope',
+      },
+    });
     const { rows } = await pool.query(
       `SELECT state, last_verified, promoted_to_id
          FROM memories
@@ -475,11 +494,14 @@ describe('MCP server', () => {
 
   it('denies lifecycle mutations to an explicit source reader', async () => {
     const { client, me } = await connectClient();
+    const author = await createPrincipal(pool, {
+      externalId: 'entra:user:reader-author', kind: 'user', displayName: 'Author',
+    });
     const readonly = await createScope(pool, { kind: 'project', name: 'readonly-source' });
     await addMembership(pool, me.id, readonly.id, 'reader');
     const verifySource = await createMemory(pool, {
       scopeId: readonly.id, scopeKind: 'project', type: 'fact', title: 'Reader verify',
-      body: 'Reader access is not mutation access.', authorId: me.id, source: 'manual',
+      body: 'Reader access is not mutation access.', authorId: author.id, source: 'manual',
     });
     const promoteSource = await createMemory(pool, {
       scopeId: readonly.id, scopeKind: 'project', type: 'decision', title: 'Reader promote',
@@ -499,15 +521,20 @@ describe('MCP server', () => {
       },
     })) as CallToolResult & { isError?: boolean };
 
-    for (const result of [verify, promote]) {
-      expect(result.isError).toBe(true);
-      expect(parseJsonResult(result)).toEqual({
-        error: {
-          code: 'FORBIDDEN',
-          message: 'principal lacks writer role on source scope',
-        },
-      });
-    }
+    expect(verify.isError).toBe(true);
+    expect(parseJsonResult(verify)).toEqual({
+      error: {
+        code: 'FORBIDDEN',
+        message: 'principal is not the memory author and lacks writer role on source scope',
+      },
+    });
+    expect(promote.isError).toBe(true);
+    expect(parseJsonResult(promote)).toEqual({
+      error: {
+        code: 'FORBIDDEN',
+        message: 'principal lacks writer role on source scope',
+      },
+    });
   });
 
   it('ensure_scope lets an org admin idempotently ensure every scope kind and audits each call', async () => {

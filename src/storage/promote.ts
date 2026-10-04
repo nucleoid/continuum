@@ -8,6 +8,7 @@ import {
   hasExplicitRoleForMutation,
 } from '../scopes/access.js';
 import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
+import { computeExpiry } from './expiry.js';
 
 export interface PromoteResult {
   source: Memory;
@@ -159,19 +160,31 @@ async function verifyOperation(
 ): Promise<Memory> {
   const memory = await getMemoryForUpdate(client, memoryId);
   if (!memory) throw new PromoteError('memory not found', 404);
+  if (memory.state === 'promoted' || memory.state === 'archived') {
+    throw new PromoteError('memory is in a terminal state', 409);
+  }
   const memoryScope = await getScope(client, memory.scopeId);
   if (!memoryScope) throw new PromoteError('source scope missing', 500);
-  if (!(await canMutateScope(client, principalId, memoryScope.id))) {
-    throw new PromoteError('principal lacks writer role on source scope', 403);
+  if (memory.authorId !== principalId
+    && !(await canMutateScope(client, principalId, memoryScope.id))) {
+    throw new PromoteError('principal is not the memory author and lacks writer role on source scope', 403);
   }
-  const nextState = stillTrue ? memory.state : 'stale';
+  const { rows: clockRows } = await client.query(
+    'SELECT statement_timestamp() AS verified_at',
+  );
+  const verifiedAt = clockRows[0].verified_at as Date;
+  const expiresAt = stillTrue
+    ? computeExpiry(memory.type, memoryScope.kind, verifiedAt)
+    : memory.expiresAt;
+  const nextState = stillTrue ? 'live' : 'stale';
   const { rows } = await client.query(
     `UPDATE memories
-        SET state = $2, last_verified = now(), updated_at = now()
-      WHERE id = $1
+        SET state = $2, last_verified = $3, updated_at = $3, expires_at = $4
+      WHERE id = $1 AND state IN ('live', 'stale')
       RETURNING ${MEMORY_COLUMNS}`,
-    [memory.id, nextState],
+    [memory.id, nextState, verifiedAt, expiresAt],
   );
+  if (!rows[0]) throw new PromoteError('memory is in a terminal state', 409);
   return rowToMemory(rows[0]);
 }
 

@@ -211,7 +211,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     'continuum.verify',
     {
       description:
-        'Verify a memory: mark it confirmed (still_true=true) or stale (still_true=false). Requires an explicit writer or admin role on the memory scope; implicit org access and reader roles are read-only.',
+        'Verify a memory: mark it confirmed (still_true=true) or stale (still_true=false). Requires an explicit writer or admin role on the memory scope, or authorship of the memory. Unrelated readers cannot verify memories.',
       inputSchema: {
         memory_id: z.string().uuid(),
         still_true: z.boolean(),
