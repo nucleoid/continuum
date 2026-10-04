@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import type { AuditAction } from '../types.js';
+import type { Queryable } from '../storage/queryable.js';
 
 export interface AuditEntry {
   principalId: string;
@@ -11,7 +12,7 @@ export interface AuditEntry {
 }
 
 export async function record(
-  pool: pg.Pool,
+  pool: Queryable,
   entry: AuditEntry,
 ): Promise<void> {
   await pool.query(

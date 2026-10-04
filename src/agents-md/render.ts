@@ -1,8 +1,7 @@
 import type pg from 'pg';
 import type { Memory, MemoryType, ScopeRef } from '../types.js';
-import { getScopeByRef } from '../storage/scopes.js';
-import { getScopesForPrincipal } from '../storage/memberships.js';
 import { MEMORY_COLUMNS, rowToMemory } from '../storage/memory-row.js';
+import { accessibleScopes } from '../services/access.js';
 
 const SECTION_ORDER: Array<{ key: 'org' | 'role' | 'team' | 'project'; heading: string }> = [
   { key: 'org', heading: 'Org' },
@@ -35,19 +34,14 @@ export async function renderAgentsMd(
   opts: RenderOptions,
 ): Promise<string> {
   const perScopeLimit = opts.perScopeLimit ?? 20;
-  const memberships = await getScopesForPrincipal(pool, opts.principalId);
+  const readable = await accessibleScopes(pool, opts.principalId);
   const accessible = new Map<string, ResolvedScope>();
-
-  const org = await getScopeByRef(pool, { kind: 'org', name: '' });
-  if (org) {
-    accessible.set(org.id, { id: org.id, kind: 'org', name: '', heading: 'org' });
-  }
-  for (const m of memberships) {
-    accessible.set(m.id, {
-      id: m.id,
-      kind: m.kind,
-      name: m.name,
-      heading: m.kind === 'org' ? 'org' : `${m.kind}:${m.name}`,
+  for (const scope of readable.values()) {
+    accessible.set(scope.id, {
+      id: scope.id,
+      kind: scope.kind,
+      name: scope.name,
+      heading: scope.label,
     });
   }
 

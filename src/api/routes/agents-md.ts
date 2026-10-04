@@ -1,8 +1,7 @@
 import { Router } from 'express';
 import type pg from 'pg';
 import { z } from 'zod';
-import { renderAgentsMd } from '../../agents-md/render.js';
-import { record as recordAudit } from '../../audit/log.js';
+import { renderAgentsMdForPrincipal } from '../../services/agents-md.js';
 
 const querySchema = z.object({
   project: z.string().optional(),
@@ -13,30 +12,23 @@ const querySchema = z.object({
 export function agentsMdRouter(pool: pg.Pool): Router {
   const router = Router();
 
-  router.get('/agents-md', async (req, res) => {
+  router.get('/agents-md', async (req, res, next) => {
     const parsed = querySchema.safeParse(req.query);
     if (!parsed.success) {
-      res.status(400).json({ error: 'invalid query', details: parsed.error.issues });
+      res.status(400).json({ code: 'INVALID_INPUT', error: 'Invalid query' });
       return;
     }
-    const principal = req.principal!;
-    const markdown = await renderAgentsMd(pool, {
-      principalId: principal.id,
-      project: parsed.data.project,
-      team: parsed.data.team,
-      perScopeLimit: parsed.data.limit,
-    });
-    await recordAudit(pool, {
-      principalId: principal.id,
-      action: 'read',
-      metadata: {
-        view: 'agents-md',
-        project: parsed.data.project ?? null,
-        team: parsed.data.team ?? null,
-      },
-    });
-    res.set('Content-Type', 'text/markdown; charset=utf-8');
-    res.send(markdown);
+    try {
+      const markdown = await renderAgentsMdForPrincipal(
+        pool,
+        req.principal!,
+        parsed.data,
+      );
+      res.set('Content-Type', 'text/markdown; charset=utf-8');
+      res.send(markdown);
+    } catch (error) {
+      next(error);
+    }
   });
 
   return router;

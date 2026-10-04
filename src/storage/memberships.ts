@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import type { MembershipRole, Scope, Principal } from '../types.js';
+import type { Queryable } from './queryable.js';
 
 export interface ScopeMembership {
   principalId: string;
@@ -18,7 +19,7 @@ function rowToMembership(row: Record<string, unknown>): ScopeMembership {
 }
 
 export async function addMembership(
-  pool: pg.Pool,
+  pool: Queryable,
   principalId: string,
   scopeId: string,
   role: MembershipRole,
@@ -34,7 +35,7 @@ export async function addMembership(
 }
 
 export async function removeMembership(
-  pool: pg.Pool,
+  pool: Queryable,
   principalId: string,
   scopeId: string,
 ): Promise<boolean> {
@@ -46,7 +47,7 @@ export async function removeMembership(
 }
 
 export async function getMembership(
-  pool: pg.Pool,
+  pool: Queryable,
   principalId: string,
   scopeId: string,
 ): Promise<ScopeMembership | null> {
@@ -59,7 +60,7 @@ export async function getMembership(
 }
 
 export async function getScopesForPrincipal(
-  pool: pg.Pool,
+  pool: Queryable,
   principalId: string,
 ): Promise<Array<Scope & { role: MembershipRole }>> {
   const { rows } = await pool.query(
@@ -79,7 +80,7 @@ export async function getScopesForPrincipal(
 }
 
 export async function getPrincipalsForScope(
-  pool: pg.Pool,
+  pool: Queryable,
   scopeId: string,
 ): Promise<Array<Principal & { role: MembershipRole }>> {
   const { rows } = await pool.query(
@@ -100,7 +101,7 @@ export async function getPrincipalsForScope(
 }
 
 export async function hasRole(
-  pool: pg.Pool,
+  pool: Queryable,
   principalId: string,
   scopeId: string,
   required: MembershipRole,

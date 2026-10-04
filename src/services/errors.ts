@@ -1,0 +1,70 @@
+export type ServiceErrorCode =
+  | 'INVALID_INPUT'
+  | 'INVALID_SCOPE'
+  | 'FORBIDDEN'
+  | 'SCOPE_NOT_FOUND'
+  | 'MEMORY_NOT_FOUND'
+  | 'CONFLICT'
+  | 'PAYLOAD_TOO_LARGE'
+  | 'DEPENDENCY_UNAVAILABLE'
+  | 'INTERNAL';
+
+const STATUS_BY_CODE: Record<ServiceErrorCode, number> = {
+  INVALID_INPUT: 400,
+  INVALID_SCOPE: 400,
+  FORBIDDEN: 403,
+  SCOPE_NOT_FOUND: 404,
+  MEMORY_NOT_FOUND: 404,
+  CONFLICT: 409,
+  PAYLOAD_TOO_LARGE: 413,
+  DEPENDENCY_UNAVAILABLE: 503,
+  INTERNAL: 500,
+};
+
+export class ServiceError extends Error {
+  readonly status: number;
+
+  constructor(
+    readonly code: ServiceErrorCode,
+    readonly publicMessage: string,
+    options: { cause?: unknown; status?: number } = {},
+  ) {
+    super(publicMessage, { cause: options.cause });
+    this.name = 'ServiceError';
+    this.status = options.status ?? STATUS_BY_CODE[code];
+  }
+}
+
+export function asServiceError(error: unknown): ServiceError {
+  return error instanceof ServiceError
+    ? error
+    : new ServiceError('INTERNAL', 'An internal error occurred', { cause: error });
+}
+
+export function dependencyUnavailable(error: unknown): ServiceError {
+  return new ServiceError(
+    'DEPENDENCY_UNAVAILABLE',
+    'A required dependency is unavailable',
+    { cause: error },
+  );
+}
+
+export interface ServiceLogger {
+  error(message: string, error: unknown): void;
+}
+
+export function logInternalServiceError(
+  logger: ServiceLogger,
+  context: string,
+  error: ServiceError,
+): void {
+  if (error.code === 'INTERNAL') {
+    logger.error(`${context}: internal service error`, error.cause ?? error);
+  }
+}
+
+export function serviceErrorBody(error: ServiceError): {
+  error: { code: ServiceErrorCode; message: string };
+} {
+  return { error: { code: error.code, message: error.publicMessage } };
+}

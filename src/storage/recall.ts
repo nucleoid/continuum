@@ -3,6 +3,7 @@ import type { MemoryType, RecallResult } from '../types.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import { vectorSearchMemoryIds } from './embeddings.js';
 import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
+import type { Queryable } from './queryable.js';
 
 export interface RecallOptions {
   query: string;
@@ -10,6 +11,13 @@ export interface RecallOptions {
   types?: MemoryType[];
   limit: number;
   embeddingProvider?: EmbeddingProvider | null;
+}
+
+export class EmbeddingProviderUnavailableError extends Error {
+  constructor(cause: unknown) {
+    super('embedding provider unavailable', { cause });
+    this.name = 'EmbeddingProviderUnavailableError';
+  }
 }
 
 function buildExcerpt(body: string, query: string): string {
@@ -29,7 +37,7 @@ interface FtsHit {
 }
 
 async function ftsHits(
-  pool: pg.Pool,
+  pool: Queryable,
   query: string,
   scopeIds: string[],
   types: MemoryType[] | undefined,
@@ -74,7 +82,7 @@ function fuse(...lists: Array<Array<{ id: string; rank: number }>>): Map<string,
 }
 
 async function hydrate(
-  pool: pg.Pool,
+  pool: Queryable,
   ids: string[],
   query: string,
   fusedScores: Map<string, number>,
@@ -111,7 +119,7 @@ async function hydrate(
 }
 
 export async function recall(
-  pool: pg.Pool,
+  pool: Queryable,
   opts: RecallOptions,
 ): Promise<RecallResult[]> {
   if (opts.scopeIds.length === 0) return [];
@@ -121,7 +129,12 @@ export async function recall(
 
   let vec: Array<{ id: string; rank: number; distance: number }> = [];
   if (opts.embeddingProvider) {
-    const [queryVec] = await opts.embeddingProvider.embed([opts.query]);
+    let queryVec: number[];
+    try {
+      [queryVec] = await opts.embeddingProvider.embed([opts.query]);
+    } catch (error) {
+      throw new EmbeddingProviderUnavailableError(error);
+    }
     const hits = await vectorSearchMemoryIds(
       pool,
       queryVec,

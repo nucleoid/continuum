@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type pg from 'pg';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -8,6 +8,7 @@ import { createPrincipal } from '../storage/principals.js';
 import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import { StubEmbeddingProvider } from '../embeddings/stub.js';
+import type { EmbeddingProvider } from '../embeddings/provider.js';
 
 interface CallToolResult {
   content: Array<{ type: string; text?: string }>;
@@ -35,7 +36,11 @@ describe('MCP server', () => {
     await pool?.end();
   });
 
-  async function connectClient() {
+  async function connectClient(
+    selectedProvider: EmbeddingProvider | null = provider,
+    selectedPool: pg.Pool = pool,
+    logger?: { error(message: string, error: unknown): void },
+  ) {
     const me = await createPrincipal(pool, {
       externalId: 'entra:user:mcp',
       kind: 'user',
@@ -45,7 +50,12 @@ describe('MCP server', () => {
     const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
     await addMembership(pool, me.id, teamPayments.id, 'writer');
 
-    const server = buildMcpServer({ pool, embeddingProvider: provider, principal: me });
+    const server = buildMcpServer({
+      pool: selectedPool,
+      embeddingProvider: selectedProvider,
+      principal: me,
+      logger,
+    });
     const [a, b] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: 'test-client', version: '0.0.1' });
     await Promise.all([server.connect(a), client.connect(b)]);
@@ -75,9 +85,65 @@ describe('MCP server', () => {
       arguments: {},
     })) as CallToolResult;
     const list = parseJsonResult(res) as Array<{ scope: string; role: string }>;
-    const scopes = list.map((s) => s.scope).sort();
-    expect(scopes).toContain('org');
-    expect(scopes).toContain('team:payments');
+    expect(list.sort((a, b) => a.scope.localeCompare(b.scope))).toEqual([
+      { scope: 'org', role: 'reader' },
+      { scope: 'team:payments', role: 'writer' },
+    ]);
+  });
+
+  it('returns capture success without exposing embedding failures and audits safely', async () => {
+    const privateMessage = 'provider token private-mcp-value';
+    const failingProvider: EmbeddingProvider = {
+      id: 'test:failing', dim: 3,
+      async embed() { throw new Error(privateMessage); },
+    };
+    const { client } = await connectClient(failingProvider);
+
+    const result = (await client.callTool({
+      name: 'continuum.capture',
+      arguments: {
+        scope_kind: 'team', scope_name: 'payments', type: 'fact',
+        title: 'MCP fallback', body: 'private-mcp-memory-text', source: 'manual',
+      },
+    })) as CallToolResult;
+    const body = parseJsonResult(result) as Record<string, unknown>;
+
+    expect(body).toEqual({
+      id: expect.any(String),
+      scope: 'team:payments',
+      expires_at: expect.any(String),
+      embedded: false,
+    });
+    expect(rawText(result)).not.toContain(privateMessage);
+    const { rows } = await pool.query(
+      'SELECT metadata::text AS metadata FROM audit_log WHERE memory_id = $1',
+      [body.id],
+    );
+    expect(rows[0].metadata).toContain('EMBEDDING_FAILED');
+    expect(rows[0].metadata).not.toContain(privateMessage);
+    expect(rows[0].metadata).not.toContain('private-mcp-memory-text');
+  });
+
+  it('returns and logs a sanitized error when recall audit persistence fails', async () => {
+    const privateMessage = 'database password private-audit-value';
+    const failingPool = poolRejecting(pool, 'INSERT INTO audit_log', privateMessage);
+    const logger = { error: vi.fn() };
+    const { client } = await connectClient(null, failingPool, logger);
+
+    const result = (await client.callTool({
+      name: 'continuum.recall',
+      arguments: { query: 'anything' },
+    })) as CallToolResult & { isError?: boolean };
+
+    expect(result.isError).toBe(true);
+    expect(parseJsonResult(result)).toEqual({
+      error: { code: 'INTERNAL', message: 'An internal error occurred' },
+    });
+    expect(rawText(result)).not.toContain(privateMessage);
+    expect(logger.error).toHaveBeenCalledWith(
+      'MCP: internal service error',
+      expect.objectContaining({ message: privateMessage }),
+    );
   });
 
   it('capture + recall round-trip', async () => {
@@ -199,4 +265,111 @@ describe('MCP server', () => {
       (parseJsonResult(b) as { id: string }).id,
     );
   });
+
+  it('ensure_scope rejects invalid scope shapes with INVALID_SCOPE', async () => {
+    const { client } = await connectClient();
+    const result = (await client.callTool({
+      name: 'continuum.ensure_scope',
+      arguments: { kind: 'org', name: 'not-empty' },
+    })) as CallToolResult & { isError?: boolean };
+
+    expect(result.isError).toBe(true);
+    expect(parseJsonResult(result)).toEqual({
+      error: { code: 'INVALID_SCOPE', message: 'Invalid scope' },
+    });
+  });
+
+  it('preserves MCP transport metadata across audited tools', async () => {
+    const { client, me, org } = await connectClient(null);
+    await addMembership(pool, me.id, org.id, 'writer');
+    const capture = (await client.callTool({
+      name: 'continuum.capture',
+      arguments: {
+        scope_kind: 'team', scope_name: 'payments', type: 'fact',
+        title: 'Transport audit', body: 'MCP marker.', source: 'manual',
+      },
+    })) as CallToolResult;
+    const id = (parseJsonResult(capture) as { id: string }).id;
+
+    await client.callTool({
+      name: 'continuum.recall', arguments: { query: 'Transport audit' },
+    });
+    await client.callTool({
+      name: 'continuum.verify', arguments: { memory_id: id, still_true: true },
+    });
+    await client.callTool({
+      name: 'continuum.agents_md', arguments: { team: 'payments' },
+    });
+    await client.callTool({
+      name: 'continuum.promote',
+      arguments: {
+        memory_id: id, target_scope_kind: 'org', target_scope_name: '',
+      },
+    });
+
+    const { rows } = await pool.query(
+      'SELECT action, metadata FROM audit_log ORDER BY id',
+    );
+    expect(rows.map((row) => row.action)).toEqual([
+      'write', 'read', 'verify', 'read', 'promote',
+    ]);
+    expect(rows.every((row) => row.metadata.transport === 'mcp')).toBe(true);
+  });
+
+  it('rejects verification notes over 2000 characters as invalid input', async () => {
+    const { client } = await connectClient(null);
+    const capture = (await client.callTool({
+      name: 'continuum.capture',
+      arguments: {
+        scope_kind: 'team', scope_name: 'payments', type: 'fact',
+        title: 'Note bound', body: 'Bounded.', source: 'manual',
+      },
+    })) as CallToolResult;
+    const id = (parseJsonResult(capture) as { id: string }).id;
+    const result = (await client.callTool({
+      name: 'continuum.verify',
+      arguments: { memory_id: id, still_true: true, note: 'x'.repeat(2001) },
+    })) as CallToolResult & { isError?: boolean };
+
+    expect(result.isError).toBe(true);
+    expect(parseJsonResult(result)).toEqual({
+      error: {
+        code: 'INVALID_INPUT',
+        message: 'Verification note must be 2000 characters or fewer',
+      },
+    });
+  });
 });
+
+function poolRejecting(
+  pool: pg.Pool,
+  sqlFragment: string,
+  privateMessage: string,
+): pg.Pool {
+  const reject = (text: unknown): void => {
+    if (typeof text === 'string' && text.includes(sqlFragment)) {
+      throw new Error(privateMessage);
+    }
+  };
+  return {
+    query: (async (...args: unknown[]) => {
+      reject(args[0]);
+      return (pool.query as (...queryArgs: unknown[]) => unknown)(...args);
+    }) as pg.Pool['query'],
+    connect: async () => {
+      const client = await pool.connect();
+      return new Proxy(client, {
+        get(target, property) {
+          if (property === 'query') {
+            return async (...args: unknown[]) => {
+              reject(args[0]);
+              return (target.query as (...queryArgs: unknown[]) => unknown)(...args);
+            };
+          }
+          const value = Reflect.get(target, property, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+    },
+  } as unknown as pg.Pool;
+}

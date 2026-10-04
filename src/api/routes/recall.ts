@@ -1,12 +1,8 @@
 import { Router } from 'express';
 import type pg from 'pg';
 import { z } from 'zod';
-import { parseScopeString } from '../../scopes/model.js';
-import { getScopeByRef } from '../../storage/scopes.js';
-import { getScopesForPrincipal } from '../../storage/memberships.js';
-import { recall } from '../../storage/recall.js';
-import { record as recordAudit } from '../../audit/log.js';
 import type { EmbeddingProvider } from '../../embeddings/provider.js';
+import { recallForPrincipal } from '../../services/recall.js';
 
 const recallSchema = z.object({
   query: z.string().min(1).max(2000),
@@ -23,72 +19,34 @@ export function recallRouter(
 ): Router {
   const router = Router();
 
-  router.post('/recall', async (req, res) => {
+  router.post('/recall', async (req, res, next) => {
     const parsed = recallSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: 'invalid request', details: parsed.error.issues });
+      res.status(400).json({ code: 'INVALID_INPUT', error: 'Invalid request' });
       return;
     }
-    const principal = req.principal!;
-    const { query, scopes: scopeStrings, types, limit } = parsed.data;
-
-    const memberships = await getScopesForPrincipal(pool, principal.id);
-    const accessible = new Map<string, string>(memberships.map((s) => [s.id, `${s.kind}:${s.name}`]));
-    const orgScope = await getScopeByRef(pool, { kind: 'org', name: '' });
-    if (orgScope) accessible.set(orgScope.id, 'org');
-
-    let scopeIds: string[];
-    if (scopeStrings && scopeStrings.length > 0) {
-      const ids: string[] = [];
-      for (const s of scopeStrings) {
-        let ref;
-        try {
-          ref = parseScopeString(s);
-        } catch {
-          res.status(400).json({ error: `invalid scope string: ${s}` });
-          return;
-        }
-        const scope = await getScopeByRef(pool, ref);
-        if (!scope) continue;
-        if (!accessible.has(scope.id)) continue;
-        ids.push(scope.id);
-      }
-      scopeIds = ids;
-    } else {
-      scopeIds = Array.from(accessible.keys());
+    try {
+      const { results, accessible } = await recallForPrincipal(
+        pool,
+        embeddingProvider,
+        req.principal!,
+        parsed.data,
+      );
+      res.json({
+        results: results.map((r) => ({
+          id: r.memory.id,
+          score: r.score,
+          scope: accessible.get(r.memory.scopeId)?.label ?? null,
+          type: r.memory.type,
+          title: r.memory.title,
+          excerpt: r.excerpt,
+          sourceRef: r.memory.sourceRef,
+          createdAt: r.memory.createdAt,
+        })),
+      });
+    } catch (error) {
+      next(error);
     }
-
-    const results = await recall(pool, {
-      query,
-      scopeIds,
-      types,
-      limit: limit ?? 10,
-      embeddingProvider,
-    });
-
-    await recordAudit(pool, {
-      principalId: principal.id,
-      action: 'read',
-      query,
-      metadata: {
-        scopes: scopeIds.length,
-        hits: results.length,
-        embedded: Boolean(embeddingProvider),
-      },
-    });
-
-    res.json({
-      results: results.map((r) => ({
-        id: r.memory.id,
-        score: r.score,
-        scope: accessible.get(r.memory.scopeId) ?? null,
-        type: r.memory.type,
-        title: r.memory.title,
-        excerpt: r.excerpt,
-        sourceRef: r.memory.sourceRef,
-        createdAt: r.memory.createdAt,
-      })),
-    });
   });
 
   return router;

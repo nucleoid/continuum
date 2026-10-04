@@ -9,13 +9,21 @@ import { auditRouter } from './routes/audit.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import { makeEmbeddingProviderFromEnv } from '../embeddings/factory.js';
 import { isDirectEntrypoint } from './entrypoint.js';
+import {
+  asServiceError,
+  logInternalServiceError,
+  ServiceError,
+  type ServiceLogger,
+} from '../services/errors.js';
 
 export interface AppOptions {
   embeddingProvider?: EmbeddingProvider | null;
+  logger?: ServiceLogger;
 }
 
 export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express {
   const app = express();
+  const logger = opts.logger ?? console;
   app.use(express.json({ limit: '1mb' }));
 
   app.get('/health', (_req, res) => {
@@ -32,7 +40,42 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
 
   app.use('/api/v0', v0);
 
+  app.use(((error, _req, res, _next) => {
+    const serviceError = mapRestError(error);
+    logInternalServiceError(logger, 'REST', serviceError);
+    res.status(serviceError.status).json({
+      code: serviceError.code,
+      error: serviceError.publicMessage,
+    });
+  }) as express.ErrorRequestHandler);
+
   return app;
+}
+
+export function mapRestError(error: unknown): ServiceError {
+  const bodyError = error as {
+    type?: string;
+    status?: number;
+    expose?: boolean;
+    message?: string;
+  };
+  if (bodyError.type === 'entity.parse.failed') {
+    return new ServiceError('INVALID_INPUT', 'Malformed JSON request body');
+  }
+  if (bodyError.type === 'entity.too.large' || bodyError.status === 413) {
+    return new ServiceError('PAYLOAD_TOO_LARGE', 'Request body exceeds the 1 MB limit');
+  }
+  if (bodyError.expose === true
+    && bodyError.status !== undefined
+    && bodyError.status >= 400
+    && bodyError.status < 500) {
+    return new ServiceError(
+      'INVALID_INPUT',
+      bodyError.message ?? 'Invalid request',
+      { status: bodyError.status },
+    );
+  }
+  return asServiceError(error);
 }
 
 function main(): void {

@@ -6,6 +6,7 @@ import { createApp } from '../server.js';
 import { createPrincipal } from '../../storage/principals.js';
 import { createScope } from '../../storage/scopes.js';
 import { addMembership } from '../../storage/memberships.js';
+import type { EmbeddingProvider } from '../../embeddings/provider.js';
 
 describe('POST /api/v0/capture', () => {
   let pool: pg.Pool;
@@ -54,6 +55,47 @@ describe('POST /api/v0/capture', () => {
       .set('Authorization', 'Bearer entra:user:capture')
       .send({ title: 'oops' });
     expect(res.status).toBe(400);
+    expect(res.body).toEqual({ code: 'INVALID_INPUT', error: 'Invalid request' });
+  });
+
+  it('commits memory and sanitized audit when the embedding provider fails', async () => {
+    const privateMessage = 'provider token private-provider-value';
+    const provider: EmbeddingProvider = {
+      id: 'test:failing',
+      dim: 3,
+      async embed() {
+        throw new Error(privateMessage);
+      },
+    };
+    app = createApp(pool, { embeddingProvider: provider });
+    await seedActor();
+
+    const res = await request(app)
+      .post('/api/v0/capture')
+      .set('Authorization', 'Bearer entra:user:capture')
+      .send({
+        scope: { kind: 'team', name: 'payments' },
+        type: 'fact',
+        title: 'Provider fallback',
+        body: 'private-rest-memory-text',
+        source: 'manual',
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({
+      id: expect.any(String),
+      scopeId: expect.any(String),
+      expiresAt: expect.any(String),
+      embedded: false,
+    });
+    expect(JSON.stringify(res.body)).not.toContain(privateMessage);
+    const { rows } = await pool.query(
+      'SELECT metadata::text AS metadata FROM audit_log WHERE memory_id = $1',
+      [res.body.id],
+    );
+    expect(rows[0].metadata).toContain('EMBEDDING_FAILED');
+    expect(rows[0].metadata).not.toContain(privateMessage);
+    expect(rows[0].metadata).not.toContain('private-rest-memory-text');
   });
 
   it('rejects writes to a scope that does not exist', async () => {

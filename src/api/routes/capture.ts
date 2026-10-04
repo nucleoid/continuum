@@ -1,12 +1,8 @@
 import { Router } from 'express';
 import type pg from 'pg';
 import { z } from 'zod';
-import { getScopeByRef } from '../../storage/scopes.js';
-import { createMemory } from '../../storage/memories.js';
-import { hasRole } from '../../storage/memberships.js';
-import { record as recordAudit } from '../../audit/log.js';
 import type { EmbeddingProvider } from '../../embeddings/provider.js';
-import { storeMemoryEmbedding } from '../../storage/embeddings.js';
+import { captureMemory } from '../../services/capture.js';
 
 const captureSchema = z.object({
   scope: z.object({
@@ -28,90 +24,24 @@ export function captureRouter(
 ): Router {
   const router = Router();
 
-  router.post('/capture', async (req, res) => {
+  router.post('/capture', async (req, res, next) => {
     const parsed = captureSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: 'invalid request', details: parsed.error.issues });
+      res.status(400).json({ code: 'INVALID_INPUT', error: 'Invalid request' });
       return;
     }
     const principal = req.principal!;
-    const { scope: scopeRef, type, title, body, tags, source, sourceRef, metadata } = parsed.data;
-
-    if (scopeRef.kind === 'org' && scopeRef.name !== '') {
-      res.status(400).json({ error: 'org scope cannot have a name' });
-      return;
+    try {
+      const result = await captureMemory(pool, embeddingProvider, principal, parsed.data);
+      res.status(201).json({
+        id: result.memory.id,
+        scopeId: result.memory.scopeId,
+        expiresAt: result.memory.expiresAt,
+        embedded: result.embedded,
+      });
+    } catch (error) {
+      next(error);
     }
-    if (scopeRef.kind !== 'org' && scopeRef.name === '') {
-      res.status(400).json({ error: `scope ${scopeRef.kind} requires a name` });
-      return;
-    }
-
-    const scope = await getScopeByRef(pool, scopeRef);
-    if (!scope) {
-      res.status(404).json({ error: 'scope not found' });
-      return;
-    }
-
-    if (!(await hasRole(pool, principal.id, scope.id, 'writer'))) {
-      res.status(403).json({ error: 'principal lacks writer role on scope' });
-      return;
-    }
-
-    const memory = await createMemory(pool, {
-      scopeId: scope.id,
-      scopeKind: scope.kind,
-      type,
-      title,
-      body,
-      authorId: principal.id,
-      source,
-      sourceRef: sourceRef ?? null,
-      tags,
-      metadata,
-    });
-
-    if (embeddingProvider) {
-      try {
-        await storeMemoryEmbedding(
-          pool,
-          memory.id,
-          `${memory.title}\n\n${memory.body}`,
-          embeddingProvider,
-        );
-      } catch (err) {
-        // Embedding failures are non-fatal: the memory is still stored and
-        // recallable via FTS. Surface via audit metadata for follow-up.
-        await recordAudit(pool, {
-          principalId: principal.id,
-          action: 'write',
-          memoryId: memory.id,
-          scopeId: scope.id,
-          metadata: { source, type, embedding_error: String(err) },
-        });
-        res.status(201).json({
-          id: memory.id,
-          scopeId: memory.scopeId,
-          expiresAt: memory.expiresAt,
-          embedded: false,
-        });
-        return;
-      }
-    }
-
-    await recordAudit(pool, {
-      principalId: principal.id,
-      action: 'write',
-      memoryId: memory.id,
-      scopeId: scope.id,
-      metadata: { source, type },
-    });
-
-    res.status(201).json({
-      id: memory.id,
-      scopeId: memory.scopeId,
-      expiresAt: memory.expiresAt,
-      embedded: Boolean(embeddingProvider),
-    });
   });
 
   return router;

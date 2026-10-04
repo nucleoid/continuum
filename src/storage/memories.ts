@@ -4,6 +4,7 @@ import type { Memory, MemoryType } from '../types.js';
 import { computeExpiry } from './expiry.js';
 import type { ScopeKind } from '../types.js';
 import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
+import type { Queryable } from './queryable.js';
 
 export interface NewMemory {
   scopeId: string;
@@ -19,7 +20,7 @@ export interface NewMemory {
 }
 
 export async function createMemory(
-  pool: pg.Pool,
+  pool: Queryable,
   input: NewMemory,
 ): Promise<Memory> {
   const id = randomUUID();
@@ -47,7 +48,7 @@ export async function createMemory(
 }
 
 export async function getMemory(
-  pool: pg.Pool,
+  pool: Queryable,
   id: string,
 ): Promise<Memory | null> {
   const { rows } = await pool.query(

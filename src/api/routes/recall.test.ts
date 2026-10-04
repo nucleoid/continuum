@@ -7,6 +7,7 @@ import { createPrincipal } from '../../storage/principals.js';
 import { createScope, getScopeByRef } from '../../storage/scopes.js';
 import { addMembership } from '../../storage/memberships.js';
 import { createMemory } from '../../storage/memories.js';
+import type { EmbeddingProvider } from '../../embeddings/provider.js';
 
 describe('POST /api/v0/recall', () => {
   let pool: pg.Pool;
@@ -151,5 +152,28 @@ describe('POST /api/v0/recall', () => {
       .set('Authorization', 'Bearer entra:user:recall')
       .send({ limit: 'huge' });
     expect(res.status).toBe(400);
+    expect(res.body).toEqual({ code: 'INVALID_INPUT', error: 'Invalid request' });
+  });
+
+  it('maps provider failures to a safe dependency error', async () => {
+    const privateMessage = 'provider endpoint private-provider-host';
+    const failingProvider: EmbeddingProvider = {
+      id: 'test:failing', dim: 3,
+      async embed() { throw new Error(privateMessage); },
+    };
+    app = createApp(pool, { embeddingProvider: failingProvider });
+    await seedWorld();
+
+    const res = await request(app)
+      .post('/api/v0/recall')
+      .set('Authorization', 'Bearer entra:user:recall')
+      .send({ query: 'checkout' });
+
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({
+      code: 'DEPENDENCY_UNAVAILABLE',
+      error: 'A required dependency is unavailable',
+    });
+    expect(JSON.stringify(res.body)).not.toContain(privateMessage);
   });
 });

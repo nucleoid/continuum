@@ -3,19 +3,24 @@ import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { getPrincipalByExternalId } from '../storage/principals.js';
-import { getOrCreateScope, getScopeByRef } from '../storage/scopes.js';
-import { getScopesForPrincipal, hasRole } from '../storage/memberships.js';
-import { createMemory } from '../storage/memories.js';
-import { recall } from '../storage/recall.js';
-import { storeMemoryEmbedding } from '../storage/embeddings.js';
-import { promoteMemory, verifyMemory, PromoteError } from '../storage/promote.js';
-import { renderAgentsMd } from '../agents-md/render.js';
-import { record as recordAudit } from '../audit/log.js';
+import { getOrCreateScope } from '../storage/scopes.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import type { Principal, ScopeKind } from '../types.js';
 import { getPool } from '../storage/pool.js';
 import { makeEmbeddingProviderFromEnv } from '../embeddings/factory.js';
 import { isDirectEntrypoint } from './entrypoint.js';
+import { accessibleScopes } from '../services/access.js';
+import { captureMemory } from '../services/capture.js';
+import { recallForPrincipal } from '../services/recall.js';
+import {
+  asServiceError,
+  logInternalServiceError,
+  serviceErrorBody,
+  type ServiceLogger,
+} from '../services/errors.js';
+import { promoteForPrincipal, verifyForPrincipal } from '../services/lifecycle.js';
+import { renderAgentsMdForPrincipal } from '../services/agents-md.js';
+import { validateScopeRef } from '../services/scopes.js';
 
 const SCOPE_KINDS = ['org', 'team', 'project', 'user', 'role'] as const;
 const MEMORY_TYPES = ['fact', 'decision', 'context', 'playbook', 'relationship'] as const;
@@ -24,6 +29,7 @@ export interface McpDeps {
   pool: pg.Pool;
   embeddingProvider: EmbeddingProvider | null;
   principal: Principal;
+  logger?: ServiceLogger;
 }
 
 function textResult(text: string): {
@@ -38,8 +44,19 @@ function jsonResult(value: unknown): {
   return textResult(JSON.stringify(value, null, 2));
 }
 
+function serviceErrorResult(error: unknown, logger: ServiceLogger): {
+  content: Array<{ type: 'text'; text: string }>;
+  isError: true;
+} {
+  const mapped = asServiceError(error);
+  logInternalServiceError(logger, 'MCP', mapped);
+  return { ...jsonResult(serviceErrorBody(mapped)), isError: true };
+}
+
 export function buildMcpServer(deps: McpDeps): McpServer {
   const { pool, embeddingProvider, principal } = deps;
+  const logger = deps.logger ?? console;
+  const errorResult = (error: unknown) => serviceErrorResult(error, logger);
 
   const server = new McpServer({
     name: 'continuum',
@@ -54,16 +71,15 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       inputSchema: {},
     },
     async () => {
-      const memberships = await getScopesForPrincipal(pool, principal.id);
-      const org = await getScopeByRef(pool, { kind: 'org', name: '' });
-      const list = memberships.map((m) => ({
-        scope: m.kind === 'org' ? 'org' : `${m.kind}:${m.name}`,
-        role: m.role,
-      }));
-      if (org && !memberships.some((m) => m.id === org.id)) {
-        list.push({ scope: 'org', role: 'reader' });
+      try {
+        const scopes = await accessibleScopes(pool, principal.id);
+        return jsonResult([...scopes.values()].map((scope) => ({
+          scope: scope.label,
+          role: scope.role,
+        })));
+      } catch (error) {
+        return errorResult(error);
       }
-      return jsonResult(list);
     },
   );
 
@@ -81,53 +97,37 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         source: z.string().min(1).default('manual'),
         source_ref: z.string().optional(),
         tags: z.array(z.string()).optional(),
+        metadata: z.record(z.unknown()).optional(),
       },
     },
     async (args) => {
-      const ref = { kind: args.scope_kind as ScopeKind, name: args.scope_name };
-      const scope = await getScopeByRef(pool, ref);
-      if (!scope) return textResult(`error: scope not found: ${ref.kind}:${ref.name}`);
-      if (!(await hasRole(pool, principal.id, scope.id, 'writer'))) {
-        return textResult('error: principal lacks writer role on scope');
+      try {
+        const ref = { kind: args.scope_kind as ScopeKind, name: args.scope_name };
+        const result = await captureMemory(
+          pool,
+          embeddingProvider,
+          principal,
+          {
+            scope: ref,
+            type: args.type,
+            title: args.title,
+            body: args.body,
+            source: args.source,
+            sourceRef: args.source_ref,
+            tags: args.tags,
+            metadata: args.metadata,
+          },
+          { transport: 'mcp' },
+        );
+        return jsonResult({
+          id: result.memory.id,
+          scope: ref.kind === 'org' ? 'org' : `${ref.kind}:${ref.name}`,
+          expires_at: result.memory.expiresAt,
+          embedded: result.embedded,
+        });
+      } catch (error) {
+        return errorResult(error);
       }
-      const memory = await createMemory(pool, {
-        scopeId: scope.id,
-        scopeKind: scope.kind,
-        type: args.type,
-        title: args.title,
-        body: args.body,
-        authorId: principal.id,
-        source: args.source,
-        sourceRef: args.source_ref ?? null,
-        tags: args.tags,
-      });
-      let embedded = false;
-      if (embeddingProvider) {
-        try {
-          await storeMemoryEmbedding(
-            pool,
-            memory.id,
-            `${memory.title}\n\n${memory.body}`,
-            embeddingProvider,
-          );
-          embedded = true;
-        } catch {
-          embedded = false;
-        }
-      }
-      await recordAudit(pool, {
-        principalId: principal.id,
-        action: 'write',
-        memoryId: memory.id,
-        scopeId: scope.id,
-        metadata: { source: args.source, type: args.type, transport: 'mcp' },
-      });
-      return jsonResult({
-        id: memory.id,
-        scope: ref.kind === 'org' ? 'org' : `${ref.kind}:${ref.name}`,
-        expires_at: memory.expiresAt,
-        embedded,
-      });
     },
   );
 
@@ -149,62 +149,29 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       },
     },
     async (args) => {
-      const memberships = await getScopesForPrincipal(pool, principal.id);
-      const accessible = new Map<string, string>(
-        memberships.map((m) => [m.id, m.kind === 'org' ? 'org' : `${m.kind}:${m.name}`]),
-      );
-      const org = await getScopeByRef(pool, { kind: 'org', name: '' });
-      if (org) accessible.set(org.id, 'org');
-
-      let scopeIds: string[];
-      if (args.scopes && args.scopes.length > 0) {
-        const ids: string[] = [];
-        for (const s of args.scopes) {
-          const ref = s === 'org'
-            ? { kind: 'org' as const, name: '' }
-            : (() => {
-                const i = s.indexOf(':');
-                if (i < 0) return null;
-                return { kind: s.slice(0, i) as ScopeKind, name: s.slice(i + 1) };
-              })();
-          if (!ref) continue;
-          const scope = await getScopeByRef(pool, ref);
-          if (!scope) continue;
-          if (!accessible.has(scope.id)) continue;
-          ids.push(scope.id);
-        }
-        scopeIds = ids;
-      } else {
-        scopeIds = Array.from(accessible.keys());
+      try {
+        const { results, accessible } = await recallForPrincipal(
+          pool,
+          embeddingProvider,
+          principal,
+          args,
+          { transport: 'mcp' },
+        );
+        return jsonResult(
+          results.map((r) => ({
+            id: r.memory.id,
+            score: r.score,
+            scope: accessible.get(r.memory.scopeId)?.label ?? null,
+            type: r.memory.type,
+            title: r.memory.title,
+            excerpt: r.excerpt,
+            source_ref: r.memory.sourceRef,
+            created_at: r.memory.createdAt,
+          })),
+        );
+      } catch (error) {
+        return errorResult(error);
       }
-
-      const results = await recall(pool, {
-        query: args.query,
-        scopeIds,
-        types: args.types,
-        limit: args.limit,
-        embeddingProvider,
-      });
-
-      await recordAudit(pool, {
-        principalId: principal.id,
-        action: 'read',
-        query: args.query,
-        metadata: { hits: results.length, transport: 'mcp' },
-      });
-
-      return jsonResult(
-        results.map((r) => ({
-          id: r.memory.id,
-          score: r.score,
-          scope: accessible.get(r.memory.scopeId) ?? null,
-          type: r.memory.type,
-          title: r.memory.title,
-          excerpt: r.excerpt,
-          source_ref: r.memory.sourceRef,
-          created_at: r.memory.createdAt,
-        })),
-      );
     },
   );
 
@@ -221,27 +188,20 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     },
     async (args) => {
       try {
-        const { source, destination } = await promoteMemory(
+        const { source, destination } = await promoteForPrincipal(
           pool,
-          principal.id,
+          principal,
           args.memory_id,
           { kind: args.target_scope_kind as ScopeKind, name: args.target_scope_name },
+          { transport: 'mcp' },
         );
-        await recordAudit(pool, {
-          principalId: principal.id,
-          action: 'promote',
-          memoryId: source.id,
-          scopeId: destination.scopeId,
-          metadata: { destination_id: destination.id, transport: 'mcp' },
-        });
         return jsonResult({
           source_id: source.id,
           destination_id: destination.id,
           destination_scope_id: destination.scopeId,
         });
-      } catch (err) {
-        if (err instanceof PromoteError) return textResult(`error (${err.status}): ${err.message}`);
-        throw err;
+      } catch (error) {
+        return errorResult(error);
       }
     },
   );
@@ -259,27 +219,21 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     },
     async (args) => {
       try {
-        const memory = await verifyMemory(
+        const memory = await verifyForPrincipal(
           pool,
-          principal.id,
+          principal,
           args.memory_id,
           args.still_true,
+          args.note,
+          { transport: 'mcp' },
         );
-        await recordAudit(pool, {
-          principalId: principal.id,
-          action: 'verify',
-          memoryId: memory.id,
-          scopeId: memory.scopeId,
-          metadata: { still_true: args.still_true, note: args.note, transport: 'mcp' },
-        });
         return jsonResult({
           id: memory.id,
           state: memory.state,
           last_verified: memory.lastVerified,
         });
-      } catch (err) {
-        if (err instanceof PromoteError) return textResult(`error (${err.status}): ${err.message}`);
-        throw err;
+      } catch (error) {
+        return errorResult(error);
       }
     },
   );
@@ -296,23 +250,16 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       },
     },
     async (args) => {
-      const md = await renderAgentsMd(pool, {
-        principalId: principal.id,
-        project: args.project,
-        team: args.team,
-        perScopeLimit: args.limit,
-      });
-      await recordAudit(pool, {
-        principalId: principal.id,
-        action: 'read',
-        metadata: {
-          view: 'agents-md',
-          project: args.project ?? null,
-          team: args.team ?? null,
-          transport: 'mcp',
-        },
-      });
-      return textResult(md);
+      try {
+        const md = await renderAgentsMdForPrincipal(pool, principal, {
+          project: args.project,
+          team: args.team,
+          limit: args.limit,
+        }, { transport: 'mcp' });
+        return textResult(md);
+      } catch (error) {
+        return errorResult(error);
+      }
     },
   );
 
@@ -328,14 +275,19 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       },
     },
     async (args) => {
-      const scope = await getOrCreateScope(pool, {
-        kind: args.kind as ScopeKind,
-        name: args.name,
-      });
-      return jsonResult({
-        id: scope.id,
-        scope: scope.kind === 'org' ? 'org' : `${scope.kind}:${scope.name}`,
-      });
+      try {
+        const ref = validateScopeRef({
+          kind: args.kind as ScopeKind,
+          name: args.name,
+        });
+        const scope = await getOrCreateScope(pool, ref);
+        return jsonResult({
+          id: scope.id,
+          scope: scope.kind === 'org' ? 'org' : `${scope.kind}:${scope.name}`,
+        });
+      } catch (error) {
+        return errorResult(error);
+      }
     },
   );
 

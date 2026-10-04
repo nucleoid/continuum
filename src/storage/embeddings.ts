@@ -1,17 +1,27 @@
 import type pg from 'pg';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
+import type { Queryable } from './queryable.js';
 
 function toPgVector(v: number[]): string {
   return `[${v.join(',')}]`;
 }
 
 export async function storeMemoryEmbedding(
-  pool: pg.Pool,
+  pool: Queryable,
   memoryId: string,
   text: string,
   provider: EmbeddingProvider,
 ): Promise<void> {
   const [vector] = await provider.embed([text]);
+  await storeMemoryEmbeddingVector(pool, memoryId, vector, provider);
+}
+
+export async function storeMemoryEmbeddingVector(
+  pool: Queryable,
+  memoryId: string,
+  vector: number[],
+  provider: Pick<EmbeddingProvider, 'id' | 'dim'>,
+): Promise<void> {
   await pool.query(
     `INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
      VALUES ($1, $2, $3, $4::vector)
@@ -25,7 +35,7 @@ export async function storeMemoryEmbedding(
 }
 
 export async function vectorSearchMemoryIds(
-  pool: pg.Pool,
+  pool: Queryable,
   queryVector: number[],
   scopeIds: string[],
   limit: number,

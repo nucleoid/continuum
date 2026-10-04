@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import type { Scope, ScopeKind, ScopeRef } from '../types.js';
+import type { Queryable } from './queryable.js';
 
 function rowToScope(row: Record<string, unknown>): Scope {
   return {
@@ -12,7 +13,7 @@ function rowToScope(row: Record<string, unknown>): Scope {
 }
 
 export async function createScope(
-  pool: pg.Pool,
+  pool: Queryable,
   ref: ScopeRef,
 ): Promise<Scope> {
   if (ref.kind === 'org' && ref.name !== '') {
@@ -31,7 +32,7 @@ export async function createScope(
 }
 
 export async function getScope(
-  pool: pg.Pool,
+  pool: Queryable,
   id: string,
 ): Promise<Scope | null> {
   const { rows } = await pool.query(
@@ -42,7 +43,7 @@ export async function getScope(
 }
 
 export async function getScopeByRef(
-  pool: pg.Pool,
+  pool: Queryable,
   ref: ScopeRef,
 ): Promise<Scope | null> {
   const { rows } = await pool.query(
@@ -53,7 +54,7 @@ export async function getScopeByRef(
 }
 
 export async function getOrCreateScope(
-  pool: pg.Pool,
+  pool: Queryable,
   ref: ScopeRef,
 ): Promise<Scope> {
   const existing = await getScopeByRef(pool, ref);
@@ -62,7 +63,7 @@ export async function getOrCreateScope(
 }
 
 export async function listScopesByKind(
-  pool: pg.Pool,
+  pool: Queryable,
   kind: ScopeKind,
 ): Promise<Scope[]> {
   const { rows } = await pool.query(
