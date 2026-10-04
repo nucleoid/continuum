@@ -1,5 +1,10 @@
 \set ON_ERROR_STOP on
 
+\if :{?external_id}
+\else
+  \prompt 'Scope operator external_id: ' external_id
+\endif
+
 BEGIN;
 
 WITH target AS (
@@ -12,16 +17,26 @@ WITH target AS (
   SELECT principal_id, scope_id, 'admin'
     FROM target
   ON CONFLICT (principal_id, scope_id)
-  DO UPDATE SET role = EXCLUDED.role
+  DO NOTHING
   RETURNING principal_id, scope_id
 )
-SELECT count(*) = 1 AS grant_succeeded FROM granted \gset
+SELECT (
+  (SELECT count(*) FROM granted) = 1
+  OR EXISTS (
+    SELECT 1
+      FROM scope_memberships sm
+      JOIN target t
+        ON t.principal_id = sm.principal_id AND t.scope_id = sm.scope_id
+     WHERE sm.role = 'admin'
+  )
+) AS grant_succeeded
+\gset
 
 \if :grant_succeeded
   COMMIT;
   \echo 'Granted org admin to the requested existing principal.'
 \else
   ROLLBACK;
-  \echo 'No unique existing principal and singleton org scope were found.'
+  \echo 'No unique operator/org pair was found, or an existing non-admin membership was left unchanged.'
   SELECT 1 / 0 AS no_unique_principal_or_org_scope;
 \endif

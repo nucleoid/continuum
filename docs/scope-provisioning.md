@@ -17,15 +17,18 @@ callers that previously created scopes without permission.
 4. Confirm that the REST port is limited to the trusted operator network. If a
    high-entropy identity and that network restriction are not both in place,
    postpone this rollout until Entra validation ships in M4.
-5. Confirm that the principal already exists in `principals`, then run the
-   checked bootstrap script:
+5. Create a fresh high-entropy identifier on the private operator terminal with
+   `openssl rand -hex 32`. Paste it only at the prompts below; do not put the
+   identifier in command arguments, shell history, tickets, or logs. Create the
+   dedicated principal, then grant org admin:
 
    ```sh
-   psql "$CONTINUUM_DATABASE_URL" \
-     -v ON_ERROR_STOP=1 \
-     -v external_id='the-dedicated-operator-external-id' \
-     -f scripts/grant-org-admin.sql
+   psql "$CONTINUUM_DATABASE_URL" -f scripts/create-scope-operator.sql
+   psql "$CONTINUUM_DATABASE_URL" -f scripts/grant-org-admin.sql
    ```
+
+   The grant script is idempotent for an existing admin and refuses to replace
+   an existing reader or writer role.
 
 6. Verify the resulting membership and record the operator change through the
    deployment change-control process:
@@ -35,7 +38,7 @@ callers that previously created scopes without permission.
      FROM scope_memberships sm
      JOIN principals p ON p.id = sm.principal_id
      JOIN scopes s ON s.id = sm.scope_id
-    WHERE p.external_id = 'the-dedicated-operator-external-id'
+    WHERE p.external_id = '<paste the operator external_id in this private session>'
       AND s.kind = 'org' AND s.name = '' AND sm.role = 'admin';
    ```
 
@@ -46,7 +49,13 @@ The v0 stdio principal and REST bearer identity are self-asserted placeholders.
 Until Entra validation ships in M4, only trusted operators may launch MCP with
 database credentials or use this bootstrap procedure, and REST must remain on a
 trusted network. Remove the temporary org-admin membership after provisioning
-if no ongoing operator workflow needs it.
+if no ongoing operator workflow needs it. Retire the temporary credential with
+the checked script below; it removes the org membership and rotates
+`external_id` while retaining the principal UUID referenced by audit rows:
+
+```sh
+psql "$CONTINUUM_DATABASE_URL" -f scripts/retire-scope-operator.sql
+```
 
 ## Rollback
 
