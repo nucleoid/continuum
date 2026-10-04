@@ -1,6 +1,8 @@
 import type { ScopeRef } from '../types.js';
 import type { Queryable } from '../storage/queryable.js';
 import { getScopeByRef } from '../storage/scopes.js';
+import { hasRole } from '../storage/memberships.js';
+import { ServiceError } from './errors.js';
 import {
   canMutateScope,
   canReadScope,
@@ -12,6 +14,16 @@ import {
 export { canReadScope, canWriteScope } from '../scopes/access.js';
 
 export type AccessibleScope = ReadableScope;
+
+export async function requireOrgAdmin(
+  queryable: Queryable,
+  principalId: string,
+): Promise<void> {
+  const org = await getScopeByRef(queryable, { kind: 'org', name: '' });
+  if (!org || !await hasRole(queryable, principalId, org.id, 'admin')) {
+    throw new ServiceError('FORBIDDEN', 'principal lacks admin role on org scope');
+  }
+}
 
 export async function accessibleScopes(
   queryable: Queryable,

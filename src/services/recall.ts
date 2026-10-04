@@ -40,6 +40,7 @@ export async function recallForPrincipal(
       query: input.query,
       metadata: {
         scopes: scopeIds.length,
+        scope_ids: scopeIds,
         hits: results.length,
         embedded: Boolean(embeddingProvider),
         ...auditMetadata,

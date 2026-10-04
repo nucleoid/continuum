@@ -13,6 +13,7 @@ import type { EmbeddingProvider } from '../embeddings/provider.js';
 import { captureSources } from '../capture/source.js';
 import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
 import { LIFECYCLE_PRINCIPAL_ID } from '../lifecycle/principal.js';
+import { recordRead } from '../audit/log.js';
 
 interface CallToolResult {
   content: Array<{ type: string; text?: string }>;
@@ -79,6 +80,7 @@ describe('MCP server', () => {
         'continuum.promote',
         'continuum.verify',
         'continuum.ensure_scope',
+        'continuum.gaps',
       ]),
     );
   });
@@ -101,6 +103,32 @@ describe('MCP server', () => {
     expect((await pool.query(
       'SELECT 1 FROM scope_memberships WHERE principal_id = $1', [lifecycle.id],
     )).rowCount).toBe(0);
+  });
+
+  it('renders knowledge-gap markdown for org admins and rejects other principals', async () => {
+    const denied = await connectClient(null);
+    const forbidden = (await denied.client.callTool({
+      name: 'continuum.gaps', arguments: {},
+    })) as CallToolResult & { isError?: boolean };
+    expect(forbidden.isError).toBe(true);
+    expect(rawText(forbidden)).toContain('FORBIDDEN');
+
+    await resetData(pool);
+    const { client, me, org } = await connectClient(null);
+    await addMembership(pool, me.id, org.id, 'admin');
+    await recordRead(pool, {
+      principalId: me.id,
+      query: 'booking rollback',
+      metadata: { hits: 0 },
+      memories: [],
+    });
+    const result = (await client.callTool({
+      name: 'continuum.gaps', arguments: { since: '30d', limit: 5 },
+    })) as CallToolResult;
+    expect(rawText(result)).toContain('# Continuum knowledge gaps');
+    expect(rawText(result)).toContain('booking rollback');
+    expect(rawText(result)).toContain('Capture input');
+    expect(rawText(result)).not.toContain(me.id);
   });
 
   it('rejects an injected provider that is incompatible with the database schema', async () => {

@@ -229,6 +229,7 @@ Methods:
 - `continuum.promote(memory_id, target_scope)`
 - `continuum.verify(memory_id, still_true: bool, note?)`
 - `continuum.list_scopes()`
+- `continuum.gaps(since?, limit?, min_frequency?, threshold?)`
 
 ACLs are enforced server-side from the bearer token's principal. The MCP client never sees memories outside its caller's read set.
 
@@ -258,7 +259,7 @@ The org scope is implicitly readable by every authenticated principal across rec
 
 REST errors use `{ "code": "...", "error": "..." }` with the HTTP status derived from the stable service code. Request-schema failures use `INVALID_INPUT`; malformed JSON uses `INVALID_INPUT`; bodies above the 1 MB parser limit use `PAYLOAD_TOO_LARGE`. No raw database or provider message is included. MCP tool failures set `isError: true` and return `{ "error": { "code": "...", "message": "..." } }` as JSON text. The MCP envelope is intentionally different because MCP tool results are content blocks rather than HTTP responses. Successful REST and MCP response shapes remain transport-specific and unchanged.
 
-Capture write-audit metadata is `{ source, type, embedded }`. When embedding fails, it additionally contains `embedding_error_code: "EMBEDDING_FAILED"`; raw provider messages and captured memory text are never copied into audit metadata. Promotion audit metadata contains `destination_id`. Verification audit metadata contains `still_true` and nullable `note`; it is committed atomically with the verification update and is absent when verification fails. Recall audit metadata contains scope count, hit count, and whether vector recall was requested.
+Capture write-audit metadata is `{ source, type, embedded }`. When embedding fails, it additionally contains `embedding_error_code: "EMBEDDING_FAILED"`; raw provider messages and captured memory text are never copied into audit metadata. Promotion audit metadata contains `destination_id`. Verification audit metadata contains `still_true` and nullable `note`; it is committed atomically with the verification update and is absent when verification fails. Recall audit metadata contains scope count, effective scope IDs, hit count, and whether vector recall was requested. Effective scope IDs let derived knowledge-gap resolution report exact scope fidelity for new requests; historical rows without them remain `unknown`. Knowledge-gap reports write one query-free `read` audit with `metadata.view: "insights-gaps"`; their internal resolution checks do not emit recursive read audits.
 
 ## Extension points
 

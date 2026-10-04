@@ -14,6 +14,7 @@ import { recallForPrincipal } from '../services/recall.js';
 import {
   asServiceError,
   logInternalServiceError,
+  ServiceError,
   serviceErrorBody,
   type ServiceLogger,
 } from '../services/errors.js';
@@ -30,6 +31,8 @@ import {
   reviewQueueForPrincipal,
 } from '../services/review-queue.js';
 import { isLifecyclePrincipal } from '../lifecycle/principal.js';
+import { gapConfigFromEnv, renderGapMarkdown, type GapConfig } from '../insights/gaps.js';
+import { getKnowledgeGaps } from '../services/gaps.js';
 
 const SCOPE_KINDS = ['org', 'team', 'project', 'user', 'role'] as const;
 const MEMORY_TYPES = ['fact', 'decision', 'context', 'playbook', 'relationship'] as const;
@@ -40,6 +43,8 @@ export interface McpDeps {
   principal: Principal;
   logger?: ServiceLogger;
   reviewHorizonDays?: number;
+  gapConfig?: GapConfig;
+  now?: () => Date;
 }
 
 function textResult(text: string): {
@@ -70,6 +75,8 @@ export function buildMcpServer(deps: McpDeps): McpServer {
   }
   if (embeddingProvider) assertEmbeddingProviderDimension(embeddingProvider);
   const logger = deps.logger ?? console;
+  const gapConfig = deps.gapConfig ?? gapConfigFromEnv();
+  const now = deps.now ?? (() => new Date());
   const errorResult = (error: unknown) => serviceErrorResult(error, logger);
 
   const server = new McpServer({
@@ -323,6 +330,43 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           limit: args.limit,
         }, { transport: 'mcp' });
         return textResult(md);
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'continuum.gaps',
+    {
+      description:
+        'Render an organization knowledge-gap report from zero-hit recall audits. Requires explicit org admin.',
+      inputSchema: {
+        since: z.string().regex(/^([1-9]\d{0,2})d$/).default('30d'),
+        limit: z.number().int().min(1).max(gapConfig.maxLimit).default(gapConfig.defaultLimit),
+        min_frequency: z.number().int().min(1).max(gapConfig.candidateLimit)
+          .default(gapConfig.defaultMinFrequency),
+        threshold: z.number().min(0).max(1).default(gapConfig.threshold),
+      },
+    },
+    async (args) => {
+      try {
+        const sinceDays = Number(args.since.slice(0, -1));
+        if (sinceDays > 365) {
+          throw new ServiceError('INVALID_INPUT', 'since must not exceed 365d');
+        }
+        const report = await getKnowledgeGaps(pool, embeddingProvider, principal, {
+          sinceDays,
+          limit: args.limit,
+          minFrequency: args.min_frequency,
+          threshold: args.threshold,
+          candidateLimit: gapConfig.candidateLimit,
+          scanLimit: gapConfig.scanLimit,
+          maxQueryChars: gapConfig.maxQueryChars,
+          now: now(),
+          transport: 'mcp',
+        });
+        return textResult(renderGapMarkdown(report));
       } catch (error) {
         return errorResult(error);
       }
