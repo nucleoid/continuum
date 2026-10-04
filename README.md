@@ -25,6 +25,7 @@ v0 design in progress. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the schema, 
 ## API contracts
 
 - [Audit query API](./docs/audit-api.md)
+- [API operations, health checks, and shutdown](./docs/api-operations.md)
 
 ## Embedding configuration
 

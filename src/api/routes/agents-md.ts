@@ -12,23 +12,19 @@ const querySchema = z.object({
 export function agentsMdRouter(pool: pg.Pool): Router {
   const router = Router();
 
-  router.get('/agents-md', async (req, res, next) => {
+  router.get('/agents-md', async (req, res) => {
     const parsed = querySchema.safeParse(req.query);
     if (!parsed.success) {
       res.status(400).json({ code: 'INVALID_INPUT', error: 'Invalid query' });
       return;
     }
-    try {
-      const markdown = await renderAgentsMdForPrincipal(
-        pool,
-        req.principal!,
-        parsed.data,
-      );
-      res.set('Content-Type', 'text/markdown; charset=utf-8');
-      res.send(markdown);
-    } catch (error) {
-      next(error);
-    }
+    const markdown = await renderAgentsMdForPrincipal(
+      pool,
+      req.principal!,
+      parsed.data,
+    );
+    res.set('Content-Type', 'text/markdown; charset=utf-8');
+    res.send(markdown);
   });
 
   return router;

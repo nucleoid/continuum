@@ -203,7 +203,9 @@ describe('POST /api/v0/recall', () => {
       .set('Authorization', 'Bearer entra:user:recall')
       .send({ limit: 'huge' });
     expect(res.status).toBe(400);
-    expect(res.body).toEqual({ code: 'INVALID_INPUT', error: 'Invalid request' });
+    expect(res.body).toEqual({
+      code: 'INVALID_INPUT', error: 'Invalid request', requestId: expect.any(String),
+    });
   });
 
   it('maps provider failures to a safe dependency error', async () => {
@@ -224,6 +226,7 @@ describe('POST /api/v0/recall', () => {
     expect(res.body).toEqual({
       code: 'DEPENDENCY_UNAVAILABLE',
       error: 'A required dependency is unavailable',
+      requestId: expect.any(String),
     });
     expect(JSON.stringify(res.body)).not.toContain(privateMessage);
   });
