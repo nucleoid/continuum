@@ -25,6 +25,11 @@ import {
 import { renderAgentsMdForPrincipal } from '../services/agents-md.js';
 import { ensureScopeForPrincipal, validateScopeRef } from '../services/scopes.js';
 import { assertEmbeddingProviderDimension } from '../storage/schema.js';
+import {
+  configuredReviewHorizonDays,
+  reviewQueueForPrincipal,
+} from '../services/review-queue.js';
+import { isLifecyclePrincipal } from '../lifecycle/principal.js';
 
 const SCOPE_KINDS = ['org', 'team', 'project', 'user', 'role'] as const;
 const MEMORY_TYPES = ['fact', 'decision', 'context', 'playbook', 'relationship'] as const;
@@ -34,6 +39,7 @@ export interface McpDeps {
   embeddingProvider: EmbeddingProvider | null;
   principal: Principal;
   logger?: ServiceLogger;
+  reviewHorizonDays?: number;
 }
 
 function textResult(text: string): {
@@ -59,6 +65,9 @@ function serviceErrorResult(error: unknown, logger: ServiceLogger): {
 
 export function buildMcpServer(deps: McpDeps): McpServer {
   const { pool, embeddingProvider, principal } = deps;
+  if (isLifecyclePrincipal(principal)) {
+    throw new Error('The internal lifecycle principal cannot start an MCP session');
+  }
   if (embeddingProvider) assertEmbeddingProviderDimension(embeddingProvider);
   const logger = deps.logger ?? console;
   const errorResult = (error: unknown) => serviceErrorResult(error, logger);
@@ -174,6 +183,54 @@ export function buildMcpServer(deps: McpDeps): McpServer {
             created_at: r.memory.createdAt,
           })),
         );
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'continuum.review_queue',
+    {
+      description:
+        'List readable memories that the caller authored or can explicitly verify and that need review.',
+      inputSchema: {
+        scopes: z.array(z.string()).optional(),
+        types: z.array(z.enum(MEMORY_TYPES)).optional(),
+        limit: z.number().int().min(1).max(100).optional(),
+        offset: z.number().int().min(0).max(10_000).optional(),
+        horizon_days: z.number().int().min(0).max(365).optional(),
+      },
+    },
+    async (args) => {
+      try {
+        const result = await reviewQueueForPrincipal(pool, principal, {
+          scopes: args.scopes,
+          types: args.types,
+          limit: args.limit,
+          offset: args.offset,
+          horizonDays: args.horizon_days,
+        }, {
+          defaultHorizonDays: deps.reviewHorizonDays,
+          auditMetadata: { transport: 'mcp' },
+        });
+        return jsonResult({
+          items: result.items.map((item) => ({
+            id: item.id,
+            scope: item.scope,
+            type: item.type,
+            title: item.title,
+            state: item.state,
+            reason: item.reason,
+            due: item.due,
+            last_verified: item.lastVerified,
+            author: item.author,
+            can_verify: item.canVerify,
+          })),
+          limit: result.limit,
+          offset: result.offset,
+          horizon_days: result.horizonDays,
+        });
       } catch (error) {
         return errorResult(error);
       }
@@ -322,12 +379,17 @@ async function main(): Promise<void> {
   }
   const pool = getPool();
   const principal = await getPrincipalByExternalId(pool, tokenEnv);
-  if (!principal) {
+  if (!principal || isLifecyclePrincipal(principal)) {
     process.stderr.write('continuum-mcp: unknown principal\n');
     process.exit(1);
   }
   const embeddingProvider = makeEmbeddingProviderFromEnv();
-  const server = buildMcpServer({ pool, embeddingProvider, principal });
+  const server = buildMcpServer({
+    pool,
+    embeddingProvider,
+    principal,
+    reviewHorizonDays: configuredReviewHorizonDays(),
+  });
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

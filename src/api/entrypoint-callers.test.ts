@@ -50,4 +50,13 @@ describe('production entrypoint callers', () => {
     );
     expect(entrypointMocks.stdioTransportConstructed).not.toHaveBeenCalled();
   });
+
+  it('sweep CLI delegates its production guard and is import-inert', async () => {
+    await import('../lifecycle/sweep-cli.js');
+
+    expect(entrypointMocks.isDirectEntrypoint).toHaveBeenCalledOnce();
+    expect(entrypointMocks.isDirectEntrypoint).toHaveBeenCalledWith(
+      expect.stringMatching(/\/sweep-cli\.(?:ts|js)$/),
+    );
+  });
 });

@@ -26,6 +26,7 @@ v0 design in progress. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the schema, 
 
 - [Audit query API](./docs/audit-api.md)
 - [API operations, health checks, and shutdown](./docs/api-operations.md)
+- [Lifecycle sweeper and review queue](./docs/lifecycle.md)
 
 ## Embedding configuration
 

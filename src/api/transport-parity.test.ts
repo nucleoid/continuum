@@ -129,6 +129,44 @@ describe('REST/MCP semantic parity matrix', () => {
     ]);
   });
 
+  it('returns equivalent actionable review queues over REST and MCP', async () => {
+    const scope = await createScope(pool, { kind: 'project', name: 'review-parity' });
+    await addMembership(pool, principal.id, scope.id, 'writer');
+    const memory = await createMemory(pool, {
+      scopeId: scope.id, scopeKind: scope.kind, type: 'relationship',
+      title: 'Review parity', body: 'private queue body', authorId: principal.id,
+      source: 'manual',
+    });
+    await pool.query(
+      `UPDATE memories SET state = 'stale', expires_at = '2026-01-01T00:00:00Z' WHERE id = $1`,
+      [memory.id],
+    );
+
+    const rest = await request(createApp(pool))
+      .get('/api/v0/review-queue')
+      .query({ scope: 'project:review-parity', type: 'relationship', limit: 1 })
+      .set('Authorization', 'Bearer entra:user:parity');
+    const mcp = toolJson((await client.callTool({
+      name: 'continuum.review_queue',
+      arguments: { scopes: ['project:review-parity'], types: ['relationship'], limit: 1 },
+    })) as ToolResult);
+
+    expect(rest.status).toBe(200);
+    expect(rest.body.items).toHaveLength(1);
+    expect(mcp.items).toHaveLength(1);
+    expect(rest.body.items[0]).toMatchObject({
+      id: memory.id, scope: 'project:review-parity', type: 'relationship',
+      state: 'stale', reason: 'stale', canVerify: true,
+    });
+    expect(mcp.items[0]).toMatchObject({
+      id: memory.id, scope: 'project:review-parity', type: 'relationship',
+      state: 'stale', reason: 'stale', can_verify: true,
+    });
+    expect(rest.body.items[0].title).toBe(mcp.items[0].title);
+    expect(rest.body.items[0].author).toEqual(mcp.items[0].author);
+    expect(rest.body.items[0].due).toBe(mcp.items[0].due);
+  });
+
   it.each(['bad', 'org:named', 'team:'])('rejects malformed recall scope %s in both transports', async (scope) => {
     const rest = await request(createApp(pool))
       .post('/api/v0/recall')
