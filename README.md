@@ -29,6 +29,7 @@ v0 design in progress. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the schema, 
 - [API operations, health checks, and shutdown](./docs/api-operations.md)
 - [AGENTS.md ETag and freshness checks](./docs/agents-md-freshness.md)
 - [Lifecycle sweeper and review queue](./docs/lifecycle.md)
+- [Audit retention operations](./docs/audit-retention.md)
 
 ## Embedding configuration
 
