@@ -262,6 +262,7 @@ async function main(): Promise<void> {
     readinessTimeoutMs,
   });
   await startRuntime(app, { port, readiness, closePool, shutdownTimeoutMs });
+  console.log(`Continuum API listening on :${port}`);
 }
 
 function positiveIntegerEnv(name: string, fallback: number): number {
