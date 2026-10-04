@@ -18,6 +18,7 @@ import { recordRead } from '../audit/log.js';
 
 interface CallToolResult {
   content: Array<{ type: string; text?: string }>;
+  _meta?: Record<string, unknown>;
 }
 
 function parseJsonResult(res: CallToolResult): unknown {
@@ -206,6 +207,32 @@ describe('MCP server', () => {
     expect(rows[0].metadata).toContain('EMBEDDING_FAILED');
     expect(rows[0].metadata).not.toContain(privateMessage);
     expect(rows[0].metadata).not.toContain('private-mcp-memory-text');
+  });
+
+  it('returns degraded recall diagnostics in MCP metadata without changing the result array', async () => {
+    const privateMessage = 'private MCP provider endpoint';
+    const failingProvider: EmbeddingProvider = {
+      id: 'test:failing', dim: 768,
+      async embed() { throw new Error(privateMessage); },
+    };
+    const { client, me, teamPayments } = await connectClient(failingProvider);
+    const memory = await createMemory(pool, {
+      scopeId: teamPayments.id, scopeKind: 'team', type: 'fact',
+      title: 'MCP degraded sentinel', body: 'Still available through full text.',
+      authorId: me.id, source: 'manual',
+    });
+
+    const result = (await client.callTool({
+      name: 'continuum.recall', arguments: { query: 'MCP degraded sentinel' },
+    })) as CallToolResult;
+
+    expect((parseJsonResult(result) as Array<{ id: string }>).map((item) => item.id))
+      .toContain(memory.id);
+    expect(result._meta).toEqual({ diagnostics: {
+      vector: 'failed',
+      groups: [{ provider: 'test:failing', dim: 768, status: 'failed', errorCode: 'EMBEDDING_FAILED' }],
+    } });
+    expect(JSON.stringify(result)).not.toContain(privateMessage);
   });
 
   it('returns and logs a sanitized error when recall audit persistence fails', async () => {

@@ -1,100 +1,88 @@
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { describe, expect, it, vi } from 'vitest';
-import { OllamaEmbeddingProvider } from './ollama.js';
+import { EmbeddingTimeoutError, OllamaEmbeddingProvider } from './ollama.js';
 
-function makeFetch(body: unknown, ok = true, status = 200): typeof fetch {
-  return vi.fn(async () =>
-    ({
-      ok,
-      status,
-      statusText: ok ? 'OK' : 'ERR',
-      json: async () => body,
-    }) as unknown as Response,
-  );
+function response(body: unknown, ok = true, status = 200): Response {
+  return {
+    ok, status, statusText: ok ? 'OK' : 'ERR', json: async () => body,
+  } as unknown as Response;
 }
 
 describe('OllamaEmbeddingProvider', () => {
-  it('returns vectors of declared dim', async () => {
-    const fetchImpl = makeFetch({ embedding: new Array(4).fill(0.1) });
-    const p = new OllamaEmbeddingProvider({
-      baseUrl: 'http://x',
-      model: 'm',
-      dim: 4,
-      fetchImpl,
+  it('returns empty output without an HTTP call', async () => {
+    const fetchImpl = vi.fn();
+    const provider = new OllamaEmbeddingProvider({
+      baseUrl: 'http://x', model: 'm', dim: 4, fetchImpl,
     });
-    const [v] = await p.embed(['hello']);
-    expect(v.length).toBe(4);
+
+    await expect(provider.embed([])).resolves.toEqual([]);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it('accepts the alternate {embeddings: [[...]]} shape', async () => {
-    const fetchImpl = makeFetch({ embeddings: [new Array(4).fill(0.2)] });
-    const p = new OllamaEmbeddingProvider({
-      baseUrl: 'http://x',
-      model: 'm',
-      dim: 4,
-      fetchImpl,
+  it('batches requests, preserves order, and uses the /api/embed array contract', async () => {
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const input = (JSON.parse(String(init?.body)) as { input: string[] }).input;
+      return response({ embeddings: input.map((text) => [text.length, 0, 0, 0]) });
     });
-    const [v] = await p.embed(['hello']);
-    expect(v[0]).toBeCloseTo(0.2);
+    const provider = new OllamaEmbeddingProvider({
+      baseUrl: 'http://x/', model: 'm', dim: 4, batchSize: 2, fetchImpl,
+    });
+
+    await expect(provider.embed(['a', 'bb', 'ccc'])).resolves.toEqual([
+      [1, 0, 0, 0], [2, 0, 0, 0], [3, 0, 0, 0],
+    ]);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(fetchImpl).toHaveBeenNthCalledWith(1, 'http://x/api/embed', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ model: 'm', input: ['a', 'bb'] }),
+      signal: expect.any(AbortSignal),
+    }));
+    expect(fetchImpl).toHaveBeenNthCalledWith(2, 'http://x/api/embed', expect.objectContaining({
+      body: JSON.stringify({ model: 'm', input: ['ccc'] }),
+    }));
   });
 
-  it('throws on dim mismatch', async () => {
-    const fetchImpl = makeFetch({ embedding: [0.1, 0.2] });
-    const p = new OllamaEmbeddingProvider({
-      baseUrl: 'http://x',
-      model: 'm',
-      dim: 4,
-      fetchImpl,
+  it.each([
+    ['cardinality', { embeddings: [[0, 0, 0, 0]] }],
+    ['dimension', { embeddings: [[0, 0], [0, 0, 0, 0]] }],
+    ['non-finite value', { embeddings: [[0, 0, 0, 0], [0, Number.NaN, 0, 0]] }],
+    ['non-numeric value', { embeddings: [[0, 0, 0, 0], [0, 'bad', 0, 0]] }],
+    ['legacy response', { embedding: [0, 0, 0, 0] }],
+  ])('rejects an invalid %s response for the entire chunk', async (_label, body) => {
+    const provider = new OllamaEmbeddingProvider({
+      baseUrl: 'http://x', model: 'm', dim: 4,
+      fetchImpl: vi.fn(async () => response(body)),
     });
-    await expect(p.embed(['hi'])).rejects.toThrow();
+
+    await expect(provider.embed(['one', 'two'])).rejects.toThrow(/Ollama/i);
   });
 
-  it('throws on non-2xx', async () => {
-    const fetchImpl = makeFetch({}, false, 500);
-    const p = new OllamaEmbeddingProvider({
-      baseUrl: 'http://x',
-      model: 'm',
-      dim: 4,
-      fetchImpl,
+  it('normalizes its request deadline to a typed timeout error', async () => {
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      }));
+    const provider = new OllamaEmbeddingProvider({
+      baseUrl: 'http://x', model: 'private-model', dim: 4,
+      timeoutMs: 5, fetchImpl,
     });
-    await expect(p.embed(['hi'])).rejects.toThrow();
+
+    const error = await provider.embed(['sensitive text']).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(EmbeddingTimeoutError);
+    expect(error).toMatchObject({ code: 'EMBEDDING_TIMEOUT', providerId: 'ollama:private-model', timeoutMs: 5 });
+    expect(String(error)).not.toContain('sensitive text');
   });
 
-  it('strips trailing slash from baseUrl', async () => {
-    const fetchImpl = vi.fn(async () =>
-      ({
-        ok: true,
-        status: 200,
-        statusText: 'OK',
-        json: async () => ({ embedding: new Array(4).fill(0) }),
-      }) as unknown as Response,
-    );
-    const p = new OllamaEmbeddingProvider({
-      baseUrl: 'http://x/',
-      model: 'm',
-      dim: 4,
-      fetchImpl,
-    });
-    await p.embed(['hi']);
-    expect(vi.mocked(fetchImpl).mock.calls[0][0]).toBe('http://x/api/embeddings');
-  });
-
-  it('passes a report abort signal to each serial request and stops after abort', async () => {
-    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      expect(init?.signal).toBeInstanceOf(AbortSignal);
-      return {
-        ok: true, status: 200, statusText: 'OK',
-        json: async () => ({ embedding: new Array(4).fill(0) }),
-      } as unknown as Response;
-    });
+  it('honors a caller abort before making a request', async () => {
+    const fetchImpl = vi.fn();
     const provider = new OllamaEmbeddingProvider({
       baseUrl: 'http://x', model: 'm', dim: 4, fetchImpl,
     });
     const controller = new AbortController();
     controller.abort(new Error('deadline'));
-    await expect(provider.embed(['one', 'two'], { signal: controller.signal }))
-      .rejects.toThrow('deadline');
+
+    await expect(provider.embed(['one'], { signal: controller.signal })).rejects.toThrow('deadline');
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
@@ -166,5 +154,13 @@ describe('OllamaEmbeddingProvider', () => {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+  });
+
+  it('reports bounded HTTP failures without response bodies', async () => {
+    const provider = new OllamaEmbeddingProvider({
+      baseUrl: 'http://x', model: 'm', dim: 4,
+      fetchImpl: vi.fn(async () => response({ secret: 'do not leak' }, false, 503)),
+    });
+    await expect(provider.embed(['private input'])).rejects.toThrow('Ollama embed failed: 503 ERR');
   });
 });

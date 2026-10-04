@@ -61,6 +61,13 @@ Vector recall uses only rows whose provider ID and dimension exactly match the
 active provider. Changing models therefore leaves existing embedding rows
 untouched and temporarily makes their memories full-text-only until they are
 re-embedded. Switching back to the old model makes those rows usable again.
+Ollama uses the batched `/api/embed` endpoint with a 10 second per-request
+deadline and a default batch size of 32. Override these with
+`CONTINUUM_EMBEDDING_TIMEOUT_MS` and `CONTINUUM_EMBEDDING_BATCH_SIZE` or the
+`timeout_ms` and `batch_size` fields in a routed provider definition. Invalid,
+non-finite, wrong-size, or wrong-cardinality responses fail the complete HTTP
+batch. Recall then returns full-text results with bounded diagnostics instead
+of failing the request.
 
 For per-scope routing, set `CONTINUUM_EMBEDDING_CONFIG` to a JSON object with
 provider definitions and a routing policy:
@@ -134,6 +141,30 @@ historical recall candidate. Live recall still routes each readable scope to
 its provider group and safely fuses the separate results. Provider outages
 degrade to exact/FTS behavior with explicit, content-free status and counts in
 the report audit.
+
+### Embedding backfill
+
+Preview missing embeddings before writing:
+
+```sh
+npm run embed-backfill -- --count
+npm run embed-backfill -- --dry-run --max-rows 100
+```
+
+Run a bounded provider-specific batch:
+
+```sh
+npm run embed-backfill -- --provider ollama:nomic-embed-text --batch-size 32 --max-rows 1000
+```
+
+The command routes every memory by its scope policy before sending text to a
+provider. A scope pinned to `local-only` is never sent to a hosted provider.
+Progress is checkpointed by provider, dimension, and optional `--scope` in
+stable memory-ID order. A provider-specific advisory lock prevents concurrent
+runs, successful writes are idempotent, and poison records are isolated with
+bounded retries and sanitized audit entries. Use `--cursor UUID` together with
+`--provider` for an explicit restart point. A completed sweep clears its
+cursor so a later run can retry records that previously failed.
 
 ## License
 

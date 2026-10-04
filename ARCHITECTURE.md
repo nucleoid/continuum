@@ -95,11 +95,12 @@ CREATE INDEX memories_tags_gin        ON memories USING gin (tags);
 CREATE INDEX memories_metadata_gin    ON memories USING gin (metadata);
 
 CREATE TABLE memory_embeddings (
-  memory_id       UUID PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+  memory_id       UUID NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
   provider        TEXT NOT NULL,         -- 'ollama:nomic-embed-text', 'voyage-3', etc.
   dim             INT  NOT NULL,
   embedding       VECTOR,                -- pgvector
-  embedded_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+  embedded_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (memory_id, provider, dim)
 );
 
 CREATE INDEX memory_embeddings_ivf ON memory_embeddings USING ivfflat (embedding vector_cosine_ops);
@@ -221,6 +222,10 @@ Content-Type: application/json
 Response includes ranked memories with `score`, `scope`, `type`, `source_ref`, and a short `excerpt`. Reading is logged to `audit_log` per principal.
 
 Search is hybrid: vector similarity on `memory_embeddings` plus full-text on `memories.body`, fused by reciprocal rank fusion. Scope filter is applied pre-rank.
+Each routed vector arm is bounded by its provider timeout. A provider or vector
+query failure degrades only that arm to full-text search and is returned as
+sanitized retrieval diagnostics. AGENTS.md generation remains deterministic
+scope-ordered retrieval and does not depend on embedding availability.
 Every serving query also excludes memories whose `expires_at` is at or before
 the database's current time. The full-text and vector candidate queries apply
 this filter before ranking, and recall hydration repeats it so a memory that

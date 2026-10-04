@@ -33,6 +33,23 @@ function embeddingTimeout(env: NodeJS.ProcessEnv): number {
   return validateEmbeddingTimeout(Number(configured));
 }
 
+function positiveIntegerSetting(
+  value: string | undefined,
+  fallback: number,
+  name: string,
+  maximum?: number,
+): number {
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  if (maximum !== undefined && parsed > maximum) {
+    throw new Error(`${name} must be at most ${maximum}`);
+  }
+  return parsed;
+}
+
 export function makeEmbeddingProviderFromEnv(env: NodeJS.ProcessEnv = process.env): EmbeddingProvider | null {
   const kind = env.CONTINUUM_EMBEDDING_PROVIDER?.toLowerCase();
   if (!kind || kind === 'none' || kind === 'noop') return null;
@@ -50,8 +67,11 @@ export function makeEmbeddingProviderFromEnv(env: NodeJS.ProcessEnv = process.en
       throw new Error('CONTINUUM_OLLAMA_URL must be an HTTP URL without credentials');
     }
     const dim = embeddingDimension(env);
+    const batchSize = positiveIntegerSetting(
+      env.CONTINUUM_EMBEDDING_BATCH_SIZE, 32, 'CONTINUUM_EMBEDDING_BATCH_SIZE', 1_000,
+    );
     return new OllamaEmbeddingProvider({
-      baseUrl, model, dim, timeoutMs: embeddingTimeout(env),
+      baseUrl, model, dim, timeoutMs: embeddingTimeout(env), batchSize,
     });
   }
   throw new Error(`Unknown CONTINUUM_EMBEDDING_PROVIDER: ${kind}`);
@@ -64,6 +84,7 @@ type ProviderDefinition = {
   dim: number;
   endpoint?: string;
   timeout_ms?: number;
+  batch_size?: number;
   local: boolean;
 };
 
@@ -79,7 +100,7 @@ function providerDefinition(value: unknown): ProviderDefinition {
   if ('apiKey' in raw || 'api_key' in raw || 'secret' in raw || 'token' in raw) {
     throw new Error('Embedding provider definitions must not contain inline credentials');
   }
-  const allowed = new Set(['alias', 'kind', 'model', 'dim', 'endpoint', 'timeout_ms', 'local']);
+  const allowed = new Set(['alias', 'kind', 'model', 'dim', 'endpoint', 'timeout_ms', 'batch_size', 'local']);
   if (Object.keys(raw).some((key) => !allowed.has(key))) {
     throw new Error('Embedding provider definition contains an unknown field');
   }
@@ -123,6 +144,11 @@ function providerDefinition(value: unknown): ProviderDefinition {
       || (raw.timeout_ms as number) < 1
       || (raw.timeout_ms as number) > MAX_EMBEDDING_TIMEOUT_MS)) {
     throw new Error(`Embedding provider timeout_ms must be between 1 and ${MAX_EMBEDDING_TIMEOUT_MS}`);
+  }
+  if (raw.batch_size !== undefined
+    && (!Number.isSafeInteger(raw.batch_size) || (raw.batch_size as number) <= 0
+      || (raw.batch_size as number) > 1_000)) {
+    throw new Error('Embedding provider batch_size must be a positive integer at most 1000');
   }
   const definition = raw as ProviderDefinition;
   validateProviderCompatibility(definition);
@@ -210,6 +236,7 @@ function instantiateProvider(
     const provider = new OllamaEmbeddingProvider({
       baseUrl: endpoint, model: definition.model, dim: definition.dim,
       timeoutMs: definition.timeout_ms ?? DEFAULT_EMBEDDING_TIMEOUT_MS,
+      ...(definition.batch_size ? { batchSize: definition.batch_size } : {}),
     });
     Object.defineProperty(provider, 'local', { value: definition.local });
     return provider;

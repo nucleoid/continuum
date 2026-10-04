@@ -227,15 +227,16 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     },
     async (args) => {
       try {
-        const { results, accessible } = await recallForPrincipal(
+        const { results, accessible, diagnostics } = await recallForPrincipal(
           pool,
           embeddingProvider,
           principal,
           args,
           { transport: 'mcp' },
+          logger,
         );
-        return jsonResult(
-          results.map((r) => ({
+        return {
+          ...jsonResult(results.map((r) => ({
             id: r.memory.id,
             score: r.score,
             scope: accessible.get(r.memory.scopeId)?.label ?? null,
@@ -246,8 +247,9 @@ export function buildMcpServer(deps: McpDeps): McpServer {
             source_ref: r.memory.sourceRef,
             ...(r.memory.supersedesId ? { supersedes_id: r.memory.supersedesId } : {}),
             created_at: r.memory.createdAt,
-          })),
-        );
+          }))),
+          _meta: { diagnostics },
+        };
       } catch (error) {
         return errorResult(error);
       }

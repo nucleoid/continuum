@@ -18,6 +18,7 @@ import {
   validateRelationThreshold,
 } from './relations.js';
 import type { Queryable } from '../storage/queryable.js';
+import { memoryEmbeddingText } from '../embeddings/text.js';
 
 export interface CaptureResult {
   memory: Memory;
@@ -259,9 +260,7 @@ export async function captureMemory(
     let relationErrorCode: 'RELATION_DETECTION_FAILED' | undefined;
     if (embeddingProvider) {
       try {
-        [embeddingVector] = await embeddingProvider.embed([
-          `${input.title}\n\n${input.body}`,
-        ]);
+        [embeddingVector] = await embeddingProvider.embed([memoryEmbeddingText(input)]);
         assertEmbeddingVectorDimension(embeddingVector, embeddingProvider);
       } catch {
         embedErrorCode = 'EMBEDDING_FAILED';

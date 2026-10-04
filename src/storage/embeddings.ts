@@ -28,10 +28,8 @@ export async function storeMemoryEmbeddingVector(
   await pool.query(
     `INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
      VALUES ($1, $2, $3, $4::vector)
-     ON CONFLICT (memory_id) DO UPDATE
-       SET provider = EXCLUDED.provider,
-           dim = EXCLUDED.dim,
-           embedding = EXCLUDED.embedding,
+     ON CONFLICT (memory_id, provider, dim) DO UPDATE
+       SET embedding = EXCLUDED.embedding,
            embedded_at = now()`,
     [memoryId, provider.id, provider.dim, toPgVector(vector)],
   );

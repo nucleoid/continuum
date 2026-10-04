@@ -48,6 +48,18 @@ describe('embedding dimension compatibility', () => {
   });
 });
 
+describe('provider-qualified storage', () => {
+  it('upserts only the matching provider identity', async () => {
+    const db = queryable();
+    vi.mocked(db.query).mockResolvedValue({ rows: [] } as never);
+    await storeMemoryEmbeddingVector(db, 'memory-id', Array(768).fill(0), {
+      id: 'ollama:model-b', dim: 768,
+    });
+    const [sql] = vi.mocked(db.query).mock.calls[0] as [string, unknown[]];
+    expect(sql).toContain('ON CONFLICT (memory_id, provider, dim)');
+  });
+});
+
 describe('vector search filters', () => {
   const vector = Array(768).fill(0) as number[];
   const scopeIds = ['00000000-0000-0000-0000-000000000001'];

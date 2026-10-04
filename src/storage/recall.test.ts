@@ -61,7 +61,7 @@ describe('recall expiry enforcement', () => {
       },
     } as unknown as Queryable;
 
-    const results = await recall(queryable, {
+    const { results } = await recall(queryable, {
       query: 'hydration race sentinel',
       scopeIds: [scope.id],
       limit: 10,
@@ -78,7 +78,7 @@ describe('recall expiry enforcement', () => {
       await client.query('BEGIN');
       await client.query('UPDATE memories SET expires_at = now() WHERE id = $1', [memory.id]);
 
-      const results = await recall(client, {
+      const { results } = await recall(client, {
         query: 'boundary sentinel',
         scopeIds: [scope.id],
         limit: 10,
@@ -94,6 +94,7 @@ describe('recall expiry enforcement', () => {
     }
   });
 
+<<<<<<< HEAD
   it.each([
     [199, false],
     [200, false],
@@ -112,5 +113,31 @@ describe('recall expiry enforcement', () => {
     expect(result.bodyTruncated).toBe(expected);
     expect(result.memory.body).toHaveLength(length);
     if (length > 200) expect(result.excerpt).toMatch(/^\.\.\./);
+=======
+  it('degrades a vector SQL failure to FTS with bounded diagnostics', async () => {
+    const { memory, scope } = await seedMemory('vector sql fallback');
+    const queryable = {
+      query: async (text: string, params?: unknown[]) => {
+        if (text.includes('FROM memory_embeddings')) throw new Error('password=private');
+        return pool.query(text, params);
+      },
+    } as unknown as Queryable;
+    const provider = {
+      id: 'ollama:local', dim: 768, local: true,
+      async embed() { return [Array(768).fill(0) as number[]]; },
+    };
+
+    const recalled = await recall(queryable, {
+      query: 'vector sql fallback', scopeIds: [scope.id], limit: 10,
+      embeddingGroups: [{ scopeIds: [scope.id], provider }],
+    });
+
+    expect(recalled.results.map((result) => result.memory.id)).toContain(memory.id);
+    expect(recalled.diagnostics).toEqual({
+      vector: 'failed',
+      groups: [{ provider: 'ollama:local', dim: 768, status: 'failed', errorCode: 'VECTOR_SEARCH_FAILED' }],
+    });
+    expect(JSON.stringify(recalled.diagnostics)).not.toContain('private');
+>>>>>>> e0f9626 (feat: harden embeddings and add routed backfill)
   });
 });

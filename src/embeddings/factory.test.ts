@@ -13,6 +13,30 @@ describe('makeEmbeddingProviderFromEnv', () => {
     expect(provider?.id).toBe('ollama:nomic-embed-text-v2');
   });
 
+  it('validates and forwards Ollama timeout and batch settings', () => {
+    const provider = makeEmbeddingProviderFromEnv({
+      CONTINUUM_EMBEDDING_PROVIDER: 'ollama',
+      CONTINUUM_EMBEDDING_DIM: '768',
+      CONTINUUM_EMBEDDING_TIMEOUT_MS: '3210',
+      CONTINUUM_EMBEDDING_BATCH_SIZE: '7',
+    }) as unknown as { timeoutMs: number; batchSize: number };
+    expect(provider.timeoutMs).toBe(3210);
+    expect(provider.batchSize).toBe(7);
+  });
+
+  it.each([
+    ['CONTINUUM_EMBEDDING_TIMEOUT_MS', '0'],
+    ['CONTINUUM_EMBEDDING_TIMEOUT_MS', '1.5'],
+    ['CONTINUUM_EMBEDDING_BATCH_SIZE', '0'],
+    ['CONTINUUM_EMBEDDING_BATCH_SIZE', '1001'],
+  ])('rejects invalid %s', (name, value) => {
+    expect(() => makeEmbeddingProviderFromEnv({
+      CONTINUUM_EMBEDDING_PROVIDER: 'ollama',
+      CONTINUUM_EMBEDDING_DIM: '768',
+      [name]: value,
+    })).toThrow(/positive integer|at most 1000/i);
+  });
+
   it.each(['1024', 'NaN', '768.5', '0', '-1'])(
     'rejects unsupported dimension %s before creating the provider',
     (dimension) => {

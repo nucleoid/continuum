@@ -20,6 +20,24 @@ export interface RecallOptions {
   }) => void;
 }
 
+export type VectorDiagnosticStatus = 'used' | 'disabled' | 'failed' | 'partial';
+export type VectorErrorCode = 'EMBEDDING_TIMEOUT' | 'EMBEDDING_FAILED' | 'VECTOR_SEARCH_FAILED';
+
+export interface RecallDiagnostics {
+  vector: VectorDiagnosticStatus;
+  groups: Array<{
+    provider: string;
+    dim: number;
+    status: 'used' | 'failed';
+    errorCode?: VectorErrorCode;
+  }>;
+}
+
+export interface RecallOutput {
+  results: RecallResult[];
+  diagnostics: RecallDiagnostics;
+}
+
 export class EmbeddingProviderUnavailableError extends Error {
   constructor(cause: unknown) {
     super('embedding provider unavailable', { cause });
@@ -131,8 +149,10 @@ async function hydrate(
 export async function recall(
   pool: Queryable,
   opts: RecallOptions,
-): Promise<RecallResult[]> {
-  if (opts.scopeIds.length === 0) return [];
+): Promise<RecallOutput> {
+  if (opts.scopeIds.length === 0) {
+    return { results: [], diagnostics: { vector: 'disabled', groups: [] } };
+  }
 
   const overFetch = Math.min(opts.limit * 5, 100);
   const fts = await ftsHits(pool, opts.query, opts.scopeIds, opts.types, overFetch);
@@ -142,28 +162,51 @@ export async function recall(
       ? [{ scopeIds: opts.scopeIds, provider: opts.embeddingProvider }]
       : []);
   const vectorLists: Array<Array<{ id: string; rank: number; distance: number }>> = [];
+  const diagnosticGroups: RecallDiagnostics['groups'] = [];
   for (const group of groups) {
     let queryVec: number[];
     try {
       [queryVec] = await group.provider.embed([opts.query]);
       assertEmbeddingVectorDimension(queryVec, group.provider);
-    } catch {
+    } catch (error) {
       // An outage degrades only this provider group to full-text search.
       opts.onEmbeddingGroupResult?.({
         provider: group.provider, scopeIds: group.scopeIds, status: 'failed',
       });
       vectorLists.push([]);
+      diagnosticGroups.push({
+        provider: group.provider.id,
+        dim: group.provider.dim,
+        status: 'failed',
+        errorCode: (error as { code?: unknown })?.code === 'EMBEDDING_TIMEOUT'
+          ? 'EMBEDDING_TIMEOUT'
+          : 'EMBEDDING_FAILED',
+      });
       continue;
     }
-    const hits = await vectorSearchMemoryIds(
-      pool, queryVec, group.scopeIds, group.provider, overFetch, opts.types,
-    );
-    vectorLists.push(hits.map((hit, index) => ({
-      id: hit.id, rank: index + 1, distance: hit.distance,
-    })));
-    opts.onEmbeddingGroupResult?.({
-      provider: group.provider, scopeIds: group.scopeIds, status: 'succeeded',
-    });
+    try {
+      const hits = await vectorSearchMemoryIds(
+        pool, queryVec, group.scopeIds, group.provider, overFetch, opts.types,
+      );
+      vectorLists.push(hits.map((hit, index) => ({
+        id: hit.id, rank: index + 1, distance: hit.distance,
+      })));
+      diagnosticGroups.push({
+        provider: group.provider.id, dim: group.provider.dim, status: 'used',
+      });
+      opts.onEmbeddingGroupResult?.({
+        provider: group.provider, scopeIds: group.scopeIds, status: 'succeeded',
+      });
+    } catch {
+      vectorLists.push([]);
+      diagnosticGroups.push({
+        provider: group.provider.id, dim: group.provider.dim,
+        status: 'failed', errorCode: 'VECTOR_SEARCH_FAILED',
+      });
+      opts.onEmbeddingGroupResult?.({
+        provider: group.provider, scopeIds: group.scopeIds, status: 'failed',
+      });
+    }
   }
 
   const fused = fuse(fts, ...vectorLists);
@@ -172,5 +215,15 @@ export async function recall(
     .map(([id]) => id)
     .slice(0, opts.limit);
 
-  return hydrate(pool, ranked, opts.query, fused, opts.scopeIds, opts.types);
+  const used = diagnosticGroups.filter((group) => group.status === 'used').length;
+  const failed = diagnosticGroups.length - used;
+  const vector: VectorDiagnosticStatus = diagnosticGroups.length === 0
+    ? 'disabled'
+    : failed === 0
+      ? 'used'
+      : used === 0 ? 'failed' : 'partial';
+  return {
+    results: await hydrate(pool, ranked, opts.query, fused, opts.scopeIds, opts.types),
+    diagnostics: { vector, groups: diagnosticGroups },
+  };
 }
