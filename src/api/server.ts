@@ -8,6 +8,7 @@ import { agentsMdRouter } from './routes/agents-md.js';
 import { auditRouter } from './routes/audit.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import { makeEmbeddingProviderFromEnv } from '../embeddings/factory.js';
+import { isDirectEntrypoint } from './entrypoint.js';
 
 export interface AppOptions {
   embeddingProvider?: EmbeddingProvider | null;
@@ -44,6 +45,6 @@ function main(): void {
   });
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isDirectEntrypoint(import.meta.url)) {
   main();
 }

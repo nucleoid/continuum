@@ -15,6 +15,7 @@ import type { EmbeddingProvider } from '../embeddings/provider.js';
 import type { Principal, ScopeKind } from '../types.js';
 import { getPool } from '../storage/pool.js';
 import { makeEmbeddingProviderFromEnv } from '../embeddings/factory.js';
+import { isDirectEntrypoint } from './entrypoint.js';
 
 const SCOPE_KINDS = ['org', 'team', 'project', 'user', 'role'] as const;
 const MEMORY_TYPES = ['fact', 'decision', 'context', 'playbook', 'relationship'] as const;
@@ -362,7 +363,7 @@ async function main(): Promise<void> {
   await server.connect(transport);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isDirectEntrypoint(import.meta.url)) {
   main().catch((err) => {
     process.stderr.write(`continuum-mcp fatal: ${(err as Error).stack ?? err}\n`);
     process.exit(1);
