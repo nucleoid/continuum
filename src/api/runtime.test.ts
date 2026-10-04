@@ -152,10 +152,12 @@ describe('runtime startup failures', () => {
     await new Promise<void>((resolve) => occupied.listen(0, '127.0.0.1', resolve));
     const address = occupied.address();
     if (!address || typeof address === 'string') throw new Error('missing occupied address');
+    const closePool = vi.fn(() => { throw new Error('pool cleanup failed'); });
     try {
       await expect(startRuntime(express(), {
-        port: address.port, host: '127.0.0.1', closePool: vi.fn(),
+        port: address.port, host: '127.0.0.1', closePool,
       })).rejects.toMatchObject({ code: 'EADDRINUSE' });
+      expect(closePool).toHaveBeenCalledOnce();
     } finally {
       await new Promise<void>((resolve) => occupied.close(() => resolve()));
     }
@@ -163,9 +165,11 @@ describe('runtime startup failures', () => {
 
   it('closes the listener and preserves a worker start failure', async () => {
     const failure = new Error('worker bootstrap failed');
+    const closePool = vi.fn(() => { throw new Error('pool cleanup failed'); });
     await expect(startRuntime(express(), {
-      port: 0, host: '127.0.0.1', closePool: vi.fn(),
+      port: 0, host: '127.0.0.1', closePool,
       workers: [{ start: vi.fn().mockRejectedValue(failure), stop: vi.fn() }],
     })).rejects.toBe(failure);
+    expect(closePool).toHaveBeenCalledOnce();
   });
 });

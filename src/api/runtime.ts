@@ -103,7 +103,7 @@ export async function startRuntime(
     if (server.listening) {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
-    await Promise.resolve(options.closePool()).catch(() => undefined);
+    await Promise.resolve().then(options.closePool).catch(() => undefined);
     throw error;
   }
 
