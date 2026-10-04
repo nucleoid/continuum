@@ -211,6 +211,30 @@ describe('shared services', () => {
     expect(rows).toEqual([{ metadata: { source: 'manual', type: 'fact', embedded: false } }]);
   });
 
+  it('rejects caller-supplied reserved relation metadata before side effects', async () => {
+    const { principal } = await seedWriter();
+
+    await expect(captureMemory(pool, null, principal, {
+      scope: { kind: 'team', name: 'payments' },
+      type: 'fact',
+      title: 'Forged relation metadata',
+      body: 'Must not persist.',
+      source: 'manual',
+      metadata: { related: [{ id: 'forged' }] },
+    })).rejects.toMatchObject<ServiceError>({
+      code: 'INVALID_INPUT',
+      publicMessage: 'metadata.related is reserved by Continuum',
+    });
+
+    const { rows } = await pool.query(
+      `SELECT
+         (SELECT count(*)::int FROM memories) AS memories,
+         (SELECT count(*)::int FROM memory_embeddings) AS embeddings,
+         (SELECT count(*)::int FROM audit_log) AS audits`,
+    );
+    expect(rows[0]).toEqual({ memories: 0, embeddings: 0, audits: 0 });
+  });
+
   it('sanitizes embedding failures in results and audit metadata', async () => {
     const { principal } = await seedWriter();
     const provider: EmbeddingProvider = {
@@ -352,7 +376,7 @@ describe('shared services', () => {
     ]));
   });
 
-  it('commits with empty relations, no embedding, and sanitized audit when probing fails', async () => {
+  it('commits the provider embedding with empty relations and sanitized audit when probing fails', async () => {
     const { principal } = await seedWriter();
     const provider: EmbeddingProvider = {
       id: 'test:probe-failure', dim: 768, async embed() { return [unitVector(1)]; },
@@ -366,11 +390,17 @@ describe('shared services', () => {
       },
     );
 
-    expect(result).toMatchObject({ embedded: false, related: [] });
+    expect(result).toMatchObject({
+      embedded: true, related: [], relationErrorCode: 'RELATION_DETECTION_FAILED',
+    });
     const { rows } = await pool.query(
-      'SELECT metadata::text AS metadata FROM audit_log WHERE memory_id = $1',
+      `SELECT a.metadata::text AS metadata,
+              EXISTS (SELECT 1 FROM memory_embeddings e WHERE e.memory_id = a.memory_id)
+                AS embedded
+         FROM audit_log a WHERE memory_id = $1`,
       [result.memory.id],
     );
+    expect(rows[0].embedded).toBe(true);
     expect(rows[0].metadata).toContain('RELATION_DETECTION_FAILED');
     expect(rows[0].metadata).not.toContain('database detail');
     expect(rows[0].metadata).not.toContain('private-probe-body');
@@ -440,7 +470,7 @@ describe('shared services', () => {
     );
 
     expect(result).toMatchObject({
-      embedded: false, related: [], embedErrorCode: 'EMBEDDING_FAILED',
+      embedded: true, related: [], relationErrorCode: 'RELATION_DETECTION_FAILED',
     });
     const { rows } = await pool.query(
       `SELECT m.metadata,
@@ -453,12 +483,26 @@ describe('shared services', () => {
     );
     expect(rows).toEqual([{
       metadata: { related: [] },
-      embedded: false,
+      embedded: true,
       audit_metadata: {
-        source: 'manual', type: 'fact', embedded: false,
-        embedding_error_code: 'EMBEDDING_FAILED',
+        source: 'manual', type: 'fact', embedded: true,
+        relation_error_code: 'RELATION_DETECTION_FAILED',
       },
     }]);
+  });
+
+  it('maps invalid programmatic relation configuration to a safe internal error', async () => {
+    const { principal } = await seedWriter();
+
+    await expect(captureMemory(pool, null, principal, {
+      scope: { kind: 'team', name: 'payments' }, type: 'fact',
+      title: 'Invalid threshold', body: 'Must not persist.', source: 'manual',
+    }, {}, { relationThreshold: Number.NaN })).rejects.toMatchObject<ServiceError>({
+      code: 'INTERNAL', publicMessage: 'An internal error occurred',
+    });
+
+    const { rows } = await pool.query('SELECT count(*)::int AS count FROM memories');
+    expect(rows[0].count).toBe(0);
   });
 
   it('calls the embedding provider before opening the capture transaction', async () => {
@@ -994,6 +1038,26 @@ describe('shared services', () => {
     await expect(promoteForPrincipal(
       pool, principal, writerSource.id, { kind: 'org', name: '' },
     )).resolves.toMatchObject({ destination: { scopeId: org.id } });
+  });
+
+  it('strips scope-bound relation candidates when promoting metadata', async () => {
+    const { principal, team } = await seedWriter();
+    const project = await createScope(pool, { kind: 'project', name: 'promotion-metadata' });
+    await addMembership(pool, principal.id, project.id, 'writer');
+    const source = await createMemory(pool, {
+      scopeId: team.id, scopeKind: team.kind, type: 'decision', title: 'Promote safely',
+      body: 'Candidate ids are scoped to the source visibility set.',
+      authorId: principal.id, source: 'manual',
+      metadata: { owner: 'payments', related: [{ id: 'narrow-scope-memory' }] },
+    });
+
+    const result = await promoteForPrincipal(
+      pool, principal, source.id, { kind: 'project', name: 'promotion-metadata' },
+    );
+
+    expect(result.destination.metadata).toEqual({
+      owner: 'payments', promoted_from: source.id,
+    });
   });
 
   it('denies an author whose source membership is revoked before authorization', async () => {

@@ -101,28 +101,4 @@ describe('vector search filters', () => {
     ]);
   });
 
-  it('applies similarity threshold and self exclusion before a bounded stable order', async () => {
-    const db = queryable();
-    vi.mocked(db.query).mockResolvedValue({ rows: [] } as never);
-
-    await vectorSearchMemoryIds(
-      db,
-      vector,
-      scopeIds,
-      provider,
-      5,
-      undefined,
-      { threshold: 0.92, excludeMemoryId: '00000000-0000-0000-0000-000000000099' },
-    );
-
-    const [sql, params] = vi.mocked(db.query).mock.calls[0] as [string, unknown[]];
-    expect(sql).toContain('m.id <> $5::uuid');
-    expect(sql).toContain('1 - (e.embedding <=> $1::vector) >= $6');
-    expect(sql).toContain('ORDER BY distance ASC, m.id ASC');
-    expect(sql).toContain('LIMIT $7');
-    expect(params).toEqual([
-      expect.any(String), scopeIds, provider.id, provider.dim,
-      '00000000-0000-0000-0000-000000000099', 0.92, 5,
-    ]);
-  });
 });

@@ -88,6 +88,8 @@ async function promoteOperation(
     throw new PromoteError(`principal lacks ${roleName} role on target scope`, 403);
   }
 
+  const destinationMetadata = { ...source.metadata };
+  delete destinationMetadata.related;
   const destination = await createMemory(client, {
     scopeId: destinationScope.id,
     scopeKind: destinationScope.kind,
@@ -98,7 +100,7 @@ async function promoteOperation(
     source: `promote:${source.source}`,
     sourceRef: source.sourceRef ?? null,
     tags: source.tags,
-    metadata: { ...source.metadata, promoted_from: source.id },
+    metadata: { ...destinationMetadata, promoted_from: source.id },
   });
   const { rows } = await client.query(
     `UPDATE memories

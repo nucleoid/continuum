@@ -132,6 +132,38 @@ describe('REST/MCP semantic parity matrix', () => {
     ]);
   });
 
+  it('rejects reserved relation metadata consistently without persistence', async () => {
+    const metadata = { related: [{ id: 'forged-candidate' }] };
+    const rest = await request(createApp(pool))
+      .post('/api/v0/capture')
+      .set('Authorization', 'Bearer entra:user:parity')
+      .send({
+        scope: { kind: 'team', name: 'payments' }, type: 'fact',
+        title: 'REST reserved key', body: 'Must fail.', source: 'manual', metadata,
+      });
+    const mcp = (await client.callTool({
+      name: 'continuum.capture',
+      arguments: {
+        scope_kind: 'team', scope_name: 'payments', type: 'fact',
+        title: 'MCP reserved key', body: 'Must fail.', source: 'manual', metadata,
+      },
+    })) as ToolResult;
+
+    expect(rest.status).toBe(400);
+    expect(rest.body).toMatchObject({
+      code: 'INVALID_INPUT', error: 'metadata.related is reserved by Continuum',
+    });
+    expect(mcp.isError).toBe(true);
+    expect(toolJson(mcp)).toEqual({
+      error: { code: 'INVALID_INPUT', message: 'metadata.related is reserved by Continuum' },
+    });
+    const { rows } = await pool.query(
+      `SELECT count(*)::int AS memories FROM memories
+        WHERE title IN ('REST reserved key', 'MCP reserved key')`,
+    );
+    expect(rows[0].memories).toBe(0);
+  });
+
   it('returns the same safe relation fields from REST and MCP capture', async () => {
     const vector = Array(768).fill(0) as number[];
     vector[0] = 1;

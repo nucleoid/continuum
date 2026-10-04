@@ -15,6 +15,7 @@ Continuum is a standalone, vendor-agnostic memory layer for development teams. I
 - No em-dashes in user-facing text (docs, READMEs, API error messages, commit subjects).
 - No speculative complexity. Build what the next milestone needs. Future-proofing is an anti-pattern until a real second use case shows up.
 - AGENTS.md output (the generator transport) is a first-class product surface. If you touch retrieval, also touch the AGENTS.md generator.
+- Capture relation candidates are advisory write metadata, not retrieval results. Do not add them to generated AGENTS.md output or the review queue without a separately authorized feature that rechecks ACLs and candidate validity at read time.
 
 ## Layout (target)
 

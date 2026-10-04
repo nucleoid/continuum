@@ -58,10 +58,11 @@ export function relationThresholdFromEnv(
 ): number {
   const raw = env.CONTINUUM_RELATION_THRESHOLD;
   if (raw === undefined) return DEFAULT_RELATION_THRESHOLD;
-  if (raw.trim() === '') {
+  const normalized = raw.trim();
+  if (!/^(?:0(?:\.\d+)?|1(?:\.0+)?)$/.test(normalized)) {
     throw new Error('CONTINUUM_RELATION_THRESHOLD must be a number between 0 and 1');
   }
-  const parsed = Number(raw);
+  const parsed = Number(normalized);
   try {
     return validateRelationThreshold(parsed);
   } catch {

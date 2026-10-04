@@ -42,6 +42,9 @@ export async function captureMemory(
     const relationThreshold = validateRelationThreshold(
       options.relationThreshold ?? DEFAULT_RELATION_THRESHOLD,
     );
+    if (input.metadata && Object.hasOwn(input.metadata, 'related')) {
+      throw new ServiceError('INVALID_INPUT', 'metadata.related is reserved by Continuum');
+    }
     if (!isCaptureSource(input.source)) {
       throw new ServiceError('INVALID_INPUT', 'Unknown capture source');
     }
@@ -86,7 +89,6 @@ export async function captureMemory(
           relationThreshold,
         );
       } catch {
-        embeddingVector = undefined;
         related = [];
         relationErrorCode = 'RELATION_DETECTION_FAILED';
       }
@@ -131,16 +133,29 @@ export async function captureMemory(
             embeddingVector,
             embeddingProvider,
           );
-          memory = await updateMemoryMetadata(client, memory.id, {
-            ...memory.metadata,
-            related,
-          });
           await client.query('RELEASE SAVEPOINT capture_embedding');
           embedded = true;
         } catch {
           await client.query('ROLLBACK TO SAVEPOINT capture_embedding');
           await client.query('RELEASE SAVEPOINT capture_embedding');
           embedErrorCode = 'EMBEDDING_FAILED';
+        }
+      }
+
+      if (embedded && !relationErrorCode) {
+        await client.query('SAVEPOINT capture_relations');
+        try {
+          const updatedMemory = await updateMemoryMetadata(client, memory.id, {
+            ...memory.metadata,
+            related,
+          });
+          await client.query('RELEASE SAVEPOINT capture_relations');
+          memory = updatedMemory;
+        } catch {
+          await client.query('ROLLBACK TO SAVEPOINT capture_relations');
+          await client.query('RELEASE SAVEPOINT capture_relations');
+          related = [];
+          relationErrorCode = 'RELATION_DETECTION_FAILED';
         }
       }
 

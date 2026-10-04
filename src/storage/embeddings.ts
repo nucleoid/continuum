@@ -44,7 +44,6 @@ export async function vectorSearchMemoryIds(
   provider: Pick<EmbeddingProvider, 'id' | 'dim'>,
   limit: number,
   types?: MemoryType[],
-  options: { threshold?: number; excludeMemoryId?: string } = {},
 ): Promise<Array<{ id: string; distance: number }>> {
   if (scopeIds.length === 0) return [];
   assertEmbeddingVectorDimension(queryVector, provider);
@@ -59,16 +58,6 @@ export async function vectorSearchMemoryIds(
     params.push(types);
     typeFilter = ` AND m.type = ANY($${params.length}::text[])`;
   }
-  let exclusionFilter = '';
-  if (options.excludeMemoryId) {
-    params.push(options.excludeMemoryId);
-    exclusionFilter = ` AND m.id <> $${params.length}::uuid`;
-  }
-  let thresholdFilter = '';
-  if (options.threshold !== undefined) {
-    params.push(options.threshold);
-    thresholdFilter = ` AND 1 - (e.embedding <=> $1::vector) >= $${params.length}`;
-  }
   params.push(limit);
   const limitIdx = params.length;
   const { rows } = await pool.query(
@@ -81,9 +70,7 @@ export async function vectorSearchMemoryIds(
         AND e.provider = $3
         AND e.dim = $4
         ${typeFilter}
-        ${exclusionFilter}
-        ${thresholdFilter}
-      ORDER BY distance ASC, m.id ASC
+      ORDER BY e.embedding <=> $1::vector
       LIMIT $${limitIdx}`,
     params,
   );

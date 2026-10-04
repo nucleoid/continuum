@@ -34,15 +34,27 @@ Successful REST and MCP captures include `related: []`. When an embedding
 provider is configured, Continuum probes the target scope plus org and returns
 up to five readable live, unexpired candidates in descending cosine similarity.
 `CONTINUUM_RELATION_THRESHOLD` sets the inclusive threshold and defaults to
-`0.92`; startup rejects values outside `0` through `1`.
+`0.92`. It accepts conventional decimal forms from `0` through `1` (for
+example `0`, `0.92`, or `1.0`) and rejects alternate numeric syntaxes.
 
 Candidates are advisory only. `possible-conflict` means a nonidentical
 fact/fact or decision/decision pair is highly similar; it does not assert a
 contradiction. Continuum never automatically supersedes an existing memory.
-Provider, embedding-storage, or candidate-probe failures do not reject the
-capture and expose no provider or memory content in diagnostics. Concurrent
-duplicate writes may miss each other in v0 because detection is intentionally
-best-effort and does not serialize captures.
+`metadata.related` is reserved; REST, MCP, and service callers that supply it
+receive `INVALID_INPUT`. Provider or embedding-storage failure does not reject
+capture and returns `embedded: false`. Candidate probing or metadata-storage
+failure preserves the valid embedding, returns `embedded: true` with an empty
+`related` array, and records only the bounded `RELATION_DETECTION_FAILED` audit
+code. No failure path exposes provider, database, or memory content in
+diagnostics. Promotion strips advisory relation metadata because source-scope
+candidate IDs are not valid destination-scope evidence. Concurrent duplicate
+writes may miss each other in v0 because detection is intentionally best-effort
+and does not serialize captures.
+
+Issue #15 does not surface candidates in the review queue. Any future issue #12
+decision workflow must reauthorize candidate IDs for the current caller and
+revalidate scope, state, expiry, provider, dimension, and relation before use.
+Stored candidates never auto-supersede, reject, or mutate memory state.
 
 Every response carries `X-Request-Id`. A conservative inbound ID is preserved;
 other values are replaced with a generated UUID. JSON errors also include the

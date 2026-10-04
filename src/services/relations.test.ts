@@ -38,7 +38,9 @@ describe('relation threshold configuration', () => {
     expect(() => validateRelationThreshold(value)).toThrow(/between 0 and 1/);
   });
 
-  it.each(['', 'nope', '-1', '1.1'])('rejects invalid environment threshold %s', (value) => {
+  it.each([
+    '', 'nope', '-1', '1.1', '.92', '00.92', '9.2e-1', '0x1', 'Infinity',
+  ])('rejects invalid environment threshold %s', (value) => {
     expect(() => relationThresholdFromEnv({ CONTINUUM_RELATION_THRESHOLD: value }))
       .toThrow(/CONTINUUM_RELATION_THRESHOLD/);
   });
