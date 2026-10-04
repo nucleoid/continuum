@@ -180,6 +180,49 @@ describe('MCP server', () => {
     })) as CallToolResult;
     const hits = parseJsonResult(recall) as Array<{ id: string }>;
     expect(hits.map((h) => h.id)).toContain(created.id);
+
+    const { rows } = await pool.query(
+      `SELECT memory_id, query, metadata FROM audit_log
+        WHERE action = 'read' ORDER BY id`,
+    );
+    expect(rows).toHaveLength(1 + hits.length);
+    expect(rows[0]).toMatchObject({
+      memory_id: null,
+      query: 'checkout retry',
+      metadata: { record_kind: 'summary', transport: 'mcp' },
+    });
+    expect(rows.slice(1).map((row) => row.memory_id)).toEqual(hits.map((hit) => hit.id));
+    expect(rows.slice(1).every((row) =>
+      row.query === null
+      && row.metadata.record_kind === 'result'
+      && row.metadata.transport === 'mcp')).toBe(true);
+  });
+
+  it('audits the same AGENTS.md memory IDs that MCP delivers', async () => {
+    const { client, me, teamPayments } = await connectClient(null);
+    const memory = await createMemory(pool, {
+      scopeId: teamPayments.id, scopeKind: 'team', type: 'decision',
+      title: 'MCP AGENTS audit', body: 'Delivered reference.',
+      authorId: me.id, source: 'manual',
+    });
+
+    const result = (await client.callTool({
+      name: 'continuum.agents_md', arguments: { team: 'payments', limit: 1 },
+    })) as CallToolResult;
+    expect(rawText(result)).toContain(memory.id.replaceAll('-', '\\-'));
+
+    const { rows } = await pool.query(
+      `SELECT memory_id, metadata FROM audit_log WHERE action = 'read' ORDER BY id`,
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows[0].metadata).toMatchObject({
+      view: 'agents-md', hits: 1, record_kind: 'summary', transport: 'mcp',
+    });
+    expect(rows[1]).toMatchObject({
+      memory_id: memory.id,
+      metadata: { rank: 1, record_kind: 'result', transport: 'mcp' },
+    });
+    expect(rows[1].metadata.request_id).toBe(rows[0].metadata.request_id);
   });
 
   it('applies recall type filters before vector limiting over MCP', async () => {
@@ -617,7 +660,7 @@ describe('MCP server', () => {
       'SELECT action, metadata FROM audit_log ORDER BY id',
     );
     expect(rows.map((row) => row.action)).toEqual([
-      'write', 'read', 'verify', 'read', 'promote', 'write',
+      'write', 'read', 'read', 'verify', 'read', 'read', 'promote', 'write',
     ]);
     expect(rows.every((row) => row.metadata.transport === 'mcp')).toBe(true);
   });

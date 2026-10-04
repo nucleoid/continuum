@@ -48,7 +48,7 @@ describe('GET /api/v0/agents-md', () => {
     await addMembership(pool, author.id, secretTeam.id, 'writer');
     await addMembership(pool, author.id, role.id, 'writer');
 
-    await createMemory(pool, {
+    const orgMemory = await createMemory(pool, {
       scopeId: org.id,
       scopeKind: 'org',
       type: 'decision',
@@ -57,7 +57,7 @@ describe('GET /api/v0/agents-md', () => {
       authorId: author.id,
       source: 'manual',
     });
-    await createMemory(pool, {
+    const teamMemory = await createMemory(pool, {
       scopeId: team.id,
       scopeKind: 'team',
       type: 'playbook',
@@ -66,7 +66,7 @@ describe('GET /api/v0/agents-md', () => {
       authorId: author.id,
       source: 'manual',
     });
-    await createMemory(pool, {
+    const projectMemory = await createMemory(pool, {
       scopeId: project.id,
       scopeKind: 'project',
       type: 'fact',
@@ -75,7 +75,7 @@ describe('GET /api/v0/agents-md', () => {
       authorId: author.id,
       source: 'manual',
     });
-    await createMemory(pool, {
+    const secretMemory = await createMemory(pool, {
       scopeId: secretTeam.id,
       scopeKind: 'team',
       type: 'fact',
@@ -84,7 +84,7 @@ describe('GET /api/v0/agents-md', () => {
       authorId: author.id,
       source: 'manual',
     });
-    await createMemory(pool, {
+    const roleMemory = await createMemory(pool, {
       scopeId: role.id,
       scopeKind: 'role',
       type: 'decision',
@@ -94,7 +94,7 @@ describe('GET /api/v0/agents-md', () => {
       source: 'manual',
     });
     // Context memory in the project scope; should be EXCLUDED from AGENTS.md.
-    await createMemory(pool, {
+    const contextMemory = await createMemory(pool, {
       scopeId: project.id,
       scopeKind: 'project',
       type: 'context',
@@ -103,6 +103,9 @@ describe('GET /api/v0/agents-md', () => {
       authorId: author.id,
       source: 'manual',
     });
+    return {
+      me, orgMemory, teamMemory, projectMemory, secretMemory, roleMemory, contextMemory,
+    };
   }
 
   it('always includes org and the principal role scopes, with no project/team', async () => {
@@ -238,16 +241,31 @@ describe('GET /api/v0/agents-md', () => {
     );
   });
 
-  it('writes an audit entry tagged as the agents-md view', async () => {
-    await seed();
-    await request(app)
-      .get('/api/v0/agents-md?project=booking-engine')
+  it('audits exactly the IDs delivered after scope, expiry, type, and limit filters', async () => {
+    const seeded = await seed();
+    const res = await request(app)
+      .get('/api/v0/agents-md?project=booking-engine&team=payments&limit=1')
       .set('Authorization', 'Bearer entra:user:bundle');
     const { rows } = await pool.query(
-      `SELECT metadata FROM audit_log
-        WHERE action = 'read' AND metadata->>'view' = 'agents-md'`,
+      `SELECT memory_id, scope_id, query, metadata FROM audit_log
+        WHERE action = 'read' ORDER BY id`,
     );
-    expect(rows.length).toBe(1);
+    const deliveredIds = [...res.text.matchAll(/- \*\*Memory ID:\*\* ([0-9a-f\\-]+)/g)]
+      .map((match) => match[1].replaceAll('\\', ''));
+    expect(rows).toHaveLength(1 + deliveredIds.length);
     expect(rows[0].metadata.project).toBe('booking-engine');
+    expect(rows[0].metadata).toMatchObject({
+      view: 'agents-md', hits: deliveredIds.length, record_kind: 'summary',
+      transport: 'rest', request_id: expect.any(String),
+    });
+    expect(rows.slice(1).map((row) => row.memory_id)).toEqual(deliveredIds);
+    expect(rows.slice(1).map((row) => row.metadata.rank)).toEqual([1, 2, 3, 4]);
+    expect(rows.slice(1).every((row) => row.query === null && row.scope_id)).toBe(true);
+    expect(deliveredIds).toEqual([
+      seeded.orgMemory.id, seeded.roleMemory.id,
+      seeded.teamMemory.id, seeded.projectMemory.id,
+    ]);
+    expect(deliveredIds).not.toContain(seeded.secretMemory.id);
+    expect(deliveredIds).not.toContain(seeded.contextMemory.id);
   });
 });

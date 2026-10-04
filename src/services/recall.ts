@@ -2,7 +2,7 @@ import type pg from 'pg';
 import type { Principal, RecallInput, RecallResult } from '../types.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import { EmbeddingProviderUnavailableError, recall } from '../storage/recall.js';
-import { record as recordAudit } from '../audit/log.js';
+import { recordRead as recordReadAudit } from '../audit/log.js';
 import { resolveReadableScopeIds, type AccessibleScope } from './access.js';
 import { asServiceError, dependencyUnavailable } from './errors.js';
 import { parseScopeString } from './scopes.js';
@@ -35,9 +35,8 @@ export async function recallForPrincipal(
     });
 
     // Recall auditing is required. Results are not returned if this write fails.
-    await recordAudit(pool, {
+    await recordReadAudit(pool, {
       principalId: principal.id,
-      action: 'read',
       query: input.query,
       metadata: {
         scopes: scopeIds.length,
@@ -45,6 +44,11 @@ export async function recallForPrincipal(
         embedded: Boolean(embeddingProvider),
         ...auditMetadata,
       },
+      memories: results.map((result, index) => ({
+        memoryId: result.memory.id,
+        scopeId: result.memory.scopeId,
+        metadata: { rank: index + 1, score: result.score },
+      })),
     });
     return { results, accessible };
   } catch (error) {

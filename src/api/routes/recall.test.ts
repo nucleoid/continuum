@@ -182,18 +182,60 @@ describe('POST /api/v0/recall', () => {
     expect(ids).toContain(nonExpiring.id);
   });
 
-  it('writes an audit entry per recall', async () => {
+  it('writes one summary plus safe ranked identity rows for exactly the returned memories', async () => {
     const { me } = await seedWorld();
-    await request(app)
+    const res = await request(app)
       .post('/api/v0/recall')
       .set('Authorization', 'Bearer entra:user:recall')
-      .send({ query: 'checkout' });
+      .send({ query: 'checkout', limit: 2 });
     const { rows } = await pool.query(
-      `SELECT action, query FROM audit_log WHERE principal_id = $1 AND action = 'read'`,
+      `SELECT action, memory_id, scope_id, query, metadata
+         FROM audit_log
+        WHERE principal_id = $1 AND action = 'read'
+        ORDER BY id`,
       [me.id],
     );
-    expect(rows.length).toBe(1);
+    expect(rows).toHaveLength(1 + res.body.results.length);
     expect(rows[0].query).toBe('checkout');
+    expect(rows[0].metadata).toMatchObject({
+      hits: res.body.results.length,
+      record_kind: 'summary',
+      transport: 'rest',
+      request_id: expect.any(String),
+    });
+    expect(rows.slice(1).map((row) => row.memory_id)).toEqual(
+      res.body.results.map((result: { id: string }) => result.id),
+    );
+    expect(rows.slice(1).map((row) => row.metadata.rank)).toEqual([1, 2]);
+    expect(rows.slice(1).every((row) => row.scope_id !== null)).toBe(true);
+    expect(rows.slice(1).every((row) => row.query === null)).toBe(true);
+    expect(rows.slice(1).every((row) =>
+      row.metadata.request_id === rows[0].metadata.request_id
+      && row.metadata.record_kind === 'result'
+      && row.metadata.transport === 'rest'
+      && typeof row.metadata.score === 'number')).toBe(true);
+    expect(JSON.stringify(rows.slice(1))).not.toContain('checkout');
+  });
+
+  it('preserves one request audit row when recall returns zero hits', async () => {
+    const { me } = await seedWorld();
+    const res = await request(app)
+      .post('/api/v0/recall')
+      .set('Authorization', 'Bearer entra:user:recall')
+      .send({ query: 'term-that-does-not-exist-anywhere' });
+    expect(res.status).toBe(200);
+    expect(res.body.results).toEqual([]);
+
+    const { rows } = await pool.query(
+      `SELECT memory_id, query, metadata FROM audit_log
+        WHERE principal_id = $1 AND action = 'read'`,
+      [me.id],
+    );
+    expect(rows).toEqual([{
+      memory_id: null,
+      query: 'term-that-does-not-exist-anywhere',
+      metadata: expect.objectContaining({ hits: 0, record_kind: 'summary' }),
+    }]);
   });
 
   it('rejects malformed input', async () => {

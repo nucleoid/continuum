@@ -30,6 +30,7 @@ export function recallRouter(
       embeddingProvider,
       req.principal!,
       parsed.data,
+      { transport: 'rest' },
     );
     res.json({
       results: results.map((r) => ({

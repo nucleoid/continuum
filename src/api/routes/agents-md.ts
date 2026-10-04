@@ -22,6 +22,7 @@ export function agentsMdRouter(pool: pg.Pool): Router {
       pool,
       req.principal!,
       parsed.data,
+      { transport: 'rest' },
     );
     res.set('Content-Type', 'text/markdown; charset=utf-8');
     res.send(markdown);
