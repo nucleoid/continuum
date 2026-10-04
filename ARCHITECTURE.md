@@ -186,6 +186,25 @@ Memory selection is tuned for "bootstrap an agent": prefers `playbook` and `deci
 
 Output is plain markdown. No vendor-specific tokens. Suitable to drop at the root of any repo and have any agent read first.
 
+The generated document treats memory content as contributed reference data, not
+as system policy. Every entry carries its scope, memory ID, source, author ID,
+and source reference. Titles, provenance values, and bodies are rendered with
+deterministic Markdown and HTML punctuation escaping after CRLF normalization;
+control and Unicode format characters are shown as explicit code-point text.
+Bodies retain every line, including blanks, inside a blockquoted data container
+with generated begin and end delimiters. Each contributed line has an explicit
+`DATA:` prefix so contributed text cannot imitate a generated boundary. This
+prevents contributed text from creating headings, lists, links, HTML, or fences
+outside its entry while preserving the content and the renderer's existing
+section and ranking order.
+
+This formatting is a defense-in-depth trust boundary, not a semantic prompt
+injection filter. Instruction-like natural language remains readable inside the
+data container, so consumers must continue to treat it as untrusted reference
+material. The endpoint, MIME type, and storage schema are unchanged, but clients
+that compare exact generated output must accept the hardened format. Rendering
+happens on read, so existing memories need no backfill.
+
 ## Capture plugins (v0 set)
 
 Each plugin lives in `src/capture/{plugin}/`, registers an id, and posts to the internal capture API with a service-account token.
