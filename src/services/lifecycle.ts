@@ -17,7 +17,21 @@ import { validateScopeRef } from './scopes.js';
 export type { PromoteResult };
 
 export const VERIFICATION_NOTE_MAX_LENGTH = 2000;
-export const VERIFICATION_NOTE_SAFE_PATTERN = /^[^\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]*$/;
+const VERIFICATION_NOTE_SAFE_PATTERN = /^[^\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]*$/;
+
+function containsLoneUtf16Surrogate(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) return true;
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
 
 export async function promoteForPrincipal(
   pool: pg.Pool,
@@ -55,6 +69,12 @@ export async function verifyForPrincipal(
       throw new ServiceError(
         'INVALID_INPUT',
         'Verification note contains unsupported control characters',
+      );
+    }
+    if (note !== undefined && containsLoneUtf16Surrogate(note)) {
+      throw new ServiceError(
+        'INVALID_INPUT',
+        'Verification note contains invalid Unicode',
       );
     }
     return await verifyMemoryWithAudit(

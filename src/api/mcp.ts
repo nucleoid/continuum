@@ -20,7 +20,6 @@ import {
 import {
   promoteForPrincipal,
   VERIFICATION_NOTE_MAX_LENGTH,
-  VERIFICATION_NOTE_SAFE_PATTERN,
   verifyForPrincipal,
 } from '../services/lifecycle.js';
 import { renderAgentsMdForPrincipal } from '../services/agents-md.js';
@@ -221,8 +220,9 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         memory_id: z.string().uuid(),
         still_true: z.boolean(),
         note: z.string()
-          .max(VERIFICATION_NOTE_MAX_LENGTH)
-          .regex(VERIFICATION_NOTE_SAFE_PATTERN)
+          .describe(
+            `Optional verification note; maximum ${VERIFICATION_NOTE_MAX_LENGTH} UTF-16 code units, valid Unicode only, and no unsupported control characters.`,
+          )
           .optional(),
       },
     },

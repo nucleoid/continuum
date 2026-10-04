@@ -695,22 +695,45 @@ describe('MCP server', () => {
     expect(rows.every((row) => row.metadata.transport === 'mcp')).toBe(true);
   });
 
-  it('publishes verification note safety constraints in the MCP input schema', async () => {
+  it('documents verification note safety while deferring validation to the service envelope', async () => {
     const { client } = await connectClient(null);
     const tools = await client.listTools();
     const verify = tools.tools.find((tool) => tool.name === 'continuum.verify');
     const note = (verify?.inputSchema as {
-      properties?: { note?: { maxLength?: number; pattern?: string } };
+      properties?: {
+        note?: { description?: string; maxLength?: number; pattern?: string };
+      };
     }).properties?.note;
 
-    expect(note?.maxLength).toBe(2000);
-    expect(note?.pattern).toBeDefined();
+    expect(note?.description).toContain('2000 UTF-16 code units');
+    expect(note?.maxLength).toBeUndefined();
+    expect(note?.pattern).toBeUndefined();
   });
 
   it.each([
-    { label: 'overlong', note: 'x'.repeat(2001) },
-    { label: 'unsafe control', note: 'unsafe\u0000note' },
-  ])('rejects $label verification notes at the MCP boundary', async ({ note }) => {
+    {
+      label: 'overlong',
+      note: 'x'.repeat(2001),
+      message: 'Verification note must be 2000 characters or fewer',
+    },
+    {
+      label: 'unsafe control',
+      note: 'unsafe\u0000note',
+      message: 'Verification note contains unsupported control characters',
+    },
+    {
+      label: 'lone high surrogate',
+      note: 'unsafe\ud800note',
+      message: 'Verification note contains invalid Unicode',
+    },
+    {
+      label: 'lone low surrogate',
+      note: 'unsafe\udc00note',
+      message: 'Verification note contains invalid Unicode',
+    },
+  ])('rejects $label verification notes with the service error envelope', async ({
+    note, message,
+  }) => {
     const { client } = await connectClient(null);
     const capture = (await client.callTool({
       name: 'continuum.capture',
@@ -726,6 +749,9 @@ describe('MCP server', () => {
     })) as CallToolResult & { isError?: boolean };
 
     expect(result.isError).toBe(true);
+    expect(parseJsonResult(result)).toEqual({
+      error: { code: 'INVALID_INPUT', message },
+    });
     expect(rawText(result)).not.toContain(note);
     const { rows } = await pool.query(
       `SELECT last_verified,
@@ -734,6 +760,33 @@ describe('MCP server', () => {
       [id],
     );
     expect(rows[0]).toEqual({ last_verified: null, audits: 1 });
+  });
+
+  it('accepts and preserves an astral character at the 2000 UTF-16-unit boundary', async () => {
+    const { client } = await connectClient(null);
+    const capture = (await client.callTool({
+      name: 'continuum.capture',
+      arguments: {
+        scope_kind: 'team', scope_name: 'payments', type: 'fact',
+        title: 'Unicode boundary', body: 'Boundary.', source: 'manual',
+      },
+    })) as CallToolResult;
+    const id = (parseJsonResult(capture) as { id: string }).id;
+    const note = `${'x'.repeat(1998)}\ud83d\ude00`;
+    expect(note.length).toBe(2000);
+
+    const result = (await client.callTool({
+      name: 'continuum.verify',
+      arguments: { memory_id: id, still_true: true, note },
+    })) as CallToolResult & { isError?: boolean };
+
+    expect(result.isError).not.toBe(true);
+    const { rows } = await pool.query(
+      `SELECT metadata FROM audit_log
+        WHERE memory_id = $1 AND action = 'verify'`,
+      [id],
+    );
+    expect(rows[0].metadata.note).toBe(note);
   });
 });
 

@@ -12,7 +12,11 @@ import { recallForPrincipal } from './recall.js';
 import { renderAgentsMdForPrincipal } from './agents-md.js';
 import { ServiceError } from './errors.js';
 import { createMemory } from '../storage/memories.js';
-import { promoteForPrincipal, verifyForPrincipal } from './lifecycle.js';
+import {
+  promoteForPrincipal,
+  VERIFICATION_NOTE_MAX_LENGTH,
+  verifyForPrincipal,
+} from './lifecycle.js';
 import { ensureScopeForPrincipal } from './scopes.js';
 
 describe('shared services', () => {
@@ -1046,13 +1050,41 @@ describe('shared services', () => {
     },
   );
 
-  it('accepts a 2000-character verification note and common whitespace', async () => {
+  it.each([
+    { label: 'lone high surrogate', note: 'unsafe\ud800note' },
+    { label: 'lone low surrogate', note: 'unsafe\udc00note' },
+  ])('rejects a $label without mutation or audit', async ({ note }) => {
+    const { principal, team } = await seedWriter();
+    const source = await createMemory(pool, {
+      scopeId: team.id, scopeKind: team.kind, type: 'fact', title: 'Unicode note',
+      body: 'No malformed Unicode audit note.', authorId: principal.id, source: 'manual',
+    });
+
+    await expect(verifyForPrincipal(
+      pool, principal, source.id, true, note,
+    )).rejects.toMatchObject<ServiceError>({
+      code: 'INVALID_INPUT',
+      status: 400,
+      publicMessage: 'Verification note contains invalid Unicode',
+    });
+
+    const { rows } = await pool.query(
+      `SELECT last_verified,
+              (SELECT count(*)::int FROM audit_log WHERE memory_id = $1) AS audits
+         FROM memories WHERE id = $1`,
+      [source.id],
+    );
+    expect(rows[0]).toEqual({ last_verified: null, audits: 0 });
+  });
+
+  it('accepts and preserves an astral character at the 2000 UTF-16-unit boundary', async () => {
     const { principal, team } = await seedWriter();
     const source = await createMemory(pool, {
       scopeId: team.id, scopeKind: team.kind, type: 'fact', title: 'Exact note bound',
       body: 'Boundary input.', authorId: principal.id, source: 'manual',
     });
-    const note = `${'x'.repeat(1997)}\n\t\r`;
+    const note = `${'x'.repeat(1995)}\ud83d\ude00\n\t\r`;
+    expect(note.length).toBe(VERIFICATION_NOTE_MAX_LENGTH);
 
     await expect(verifyForPrincipal(pool, principal, source.id, true, note))
       .resolves.toMatchObject({ state: 'live' });
