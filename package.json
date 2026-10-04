@@ -2,6 +2,7 @@
   "name": "@continuum/core",
   "version": "0.1.0",
   "description": "Vendor-agnostic memory layer for development teams",
+  "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

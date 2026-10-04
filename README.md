@@ -24,4 +24,4 @@ v0 design in progress. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the schema, 
 
 ## License
 
-Proprietary. All rights reserved. Contact mitch@pragmaticcoder.com for licensing.
+Continuum is licensed under the [MIT License](./LICENSE).
