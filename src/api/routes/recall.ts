@@ -19,34 +19,30 @@ export function recallRouter(
 ): Router {
   const router = Router();
 
-  router.post('/recall', async (req, res, next) => {
+  router.post('/recall', async (req, res) => {
     const parsed = recallSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ code: 'INVALID_INPUT', error: 'Invalid request' });
       return;
     }
-    try {
-      const { results, accessible } = await recallForPrincipal(
-        pool,
-        embeddingProvider,
-        req.principal!,
-        parsed.data,
-      );
-      res.json({
-        results: results.map((r) => ({
-          id: r.memory.id,
-          score: r.score,
-          scope: accessible.get(r.memory.scopeId)?.label ?? null,
-          type: r.memory.type,
-          title: r.memory.title,
-          excerpt: r.excerpt,
-          sourceRef: r.memory.sourceRef,
-          createdAt: r.memory.createdAt,
-        })),
-      });
-    } catch (error) {
-      next(error);
-    }
+    const { results, accessible } = await recallForPrincipal(
+      pool,
+      embeddingProvider,
+      req.principal!,
+      parsed.data,
+    );
+    res.json({
+      results: results.map((r) => ({
+        id: r.memory.id,
+        score: r.score,
+        scope: accessible.get(r.memory.scopeId)?.label ?? null,
+        type: r.memory.type,
+        title: r.memory.title,
+        excerpt: r.excerpt,
+        sourceRef: r.memory.sourceRef,
+        createdAt: r.memory.createdAt,
+      })),
+    });
   });
 
   return router;

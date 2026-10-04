@@ -56,7 +56,9 @@ describe('POST /api/v0/capture', () => {
       .set('Authorization', 'Bearer entra:user:capture')
       .send({ title: 'oops' });
     expect(res.status).toBe(400);
-    expect(res.body).toEqual({ code: 'INVALID_INPUT', error: 'Invalid request' });
+    expect(res.body).toEqual({
+      code: 'INVALID_INPUT', error: 'Invalid request', requestId: expect.any(String),
+    });
   });
 
   it.each(captureSources)('accepts registered capture source %s', async (source) => {
@@ -97,7 +99,9 @@ describe('POST /api/v0/capture', () => {
       });
 
     expect(res.status).toBe(400);
-    expect(res.body).toEqual({ code: 'INVALID_INPUT', error: 'Unknown capture source' });
+    expect(res.body).toEqual({
+      code: 'INVALID_INPUT', error: 'Unknown capture source', requestId: expect.any(String),
+    });
     expect(embed).not.toHaveBeenCalled();
     const sideEffects = await pool.query(
       `SELECT

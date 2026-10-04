@@ -24,24 +24,20 @@ export function captureRouter(
 ): Router {
   const router = Router();
 
-  router.post('/capture', async (req, res, next) => {
+  router.post('/capture', async (req, res) => {
     const parsed = captureSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ code: 'INVALID_INPUT', error: 'Invalid request' });
       return;
     }
     const principal = req.principal!;
-    try {
-      const result = await captureMemory(pool, embeddingProvider, principal, parsed.data);
-      res.status(201).json({
-        id: result.memory.id,
-        scopeId: result.memory.scopeId,
-        expiresAt: result.memory.expiresAt,
-        embedded: result.embedded,
-      });
-    } catch (error) {
-      next(error);
-    }
+    const result = await captureMemory(pool, embeddingProvider, principal, parsed.data);
+    res.status(201).json({
+      id: result.memory.id,
+      scopeId: result.memory.scopeId,
+      expiresAt: result.memory.expiresAt,
+      embedded: result.embedded,
+    });
   });
 
   return router;
