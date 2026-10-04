@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import type pg from 'pg';
@@ -19,14 +19,20 @@ const demoteAdminScript = fileURLToPath(
 const removeAdminScript = fileURLToPath(
   new URL('../../scripts/remove-org-admin.sql', import.meta.url),
 );
-const databaseUrl = process.env.CONTINUUM_TEST_DATABASE_URL
+const restoreAdminScript = fileURLToPath(
+  new URL('../../scripts/restore-org-admin.sql', import.meta.url),
+);
+const hasPsql = spawnSync('psql', ['--version'], { stdio: 'ignore' }).status === 0;
+const fallbackDatabaseUrl = process.env.CONTINUUM_TEST_DATABASE_URL
   ?? 'postgres://continuum:continuum@localhost:5433/continuum';
 
 describe('ensure-scope operator client', () => {
   let pool: pg.Pool;
+  let databaseUrl: string;
 
   beforeEach(async () => {
     pool ??= await makeTestPool();
+    databaseUrl = pool.options.connectionString ?? fallbackDatabaseUrl;
     await resetData(pool);
   });
 
@@ -74,9 +80,25 @@ describe('ensure-scope operator client', () => {
     const invalid = await execFileAsync(process.execPath, [script, 'bad', 'name'])
       .catch((error: unknown) => error as { code: number });
     expect(invalid.code).toBe(2);
+
+    const unknownCredential = 'c'.repeat(64);
+    const startupFailure = await execFileAsync(process.execPath, [
+      script, 'project', 'client-smoke',
+    ], {
+      cwd: '/tmp',
+      env: {
+        ...process.env,
+        CONTINUUM_DATABASE_URL: databaseUrl,
+        CONTINUUM_PRINCIPAL_EXTERNAL_ID: unknownCredential,
+      },
+    }).catch((error: unknown) => error as { code: number; stderr: string });
+    expect(startupFailure.code).toBe(3);
+    expect(startupFailure.stderr).toContain('transport or startup failure');
+    expect(startupFailure.stderr).not.toContain(unknownCredential);
+    expect(startupFailure.stderr).not.toContain('Error:');
   }, 20_000);
 
-  it('lists admins without bearer values and safely demotes or removes by UUID', async () => {
+  it.skipIf(!hasPsql)('lists admins without bearer values and safely changes roles by UUID', async () => {
     const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
     const writer = await createPrincipal(pool, {
       externalId: 'secret-writer-bearer', kind: 'service', displayName: 'Writer',
@@ -84,16 +106,22 @@ describe('ensure-scope operator client', () => {
     const removed = await createPrincipal(pool, {
       externalId: 'secret-removed-bearer', kind: 'service', displayName: 'Removed',
     });
+    const keeper = await createPrincipal(pool, {
+      externalId: 'secret-keeper-bearer', kind: 'service', displayName: 'Keeper',
+    });
     await addMembership(pool, writer.id, org.id, 'admin');
     await addMembership(pool, removed.id, org.id, 'admin');
+    await addMembership(pool, keeper.id, org.id, 'admin');
 
     const inventory = await execFileAsync('psql', [
       databaseUrl, '-v', 'ON_ERROR_STOP=1', '-f', listAdminsScript,
     ]);
     expect(inventory.stdout).toContain(writer.id);
     expect(inventory.stdout).toContain(removed.id);
+    expect(inventory.stdout).toContain(keeper.id);
     expect(inventory.stdout).not.toContain(writer.externalId);
     expect(inventory.stdout).not.toContain(removed.externalId);
+    expect(inventory.stdout).not.toContain(keeper.externalId);
 
     await execFileAsync('psql', [
       databaseUrl, '-v', 'ON_ERROR_STOP=1', '-v', `principal_id=${writer.id}`,
@@ -107,8 +135,31 @@ describe('ensure-scope operator client', () => {
     const { rows } = await pool.query(
       `SELECT principal_id, role FROM scope_memberships
         WHERE principal_id = ANY($1::uuid[]) ORDER BY principal_id`,
-      [[writer.id, removed.id]],
+      [[writer.id, removed.id, keeper.id]],
     );
-    expect(rows).toEqual([{ principal_id: writer.id, role: 'writer' }]);
+    expect(rows).toEqual([
+      { principal_id: writer.id, role: 'writer' },
+      { principal_id: keeper.id, role: 'admin' },
+    ].sort((a, b) => a.principal_id.localeCompare(b.principal_id)));
+
+    await execFileAsync('psql', [
+      databaseUrl, '-v', 'ON_ERROR_STOP=1', '-v', `principal_id=${writer.id}`,
+      '-f', restoreAdminScript,
+    ]);
+    const restored = await pool.query(
+      `SELECT role FROM scope_memberships WHERE principal_id = $1 AND scope_id = $2`,
+      [writer.id, org.id],
+    );
+    expect(restored.rows).toEqual([{ role: 'admin' }]);
+
+    await execFileAsync('psql', [
+      databaseUrl, '-v', 'ON_ERROR_STOP=1', '-v', `principal_id=${writer.id}`,
+      '-v', 'replacement_role=writer', '-f', demoteAdminScript,
+    ]);
+    const lastAdminAttempt = await execFileAsync('psql', [
+      databaseUrl, '-v', 'ON_ERROR_STOP=1', '-v', `principal_id=${keeper.id}`,
+      '-f', removeAdminScript,
+    ]).catch((error: unknown) => error as { code: number });
+    expect(lastAdminAttempt.code).not.toBe(0);
   }, 20_000);
 });

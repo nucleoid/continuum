@@ -34,7 +34,7 @@ const transport = new StdioClientTransport({
   command: process.execPath,
   args: [mcpEntrypoint],
   env: process.env,
-  stderr: 'inherit',
+  stderr: 'pipe',
 });
 
 try {
@@ -53,6 +53,13 @@ try {
   } else {
     process.stdout.write(`${text}\n`);
   }
+} catch {
+  process.stderr.write('continuum ensure-scope transport or startup failure\n');
+  process.exitCode = 3;
 } finally {
-  await client.close();
+  try {
+    await client.close();
+  } catch {
+    // Preserve the primary result or transport failure.
+  }
 }

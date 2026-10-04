@@ -27,28 +27,32 @@ SELECT
 
 BEGIN;
 
-WITH target AS (
+WITH admins AS MATERIALIZED (
   SELECT sm.principal_id, sm.scope_id
     FROM scope_memberships sm
     JOIN scopes s ON s.id = sm.scope_id
-   WHERE sm.principal_id = :'principal_id'
-     AND s.kind = 'org' AND s.name = ''
+   WHERE s.kind = 'org' AND s.name = ''
      AND sm.role = 'admin'
    FOR UPDATE
+), target AS (
+  SELECT principal_id, scope_id
+    FROM admins
+   WHERE principal_id = :'principal_id'
 ), changed AS (
   UPDATE scope_memberships sm
      SET role = :'replacement_role'
     FROM target t
    WHERE sm.principal_id = t.principal_id AND sm.scope_id = t.scope_id
+     AND (SELECT count(*) FROM admins) > 1
   RETURNING sm.principal_id
 )
 SELECT count(*) = 1 AS demote_succeeded FROM changed \gset
 
 \if :demote_succeeded
   COMMIT;
-  \echo 'Demoted exactly one org-admin membership.'
+  \echo 'Changed principal' :principal_id 'from admin to' :replacement_role
 \else
   ROLLBACK;
-  \echo 'Expected exactly one matching org-admin membership; nothing changed.'
+  \echo 'Expected one matching org admin and at least one other admin; nothing changed.'
   SELECT 1 / 0 AS org_admin_demote_failed;
 \endif

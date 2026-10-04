@@ -14,11 +14,15 @@ callers that previously created scopes without permission.
    psql "$CONTINUUM_DATABASE_URL" -f scripts/list-org-admins.sql
    ```
 
-   For each unnecessary admin, first determine whether it still writes to the
-   org scope. Demote required org writers with the checked script below; remove
-   the membership only when the principal needs no explicit org role. Both
-   scripts key on the non-secret principal UUID printed by the inventory and
-   refuse to change anything other than exactly one current org admin:
+   For each admin, determine whether it still writes to the org scope, promotes
+   memberships into org scope, or reads audit entries for other principals.
+   Check recent `promote_membership` audit rows and the callers of the audit API,
+   not only application write paths. Keep `admin` when promotion or
+   cross-principal audit access is required; demote to `writer` only when org
+   writes are the sole requirement; remove the membership only when no explicit
+   org role is needed. Both scripts key on the non-secret principal UUID printed
+   by the inventory, refuse to change anything other than exactly one current
+   org admin, and refuse to remove or demote the last org admin:
 
    ```sh
    psql "$CONTINUUM_DATABASE_URL" \
@@ -27,6 +31,15 @@ callers that previously created scopes without permission.
    psql "$CONTINUUM_DATABASE_URL" \
      -v principal_id='<principal UUID>' \
      -f scripts/remove-org-admin.sql
+   ```
+
+   Record the principal UUID, former `admin` role, and replacement action in
+   change control. To reverse either membership change, restore that UUID with:
+
+   ```sh
+   psql "$CONTINUUM_DATABASE_URL" \
+     -v principal_id='<principal UUID>' \
+     -f scripts/restore-org-admin.sql
    ```
 3. Pre-create scopes required by non-admin callers or move provisioning into an
    operator workflow.
@@ -97,9 +110,20 @@ The interactive prompts keep the bearer out of command arguments and shell
 history, but the value is visible while typed and may remain in terminal
 scrollback. Use a private operator session and clear it after retirement.
 
+## Development prerequisites
+
+The SQL-script integration test requires `psql` on `PATH` and a reachable
+`CONTINUUM_TEST_DATABASE_URL`. When `psql` is absent, that test reports a skip;
+the MCP one-shot client tests still run.
+
 ## Rollback
 
 No migration or backfill is involved. Revert the application build and restart
 MCP processes. Existing scopes, memberships, and `create_scope` audit entries
 remain valid. Rolling back restores the insecure scope-creation behavior, so it
 is an emergency measure rather than a steady state.
+
+Reverting application code does not undo an admin demotion or removal. Restore
+each recorded principal UUID with `scripts/restore-org-admin.sql`, verify the
+result with `scripts/list-org-admins.sql`, and record the restoration in change
+control.
