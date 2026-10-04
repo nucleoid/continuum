@@ -59,4 +59,13 @@ describe('production entrypoint callers', () => {
       expect.stringMatching(/\/sweep-cli\.(?:ts|js)$/),
     );
   });
+
+  it('tag vocabulary CLI delegates its production guard and is import-inert', async () => {
+    await import('../cli/tag-vocabularies.js');
+
+    expect(entrypointMocks.isDirectEntrypoint).toHaveBeenCalledOnce();
+    expect(entrypointMocks.isDirectEntrypoint).toHaveBeenCalledWith(
+      expect.stringMatching(/\/tag-vocabularies\.(?:ts|js)$/),
+    );
+  });
 });

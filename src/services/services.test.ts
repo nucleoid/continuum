@@ -193,14 +193,14 @@ describe('shared services', () => {
       body: 'Three attempts.',
       source: 'manual',
       sourceRef: 'https://example.test/source/1',
-      tags: ['checkout'],
+      tags: ['decision'],
       metadata: { branch: 'main' },
     });
 
     expect(result.embedded).toBe(false);
     expect(result.memory).toMatchObject({
       scopeId: team.id,
-      tags: ['checkout'],
+      tags: ['decision'],
       sourceRef: 'https://example.test/source/1',
       metadata: { branch: 'main' },
     });

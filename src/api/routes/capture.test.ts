@@ -247,13 +247,16 @@ describe('POST /api/v0/capture', () => {
         title: 'Use ADO not Jira',
         body: 'ExampleOrg uses Azure DevOps exclusively for work tracking.',
         source: 'manual',
-        tags: ['tooling'],
+        tags: [' Decision '],
       });
     expect(res.status).toBe(201);
     expect(res.body.id).toMatch(/^[0-9a-f-]{36}$/);
     expect(res.body.scopeId).toBe(scope.id);
     expect(res.body.expiresAt).toBeNull();
     expect(res.body.related).toEqual([]);
+
+    const stored = await pool.query('SELECT tags FROM memories WHERE id = $1', [res.body.id]);
+    expect(stored.rows).toEqual([{ tags: ['decision'] }]);
 
     const audit = await pool.query(
       'SELECT action, memory_id, scope_id FROM audit_log WHERE principal_id = $1',
@@ -263,6 +266,61 @@ describe('POST /api/v0/capture', () => {
     expect(audit.rows[0].action).toBe('write');
     expect(audit.rows[0].memory_id).toBe(res.body.id);
     expect(audit.rows[0].scope_id).toBe(scope.id);
+  });
+
+  it('rejects unknown tags before embedding or persistence with deterministic details', async () => {
+    const embed = vi.fn(async () => [[0.1, 0.2, 0.3]]);
+    app = createApp(pool, {
+      embeddingProvider: { id: 'test:tag-validation', dim: 768, embed },
+    });
+    await seedActor('writer');
+
+    const res = await request(app)
+      .post('/api/v0/capture')
+      .set('Authorization', 'Bearer entra:user:capture')
+      .send({
+        scope: { kind: 'team', name: 'payments' },
+        type: 'fact',
+        title: 'Ad hoc taxonomy',
+        body: 'Must not persist.',
+        source: 'manual',
+        tags: ['unknown-two', ' Deploy ', 'unknown-one'],
+      });
+
+    expect(res.status).toBe(422);
+    expect(res.body).toEqual({
+      code: 'UNKNOWN_TAGS',
+      error: 'One or more tags are not in the vocabulary for this scope kind',
+      scopeKind: 'team',
+      unknownTags: ['unknown-one', 'unknown-two'],
+      allowedTags: ['ado', 'branch', 'decision', 'deploy', 'github', 'merged', 'pr', 'session', 'terminal'],
+      requestId: expect.any(String),
+    });
+    expect(embed).not.toHaveBeenCalled();
+    const sideEffects = await pool.query(
+      `SELECT
+         (SELECT count(*)::int FROM memories) AS memories,
+         (SELECT count(*)::int FROM memory_embeddings) AS embeddings,
+         (SELECT count(*)::int FROM audit_log) AS audits`,
+    );
+    expect(sideEffects.rows[0]).toEqual({ memories: 0, embeddings: 0, audits: 0 });
+  });
+
+  it('rejects duplicate tags after normalization', async () => {
+    await seedActor('writer');
+    const res = await request(app)
+      .post('/api/v0/capture')
+      .set('Authorization', 'Bearer entra:user:capture')
+      .send({
+        scope: { kind: 'team', name: 'payments' },
+        type: 'fact', title: 'Duplicate tags', body: 'No ambiguity.', source: 'manual',
+        tags: ['deploy', ' Deploy '],
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({
+      code: 'INVALID_INPUT', error: 'Tags must be unique after normalization',
+    });
   });
 
   it('computes expires_at for context memories in team scope (60 days)', async () => {

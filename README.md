@@ -30,6 +30,7 @@ v0 design in progress. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the schema, 
 - [Knowledge-gap insights](./docs/knowledge-gap-insights.md)
 - [API operations, health checks, and shutdown](./docs/api-operations.md)
 - [AGENTS.md ETag and freshness checks](./docs/agents-md-freshness.md)
+- [Controlled tag vocabularies](./docs/tag-vocabularies.md)
 - [Lifecycle sweeper and review queue](./docs/lifecycle.md)
 - [Audit retention operations](./docs/audit-retention.md)
 - [Memory fetch and browse API](./docs/memory-api.md)

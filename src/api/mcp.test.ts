@@ -398,6 +398,33 @@ describe('MCP server', () => {
     expect(stored.rows).toEqual([{ source }]);
   });
 
+  it('returns the shared unknown-tag domain error before embedding or persistence', async () => {
+    const embed = vi.fn(async () => [[0.1, 0.2, 0.3]]);
+    const { client } = await connectClient({ id: 'test:tags', dim: 768, embed });
+    const result = (await client.callTool({
+      name: 'continuum.capture',
+      arguments: {
+        scope_kind: 'team', scope_name: 'payments', type: 'fact',
+        title: 'Unknown tag', body: 'Must not persist.', source: 'manual',
+        tags: ['unknown-tag'],
+      },
+    })) as CallToolResult & { isError?: boolean };
+
+    expect(result.isError).toBe(true);
+    expect(parseJsonResult(result)).toEqual({
+      error: {
+        code: 'UNKNOWN_TAGS',
+        message: 'One or more tags are not in the vocabulary for this scope kind',
+        scopeKind: 'team',
+        unknownTags: ['unknown-tag'],
+        allowedTags: ['ado', 'branch', 'decision', 'deploy', 'github', 'merged', 'pr', 'session', 'terminal'],
+      },
+    });
+    expect(embed).not.toHaveBeenCalled();
+    expect((await pool.query('SELECT 1 FROM memories')).rowCount).toBe(0);
+    expect((await pool.query('SELECT 1 FROM audit_log')).rowCount).toBe(0);
+  });
+
   it('rejects an unknown source before embedding or persistence', async () => {
     const embed = vi.fn(async () => [[0.1, 0.2, 0.3]]);
     const { client } = await connectClient({

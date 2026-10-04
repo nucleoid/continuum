@@ -94,6 +94,17 @@ CREATE INDEX memories_type_idx        ON memories (type);
 CREATE INDEX memories_tags_gin        ON memories USING gin (tags);
 CREATE INDEX memories_metadata_gin    ON memories USING gin (metadata);
 
+CREATE TABLE tag_vocabularies (
+  scope_kind  TEXT NOT NULL,
+  tag         TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  created_by  UUID REFERENCES principals(id) ON DELETE RESTRICT,
+  is_system   BOOLEAN NOT NULL DEFAULT false,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (scope_kind, tag)
+);
+
 CREATE TABLE memory_embeddings (
   memory_id       UUID PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
   provider        TEXT NOT NULL,         -- 'ollama:nomic-embed-text', 'voyage-3', etc.
@@ -154,7 +165,9 @@ Response:
 Validation rules:
 - `scope` must exist; caller must have `writer` role on it.
 - `type` must be valid; `expires_at` is computed from type + scope kind.
-- `tags` validated against the controlled vocabulary for the scope kind (org-admins manage vocabularies).
+- `tags` are trimmed, lowercased, bounded, and validated against the controlled
+  vocabulary for the scope kind. Org admins manage vocabularies through REST or
+  CLI. Unknown tags fail with `UNKNOWN_TAGS` before embedding or persistence.
 - `source` must be a registered capture plugin id or `"manual"`.
 
 When embedding is configured, capture computes the new vector once and probes

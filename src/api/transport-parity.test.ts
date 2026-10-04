@@ -79,14 +79,14 @@ describe('REST/MCP semantic parity matrix', () => {
       .send({
         scope: { kind: 'team', name: 'payments' },
         type: 'fact', title: 'REST', body: 'body', source: 'manual',
-        sourceRef: 'rest-ref', tags: ['shared'], metadata: { transport: 'rest-value' },
+        sourceRef: 'rest-ref', tags: ['session'], metadata: { transport: 'rest-value' },
       });
     const mcp = (await client.callTool({
       name: 'continuum.capture',
       arguments: {
         scope_kind: 'team', scope_name: 'payments', type: 'fact',
         title: 'MCP', body: 'body', source: 'manual', source_ref: 'mcp-ref',
-        tags: ['shared'], metadata: { transport: 'mcp-value' },
+        tags: ['session'], metadata: { transport: 'mcp-value' },
       },
     })) as ToolResult;
 

@@ -18,6 +18,7 @@ import {
   validateRelationThreshold,
 } from './relations.js';
 import type { Queryable } from '../storage/queryable.js';
+import { normalizeTags, validateTagsForScopeKind } from './tag-vocabularies.js';
 
 export interface CaptureResult {
   memory: Memory;
@@ -241,12 +242,14 @@ export async function captureMemory(
     const relationThreshold = validateRelationThreshold(
       options.relationThreshold ?? DEFAULT_RELATION_THRESHOLD,
     );
+    const tags = normalizeTags(input.tags);
     validateScopeRef(input.scope);
     const scope = await getScopeByRef(pool, input.scope);
     if (!scope) throw new ServiceError('SCOPE_NOT_FOUND', 'Scope not found');
     if (!(await canWriteScope(pool, principal.id, scope.id))) {
       throw new ServiceError('FORBIDDEN', 'Principal lacks writer role on scope');
     }
+    await validateTagsForScopeKind(pool, scope.kind, tags);
 
     const memoryId = randomUUID();
     const route = asEmbeddingRouter(embeddingRouting).resolve({
@@ -304,6 +307,7 @@ export async function captureMemory(
       if (!(await canWriteScopeForMutation(client, principal.id, authorizedScope.id))) {
         throw new ServiceError('FORBIDDEN', 'Principal lacks writer role on scope');
       }
+      await validateTagsForScopeKind(client, authorizedScope.kind, tags, true);
 
       let memory = await createMemory(client, {
         id: memoryId,
@@ -315,7 +319,7 @@ export async function captureMemory(
         authorId: principal.id,
         source: input.source,
         sourceRef: input.sourceRef ?? null,
-        tags: input.tags,
+        tags,
         metadata: { ...input.metadata, related: [] },
       });
 

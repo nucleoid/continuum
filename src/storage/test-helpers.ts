@@ -18,6 +18,7 @@ export async function resetData(pool: pg.Pool): Promise<void> {
       audit_log,
       memory_embeddings,
       memories,
+      tag_vocabularies,
       scope_memberships,
       scopes,
       principals
@@ -32,4 +33,12 @@ export async function resetData(pool: pg.Pool): Promise<void> {
      VALUES ('00000000-0000-4000-8000-000000000011',
              NULL, 'service', 'system:lifecycle')`,
   );
+  await pool.query(`
+    INSERT INTO tag_vocabularies (scope_kind, tag, description, is_system)
+    SELECT scope_kind, tag, 'Built-in Continuum tag', true
+      FROM unnest(ARRAY['org', 'team', 'project', 'user', 'role']) AS scope_kind
+     CROSS JOIN unnest(ARRAY[
+       'pr', 'merged', 'branch', 'github', 'ado', 'deploy', 'session', 'terminal', 'decision'
+     ]) AS tag
+  `);
 }

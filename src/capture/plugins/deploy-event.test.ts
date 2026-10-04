@@ -25,7 +25,7 @@ describe('deploy-event plugin', () => {
     expect(m.scope).toEqual({ kind: 'project', name: 'booking-engine' });
     expect(m.type).toBe('fact');
     expect(m.title).toBe('v1.42.0 deployed on prod');
-    expect(m.tags).toEqual(['deploy', 'prod', 'success']);
+    expect(m.tags).toEqual(['deploy']);
     expect(m.source).toBe('deploy-event');
     expect(m.sourceRef).toBe('https://dev.azure.com/exampleorg/_build/results?buildId=99812');
   });
@@ -47,13 +47,13 @@ describe('deploy-event plugin', () => {
     const out = deployEventPlugin.transform(deploy({ status: 'failure' }));
     expect(out[0].title).toBe('v1.42.0 failed to deploy on prod');
     expect(out[0].body).toContain('v1.42.0 failed to deploy on prod.');
-    expect(out[0].tags).toContain('failure');
+    expect(out[0].tags).toEqual(['deploy']);
   });
 
   it('emits the rollback verb when status is rollback', () => {
     const out = deployEventPlugin.transform(deploy({ status: 'rollback' }));
     expect(out[0].title).toBe('v1.42.0 rolled back on prod');
-    expect(out[0].tags).toContain('rollback');
+    expect(out[0].tags).toEqual(['deploy']);
   });
 
   it('omits optional fields cleanly when they are missing', () => {
