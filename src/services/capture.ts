@@ -8,6 +8,7 @@ import { record as recordAudit } from '../audit/log.js';
 import { canWriteScope, canWriteScopeForMutation } from './access.js';
 import { asServiceError, dependencyUnavailable, ServiceError } from './errors.js';
 import { validateScopeRef } from './scopes.js';
+import { isCaptureSource } from '../capture/source.js';
 
 export interface CaptureResult {
   memory: Memory;
@@ -23,6 +24,9 @@ export async function captureMemory(
   auditMetadata: Record<string, unknown> = {},
 ): Promise<CaptureResult> {
   try {
+    if (!isCaptureSource(input.source)) {
+      throw new ServiceError('INVALID_INPUT', 'Unknown capture source');
+    }
     validateScopeRef(input.scope);
     const scope = await getScopeByRef(pool, input.scope);
     if (!scope) throw new ServiceError('SCOPE_NOT_FOUND', 'Scope not found');

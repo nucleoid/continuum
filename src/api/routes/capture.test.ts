@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type pg from 'pg';
 import request from 'supertest';
 import { makeTestPool, resetData } from '../../storage/test-helpers.js';
@@ -7,6 +7,7 @@ import { createPrincipal } from '../../storage/principals.js';
 import { createScope } from '../../storage/scopes.js';
 import { addMembership } from '../../storage/memberships.js';
 import type { EmbeddingProvider } from '../../embeddings/provider.js';
+import { captureSources } from '../../capture/source.js';
 
 describe('POST /api/v0/capture', () => {
   let pool: pg.Pool;
@@ -56,6 +57,55 @@ describe('POST /api/v0/capture', () => {
       .send({ title: 'oops' });
     expect(res.status).toBe(400);
     expect(res.body).toEqual({ code: 'INVALID_INPUT', error: 'Invalid request' });
+  });
+
+  it.each(captureSources)('accepts registered capture source %s', async (source) => {
+    await seedActor();
+    const res = await request(app)
+      .post('/api/v0/capture')
+      .set('Authorization', 'Bearer entra:user:capture')
+      .send({
+        scope: { kind: 'team', name: 'payments' },
+        type: 'fact',
+        title: `Captured by ${source}`,
+        body: 'Known provenance.',
+        source,
+      });
+
+    expect(res.status).toBe(201);
+    const stored = await pool.query('SELECT source FROM memories WHERE id = $1', [res.body.id]);
+    expect(stored.rows).toEqual([{ source }]);
+  });
+
+  it('rejects an unknown source before embedding or persistence', async () => {
+    const embed = vi.fn(async () => [[0.1, 0.2, 0.3]]);
+    app = createApp(pool, {
+      embeddingProvider: { id: 'test:source-validation', dim: 768, embed },
+    });
+    await seedActor();
+
+    const res = await request(app)
+      .post('/api/v0/capture')
+      .set('Authorization', 'Bearer entra:user:capture')
+      .send({
+        scope: { kind: 'team', name: 'payments' },
+        type: 'fact',
+        title: 'Forged provenance',
+        body: 'Must not persist.',
+        source: 'unregistered-plugin',
+        sourceRef: 'https://example.test/forged',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ code: 'INVALID_INPUT', error: 'Unknown capture source' });
+    expect(embed).not.toHaveBeenCalled();
+    const sideEffects = await pool.query(
+      `SELECT
+         (SELECT count(*)::int FROM memories) AS memories,
+         (SELECT count(*)::int FROM memory_embeddings) AS embeddings,
+         (SELECT count(*)::int FROM audit_log) AS audits`,
+    );
+    expect(sideEffects.rows[0]).toEqual({ memories: 0, embeddings: 0, audits: 0 });
   });
 
   it('commits memory and sanitized audit when the embedding provider fails', async () => {

@@ -10,6 +10,7 @@ import { addMembership } from '../storage/memberships.js';
 import { createMemory } from '../storage/memories.js';
 import { StubEmbeddingProvider } from '../embeddings/stub.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
+import { captureSources } from '../capture/source.js';
 
 interface CallToolResult {
   content: Array<{ type: string; text?: string }>;
@@ -178,6 +179,51 @@ describe('MCP server', () => {
     })) as CallToolResult;
     const hits = parseJsonResult(recall) as Array<{ id: string }>;
     expect(hits.map((h) => h.id)).toContain(created.id);
+  });
+
+  it.each(captureSources)('accepts registered capture source %s', async (source) => {
+    const { client } = await connectClient(null);
+    const result = (await client.callTool({
+      name: 'continuum.capture',
+      arguments: {
+        scope_kind: 'team', scope_name: 'payments', type: 'fact',
+        title: `Captured by ${source}`, body: 'Known provenance.', source,
+      },
+    })) as CallToolResult & { isError?: boolean };
+
+    expect(result.isError).not.toBe(true);
+    const body = parseJsonResult(result) as { id: string };
+    const stored = await pool.query('SELECT source FROM memories WHERE id = $1', [body.id]);
+    expect(stored.rows).toEqual([{ source }]);
+  });
+
+  it('rejects an unknown source before embedding or persistence', async () => {
+    const embed = vi.fn(async () => [[0.1, 0.2, 0.3]]);
+    const { client } = await connectClient({
+      id: 'test:source-validation', dim: 768, embed,
+    });
+
+    const result = (await client.callTool({
+      name: 'continuum.capture',
+      arguments: {
+        scope_kind: 'team', scope_name: 'payments', type: 'fact',
+        title: 'Forged provenance', body: 'Must not persist.',
+        source: 'unregistered-plugin', source_ref: 'https://example.test/forged',
+      },
+    })) as CallToolResult & { isError?: boolean };
+
+    expect(result.isError).toBe(true);
+    expect(parseJsonResult(result)).toEqual({
+      error: { code: 'INVALID_INPUT', message: 'Unknown capture source' },
+    });
+    expect(embed).not.toHaveBeenCalled();
+    const sideEffects = await pool.query(
+      `SELECT
+         (SELECT count(*)::int FROM memories) AS memories,
+         (SELECT count(*)::int FROM memory_embeddings) AS embeddings,
+         (SELECT count(*)::int FROM audit_log) AS audits`,
+    );
+    expect(sideEffects.rows[0]).toEqual({ memories: 0, embeddings: 0, audits: 0 });
   });
 
   it('capture refuses scope without writer role', async () => {
