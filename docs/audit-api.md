@@ -18,3 +18,15 @@ GET /api/v0/audit?since=2026-01-01T12%3A30%3A00%2B12%3A00&until=2026-01-01T01%3A
 ```
 
 The `limit` and `offset` query parameters continue to control pagination when time filters are present.
+
+## Scope-provisioning writes
+
+Successful `continuum.ensure_scope` calls use the existing `write` action with
+`memory_id: null` and `metadata.operation: "create_scope"`. Metadata also
+contains `created`, `kind`, `name`, and `transport`. This includes authorized
+idempotent calls where the scope already exists (`created: false`). Audit and
+SIEM consumers that report memory writes should exclude rows whose
+`metadata.operation` is `create_scope`; scope-provisioning reports should select
+that operation explicitly. The v0 audit endpoint cannot filter on metadata, so
+consumers must filter each returned page client-side and must not treat a
+server-side `action=write` count as an exact memory-write count.

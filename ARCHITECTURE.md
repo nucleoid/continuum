@@ -208,6 +208,22 @@ Methods:
 
 ACLs are enforced server-side from the bearer token's principal. The MCP client never sees memories outside its caller's read set.
 
+`continuum.ensure_scope` is a tenant-administration operation. Every scope kind,
+including the singleton org scope, requires an explicit `admin` membership on
+org. The initial org admin is provisioned through a trusted operator path after
+the migration seeds org; MCP has no bootstrap bypass. Successful ensure calls
+are audited even when the scope already exists, and concurrent calls converge
+on one scope without issuing no-op updates. The checked operator procedure is
+documented in `docs/scope-provisioning.md`; running MCP processes must be
+restarted to load this policy.
+
+This authorization is enforced at Continuum's service boundary. The v0 stdio
+MCP principal and REST bearer identity remain self-asserted placeholders until
+Entra validation lands in M4, so database and process-launch access remain
+trusted administrative capabilities rather than security boundaries. The v0
+REST bearer is the principal `external_id`; org-admin bootstrap therefore uses
+a high-entropy identity and requires trusted-network REST restriction.
+
 ## Shared service layer
 
 REST, MCP, and the AGENTS.md generator share canonical scope and access resolution under `src/services/`. Transport adapters parse protocol-specific input and serialize their existing wire formats. Services own scope validation, ACL decisions, persistence orchestration, and audit policy.

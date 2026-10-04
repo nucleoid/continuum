@@ -57,9 +57,34 @@ export async function getOrCreateScope(
   pool: Queryable,
   ref: ScopeRef,
 ): Promise<Scope> {
+  return (await ensureScopeRow(pool, ref)).scope;
+}
+
+export async function ensureScopeRow(
+  pool: Queryable,
+  ref: ScopeRef,
+): Promise<{ scope: Scope; created: boolean }> {
+  if (ref.kind === 'org' && ref.name !== '') {
+    throw new Error('org scope cannot have a name');
+  }
+  if (ref.kind !== 'org' && ref.name === '') {
+    throw new Error(`Scope ${ref.kind} requires a name`);
+  }
+
+  const id = randomUUID();
+  const { rows } = await pool.query(
+    `INSERT INTO scopes (id, kind, name) VALUES ($1, $2, $3)
+     ON CONFLICT (kind, name) DO NOTHING
+     RETURNING id, kind, name, created_at`,
+    [id, ref.kind, ref.name],
+  );
+  if (rows[0]) return { scope: rowToScope(rows[0]), created: true };
+
+  // This is a fresh statement, so under PostgreSQL READ COMMITTED it sees the
+  // concurrent winner after ON CONFLICT has waited for that transaction.
   const existing = await getScopeByRef(pool, ref);
-  if (existing) return existing;
-  return createScope(pool, ref);
+  if (!existing) throw new Error('scope conflict winner not found');
+  return { scope: existing, created: false };
 }
 
 export async function listScopesByKind(

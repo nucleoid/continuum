@@ -363,32 +363,118 @@ describe('MCP server', () => {
     }
   });
 
-  it('ensure_scope creates a new scope idempotently', async () => {
-    const { client } = await connectClient();
-    const a = (await client.callTool({
-      name: 'continuum.ensure_scope',
-      arguments: { kind: 'project', name: 'booking-engine' },
-    })) as CallToolResult;
-    const b = (await client.callTool({
-      name: 'continuum.ensure_scope',
-      arguments: { kind: 'project', name: 'booking-engine' },
-    })) as CallToolResult;
-    expect((parseJsonResult(a) as { id: string }).id).toBe(
-      (parseJsonResult(b) as { id: string }).id,
+  it('ensure_scope lets an org admin idempotently ensure every scope kind and audits each call', async () => {
+    const { client, me, org } = await connectClient();
+    await addMembership(pool, me.id, org.id, 'admin');
+    const refs = [
+      { kind: 'org', name: '' },
+      { kind: 'team', name: 'delivery' },
+      { kind: 'project', name: 'booking-engine' },
+      { kind: 'user', name: 'entra:user:other' },
+      { kind: 'role', name: 'security' },
+    ];
+
+    for (const ref of refs) {
+      const first = (await client.callTool({
+        name: 'continuum.ensure_scope', arguments: ref,
+      })) as CallToolResult;
+      const second = (await client.callTool({
+        name: 'continuum.ensure_scope', arguments: ref,
+      })) as CallToolResult;
+      const a = parseJsonResult(first) as { id: string; scope: string; created: boolean };
+      const b = parseJsonResult(second) as { id: string; scope: string; created: boolean };
+      expect(b.id).toBe(a.id);
+      expect(a.created).toBe(ref.kind !== 'org');
+      expect(b.created).toBe(false);
+    }
+
+    const { rows } = await pool.query(
+      `SELECT principal_id, scope_id, action, metadata
+         FROM audit_log
+        ORDER BY id`,
+    );
+    expect(rows).toHaveLength(refs.length * 2);
+    expect(rows.every((row) => row.principal_id === me.id)).toBe(true);
+    expect(rows.every((row) => row.scope_id)).toBe(true);
+    expect(rows.every((row) => row.action === 'write')).toBe(true);
+    expect(rows.map((row) => row.metadata)).toEqual(
+      refs.flatMap((ref) => [
+        {
+          operation: 'create_scope', created: ref.kind !== 'org',
+          kind: ref.kind, name: ref.name, transport: 'mcp',
+        },
+        {
+          operation: 'create_scope', created: false,
+          kind: ref.kind, name: ref.name, transport: 'mcp',
+        },
+      ]),
     );
   });
 
-  it('ensure_scope rejects invalid scope shapes with INVALID_SCOPE', async () => {
+  it.each(['writer', 'reader'] as const)(
+    'ensure_scope denies an org %s without revealing whether the target exists',
+    async (role) => {
+      const { client, me, org } = await connectClient();
+      await addMembership(pool, me.id, org.id, role);
+      await createScope(pool, { kind: 'project', name: 'already-there' });
+
+      const results = await Promise.all(['already-there', 'not-there'].map(async (name) =>
+        client.callTool({
+          name: 'continuum.ensure_scope',
+          arguments: { kind: 'project', name },
+        }) as Promise<CallToolResult & { isError?: boolean }>));
+
+      for (const result of results) {
+        expect(result.isError).toBe(true);
+        expect(parseJsonResult(result)).toEqual({
+          error: {
+            code: 'FORBIDDEN',
+            message: 'principal lacks admin role on org scope',
+          },
+        });
+      }
+      const { rows } = await pool.query('SELECT count(*)::int AS count FROM audit_log');
+      expect(rows[0].count).toBe(0);
+    },
+  );
+
+  it('ensure_scope denies a principal without org membership', async () => {
     const { client } = await connectClient();
     const result = (await client.callTool({
       name: 'continuum.ensure_scope',
-      arguments: { kind: 'org', name: 'not-empty' },
+      arguments: { kind: 'team', name: 'unknown' },
+    })) as CallToolResult & { isError?: boolean };
+
+    expect(result.isError).toBe(true);
+    expect(parseJsonResult(result)).toEqual({
+      error: {
+        code: 'FORBIDDEN',
+        message: 'principal lacks admin role on org scope',
+      },
+    });
+  });
+
+  it.each([
+    { kind: 'org', name: 'not-empty' },
+    { kind: 'team', name: '' },
+  ])('ensure_scope rejects invalid $kind scope shapes without inserting or auditing', async (ref) => {
+    const { client, me, org } = await connectClient();
+    await addMembership(pool, me.id, org.id, 'admin');
+    const result = (await client.callTool({
+      name: 'continuum.ensure_scope', arguments: ref,
     })) as CallToolResult & { isError?: boolean };
 
     expect(result.isError).toBe(true);
     expect(parseJsonResult(result)).toEqual({
       error: { code: 'INVALID_SCOPE', message: 'Invalid scope' },
     });
+    const { rows } = await pool.query(
+      `SELECT
+         (SELECT count(*)::int FROM audit_log) AS audits,
+         (SELECT count(*)::int FROM scopes WHERE kind = $1 AND name = $2) AS scopes`,
+      [ref.kind, ref.name],
+    );
+    expect(rows[0]).toEqual({ audits: 0, scopes: 0 });
   });
 
   it('preserves MCP transport metadata across audited tools', async () => {
@@ -418,12 +504,16 @@ describe('MCP server', () => {
         memory_id: id, target_scope_kind: 'org', target_scope_name: '',
       },
     });
+    await client.callTool({
+      name: 'continuum.ensure_scope',
+      arguments: { kind: 'project', name: 'transport-audit' },
+    });
 
     const { rows } = await pool.query(
       'SELECT action, metadata FROM audit_log ORDER BY id',
     );
     expect(rows.map((row) => row.action)).toEqual([
-      'write', 'read', 'verify', 'read', 'promote',
+      'write', 'read', 'verify', 'read', 'promote', 'write',
     ]);
     expect(rows.every((row) => row.metadata.transport === 'mcp')).toBe(true);
   });
