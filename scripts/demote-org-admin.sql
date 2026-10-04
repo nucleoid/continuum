@@ -33,7 +33,7 @@ WITH admins AS MATERIALIZED (
     JOIN scopes s ON s.id = sm.scope_id
    WHERE s.kind = 'org' AND s.name = ''
      AND sm.role = 'admin'
-   FOR UPDATE
+   FOR UPDATE OF sm
 ), target AS (
   SELECT principal_id, scope_id
     FROM admins

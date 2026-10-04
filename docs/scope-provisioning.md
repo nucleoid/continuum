@@ -14,15 +14,22 @@ callers that previously created scopes without permission.
    psql "$CONTINUUM_DATABASE_URL" -f scripts/list-org-admins.sql
    ```
 
-   For each admin, determine whether it still writes to the org scope, promotes
-   memberships into org scope, or reads audit entries for other principals.
-   Check recent `promote_membership` audit rows and the callers of the audit API,
-   not only application write paths. Keep `admin` when promotion or
-   cross-principal audit access is required; demote to `writer` only when org
-   writes are the sole requirement; remove the membership only when no explicit
-   org role is needed. Both scripts key on the non-secret principal UUID printed
-   by the inventory, refuse to change anything other than exactly one current
-   org admin, and refuse to remove or demote the last org admin:
+   For each admin, determine whether it still writes to the org scope, creates
+   scopes with `ensure_scope`, promotes memories into org scope, or reads audit
+   entries for other principals. Use the real audit evidence: scope creation is
+   recorded as `action='write'` with
+   `metadata->>'operation' = 'create_scope'`; promotion is recorded as
+   `action='promote'` with `scope_id` equal to the singleton org scope; audit
+   access is recorded as `action='read'` with
+   `metadata->>'view' = 'audit'`, `metadata->>'orgAdmin' = 'true'`, and a
+   `metadata->'filter'->>'principalId'` other than the caller (including null,
+   which means all principals). Inspect the callers as well as recent rows.
+   Keep `admin` when scope creation, promotion into org, or cross-principal audit
+   access is required; demote to `writer` only when org writes are the sole
+   requirement; remove the membership only when no explicit org role is needed.
+   Both scripts key on the non-secret principal UUID printed by the inventory,
+   refuse to change anything other than exactly one current org admin, and
+   refuse to remove or demote the last org admin:
 
    ```sh
    psql "$CONTINUUM_DATABASE_URL" \
