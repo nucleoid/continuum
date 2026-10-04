@@ -169,6 +169,11 @@ Content-Type: application/json
 Response includes ranked memories with `score`, `scope`, `type`, `source_ref`, and a short `excerpt`. Reading is logged to `audit_log` per principal.
 
 Search is hybrid: vector similarity on `memory_embeddings` plus full-text on `memories.body`, fused by reciprocal rank fusion. Scope filter is applied pre-rank.
+Every serving query also excludes memories whose `expires_at` is at or before
+the database's current time. The full-text and vector candidate queries apply
+this filter before ranking, and recall hydration repeats it so a memory that
+expires while a request is in flight is not returned. The AGENTS.md generator
+uses the same database-clock rule. A null `expires_at` remains non-expiring.
 
 ## AGENTS.md generator
 

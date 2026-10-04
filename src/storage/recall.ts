@@ -59,6 +59,7 @@ async function ftsHits(
        FROM memories
       WHERE scope_id = ANY($2::uuid[])
         AND state = 'live'
+        AND (expires_at IS NULL OR expires_at > now())
         AND to_tsvector('english', title || ' ' || body) @@ plainto_tsquery('english', $1)
         ${typeFilter}
       ORDER BY score DESC
@@ -102,6 +103,7 @@ async function hydrate(
       WHERE id = ANY($1::uuid[])
         AND scope_id = ANY($2::uuid[])
         AND state = 'live'
+        AND (expires_at IS NULL OR expires_at > now())
         ${typeFilter}`,
     params,
   );

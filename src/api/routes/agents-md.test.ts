@@ -151,6 +151,42 @@ describe('GET /api/v0/agents-md', () => {
     expect(res.text).not.toContain('Yesterday I was looking at routing');
   });
 
+  it('omits expired facts while retaining future and null-expiry memories', async () => {
+    await seed();
+    const project = (await getScopeByRef(pool, {
+      kind: 'project',
+      name: 'booking-engine',
+    }))!;
+    const { rows: [author] } = await pool.query(
+      `SELECT id FROM principals WHERE external_id = 'svc:author'`,
+    );
+    await pool.query(
+      `UPDATE memories
+          SET title = 'Expired project fact',
+              expires_at = now() - interval '1 second'
+        WHERE scope_id = $1 AND title = 'Booking-engine deploy host'`,
+      [project.id],
+    );
+    await createMemory(pool, {
+      scopeId: project.id,
+      scopeKind: 'project',
+      type: 'fact',
+      title: 'Future project fact',
+      body: 'This unexpired fact remains in bootstrap context.',
+      authorId: author.id,
+      source: 'manual',
+    });
+
+    const res = await request(app)
+      .get('/api/v0/agents-md?project=booking-engine')
+      .set('Authorization', 'Bearer entra:user:bundle');
+
+    expect(res.status).toBe(200);
+    expect(res.text).not.toContain('Expired project fact');
+    expect(res.text).toContain('Future project fact');
+    expect(res.text).toContain('We use ADO not Jira');
+  });
+
   it('emits only generated headings and identifies memory content as untrusted data', async () => {
     await seed();
     const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;

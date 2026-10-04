@@ -131,6 +131,57 @@ describe('POST /api/v0/recall', () => {
     expect(types).toEqual(new Set(['decision']));
   });
 
+  it('omits expired FTS matches while retaining future and non-expiring matches', async () => {
+    const { other, teamPayments } = await seedWorld();
+    const expired = await createMemory(pool, {
+      scopeId: teamPayments.id,
+      scopeKind: 'team',
+      type: 'fact',
+      title: 'Expired expiry sentinel',
+      body: 'expiry sentinel full text match',
+      authorId: other.id,
+      source: 'manual',
+    });
+    const future = await createMemory(pool, {
+      scopeId: teamPayments.id,
+      scopeKind: 'team',
+      type: 'fact',
+      title: 'Future expiry sentinel',
+      body: 'expiry sentinel full text match',
+      authorId: other.id,
+      source: 'manual',
+    });
+    const nonExpiring = await createMemory(pool, {
+      scopeId: teamPayments.id,
+      scopeKind: 'team',
+      type: 'decision',
+      title: 'Null expiry sentinel',
+      body: 'expiry sentinel full text match',
+      authorId: other.id,
+      source: 'manual',
+    });
+    await pool.query(
+      `UPDATE memories
+          SET expires_at = CASE id
+            WHEN $1 THEN now() - interval '1 second'
+            WHEN $2 THEN now() + interval '1 hour'
+          END
+        WHERE id = ANY($3::uuid[])`,
+      [expired.id, future.id, [expired.id, future.id]],
+    );
+
+    const res = await request(app)
+      .post('/api/v0/recall')
+      .set('Authorization', 'Bearer entra:user:recall')
+      .send({ query: 'expiry sentinel', limit: 10 });
+
+    expect(res.status).toBe(200);
+    const ids = res.body.results.map((result: { id: string }) => result.id);
+    expect(ids).not.toContain(expired.id);
+    expect(ids).toContain(future.id);
+    expect(ids).toContain(nonExpiring.id);
+  });
+
   it('writes an audit entry per recall', async () => {
     const { me } = await seedWorld();
     await request(app)

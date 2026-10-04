@@ -66,6 +66,7 @@ export async function vectorSearchMemoryIds(
        JOIN memories m ON m.id = e.memory_id
       WHERE m.scope_id = ANY($2::uuid[])
         AND m.state = 'live'
+        AND (m.expires_at IS NULL OR m.expires_at > now())
         AND e.provider = $3
         AND e.dim = $4
         ${typeFilter}

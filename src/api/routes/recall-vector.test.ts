@@ -9,7 +9,10 @@ import { addMembership } from '../../storage/memberships.js';
 import { StubEmbeddingProvider } from '../../embeddings/stub.js';
 import type { EmbeddingProvider } from '../../embeddings/provider.js';
 import { createMemory } from '../../storage/memories.js';
-import { storeMemoryEmbeddingVector } from '../../storage/embeddings.js';
+import {
+  storeMemoryEmbeddingVector,
+  vectorSearchMemoryIds,
+} from '../../storage/embeddings.js';
 
 class NamedStubEmbeddingProvider implements EmbeddingProvider {
   readonly dim = 768;
@@ -252,5 +255,57 @@ describe('capture + recall with embeddings', () => {
       .toEqual(decisionIds.sort());
     expect(recall.body.results.every((result: { type: string }) => result.type === 'decision'))
       .toBe(true);
+  });
+
+  it('filters expired vector rows before top-K ranking', async () => {
+    const { scope, principal } = await seedActor();
+    const controlledProvider = new ControlledEmbeddingProvider();
+    const [highSimilarityVector] = await controlledProvider.embed(['higher similarity']);
+    const [lowSimilarityVector] = await controlledProvider.embed(['lower similarity']);
+
+    const expired = await createMemory(pool, {
+      scopeId: scope.id,
+      scopeKind: 'team',
+      type: 'decision',
+      title: 'Expired exact vector match',
+      body: 'Would consume the only ranking slot without pre-rank filtering.',
+      authorId: principal.id,
+      source: 'manual',
+    });
+    const live = await createMemory(pool, {
+      scopeId: scope.id,
+      scopeKind: 'team',
+      type: 'decision',
+      title: 'Live lower vector match',
+      body: 'Must occupy the only ranking slot.',
+      authorId: principal.id,
+      source: 'manual',
+    });
+    await storeMemoryEmbeddingVector(
+      pool,
+      expired.id,
+      highSimilarityVector,
+      controlledProvider,
+    );
+    await storeMemoryEmbeddingVector(
+      pool,
+      live.id,
+      lowSimilarityVector,
+      controlledProvider,
+    );
+    await pool.query(
+      `UPDATE memories SET expires_at = now() - interval '1 second' WHERE id = $1`,
+      [expired.id],
+    );
+
+    const hits = await vectorSearchMemoryIds(
+      pool,
+      highSimilarityVector,
+      [scope.id],
+      controlledProvider,
+      1,
+    );
+
+    expect(hits.map((hit) => hit.id)).toEqual([live.id]);
   });
 });

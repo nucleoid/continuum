@@ -200,6 +200,7 @@ async function fetchSectionMemories(
        FROM memories
       WHERE scope_id = $1
         AND state = 'live'
+        AND (expires_at IS NULL OR expires_at > now())
         AND type = ANY($2::text[])
       ORDER BY array_position($2::text[], type),
                COALESCE(last_verified, updated_at) DESC,
