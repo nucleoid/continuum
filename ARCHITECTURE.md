@@ -220,7 +220,9 @@ restarted to load this policy.
 This authorization is enforced at Continuum's service boundary. The v0 stdio
 MCP principal and REST bearer identity remain self-asserted placeholders until
 Entra validation lands in M4, so database and process-launch access remain
-trusted administrative capabilities rather than security boundaries.
+trusted administrative capabilities rather than security boundaries. The v0
+REST bearer is the principal `external_id`; org-admin bootstrap therefore uses
+a high-entropy identity and requires trusted-network REST restriction.
 
 ## Shared service layer
 

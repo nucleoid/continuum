@@ -23,5 +23,5 @@ SELECT count(*) = 1 AS grant_succeeded FROM granted \gset
 \else
   ROLLBACK;
   \echo 'No unique existing principal and singleton org scope were found.'
-  \quit 3
+  SELECT 1 / 0 AS no_unique_principal_or_org_scope;
 \endif
