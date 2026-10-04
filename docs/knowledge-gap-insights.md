@@ -19,8 +19,12 @@ for each gap. It never returns principal identities. There is no web link
 because capture is an authenticated API operation and Continuum has no web UI.
 
 `continuum.gaps` exposes the same operation through MCP and renders deterministic
-Markdown. Continuum does not schedule a weekly digest or post reports to a
-channel. An external scheduler may call the REST endpoint or MCP tool.
+Markdown. Query-derived capture input is escaped and enclosed in explicit
+`CONTINUUM GAP CAPTURE DATA` boundaries, with each line prefixed `DATA:`, so
+Markdown, HTML, fences, and instruction-like text remain contributed data rather
+than report structure. Continuum does not schedule a weekly digest or post
+reports to a channel. An external scheduler may call the REST endpoint or MCP
+tool.
 
 ## Selection and ranking
 
@@ -39,13 +43,18 @@ by most-recent observation and a stable representative tie-break.
 Resolution is derived from current live memory, not stored as durable insight
 state. Recall summaries written by current Continuum include original scope IDs,
 which permits `scopeFidelity: exact`. Older rows without those IDs remain
-`unknown`; the report does not claim that a current organization-wide match is
-historically equivalent to the original search.
+`unknown` and remain unresolved because no safe current scope filter can be
+reconstructed. An exact empty scope set means the original search covered no
+scopes and also remains unresolved; it never becomes an unfiltered organization
+search.
 
 ## Bounds and configuration
 
 All values are validated at startup. Query values remain capped by these
-settings and fixed API limits.
+settings and fixed API limits. Selection scans only the newest
+`CONTINUUM_GAPS_SCAN_LIMIT` audit rows in the requested time window. The report
+sets `truncated: true` when that scan bound, the candidate bound, or the result
+limit omits otherwise eligible data.
 
 | Variable | Default | Allowed |
 | --- | ---: | ---: |

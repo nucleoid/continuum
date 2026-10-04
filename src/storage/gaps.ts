@@ -32,11 +32,14 @@ function cleanDisplay(value: string): string {
 
 function parseScopeMetadata(values: unknown[]): { scopeIds: string[]; fidelity: 'exact' | 'unknown' } {
   const sets = values.map((value) => Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === 'string')
+    ? [...new Set(value.filter((item): item is string => typeof item === 'string'))].sort()
     : null);
   if (sets.some((set) => set === null)) return { scopeIds: [], fidelity: 'unknown' };
+  const distinctSets = new Map(sets.map((set) => [JSON.stringify(set), set!])).values();
+  const exactSets = [...distinctSets];
+  if (exactSets.length !== 1) return { scopeIds: [], fidelity: 'unknown' };
   return {
-    scopeIds: [...new Set(sets.flatMap((set) => set ?? []))].sort(),
+    scopeIds: exactSets[0]!,
     fidelity: 'exact',
   };
 }
@@ -60,8 +63,7 @@ export async function selectGapCandidates(
        SELECT * FROM scanned
         WHERE action = 'read'
           AND query IS NOT NULL
-          AND jsonb_typeof(metadata->'hits') = 'number'
-          AND (metadata->>'hits')::numeric = 0
+          AND metadata->'hits' = '0'::jsonb
           AND COALESCE(metadata->>'record_kind', 'summary') = 'summary'
           AND COALESCE(metadata->>'view', '') NOT IN ('insights-gaps', 'insights-gap-probe')
         ORDER BY at DESC, id DESC
@@ -136,20 +138,19 @@ export async function isGapCurrentlyResolved(
   query: string,
   scopeIds: readonly string[],
 ): Promise<boolean> {
-  const values: unknown[] = [query];
-  const scopeFilter = scopeIds.length > 0
-    ? (values.push(scopeIds), `AND scope_id = ANY($2::uuid[])`)
-    : '';
+  // An exact empty scope set means the originating recall searched no scopes.
+  // It must not degrade into an unfiltered, organization-wide probe.
+  if (scopeIds.length === 0) return false;
   const { rows } = await pool.query(
     `SELECT EXISTS (
        SELECT 1 FROM memories
         WHERE state = 'live'
           AND (expires_at IS NULL OR expires_at > now())
-          ${scopeFilter}
+          AND scope_id = ANY($2::uuid[])
           AND to_tsvector('english', title || ' ' || body)
               @@ plainto_tsquery('english', $1)
      ) AS resolved`,
-    values,
+    [query, scopeIds],
   );
   return rows[0]?.resolved === true;
 }

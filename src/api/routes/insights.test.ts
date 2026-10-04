@@ -8,6 +8,7 @@ import { getScopeByRef } from '../../storage/scopes.js';
 import { recordRead } from '../../audit/log.js';
 import { createApp } from '../server.js';
 import type { EmbeddingProvider } from '../../embeddings/provider.js';
+import { createMemory } from '../../storage/memories.js';
 
 describe('GET /api/v0/insights/gaps', () => {
   let pool: pg.Pool;
@@ -83,5 +84,25 @@ describe('GET /api/v0/insights/gaps', () => {
     expect(res.body.semanticClustering).toBe(false);
     expect(JSON.stringify(events)).not.toContain('secret-token-gap');
     expect(JSON.stringify(events)).not.toContain(privateError);
+  });
+
+  it('reports exact empty scope searches as unresolved despite matching org memory', async () => {
+    const admin = await seed('admin');
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await createMemory(pool, {
+      scopeId: org.id, scopeKind: 'org', type: 'playbook', title: 'Release rollback guide',
+      body: 'Unrelated org answer.', authorId: admin.id, source: 'manual',
+    });
+    await recordRead(pool, {
+      principalId: admin.id, query: 'release rollback',
+      metadata: { hits: 0, scope_ids: [] }, memories: [],
+    });
+
+    const res = await request(createApp(pool))
+      .get('/api/v0/insights/gaps')
+      .set('Authorization', 'Bearer entra:admin');
+
+    expect(res.status).toBe(200);
+    expect(res.body.gaps[0].resolution).toEqual({ status: 'unresolved', scopeFidelity: 'exact' });
   });
 });

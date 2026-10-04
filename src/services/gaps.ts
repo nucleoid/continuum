@@ -113,7 +113,9 @@ function mergedCluster(cluster: Cluster) {
   const firstSeen = new Date(Math.min(...cluster.members.map((member) => member.firstSeen.getTime())));
   const lastSeen = new Date(Math.max(...cluster.members.map((member) => member.lastSeen.getTime())));
   const representative = cluster.members[0]!;
-  const fidelity = cluster.members.every((member) => member.scopeFidelity === 'exact')
+  const exactScopeSets = new Set(cluster.members.map((member) =>
+    member.scopeFidelity === 'exact' ? JSON.stringify(member.scopeIds) : 'unknown'));
+  const fidelity = exactScopeSets.size === 1 && !exactScopeSets.has('unknown')
     ? 'exact' as const : 'unknown' as const;
   return {
     representative: representative.representative,
@@ -123,7 +125,7 @@ function mergedCluster(cluster: Cluster) {
     firstSeen,
     lastSeen,
     score: frequency * principalKeys.size,
-    scopeIds: [...new Set(cluster.members.flatMap((member) => member.scopeIds))].sort(),
+    scopeIds: fidelity === 'exact' ? cluster.members[0]!.scopeIds : [],
     scopeFidelity: fidelity,
   };
 }
@@ -171,9 +173,12 @@ export async function getKnowledgeGaps(
       .slice(0, options.limit);
     const gaps: KnowledgeGap[] = [];
     for (const gap of merged) {
-      const resolved = await isGapCurrentlyResolved(
-        pool, gap.representative, gap.scopeFidelity === 'exact' ? gap.scopeIds : [],
-      );
+      // Legacy rows do not identify the scopes searched, so they cannot be
+      // safely compared with current memory. Exact empty scope sets likewise
+      // represent a search over no scopes and are deterministically unresolved.
+      const resolved = gap.scopeFidelity === 'exact' && gap.scopeIds.length > 0
+        ? await isGapCurrentlyResolved(pool, gap.representative, gap.scopeIds)
+        : false;
       gaps.push({
         representative: gap.representative,
         variants: gap.variants,

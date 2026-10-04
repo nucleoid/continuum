@@ -88,4 +88,28 @@ describe('getKnowledgeGaps', () => {
     expect(report.gaps[0].resolution).toEqual({ status: 'resolved', scopeFidelity: 'exact' });
     expect(JSON.stringify(report)).not.toContain('private-memory-content');
   });
+
+  it.each([
+    ['an exact empty scope set', { hits: 0, scope_ids: [] }, 'exact'],
+    ['legacy scope metadata', { hits: 0 }, 'unknown'],
+  ] as const)('does not resolve %s from unrelated org memory', async (_label, metadata, fidelity) => {
+    const me = await admin();
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await createMemory(pool, {
+      scopeId: org.id, scopeKind: 'org', type: 'playbook', title: 'Release rollback guide',
+      body: 'private-memory-content', authorId: me.id, source: 'manual',
+    });
+    await recordRead(pool, {
+      principalId: me.id, query: 'release rollback', metadata, memories: [],
+    });
+
+    const report = await getKnowledgeGaps(pool, null, me, {
+      sinceDays: 30, limit: 10, minFrequency: 1, threshold: 0.9,
+      candidateLimit: 20, scanLimit: 100, maxQueryChars: 2_000,
+      now: new Date('2026-10-04T12:00:00Z'),
+    });
+
+    expect(report.gaps[0].resolution).toEqual({ status: 'unresolved', scopeFidelity: fidelity });
+    expect(JSON.stringify(report)).not.toContain('private-memory-content');
+  });
 });

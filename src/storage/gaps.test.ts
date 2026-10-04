@@ -3,7 +3,9 @@ import type pg from 'pg';
 import { makeTestPool, resetData } from './test-helpers.js';
 import { createPrincipal } from './principals.js';
 import { recordRead } from '../audit/log.js';
-import { selectGapCandidates } from './gaps.js';
+import { isGapCurrentlyResolved, selectGapCandidates } from './gaps.js';
+import { createMemory } from './memories.js';
+import { getScopeByRef } from './scopes.js';
 
 describe('selectGapCandidates', () => {
   let pool: pg.Pool;
@@ -62,5 +64,54 @@ describe('selectGapCandidates', () => {
     expect(result.candidates.map((item) => item.normalized)).toEqual([
       'alpha gap', 'middle gap',
     ]);
+  });
+
+  it('keeps an exact empty scope set distinct and never resolves it globally', async () => {
+    const principal = await createPrincipal(pool, {
+      externalId: 'empty-scopes', kind: 'user', displayName: 'Empty scopes',
+    });
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await createMemory(pool, {
+      scopeId: org.id, scopeKind: 'org', type: 'playbook', title: 'Release rollback guide',
+      body: 'Use the documented rollback process.', authorId: principal.id, source: 'manual',
+    });
+    await recordRead(pool, {
+      principalId: principal.id, query: 'release rollback',
+      metadata: { hits: 0, scope_ids: [] }, memories: [],
+    });
+
+    const selection = await selectGapCandidates(pool, {
+      since: new Date(Date.now() - 86_400_000), scanLimit: 50,
+      candidateLimit: 10, maxQueryChars: 2_000,
+    });
+
+    expect(selection.candidates[0]).toMatchObject({
+      scopeIds: [], scopeFidelity: 'exact',
+    });
+    await expect(isGapCurrentlyResolved(pool, 'release rollback', [])).resolves.toBe(false);
+  });
+
+  it('marks grouped searches with different exact scope sets as unknown', async () => {
+    const principal = await createPrincipal(pool, {
+      externalId: 'mixed-scopes', kind: 'user', displayName: 'Mixed scopes',
+    });
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await recordRead(pool, {
+      principalId: principal.id, query: 'same question',
+      metadata: { hits: 0, scope_ids: [] }, memories: [],
+    });
+    await recordRead(pool, {
+      principalId: principal.id, query: 'same question',
+      metadata: { hits: 0, scope_ids: [org.id] }, memories: [],
+    });
+
+    const selection = await selectGapCandidates(pool, {
+      since: new Date(Date.now() - 86_400_000), scanLimit: 50,
+      candidateLimit: 10, maxQueryChars: 2_000,
+    });
+
+    expect(selection.candidates[0]).toMatchObject({
+      scopeIds: [], scopeFidelity: 'unknown', frequency: 2,
+    });
   });
 });

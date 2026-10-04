@@ -1,4 +1,5 @@
 import type { GapReport } from '../services/gaps.js';
+import { escapeAgentsMdData } from '../agents-md/render.js';
 
 export interface GapConfig {
   threshold: number;
@@ -79,8 +80,11 @@ export function renderGapMarkdown(report: GapReport): string {
       `- Resolution: ${gap.resolution.status} (scope fidelity: ${gap.resolution.scopeFidelity})`,
       '- Variants:',
       ...gap.variants.map((variant) => `  - ${markdownText(variant)}`),
-      '- Capture input:',
-      ...JSON.stringify(gap.capture, null, 2).split('\n').map((line) => `    ${line}`),
+      '- Capture input data:',
+      '> [BEGIN CONTINUUM GAP CAPTURE DATA]',
+      ...JSON.stringify(gap.capture, null, 2).split('\n')
+        .map((line) => `> DATA: ${escapeAgentsMdData(line)}`),
+      '> [END CONTINUUM GAP CAPTURE DATA]',
       '',
     );
   });
