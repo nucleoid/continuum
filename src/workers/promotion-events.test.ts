@@ -23,6 +23,16 @@ function deferred<T = void>() {
   return { promise, resolve };
 }
 
+function rejectable<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
 const claimedDelivery: ClaimedPromotionDelivery = {
   event: {
     eventId: 'event-1',
@@ -290,6 +300,32 @@ describe('PromotionEventWorker', () => {
     expect(store.release).toHaveBeenCalledOnce();
   });
 
+  it('bounds a hung database claim so a later delivery cycle can run', async () => {
+    vi.useFakeTimers();
+    try {
+      const never = new Promise<ClaimedPromotionDelivery[]>(() => undefined);
+      const store = mockStore({
+        claim: vi.fn().mockReturnValueOnce(never).mockResolvedValueOnce([]),
+      });
+      const instance = new PromotionEventWorker(
+        pool,
+        new PromotionWebhookRegistry(),
+        { ...workerOptions(), databaseTimeoutMs: 20 },
+        store,
+      );
+
+      let firstSettled = false;
+      void instance.drainOnce().finally(() => { firstSettled = true; }).catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(20);
+
+      expect(firstSettled).toBe(true);
+      await expect(instance.drainOnce()).resolves.toBe(0);
+      expect(store.claim).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('tracks every sibling callback when one delivery persistence rejects', async () => {
     const siblingEntered = deferred();
     const releaseSibling = deferred();
@@ -397,6 +433,31 @@ describe('PromotionEventWorker', () => {
     }
   });
 
+  it('persists a genuine callback failure that settles during shutdown grace', async () => {
+    const entered = deferred();
+    const callbackResult = rejectable();
+    const registry = new PromotionWebhookRegistry();
+    registry.register({
+      id: 'hook',
+      onPromoted: async () => {
+        entered.resolve();
+        await callbackResult.promise;
+      },
+    });
+    const store = mockStore({ claim: vi.fn().mockResolvedValue([claimedDelivery]) });
+    const instance = new PromotionEventWorker(pool, registry, workerOptions(), store);
+
+    const draining = instance.drainOnce();
+    await entered.promise;
+    const stopping = instance.stop('SIGTERM');
+    callbackResult.reject(new Error('genuine failure'));
+
+    await expect(draining).resolves.toBe(1);
+    await expect(stopping).resolves.toBeUndefined();
+    expect(store.fail).toHaveBeenCalledOnce();
+    expect(store.abandon).not.toHaveBeenCalled();
+  });
+
   it('requires shutdown grace to be shorter than the delivery lease', () => {
     expect(() => new PromotionEventWorker(
       pool,
@@ -430,6 +491,67 @@ describe('PromotionEventWorker', () => {
     expect(store.complete).toHaveBeenCalledWith(pool, 'event-1', 'hook', 'worker-test');
     expect(store.complete).toHaveResolvedWith(true);
     expect(store.complete).toHaveBeenCalledBefore(store.release as ReturnType<typeof vi.fn>);
+  });
+
+  it('keeps the exact successful attempt retained while shutdown release races its acknowledgement', async () => {
+    vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
+    const releaseCallback = deferred();
+    const releaseComplete = deferred();
+    try {
+      const entered = deferred();
+      const completeEntered = deferred();
+      let owned = true;
+      let acknowledged: boolean | undefined;
+      const store = mockStore({
+        claim: vi.fn().mockResolvedValue([claimedDelivery]),
+        complete: vi.fn(async () => {
+          completeEntered.resolve();
+          await releaseComplete.promise;
+          acknowledged = owned;
+          return owned;
+        }),
+        release: vi.fn(async (_pool, _owner, retained = []) => {
+          const exactAttemptRetained = retained.some((delivery) =>
+            delivery.event.eventId === claimedDelivery.event.eventId
+            && delivery.webhookId === claimedDelivery.webhookId
+            && delivery.attemptCount === claimedDelivery.attemptCount);
+          if (!exactAttemptRetained) owned = false;
+          return exactAttemptRetained ? 0 : 1;
+        }),
+      });
+      const registry = new PromotionWebhookRegistry();
+      registry.register({
+        id: 'hook',
+        onPromoted: async () => {
+          entered.resolve();
+          await releaseCallback.promise;
+        },
+      });
+      const instance = new PromotionEventWorker(
+        pool,
+        registry,
+        workerOptions({ leaseMs: 100, callbackTimeoutMs: 80, shutdownWaitMs: 40 }),
+        store,
+      );
+
+      const draining = instance.drainOnce();
+      await entered.promise;
+      const stopping = instance.stop('SIGTERM');
+      releaseCallback.resolve();
+      await completeEntered.promise;
+      await vi.advanceTimersByTimeAsync(40);
+      await stopping;
+      releaseComplete.resolve();
+      await draining;
+
+      expect(store.release).toHaveBeenCalledWith(pool, 'worker-test', [claimedDelivery]);
+      expect(acknowledged).toBe(true);
+    } finally {
+      releaseCallback.resolve();
+      releaseComplete.resolve();
+      await vi.runAllTimersAsync();
+      vi.useRealTimers();
+    }
   });
 
   it.each([
@@ -569,6 +691,46 @@ describe('PromotionEventWorker', () => {
       expect(store.claim).toHaveBeenCalledTimes(2);
     } finally {
       releaseCallback.resolve();
+      await vi.runAllTimersAsync();
+      vi.useRealTimers();
+    }
+  });
+
+  it('bounds callbacks that remain hung after ignoring abort', async () => {
+    vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
+    const releaseCallbacks = deferred();
+    try {
+      const secondDelivery: ClaimedPromotionDelivery = {
+        ...claimedDelivery,
+        event: { ...claimedDelivery.event, eventId: 'event-2' },
+      };
+      const callback = vi.fn(async () => { await releaseCallbacks.promise; });
+      const registry = new PromotionWebhookRegistry();
+      registry.register({ id: 'hook', onPromoted: callback });
+      const store = mockStore({
+        claim: vi.fn()
+          .mockResolvedValueOnce([claimedDelivery])
+          .mockResolvedValueOnce([secondDelivery]),
+      });
+      const instance = new PromotionEventWorker(
+        pool,
+        registry,
+        workerOptions({ claimBatch: 1, leaseMs: 90, callbackTimeoutMs: 20 }),
+        store,
+      );
+
+      const first = instance.drainOnce();
+      await vi.advanceTimersByTimeAsync(20);
+      await first;
+      expect(store.timeout).toHaveBeenCalledOnce();
+
+      const second = instance.drainOnce();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(callback).toHaveBeenCalledOnce();
+      await expect(second).resolves.toBe(0);
+      expect(store.claim).toHaveBeenCalledOnce();
+    } finally {
+      releaseCallbacks.resolve();
       await vi.runAllTimersAsync();
       vi.useRealTimers();
     }

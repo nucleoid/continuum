@@ -291,6 +291,56 @@ describe('promotion outbox', () => {
     expect(rows).toEqual([{ state: 'delivered', lease_owner: null, lease_expires_at: null }]);
   });
 
+  it.each(['complete', 'fail', 'timeout'] as const)(
+    'fences a stale %s write after the same owner reclaims a newer attempt',
+    async (operation) => {
+      const { principal, source } = await seed();
+      await promoteMemoryWithAudit(
+        pool, principal.id, source.id, { kind: 'project', name: 'destination' }, {}, ['hook'],
+      );
+      const [first] = await claimPromotionDeliveries(pool, {
+        owner: 'worker', webhookIds: ['hook'], limit: 1, leaseMs: 1000,
+      });
+      await pool.query(
+        `UPDATE promotion_event_deliveries SET lease_expires_at = now() - interval '1 second'`,
+      );
+      const [second] = await claimPromotionDeliveries(pool, {
+        owner: 'worker', webhookIds: ['hook'], limit: 1, leaseMs: 1000,
+      });
+      expect(second.attemptCount).toBe(first.attemptCount + 1);
+
+      if (operation === 'complete') {
+        await expect(completePromotionDelivery(
+          pool, first.event.eventId, first.webhookId, 'worker', first.attemptCount,
+        )).resolves.toBe(false);
+      } else if (operation === 'fail') {
+        const staleFailure = {
+          maxAttempts: 3, retryDelayMs: 25, error: new Error('stale'),
+          attemptCount: first.attemptCount,
+        };
+        await expect(failPromotionDelivery(
+          pool, first.event.eventId, first.webhookId, 'worker', staleFailure,
+        )).resolves.toBe('lost_lease');
+      } else {
+        const staleTimeout = {
+          maxAttempts: 3, retryDelayMs: 25, attemptCount: first.attemptCount,
+        };
+        await expect(timeoutPromotionDelivery(
+          pool, first.event.eventId, first.webhookId, 'worker', staleTimeout,
+        )).resolves.toBe('lost_lease');
+      }
+
+      const { rows } = await pool.query(
+        `SELECT state, attempt_count, lease_owner, last_error
+           FROM promotion_event_deliveries`,
+      );
+      expect(rows).toEqual([{
+        state: 'pending', attempt_count: second.attemptCount,
+        lease_owner: 'worker', last_error: null,
+      }]);
+    },
+  );
+
   it('dead-letters crash-recovered deliveries at the configured attempt bound', async () => {
     const { principal, source } = await seed();
     await promoteMemoryWithAudit(
