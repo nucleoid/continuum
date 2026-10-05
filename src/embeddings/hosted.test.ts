@@ -239,6 +239,23 @@ describe('hosted embedding providers', () => {
     });
   });
 
+  it('rejects an oversized successful body using a count and dimension bound', async () => {
+    const body = JSON.stringify({
+      data: [{ index: 0, embedding: [1, 0] }],
+      padding: 'x'.repeat(100_000),
+    });
+    const provider = new OpenAIEmbeddingProvider({
+      apiKey: '***', model: 'model', dim: 2,
+      fetchImpl: vi.fn(async () => new Response(body, {
+        headers: { 'content-length': String(body.length) },
+      })),
+    });
+
+    await expect(provider.embed(['one'])).rejects.toMatchObject({
+      code: 'EMBEDDING_INVALID_RESPONSE', failureScope: 'provider',
+    });
+  });
+
   it('enforces its deadline even when an injected fetch ignores abort', async () => {
     const fetchImpl = vi.fn(async () => new Promise<Response>(() => undefined));
     const provider = new OpenAIEmbeddingProvider({

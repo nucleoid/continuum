@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type pg from 'pg';
 import { createPrincipal } from './principals.js';
 import { recall } from './recall.js';
@@ -92,6 +92,81 @@ describe('recall expiry enforcement', () => {
     } finally {
       client.release();
     }
+  });
+
+  it('rechecks expiry against the wall clock inside a long-lived transaction', async () => {
+    const { memory, scope } = await seedMemory('wall clock expiry sentinel');
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `UPDATE memories SET expires_at = clock_timestamp() + interval '20 milliseconds' WHERE id = $1`,
+        [memory.id],
+      );
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      const { results } = await recall(client, {
+        query: 'wall clock expiry sentinel', scopeIds: [scope.id], limit: 10,
+      });
+      expect(results).toEqual([]);
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
+
+  it('runs provider groups concurrently under one overall deadline', async () => {
+    const { scope } = await seedMemory('concurrent groups');
+    let resolveFirst!: (vectors: number[][]) => void;
+    let resolveSecond!: (vectors: number[][]) => void;
+    const first = {
+      id: 'provider:first', dim: 2,
+      embed: vi.fn(() => new Promise<number[][]>((resolve) => { resolveFirst = resolve; })),
+    };
+    const second = {
+      id: 'provider:second', dim: 2,
+      embed: vi.fn(() => new Promise<number[][]>((resolve) => { resolveSecond = resolve; })),
+    };
+    const pending = recall(pool, {
+      query: 'concurrent groups', scopeIds: [scope.id], limit: 10,
+      embeddingDeadlineMs: 1_000,
+      embeddingGroups: [
+        { scopeIds: [scope.id], provider: first },
+        { scopeIds: [scope.id], provider: second },
+      ],
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    try {
+      expect(first.embed).toHaveBeenCalledOnce();
+      expect(second.embed).toHaveBeenCalledOnce();
+    } finally {
+      resolveFirst([[0, 0]]);
+      resolveSecond([[0, 0]]);
+    }
+    await expect(pending).resolves.toMatchObject({ diagnostics: { vector: 'used' } });
+  });
+
+  it('returns settled provider results when another group exceeds the shared deadline', async () => {
+    const { scope } = await seedMemory('shared deadline');
+    const fast = { id: 'provider:fast', dim: 2, async embed() { return [[0, 0]]; } };
+    const stuck = { id: 'provider:stuck', dim: 2, async embed() { return new Promise<number[][]>(() => undefined); } };
+    const recalled = await recall(pool, {
+      query: 'shared deadline', scopeIds: [scope.id], limit: 10,
+      embeddingDeadlineMs: 10,
+      embeddingGroups: [
+        { scopeIds: [scope.id], provider: fast },
+        { scopeIds: [scope.id], provider: stuck },
+      ],
+    });
+    expect(recalled.diagnostics).toEqual({
+      vector: 'partial',
+      groups: [
+        { provider: 'provider:fast', dim: 2, status: 'used' },
+        { provider: 'provider:stuck', dim: 2, status: 'failed', errorCode: 'EMBEDDING_TIMEOUT' },
+      ],
+    });
   });
 
   it.each([

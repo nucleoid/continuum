@@ -39,6 +39,24 @@ afterEach(async () => {
 });
 
 describe('runMigrations', () => {
+  it('ships the embedding key swap as concurrent attachable DDL and seeds failed audits only', async () => {
+    const keySwap = await readFile(
+      join(process.cwd(), 'migrations/0010_provider_embeddings_backfill.sql'),
+      'utf8',
+    );
+    expect(keySwap.trimStart()).toMatch(/^-- continuum:no-transaction/);
+    expect(keySwap).toMatch(/CREATE UNIQUE INDEX CONCURRENTLY/i);
+    expect(keySwap).toMatch(/PRIMARY KEY USING INDEX/i);
+
+    const failureSeed = await readFile(
+      join(process.cwd(), 'migrations/0011_embedding_backfill_failures.sql'),
+      'utf8',
+    );
+    expect(failureSeed).toMatch(/metadata->>'embedded'\s*=\s*'false'/i);
+    expect(failureSeed).toMatch(/metadata->>'embedding_error_code'\s*=\s*'EMBEDDING_FAILED'/i);
+    expect(failureSeed).toMatch(/CREATE INDEX CONCURRENTLY/i);
+  });
+
   it('ships decision constraints after ingestion with nonblocking validation and indexing', async () => {
     const migrations = (await readdir(join(process.cwd(), 'migrations')))
       .filter((file) => file.endsWith('.sql'))
@@ -280,13 +298,15 @@ describe('runMigrations', () => {
         INSERT INTO memories (id) VALUES ('${memoryId}');
         INSERT INTO audit_log (at, action, memory_id, metadata) VALUES
           ('2026-01-02T00:00:00Z', 'write', '${memoryId}',
-           '{"operation":"embedding_backfill","provider":"ollama:model","dim":768}'),
+           '{"operation":"embedding_backfill","provider":"ollama:model","dim":768,"embedded":false,"embedding_error_code":"EMBEDDING_FAILED"}'),
           ('2026-01-01T00:00:00Z', 'write', '${memoryId}',
-           '{"operation":"embedding_backfill","provider":"ollama:model","dim":768}'),
+           '{"operation":"embedding_backfill","provider":"ollama:model","dim":768,"embedded":false,"embedding_error_code":"EMBEDDING_FAILED"}'),
           ('2026-01-01T00:00:00Z', 'write', '${memoryId}',
-           '{"operation":"embedding_backfill","provider":"ollama:model","dim":"invalid"}'),
+           '{"operation":"embedding_backfill","provider":"ollama:model","dim":"invalid","embedded":false,"embedding_error_code":"EMBEDDING_FAILED"}'),
+          ('2025-12-31T00:00:00Z', 'write', '${memoryId}',
+           '{"operation":"embedding_backfill","provider":"successful:model","dim":768,"embedded":true}'),
           ('2026-01-01T00:00:00Z', 'read', '${memoryId}',
-           '{"operation":"embedding_backfill","provider":"ignored","dim":768}');
+           '{"operation":"embedding_backfill","provider":"ignored","dim":768,"embedded":false,"embedding_error_code":"EMBEDDING_FAILED"}');
       `);
 
       await expect(runMigrations(pool, directory)).resolves.toHaveLength(1);

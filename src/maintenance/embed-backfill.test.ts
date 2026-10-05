@@ -368,6 +368,108 @@ describe('embedding backfill', () => {
     )).rows[0].count).toBe(0);
   });
 
+  it.each([
+    ['server response', new EmbeddingProviderError('EMBEDDING_SERVER', 'ambiguous upstream failure')],
+    ['invalid response', new EmbeddingProviderError('EMBEDDING_INVALID_RESPONSE', 'ambiguous response')],
+    ['unclassified response', new EmbeddingProviderError('EMBEDDING_FAILED', 'ambiguous rejection')],
+  ])('diagnostically isolates one poison row after an ambiguous %s', async (_label, failure) => {
+    const { memories } = await seed('project', `ambiguous-${_label}`, [
+      'healthy one', 'poison item', 'healthy two', 'healthy three',
+    ]);
+    const embed = vi.fn(async (texts: string[]) => {
+      if (texts.some((text) => text.includes('poison item'))) throw failure;
+      return vectors.embed(texts);
+    });
+    const provider: EmbeddingProvider = {
+      id: `hosted:ambiguous-${_label}`, dim: 768, local: false, embed,
+    };
+
+    const report = await runEmbeddingBackfill(pool, provider, { batchSize: 4, maxRows: 10 });
+
+    expect(report).toMatchObject({ embedded: 3, failed: 1, completed: true });
+    expect((await pool.query(
+      'SELECT memory_id FROM embedding_backfill_failures WHERE provider = $1',
+      [provider.id],
+    )).rows).toEqual([{ memory_id: memories[1]!.id }]);
+  });
+
+  it('does not convert a provider-wide ambiguous outage into durable row failures', async () => {
+    await seed('project', 'ambiguous-outage', ['one', 'two', 'three', 'four']);
+    const embed = vi.fn(async () => {
+      throw new EmbeddingProviderError('EMBEDDING_SERVER', 'provider unavailable');
+    });
+    const provider: EmbeddingProvider = {
+      id: 'hosted:ambiguous-outage', dim: 768, local: false, embed,
+    };
+    const report = await runEmbeddingBackfill(pool, provider, { batchSize: 4, maxRows: 10 });
+    expect(report).toMatchObject({ embedded: 0, failed: 0, completed: false });
+    expect(report.providerReports).toEqual([
+      expect.objectContaining({ provider: provider.id, errorCode: 'EMBEDDING_SERVER' }),
+    ]);
+    expect((await pool.query('SELECT 1 FROM embedding_backfill_failures')).rowCount).toBe(0);
+  });
+
+  it('continues other providers and preserves per-provider cursors when one provider fails', async () => {
+    await seed('team', 'failed-provider-scope', ['one']);
+    await seed('project', 'healthy-provider-scope', ['two']);
+    const failed: EmbeddingProvider = {
+      id: 'hosted:failed', dim: 768, local: false,
+      async embed() { throw new EmbeddingProviderError('EMBEDDING_AUTH', 'private'); },
+    };
+    const healthy: EmbeddingProvider = {
+      id: 'ollama:healthy', dim: 768, local: true,
+      embed: (texts) => vectors.embed(texts),
+    };
+    const router = new ScopeEmbeddingRouter(
+      new EmbeddingRegistry([['failed', failed], ['healthy', healthy]]),
+      {
+        default: 'healthy',
+        rules: [{ match: { kind: 'team', name: 'failed-provider-scope' }, provider: 'failed' }],
+      },
+    );
+    const report = await runEmbeddingBackfill(pool, router, { maxRows: 10 });
+    expect(report).toMatchObject({ embedded: 1, completed: false });
+    expect(report.providerReports).toEqual(expect.arrayContaining([
+      expect.objectContaining({ provider: failed.id, errorCode: 'EMBEDDING_AUTH' }),
+      expect.objectContaining({ provider: healthy.id, embedded: 1, cursor: null }),
+    ]));
+  });
+
+  it('aligns provider calls to its advertised batch size', async () => {
+    await seed('project', 'provider-batch-alignment', ['one', 'two', 'three', 'four', 'five']);
+    const embed = vi.fn((texts: string[]) => vectors.embed(texts));
+    const provider: EmbeddingProvider = {
+      id: 'hosted:small-batches', dim: 768, local: false, batchSize: 2, embed,
+    };
+    await runEmbeddingBackfill(pool, provider, { batchSize: 5, maxRows: 10 });
+    expect(embed.mock.calls.map(([texts]) => texts.length)).toEqual([2, 2, 1]);
+  });
+
+  it('supports no-wrap and an explicit durable mark-failed operator escape hatch', async () => {
+    const { memories } = await seed('project', 'operator-escape', ['lower', 'upper']);
+    const [lower, upper] = [...memories].sort((left, right) => left.id.localeCompare(right.id));
+    const embed = vi.fn((texts: string[]) => vectors.embed(texts));
+    const provider: EmbeddingProvider = {
+      id: 'ollama:operator-escape', dim: 768, local: true, embed,
+    };
+    const noWrap = await runEmbeddingBackfill(pool, provider, {
+      providerId: provider.id, cursor: upper!.id, noWrap: true, maxRows: 10,
+    });
+    expect(noWrap).toMatchObject({ completed: true, embedded: 0 });
+    expect(embed).not.toHaveBeenCalled();
+
+    const marked = await runEmbeddingBackfill(pool, provider, {
+      providerId: provider.id, markFailed: lower!.id, maxRows: 10,
+    });
+    expect(marked).toMatchObject({ failed: 1, completed: true });
+    expect((await pool.query(
+      `SELECT memory_id FROM embedding_backfill_failures
+        WHERE provider = $1 AND dim = $2`,
+      [provider.id, provider.dim],
+    )).rows).toEqual([{ memory_id: lower!.id }]);
+    expect(embed).not.toHaveBeenCalled();
+  });
+
   it('checkpoints the poison item before stopping at an exhausted error budget', async () => {
     const { memories } = await seed('project', 'error-budget-progress', [
       'healthy one', 'poison item', 'healthy two',
@@ -661,17 +763,17 @@ describe('embedding backfill', () => {
     )).rows[0].count).toBe(0);
   });
 
-  it('treats an invalid whole-batch response as provider-wide without recursive calls', async () => {
+  it('keeps a uniformly invalid whole-batch response provider-wide without row failures', async () => {
     await seed('project', 'invalid-global-response', ['one', 'two', 'three']);
     const embed = vi.fn(async () => [[0]]);
     const provider: EmbeddingProvider = {
       id: 'ollama:invalid-response', dim: 768, local: true, embed,
     };
 
-    await expect(runEmbeddingBackfill(pool, provider, {
-      batchSize: 3, maxRows: 10,
-    })).rejects.toMatchObject({ code: 'EMBEDDING_FAILED' });
-    expect(embed).toHaveBeenCalledTimes(1);
+    const report = await runEmbeddingBackfill(pool, provider, { batchSize: 3, maxRows: 10 });
+    expect(report).toMatchObject({ embedded: 0, failed: 0, completed: false });
+    expect(report.providerReports[0]).toMatchObject({ errorCode: 'EMBEDDING_INVALID_RESPONSE' });
+    expect(embed.mock.calls.length).toBeGreaterThan(1);
     expect((await pool.query(
       `SELECT count(*)::int AS count FROM audit_log
         WHERE metadata->>'operation' = 'embedding_backfill'`,
