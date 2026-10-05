@@ -371,9 +371,12 @@ Five interfaces. Engram and any future system integrate through these. Continuum
    creation, source mutation, and promotion audit. Workers claim with leases,
    renew them while callbacks drain, invoke callbacks outside database
    transactions, retry with bounded backoff, reclaim expired leases, and
-   dead-letter after a bounded attempt count. Shutdown waits for in-flight
-   claims and callbacks before releasing leases, so no callback begins or
-   remains active after worker stop resolves.
+   dead-letter after a bounded attempt count. Shutdown stops new work, renews
+   exact active leases through a bounded grace period, and acknowledges
+   callbacks that succeed during that grace. At the deadline it aborts and
+   detaches non-cooperative callbacks without releasing their leases. Those
+   leases receive no further renewal and become recoverable only after durable
+   expiry, while process exit provides the final callback execution boundary.
    Delivery is at least once, so consumers deduplicate by event ID. Manual retry
    preserves that ID. Unknown webhook IDs remain pending and observable.
 4. **EmbeddingProvider**: implements `embed(texts) -> vectors`. Default impls: `ollama`, `voyage`, `openai`. Sensitive scopes pin to local-only providers.

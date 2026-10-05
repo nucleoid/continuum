@@ -95,13 +95,20 @@ not dead-lettered.
 - `CONTINUUM_PROMOTION_BASE_BACKOFF_MS`, default `1000`
 - `CONTINUUM_PROMOTION_MAX_BACKOFF_MS`, default `300000`
 
-On shutdown the worker stops claiming new rows and waits for any claim already
-in flight before deciding whether callbacks may start. It keeps owned leases
-renewed while active callbacks drain, signals abort at its callback-drain
-deadline, and does not resolve `stop()` or release leases until those callbacks
-actually settle. The runtime's global shutdown deadline remains the final bound
-for an extension that ignores its abort signal. Released work is then safe to
-retry in another process.
+Worker owners are unique process-instance identifiers. On shutdown the worker
+stops claiming new rows and waits for any claim already in flight before
+deciding whether callbacks may start. It renews only the exact deliveries with
+active callbacks during the configured grace period. A callback that succeeds
+during that period is durably acknowledged before its lease can be released.
+
+At the grace deadline, the worker signals abort and detaches callbacks that do
+not settle. `stop()` is therefore bounded even when an extension ignores its
+`AbortSignal`. Leases for those ambiguous deliveries are not released and are
+not renewed again; they remain unavailable until their last durable expiry,
+then become eligible for at-least-once recovery. All other owned leases are
+released immediately. Callback execution cannot be forcibly interrupted inside
+JavaScript, so process exit is the final execution boundary. Consumers must
+still deduplicate by event ID.
 
 The default registries are empty. Deployments register consumers at their
 composition boundary. Core does not import or know about downstream products.

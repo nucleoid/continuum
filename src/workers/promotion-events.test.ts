@@ -42,6 +42,7 @@ function mockStore(
     claim: vi.fn().mockResolvedValue([]),
     complete: vi.fn().mockResolvedValue(true),
     fail: vi.fn().mockResolvedValue('pending'),
+    timeout: vi.fn().mockResolvedValue('pending'),
     release: vi.fn().mockResolvedValue(0),
     renew: vi.fn().mockResolvedValue(0),
     ...overrides,
@@ -126,7 +127,7 @@ describe('PromotionEventWorker', () => {
     expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('do-not-log');
   });
 
-  it('aborts a timed-out callback, schedules bounded retry, and retains the event ID', async () => {
+  it('aborts a timed-out callback and retains its lease for expiry-based retry', async () => {
     const promoted = await seed(['slow']);
     const registry = new PromotionWebhookRegistry();
     const aborted = deferred();
@@ -141,15 +142,17 @@ describe('PromotionEventWorker', () => {
     await aborted.promise;
     await expect(draining).resolves.toBe(1);
     const { rows } = await pool.query(
-      'SELECT event_id, state, attempt_count, lease_owner FROM promotion_event_deliveries',
+      `SELECT event_id, state, attempt_count, lease_owner,
+              lease_expires_at IS NOT NULL AS lease_retained
+         FROM promotion_event_deliveries`,
     );
     expect(rows).toEqual([{
       event_id: promoted.promotionEvent.eventId,
-      state: 'pending', attempt_count: 1, lease_owner: null,
+      state: 'pending', attempt_count: 1, lease_owner: 'worker-test', lease_retained: true,
     }]);
   });
 
-  it('stops claiming, drains cooperative callbacks, and releases abandoned leases', async () => {
+  it('stops claiming and retains a deadline-abandoned callback lease', async () => {
     vi.useFakeTimers();
     try {
       await seed(['stuck']);
@@ -173,9 +176,12 @@ describe('PromotionEventWorker', () => {
       await expect(draining).resolves.toBe(1);
       await expect(instance.drainOnce()).resolves.toBe(0);
       const { rows } = await pool.query(
-        'SELECT state, lease_owner, lease_expires_at FROM promotion_event_deliveries',
+        `SELECT state, lease_owner, lease_expires_at IS NOT NULL AS lease_retained
+           FROM promotion_event_deliveries`,
       );
-      expect(rows).toEqual([{ state: 'pending', lease_owner: null, lease_expires_at: null }]);
+      expect(rows).toEqual([{
+        state: 'pending', lease_owner: 'worker-test', lease_retained: true,
+      }]);
     } finally {
       vi.useRealTimers();
     }
@@ -206,6 +212,7 @@ describe('PromotionEventWorker', () => {
     await expect(firstStop).resolves.toBeUndefined();
     expect(callback).not.toHaveBeenCalled();
     expect(store.release).toHaveBeenCalledOnce();
+    expect(store.release).toHaveBeenCalledWith(pool, 'worker-test', []);
     await expect(instance.drainOnce()).resolves.toBe(0);
   });
 
@@ -266,6 +273,36 @@ describe('PromotionEventWorker', () => {
     vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
     const releaseCallback = deferred();
     try {
+      let owner: string | undefined;
+      let leaseExpiresAt = 0;
+      let delivered = false;
+      const store = mockStore({
+        claim: vi.fn(async (_pool, input) => {
+          if (delivered || (owner && leaseExpiresAt > Date.now())) return [];
+          owner = input.owner;
+          leaseExpiresAt = Date.now() + input.leaseMs;
+          return [claimedDelivery];
+        }),
+        complete: vi.fn(async (_pool, _eventId, _webhookId, claimant) => {
+          if (owner !== claimant || leaseExpiresAt <= Date.now()) return false;
+          delivered = true;
+          owner = undefined;
+          return true;
+        }),
+        release: vi.fn(async (_pool, claimant, retained = []) => {
+          if (owner !== claimant) return 0;
+          if (retained.some((delivery) => delivery.event.eventId === claimedDelivery.event.eventId
+            && delivery.webhookId === claimedDelivery.webhookId)) return 0;
+          owner = undefined;
+          leaseExpiresAt = 0;
+          return 1;
+        }),
+        renew: vi.fn(async (_pool, claimant, deliveries, leaseMs) => {
+          if (owner !== claimant || deliveries.length === 0) return 0;
+          leaseExpiresAt = Date.now() + leaseMs;
+          return 1;
+        }),
+      });
       const entered = deferred();
       const aborted = deferred();
       const registry = new PromotionWebhookRegistry();
@@ -277,7 +314,6 @@ describe('PromotionEventWorker', () => {
           await releaseCallback.promise;
         },
       });
-      const store = mockStore({ claim: vi.fn().mockResolvedValue([claimedDelivery]) });
       const instance = new PromotionEventWorker(
         pool,
         registry,
@@ -295,8 +331,25 @@ describe('PromotionEventWorker', () => {
       await expect(draining).resolves.toBe(1);
       expect(store.renew).toHaveBeenCalledOnce();
       expect(store.release).toHaveBeenCalledOnce();
+      expect(store.release).toHaveBeenCalledWith(pool, 'worker-test', [claimedDelivery]);
 
-      await vi.advanceTimersByTimeAsync(1_000);
+      const contenderCallback = vi.fn();
+      const contenderRegistry = new PromotionWebhookRegistry();
+      contenderRegistry.register({ id: 'hook', onPromoted: contenderCallback });
+      const contender = new PromotionEventWorker(
+        pool,
+        contenderRegistry,
+        workerOptions({ owner: 'contender', leaseMs: 90, callbackTimeoutMs: 60 }),
+        store,
+      );
+      await expect(contender.drainOnce()).resolves.toBe(0);
+      expect(contenderCallback).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(81);
+      await expect(contender.drainOnce()).resolves.toBe(1);
+      expect(contenderCallback).toHaveBeenCalledOnce();
+      await contender.stop('test_complete');
+
       expect(store.renew).toHaveBeenCalledOnce();
     } finally {
       releaseCallback.resolve();
@@ -324,14 +377,17 @@ describe('PromotionEventWorker', () => {
           owner = undefined;
           return true;
         }),
-        release: vi.fn(async (_pool, claimant) => {
+        release: vi.fn(async (_pool, claimant, retained = []) => {
           if (owner !== claimant) return 0;
+          if (retained.some((delivery) => delivery.event.eventId === claimedDelivery.event.eventId
+            && delivery.webhookId === claimedDelivery.webhookId)) return 0;
           owner = undefined;
           leaseExpiresAt = 0;
           return 1;
         }),
-        renew: vi.fn(async (_pool, claimant, leaseMs) => {
+        renew: vi.fn(async (_pool, claimant, deliveries, leaseMs) => {
           if (owner !== claimant) return 0;
+          if (deliveries.length === 0) return 0;
           leaseExpiresAt = Date.now() + leaseMs;
           return 1;
         }),

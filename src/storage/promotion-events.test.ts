@@ -13,6 +13,7 @@ import {
   manualRetryPromotionDelivery,
   releasePromotionDeliveries,
   renewPromotionDeliveries,
+  timeoutPromotionDelivery,
 } from './promotion-events.js';
 
 describe('promotion outbox', () => {
@@ -154,20 +155,64 @@ describe('promotion outbox', () => {
   it('renews only leases owned by the stopping worker', async () => {
     const { principal, source } = await seed();
     await promoteMemoryWithAudit(
-      pool, principal.id, source.id, { kind: 'project', name: 'destination' }, {}, ['hook'],
+      pool, principal.id, source.id,
+      { kind: 'project', name: 'destination' }, {}, ['hook', 'other'],
     );
     await claimPromotionDeliveries(pool, {
-      owner: 'worker', webhookIds: ['hook'], limit: 1, leaseMs: 1000,
+      owner: 'worker', webhookIds: ['hook', 'other'], limit: 2, leaseMs: 1000,
     });
     await pool.query(
       `UPDATE promotion_event_deliveries SET lease_expires_at = now() - interval '1 second'`,
     );
 
-    expect(await renewPromotionDeliveries(pool, 'other-worker', 1000)).toBe(0);
-    expect(await renewPromotionDeliveries(pool, 'worker', 1000)).toBe(1);
-    expect(await claimPromotionDeliveries(pool, {
+    const reclaimed = await claimPromotionDeliveries(pool, {
+      owner: 'worker', webhookIds: ['hook', 'other'], limit: 2, leaseMs: 1000,
+    });
+    const delivery = reclaimed.find((candidate) => candidate.webhookId === 'hook')!;
+    expect(await renewPromotionDeliveries(pool, 'other-worker', [delivery], 1000)).toBe(0);
+    expect(await renewPromotionDeliveries(pool, 'worker', [delivery], 1000)).toBe(1);
+    expect(await releasePromotionDeliveries(pool, 'worker', [delivery])).toBe(1);
+    const available = await claimPromotionDeliveries(pool, {
+      owner: 'contender', webhookIds: ['hook', 'other'], limit: 2, leaseMs: 1000,
+    });
+    expect(available.map((candidate) => candidate.webhookId)).toEqual(['other']);
+    await pool.query(
+      `UPDATE promotion_event_deliveries SET lease_expires_at = now() - interval '1 second'`,
+    );
+    const afterExpiry = await claimPromotionDeliveries(pool, {
       owner: 'contender', webhookIds: ['hook'], limit: 1, leaseMs: 1000,
-    })).toEqual([]);
+    });
+    expect(afterExpiry.map((candidate) => candidate.webhookId)).toEqual(['hook']);
+  });
+
+  it('records timeout retry state without releasing the active lease', async () => {
+    const { principal, source } = await seed();
+    await promoteMemoryWithAudit(
+      pool, principal.id, source.id, { kind: 'project', name: 'destination' }, {}, ['hook'],
+    );
+    const [delivery] = await claimPromotionDeliveries(pool, {
+      owner: 'worker', webhookIds: ['hook'], limit: 1, leaseMs: 1000,
+    });
+
+    expect(await timeoutPromotionDelivery(
+      pool,
+      delivery.event.eventId,
+      delivery.webhookId,
+      'worker',
+      { maxAttempts: 3, retryDelayMs: 25 },
+    )).toBe('pending');
+    const { rows } = await pool.query(
+      `SELECT state, lease_owner, lease_expires_at IS NOT NULL AS lease_retained,
+              available_at >= lease_expires_at AS retry_after_lease, last_error
+         FROM promotion_event_deliveries`,
+    );
+    expect(rows).toEqual([{
+      state: 'pending',
+      lease_owner: 'worker',
+      lease_retained: true,
+      retry_after_lease: true,
+      last_error: 'callback timed out',
+    }]);
   });
 
   it('leaves deliveries for unregistered webhook IDs pending and observable', async () => {
