@@ -20,59 +20,44 @@ SELECT scope_kind, tag, 'Built-in Continuum tag', true
    'knowledge-gap'
  ]) AS tag;
 
--- Normalize historical input before strict capture validation is enabled.
-UPDATE memories AS memory
-   SET tags = (
-    SELECT COALESCE(array_agg(item.tag ORDER BY item.first_position), '{}') AS tags
-      FROM (
-        SELECT lower(btrim(value)) AS tag, min(position) AS first_position
-          FROM unnest(memory.tags) WITH ORDINALITY AS existing(value, position)
-         WHERE btrim(value) <> ''
-         GROUP BY lower(btrim(value))
-      ) AS item
-  );
-
--- Dynamic plugin dimensions already live in metadata and are not taxonomy.
-UPDATE memories AS memory
-   SET tags = (
-     SELECT COALESCE(array_agg(value ORDER BY position), '{}') AS tags
-       FROM unnest(memory.tags) WITH ORDINALITY AS existing(value, position)
-      WHERE EXISTS (
-        SELECT 1
-          FROM tag_vocabularies AS vocabulary
-          JOIN scopes AS scope ON scope.id = memory.scope_id
-         WHERE vocabulary.scope_kind = scope.kind
-           AND vocabulary.tag = existing.value
-      )
-   )
- WHERE memory.source IN ('ado-workitem', 'deploy-event');
-
--- Preserve conforming historical taxonomy by adopting it for the scope kind.
--- There is no trustworthy actor to attribute these pre-vocabulary rows to, so
--- imported entries are system-owned rather than fabricating a principal.
-INSERT INTO tag_vocabularies (scope_kind, tag, description, is_system)
-SELECT DISTINCT scope.kind, existing.tag, 'Imported historical tag', true
-  FROM memories AS memory
-  JOIN scopes AS scope ON scope.id = memory.scope_id
- CROSS JOIN LATERAL unnest(memory.tags) AS existing(tag)
- WHERE length(existing.tag) BETWEEN 1 AND 64
-   AND existing.tag ~ '^[a-z0-9]+(?:-[a-z0-9]+)*$'
-ON CONFLICT (scope_kind, tag) DO NOTHING;
-
--- Nonconforming historical values cannot become new controlled tags. Retain
--- them as explicit legacy metadata before removing them from active taxonomy,
--- allowing deployment to proceed without either silent loss or policy bypass.
-WITH classified AS (
+-- A vocabulary is shared by every scope of a kind. Historical private values
+-- must therefore never be adopted into it. Keep only shipped vocabulary tags
+-- active and retain every unknown original value on its memory, including
+-- plugin dimensions and malformed values, without exposing them cross-scope.
+WITH expanded AS (
   SELECT memory.id,
-         array_agg(value ORDER BY position)
-           FILTER (WHERE length(value) BETWEEN 1 AND 64
-                     AND value ~ '^[a-z0-9]+(?:-[a-z0-9]+)*$') AS valid_tags,
-         array_agg(value ORDER BY position)
-           FILTER (WHERE length(value) NOT BETWEEN 1 AND 64
-                      OR value !~ '^[a-z0-9]+(?:-[a-z0-9]+)*$') AS invalid_tags
+         existing.value,
+         existing.position,
+         lower(btrim(existing.value)) AS normalized,
+         EXISTS (
+           SELECT 1
+             FROM tag_vocabularies AS vocabulary
+            WHERE vocabulary.scope_kind = scope.kind
+              AND vocabulary.tag = lower(btrim(existing.value))
+         ) AS is_shipped
     FROM memories AS memory
+    JOIN scopes AS scope ON scope.id = memory.scope_id
    CROSS JOIN LATERAL unnest(memory.tags) WITH ORDINALITY AS existing(value, position)
-   GROUP BY memory.id
+), shipped AS (
+  SELECT id, normalized AS tag, min(position) AS first_position
+    FROM expanded
+   WHERE is_shipped
+   GROUP BY id, normalized
+), classified AS (
+  SELECT memory.id,
+         (
+           SELECT array_agg(shipped.tag ORDER BY shipped.first_position)
+             FROM shipped
+            WHERE shipped.id = memory.id
+         ) AS active_tags,
+         (
+           SELECT array_agg(expanded.value ORDER BY expanded.position)
+             FROM expanded
+            WHERE expanded.id = memory.id
+              AND NOT expanded.is_shipped
+         ) AS legacy_tags
+    FROM memories AS memory
+   WHERE cardinality(memory.tags) > 0
 )
 UPDATE memories AS memory
    SET metadata = jsonb_set(
@@ -84,10 +69,36 @@ UPDATE memories AS memory
            WHEN memory.metadata ? 'continuum_legacy_tags'
              THEN jsonb_build_array(memory.metadata->'continuum_legacy_tags')
            ELSE '[]'::jsonb
-         END || to_jsonb(classified.invalid_tags),
+         END || to_jsonb(classified.legacy_tags),
          true
        ),
-       tags = COALESCE(classified.valid_tags, '{}')
+       tags = COALESCE(classified.active_tags, '{}')
   FROM classified
  WHERE classified.id = memory.id
-   AND classified.invalid_tags IS NOT NULL;
+   AND classified.legacy_tags IS NOT NULL;
+
+-- Memories containing only shipped tags still need normalization and
+-- de-duplication but do not need a legacy metadata field.
+WITH shipped AS (
+  SELECT memory.id,
+         lower(btrim(existing.value)) AS tag,
+         min(existing.position) AS first_position
+    FROM memories AS memory
+    JOIN scopes AS scope ON scope.id = memory.scope_id
+   CROSS JOIN LATERAL unnest(memory.tags) WITH ORDINALITY AS existing(value, position)
+   WHERE EXISTS (
+     SELECT 1
+       FROM tag_vocabularies AS vocabulary
+      WHERE vocabulary.scope_kind = scope.kind
+        AND vocabulary.tag = lower(btrim(existing.value))
+   )
+   GROUP BY memory.id, lower(btrim(existing.value))
+)
+UPDATE memories AS memory
+   SET tags = classified.tags
+  FROM (
+    SELECT id, array_agg(tag ORDER BY first_position) AS tags
+      FROM shipped
+     GROUP BY id
+  ) AS classified
+ WHERE memory.id = classified.id;

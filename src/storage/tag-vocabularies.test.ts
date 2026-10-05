@@ -71,19 +71,23 @@ describe('tag vocabulary schema', () => {
         VALUES ('10000000-0000-4000-8000-000000000001', 'historical:user', 'user', 'Historical');
         INSERT INTO scopes (id, kind, name)
         VALUES ('20000000-0000-4000-8000-000000000001', 'project', 'legacy');
-        INSERT INTO memories (id, scope_id, type, title, body, author_id, source, tags)
+        INSERT INTO memories (
+          id, scope_id, type, title, body, author_id, source, tags, metadata
+        )
         VALUES (
           '30000000-0000-4000-8000-000000000001',
           '20000000-0000-4000-8000-000000000001',
           'fact', 'Legacy', 'Keep its taxonomy',
           '10000000-0000-4000-8000-000000000001', 'manual',
-          ARRAY['decision', ' Customer-Impact ', 'customer-impact', 'legacy label']
+          ARRAY['decision', ' Customer-Impact ', 'customer-impact', 'legacy label'],
+          '{}'::jsonb
         ), (
           '30000000-0000-4000-8000-000000000002',
           '20000000-0000-4000-8000-000000000001',
           'fact', 'Plugin legacy', 'Keep plugin dimensions privately',
           '10000000-0000-4000-8000-000000000001', 'ado-workitem',
-          ARRAY['ado', 'private-project', 'System.AreaPath=Secret Team']
+          ARRAY['ado', 'private-project', 'System.AreaPath=Secret Team'],
+          '{"continuum_legacy_tags":"pre-existing","keep":"yes"}'::jsonb
         )
       `);
 
@@ -110,7 +114,10 @@ describe('tag vocabulary schema', () => {
           id: '30000000-0000-4000-8000-000000000002',
           tags: ['ado'],
           metadata: {
-            continuum_legacy_tags: ['private-project', 'System.AreaPath=Secret Team'],
+            continuum_legacy_tags: [
+              'pre-existing', 'private-project', 'System.AreaPath=Secret Team',
+            ],
+            keep: 'yes',
           },
         },
       ]);
