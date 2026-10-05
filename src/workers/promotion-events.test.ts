@@ -226,6 +226,39 @@ describe('PromotionEventWorker', () => {
     await expect(instance.drainOnce()).resolves.toBe(0);
   });
 
+  it('releases a claim that finishes after the bounded shutdown deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const claimEntered = deferred();
+      const claimResult = deferred<ClaimedPromotionDelivery[]>();
+      const store = mockStore({
+        claim: vi.fn(async () => {
+          claimEntered.resolve();
+          return claimResult.promise;
+        }),
+      });
+      const registry = new PromotionWebhookRegistry();
+      const callback = vi.fn();
+      registry.register({ id: 'hook', onPromoted: callback });
+      const instance = new PromotionEventWorker(pool, registry, workerOptions(), store);
+
+      const draining = instance.drainOnce();
+      await claimEntered.promise;
+      const stopping = instance.stop('SIGTERM');
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(stopping).resolves.toBeUndefined();
+      expect(store.release).toHaveBeenCalledOnce();
+
+      claimResult.resolve([claimedDelivery]);
+      await expect(draining).resolves.toBe(1);
+      expect(callback).not.toHaveBeenCalled();
+      expect(store.release).toHaveBeenCalledTimes(2);
+      expect(store.release).toHaveBeenLastCalledWith(pool, 'worker-test', []);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not resolve stop until an already-started callback has settled', async () => {
     const entered = deferred();
     const release = deferred();
@@ -277,6 +310,151 @@ describe('PromotionEventWorker', () => {
     expect(store.complete).toHaveBeenCalledWith(pool, 'event-1', 'hook', 'worker-test');
     expect(store.complete).toHaveResolvedWith(true);
     expect(store.complete).toHaveBeenCalledBefore(store.release as ReturnType<typeof vi.fn>);
+  });
+
+  it.each([
+    { outcome: 'complete', callback: async () => undefined },
+    { outcome: 'fail', callback: async () => { throw new Error('expected'); } },
+  ])('removes the callback fence while $outcome persistence is in flight', async ({
+    outcome, callback,
+  }) => {
+    const persistenceEntered = deferred();
+    const persistenceResult = deferred<boolean | 'pending'>();
+    const store = mockStore({
+      claim: vi.fn().mockResolvedValue([claimedDelivery]),
+      complete: vi.fn(async () => {
+        persistenceEntered.resolve();
+        return persistenceResult.promise as Promise<boolean>;
+      }),
+      fail: vi.fn(async () => {
+        persistenceEntered.resolve();
+        return persistenceResult.promise as Promise<'pending'>;
+      }),
+    });
+    const registry = new PromotionWebhookRegistry();
+    registry.register({ id: 'hook', onPromoted: callback });
+    const instance = new PromotionEventWorker(pool, registry, workerOptions(), store);
+
+    const draining = instance.drainOnce();
+    await persistenceEntered.promise;
+
+    const contenderStore = mockStore();
+    const contender = new PromotionEventWorker(
+      pool,
+      registry,
+      workerOptions({ owner: 'contender' }),
+      contenderStore,
+    );
+    await expect(contender.drainOnce()).resolves.toBe(0);
+    expect((contenderStore.claim as ReturnType<typeof vi.fn>).mock.calls[0]?.[1].excluded)
+      .toEqual([]);
+
+    persistenceResult.resolve(outcome === 'complete' ? true : 'pending');
+    await expect(draining).resolves.toBe(1);
+    await instance.stop('test_complete');
+    await contender.stop('test_complete');
+  });
+
+  it('keeps a real late follower fenced when timeout persistence rejects, then cleans it', async () => {
+    vi.useFakeTimers();
+    const releaseCallback = deferred();
+    try {
+      const entered = deferred();
+      const registry = new PromotionWebhookRegistry();
+      registry.register({
+        id: 'hook',
+        onPromoted: async () => {
+          entered.resolve();
+          await releaseCallback.promise;
+        },
+      });
+      const store = mockStore({
+        claim: vi.fn().mockResolvedValueOnce([claimedDelivery]).mockResolvedValue([]),
+        timeout: vi.fn().mockRejectedValue(new Error('timeout write failed')),
+      });
+      const instance = new PromotionEventWorker(
+        pool,
+        registry,
+        workerOptions({ leaseMs: 90, callbackTimeoutMs: 20 }),
+        store,
+      );
+      const draining = instance.drainOnce();
+      await entered.promise;
+      await vi.advanceTimersByTimeAsync(20);
+      await expect(draining).rejects.toThrow('timeout write failed');
+      await vi.advanceTimersByTimeAsync(100);
+      expect(store.renew).not.toHaveBeenCalled();
+
+      const contenderStore = mockStore();
+      const contender = new PromotionEventWorker(
+        pool,
+        registry,
+        workerOptions({ owner: 'contender' }),
+        contenderStore,
+      );
+      await contender.drainOnce();
+      expect((contenderStore.claim as ReturnType<typeof vi.fn>).mock.calls[0]?.[1].excluded)
+        .toEqual([claimedDelivery]);
+
+      releaseCallback.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(store.complete).toHaveBeenCalledOnce();
+      await contender.drainOnce();
+      expect((contenderStore.claim as ReturnType<typeof vi.fn>).mock.calls[1]?.[1].excluded)
+        .toEqual([]);
+      await instance.stop('test_complete');
+      await contender.stop('test_complete');
+    } finally {
+      releaseCallback.resolve();
+      await vi.runAllTimersAsync();
+      vi.useRealTimers();
+    }
+  });
+
+  it('bounds a hung renewal and aborts callbacks fail-closed without rearming', async () => {
+    vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
+    const releaseCallback = deferred();
+    try {
+      const entered = deferred();
+      const aborted = deferred();
+      const registry = new PromotionWebhookRegistry();
+      registry.register({
+        id: 'hook',
+        onPromoted: async (_event, { signal }) => {
+          entered.resolve();
+          signal.addEventListener('abort', () => aborted.resolve(), { once: true });
+          await releaseCallback.promise;
+        },
+      });
+      const never = new Promise<number>(() => undefined);
+      const store = mockStore({
+        claim: vi.fn().mockResolvedValue([claimedDelivery]),
+        renew: vi.fn(() => never),
+      });
+      const instance = new PromotionEventWorker(
+        pool,
+        registry,
+        workerOptions({ leaseMs: 90, callbackTimeoutMs: 80 }),
+        store,
+      );
+
+      const draining = instance.drainOnce();
+      await entered.promise;
+      await vi.advanceTimersByTimeAsync(59);
+      expect(store.renew).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      await aborted.promise;
+      await expect(draining).resolves.toBe(1);
+
+      await vi.advanceTimersByTimeAsync(300);
+      expect(store.renew).toHaveBeenCalledOnce();
+      await expect(instance.drainOnce()).resolves.toBe(0);
+      expect(store.claim).toHaveBeenCalledOnce();
+    } finally {
+      releaseCallback.resolve();
+      await vi.runAllTimersAsync();
+      vi.useRealTimers();
+    }
   });
 
   it('keeps stop wall-clock bounded when renewal and release never settle', async () => {

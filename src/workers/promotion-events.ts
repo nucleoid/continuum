@@ -141,6 +141,8 @@ export class PromotionEventWorker implements RuntimeWorker {
   private timer?: NodeJS.Timeout;
   private leaseTimer?: NodeJS.Timeout;
   private leaseRenewal?: Promise<void>;
+  private renewalBlocked = false;
+  private finalReleaseStarted = false;
   private readonly active = new Set<Promise<number>>();
   private readonly controllers = new Map<AbortController, ClaimedPromotionDelivery>();
   private readonly retainedLeases = new Map<string, ClaimedPromotionDelivery>();
@@ -203,6 +205,7 @@ export class PromotionEventWorker implements RuntimeWorker {
   }
 
   private async drainCycle(): Promise<number> {
+    if (this.renewalBlocked) return 0;
     const deliveries = await this.store.claim(this.pool, {
       owner: this.options.owner,
       webhookIds: this.registry.ids(),
@@ -212,6 +215,9 @@ export class PromotionEventWorker implements RuntimeWorker {
       excluded: [...inFlightCallbacks.values()],
     });
     if (this.stopped) {
+      // While stop() is still draining, its final release will include this claim. Once that
+      // release has begun, a claim completing behind it needs its own compensating release.
+      if (this.finalReleaseStarted) await this.releaseUnfollowedClaims();
       return deliveries.length;
     }
     const tasks = deliveries.map((delivery) => {
@@ -252,6 +258,7 @@ export class PromotionEventWorker implements RuntimeWorker {
       await this.beforeDeadline(this.leaseRenewal, deadline);
     }
     const retained = [...this.retainedLeases.values()];
+    this.finalReleaseStarted = true;
     const release = this.store.release(this.pool, this.options.owner, retained);
     const released = await this.beforeDeadline(release, deadline);
     this.logger.info({
@@ -302,6 +309,7 @@ export class PromotionEventWorker implements RuntimeWorker {
     });
 
     let timer: NodeJS.Timeout | undefined;
+    let lateFollower = false;
     try {
       let callback: Promise<CallbackOutcome>;
       if (this.stopped || controller.signal.aborted) {
@@ -331,21 +339,32 @@ export class PromotionEventWorker implements RuntimeWorker {
       if (outcome === 'timeout') {
         controller.abort();
         this.retainLease(delivery);
+        lateFollower = true;
+        this.followLateCallback(delivery, controller, callback, 'timeout');
       }
 
       if (outcome === 'success') {
+        this.finishCallback(delivery, controller);
         await this.persistCallbackOutcome(delivery, outcome);
         return;
       }
       if (outcome === 'timeout') {
         const retryDelayMs = this.retryDelay(delivery.attemptCount);
-        const state = await this.store.timeout(
-          this.pool,
-          eventId,
-          webhookId,
-          this.options.owner,
-          { maxAttempts: this.options.maxAttempts, retryDelayMs },
-        );
+        let state: 'pending' | 'dead_letter' | 'lost_lease';
+        try {
+          state = await this.store.timeout(
+            this.pool,
+            eventId,
+            webhookId,
+            this.options.owner,
+            { maxAttempts: this.options.maxAttempts, retryDelayMs },
+          );
+        } catch (error) {
+          // The callback follower remains as an in-process fence, but a failed timeout write
+          // must not keep extending an ownership claim the database never recorded.
+          this.stopRenewingCallback(controller);
+          throw error;
+        }
         this.logger.warn({
           event: 'promotion_delivery_timed_out',
           eventId,
@@ -355,39 +374,80 @@ export class PromotionEventWorker implements RuntimeWorker {
           state,
           retryDelayMs: state === 'pending' ? retryDelayMs : undefined,
         });
-        this.followLateCallback(delivery, controller, callback, 'timeout');
         return;
       }
       if (outcome === 'shutdown' || this.stopped) {
         this.retainLease(delivery);
+        lateFollower = true;
         this.followLateCallback(delivery, controller, callback, 'shutdown');
         return;
       }
       if (outcome === 'not_started') return;
+      this.finishCallback(delivery, controller);
       await this.persistCallbackOutcome(delivery, outcome);
     } finally {
       if (timer) clearTimeout(timer);
-      if (!this.retainedLeases.has(key)) this.finishCallback(delivery, controller);
+      // A retained lease is only useful while an actual callback follower owns its cleanup.
+      // Persistence errors before follower installation must never strand fences or renewals.
+      if (!lateFollower) this.finishCallback(delivery, controller);
     }
   }
 
   private ensureLeaseRenewal(): void {
-    if (this.stopped || this.leaseTimer || this.leaseRenewal) return;
+    if (this.stopped || this.renewalBlocked || this.leaseTimer || this.leaseRenewal) return;
     const renewalMs = Math.max(1, Math.floor(this.options.leaseMs / 3));
     this.leaseTimer = setTimeout(() => {
       this.leaseTimer = undefined;
-      this.leaseRenewal = this.store.renew(
-        this.pool,
-        this.options.owner,
-        [...this.controllers.values()],
-        this.options.leaseMs,
-      ).then(() => undefined, () => {
-        this.logger.error({ event: 'promotion_worker_lease_renewal_failed' });
-      }).finally(() => {
+      const deliveries = [...this.controllers.values()];
+      this.leaseRenewal = this.renewLeases(deliveries, renewalMs).finally(() => {
         this.leaseRenewal = undefined;
-        if (!this.stopped && this.controllers.size > 0) this.ensureLeaseRenewal();
+        if (!this.stopped && !this.renewalBlocked && this.controllers.size > 0) {
+          this.ensureLeaseRenewal();
+        }
       });
     }, renewalMs);
+  }
+
+  private async renewLeases(
+    deliveries: readonly ClaimedPromotionDelivery[],
+    timeoutMs: number,
+  ): Promise<void> {
+    if (deliveries.length === 0) return;
+    let timer: NodeJS.Timeout | undefined;
+    const operation = Promise.resolve().then(() => this.store.renew(
+      this.pool,
+      this.options.owner,
+      deliveries,
+      this.options.leaseMs,
+    ));
+    const result = await Promise.race([
+      operation.then(
+        (renewed) => ({ state: 'settled' as const, renewed }),
+        () => ({ state: 'failed' as const }),
+      ),
+      new Promise<{ state: 'timeout' }>((resolve) => {
+        timer = setTimeout(() => resolve({ state: 'timeout' }), timeoutMs);
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+    if (result.state === 'settled' && result.renewed === deliveries.length) return;
+
+    // Ownership is now ambiguous. Abort every affected callback and stop accepting more work
+    // until those callbacks settle; their leases are retained to avoid eager redelivery.
+    void operation.catch(() => undefined);
+    this.renewalBlocked = true;
+    const keys = new Set(deliveries.map(deliveryKey));
+    for (const [controller, delivery] of this.controllers) {
+      if (!keys.has(deliveryKey(delivery))) continue;
+      this.retainLease(delivery);
+      controller.abort();
+    }
+    this.logger.error({
+      event: 'promotion_worker_lease_renewal_failed',
+      reason: result.state,
+      expected: deliveries.length,
+      renewed: result.state === 'settled' ? result.renewed : undefined,
+    });
   }
 
   private retryDelay(attempt: number): number {
@@ -410,6 +470,9 @@ export class PromotionEventWorker implements RuntimeWorker {
     abortReason: 'timeout' | 'shutdown',
   ): void {
     void callback.then(async (outcome) => {
+      // The callback fence covers callback execution, not potentially unbounded persistence.
+      // Once the callback settles, an expired lease may safely be retried at least once.
+      this.finishCallback(delivery, controller);
       if (outcome === 'success' || (outcome === 'failure' && abortReason === 'shutdown')) {
         await this.persistCallbackOutcome(delivery, outcome);
       }
@@ -460,12 +523,29 @@ export class PromotionEventWorker implements RuntimeWorker {
     controller: AbortController,
   ): void {
     const key = deliveryKey(delivery);
-    this.controllers.delete(controller);
+    this.stopRenewingCallback(controller);
     this.retainedLeases.delete(key);
     inFlightCallbacks.delete(key);
+  }
+
+  private stopRenewingCallback(controller: AbortController): void {
+    this.controllers.delete(controller);
     if (this.controllers.size === 0 && this.leaseTimer) {
       clearTimeout(this.leaseTimer);
       this.leaseTimer = undefined;
+    }
+    if (this.controllers.size === 0) this.renewalBlocked = false;
+  }
+
+  private async releaseUnfollowedClaims(): Promise<void> {
+    const retained = new Map(this.retainedLeases);
+    for (const delivery of this.controllers.values()) {
+      retained.set(deliveryKey(delivery), delivery);
+    }
+    try {
+      await this.store.release(this.pool, this.options.owner, [...retained.values()]);
+    } catch {
+      this.logger.error({ event: 'promotion_worker_post_shutdown_release_failed' });
     }
   }
 
