@@ -75,8 +75,8 @@ bounded safe category.
 Operators can inspect delivery state directly:
 
 ```sql
-SELECT event_id, webhook_id, state, attempt_count, available_at,
-       lease_owner, lease_expires_at, last_error
+SELECT event_id, webhook_id, state, attempt_count, lease_generation,
+       available_at, lease_owner, lease_expires_at, last_error
 FROM promotion_event_deliveries
 ORDER BY available_at;
 ```
@@ -93,6 +93,7 @@ not dead-lettered.
 - `CONTINUUM_PROMOTION_CLAIM_BATCH`, default `10`, maximum `100`
 - `CONTINUUM_PROMOTION_LEASE_MS`, default `30000`
 - `CONTINUUM_PROMOTION_CALLBACK_TIMEOUT_MS`, default `5000`, must be less than the lease
+- `CONTINUUM_PROMOTION_DATABASE_TIMEOUT_MS`, default `5000`, must be less than the lease
 - `CONTINUUM_PROMOTION_SHUTDOWN_WAIT_MS`, default `5000`
 - `CONTINUUM_PROMOTION_MAX_ATTEMPTS`, default `10`
 - `CONTINUUM_PROMOTION_BASE_BACKOFF_MS`, default `1000`
@@ -110,6 +111,13 @@ shutdown deadline while callbacks receive abort and the process exits.
 At the grace deadline, the worker signals abort and detaches callbacks that do
 not settle. `stop()` uses the same wall-clock deadline for callback drain,
 renewal, and release, so a stuck database operation cannot extend shutdown.
+Claim, acknowledgement, failure, timeout, and abandonment writes also use the
+configured database deadline, so one unavailable database operation cannot
+stop later polling cycles. Every post-claim mutation is fenced by event ID,
+webhook ID, lease owner, attempt number, and a monotonic lease generation that
+is not reset by manual retry. A late write from an older claim cannot mutate a
+newer claim held by the same process owner, even when manual retry reuses the
+same attempt number.
 Leases for ambiguous deliveries are not released or renewed after stop. A
 process-wide in-flight fence excludes them from claims by replacement workers
 in the same process until the original callback settles. Late success is then
@@ -121,8 +129,11 @@ provides at-least-once recovery, and
 claims that end in repeated crashes are dead-lettered at the configured attempt
 limit. Callback execution cannot be forcibly interrupted inside JavaScript, so
 process exit remains the bounded cross-process execution fence. The worker does
-not promise that abort-ignoring extension code settles in-process. Consumers
-must still deduplicate by event ID. Claims that complete after stop begins,
+not promise that abort-ignoring extension code settles in-process. It caps
+process-wide callback admission at the configured claim batch, so detached
+callbacks cannot accumulate without bound; a saturated process leaves rows for
+another worker or later process restart. Consumers must still deduplicate by
+event ID. Claims that complete after stop begins,
 callbacks unavailable in the local registry, and callbacks that reject after
 the worker's own shutdown abort are abandoned without consuming an attempt.
 

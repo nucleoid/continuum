@@ -45,6 +45,7 @@ const claimedDelivery: ClaimedPromotionDelivery = {
   },
   webhookId: 'hook',
   attemptCount: 1,
+  leaseGeneration: 1,
   leaseRecovered: false,
 };
 
@@ -375,7 +376,7 @@ describe('PromotionEventWorker', () => {
     releaseSibling.resolve();
     await expect(draining).rejects.toThrow('complete write failed');
     await expect(stopping).resolves.toBeUndefined();
-    expect(store.complete).toHaveBeenCalledWith(pool, 'event-2', 'hook', 'worker-test', 1);
+    expect(store.complete).toHaveBeenCalledWith(pool, 'event-2', 'hook', 'worker-test', 1, 1);
     expect(store.complete).toHaveBeenCalledBefore(store.release as ReturnType<typeof vi.fn>);
   });
 
@@ -496,7 +497,7 @@ describe('PromotionEventWorker', () => {
     await expect(draining).resolves.toBe(1);
     await expect(stopping).resolves.toBeUndefined();
     expect(store.complete).toHaveBeenCalledOnce();
-    expect(store.complete).toHaveBeenCalledWith(pool, 'event-1', 'hook', 'worker-test', 1);
+    expect(store.complete).toHaveBeenCalledWith(pool, 'event-1', 'hook', 'worker-test', 1, 1);
     expect(store.complete).toHaveResolvedWith(true);
     expect(store.complete).toHaveBeenCalledBefore(store.release as ReturnType<typeof vi.fn>);
   });
@@ -522,7 +523,8 @@ describe('PromotionEventWorker', () => {
           const exactAttemptRetained = retained.some((delivery) =>
             delivery.event.eventId === claimedDelivery.event.eventId
             && delivery.webhookId === claimedDelivery.webhookId
-            && delivery.attemptCount === claimedDelivery.attemptCount);
+            && delivery.attemptCount === claimedDelivery.attemptCount
+            && delivery.leaseGeneration === claimedDelivery.leaseGeneration);
           if (!exactAttemptRetained) owned = false;
           return exactAttemptRetained ? 0 : 1;
         }),
@@ -800,7 +802,7 @@ describe('PromotionEventWorker', () => {
       expect(secondAborted).not.toHaveBeenCalled();
       finishSecond.resolve();
       await expect(draining).resolves.toBe(2);
-      expect(store.complete).toHaveBeenCalledWith(pool, 'event-2', 'hook', 'worker-test', 1);
+      expect(store.complete).toHaveBeenCalledWith(pool, 'event-2', 'hook', 'worker-test', 1, 1);
     } finally {
       finishFirst.resolve();
       finishSecond.resolve();

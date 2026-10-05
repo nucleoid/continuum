@@ -25,6 +25,7 @@ export interface PromotionWorkerOptions {
   claimBatch: number;
   leaseMs: number;
   callbackTimeoutMs: number;
+  databaseTimeoutMs: number;
   shutdownWaitMs: number;
   maxAttempts: number;
   baseBackoffMs: number;
@@ -58,6 +59,7 @@ export function promotionWorkerOptionsFromEnv(
     claimBatch: positiveEnv(env, 'CONTINUUM_PROMOTION_CLAIM_BATCH', 10, 100),
     leaseMs: positiveEnv(env, 'CONTINUUM_PROMOTION_LEASE_MS', 30_000),
     callbackTimeoutMs: positiveEnv(env, 'CONTINUUM_PROMOTION_CALLBACK_TIMEOUT_MS', 5_000),
+    databaseTimeoutMs: positiveEnv(env, 'CONTINUUM_PROMOTION_DATABASE_TIMEOUT_MS', 5_000),
     shutdownWaitMs: positiveEnv(env, 'CONTINUUM_PROMOTION_SHUTDOWN_WAIT_MS', 5_000),
     maxAttempts: positiveEnv(env, 'CONTINUUM_PROMOTION_MAX_ATTEMPTS', 10, 1_000),
     baseBackoffMs: positiveEnv(env, 'CONTINUUM_PROMOTION_BASE_BACKOFF_MS', 1_000),
@@ -88,20 +90,33 @@ export interface PromotionWorkerStore {
     eventId: string,
     webhookId: string,
     owner: string,
+    attemptCount: number,
+    leaseGeneration: number,
   ): Promise<boolean>;
   fail(
     pool: pg.Pool,
     eventId: string,
     webhookId: string,
     owner: string,
-    input: { maxAttempts: number; retryDelayMs: number; error: unknown },
+    input: {
+      maxAttempts: number;
+      retryDelayMs: number;
+      error: unknown;
+      attemptCount: number;
+      leaseGeneration: number;
+    },
   ): Promise<'pending' | 'dead_letter' | 'lost_lease'>;
   timeout(
     pool: pg.Pool,
     eventId: string,
     webhookId: string,
     owner: string,
-    input: { maxAttempts: number; retryDelayMs: number },
+    input: {
+      maxAttempts: number;
+      retryDelayMs: number;
+      attemptCount: number;
+      leaseGeneration: number;
+    },
   ): Promise<'pending' | 'dead_letter' | 'lost_lease'>;
   abandon(
     pool: pg.Pool,
@@ -139,6 +154,7 @@ function deliveryKey(delivery: Pick<ClaimedPromotionDelivery, 'webhookId' | 'eve
 // callback fence process-wide so a lease expiry cannot start a second local callback while the
 // first callback is still ignoring its AbortSignal.
 const inFlightCallbacks = new Map<string, ClaimedPromotionDelivery>();
+let callbackReservations = 0;
 
 type CallbackOutcome = 'success' | 'failure' | 'not_started';
 
@@ -167,6 +183,7 @@ export class PromotionEventWorker implements RuntimeWorker {
       claimBatch: options.claimBatch,
       leaseMs: options.leaseMs,
       callbackTimeoutMs: options.callbackTimeoutMs,
+      databaseTimeoutMs: options.databaseTimeoutMs,
       shutdownWaitMs: options.shutdownWaitMs,
       maxAttempts: options.maxAttempts,
       baseBackoffMs: options.baseBackoffMs,
@@ -182,6 +199,9 @@ export class PromotionEventWorker implements RuntimeWorker {
     }
     if (options.callbackTimeoutMs >= options.leaseMs) {
       throw new Error('callbackTimeoutMs must be less than leaseMs');
+    }
+    if (options.databaseTimeoutMs >= options.leaseMs) {
+      throw new Error('databaseTimeoutMs must be less than leaseMs');
     }
     if (options.shutdownWaitMs >= options.leaseMs) {
       throw new Error('shutdownWaitMs must be less than leaseMs');
@@ -215,14 +235,25 @@ export class PromotionEventWorker implements RuntimeWorker {
   }
 
   private async drainCycle(): Promise<number> {
-    const deliveries = await this.store.claim(this.pool, {
-      owner: this.options.owner,
-      webhookIds: this.registry.ids(),
-      limit: this.options.claimBatch,
-      leaseMs: this.options.leaseMs,
-      maxAttempts: this.options.maxAttempts,
-      excluded: [...inFlightCallbacks.values()],
-    });
+    const available = Math.max(
+      0,
+      this.options.claimBatch - inFlightCallbacks.size - callbackReservations,
+    );
+    if (available === 0) return 0;
+    callbackReservations += available;
+    let deliveries: ClaimedPromotionDelivery[];
+    try {
+      deliveries = await this.databaseOperation(this.store.claim(this.pool, {
+        owner: this.options.owner,
+        webhookIds: this.registry.ids(),
+        limit: available,
+        leaseMs: this.options.leaseMs,
+        maxAttempts: this.options.maxAttempts,
+        excluded: [...inFlightCallbacks.values()],
+      }));
+    } finally {
+      callbackReservations -= available;
+    }
     if (this.stopped) {
       await this.abandonDeliveries(deliveries, 'promotion_worker_stopped_claim_abandoned');
       return deliveries.length;
@@ -360,7 +391,6 @@ export class PromotionEventWorker implements RuntimeWorker {
       }
 
       if (outcome === 'success') {
-        this.finishCallback(delivery, controller);
         await this.persistCallbackOutcome(delivery, outcome);
         return;
       }
@@ -368,13 +398,18 @@ export class PromotionEventWorker implements RuntimeWorker {
         const retryDelayMs = this.retryDelay(delivery.attemptCount);
         let state: 'pending' | 'dead_letter' | 'lost_lease';
         try {
-          state = await this.store.timeout(
+          state = await this.databaseOperation(this.store.timeout(
             this.pool,
             eventId,
             webhookId,
             this.options.owner,
-            { maxAttempts: this.options.maxAttempts, retryDelayMs },
-          );
+            {
+              maxAttempts: this.options.maxAttempts,
+              retryDelayMs,
+              attemptCount: delivery.attemptCount,
+              leaseGeneration: delivery.leaseGeneration,
+            },
+          ));
         } catch (error) {
           // The callback follower remains as an in-process fence, but a failed timeout write
           // must not keep extending an ownership claim the database never recorded.
@@ -396,14 +431,13 @@ export class PromotionEventWorker implements RuntimeWorker {
         this.stopLeaseRenewal(controller);
         return;
       }
-      if (outcome === 'shutdown' || this.stopped) {
+      if (outcome === 'shutdown') {
         if (!this.ownershipLost.has(controller)) this.retainLease(delivery);
         lateFollower = true;
         this.followLateCallback(delivery, controller, callback, 'shutdown');
         return;
       }
       if (outcome === 'not_started') return;
-      this.finishCallback(delivery, controller);
       await this.persistCallbackOutcome(delivery, outcome);
     } finally {
       if (timer) clearTimeout(timer);
@@ -504,9 +538,6 @@ export class PromotionEventWorker implements RuntimeWorker {
     abortReason: 'timeout' | 'shutdown',
   ): void {
     void callback.then(async (outcome) => {
-      // The callback fence covers callback execution, not potentially unbounded persistence.
-      // Once the callback settles, an expired lease may safely be retried at least once.
-      this.finishCallback(delivery, controller);
       if (outcome === 'success') {
         await this.persistCallbackOutcome(delivery, outcome);
       } else if (outcome === 'failure' && abortReason === 'shutdown') {
@@ -532,9 +563,10 @@ export class PromotionEventWorker implements RuntimeWorker {
     const eventId = delivery.event.eventId;
     const webhookId = delivery.webhookId;
     if (outcome === 'success') {
-      const acknowledged = await this.store.complete(
+      const acknowledged = await this.databaseOperation(this.store.complete(
         this.pool, eventId, webhookId, this.options.owner,
-      );
+        delivery.attemptCount, delivery.leaseGeneration,
+      ));
       this.logger.info({
         event: 'promotion_delivery_succeeded', eventId, webhookId,
         attempt: delivery.attemptCount, acknowledged,
@@ -542,7 +574,7 @@ export class PromotionEventWorker implements RuntimeWorker {
       return;
     }
     const retryDelayMs = this.retryDelay(delivery.attemptCount);
-    const state = await this.store.fail(
+    const state = await this.databaseOperation(this.store.fail(
       this.pool,
       eventId,
       webhookId,
@@ -551,8 +583,10 @@ export class PromotionEventWorker implements RuntimeWorker {
         maxAttempts: this.options.maxAttempts,
         retryDelayMs,
         error: new Error('callback failed'),
+        attemptCount: delivery.attemptCount,
+        leaseGeneration: delivery.leaseGeneration,
       },
-    );
+    ));
     this.logger.warn({
       event: 'promotion_delivery_failed', eventId, webhookId,
       attempt: delivery.attemptCount, reason: 'error', state,
@@ -599,12 +633,34 @@ export class PromotionEventWorker implements RuntimeWorker {
   ): Promise<void> {
     if (deliveries.length === 0) return;
     try {
-      const abandoned = await this.store.abandon(this.pool, this.options.owner, deliveries);
+      const abandoned = await this.databaseOperation(
+        this.store.abandon(this.pool, this.options.owner, deliveries),
+      );
       this.logger.warn({ event, deliveries: deliveries.length, abandoned });
     } catch {
       this.logger.error({ event: `${event}_failed`, deliveries: deliveries.length });
       throw new Error(event);
     }
+  }
+
+  private async databaseOperation<T>(operation: Promise<T>): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    const result = await Promise.race([
+      operation.then(
+        (value) => ({ state: 'settled' as const, value }),
+        (error: unknown) => ({ state: 'failed' as const, error }),
+      ),
+      new Promise<{ state: 'timeout' }>((resolve) => {
+        timer = setTimeout(
+          () => resolve({ state: 'timeout' }),
+          this.options.databaseTimeoutMs,
+        );
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+    if (result.state === 'settled') return result.value;
+    if (result.state === 'failed') throw result.error;
+    throw new Error('promotion database operation timed out');
   }
 
   private async beforeDeadline<T>(

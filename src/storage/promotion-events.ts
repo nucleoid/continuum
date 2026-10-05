@@ -7,6 +7,7 @@ export interface ClaimedPromotionDelivery {
   event: PromotionEvent;
   webhookId: string;
   attemptCount: number;
+  leaseGeneration: number;
   leaseRecovered: boolean;
 }
 
@@ -40,6 +41,14 @@ function rowToEvent(row: PromotionEventRow): PromotionEvent {
     principalId: row.principal_id,
     occurredAt: row.occurred_at,
   };
+}
+
+function parseLeaseGeneration(value: string | number): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new Error('lease generation is outside the supported range');
+  }
+  return parsed;
 }
 
 export async function enqueuePromotionEvent(
@@ -130,6 +139,7 @@ export async function claimPromotionDeliveries(
     const { rows } = await client.query<PromotionEventRow & {
       webhook_id: string;
       attempt_count: number;
+      lease_generation: string;
       lease_recovered: boolean;
     }>(
       `WITH candidates AS (
@@ -151,13 +161,14 @@ export async function claimPromotionDeliveries(
          UPDATE promotion_event_deliveries d
             SET lease_owner = $1,
                 lease_expires_at = now() + ($4 * interval '1 millisecond'),
-                attempt_count = d.attempt_count + 1
+                attempt_count = d.attempt_count + 1,
+                lease_generation = d.lease_generation + 1
            FROM candidates c
           WHERE d.event_id = c.event_id AND d.webhook_id = c.webhook_id
-          RETURNING d.event_id, d.webhook_id, d.attempt_count,
+          RETURNING d.event_id, d.webhook_id, d.attempt_count, d.lease_generation,
                     c.lease_recovered
        )
-       SELECT e.*, c.webhook_id, c.attempt_count, c.lease_recovered
+       SELECT e.*, c.webhook_id, c.attempt_count, c.lease_generation, c.lease_recovered
          FROM claimed c
          JOIN promotion_events e ON e.id = c.event_id
         ORDER BY c.webhook_id`,
@@ -176,6 +187,7 @@ export async function claimPromotionDeliveries(
       event: rowToEvent(row),
       webhookId: row.webhook_id,
       attemptCount: row.attempt_count,
+      leaseGeneration: parseLeaseGeneration(row.lease_generation),
       leaseRecovered: row.lease_recovered,
     }));
   } catch (error) {
@@ -191,6 +203,8 @@ export async function completePromotionDelivery(
   eventId: string,
   webhookId: string,
   owner: string,
+  attemptCount: number,
+  leaseGeneration: number,
 ): Promise<boolean> {
   const result = await queryable.query(
     `UPDATE promotion_event_deliveries
@@ -198,8 +212,8 @@ export async function completePromotionDelivery(
             lease_owner = NULL, lease_expires_at = NULL, last_error = NULL
       WHERE event_id = $1 AND webhook_id = $2
         AND state IN ('pending', 'dead_letter')
-        AND lease_owner = $3`,
-    [eventId, webhookId, owner],
+        AND lease_owner = $3 AND attempt_count = $4 AND lease_generation = $5`,
+    [eventId, webhookId, owner, attemptCount, leaseGeneration],
   );
   return result.rowCount === 1;
 }
@@ -209,7 +223,13 @@ export async function failPromotionDelivery(
   eventId: string,
   webhookId: string,
   owner: string,
-  input: { maxAttempts: number; retryDelayMs: number; error: unknown },
+  input: {
+    maxAttempts: number;
+    retryDelayMs: number;
+    error: unknown;
+    attemptCount: number;
+    leaseGeneration: number;
+  },
 ): Promise<'pending' | 'dead_letter' | 'lost_lease'> {
   const { rows } = await queryable.query<{ state: 'pending' | 'dead_letter' }>(
     `UPDATE promotion_event_deliveries
@@ -221,9 +241,12 @@ export async function failPromotionDelivery(
             lease_owner = NULL,
             lease_expires_at = NULL
       WHERE event_id = $1 AND webhook_id = $2 AND state = 'pending'
-        AND lease_owner = $3
+        AND lease_owner = $3 AND attempt_count = $6 AND lease_generation = $7
       RETURNING state`,
-    [eventId, webhookId, owner, input.maxAttempts, input.retryDelayMs],
+    [
+      eventId, webhookId, owner, input.maxAttempts, input.retryDelayMs,
+      input.attemptCount, input.leaseGeneration,
+    ],
   );
   return rows[0]?.state ?? 'lost_lease';
 }
@@ -233,7 +256,12 @@ export async function timeoutPromotionDelivery(
   eventId: string,
   webhookId: string,
   owner: string,
-  input: { maxAttempts: number; retryDelayMs: number },
+  input: {
+    maxAttempts: number;
+    retryDelayMs: number;
+    attemptCount: number;
+    leaseGeneration: number;
+  },
 ): Promise<'pending' | 'dead_letter' | 'lost_lease'> {
   const { rows } = await queryable.query<{ state: 'pending' | 'dead_letter' }>(
     `UPDATE promotion_event_deliveries
@@ -246,9 +274,12 @@ export async function timeoutPromotionDelivery(
             dead_lettered_at = CASE WHEN attempt_count >= $4 THEN now() ELSE NULL END,
             last_error = 'callback timed out'
       WHERE event_id = $1 AND webhook_id = $2 AND state = 'pending'
-        AND lease_owner = $3
+        AND lease_owner = $3 AND attempt_count = $6 AND lease_generation = $7
       RETURNING state`,
-    [eventId, webhookId, owner, input.maxAttempts, input.retryDelayMs],
+    [
+      eventId, webhookId, owner, input.maxAttempts, input.retryDelayMs,
+      input.attemptCount, input.leaseGeneration,
+    ],
   );
   return rows[0]?.state ?? 'lost_lease';
 }
@@ -272,21 +303,32 @@ export async function manualRetryPromotionDelivery(
 export async function releasePromotionDeliveries(
   queryable: Queryable,
   owner: string,
-  retained: readonly Pick<ClaimedPromotionDelivery, 'webhookId' | 'event'>[] = [],
+  retained: readonly Pick<
+    ClaimedPromotionDelivery,
+    'webhookId' | 'event' | 'attemptCount' | 'leaseGeneration'
+  >[] = [],
 ): Promise<number> {
   const retainedEventIds = retained.map((delivery) => delivery.event.eventId);
   const retainedWebhookIds = retained.map((delivery) => delivery.webhookId);
+  const retainedAttemptCounts = retained.map((delivery) => delivery.attemptCount);
+  const retainedLeaseGenerations = retained.map((delivery) => delivery.leaseGeneration);
   const result = await queryable.query(
     `UPDATE promotion_event_deliveries
         SET lease_owner = NULL, lease_expires_at = NULL, available_at = now()
       WHERE state = 'pending' AND lease_owner = $1
         AND NOT EXISTS (
           SELECT 1
-            FROM unnest($2::uuid[], $3::text[]) AS retained(event_id, webhook_id)
+            FROM unnest($2::uuid[], $3::text[], $4::integer[], $5::bigint[])
+                 AS retained(event_id, webhook_id, attempt_count, lease_generation)
            WHERE retained.event_id = promotion_event_deliveries.event_id
              AND retained.webhook_id = promotion_event_deliveries.webhook_id
+             AND retained.attempt_count = promotion_event_deliveries.attempt_count
+             AND retained.lease_generation = promotion_event_deliveries.lease_generation
         )`,
-    [owner, retainedEventIds, retainedWebhookIds],
+    [
+      owner, retainedEventIds, retainedWebhookIds,
+      retainedAttemptCounts, retainedLeaseGenerations,
+    ],
   );
   return result.rowCount ?? 0;
 }
@@ -300,20 +342,22 @@ export async function abandonPromotionDeliveries(
   const eventIds = deliveries.map((delivery) => delivery.event.eventId);
   const webhookIds = deliveries.map((delivery) => delivery.webhookId);
   const attemptCounts = deliveries.map((delivery) => delivery.attemptCount);
+  const leaseGenerations = deliveries.map((delivery) => delivery.leaseGeneration);
   const result = await queryable.query(
     `UPDATE promotion_event_deliveries AS target
         SET attempt_count = GREATEST(target.attempt_count - 1, 0),
             lease_owner = NULL,
             lease_expires_at = NULL,
             available_at = now()
-       FROM unnest($2::uuid[], $3::text[], $4::integer[])
-            AS abandoned(event_id, webhook_id, attempt_count)
+       FROM unnest($2::uuid[], $3::text[], $4::integer[], $5::bigint[])
+            AS abandoned(event_id, webhook_id, attempt_count, lease_generation)
       WHERE target.event_id = abandoned.event_id
         AND target.webhook_id = abandoned.webhook_id
         AND target.attempt_count = abandoned.attempt_count
+        AND target.lease_generation = abandoned.lease_generation
         AND target.state = 'pending'
         AND (target.lease_owner = $1 OR target.lease_owner IS NULL)`,
-    [owner, eventIds, webhookIds, attemptCounts],
+    [owner, eventIds, webhookIds, attemptCounts, leaseGenerations],
   );
   return result.rowCount ?? 0;
 }
@@ -338,8 +382,10 @@ export async function renewPromotionDeliveries(
       webhook_id: string;
       state: string;
       lease_owner: string | null;
+      attempt_count: number;
+      lease_generation: string;
     }>(
-      `SELECT event_id, webhook_id, state, lease_owner
+      `SELECT event_id, webhook_id, state, lease_owner, attempt_count, lease_generation
          FROM promotion_event_deliveries
         WHERE (event_id, webhook_id) IN (
           SELECT * FROM unnest($1::uuid[], $2::text[])
@@ -356,8 +402,11 @@ export async function renewPromotionDeliveries(
     const lost: ClaimedPromotionDelivery[] = [];
     for (const delivery of deliveries) {
       const row = rowByKey.get(`${delivery.event.eventId}\u0000${delivery.webhookId}`);
-      if (row?.state === 'pending' && row.lease_owner === owner) renewed.push(delivery);
-      else if (row?.state !== 'pending' && row?.lease_owner === owner) {
+      const exactOwner = row?.lease_owner === owner
+        && row.attempt_count === delivery.attemptCount
+        && Number(row.lease_generation) === delivery.leaseGeneration;
+      if (row?.state === 'pending' && exactOwner) renewed.push(delivery);
+      else if (row?.state !== 'pending' && exactOwner) {
         terminalOwned.push(delivery);
       } else lost.push(delivery);
     }

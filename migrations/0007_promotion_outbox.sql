@@ -17,6 +17,7 @@ CREATE TABLE promotion_event_deliveries (
                    CHECK (state IN ('pending', 'delivered', 'dead_letter')),
   available_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   attempt_count    INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+  lease_generation BIGINT NOT NULL DEFAULT 0 CHECK (lease_generation >= 0),
   lease_owner      TEXT,
   lease_expires_at TIMESTAMPTZ,
   last_error       TEXT CHECK (last_error IS NULL OR char_length(last_error) <= 256),

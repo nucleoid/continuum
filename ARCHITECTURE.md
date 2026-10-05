@@ -371,7 +371,10 @@ Five interfaces. Engram and any future system integrate through these. Continuum
    creation, source mutation, and promotion audit. Workers claim with leases,
    renew them while callbacks drain, invoke callbacks outside database
    transactions, retry with bounded backoff, reclaim expired leases, and
-   dead-letter after a bounded attempt count. Shutdown stops new work, renews
+   dead-letter after a bounded attempt count. Worker database waits and
+   callback admission are bounded. Every delivery mutation is fenced by the
+   exact durable owner, attempt, and monotonic lease generation, and successful
+   callbacks retain that ownership until acknowledgement settles. Shutdown stops new work, renews
    exact active leases through a bounded grace period, and acknowledges
    callbacks that succeed during that grace. The grace must remain shorter
    than the lease duration. At the deadline it aborts and detaches
