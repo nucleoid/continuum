@@ -1,6 +1,7 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type pg from 'pg';
@@ -11,6 +12,29 @@ import { updateTagVocabulary } from './tag-vocabularies.js';
 const DATABASE_URL = process.env.CONTINUUM_TEST_DATABASE_URL
   ?? 'postgres://continuum:***@localhost:5433/continuum';
 const MIGRATIONS = resolve(dirname(fileURLToPath(import.meta.url)), '../../migrations');
+
+async function waitForTableLock(
+  admin: pg.Pool,
+  relation: string,
+  mode: string,
+  granted: boolean,
+): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const { rows } = await admin.query<{ found: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1
+           FROM pg_locks
+          WHERE relation = $1::regclass
+            AND mode = $2
+            AND granted = $3
+       ) AS found`,
+      [relation, mode, granted],
+    );
+    if (rows[0]?.found) return;
+    await delay(10);
+  }
+  throw new Error(`Timed out waiting for ${mode} on ${relation}`);
+}
 
 describe('tag vocabulary schema', () => {
   let pool: pg.Pool;
@@ -172,6 +196,114 @@ describe('tag vocabulary schema', () => {
     }
   });
 
+  it('serializes the migration with old writers before scanning and installing the trigger', async () => {
+    const suffix = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const schema = `tag_migration_race_${suffix}`;
+    const first = await mkdtemp(join(tmpdir(), 'continuum-tags-race-before-'));
+    const second = await mkdtemp(join(tmpdir(), 'continuum-tags-race-after-'));
+    const PgPool = (await import('pg')).default.Pool;
+    const admin = new PgPool({ connectionString: DATABASE_URL });
+    const writers = new PgPool({
+      connectionString: DATABASE_URL,
+      max: 3,
+      options: `-c search_path=${schema},public`,
+    });
+    const migrator = new PgPool({
+      connectionString: DATABASE_URL,
+      options: `-c search_path=${schema},public`,
+    });
+    let priorWriter: pg.PoolClient | undefined;
+    let queuedWriter: pg.PoolClient | undefined;
+    let priorWriterOpen = false;
+    let migration: Promise<unknown> | undefined;
+    let queuedInsert: Promise<{ error?: { code?: string }; inserted?: boolean }> | undefined;
+    try {
+      await admin.query(`CREATE SCHEMA ${schema}`);
+      for (const name of [
+        '0001_init.sql', '0002_lifecycle_principal.sql',
+        '0003_lifecycle_expiry_index.sql', '0004_review_queue_index.sql',
+      ]) {
+        await writeFile(join(first, name), await readFile(join(MIGRATIONS, name), 'utf8'));
+      }
+      await writeFile(
+        join(second, '0007_tag_vocabularies.sql'),
+        await readFile(join(MIGRATIONS, '0007_tag_vocabularies.sql'), 'utf8'),
+      );
+      await runMigrations(writers, first);
+      await writers.query(`
+        INSERT INTO principals (id, external_id, kind, display_name)
+        VALUES ('10000000-0000-4000-8000-000000000020', 'race:writer', 'user', 'Old Writer');
+        INSERT INTO scopes (id, kind, name)
+        VALUES ('20000000-0000-4000-8000-000000000020', 'project', 'migration-race');
+        INSERT INTO memories (
+          id, scope_id, type, title, body, author_id, source, tags
+        ) VALUES (
+          '30000000-0000-4000-8000-000000000020',
+          '20000000-0000-4000-8000-000000000020',
+          'fact', 'Before migration', 'Updated by an old writer',
+          '10000000-0000-4000-8000-000000000020', 'manual', ARRAY['decision']
+        )
+      `);
+
+      priorWriter = await writers.connect();
+      await priorWriter.query('BEGIN');
+      priorWriterOpen = true;
+      await priorWriter.query(`
+        UPDATE memories
+           SET tags = ARRAY['private-during-rollout']
+         WHERE id = '30000000-0000-4000-8000-000000000020'
+      `);
+
+      migration = runMigrations(migrator, second);
+      await waitForTableLock(
+        admin, `${schema}.memories`, 'ShareRowExclusiveLock', false,
+      );
+
+      queuedWriter = await writers.connect();
+      queuedInsert = queuedWriter.query(`
+        INSERT INTO memories (
+          id, scope_id, type, title, body, author_id, source, tags
+        ) VALUES (
+          '30000000-0000-4000-8000-000000000021',
+          '20000000-0000-4000-8000-000000000020',
+          'fact', 'Queued writer', 'Must meet the installed trigger',
+          '10000000-0000-4000-8000-000000000020', 'manual', ARRAY['unchecked-after-scan']
+        )
+      `).then(
+        () => ({ inserted: true }),
+        (error: { code?: string }) => ({ error }),
+      );
+      await waitForTableLock(admin, `${schema}.memories`, 'RowExclusiveLock', false);
+
+      await priorWriter.query('COMMIT');
+      priorWriterOpen = false;
+      await migration;
+      expect(await queuedInsert).toMatchObject({ error: { code: '23514' } });
+
+      const { rows } = await writers.query(
+        `SELECT tags, metadata FROM memories
+          WHERE id = '30000000-0000-4000-8000-000000000020'`,
+      );
+      expect(rows).toEqual([{
+        tags: [],
+        metadata: { continuum_legacy_tags: ['private-during-rollout'] },
+      }]);
+    } finally {
+      if (priorWriterOpen) await priorWriter?.query('ROLLBACK').catch(() => undefined);
+      await migration?.catch(() => undefined);
+      await queuedInsert?.catch(() => undefined);
+      priorWriter?.release();
+      queuedWriter?.release();
+      await Promise.all([writers.end(), migrator.end()]);
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+      await admin.end();
+      await Promise.all([
+        rm(first, { recursive: true, force: true }),
+        rm(second, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
   it.each([
     ['uppercase', 'Deploy'],
     ['spaces', 'release ready'],
@@ -226,6 +358,17 @@ describe('tag vocabulary schema', () => {
         '10000000-0000-4000-8000-000000000010', 'manual', ARRAY['deploy']
       )
     `)).resolves.toMatchObject({ rowCount: 1 });
+
+    await expect(pool.query(`
+      INSERT INTO memories (
+        id, scope_id, type, title, body, author_id, source, tags
+      ) VALUES (
+        '30000000-0000-4000-8000-000000000012',
+        '20000000-0000-4000-8000-000000000010',
+        'fact', 'Old writer', 'Duplicate canonical tags fail closed',
+        '10000000-0000-4000-8000-000000000010', 'manual', ARRAY['deploy', 'deploy']
+      )
+    `)).rejects.toMatchObject({ code: '23514' });
   });
 
   it('uses a no-key update lock for description-only changes', async () => {

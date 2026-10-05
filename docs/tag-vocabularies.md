@@ -37,14 +37,20 @@ Use this rolling-deploy sequence:
 3. Deploy the vocabulary-aware application version only after migration
    `0007_tag_vocabularies.sql` is recorded in `_continuum_migrations`.
 
-The migration rewrites historical rows and installs a database trigger in one
-transaction. Once it commits, an old application process can continue writing
-empty or built-in tags, but PostgreSQL rejects any out-of-vocabulary tag with
-a check-violation error. The trigger locks only matching vocabulary rows, so a
-concurrent delete cannot remove a tag after an old writer has validated it.
-This fail-closed boundary prevents old-writer corruption during step 3. Do not
-deploy the new application before the migration, because its vocabulary
-queries require the new table.
+The migration takes a `SHARE ROW EXCLUSIVE` lock on `memories` before it scans
+historical rows, rewrites them, and installs the database trigger in the same
+transaction. Reads continue, but inserts, updates, and deletes pause while the
+lock is held. The pause is bounded by waiting for already-open memory writes to
+finish plus the historical rewrite and trigger installation; monitor and end
+unexpectedly long write transactions before starting the migration.
+
+Once the migration commits, paused old application processes can continue
+writing empty or unique built-in tags, but PostgreSQL rejects duplicate or
+out-of-vocabulary tags with a check-violation error. The trigger locks only
+matching vocabulary rows, so a concurrent delete cannot remove a tag after an
+old writer has validated it. This fail-closed boundary prevents old-writer
+corruption during step 3. Do not deploy the new application before the
+migration, because its vocabulary queries require the new table.
 
 Legacy values remain private to each memory instead of entering the shared
 scope-kind vocabulary. Promotion deliberately copies source metadata,

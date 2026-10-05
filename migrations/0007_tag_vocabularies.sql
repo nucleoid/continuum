@@ -20,6 +20,12 @@ SELECT scope_kind, tag, 'Built-in Continuum tag', true
    'knowledge-gap'
  ]) AS tag;
 
+-- Drain writers that started before this migration, then keep later writers
+-- paused until the historical rewrite and enforcement trigger commit together.
+-- SHARE ROW EXCLUSIVE permits reads but conflicts with the ROW EXCLUSIVE lock
+-- taken by INSERT, UPDATE, and DELETE on memories.
+LOCK TABLE memories IN SHARE ROW EXCLUSIVE MODE;
+
 -- A vocabulary is shared by every scope of a kind. Historical private values
 -- must therefore never be adopted into it. Keep only shipped vocabulary tags
 -- active and retain every unknown original value on its memory, including
@@ -147,7 +153,11 @@ BEGIN
            AND vocabulary.tag = requested.tag
       );
 
-  IF unknown_count > 0 THEN
+  IF unknown_count > 0
+     OR cardinality(NEW.tags) <> (
+       SELECT count(DISTINCT requested.tag)
+         FROM unnest(NEW.tags) AS requested(tag)
+     ) THEN
     RAISE EXCEPTION USING
       ERRCODE = '23514',
       MESSAGE = 'memory tags violate the controlled vocabulary',
