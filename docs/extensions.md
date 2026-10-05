@@ -52,7 +52,10 @@ share one database transaction. A rollback leaves none of them committed.
 
 The promotion worker claims rows with `FOR UPDATE SKIP LOCKED` and a bounded
 lease, commits that claim, then invokes callbacks outside the transaction.
-Success is acknowledged only while the worker still owns an unexpired lease.
+Success is acknowledged while the worker still owns the delivery; this lets a
+callback that settles after abort durably complete even if its lease has just
+expired, while the owner fence rejects stale completion after another process
+has reclaimed it.
 Failures use bounded exponential backoff with jitter. After the configured
 attempt limit, a delivery enters `dead_letter`. A successful webhook is not
 blocked by another webhook's failure.
@@ -102,13 +105,18 @@ active callbacks during the configured grace period. A callback that succeeds
 during that period is durably acknowledged before its lease can be released.
 
 At the grace deadline, the worker signals abort and detaches callbacks that do
-not settle. `stop()` is therefore bounded even when an extension ignores its
-`AbortSignal`. Leases for those ambiguous deliveries are not released and are
-not renewed again; they remain unavailable until their last durable expiry,
-then become eligible for at-least-once recovery. All other owned leases are
-released immediately. Callback execution cannot be forcibly interrupted inside
-JavaScript, so process exit is the final execution boundary. Consumers must
-still deduplicate by event ID.
+not settle. `stop()` uses the same wall-clock deadline for callback drain,
+renewal, and release, so a stuck database operation cannot extend shutdown.
+Leases for ambiguous deliveries are not released or renewed after stop. A
+process-wide in-flight fence excludes them from claims by replacement workers
+in the same process until the original callback settles. Late success is then
+acknowledged if the durable owner fence is still intact; late failure schedules
+the normal bounded retry. Settled callbacks are removed from both the in-flight
+and retained sets. After a crash, expiry provides at-least-once recovery, and
+claims that end in repeated crashes are dead-lettered at the configured attempt
+limit. Callback execution cannot be forcibly interrupted inside JavaScript, so
+process exit remains the cross-process execution boundary. Consumers must still
+deduplicate by event ID.
 
 The default registries are empty. Deployments register consumers at their
 composition boundary. Core does not import or know about downstream products.

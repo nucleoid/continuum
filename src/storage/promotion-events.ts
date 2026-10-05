@@ -75,7 +75,14 @@ export async function enqueuePromotionEvent(
 
 export async function claimPromotionDeliveries(
   pool: pg.Pool,
-  input: { owner: string; webhookIds: readonly string[]; limit: number; leaseMs: number },
+  input: {
+    owner: string;
+    webhookIds: readonly string[];
+    limit: number;
+    leaseMs: number;
+    maxAttempts?: number;
+    excluded?: readonly Pick<ClaimedPromotionDelivery, 'webhookId' | 'event'>[];
+  },
 ): Promise<ClaimedPromotionDelivery[]> {
   if (!input.owner || input.owner.length > 128) throw new Error('owner must be 1 to 128 characters');
   if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
@@ -84,10 +91,28 @@ export async function claimPromotionDeliveries(
   if (!Number.isSafeInteger(input.leaseMs) || input.leaseMs < 1) {
     throw new Error('leaseMs must be positive');
   }
+  const maxAttempts = input.maxAttempts ?? 10;
+  if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) {
+    throw new Error('maxAttempts must be positive');
+  }
   if (input.webhookIds.length === 0) return [];
+  const excludedEventIds = (input.excluded ?? []).map((delivery) => delivery.event.eventId);
+  const excludedWebhookIds = (input.excluded ?? []).map((delivery) => delivery.webhookId);
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await client.query(
+      `UPDATE promotion_event_deliveries
+          SET state = 'dead_letter', dead_lettered_at = now(),
+              last_error = 'maximum attempts exhausted after interrupted delivery',
+              lease_owner = NULL, lease_expires_at = NULL
+        WHERE state = 'pending'
+          AND available_at <= now()
+          AND (lease_expires_at IS NULL OR lease_expires_at <= now())
+          AND webhook_id = ANY($1::text[])
+          AND attempt_count >= $2`,
+      [[...new Set(input.webhookIds)].sort(), maxAttempts],
+    );
     const { rows } = await client.query<PromotionEventRow & {
       webhook_id: string;
       attempt_count: number;
@@ -101,6 +126,10 @@ export async function claimPromotionDeliveries(
             AND d.available_at <= now()
             AND (d.lease_expires_at IS NULL OR d.lease_expires_at <= now())
             AND d.webhook_id = ANY($2::text[])
+            AND d.attempt_count < $5
+            AND (d.event_id, d.webhook_id) NOT IN (
+              SELECT * FROM unnest($6::uuid[], $7::text[])
+            )
           ORDER BY d.available_at, d.event_id, d.webhook_id
           FOR UPDATE SKIP LOCKED
           LIMIT $3
@@ -118,7 +147,15 @@ export async function claimPromotionDeliveries(
          FROM claimed c
          JOIN promotion_events e ON e.id = c.event_id
         ORDER BY c.webhook_id`,
-      [input.owner, [...new Set(input.webhookIds)].sort(), input.limit, input.leaseMs],
+      [
+        input.owner,
+        [...new Set(input.webhookIds)].sort(),
+        input.limit,
+        input.leaseMs,
+        maxAttempts,
+        excludedEventIds,
+        excludedWebhookIds,
+      ],
     );
     await client.query('COMMIT');
     return rows.map((row) => ({
@@ -145,8 +182,9 @@ export async function completePromotionDelivery(
     `UPDATE promotion_event_deliveries
         SET state = 'delivered', delivered_at = now(),
             lease_owner = NULL, lease_expires_at = NULL, last_error = NULL
-      WHERE event_id = $1 AND webhook_id = $2 AND state = 'pending'
-        AND lease_owner = $3 AND lease_expires_at > now()`,
+      WHERE event_id = $1 AND webhook_id = $2
+        AND state IN ('pending', 'dead_letter')
+        AND lease_owner = $3`,
     [eventId, webhookId, owner],
   );
   return result.rowCount === 1;

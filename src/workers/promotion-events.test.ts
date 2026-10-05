@@ -127,15 +127,16 @@ describe('PromotionEventWorker', () => {
     expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('do-not-log');
   });
 
-  it('aborts a timed-out callback and retains its lease for expiry-based retry', async () => {
+  it('retains a timed-out callback lease until its late success is acknowledged', async () => {
     const promoted = await seed(['slow']);
     const registry = new PromotionWebhookRegistry();
     const aborted = deferred();
+    const releaseCallback = deferred();
     registry.register({
-      id: 'slow',
-      onPromoted: (_event, { signal }) => new Promise((resolve) => {
-        signal.addEventListener('abort', () => { aborted.resolve(); resolve(); });
-      }),
+      id: 'slow', onPromoted: async (_event, { signal }) => {
+        signal.addEventListener('abort', () => aborted.resolve(), { once: true });
+        await releaseCallback.promise;
+      },
     });
     const instance = worker(registry, { callbackTimeoutMs: 25 });
     const draining = instance.drainOnce();
@@ -150,10 +151,16 @@ describe('PromotionEventWorker', () => {
       event_id: promoted.promotionEvent.eventId,
       state: 'pending', attempt_count: 1, lease_owner: 'worker-test', lease_retained: true,
     }]);
+    releaseCallback.resolve();
+    await vi.waitFor(async () => {
+      const result = await pool.query('SELECT state FROM promotion_event_deliveries');
+      expect(result.rows).toEqual([{ state: 'delivered' }]);
+    });
   });
 
   it('stops claiming and retains a deadline-abandoned callback lease', async () => {
     vi.useFakeTimers();
+    const releaseCallback = deferred();
     try {
       await seed(['stuck']);
       const entered = deferred();
@@ -162,7 +169,8 @@ describe('PromotionEventWorker', () => {
         id: 'stuck',
         onPromoted: async (_event, { signal }) => {
           entered.resolve();
-          await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve()));
+          signal.addEventListener('abort', () => undefined, { once: true });
+          await releaseCallback.promise;
         },
       });
       const instance = worker(registry, {
@@ -183,6 +191,8 @@ describe('PromotionEventWorker', () => {
         state: 'pending', lease_owner: 'worker-test', lease_retained: true,
       }]);
     } finally {
+      releaseCallback.resolve();
+      await vi.runAllTicks();
       vi.useRealTimers();
     }
   });
@@ -269,6 +279,101 @@ describe('PromotionEventWorker', () => {
     expect(store.complete).toHaveBeenCalledBefore(store.release as ReturnType<typeof vi.fn>);
   });
 
+  it('keeps stop wall-clock bounded when renewal and release never settle', async () => {
+    vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
+    const releaseCallback = deferred();
+    try {
+      const entered = deferred();
+      const never = new Promise<number>(() => undefined);
+      const registry = new PromotionWebhookRegistry();
+      registry.register({
+        id: 'hook',
+        onPromoted: async () => {
+          entered.resolve();
+          await releaseCallback.promise;
+        },
+      });
+      const store = mockStore({
+        claim: vi.fn().mockResolvedValue([claimedDelivery]),
+        renew: vi.fn(() => never),
+        release: vi.fn(() => never),
+      });
+      const instance = new PromotionEventWorker(
+        pool,
+        registry,
+        workerOptions({ leaseMs: 90, callbackTimeoutMs: 80, shutdownWaitMs: 40 }),
+        store,
+      );
+
+      void instance.drainOnce();
+      await entered.promise;
+      await vi.advanceTimersByTimeAsync(30);
+      expect(store.renew).toHaveBeenCalledOnce();
+      const stopping = instance.stop('SIGTERM');
+      let stopped = false;
+      void stopping.then(() => { stopped = true; });
+
+      await vi.advanceTimersByTimeAsync(39);
+      expect(stopped).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(stopping).resolves.toBeUndefined();
+      expect(store.release).toHaveBeenCalledOnce();
+    } finally {
+      releaseCallback.resolve();
+      await vi.runAllTicks();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not rearm renewal after stop and prunes a late successful callback fence', async () => {
+    vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
+    const releaseCallback = deferred();
+    try {
+      const entered = deferred();
+      const renewal = deferred<number>();
+      const registry = new PromotionWebhookRegistry();
+      registry.register({
+        id: 'hook',
+        onPromoted: async () => {
+          entered.resolve();
+          await releaseCallback.promise;
+        },
+      });
+      const store = mockStore({
+        claim: vi.fn().mockResolvedValue([claimedDelivery]),
+        renew: vi.fn(() => renewal.promise),
+      });
+      const instance = new PromotionEventWorker(
+        pool,
+        registry,
+        workerOptions({ leaseMs: 90, callbackTimeoutMs: 80, shutdownWaitMs: 40 }),
+        store,
+      );
+
+      void instance.drainOnce();
+      await entered.promise;
+      await vi.advanceTimersByTimeAsync(30);
+      const stopping = instance.stop('SIGTERM');
+      await vi.advanceTimersByTimeAsync(40);
+      await stopping;
+
+      renewal.resolve(1);
+      releaseCallback.resolve();
+      await vi.runAllTicks();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(store.complete).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(store.renew).toHaveBeenCalledOnce();
+
+      await instance.stop('again');
+      expect(store.release).toHaveBeenCalledWith(pool, 'worker-test', [claimedDelivery]);
+    } finally {
+      releaseCallback.resolve();
+      await vi.runAllTimersAsync();
+      vi.useRealTimers();
+    }
+  });
+
   it('bounds lease renewal and shutdown when a callback ignores abort', async () => {
     vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
     const releaseCallback = deferred();
@@ -279,12 +384,15 @@ describe('PromotionEventWorker', () => {
       const store = mockStore({
         claim: vi.fn(async (_pool, input) => {
           if (delivered || (owner && leaseExpiresAt > Date.now())) return [];
+          if (input.excluded.some((delivery) =>
+            delivery.event.eventId === claimedDelivery.event.eventId
+            && delivery.webhookId === claimedDelivery.webhookId)) return [];
           owner = input.owner;
           leaseExpiresAt = Date.now() + input.leaseMs;
           return [claimedDelivery];
         }),
         complete: vi.fn(async (_pool, _eventId, _webhookId, claimant) => {
-          if (owner !== claimant || leaseExpiresAt <= Date.now()) return false;
+          if (owner !== claimant) return false;
           delivered = true;
           owner = undefined;
           return true;
@@ -346,8 +454,19 @@ describe('PromotionEventWorker', () => {
       expect(contenderCallback).not.toHaveBeenCalled();
 
       await vi.advanceTimersByTimeAsync(81);
-      await expect(contender.drainOnce()).resolves.toBe(1);
-      expect(contenderCallback).toHaveBeenCalledOnce();
+      await expect(contender.drainOnce()).resolves.toBe(0);
+      expect(contenderCallback).not.toHaveBeenCalled();
+      expect((store.claim as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[1].excluded)
+        .toEqual([claimedDelivery]);
+
+      releaseCallback.resolve();
+      await vi.runAllTicks();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(store.complete).toHaveBeenCalledOnce();
+      await expect(contender.drainOnce()).resolves.toBe(0);
+      expect(contenderCallback).not.toHaveBeenCalled();
+      expect((store.claim as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[1].excluded)
+        .toEqual([]);
       await contender.stop('test_complete');
 
       expect(store.renew).toHaveBeenCalledOnce();
@@ -367,6 +486,9 @@ describe('PromotionEventWorker', () => {
       const store = mockStore({
         claim: vi.fn(async (_pool, input) => {
           if (delivered || (owner && leaseExpiresAt > Date.now())) return [];
+          if (input.excluded.some((delivery) =>
+            delivery.event.eventId === claimedDelivery.event.eventId
+            && delivery.webhookId === claimedDelivery.webhookId)) return [];
           owner = input.owner;
           leaseExpiresAt = Date.now() + input.leaseMs;
           return [claimedDelivery];

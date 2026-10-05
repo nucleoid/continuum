@@ -215,6 +215,61 @@ describe('promotion outbox', () => {
     }]);
   });
 
+  it('durably acknowledges a late success while the expired lease owner is unchanged', async () => {
+    const { principal, source } = await seed();
+    await promoteMemoryWithAudit(
+      pool, principal.id, source.id, { kind: 'project', name: 'destination' }, {}, ['hook'],
+    );
+    const [delivery] = await claimPromotionDeliveries(pool, {
+      owner: 'worker', webhookIds: ['hook'], limit: 1, leaseMs: 1000, maxAttempts: 3,
+    });
+    await pool.query(
+      `UPDATE promotion_event_deliveries SET lease_expires_at = now() - interval '1 second'`,
+    );
+
+    await expect(completePromotionDelivery(
+      pool, delivery.event.eventId, delivery.webhookId, 'worker',
+    )).resolves.toBe(true);
+    const { rows } = await pool.query(
+      `SELECT state, lease_owner, lease_expires_at FROM promotion_event_deliveries`,
+    );
+    expect(rows).toEqual([{ state: 'delivered', lease_owner: null, lease_expires_at: null }]);
+  });
+
+  it('dead-letters crash-recovered deliveries at the configured attempt bound', async () => {
+    const { principal, source } = await seed();
+    await promoteMemoryWithAudit(
+      pool, principal.id, source.id, { kind: 'project', name: 'destination' }, {}, ['hook'],
+    );
+    const first = await claimPromotionDeliveries(pool, {
+      owner: 'first', webhookIds: ['hook'], limit: 1, leaseMs: 1000, maxAttempts: 2,
+    });
+    expect(first[0].attemptCount).toBe(1);
+    await pool.query(
+      `UPDATE promotion_event_deliveries SET lease_expires_at = now() - interval '1 second'`,
+    );
+    const second = await claimPromotionDeliveries(pool, {
+      owner: 'second', webhookIds: ['hook'], limit: 1, leaseMs: 1000, maxAttempts: 2,
+    });
+    expect(second[0].attemptCount).toBe(2);
+    await pool.query(
+      `UPDATE promotion_event_deliveries SET lease_expires_at = now() - interval '1 second'`,
+    );
+
+    await expect(claimPromotionDeliveries(pool, {
+      owner: 'third', webhookIds: ['hook'], limit: 1, leaseMs: 1000, maxAttempts: 2,
+    })).resolves.toEqual([]);
+    const { rows } = await pool.query(
+      `SELECT state, attempt_count, lease_owner, last_error FROM promotion_event_deliveries`,
+    );
+    expect(rows).toEqual([{
+      state: 'dead_letter',
+      attempt_count: 2,
+      lease_owner: null,
+      last_error: 'maximum attempts exhausted after interrupted delivery',
+    }]);
+  });
+
   it('leaves deliveries for unregistered webhook IDs pending and observable', async () => {
     const { principal, source } = await seed();
     await promoteMemoryWithAudit(

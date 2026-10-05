@@ -72,7 +72,14 @@ const defaultLogger: PromotionWorkerLogger = {
 export interface PromotionWorkerStore {
   claim(
     pool: pg.Pool,
-    input: { owner: string; webhookIds: readonly string[]; limit: number; leaseMs: number },
+    input: {
+      owner: string;
+      webhookIds: readonly string[];
+      limit: number;
+      leaseMs: number;
+      maxAttempts: number;
+      excluded: readonly ClaimedPromotionDelivery[];
+    },
   ): Promise<ClaimedPromotionDelivery[]>;
   complete(
     pool: pg.Pool,
@@ -115,6 +122,17 @@ const defaultStore: PromotionWorkerStore = {
   release: releasePromotionDeliveries,
   renew: renewPromotionDeliveries,
 };
+
+function deliveryKey(delivery: Pick<ClaimedPromotionDelivery, 'webhookId' | 'event'>): string {
+  return `${delivery.event.eventId}\u0000${delivery.webhookId}`;
+}
+
+// Multiple workers can briefly coexist in one process during shutdown/startup handoff. Keep the
+// callback fence process-wide so a lease expiry cannot start a second local callback while the
+// first callback is still ignoring its AbortSignal.
+const inFlightCallbacks = new Map<string, ClaimedPromotionDelivery>();
+
+type CallbackOutcome = 'success' | 'failure' | 'not_started';
 
 export class PromotionEventWorker implements RuntimeWorker {
   private stopped = false;
@@ -190,8 +208,12 @@ export class PromotionEventWorker implements RuntimeWorker {
       webhookIds: this.registry.ids(),
       limit: this.options.claimBatch,
       leaseMs: this.options.leaseMs,
+      maxAttempts: this.options.maxAttempts,
+      excluded: [...inFlightCallbacks.values()],
     });
-    if (this.stopped) return deliveries.length;
+    if (this.stopped) {
+      return deliveries.length;
+    }
     const tasks = deliveries.map((delivery) => {
       return this.deliver(delivery);
     });
@@ -201,11 +223,15 @@ export class PromotionEventWorker implements RuntimeWorker {
 
   private async stopWorker(reason: string): Promise<void> {
     if (this.timer) clearTimeout(this.timer);
+    const deadline = Date.now() + this.options.shutdownWaitMs;
     let timeout: NodeJS.Timeout | undefined;
     const outcome = await Promise.race([
       Promise.allSettled([...this.active]).then(() => 'drained' as const),
       new Promise<'timeout'>((resolve) => {
-        timeout = setTimeout(() => resolve('timeout'), this.options.shutdownWaitMs);
+        timeout = setTimeout(
+          () => resolve('timeout'),
+          Math.max(0, deadline - Date.now()),
+        );
       }),
     ]);
     if (timeout) clearTimeout(timeout);
@@ -221,11 +247,19 @@ export class PromotionEventWorker implements RuntimeWorker {
       });
     }
     if (this.leaseTimer) clearTimeout(this.leaseTimer);
-    await this.leaseRenewal;
+    this.leaseTimer = undefined;
+    if (this.leaseRenewal) {
+      await this.beforeDeadline(this.leaseRenewal, deadline);
+    }
     const retained = [...this.retainedLeases.values()];
-    const released = await this.store.release(this.pool, this.options.owner, retained);
+    const release = this.store.release(this.pool, this.options.owner, retained);
+    const released = await this.beforeDeadline(release, deadline);
     this.logger.info({
-      event: 'promotion_worker_stopped', reason, released, retained: retained.length,
+      event: 'promotion_worker_stopped',
+      reason,
+      released: released.settled ? released.value : undefined,
+      retained: retained.length,
+      databaseTimedOut: !released.settled,
     });
   }
 
@@ -252,8 +286,11 @@ export class PromotionEventWorker implements RuntimeWorker {
     });
     const eventId = event.eventId;
     const webhookId = delivery.webhookId;
+    const key = deliveryKey(delivery);
+    if (inFlightCallbacks.has(key)) return;
     const controller = new AbortController();
     this.controllers.set(controller, delivery);
+    inFlightCallbacks.set(key, delivery);
     this.ensureLeaseRenewal();
     this.logger.info({
       event: 'promotion_delivery_claimed',
@@ -266,10 +303,19 @@ export class PromotionEventWorker implements RuntimeWorker {
 
     let timer: NodeJS.Timeout | undefined;
     try {
-      const callback = Promise.resolve().then(() => webhook.onPromoted(
-        event,
-        { signal: controller.signal },
-      )).then(() => 'success' as const, () => 'failure' as const);
+      let callback: Promise<CallbackOutcome>;
+      if (this.stopped || controller.signal.aborted) {
+        callback = Promise.resolve('not_started');
+      } else {
+        try {
+          callback = Promise.resolve(webhook.onPromoted(
+            event,
+            { signal: controller.signal },
+          )).then(() => 'success', () => 'failure');
+        } catch {
+          callback = Promise.resolve('failure');
+        }
+      }
       const timeout = new Promise<'timeout'>((resolve) => {
         timer = setTimeout(() => {
           resolve('timeout');
@@ -288,19 +334,7 @@ export class PromotionEventWorker implements RuntimeWorker {
       }
 
       if (outcome === 'success') {
-        const acknowledged = await this.store.complete(
-          this.pool,
-          eventId,
-          webhookId,
-          this.options.owner,
-        );
-        this.logger.info({
-          event: 'promotion_delivery_succeeded',
-          eventId,
-          webhookId,
-          attempt: delivery.attemptCount,
-          acknowledged,
-        });
+        await this.persistCallbackOutcome(delivery, outcome);
         return;
       }
       if (outcome === 'timeout') {
@@ -321,42 +355,24 @@ export class PromotionEventWorker implements RuntimeWorker {
           state,
           retryDelayMs: state === 'pending' ? retryDelayMs : undefined,
         });
+        this.followLateCallback(delivery, controller, callback, 'timeout');
         return;
       }
-      if (outcome === 'shutdown' || this.stopped) return;
-      const retryDelayMs = this.retryDelay(delivery.attemptCount);
-      const state = await this.store.fail(
-        this.pool,
-        eventId,
-        webhookId,
-        this.options.owner,
-        {
-          maxAttempts: this.options.maxAttempts,
-          retryDelayMs,
-          error: new Error('callback failed'),
-        },
-      );
-      this.logger.warn({
-        event: 'promotion_delivery_failed',
-        eventId,
-        webhookId,
-        attempt: delivery.attemptCount,
-        reason: 'error',
-        state,
-        retryDelayMs: state === 'pending' ? retryDelayMs : undefined,
-      });
+      if (outcome === 'shutdown' || this.stopped) {
+        this.retainLease(delivery);
+        this.followLateCallback(delivery, controller, callback, 'shutdown');
+        return;
+      }
+      if (outcome === 'not_started') return;
+      await this.persistCallbackOutcome(delivery, outcome);
     } finally {
       if (timer) clearTimeout(timer);
-      this.controllers.delete(controller);
-      if (this.controllers.size === 0 && this.leaseTimer) {
-        clearTimeout(this.leaseTimer);
-        this.leaseTimer = undefined;
-      }
+      if (!this.retainedLeases.has(key)) this.finishCallback(delivery, controller);
     }
   }
 
   private ensureLeaseRenewal(): void {
-    if (this.leaseTimer || this.leaseRenewal) return;
+    if (this.stopped || this.leaseTimer || this.leaseRenewal) return;
     const renewalMs = Math.max(1, Math.floor(this.options.leaseMs / 3));
     this.leaseTimer = setTimeout(() => {
       this.leaseTimer = undefined;
@@ -369,7 +385,7 @@ export class PromotionEventWorker implements RuntimeWorker {
         this.logger.error({ event: 'promotion_worker_lease_renewal_failed' });
       }).finally(() => {
         this.leaseRenewal = undefined;
-        if (this.controllers.size > 0) this.ensureLeaseRenewal();
+        if (!this.stopped && this.controllers.size > 0) this.ensureLeaseRenewal();
       });
     }, renewalMs);
   }
@@ -384,6 +400,95 @@ export class PromotionEventWorker implements RuntimeWorker {
   }
 
   private retainLease(delivery: ClaimedPromotionDelivery): void {
-    this.retainedLeases.set(`${delivery.event.eventId}\u0000${delivery.webhookId}`, delivery);
+    this.retainedLeases.set(deliveryKey(delivery), delivery);
+  }
+
+  private followLateCallback(
+    delivery: ClaimedPromotionDelivery,
+    controller: AbortController,
+    callback: Promise<CallbackOutcome>,
+    abortReason: 'timeout' | 'shutdown',
+  ): void {
+    void callback.then(async (outcome) => {
+      if (outcome === 'success' || (outcome === 'failure' && abortReason === 'shutdown')) {
+        await this.persistCallbackOutcome(delivery, outcome);
+      }
+    }).catch(() => {
+      this.logger.error({ event: 'promotion_delivery_late_settlement_failed' });
+    }).finally(() => {
+      this.finishCallback(delivery, controller);
+    });
+  }
+
+  private async persistCallbackOutcome(
+    delivery: ClaimedPromotionDelivery,
+    outcome: Exclude<CallbackOutcome, 'not_started'>,
+  ): Promise<void> {
+    const eventId = delivery.event.eventId;
+    const webhookId = delivery.webhookId;
+    if (outcome === 'success') {
+      const acknowledged = await this.store.complete(
+        this.pool, eventId, webhookId, this.options.owner,
+      );
+      this.logger.info({
+        event: 'promotion_delivery_succeeded', eventId, webhookId,
+        attempt: delivery.attemptCount, acknowledged,
+      });
+      return;
+    }
+    const retryDelayMs = this.retryDelay(delivery.attemptCount);
+    const state = await this.store.fail(
+      this.pool,
+      eventId,
+      webhookId,
+      this.options.owner,
+      {
+        maxAttempts: this.options.maxAttempts,
+        retryDelayMs,
+        error: new Error('callback failed'),
+      },
+    );
+    this.logger.warn({
+      event: 'promotion_delivery_failed', eventId, webhookId,
+      attempt: delivery.attemptCount, reason: 'error', state,
+      retryDelayMs: state === 'pending' ? retryDelayMs : undefined,
+    });
+  }
+
+  private finishCallback(
+    delivery: ClaimedPromotionDelivery,
+    controller: AbortController,
+  ): void {
+    const key = deliveryKey(delivery);
+    this.controllers.delete(controller);
+    this.retainedLeases.delete(key);
+    inFlightCallbacks.delete(key);
+    if (this.controllers.size === 0 && this.leaseTimer) {
+      clearTimeout(this.leaseTimer);
+      this.leaseTimer = undefined;
+    }
+  }
+
+  private async beforeDeadline<T>(
+    operation: Promise<T>,
+    deadline: number,
+  ): Promise<{ settled: true; value: T } | { settled: false }> {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      void operation.catch(() => undefined);
+      return { settled: false };
+    }
+    let timer: NodeJS.Timeout | undefined;
+    const result = await Promise.race([
+      operation.then(
+        (value) => ({ settled: true as const, value }),
+        () => ({ settled: false as const }),
+      ),
+      new Promise<{ settled: false }>((resolve) => {
+        timer = setTimeout(() => resolve({ settled: false }), remainingMs);
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+    return result;
   }
 }
