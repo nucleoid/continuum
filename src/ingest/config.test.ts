@@ -2,6 +2,22 @@ import { describe, expect, it } from 'vitest';
 import { ingestConfigFromEnv } from './config.js';
 
 describe('ingest configuration', () => {
+  it('requires bearer activity producers to bind one immutable actor identity', () => {
+    expect(() => ingestConfigFromEnv({
+      CONTINUUM_INGEST_DEPLOY_EVENT_ENABLED: 'true',
+      CONTINUUM_INGEST_DEPLOY_EVENT_PRINCIPAL: 'service:deploy',
+    })).toThrow(/ACTOR_EXTERNAL_ID is required/);
+  });
+
+  it('reserves the github namespace for GitHub-signed producers', () => {
+    expect(() => ingestConfigFromEnv({
+      CONTINUUM_INGEST_DEPLOY_EVENT_ENABLED: 'true',
+      CONTINUUM_INGEST_DEPLOY_EVENT_PRINCIPAL: 'service:deploy',
+      CONTINUUM_INGEST_DEPLOY_EVENT_ACTOR_EXTERNAL_ID: 'subject-1',
+      CONTINUUM_INGEST_DEPLOY_EVENT_ACTIVITY_NAMESPACE: 'github',
+    })).toThrow(/github namespace is reserved/i);
+  });
+
   it('keeps every plugin disabled by default', () => {
     expect(ingestConfigFromEnv({})).toEqual({ plugins: {} });
   });

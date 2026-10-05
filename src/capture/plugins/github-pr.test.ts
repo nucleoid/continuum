@@ -23,6 +23,20 @@ function mergedEvent(overrides: Partial<GitHubPrEvent['pull_request']> = {}): Gi
 }
 
 describe('github-pr plugin', () => {
+  it('uses the immutable numeric repository id in PR and branch closure keys', () => {
+    const event = mergedEvent();
+    (event.repository as typeof event.repository & { id: number }).id = 987654321;
+    const [memory] = githubPrPlugin.transform(event, {
+      activityNamespace: 'github',
+      resolveActorPrincipalId: () => '11111111-1111-4111-8111-111111111111',
+    });
+
+    expect(memory.metadata?.thread_key).toBe('github:repo:987654321:pr:4421');
+    expect(memory.metadata?.closes_thread_keys).toContain(
+      'github:repo:987654321:branch:feature/checkout-v2',
+    );
+  });
+
   it('emits one context memory at project scope for a merged PR', () => {
     const out = githubPrPlugin.transform(mergedEvent());
     expect(out).toHaveLength(1);
