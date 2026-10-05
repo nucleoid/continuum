@@ -47,8 +47,32 @@ describe('github-pr plugin', () => {
       authorLogin: 'cass-exampleorg',
       mergedBy: '1002',
       mergedByLogin: 'scott-exampleorg',
+      actor: '1001',
+      merged_by: 'scott-exampleorg',
+      thread_key: 'github-pr:exampleorg/booking-engine#4421',
+      closes_thread_keys: [
+        'github-pr:exampleorg/booking-engine#4421',
+        'github-branch:exampleorg/booking-engine:feature/checkout-v2',
+      ],
       baseRef: 'main',
       headRef: 'feature/checkout-v2',
+    });
+  });
+
+  it('keeps the PR author as actor and merger/reviewers separate', () => {
+    const ev = mergedEvent({ requested_reviewers: [{ login: 'reviewer-exampleorg' }] });
+    ev.reviews = [{ user: { login: 'actual-reviewer-exampleorg' } }];
+    const out = githubPrPlugin.transform(ev, {
+      resolveActorPrincipalId: (actor) => actor === '1001'
+        ? '11111111-1111-4111-8111-111111111111'
+        : null,
+    });
+    expect(out[0].metadata).toMatchObject({
+      actor: '1001',
+      actor_principal_id: '11111111-1111-4111-8111-111111111111',
+      merged_by: 'scott-exampleorg',
+      reviewers: ['actual-reviewer-exampleorg'],
+      requested_reviewers: ['reviewer-exampleorg'],
     });
   });
 

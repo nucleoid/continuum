@@ -33,6 +33,7 @@ v0 design in progress. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the schema, 
 - [Lifecycle sweeper and review queue](./docs/lifecycle.md)
 - [Audit retention operations](./docs/audit-retention.md)
 - [Memory fetch and browse API](./docs/memory-api.md)
+- [Standup digest](./docs/standup-digest.md)
 
 ## CLI quick start
 

@@ -57,6 +57,7 @@ CREATE TABLE scopes (
   id              UUID PRIMARY KEY,
   kind            TEXT NOT NULL,         -- 'org' | 'team' | 'project' | 'user' | 'role'
   name            TEXT NOT NULL,         -- '' for org, otherwise the scope name
+  owner_principal_id UUID UNIQUE REFERENCES principals(id), -- explicit for user scopes
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (kind, name)
 );
@@ -317,6 +318,14 @@ Entra validation lands in M4, so database and process-launch access remain
 trusted administrative capabilities rather than security boundaries. The v0
 REST bearer is the principal `external_id`; org-admin bootstrap therefore uses
 a high-entropy identity and requires trusted-network REST restriction.
+
+User-scope identity is stored explicitly as `scopes.owner_principal_id`; it is
+never inferred from a scope name, display name, author, or membership. Existing
+unowned user scopes fail closed until an administrator reviews and audits a
+one-to-one backfill. Standup activity similarly requires explicit
+`metadata.actor_principal_id`, `actor`, and stable `thread_key`; closure uses
+only explicit `closes_thread_keys`. PR authors and deploy actors are the
+activity actors, while mergers and reviewers remain separate metadata.
 
 ## Shared service layer
 

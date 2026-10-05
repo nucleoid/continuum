@@ -11,6 +11,9 @@ export interface TerminalSummaryPayload {
   finishedAt?: string;
   transcriptHash?: string;
   scopeOverride?: ScopeRef;
+  actorPrincipalId?: string;
+  threadKey?: string;
+  closesThreadKeys?: string[];
 }
 
 export const terminalSummaryPlugin: CapturePlugin<TerminalSummaryPayload> = {
@@ -23,8 +26,14 @@ export const terminalSummaryPlugin: CapturePlugin<TerminalSummaryPayload> = {
         name: ctx.resolveUserScope?.(event.actor) ?? event.actor,
       };
 
+    const actorPrincipalId = event.actorPrincipalId
+      ?? ctx.resolveActorPrincipalId?.(event.actor)
+      ?? null;
     const metadata = {
       actor: event.actor,
+      ...(actorPrincipalId ? { actor_principal_id: actorPrincipalId } : {}),
+      thread_key: event.threadKey ?? `terminal-session:${event.sessionId}`,
+      closes_thread_keys: event.closesThreadKeys ?? [],
       sessionId: event.sessionId,
       workingDir: event.workingDir ?? null,
       startedAt: event.startedAt ?? null,

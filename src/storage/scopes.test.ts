@@ -10,6 +10,7 @@ import {
   getScopes,
   listScopesByKind,
 } from './scopes.js';
+import { createPrincipal } from './principals.js';
 
 describe('scopes repository', () => {
   let pool: pg.Pool;
@@ -58,6 +59,26 @@ describe('scopes repository', () => {
     await expect(
       createScope(pool, { kind: 'project', name: 'booking' }),
     ).rejects.toThrow();
+  });
+
+  it('enforces explicit one-to-one user-scope ownership without name inference', async () => {
+    const owner = await createPrincipal(pool, {
+      externalId: 'entra:scope-owner', kind: 'user', displayName: 'Display Name',
+    });
+    const first = await createScope(pool, { kind: 'user', name: 'opaque-a' }, owner.id);
+    expect(first.ownerPrincipalId).toBe(owner.id);
+    await expect(createScope(pool, { kind: 'user', name: 'opaque-b' }, owner.id))
+      .rejects.toThrow();
+    await expect(createScope(pool, { kind: 'team', name: 'bad-owner' }, owner.id))
+      .rejects.toThrow();
+
+    const service = await createPrincipal(pool, {
+      externalId: 'service:scope-owner', kind: 'service', displayName: 'Service',
+    });
+    await expect(createScope(pool, { kind: 'user', name: 'service-owned' }, service.id))
+      .rejects.toThrow(/user scope owner must be a user principal/);
+    const legacy = await createScope(pool, { kind: 'user', name: 'Display Name' });
+    expect(legacy.ownerPrincipalId).toBeNull();
   });
 
   it('getOrCreateScope returns existing or new', async () => {

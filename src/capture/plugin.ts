@@ -3,6 +3,7 @@ import type { CaptureInput } from '../types.js';
 export interface CaptureContext {
   defaultProjectName?: string;
   resolveUserScope?: (externalActor: string) => string | null;
+  resolveActorPrincipalId?: (externalActor: string) => string | null;
   now?: () => Date;
 }
 

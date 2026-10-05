@@ -3,6 +3,7 @@ import type { CapturePlugin, CaptureContext } from '../plugin.js';
 
 export interface GitHubPrEvent {
   action: string;
+  reviews?: Array<{ user: { login: string } }>;
   pull_request: {
     number: number;
     title: string;
@@ -13,6 +14,7 @@ export interface GitHubPrEvent {
     merged_at?: string | null;
     merged_by?: { id: number; login: string } | null;
     user: { id: number; login: string };
+    requested_reviewers?: Array<{ login: string }>;
     base: { ref: string };
     head: { ref: string };
   };
@@ -35,6 +37,9 @@ export const githubPrPlugin: CapturePlugin<GitHubPrEvent> = {
 
     const pr = event.pull_request;
     const project = ctx.defaultProjectName ?? projectName(event.repository.full_name);
+    const actor = String(pr.user.id);
+    const actorPrincipalId = ctx.resolveActorPrincipalId?.(actor) ?? null;
+    const threadKey = `github-pr:${event.repository.full_name}#${pr.number}`;
 
     const lines: string[] = [];
     if (pr.body && pr.body.trim()) lines.push(pr.body.trim());
@@ -60,6 +65,18 @@ export const githubPrPlugin: CapturePlugin<GitHubPrEvent> = {
           authorLogin: pr.user.login,
           mergedBy: pr.merged_by ? String(pr.merged_by.id) : null,
           mergedByLogin: pr.merged_by?.login ?? null,
+          actor,
+          ...(actorPrincipalId ? { actor_principal_id: actorPrincipalId } : {}),
+          merged_by: pr.merged_by?.login ?? null,
+          reviewers: [...new Set((event.reviews ?? []).map((review) => review.user.login))],
+          requested_reviewers: [
+            ...new Set((pr.requested_reviewers ?? []).map((reviewer) => reviewer.login)),
+          ],
+          thread_key: threadKey,
+          closes_thread_keys: [
+            threadKey,
+            `github-branch:${event.repository.full_name}:${pr.head.ref}`,
+          ],
           baseRef: pr.base.ref,
           headRef: pr.head.ref,
           mergedAt: pr.merged_at ?? null,

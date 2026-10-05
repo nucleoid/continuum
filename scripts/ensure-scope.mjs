@@ -4,12 +4,14 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
-const [kind, name] = process.argv.slice(2);
+const [kind, name, ownerPrincipalId] = process.argv.slice(2);
 const kinds = new Set(['org', 'team', 'project', 'user', 'role']);
-if (!kinds.has(kind) || name === undefined || (kind === 'org' ? name !== '' : name === '')) {
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+if (!kinds.has(kind) || name === undefined || (kind === 'org' ? name !== '' : name === '')
+  || (kind === 'user' ? !ownerPrincipalId || !uuid.test(ownerPrincipalId) : ownerPrincipalId !== undefined)) {
   process.stderr.write(
-    'usage: node scripts/ensure-scope.mjs <org|team|project|user|role> <name>\n'
-      + 'Use an empty quoted name only for org.\n',
+    'usage: node scripts/ensure-scope.mjs <org|team|project|user|role> <name> [owner-principal-uuid]\n'
+      + 'Use an empty quoted name only for org. User scopes require the owner UUID.\n',
   );
   process.exit(2);
 }
@@ -41,7 +43,11 @@ try {
   await client.connect(transport);
   const result = await client.callTool({
     name: 'continuum.ensure_scope',
-    arguments: { kind, name },
+    arguments: {
+      kind,
+      name,
+      ...(ownerPrincipalId ? { owner_principal_id: ownerPrincipalId } : {}),
+    },
   });
   const text = result.content
     .filter((item) => item.type === 'text')

@@ -53,6 +53,8 @@ import {
 import type { MemoryReadRecord } from '../storage/memory-reads.js';
 import type { MemoryState, MemoryType } from '../types.js';
 import { decisionHistoryForPrincipal, supersedeForPrincipal } from '../services/supersede.js';
+import { standupForPrincipal } from '../services/standup.js';
+import { renderStandupMarkdown } from '../standup/render.js';
 
 const SCOPE_KINDS = ['org', 'team', 'project', 'user', 'role'] as const;
 const MEMORY_TYPES = ['fact', 'decision', 'context', 'playbook', 'relationship'] as const;
@@ -536,6 +538,39 @@ export function buildMcpServer(deps: McpDeps): McpServer {
   );
 
   server.registerTool(
+    'continuum.standup',
+    {
+      description:
+        'Render a bounded, source-cited digest of activity explicitly attributed to the caller and open threads in their authorized scopes.',
+      inputSchema: {
+        since: z.string().regex(/^([1-9]\d{0,2})h$/).optional(),
+        date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+        timezone: z.string().max(100).optional(),
+        limit: z.number().int().min(1).max(100).optional(),
+        offset: z.number().int().min(0).max(10_000).optional(),
+        open_thread_days: z.number().int().min(1).max(30).optional(),
+        open_thread_limit: z.number().int().min(1).max(100).optional(),
+      },
+    },
+    async (args) => {
+      try {
+        const result = await standupForPrincipal(pool, principal, {
+          sinceHours: args.since === undefined ? undefined : Number(args.since.slice(0, -1)),
+          date: args.date,
+          timezone: args.timezone,
+          limit: args.limit,
+          offset: args.offset,
+          openThreadDays: args.open_thread_days,
+          openThreadLimit: args.open_thread_limit,
+        }, { now: now(), transport: 'mcp' });
+        return textResult(renderStandupMarkdown(result));
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
     'continuum.gaps',
     {
       description:
@@ -583,10 +618,11 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     'continuum.ensure_scope',
     {
       description:
-        'Get or create a scope. Requires explicit org admin. Returns the scope id and does not grant memberships.',
+        'Get or create a scope. Requires explicit org admin. User scopes require owner_principal_id. Returns the scope id and does not grant memberships.',
       inputSchema: {
         kind: z.enum(SCOPE_KINDS),
         name: z.string(),
+        owner_principal_id: z.string().uuid().optional(),
       },
     },
     async (args) => {
@@ -600,6 +636,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           principal,
           ref,
           { transport: 'mcp' },
+          args.owner_principal_id,
         );
         return jsonResult({
           id: result.scope.id,

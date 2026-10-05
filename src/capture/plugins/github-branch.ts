@@ -22,6 +22,7 @@ export const githubBranchPlugin: CapturePlugin<GitHubBranchEvent> = {
     const actor = String(event.sender.id);
     const actorLogin = event.sender.login;
     const userScopeName = ctx.resolveUserScope?.(actor) ?? actor;
+    const actorPrincipalId = ctx.resolveActorPrincipalId?.(actor) ?? null;
 
     const lines = [
       `Branch ${event.ref} created in ${event.repository.full_name}.`,
@@ -44,6 +45,9 @@ export const githubBranchPlugin: CapturePlugin<GitHubBranchEvent> = {
           base: event.master_branch ?? null,
           actor,
           actorLogin,
+          ...(actorPrincipalId ? { actor_principal_id: actorPrincipalId } : {}),
+          thread_key: `github-branch:${event.repository.full_name}:${event.ref}`,
+          closes_thread_keys: [],
         },
       },
     ];

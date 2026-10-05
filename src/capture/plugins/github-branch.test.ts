@@ -39,6 +39,8 @@ describe('github-branch plugin', () => {
       base: 'main',
       actor: '12345',
       actorLogin: 'cass-exampleorg',
+      thread_key: 'github-branch:exampleorg/booking-engine:feature/checkout-v2',
+      closes_thread_keys: [],
     });
   });
 
@@ -51,8 +53,13 @@ describe('github-branch plugin', () => {
     const ev = event({ sender: { id: 12345, login: 'github-cass' } });
     const out = githubBranchPlugin.transform(ev, {
       resolveUserScope: (id) => (id === '12345' ? 'entra-cass' : null),
+      resolveActorPrincipalId: () => '11111111-1111-4111-8111-111111111111',
     });
     expect(out[0].scope).toEqual({ kind: 'user', name: 'entra-cass' });
+    expect(out[0].metadata).toMatchObject({
+      actor: '12345',
+      actor_principal_id: '11111111-1111-4111-8111-111111111111',
+    });
   });
 
   it('falls back to actor ID when resolveUserScope returns null', () => {

@@ -113,6 +113,28 @@ describe('POST /api/v0/capture', () => {
     expect(sideEffects.rows[0]).toEqual({ memories: 0, embeddings: 0, audits: 0 });
   });
 
+  it('prevents user callers from attributing activity to another principal', async () => {
+    const { principal } = await seedActor();
+    const other = await createPrincipal(pool, {
+      externalId: 'entra:user:capture-other', kind: 'user', displayName: 'Other User',
+    });
+    const response = await request(app)
+      .post('/api/v0/capture')
+      .set('Authorization', 'Bearer entra:user:capture')
+      .send({
+        scope: { kind: 'team', name: 'payments' }, type: 'context',
+        title: 'Forged activity', body: 'Must not persist.', source: 'manual',
+        metadata: {
+          actor_principal_id: other.id, actor: 'other-user', thread_key: 'manual:forged',
+        },
+      });
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe('FORBIDDEN');
+    expect(principal.id).not.toBe(other.id);
+    expect((await pool.query("SELECT 1 FROM memories WHERE title = 'Forged activity'")).rowCount)
+      .toBe(0);
+  });
+
   it('commits memory and sanitized audit when the embedding provider fails', async () => {
     const privateMessage = 'provider token private-provider-value';
     const provider: EmbeddingProvider = {

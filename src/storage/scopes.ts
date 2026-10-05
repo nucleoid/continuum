@@ -8,6 +8,7 @@ function rowToScope(row: Record<string, unknown>): Scope {
     id: row.id as string,
     kind: row.kind as ScopeKind,
     name: row.name as string,
+    ownerPrincipalId: (row.owner_principal_id as string | null) ?? null,
     createdAt: row.created_at as Date,
   };
 }
@@ -15,6 +16,7 @@ function rowToScope(row: Record<string, unknown>): Scope {
 export async function createScope(
   pool: Queryable,
   ref: ScopeRef,
+  ownerPrincipalId: string | null = null,
 ): Promise<Scope> {
   if (ref.kind === 'org' && ref.name !== '') {
     throw new Error('org scope cannot have a name');
@@ -24,9 +26,9 @@ export async function createScope(
   }
   const id = randomUUID();
   const { rows } = await pool.query(
-    `INSERT INTO scopes (id, kind, name) VALUES ($1, $2, $3)
-     RETURNING id, kind, name, created_at`,
-    [id, ref.kind, ref.name],
+    `INSERT INTO scopes (id, kind, name, owner_principal_id) VALUES ($1, $2, $3, $4)
+     RETURNING id, kind, name, owner_principal_id, created_at`,
+    [id, ref.kind, ref.name, ownerPrincipalId],
   );
   return rowToScope(rows[0]);
 }
@@ -36,7 +38,7 @@ export async function getScope(
   id: string,
 ): Promise<Scope | null> {
   const { rows } = await pool.query(
-    `SELECT id, kind, name, created_at FROM scopes WHERE id = $1`,
+    `SELECT id, kind, name, owner_principal_id, created_at FROM scopes WHERE id = $1`,
     [id],
   );
   return rows[0] ? rowToScope(rows[0]) : null;
@@ -62,7 +64,7 @@ export async function getScopeByRef(
   ref: ScopeRef,
 ): Promise<Scope | null> {
   const { rows } = await pool.query(
-    `SELECT id, kind, name, created_at FROM scopes WHERE kind = $1 AND name = $2`,
+    `SELECT id, kind, name, owner_principal_id, created_at FROM scopes WHERE kind = $1 AND name = $2`,
     [ref.kind, ref.name],
   );
   return rows[0] ? rowToScope(rows[0]) : null;
@@ -71,13 +73,15 @@ export async function getScopeByRef(
 export async function getOrCreateScope(
   pool: Queryable,
   ref: ScopeRef,
+  ownerPrincipalId: string | null = null,
 ): Promise<Scope> {
-  return (await ensureScopeRow(pool, ref)).scope;
+  return (await ensureScopeRow(pool, ref, ownerPrincipalId)).scope;
 }
 
 export async function ensureScopeRow(
   pool: Queryable,
   ref: ScopeRef,
+  ownerPrincipalId: string | null = null,
 ): Promise<{ scope: Scope; created: boolean }> {
   if (ref.kind === 'org' && ref.name !== '') {
     throw new Error('org scope cannot have a name');
@@ -88,10 +92,10 @@ export async function ensureScopeRow(
 
   const id = randomUUID();
   const { rows } = await pool.query(
-    `INSERT INTO scopes (id, kind, name) VALUES ($1, $2, $3)
+    `INSERT INTO scopes (id, kind, name, owner_principal_id) VALUES ($1, $2, $3, $4)
      ON CONFLICT (kind, name) DO NOTHING
-     RETURNING id, kind, name, created_at`,
-    [id, ref.kind, ref.name],
+     RETURNING id, kind, name, owner_principal_id, created_at`,
+    [id, ref.kind, ref.name, ownerPrincipalId],
   );
   if (rows[0]) return { scope: rowToScope(rows[0]), created: true };
 
@@ -107,7 +111,8 @@ export async function listScopesByKind(
   kind: ScopeKind,
 ): Promise<Scope[]> {
   const { rows } = await pool.query(
-    `SELECT id, kind, name, created_at FROM scopes WHERE kind = $1 ORDER BY name`,
+    `SELECT id, kind, name, owner_principal_id, created_at
+       FROM scopes WHERE kind = $1 ORDER BY name`,
     [kind],
   );
   return rows.map(rowToScope);

@@ -12,6 +12,9 @@ export interface DeployEventPayload {
   pr?: number;
   url?: string;
   actor?: string;
+  actorPrincipalId?: string;
+  threadKey?: string;
+  closesThreadKeys?: string[];
   startedAt?: string;
   finishedAt?: string;
   notes?: string;
@@ -57,6 +60,10 @@ export const deployEventPlugin: CapturePlugin<DeployEventPayload> = {
           commit: event.commit ?? null,
           pr: event.pr ?? null,
           actor: event.actor ?? null,
+          ...(event.actorPrincipalId ? { actor_principal_id: event.actorPrincipalId } : {}),
+          thread_key: event.threadKey
+            ?? `deploy:${event.project}:${event.environment}:${event.version}`,
+          closes_thread_keys: event.closesThreadKeys ?? [],
           startedAt: event.startedAt ?? null,
           finishedAt: event.finishedAt ?? null,
         },

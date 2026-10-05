@@ -46,6 +46,7 @@ describe('MCP server', () => {
     selectedProvider: EmbeddingProvider | null = provider,
     selectedPool: pg.Pool = pool,
     logger?: { error(message: string, error: unknown): void },
+    now?: () => Date,
   ) {
     const me = await createPrincipal(pool, {
       externalId: 'entra:user:mcp',
@@ -61,6 +62,7 @@ describe('MCP server', () => {
       embeddingProvider: selectedProvider,
       principal: me,
       logger,
+      now,
     });
     const [a, b] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: 'test-client', version: '0.0.1' });
@@ -84,6 +86,7 @@ describe('MCP server', () => {
         'continuum.verify',
         'continuum.ensure_scope',
         'continuum.gaps',
+        'continuum.standup',
       ]),
     );
   });
@@ -172,6 +175,42 @@ describe('MCP server', () => {
       { scope: 'org', role: 'reader' },
       { scope: 'team:payments', role: 'writer' },
     ]);
+  });
+
+  it('renders a deterministic source-cited standup for explicitly attributed activity', async () => {
+    const fixedNow = new Date('2026-10-05T12:00:00Z');
+    const { client, me } = await connectClient(null, pool, undefined, () => fixedNow);
+    const personal = await createScope(pool, { kind: 'user', name: 'opaque-mcp-user' }, me.id);
+    await addMembership(pool, me.id, personal.id, 'reader');
+    const memory = await createMemory(pool, {
+      scopeId: personal.id, scopeKind: 'user', type: 'context',
+      title: 'Implemented [standup] markdown', body: 'private body',
+      authorId: me.id, source: 'terminal-summary', sourceRef: 'session://source-1',
+      metadata: {
+        actor_principal_id: me.id, actor: 'mcp-user',
+        thread_key: 'terminal-session:source-1', closes_thread_keys: [],
+      },
+    });
+    await pool.query(
+      `UPDATE memories SET created_at = '2026-10-05T10:00:00Z' WHERE id = $1`,
+      [memory.id],
+    );
+
+    const result = (await client.callTool({
+      name: 'continuum.standup', arguments: { since: '24h' },
+    })) as CallToolResult;
+    const markdown = rawText(result);
+    expect(markdown).toContain('# Standup digest');
+    expect(markdown).toContain('Implemented \\[standup\\] markdown');
+    expect(markdown).toContain(`memory ${memory.id.replaceAll('-', '\\-')}`);
+    expect(markdown).toContain('session://source\\-1');
+    expect(markdown).not.toContain('private body');
+    const audit = await pool.query(
+      `SELECT memory_id, metadata FROM audit_log WHERE metadata->>'view' = 'standup'
+         OR metadata->>'record_kind' = 'result' ORDER BY id`,
+    );
+    expect(audit.rows.map((row) => row.memory_id)).toEqual([null, memory.id]);
+    expect(audit.rows[0].metadata.transport).toBe('mcp');
   });
 
   it('returns capture success without exposing embedding failures and audits safely', async () => {
@@ -688,11 +727,14 @@ describe('MCP server', () => {
   it('ensure_scope lets an org admin idempotently ensure every scope kind and audits each call', async () => {
     const { client, me, org } = await connectClient();
     await addMembership(pool, me.id, org.id, 'admin');
+    const personalOwner = await createPrincipal(pool, {
+      externalId: 'entra:user:personal-owner', kind: 'user', displayName: 'Personal Owner',
+    });
     const refs = [
       { kind: 'org', name: '' },
       { kind: 'team', name: 'delivery' },
       { kind: 'project', name: 'booking-engine' },
-      { kind: 'user', name: 'entra:user:other' },
+      { kind: 'user', name: 'opaque-personal', owner_principal_id: personalOwner.id },
       { kind: 'role', name: 'security' },
     ];
 
@@ -724,10 +766,12 @@ describe('MCP server', () => {
         {
           operation: 'create_scope', created: ref.kind !== 'org',
           kind: ref.kind, name: ref.name, transport: 'mcp',
+          owner_principal_id: 'owner_principal_id' in ref ? ref.owner_principal_id : null,
         },
         {
           operation: 'create_scope', created: false,
           kind: ref.kind, name: ref.name, transport: 'mcp',
+          owner_principal_id: 'owner_principal_id' in ref ? ref.owner_principal_id : null,
         },
       ]),
     );

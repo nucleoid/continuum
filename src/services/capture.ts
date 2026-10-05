@@ -18,6 +18,7 @@ import {
   validateRelationThreshold,
 } from './relations.js';
 import type { Queryable } from '../storage/queryable.js';
+import { validateCaptureMetadata } from '../capture/metadata.js';
 
 export interface CaptureResult {
   memory: Memory;
@@ -48,6 +49,7 @@ export function validateCaptureContent(input: Pick<CaptureInput,
   if (input.metadata && Object.hasOwn(input.metadata, 'related')) {
     throw new ServiceError('INVALID_INPUT', 'metadata.related is reserved by Continuum');
   }
+  validateCaptureMetadata(input.metadata);
 }
 
 /** Insert one capture into a caller-owned transaction. */
@@ -247,6 +249,16 @@ export async function captureMemory(
     if (!(await canWriteScope(pool, principal.id, scope.id))) {
       throw new ServiceError('FORBIDDEN', 'Principal lacks writer role on scope');
     }
+    const actorPrincipalId = input.metadata?.actor_principal_id;
+    if (typeof actorPrincipalId === 'string') {
+      if (principal.kind === 'user' && actorPrincipalId !== principal.id) {
+        throw new ServiceError('FORBIDDEN', 'A user can attribute activity only to itself');
+      }
+      const actor = await pool.query('SELECT kind FROM principals WHERE id = $1', [actorPrincipalId]);
+      if (actor.rows[0]?.kind !== 'user') {
+        throw new ServiceError('INVALID_INPUT', 'Activity actor must be an existing user principal');
+      }
+    }
 
     const memoryId = randomUUID();
     const route = asEmbeddingRouter(embeddingRouting).resolve({
@@ -303,6 +315,15 @@ export async function captureMemory(
       if (!authorizedScope) throw new ServiceError('SCOPE_NOT_FOUND', 'Scope not found');
       if (!(await canWriteScopeForMutation(client, principal.id, authorizedScope.id))) {
         throw new ServiceError('FORBIDDEN', 'Principal lacks writer role on scope');
+      }
+      if (typeof actorPrincipalId === 'string') {
+        const actor = await client.query(
+          'SELECT kind FROM principals WHERE id = $1 FOR KEY SHARE',
+          [actorPrincipalId],
+        );
+        if (actor.rows[0]?.kind !== 'user') {
+          throw new ServiceError('INVALID_INPUT', 'Activity actor must be an existing user principal');
+        }
       }
 
       let memory = await createMemory(client, {
