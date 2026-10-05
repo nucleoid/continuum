@@ -154,7 +154,7 @@ export class ApiClient {
       ? requestIdCandidate
       : undefined;
     const redacted = this.redact(message)
-      .replace(/[\u0000-\u001f\u007f]/g, ' ')
+      .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
       .slice(0, MAX_ERROR_DETAIL_CHARS);
     const detail = requestId === undefined
       ? redacted

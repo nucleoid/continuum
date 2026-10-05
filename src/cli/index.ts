@@ -321,9 +321,10 @@ export async function runCli(argv: string[], dependencies: Partial<CliDependenci
   const deps = { ...defaults, ...dependencies } as CliDependencies;
   const jsonErrors = argv.includes('--json');
   const fail = (message: string, exitCode: 2 | 3 | 4 | 5): number => {
+    const safeMessage = terminalDocument(message);
     deps.stderr(jsonErrors
-      ? jsonDocument({ error: { message, exitCode } })
-      : `continuum: ${humanText(message)}\n`);
+      ? jsonDocument({ error: { message: safeMessage, exitCode } })
+      : `continuum: ${humanText(safeMessage)}\n`);
     return exitCode;
   };
   try {

@@ -1,6 +1,6 @@
 export function humanText(value: unknown): string {
   if (value === null || value === undefined) return '-';
-  return String(value).replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim() || '-';
+  return String(value).replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').trim() || '-';
 }
 
 export function jsonDocument(value: unknown): string {

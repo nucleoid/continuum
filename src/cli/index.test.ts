@@ -246,6 +246,35 @@ describe('continuum CLI', () => {
     expect(success.stdout()).not.toContain('\u001b');
   });
 
+  it('strips C1 controls from tables and human and JSON error output', async () => {
+    const recall = harness(async () => Response.json({
+      results: [{
+        id: 'memory-1', scope: 'org', type: 'fact', score: 1,
+        title: 'safe\u009b31m', excerpt: 'also\u0085safe',
+      }],
+    }));
+    expect(await runCli(['recall', 'query'], recall.deps)).toBe(0);
+    expect(recall.stdout()).toContain('safe 31m');
+    expect(recall.stdout()).toContain('also safe');
+    expect(recall.stdout()).not.toMatch(/[\u0080-\u009f]/);
+
+    const humanError = harness(async () => Response.json(
+      { error: 'denied\u009b31m\nforged' }, { status: 403 },
+    ));
+    expect(await runCli(['scopes'], humanError.deps)).toBe(3);
+    expect(humanError.stderr()).toBe('continuum: denied 31m forged\n');
+    expect(humanError.stderr()).not.toMatch(/[\u0080-\u009f]/);
+
+    const jsonError = harness(async () => Response.json(
+      { error: 'denied\u009b31m' }, { status: 403 },
+    ));
+    expect(await runCli(['scopes', '--json'], jsonError.deps)).toBe(3);
+    expect(JSON.parse(jsonError.stderr())).toEqual({
+      error: { message: 'denied 31m', exitCode: 3 },
+    });
+    expect(jsonError.stderr()).not.toMatch(/[\u0080-\u009f]/);
+  });
+
   it('keeps scope access read-only and sanitizes agents-md terminal output', async () => {
     const mutation = harness(vi.fn() as typeof globalThis.fetch);
     expect(await runCli([
