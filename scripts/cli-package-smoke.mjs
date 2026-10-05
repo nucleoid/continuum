@@ -13,7 +13,8 @@ try {
   ));
   const tarball = join(temporary, packed[0].filename);
   const compiledTests = packed[0].files.filter(
-    ({ path }) => /\.(?:test|spec)\.(?:js|d\.ts)(?:\.map)?$/.test(path),
+    ({ path }) => /\.(?:test|spec)\.(?:js|d\.ts)(?:\.map)?$/.test(path)
+      || /(?:^|\/)test-helpers\.(?:js|d\.ts)(?:\.map)?$/.test(path),
   );
   if (compiledTests.length > 0) {
     throw new Error(
@@ -58,9 +59,20 @@ try {
     'scripts/ensure-scope.mjs',
     'scripts/create-scope-operator.sql',
     'scripts/retire-scope-operator.sql',
+    'docs/audit-retention.md',
+    'docs/memory-api.md',
   ]) {
     if (!existsSync(join(installedRoot, required))) {
       throw new Error(`Packed package is missing required runtime artifact: ${required}`);
+    }
+  }
+  for (const migrationDoc of ['README.md', 'docs/cli.md']) {
+    const contents = readFileSync(join(installedRoot, migrationDoc), 'utf8');
+    if (!contents.includes('CONTINUUM_DATABASE_URL')) {
+      throw new Error(`${migrationDoc} does not document the migration database configuration`);
+    }
+    if (/set `DATABASE_URL`/.test(contents)) {
+      throw new Error(`${migrationDoc} documents the unsupported DATABASE_URL variable`);
     }
   }
   const { pathToFileURL } = await import('node:url');

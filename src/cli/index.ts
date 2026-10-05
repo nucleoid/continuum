@@ -239,8 +239,9 @@ async function commandAudit(args: string[], client: ApiClient, deps: CliDependen
   if (positionals.length) throw new CliError('audit does not accept positional arguments', 2);
   if (values.action && !AUDIT_ACTIONS.has(values.action)) throw new CliError('Invalid audit action', 2);
   const query = new URLSearchParams();
-  if (values.since) query.set('since', parseSince(values.since, deps.now()));
-  if (values.until) query.set('until', parseSince(values.until, deps.now()));
+  const now = values.since || values.until ? deps.now() : undefined;
+  if (values.since) query.set('since', parseSince(values.since, now!));
+  if (values.until) query.set('until', parseSince(values.until, now!));
   if (values.action) query.set('action', values.action);
   if (values.principal) query.set('principalId', values.principal);
   if (values.scope) query.set('scopeId', values.scope);

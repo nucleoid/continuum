@@ -76,7 +76,8 @@ Diagnostics go to stderr.
 ## Installed-package migrations
 
 The npm package includes every SQL migration and exposes an installed migration
-entrypoint. Set `DATABASE_URL` for the target PostgreSQL database, then run:
+entrypoint. Set `CONTINUUM_DATABASE_URL` for the target PostgreSQL database,
+then run:
 
 ```text
 continuum-migrate

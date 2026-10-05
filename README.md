@@ -42,8 +42,9 @@ export CONTINUUM_TOKEN='your-opaque-bearer-token'
 continuum recall "deployment rollback" --json
 ```
 
-Installed packages also expose `continuum-migrate`; set `DATABASE_URL` and run
-it as a trusted operator before starting a newly installed application version.
+Installed packages also expose `continuum-migrate`; set
+`CONTINUUM_DATABASE_URL` and run it as a trusted operator before starting a
+newly installed application version.
 
 The CLI supports capture, recall, audit, scope membership administration,
 promotion, verification, and AGENTS.md generation through the same authenticated

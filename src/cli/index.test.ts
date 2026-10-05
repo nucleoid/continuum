@@ -191,6 +191,24 @@ describe('continuum CLI', () => {
     expect(JSON.parse(h.stdout())).toMatchObject({ count: 0, entries: [] });
   });
 
+  it('anchors every relative audit bound to one clock reading', async () => {
+    const fetch = vi.fn(async (url: string | URL | Request) => {
+      const parsed = new URL(String(url));
+      expect(parsed.searchParams.get('since')).toBe('2026-10-04T11:00:00.000Z');
+      expect(parsed.searchParams.get('until')).toBe('2026-10-04T12:00:00.000Z');
+      return Response.json({ count: 0, orgAdmin: false, entries: [] });
+    });
+    const h = harness(fetch as typeof globalThis.fetch);
+    h.deps.now = vi.fn()
+      .mockReturnValueOnce(new Date('2026-10-04T13:00:00Z'))
+      .mockReturnValueOnce(new Date('2026-10-05T13:00:00Z'));
+
+    expect(await runCli([
+      'audit', '--since', '2h', '--until', '1h', '--json',
+    ], h.deps)).toBe(0);
+    expect(h.deps.now).toHaveBeenCalledTimes(1);
+  });
+
   it('returns documented status codes and keeps diagnostics on stderr', async () => {
     const h = harness(async () => Response.json(
       { code: 'MEMORY_NOT_FOUND', error: 'memory not found' }, { status: 404 },
