@@ -53,6 +53,8 @@
     "audit-retention:dev": "tsx src/maintenance/audit-retention-cli.ts",
     "sync:memberships": "node dist/identity/sync-cli.js",
     "sync:memberships:dev": "tsx src/identity/sync-cli.ts",
+    "admin": "node dist/identity/admin-cli.js",
+    "admin:dev": "tsx src/identity/admin-cli.ts",
     "smoke:cli-package": "node scripts/cli-package-smoke.mjs"
   },
   "dependencies": {

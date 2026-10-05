@@ -3,6 +3,7 @@ import { MAX_GROUP_MEMBERS, MAX_SYNC_GROUPS, MAX_SYNC_MEMBERSHIPS } from '../ser
 
 interface GraphPage { value?: unknown; '@odata.nextLink'?: unknown }
 type Fetch = typeof globalThis.fetch;
+const DEFAULT_TIMEOUT_MS = 10_000;
 
 function safeGraphUrl(value: string): URL {
   const url = new URL(value);
@@ -13,55 +14,86 @@ function safeGraphUrl(value: string): URL {
   return url;
 }
 
-async function page(fetcher: Fetch, url: URL, token: string): Promise<GraphPage> {
-  const response = await fetcher(url, {
+async function request(
+  fetcher: Fetch,
+  url: URL,
+  token: string,
+  timeoutMs: number,
+): Promise<Response> {
+  return fetcher(url, {
     headers: { authorization: `Bearer ${token}`, consistencyLevel: 'eventual' },
+    signal: AbortSignal.timeout(timeoutMs),
   });
+}
+
+async function page(
+  fetcher: Fetch,
+  url: URL,
+  token: string,
+  timeoutMs: number,
+): Promise<GraphPage> {
+  const response = await request(fetcher, url, token, timeoutMs);
   if (!response.ok) throw new Error(`Microsoft Graph request failed with status ${response.status}`);
   const body = await response.json() as GraphPage;
   if (!Array.isArray(body.value)) throw new Error('Microsoft Graph returned an invalid page');
   return body;
 }
 
+/** Fetches only administrator-approved immutable group IDs. */
 export async function fetchMembershipSnapshot(
+  boundGroupIds: readonly string[],
   token: string,
   fetcher: Fetch = globalThis.fetch,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
 ): Promise<EntraGroupSnapshot[]> {
   if (token.length < 32 || token.length > 16_384) throw new Error('Graph access token is invalid');
-  const groups: EntraGroupSnapshot[] = [];
-  let next: URL | undefined = new URL(
-    "https://graph.microsoft.com/v1.0/groups?$filter=startsWith(displayName,'continuum-')&$select=id,displayName&$top=100",
-  );
-  while (next) {
-    const current = await page(fetcher, next, token);
-    for (const raw of current.value as unknown[]) {
-      const item = raw as { id?: unknown; displayName?: unknown };
-      if (typeof item.id !== 'string' || typeof item.displayName !== 'string') {
-        throw new Error('Microsoft Graph returned an invalid group');
-      }
-      groups.push({ id: item.id, displayName: item.displayName, memberObjectIds: [] });
-      if (groups.length > MAX_SYNC_GROUPS) throw new Error('Microsoft Graph group result exceeds sync limit');
-    }
-    next = typeof current['@odata.nextLink'] === 'string'
-      ? safeGraphUrl(current['@odata.nextLink']) : undefined;
+  if (boundGroupIds.length > MAX_SYNC_GROUPS) throw new Error('bound group count exceeds sync limit');
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) {
+    throw new Error('Graph timeout is invalid');
   }
+  const snapshots: EntraGroupSnapshot[] = [];
   let total = 0;
-  for (const group of groups) {
-    next = new URL(`https://graph.microsoft.com/v1.0/groups/${encodeURIComponent(group.id)}/members?$select=id&$top=999`);
-    while (next) {
-      const current = await page(fetcher, next, token);
-      for (const raw of current.value as unknown[]) {
-        const id = (raw as { id?: unknown }).id;
-        if (typeof id !== 'string') throw new Error('Microsoft Graph returned an invalid member');
-        group.memberObjectIds.push(id);
-        total += 1;
-        if (group.memberObjectIds.length > MAX_GROUP_MEMBERS || total > MAX_SYNC_MEMBERSHIPS) {
-          throw new Error('Microsoft Graph membership result exceeds sync limit');
-        }
+  for (const id of boundGroupIds) {
+    try {
+      const groupResponse = await request(
+        fetcher,
+        new URL(`https://graph.microsoft.com/v1.0/groups/${encodeURIComponent(id)}?$select=id,displayName`),
+        token,
+        timeoutMs,
+      );
+      if (groupResponse.status === 404) {
+        snapshots.push({ id, status: 'missing' });
+        continue;
       }
-      next = typeof current['@odata.nextLink'] === 'string'
-        ? safeGraphUrl(current['@odata.nextLink']) : undefined;
+      if (!groupResponse.ok) throw new Error(`GROUP_HTTP_${groupResponse.status}`);
+      const group = await groupResponse.json() as { id?: unknown; displayName?: unknown };
+      if (group.id !== id || typeof group.displayName !== 'string' || group.displayName.length > 256) {
+        throw new Error('MALFORMED_GROUP');
+      }
+      const members: string[] = [];
+      let next: URL | undefined = new URL(
+        `https://graph.microsoft.com/v1.0/groups/${encodeURIComponent(id)}/members/microsoft.graph.user?$select=id&$top=999`,
+      );
+      while (next) {
+        const current = await page(fetcher, next, token, timeoutMs);
+        for (const raw of current.value as unknown[]) {
+          const memberId = (raw as { id?: unknown }).id;
+          if (typeof memberId !== 'string') throw new Error('MALFORMED_MEMBERS');
+          members.push(memberId);
+          if (members.length > MAX_GROUP_MEMBERS || total + members.length > MAX_SYNC_MEMBERSHIPS) {
+            throw new Error('GROUP_TOO_LARGE');
+          }
+        }
+        next = typeof current['@odata.nextLink'] === 'string'
+          ? safeGraphUrl(current['@odata.nextLink']) : undefined;
+      }
+      snapshots.push({ id, status: 'present', displayName: group.displayName, memberObjectIds: members });
+      total += members.length;
+    } catch (error) {
+      const raw = error instanceof Error ? error.message : 'GRAPH_FAILURE';
+      const errorCode = /^[A-Z0-9_]+$/.test(raw) ? raw : 'GRAPH_FAILURE';
+      snapshots.push({ id, status: 'invalid', errorCode });
     }
   }
-  return groups;
+  return snapshots;
 }

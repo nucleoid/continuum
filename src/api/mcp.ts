@@ -641,9 +641,30 @@ async function main(): Promise<void> {
   );
   const authenticated = await authenticator.authenticate('Bearer', tokenEnv);
   const principal = authenticated?.principal ?? null;
-  if (!principal || isLifecyclePrincipal(principal)) {
+  if (!authenticated || !principal || isLifecyclePrincipal(principal)) {
     process.stderr.write('continuum-mcp: unknown principal\n');
     process.exit(1);
+  }
+  // Stdio MCP sessions are long-lived. Revalidate revocation/rotation and token
+  // expiry instead of treating process startup authentication as permanent.
+  const revalidate = async () => {
+    const current = await authenticator.authenticate('Bearer', tokenEnv);
+    if (!current || current.principal.id !== principal.id
+      || (current.expiresAt && current.expiresAt.getTime() <= Date.now())) {
+      process.stderr.write('continuum-mcp: credential expired or revoked\n');
+      process.exit(1);
+    }
+  };
+  const credentialTimer = setInterval(() => { void revalidate().catch(() => process.exit(1)); }, 30_000);
+  credentialTimer.unref();
+  if (authenticated.expiresAt) {
+    const remaining = authenticated.expiresAt.getTime() - Date.now();
+    if (remaining <= 0) {
+      process.stderr.write('continuum-mcp: credential expired\n');
+      process.exit(1);
+    }
+    const expiryTimer = setTimeout(() => process.exit(1), Math.min(remaining + 1, 2_147_483_647));
+    expiryTimer.unref();
   }
   const embeddingProvider = makeEmbeddingRouterFromEnv();
   await warnOnMissingEmbeddingRoutingScopes(pool, embeddingProvider);

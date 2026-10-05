@@ -14,9 +14,10 @@ if (!kinds.has(kind) || name === undefined || (kind === 'org' ? name !== '' : na
   process.exit(2);
 }
 if (!process.env.CONTINUUM_PRINCIPAL_EXTERNAL_ID
-  || !process.env.CONTINUUM_DATABASE_URL) {
+  || !process.env.CONTINUUM_DATABASE_URL
+  || !process.env.CONTINUUM_AUTH_MODE) {
   process.stderr.write(
-    'CONTINUUM_PRINCIPAL_EXTERNAL_ID and CONTINUUM_DATABASE_URL are required\n',
+    'CONTINUUM_PRINCIPAL_EXTERNAL_ID, CONTINUUM_DATABASE_URL, and CONTINUUM_AUTH_MODE are required\n',
   );
   process.exit(2);
 }
@@ -35,9 +36,7 @@ const transport = new StdioClientTransport({
   args: [mcpEntrypoint],
   env: {
     ...process.env,
-    // Supplying the legacy external-id credential to this trusted operator
-    // script is an explicit request for the development identity mode.
-    CONTINUUM_AUTH_MODE: process.env.CONTINUUM_AUTH_MODE ?? 'dev',
+    CONTINUUM_AUTH_MODE: process.env.CONTINUUM_AUTH_MODE,
   },
   stderr: 'pipe',
 });

@@ -29,6 +29,7 @@ export interface AuthenticatedPrincipal {
   principal: Principal;
   allowedSource?: string;
   credential: 'dev' | 'entra' | 'api-key';
+  expiresAt?: Date;
 }
 
 export interface Memory {

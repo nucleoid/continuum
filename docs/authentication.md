@@ -1,25 +1,63 @@
 # Authentication and Entra membership sync
 
-Continuum requires an explicit authentication mode at every REST API or MCP
-process start:
+Continuum requires an explicit authentication mode at every REST API, MCP, or
+operator process start. There is no production default:
 
 - `CONTINUUM_AUTH_MODE=dev` enables the local integration-test identity where a
-  bearer value is an existing principal `external_id`.
-- `CONTINUUM_AUTH_MODE=entra` requires `CONTINUUM_ENTRA_TENANT` (a tenant UUID)
-  and `CONTINUUM_ENTRA_AUDIENCE`.
+  bearer value is an existing principal `external_id`. Do not expose this mode
+  outside a trusted development machine.
+- `CONTINUUM_AUTH_MODE=entra` requires a tenant UUID, audience, delegated user
+  scope, and application role in `CONTINUUM_ENTRA_TENANT`,
+  `CONTINUUM_ENTRA_AUDIENCE`, `CONTINUUM_ENTRA_USER_SCOPE`, and
+  `CONTINUUM_ENTRA_SERVICE_APP_ROLE`.
 
-Entra mode loads the tenant's OIDC discovery document and JWKS, then validates
-signature, issuer, audience, and token lifetime with `jose`. The immutable `oid`
-claim owns principal identity. A changed `name` only updates display metadata.
-Delegated tokens create user principals; client-credential tokens create
-service principals. A principal cannot change kind through a later token.
+Entra mode loads only the configured tenant's OIDC metadata and Microsoft JWKS
+over HTTPS with bounded timeouts. Rejected metadata loads are evicted so a
+later request retries. Tokens must be RS256 v2 access tokens from that tenant.
+Delegated user tokens must carry `idtyp=user` and the configured `scp` value.
+Client-credential tokens must carry `idtyp=app`, a UUID client ID, and the
+configured `roles` value. Audience, issuer, lifetime, and immutable `oid` are
+also validated. ID tokens and tokens for unassigned applications are rejected.
+All credential, JOSE, JWKS, key, and claim failures return an authentication
+failure without exposing provider details.
+
+The immutable `oid` claim owns principal identity. A changed `name` only
+updates display metadata, and a principal cannot change kind. Stdio MCP
+sessions revalidate credentials every 30 seconds and terminate at token or API
+key expiry, rotation, or revocation.
+
+## Service API keys
 
 Service API keys contain 256 random bits and use the `ctm_` prefix. Continuum
 stores only SHA-256 hashes plus a display prefix and final four characters.
-Keys can be restricted to one capture source and expire for authentication 90
-days after issue or rotation. Issue and rotation require an org administrator;
-the credential mutation and its audit entry commit atomically. The cleartext
-key is returned only by the issue or rotation call.
+Keys can be restricted to one capture source and expire 90 days after issue or
+rotation. Issue, rotation, and revocation require an org administrator, and the
+credential mutation and audit commit atomically. Cleartext is returned only by
+issue or rotation.
+
+Use the checked admin transport with `CONTINUUM_ADMIN_ACTOR` set to an existing
+org administrator:
+
+```text
+npm run admin -- issue-key <service-external-id> [allowed-source]
+npm run admin -- rotate-key <key-id>
+npm run admin -- revoke-key <key-id>
+```
+
+## Approved group bindings
+
+Group names never grant access. Before sync can activate membership, an org
+administrator must approve the immutable Entra group object ID, target scope
+ID, and role:
+
+```text
+npm run admin -- bind-group <group-id> <scope-id> <reader|writer|admin> [display-name]
+```
+
+The same audited command updates an approved binding or reactivates one after
+investigation. A tenant user cannot create a privileged group with a matching
+name and self-escalate. Renames only update display metadata and never alter the
+approved scope or role.
 
 ## Membership sync
 
@@ -27,22 +65,35 @@ Run `npm run sync:memberships` from a nightly scheduler. It requires:
 
 - `CONTINUUM_ENTRA_MEMBERSHIP_SYNC=true`
 - `CONTINUUM_GRAPH_ACCESS_TOKEN`
-- `CONTINUUM_MEMBERSHIP_SYNC_ACTOR`, the external ID of an existing org admin
+- `CONTINUUM_MEMBERSHIP_SYNC_ACTOR`, the external ID of an org admin
 - the normal database configuration
 
-The Graph token is read from the environment and is never logged. The job
-fetches every matching group and member page before opening the sync
-transaction. Any failed, malformed, untrusted, or oversized response aborts
-without changing membership state.
+The job reads all approved bindings, including currently missing groups, then fetches each directly by
+immutable ID. It does not perform name-based group discovery. A Graph 404 is a
+definitive disappearance. If that immutable ID returns, its still-approved
+binding is safely reactivated. Renames outside any naming convention remain active
+and update metadata. Malformed, failed, duplicate, and unbound results are
+skipped and counted in the audit summary; valid bound groups remain
+authoritative, so removed memberships from those groups are deactivated.
 
-New groups use `continuum-{kind}-{name}-{role}`. The org form has an empty name,
-for example `continuum-org--admin`. A group is permanently bound to its Entra
-object ID, target scope, and role when first seen. Later display-name changes
-update metadata only. If a bound group disappears, its sourced membership rows
-are soft-deactivated. A disappeared group is not silently reactivated if the
-same object ID returns; an administrator must investigate it. Manual membership
-rows and rows sourced by other groups are not changed.
+Empty snapshots fail closed. By default, a run that would deactivate more than
+25 percent of active bindings rolls back. After investigation, an operator may
+set `CONTINUUM_MEMBERSHIP_SYNC_ALLOW_MASS_DEACTIVATION=true` for one run. A sync
+also rolls back if it would remove the synchronizing administrator's authority
+or the organization's last active administrator. Manual memberships and rows
+sourced by other groups are unchanged.
 
-Sync accepts at most 500 groups, 10,000 members per group, and 50,000 total
-memberships. One database advisory transaction lock serializes jobs. The
-membership changes, group state, and bounded audit summary commit together.
+Only direct user members are fetched through the typed Graph user-member
+endpoint. Nested groups are intentionally not expanded. Users are not
+provisioned by sync; an Entra user must already have a Continuum principal,
+normally from successful first sign-in, before group membership becomes active.
+
+The migration is additive for credential and binding tables and gives defaults
+to new membership provenance columns, so an older binary can continue writing
+manual rows during a rolling deployment. A database trigger rejects active
+Entra memberships without approval, so a pre-remediation binary cannot restore
+name-based first binding. Run migrations before starting the new binary and
+pause the membership-sync scheduler until every sync worker is upgraded; an old
+worker does not understand ID-authoritative disappearance checks. Roll back
+application binaries only after confirming they tolerate the new columns; do
+not roll back the schema by dropping audit or provenance data.

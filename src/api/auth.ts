@@ -14,7 +14,15 @@ declare module 'express-serve-static-core' {
 }
 
 export type AuthMode = 'dev' | 'entra';
-export interface EntraAuthConfig { tenant: string; audience: string }
+export interface EntraAuthConfig {
+  tenant: string;
+  audience: string;
+  userScope: string;
+  serviceAppRole: string;
+  discoveryTimeoutMs?: number;
+  jwksTimeoutMs?: number;
+  fetcher?: typeof globalThis.fetch;
+}
 export interface Authenticator {
   authenticate(scheme: string, credential: string): Promise<AuthenticatedPrincipal | null>;
 }
@@ -30,11 +38,15 @@ export function authModeFromEnv(env: NodeJS.ProcessEnv = process.env): AuthMode 
 export function entraConfigFromEnv(env: NodeJS.ProcessEnv = process.env): EntraAuthConfig {
   const tenant = env.CONTINUUM_ENTRA_TENANT?.trim() ?? '';
   const audience = env.CONTINUUM_ENTRA_AUDIENCE?.trim() ?? '';
+  const userScope = env.CONTINUUM_ENTRA_USER_SCOPE?.trim() ?? '';
+  const serviceAppRole = env.CONTINUUM_ENTRA_SERVICE_APP_ROLE?.trim() ?? '';
   if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(tenant)
-    || audience.length === 0 || audience.length > 256) {
-    throw new Error('Entra mode requires a tenant UUID and bounded audience');
+    || audience.length === 0 || audience.length > 256
+    || !/^[A-Za-z0-9._:-]{1,128}$/.test(userScope)
+    || !/^[A-Za-z0-9._:-]{1,128}$/.test(serviceAppRole)) {
+    throw new Error('Entra mode requires tenant, audience, user scope, and service app role');
   }
-  return { tenant, audience };
+  return { tenant, audience, userScope, serviceAppRole };
 }
 
 async function authenticateApiKey(
@@ -45,6 +57,7 @@ async function authenticateApiKey(
   const hash = createHash('sha256').update(credential, 'utf8').digest();
   const { rows } = await pool.query(
     `SELECT p.id, p.external_id, p.kind, p.display_name, p.created_at, k.allowed_source
+       , COALESCE(k.rotated_at, k.created_at) + interval '90 days' AS expires_at
        FROM service_api_keys k JOIN principals p ON p.id = k.principal_id
       WHERE k.key_hash = $1 AND k.revoked_at IS NULL
         AND COALESCE(k.rotated_at, k.created_at) > now() - interval '90 days'`,
@@ -58,6 +71,7 @@ async function authenticateApiKey(
       displayName: row.display_name, createdAt: row.created_at,
     },
     credential: 'api-key',
+    expiresAt: row.expires_at,
     ...(row.allowed_source ? { allowedSource: row.allowed_source } : {}),
   };
 }
@@ -82,18 +96,25 @@ export function createAuthenticator(
   const metadata = () => {
     metadataPromise ??= (async () => {
       const discoveryUrl = new URL(`${expectedIssuer}/.well-known/openid-configuration`);
-      const response = await fetch(discoveryUrl);
+      const response = await (entra.fetcher ?? globalThis.fetch)(discoveryUrl, {
+        signal: AbortSignal.timeout(entra.discoveryTimeoutMs ?? 5_000),
+      });
       if (!response.ok) throw new Error('Entra discovery failed');
       const value = await response.json() as { issuer?: unknown; jwks_uri?: unknown };
       if (value.issuer !== expectedIssuer || typeof value.jwks_uri !== 'string') {
         throw new Error('Entra discovery metadata is invalid');
       }
       const jwksUrl = new URL(value.jwks_uri);
-      if (jwksUrl.protocol !== 'https:' || jwksUrl.hostname !== 'login.microsoftonline.com') {
+      if (jwksUrl.protocol !== 'https:' || jwksUrl.hostname !== 'login.microsoftonline.com'
+        || !jwksUrl.pathname.toLowerCase().startsWith(`/${entra.tenant.toLowerCase()}/`)) {
         throw new Error('Entra JWKS URL is invalid');
       }
-      return { issuer: value.issuer, jwks: createRemoteJWKSet(jwksUrl) };
+      return {
+        issuer: value.issuer,
+        jwks: createRemoteJWKSet(jwksUrl, { timeoutDuration: entra.jwksTimeoutMs ?? 5_000 }),
+      };
     })();
+    metadataPromise.catch(() => { metadataPromise = undefined; });
     return metadataPromise;
   };
   return {
@@ -103,11 +124,21 @@ export function createAuthenticator(
         return authenticateApiKey(pool, credential);
       }
       if (scheme.toLowerCase() !== 'bearer') return null;
-      const resolved = await metadata();
-      const { payload } = await jwtVerify(credential, resolved.jwks, {
-        issuer: resolved.issuer, audience: entra.audience,
-      });
-      return principalFromClaims(pool, payload);
+      try {
+        const resolved = await metadata();
+        const { payload, protectedHeader } = await jwtVerify(credential, resolved.jwks, {
+          issuer: resolved.issuer,
+          audience: entra.audience,
+          algorithms: ['RS256'],
+          requiredClaims: ['exp', 'iat', 'iss', 'aud', 'tid', 'oid'],
+        });
+        if (protectedHeader.alg !== 'RS256'
+          || (protectedHeader.typ !== undefined && protectedHeader.typ !== 'JWT'
+            && protectedHeader.typ !== 'at+jwt')) return null;
+        return principalFromClaims(pool, payload, entra);
+      } catch {
+        return null;
+      }
     },
   };
 }
@@ -115,22 +146,40 @@ export function createAuthenticator(
 export async function principalFromClaims(
   pool: pg.Pool,
   claims: JWTPayload,
+  contract: Pick<EntraAuthConfig, 'tenant' | 'userScope' | 'serviceAppRole'>,
 ): Promise<AuthenticatedPrincipal | null> {
   const oid = typeof claims.oid === 'string' ? claims.oid : '';
   if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(oid)) return null;
   const name = typeof claims.name === 'string' ? claims.name.trim().slice(0, 256) : '';
-  const kind: PrincipalKind = claims.idtyp === 'app'
-    || (typeof claims.scp !== 'string'
-      && (typeof claims.azp === 'string' || typeof claims.appid === 'string'))
-    ? 'service' : 'user';
+  let kind: PrincipalKind;
+  if (claims.tid !== contract.tenant || claims.ver !== '2.0') return null;
+  if (claims.idtyp === 'user') {
+    const scopes = typeof claims.scp === 'string' ? claims.scp.split(/\s+/) : [];
+    if (!scopes.includes(contract.userScope)) return null;
+    kind = 'user';
+  } else if (claims.idtyp === 'app') {
+    const roles = Array.isArray(claims.roles)
+      ? claims.roles.filter((value): value is string => typeof value === 'string') : [];
+    const clientId = typeof claims.azp === 'string' ? claims.azp
+      : typeof claims.appid === 'string' ? claims.appid : '';
+    if (typeof claims.scp === 'string' || !roles.includes(contract.serviceAppRole)
+      || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(clientId)) return null;
+    kind = 'service';
+  } else return null;
   const principal = await upsertPrincipalByExternalId(pool, {
     externalId: oid, kind, displayName: name || oid,
   });
-  return { principal, credential: 'entra' };
+  return {
+    principal,
+    credential: 'entra',
+    ...(typeof claims.exp === 'number' ? { expiresAt: new Date(claims.exp * 1000) } : {}),
+  };
 }
 
 export function bearerAuth(pool: pg.Pool, authenticator?: Authenticator) {
-  const selected = authenticator ?? createAuthenticator(pool, 'dev');
+  const selected = authenticator
+    ?? (process.env.NODE_ENV === 'test' ? createAuthenticator(pool, 'dev') : undefined);
+  if (!selected) throw new Error('an explicit authenticator is required');
   return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
     const header = req.header('authorization') ?? '';
     const match = /^(Bearer|ApiKey)\s+([^\s]+)$/i.exec(header);
@@ -148,11 +197,6 @@ export function bearerAuth(pool: pg.Pool, authenticator?: Authenticator) {
       req.authContext = result;
       next();
     } catch (error) {
-      const code = (error as { code?: unknown })?.code;
-      if (typeof code === 'string' && /^(ERR_JWT|ERR_JWS|ERR_JOSE)/.test(code)) {
-        res.status(401).json({ error: 'invalid credential' });
-        return;
-      }
       next(error);
     }
   };

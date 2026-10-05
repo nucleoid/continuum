@@ -58,6 +58,7 @@ describe('ensure-scope operator client', () => {
         ...process.env,
         CONTINUUM_DATABASE_URL: databaseUrl,
         CONTINUUM_PRINCIPAL_EXTERNAL_ID: admin.externalId,
+        CONTINUUM_AUTH_MODE: 'dev',
       },
     });
     expect(JSON.parse(success.stdout)).toMatchObject({
@@ -72,6 +73,7 @@ describe('ensure-scope operator client', () => {
         ...process.env,
         CONTINUUM_DATABASE_URL: databaseUrl,
         CONTINUUM_PRINCIPAL_EXTERNAL_ID: nonAdmin.externalId,
+        CONTINUUM_AUTH_MODE: 'dev',
       },
     }).catch((error: unknown) => error as { code: number; stderr: string });
     expect(denied.code).toBe(1);
@@ -90,6 +92,7 @@ describe('ensure-scope operator client', () => {
         ...process.env,
         CONTINUUM_DATABASE_URL: databaseUrl,
         CONTINUUM_PRINCIPAL_EXTERNAL_ID: unknownCredential,
+        CONTINUUM_AUTH_MODE: 'dev',
       },
     }).catch((error: unknown) => error as { code: number; stderr: string });
     expect(startupFailure.code).toBe(3);

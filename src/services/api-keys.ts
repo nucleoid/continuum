@@ -95,3 +95,30 @@ export async function rotateApiKey(
   } catch (error) { await client.query('ROLLBACK'); throw error; }
   finally { client.release(); }
 }
+
+export async function revokeApiKey(
+  pool: pg.Pool,
+  actor: Principal,
+  keyId: string,
+): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await requireOrgAdmin(client, actor.id);
+    const { rows } = await client.query(
+      `UPDATE service_api_keys SET revoked_at = now()
+        WHERE id = $1 AND revoked_at IS NULL
+      RETURNING principal_id, revoked_at`,
+      [keyId],
+    );
+    if (!rows[0]) throw new ServiceError('INVALID_INPUT', 'API key not found');
+    await client.query(
+      `INSERT INTO audit_log (principal_id, action, metadata)
+       VALUES ($1, 'write', $2::jsonb)`,
+      [actor.id, JSON.stringify({ operation: 'api_key_revoked', key_id: keyId,
+        service_principal_id: rows[0].principal_id, key_revoked_at: rows[0].revoked_at })],
+    );
+    await client.query('COMMIT');
+  } catch (error) { await client.query('ROLLBACK'); throw error; }
+  finally { client.release(); }
+}

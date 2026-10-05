@@ -1,7 +1,7 @@
 import { getPool, closePool } from '../storage/pool.js';
 import { getPrincipalByExternalId } from '../storage/principals.js';
 import { fetchMembershipSnapshot } from './graph-membership.js';
-import { syncEntraMemberships } from '../services/membership-sync.js';
+import { listBoundEntraGroupIds, syncEntraMemberships } from '../services/membership-sync.js';
 
 async function main(): Promise<void> {
   if (process.env.CONTINUUM_ENTRA_MEMBERSHIP_SYNC !== 'true') {
@@ -14,8 +14,11 @@ async function main(): Promise<void> {
   try {
     const actor = await getPrincipalByExternalId(pool, actorExternalId);
     if (!actor) throw new Error('membership sync actor is unknown');
-    const snapshots = await fetchMembershipSnapshot(token);
-    const result = await syncEntraMemberships(pool, actor, snapshots);
+    const boundGroupIds = await listBoundEntraGroupIds(pool);
+    const snapshots = await fetchMembershipSnapshot(boundGroupIds, token);
+    const result = await syncEntraMemberships(pool, actor, snapshots, {
+      allowMassDeactivation: process.env.CONTINUUM_MEMBERSHIP_SYNC_ALLOW_MASS_DEACTIVATION === 'true',
+    });
     process.stdout.write(`${JSON.stringify({ event: 'entra_membership_sync_complete', ...result })}\n`);
   } finally {
     await closePool();

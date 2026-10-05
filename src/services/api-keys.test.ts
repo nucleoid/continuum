@@ -5,7 +5,7 @@ import { createPrincipal } from '../storage/principals.js';
 import { getScopeByRef } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import { createAuthenticator } from '../api/auth.js';
-import { issueApiKey, rotateApiKey } from './api-keys.js';
+import { issueApiKey, revokeApiKey, rotateApiKey } from './api-keys.js';
 
 describe('service API keys', () => {
   let pool: pg.Pool;
@@ -22,6 +22,7 @@ describe('service API keys', () => {
     expect(stored.rows[0].key_hash.toString('utf8')).not.toContain(issued.key);
     const auth = createAuthenticator(pool, 'entra', {
       tenant: '22222222-2222-4222-8222-222222222222', audience: 'api://continuum',
+      userScope: 'Continuum.User', serviceAppRole: 'Continuum.Service',
     });
     expect(await auth.authenticate('ApiKey', issued.key)).toMatchObject({
       principal: { id: service.id }, allowedSource: 'github-pr', credential: 'api-key',
@@ -29,7 +30,10 @@ describe('service API keys', () => {
     const rotated = await rotateApiKey(pool, admin, issued.id);
     expect(await auth.authenticate('ApiKey', issued.key)).toBeNull();
     expect((await auth.authenticate('ApiKey', rotated.key))?.principal.id).toBe(service.id);
+    await revokeApiKey(pool, admin, rotated.id);
+    expect(await auth.authenticate('ApiKey', rotated.key)).toBeNull();
     const audit = await pool.query("SELECT metadata FROM audit_log WHERE metadata->>'key_rotated_at' IS NOT NULL");
     expect(audit.rowCount).toBe(1);
+    expect((await pool.query("SELECT count(*)::int AS count FROM audit_log WHERE metadata->>'operation' = 'api_key_revoked'")).rows[0].count).toBe(1);
   });
 });
