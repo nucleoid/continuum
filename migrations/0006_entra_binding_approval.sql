@@ -34,7 +34,10 @@ BEGIN
   IF NEW.source_kind = 'entra' AND NEW.active
      AND NOT EXISTS (
        SELECT 1 FROM entra_groups g
-        WHERE g.external_id = NEW.source_id AND g.approved_by IS NOT NULL
+        WHERE g.external_id = NEW.source_id
+          AND g.scope_id = NEW.scope_id
+          AND g.role = NEW.role
+          AND g.approved_by IS NOT NULL
      ) THEN
     RAISE EXCEPTION 'active Entra membership requires an approved immutable group binding';
   END IF;
@@ -43,6 +46,6 @@ END;
 $$;
 
 CREATE TRIGGER scope_memberships_require_approved_entra_binding
-BEFORE INSERT OR UPDATE OF source_kind, source_id, active
+BEFORE INSERT OR UPDATE OF source_kind, source_id, scope_id, role, active
 ON scope_memberships
 FOR EACH ROW EXECUTE FUNCTION continuum_require_approved_entra_binding();

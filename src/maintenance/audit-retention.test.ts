@@ -586,4 +586,17 @@ describe('audit retention', () => {
     })).rejects.toThrow('current org admin');
     expect((await pool.query('SELECT count(*)::int AS count FROM audit_log')).rows[0].count).toBe(1);
   });
+
+  it('does not authorize retention through an inactive admin membership', async () => {
+    const admin = await seedPrincipal('svc:retention', 'admin');
+    await insertAudit(admin.id, new Date('2026-01-01T00:00:00Z'));
+    await pool.query(
+      `UPDATE scope_memberships SET active = FALSE, deactivated_at = now()
+        WHERE principal_id = $1`,
+      [admin.id],
+    );
+
+    await expect(runAuditRetention(pool, options())).rejects.toThrow('current org admin');
+    expect((await pool.query('SELECT count(*)::int AS count FROM audit_log')).rows[0].count).toBe(1);
+  });
 });

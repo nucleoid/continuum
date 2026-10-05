@@ -52,6 +52,42 @@ describe('Entra membership sync', () => {
     )).rejects.toThrow(/approved immutable group binding/);
   });
 
+  it('database-enforces the approved source, scope, and role on inserts and updates', async () => {
+    const alpha = await createScope(pool, { kind: 'team', name: 'alpha' });
+    const beta = await createScope(pool, { kind: 'team', name: 'beta' });
+    const user = await createPrincipal(pool, {
+      externalId: '11111111-1111-4111-8111-111111111111', kind: 'user', displayName: 'User',
+    });
+    const groupId = '22222222-2222-4222-8222-222222222222';
+    await provisionEntraGroupBinding(pool, admin, {
+      externalId: groupId, scopeId: alpha.id, role: 'writer',
+    });
+
+    await expect(pool.query(
+      `INSERT INTO scope_memberships
+         (principal_id, scope_id, role, source_kind, source_id, active)
+       VALUES ($1, $2, 'admin', 'entra', $3, TRUE)`,
+      [user.id, alpha.id, groupId],
+    )).rejects.toThrow(/approved immutable group binding/);
+
+    await pool.query(
+      `INSERT INTO scope_memberships
+         (principal_id, scope_id, role, source_kind, source_id, active)
+       VALUES ($1, $2, 'writer', 'entra', $3, TRUE)`,
+      [user.id, alpha.id, groupId],
+    );
+    for (const [column, value] of [
+      ['role', 'admin'], ['scope_id', beta.id],
+      ['source_id', '33333333-3333-4333-8333-333333333333'],
+    ] as const) {
+      await expect(pool.query(
+        `UPDATE scope_memberships SET ${column} = $1
+          WHERE principal_id = $2 AND source_kind = 'entra' AND source_id = $3`,
+        [value, user.id, groupId],
+      )).rejects.toThrow(/approved immutable group binding/);
+    }
+  });
+
   it('uses an audited explicit binding, treats rename as metadata, and safely reactivates', async () => {
     const alpha = await createScope(pool, { kind: 'team', name: 'alpha' });
     const beta = await createScope(pool, { kind: 'team', name: 'beta' });
@@ -189,6 +225,13 @@ describe('Entra membership sync', () => {
     await expect(syncEntraMemberships(pool, admin, oversized)).rejects
       .toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
     expect(await hasRole(pool, user.id, alpha.id, 'reader')).toBe(false);
+    expect((await pool.query(
+      `SELECT metadata FROM audit_log
+        WHERE metadata->>'operation' = 'entra_membership_sync_rejected'
+        ORDER BY id DESC LIMIT 1`,
+    )).rows[0].metadata).toMatchObject({
+      reason: 'SNAPSHOT_TOO_LARGE', groups_deactivated: 1, memberships_deactivated: 1,
+    });
   });
 
   it('fails closed on empty and mass-deactivation snapshots and preserves syncing authority', async () => {
@@ -226,6 +269,69 @@ describe('Entra membership sync', () => {
     expect((await pool.query(
       "SELECT count(*)::int AS count FROM scope_memberships WHERE source_kind = 'entra' AND active",
     )).rows[0].count).toBe(100);
+  });
+
+  it('keeps quarantine and rejection audits when a later global guard rolls back valid removals', async () => {
+    const alpha = await createScope(pool, { kind: 'team', name: 'alpha' });
+    const beta = await createScope(pool, { kind: 'team', name: 'beta' });
+    const good = '22222222-2222-4222-8222-222222222222';
+    const failed = '33333333-3333-4333-8333-333333333333';
+    await provisionEntraGroupBinding(pool, admin, { externalId: good, scopeId: alpha.id, role: 'reader' });
+    await provisionEntraGroupBinding(pool, admin, { externalId: failed, scopeId: beta.id, role: 'reader' });
+    const inserted = await pool.query(
+      `INSERT INTO principals (id, external_id, kind, display_name)
+       SELECT gen_random_uuid(), gen_random_uuid()::text, 'user', 'Bulk user'
+         FROM generate_series(1, 101)
+       RETURNING id, external_id`,
+    );
+    const goodIds = inserted.rows.slice(0, 100).map((row) => row.external_id as string);
+    const failedId = inserted.rows[100].external_id as string;
+    await syncEntraMemberships(pool, admin, [
+      { id: good, status: 'present', displayName: 'good', memberObjectIds: goodIds },
+      { id: failed, status: 'present', displayName: 'failed', memberObjectIds: [failedId] },
+    ]);
+
+    await expect(syncEntraMemberships(pool, admin, [
+      { id: good, status: 'present', displayName: 'good', memberObjectIds: [] },
+      { id: failed, status: 'invalid', errorCode: 'GRAPH_FAILURE' },
+    ])).rejects.toMatchObject({ code: 'CONFLICT' });
+
+    expect((await pool.query(
+      `SELECT count(*)::int AS count FROM scope_memberships
+        WHERE source_kind = 'entra' AND source_id = $1 AND active`, [good],
+    )).rows[0].count).toBe(100);
+    expect((await pool.query(
+      `SELECT count(*)::int AS count FROM scope_memberships
+        WHERE source_kind = 'entra' AND source_id = $1 AND active`, [failed],
+    )).rows[0].count).toBe(0);
+    expect((await pool.query(
+      `SELECT metadata FROM audit_log
+        WHERE metadata->>'operation' = 'entra_membership_sync_rejected'
+        ORDER BY id DESC LIMIT 1`,
+    )).rows[0].metadata).toMatchObject({
+      reason: 'MEMBERSHIP_DEACTIVATION_THRESHOLD',
+      quarantine: { memberships_deactivated: 1, skip_codes: { GRAPH_FAILURE: 1 } },
+    });
+  });
+
+  it('quarantines a duplicated binding without reapplying its first result', async () => {
+    const alpha = await createScope(pool, { kind: 'team', name: 'alpha' });
+    const user = await createPrincipal(pool, {
+      externalId: '11111111-1111-4111-8111-111111111111', kind: 'user', displayName: 'User',
+    });
+    const groupId = '22222222-2222-4222-8222-222222222222';
+    await provisionEntraGroupBinding(pool, admin, { externalId: groupId, scopeId: alpha.id, role: 'reader' });
+    const snapshot = {
+      id: groupId, status: 'present' as const, displayName: 'alpha', memberObjectIds: [user.externalId],
+    };
+    await syncEntraMemberships(pool, admin, [snapshot]);
+
+    const result = await syncEntraMemberships(pool, admin, [snapshot, snapshot]);
+    expect(result).toMatchObject({
+      groupsSeen: 0, groupsSkipped: 1, membershipsDeactivated: 1,
+      skipCodes: { DUPLICATE_GROUP_ID: 1 },
+    });
+    expect(await hasRole(pool, user.id, alpha.id, 'reader')).toBe(false);
   });
 
   it('cannot remove the synchronizing principal when it is the last org admin', async () => {

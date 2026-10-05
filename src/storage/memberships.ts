@@ -1,4 +1,3 @@
-import type pg from 'pg';
 import type { MembershipRole, Scope, Principal } from '../types.js';
 import type { Queryable } from './queryable.js';
 

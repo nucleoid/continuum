@@ -26,7 +26,6 @@ export * from './services/review-queue.js';
 export * from './services/agents-md.js';
 export * from './services/api-keys.js';
 export * from './services/membership-sync.js';
-export * from './services/api-keys.js';
 export * from './identity/graph-membership.js';
 export * from './lifecycle/sweep.js';
 export { promoteMemory, verifyMemory, PromoteError } from './storage/promote.js';

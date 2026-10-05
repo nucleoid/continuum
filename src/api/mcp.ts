@@ -2,7 +2,6 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { getPrincipalByExternalId } from '../storage/principals.js';
 import {
   asEmbeddingRouter,
   warnOnMissingEmbeddingRoutingScopes,
@@ -39,7 +38,9 @@ import {
   reviewQueueForPrincipal,
 } from '../services/review-queue.js';
 import { isLifecyclePrincipal } from '../lifecycle/principal.js';
-import { authModeFromEnv, createAuthenticator, entraConfigFromEnv } from './auth.js';
+import {
+  authModeFromEnv, createAuthenticator, entraConfigFromEnv, warnOnDevAuthMode,
+} from './auth.js';
 import { gapConfigFromEnv, renderGapMarkdown, type GapConfig } from '../insights/gaps.js';
 import { getKnowledgeGaps } from '../services/gaps.js';
 import {
@@ -636,6 +637,7 @@ async function main(): Promise<void> {
   }
   const pool = getPool();
   const authMode = authModeFromEnv();
+  warnOnDevAuthMode(authMode);
   const authenticator = createAuthenticator(
     pool, authMode, authMode === 'entra' ? entraConfigFromEnv() : undefined,
   );

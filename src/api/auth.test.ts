@@ -1,7 +1,9 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type pg from 'pg';
 import request from 'supertest';
-import { authModeFromEnv, createAuthenticator, entraConfigFromEnv, principalFromClaims } from './auth.js';
+import {
+  authModeFromEnv, createAuthenticator, entraConfigFromEnv, principalFromClaims, warnOnDevAuthMode,
+} from './auth.js';
 import { createApp } from './server.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
 
@@ -28,6 +30,14 @@ describe('authentication configuration and Entra claims', () => {
       CONTINUUM_ENTRA_SERVICE_APP_ROLE: contract.serviceAppRole,
       CONTINUUM_ENTRA_ALLOWED_CLIENT_IDS: contract.allowedClientIds[0],
     })).toMatchObject(contract);
+  });
+
+  it('emits a loud warning only for development authentication', () => {
+    const write = vi.fn();
+    warnOnDevAuthMode('dev', write);
+    warnOnDevAuthMode('entra', write);
+    expect(write).toHaveBeenCalledOnce();
+    expect(write).toHaveBeenCalledWith(expect.stringMatching(/WARNING.*untrusted network/));
   });
 
   it('accepts only tenant user access tokens with the configured delegated scope', async () => {

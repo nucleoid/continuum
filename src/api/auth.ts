@@ -38,6 +38,15 @@ export function authModeFromEnv(env: NodeJS.ProcessEnv = process.env): AuthMode 
   return mode;
 }
 
+export function warnOnDevAuthMode(
+  mode: AuthMode,
+  write: (message: string) => unknown = (message) => process.stderr.write(message),
+): void {
+  if (mode === 'dev') {
+    write('continuum: WARNING: dev authentication accepts principal IDs as bearer credentials; never expose this process to an untrusted network\n');
+  }
+}
+
 export function entraConfigFromEnv(env: NodeJS.ProcessEnv = process.env): EntraAuthConfig {
   const tenant = env.CONTINUUM_ENTRA_TENANT?.trim() ?? '';
   const audience = env.CONTINUUM_ENTRA_AUDIENCE?.trim() ?? '';

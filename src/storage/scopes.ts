@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import type pg from 'pg';
 import type { Scope, ScopeKind, ScopeRef } from '../types.js';
 import type { Queryable } from './queryable.js';
 

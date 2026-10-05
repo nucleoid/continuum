@@ -1,4 +1,3 @@
-import type pg from 'pg';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import type { MemoryType } from '../types.js';
 import type { Queryable } from './queryable.js';

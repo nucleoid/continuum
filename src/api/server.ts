@@ -8,6 +8,7 @@ import {
   createAuthenticator,
   entraConfigFromEnv,
   type Authenticator,
+  warnOnDevAuthMode,
 } from './auth.js';
 import { captureRouter } from './routes/capture.js';
 import { recallRouter } from './routes/recall.js';
@@ -345,6 +346,7 @@ async function main(): Promise<void> {
   const shutdownTimeoutMs = positiveIntegerEnv('CONTINUUM_SHUTDOWN_TIMEOUT_MS', 10_000);
   const pool = getPool();
   const authMode = authModeFromEnv();
+  warnOnDevAuthMode(authMode);
   const authenticator = createAuthenticator(
     pool,
     authMode,

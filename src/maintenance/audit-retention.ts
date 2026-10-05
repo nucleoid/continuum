@@ -234,7 +234,8 @@ async function authorizedPrincipalId(client: pg.PoolClient, externalId: string):
   const result = await client.query<{ id: string }>(
     `SELECT p.id
        FROM principals p
-       JOIN scope_memberships sm ON sm.principal_id = p.id AND sm.role = 'admin'
+       JOIN scope_memberships sm ON sm.principal_id = p.id
+        AND sm.role = 'admin' AND sm.active
        JOIN scopes s ON s.id = sm.scope_id AND s.kind = 'org' AND s.name = ''
       WHERE p.external_id = $1
       FOR KEY SHARE OF p, sm, s`,

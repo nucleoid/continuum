@@ -5,7 +5,8 @@ operator process start. There is no production default:
 
 - `CONTINUUM_AUTH_MODE=dev` enables the local integration-test identity where a
   bearer value is an existing principal `external_id`. Do not expose this mode
-  outside a trusted development machine.
+  outside a trusted development machine. API and MCP startup emit a warning to
+  stderr whenever this mode is selected.
 - `CONTINUUM_AUTH_MODE=entra` requires a tenant UUID, audience, delegated user
   scope, and application role in `CONTINUUM_ENTRA_TENANT`,
   `CONTINUUM_ENTRA_AUDIENCE`, `CONTINUUM_ENTRA_USER_SCOPE`, and
@@ -33,7 +34,12 @@ key expiry, rotation, or revocation.
 Service API keys contain 256 random bits and use the `ctm_` prefix. Continuum
 stores only SHA-256 hashes plus a display prefix and final four characters.
 Keys can be restricted to one capture source and expire 90 days after issue or
-rotation. Issue, rotation, and revocation require an org administrator, and the
+rotation. `allowed-source` is an exact match against the caller-supplied
+`source` field on REST and MCP capture operations. It does not make the key
+capture-only and does not narrow recall or other operations; those continue to
+use the service principal's scope memberships. Use a dedicated least-privilege
+service principal when a credential must have capture-only effective access.
+Issue, rotation, and revocation require an org administrator, and the
 credential mutation and audit commit atomically. Cleartext is returned only by
 issue or rotation.
 
@@ -73,13 +79,21 @@ Run `npm run sync:memberships` from a nightly scheduler. It requires:
 - `CONTINUUM_MEMBERSHIP_SYNC_ACTOR`, the external ID of an org admin
 - the normal database configuration
 
+Before enabling the scheduler, retain an independently managed manual org
+administrator as a break-glass identity. Invalid-input quarantine is
+intentionally fail-closed and takes precedence over availability: if the only
+org-admin access is sourced by a malformed, failed, duplicate, or oversized
+Entra result, that access is removed and direct database recovery is required.
+
 The job reads all approved bindings, including currently missing groups, then fetches each directly by
 immutable ID. It does not perform name-based group discovery. A Graph 404 is a
 definitive disappearance. If that immutable ID returns, its still-approved
 binding is safely reactivated. Renames outside any naming convention remain active
 and update metadata. Malformed, failed, duplicate, and oversized results are
-counted in the audit summary and soft-deactivate access sourced by the affected
-approved binding. Unbound and revoked IDs cannot confer access. Valid bound
+counted in a durable screening audit and soft-deactivate access sourced by the
+affected approved binding. That quarantine commits before valid results are
+applied, so a later global threshold or administrator guard cannot restore
+stale invalid access. Unbound and revoked IDs cannot confer access. Valid bound
 groups remain authoritative, so removed memberships from those groups are
 deactivated. A snapshot exceeding the whole-run bound quarantines all active
 Entra-sourced access before the run reports failure.
@@ -87,22 +101,23 @@ Entra-sourced access before the run reports failure.
 Empty snapshots fail closed. By default, a run that would deactivate more than
 25 percent of active bindings rolls back. After investigation, an operator may
 set `CONTINUUM_MEMBERSHIP_SYNC_ALLOW_MASS_DEACTIVATION=true` for one run. A sync
-also rolls back if it would remove the synchronizing administrator's authority
-or the organization's last active administrator. Manual memberships and rows
-sourced by other groups are unchanged.
+also rolls back valid authoritative changes if they would remove the
+synchronizing administrator's authority or the organization's last active
+administrator. Already committed invalid-input quarantine and its audits are
+not rolled back. Manual memberships and rows sourced by other groups are
+unchanged.
 
 Only direct user members are fetched through the typed Graph user-member
 endpoint. Nested groups are intentionally not expanded. Users are not
 provisioned by sync; an Entra user must already have a Continuum principal,
 normally from successful first sign-in, before group membership becomes active.
 
-The migration is additive for credential and binding tables, deactivates all
-pre-approval Entra memberships, and gives defaults
-to new membership provenance columns, so an older binary can continue writing
-manual rows during a rolling deployment. A database trigger rejects active
-Entra memberships without approval, so a pre-remediation binary cannot restore
-name-based first binding. Run migrations before starting the new binary and
-pause the membership-sync scheduler until every sync worker is upgraded; an old
-worker does not understand ID-authoritative disappearance checks. Roll back
-application binaries only after confirming they tolerate the new columns; do
-not roll back the schema by dropping audit or provenance data.
+This release does not support a mixed-version rolling deployment. Stop every
+API, MCP, admin, and membership-sync process built from the old version, then
+apply the migrations, then start only the new binaries. The database trigger
+enforces the approved binding's immutable group ID, target scope, and role on
+inserts and relevant updates, but old binaries do not understand the complete
+ID-authoritative sync and provenance contract. Pause external schedulers for
+the entire stop/migrate/start window. Treat the schema as forward-only: do not
+restart old binaries after migration and do not roll back by dropping audit,
+credential, binding, or provenance data.

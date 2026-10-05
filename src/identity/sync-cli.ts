@@ -29,7 +29,7 @@ async function main(): Promise<void> {
   }
 }
 
-void main().catch((error: unknown) => {
+void main().catch(() => {
   process.stderr.write(`${JSON.stringify({ event: 'entra_membership_sync_failed', message: 'sync failed' })}\n`);
   process.exitCode = 1;
 });
