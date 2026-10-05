@@ -1,3 +1,5 @@
+import { createServer } from 'node:http';
+import { once } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import { ApiClient, CliError } from './http.js';
 
@@ -46,6 +48,44 @@ describe('CLI HTTP client', () => {
       fetch: async () => Response.json({ error: 'try later' }, { status: 429 }),
     });
     await expect(client.json('GET', '/scopes')).rejects.toMatchObject({ exitCode: 5 });
+  });
+
+  it('fails closed on redirects without sending the request body to the target', async () => {
+    let targetRequests = 0;
+    const sourceBodies: string[] = [];
+    const server = createServer((request, response) => {
+      if (request.url === '/api/v0/capture') {
+        let body = '';
+        request.setEncoding('utf8');
+        request.on('data', (chunk) => { body += chunk; });
+        request.on('end', () => {
+          sourceBodies.push(body);
+          response.writeHead(307, { location: '/redirect-target' });
+          response.end();
+        });
+        return;
+      }
+      targetRequests += 1;
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end('{}');
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    try {
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('missing test server address');
+      const client = new ApiClient({
+        apiUrl: `http://127.0.0.1:${address.port}`, token: 'x', timeoutMs: 1_000,
+      });
+      await expect(client.json('POST', '/capture', { body: 'secret body' })).rejects.toMatchObject({
+        exitCode: 5,
+      });
+      expect(sourceBodies).toEqual(['{"body":"secret body"}']);
+      expect(targetRequests).toBe(0);
+    } finally {
+      server.close();
+      await once(server, 'close');
+    }
   });
 
   it('times out while waiting for headers and while streaming the body', async () => {

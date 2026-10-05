@@ -27,7 +27,6 @@ describe('CLI REST support routes', () => {
     });
     const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
     const project = await createScope(pool, { kind: 'project', name: 'continuum' });
-    const hidden = await createScope(pool, { kind: 'team', name: 'unassigned' });
     await addMembership(pool, admin.id, org.id, 'admin');
     await addMembership(pool, admin.id, project.id, 'writer');
     await addMembership(pool, member.id, project.id, 'reader');
@@ -35,7 +34,7 @@ describe('CLI REST support routes', () => {
       scopeId: project.id, scopeKind: 'project', type: 'fact', title: 'CLI fact',
       body: 'The CLI uses the REST API.', authorId: admin.id, source: 'manual',
     });
-    return { admin, member, org, project, hidden, memory };
+    return { admin, member, org, project, memory };
   }
 
   it('lists only readable scopes with the caller role', async () => {
@@ -51,10 +50,22 @@ describe('CLI REST support routes', () => {
     expect(response.body.scopes).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ scope: 'team:unassigned' }),
     ]));
-    const manage = await request(createApp(pool))
+    const managed = await request(createApp(pool))
       .get('/api/v0/scopes?manage=true')
       .set('Authorization', 'Bearer token-member');
-    expect(manage.status).toBe(403);
+    expect(managed.status).toBe(400);
+  });
+
+  it('distinguishes an explicit org reader from implicit org readability', async () => {
+    const { member, org } = await seed();
+    await addMembership(pool, member.id, org.id, 'reader');
+    const response = await request(createApp(pool))
+      .get('/api/v0/scopes')
+      .set('Authorization', 'Bearer token-member');
+    expect(response.status).toBe(200);
+    expect(response.body.scopes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: org.id, scope: 'org', role: 'reader' }),
+    ]));
   });
 
   it('exposes promote and verify through the shared lifecycle services', async () => {
@@ -75,59 +86,26 @@ describe('CLI REST support routes', () => {
     expect(promote.body.destinationId).toMatch(/^[0-9a-f-]{36}$/);
   });
 
-  it('requires org admin and audits membership grant and revoke', async () => {
-    const { admin, member, project, hidden } = await seed();
+  it('does not expose REST membership mutation, even to org admins', async () => {
+    const { admin, member, org, project } = await seed();
     const app = createApp(pool);
-    const denied = await request(app)
-      .put(`/api/v0/scopes/${project.id}/members/${admin.id}`)
-      .set('Authorization', 'Bearer token-member')
-      .send({ role: 'writer' });
-    expect(denied.status).toBe(403);
-
-    const managed = await request(app)
-      .get('/api/v0/scopes?manage=true')
-      .set('Authorization', 'Bearer token-admin');
-    expect(managed.status).toBe(200);
-    expect(managed.body.scopes).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: hidden.id, scope: 'team:unassigned', role: null }),
-    ]));
-
     const grant = await request(app)
       .put(`/api/v0/scopes/${project.id}/members/${member.id}`)
       .set('Authorization', 'Bearer token-admin')
       .send({ role: 'writer' });
-    expect(grant.status).toBe(200);
-    expect((await getMembership(pool, member.id, project.id))?.role).toBe('writer');
+    expect(grant.status).toBe(404);
+    expect((await getMembership(pool, member.id, project.id))?.role).toBe('reader');
 
     const revoke = await request(app)
-      .delete(`/api/v0/scopes/${project.id}/members/${member.id}`)
+      .delete(`/api/v0/scopes/${org.id}/members/${admin.id}`)
       .set('Authorization', 'Bearer token-admin');
-    expect(revoke.status).toBe(200);
-    expect(await getMembership(pool, member.id, project.id)).toBeNull();
+    expect(revoke.status).toBe(404);
+    expect((await getMembership(pool, admin.id, org.id))?.role).toBe('admin');
 
     const audit = await pool.query(
       `SELECT metadata FROM audit_log WHERE principal_id = $1 AND action = 'write' ORDER BY id`,
       [admin.id],
     );
-    expect(audit.rows.map((row) => row.metadata.operation)).toEqual([
-      'grant_membership', 'revoke_membership',
-    ]);
-  });
-
-  it('prevents an org admin from revoking or downgrading their own admin role', async () => {
-    const { admin, org } = await seed();
-    const app = createApp(pool);
-    const revoke = await request(app)
-      .delete(`/api/v0/scopes/${org.id}/members/${admin.id}`)
-      .set('Authorization', 'Bearer token-admin');
-    expect(revoke.status).toBe(409);
-    expect(revoke.body.error).toMatch(/own org admin role/i);
-
-    const downgrade = await request(app)
-      .put(`/api/v0/scopes/${org.id}/members/${admin.id}`)
-      .set('Authorization', 'Bearer token-admin')
-      .send({ role: 'reader' });
-    expect(downgrade.status).toBe(409);
-    expect((await getMembership(pool, admin.id, org.id))?.role).toBe('admin');
+    expect(audit.rows).toEqual([]);
   });
 });

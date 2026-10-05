@@ -52,8 +52,6 @@ cat notes.md | continuum capture --scope user:me --type context --title "Session
 continuum recall "checkout retry policy" --scopes project:booking-engine,org --types decision,playbook
 continuum audit --since 24h --action read --limit 100
 continuum scopes list
-continuum scopes grant <principal-uuid> project:booking-engine writer
-continuum scopes revoke <principal-uuid> project:booking-engine
 continuum verify <memory-uuid> --still-true --note "Confirmed in production"
 continuum verify <memory-uuid> --no-longer-true
 continuum promote <memory-uuid> --to team:payments
@@ -70,7 +68,8 @@ timestamps must include `Z` or an offset.
 All commands accept `--json`. On success, JSON mode writes exactly one JSON
 document to stdout. On failure, stdout is empty and stderr contains one document
 with the shape `{ "error": { "message": string, "exitCode": number } }`.
-Human output is deterministic and strips terminal control characters.
+Human output is deterministic and strips terminal control characters, including
+from rendered `agents-md` content, while preserving its line structure.
 Diagnostics go to stderr.
 
 ## Installed-package migrations
@@ -97,6 +96,8 @@ operator before starting a newly installed application version.
 | `4` | Not found or conflict |
 | `5` | Network, timeout, dependency, or server failure |
 
-The API remains the authority for ACL decisions. Scope membership changes
-require an org administrator. The CLI does not expose scope creation; use the
-checked operator workflow in [scope-provisioning.md](./scope-provisioning.md).
+The v0 REST API and CLI expose scope membership as read-only data. They do not
+grant, revoke, or alter memberships, including org-admin roles and private user
+scopes. Use the checked operator workflow in
+[scope-provisioning.md](./scope-provisioning.md) for controlled membership and
+scope changes.

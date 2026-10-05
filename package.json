@@ -16,6 +16,7 @@
     "!dist/**/*.test.*",
     "!dist/**/*.spec.*",
     "!dist/**/test-helpers.*",
+    "!dist/**/*.map",
     "docs/agents-md-freshness.md",
     "docs/api-operations.md",
     "docs/audit-api.md",

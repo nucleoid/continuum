@@ -59,6 +59,16 @@ describe('continuum CLI', () => {
     ], ambiguous.deps)).toBe(2);
   });
 
+  it.each([
+    ['scope', ['capture', '--type', 'fact', '--title', 'Missing scope']],
+    ['type', ['capture', '--scope', 'org', '--title', 'Missing type']],
+    ['title', ['capture', '--scope', 'org', '--type', 'fact']],
+  ])('validates required capture %s before reading redirected stdin', async (_label, argv) => {
+    const h = harness(vi.fn() as typeof globalThis.fetch, 'must not be consumed', false);
+    expect(await runCli(argv, h.deps)).toBe(2);
+    expect(h.readStdin).not.toHaveBeenCalled();
+  });
+
   it('uses explicit flag and file bodies in non-TTY scripts without reading stdin', async () => {
     const bodies: string[] = [];
     const fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
@@ -234,5 +244,27 @@ describe('continuum CLI', () => {
     ], success.deps)).toBe(0);
     expect(success.stdout()).toBe('Captured memory [31m forged\n');
     expect(success.stdout()).not.toContain('\u001b');
+  });
+
+  it('keeps scope access read-only and sanitizes agents-md terminal output', async () => {
+    const mutation = harness(vi.fn() as typeof globalThis.fetch);
+    expect(await runCli([
+      'scopes', 'grant', '00000000-0000-4000-8000-000000000099', 'org', 'admin',
+    ], mutation.deps)).toBe(2);
+    expect(mutation.stderr()).toContain('read-only listing');
+    expect(mutation.deps.fetch).not.toHaveBeenCalled();
+
+    const agents = harness(async () => new Response(
+      '# Safe\r\nbody\u001b]0;forged\u0007\nnext\u009b31m\n',
+      { headers: { 'content-type': 'text/markdown' } },
+    ));
+    expect(await runCli(['agents-md'], agents.deps)).toBe(0);
+    expect(agents.stdout()).toBe('# Safe\nbody]0;forged\nnext31m\n');
+    expect(agents.stdout()).not.toMatch(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/);
+
+    const agentsJson = harness(async () => new Response('safe\u009b31m'));
+    expect(await runCli(['agents-md', '--json'], agentsJson.deps)).toBe(0);
+    expect(JSON.parse(agentsJson.stdout())).toEqual({ markdown: 'safe31m' });
+    expect(agentsJson.stdout()).not.toContain('\u009b');
   });
 });

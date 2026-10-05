@@ -21,6 +21,12 @@ try {
       `Packed package contains compiled tests: ${compiledTests.map(({ path }) => path).join(', ')}`,
     );
   }
+  const sourceMaps = packed[0].files.filter(({ path }) => path.endsWith('.map'));
+  if (sourceMaps.length > 0) {
+    throw new Error(
+      `Packed package contains source maps without packaged sources: ${sourceMaps.map(({ path }) => path).join(', ')}`,
+    );
+  }
   const forbidden = packed[0].files.filter(
     ({ path }) => path === 'docs/internal-security-brief.md' || /(?:^|\/)tenants?(?:\/|$)/i.test(path),
   );

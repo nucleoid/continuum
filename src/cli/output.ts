@@ -7,6 +7,12 @@ export function jsonDocument(value: unknown): string {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
 
+export function terminalDocument(value: string): string {
+  return value
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, '');
+}
+
 export function table(headers: string[], rows: unknown[][]): string {
   const normalized = rows.map((row) => row.map(humanText));
   const widths = headers.map((header, index) => Math.max(

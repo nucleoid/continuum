@@ -63,6 +63,7 @@ export class ApiClient {
       const response = await Promise.race([
         this.fetchImpl(`${this.options.apiUrl}/api/v0${path}`, {
           method,
+          redirect: 'error',
           signal: controller.signal,
           headers: {
             authorization: `Bearer ${this.options.token}`,

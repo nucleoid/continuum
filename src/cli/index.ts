@@ -2,7 +2,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { ApiClient, CliError } from './http.js';
 import { readConfigFile, resolveConfig, type FileConfig } from './config.js';
-import { humanText, jsonDocument, table } from './output.js';
+import { humanText, jsonDocument, table, terminalDocument } from './output.js';
 
 const MAX_INPUT_BYTES = 1024 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -95,7 +95,7 @@ const commonOptions = {
 };
 
 function usage(): string {
-  return `Usage: continuum <command> [options]\n\nCommands:\n  capture     Capture a memory\n  recall      Recall memories\n  audit       Query the audit log\n  scopes      List or manage scope memberships\n  promote     Promote a memory\n  verify      Verify or mark a memory stale\n  agents-md   Render an AGENTS.md bundle\n\nGlobal options:\n  --api-url URL  --token TOKEN  --profile NAME  --config FILE\n  --timeout MS   --json\n`;
+  return `Usage: continuum <command> [options]\n\nCommands:\n  capture     Capture a memory\n  recall      Recall memories\n  audit       Query the audit log\n  scopes      List readable scopes\n  promote     Promote a memory\n  verify      Verify or mark a memory stale\n  agents-md   Render an AGENTS.md bundle\n\nGlobal options:\n  --api-url URL  --token TOKEN  --profile NAME  --config FILE\n  --timeout MS   --json\n`;
 }
 
 function requireString(value: string | undefined, name: string): string {
@@ -179,6 +179,19 @@ async function commandCapture(args: string[], client: ApiClient, deps: CliDepend
   if (values.body !== undefined && values['body-file'] !== undefined) {
     throw new CliError('Capture accepts only one of --body or --body-file', 2);
   }
+  const scope = scopeRef(requireString(values.scope, '--scope'));
+  const type = requireString(values.type, '--type');
+  if (!MEMORY_TYPES.has(type)) throw new CliError(`Invalid memory type: ${type}`, 2);
+  const title = requireString(values.title, '--title');
+  const tags = csv(values.tags);
+  let metadata: Record<string, unknown> | undefined;
+  if (values.metadata) {
+    try {
+      const parsed: unknown = JSON.parse(values.metadata);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error();
+      metadata = parsed as Record<string, unknown>;
+    } catch { throw new CliError('--metadata must be a JSON object', 2); }
+  }
   let body = values.body;
   if (values['body-file'] !== undefined) {
     body = await readBodyFile(requireString(values['body-file'], '--body-file'), deps);
@@ -190,22 +203,12 @@ async function commandCapture(args: string[], client: ApiClient, deps: CliDepend
   }
   body = cleanInput(body ?? '');
   if (!body) throw new CliError('Capture body cannot be empty', 2);
-  const type = requireString(values.type, '--type');
-  if (!MEMORY_TYPES.has(type)) throw new CliError(`Invalid memory type: ${type}`, 2);
-  let metadata: Record<string, unknown> | undefined;
-  if (values.metadata) {
-    try {
-      const parsed: unknown = JSON.parse(values.metadata);
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error();
-      metadata = parsed as Record<string, unknown>;
-    } catch { throw new CliError('--metadata must be a JSON object', 2); }
-  }
   const result = await client.json('POST', '/capture', {
-    scope: scopeRef(requireString(values.scope, '--scope')),
+    scope,
     type,
-    title: requireString(values.title, '--title'),
+    title,
     body,
-    ...(csv(values.tags) ? { tags: csv(values.tags) } : {}),
+    ...(tags ? { tags } : {}),
     source: values.source,
     ...(values['source-ref'] ? { sourceRef: values['source-ref'] } : {}),
     ...(metadata ? { metadata } : {}),
@@ -257,38 +260,16 @@ async function commandAudit(args: string[], client: ApiClient, deps: CliDependen
   ));
 }
 
-async function listScopes(client: ApiClient, manage = false): Promise<any> {
-  return client.json('GET', manage ? '/scopes?manage=true' : '/scopes');
-}
-
 async function commandScopes(args: string[], client: ApiClient, deps: CliDependencies) {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: commonOptions });
   const action = positionals[0] ?? 'list';
-  if (action === 'list' && positionals.length === 1 || action === 'list' && positionals.length === 0) {
-    const result = await listScopes(client);
-    emit(deps, values.json, result, table(
-      ['ID', 'SCOPE', 'ROLE'], result.scopes.map((item: any) => [item.id, item.scope, item.role]),
-    ));
-    return;
+  if (action !== 'list' || positionals.length > 1) {
+    throw new CliError('scopes only supports read-only listing', 2);
   }
-  if (action !== 'grant' && action !== 'revoke') throw new CliError('scopes expects list, grant, or revoke', 2);
-  const expected = action === 'grant' ? 4 : 3;
-  if (positionals.length !== expected) {
-    throw new CliError(`scopes ${action} has invalid arguments`, 2);
-  }
-  const [, principalId, scopeLabel, role] = positionals;
-  if (!UUID.test(principalId)) throw new CliError('Principal must be a UUID', 2);
-  if (action === 'grant' && !['reader', 'writer', 'admin'].includes(role)) throw new CliError('Invalid membership role', 2);
-  const scopes = await listScopes(client, true);
-  const scope = scopes.scopes.find((item: any) => item.scope === scopeLabel);
-  if (!scope) throw new CliError(`Scope is not visible: ${scopeLabel}`, 4);
-  const path = `/scopes/${scope.id}/members/${principalId}`;
-  const result = action === 'grant'
-    ? await client.json('PUT', path, { role })
-    : await client.json('DELETE', path);
-  emit(deps, values.json, result, action === 'grant'
-    ? `Granted ${humanText(role)} on ${humanText(scopeLabel)} to ${humanText(principalId)}\n`
-    : `Revoked membership on ${humanText(scopeLabel)} from ${humanText(principalId)}\n`);
+  const result = await client.json('GET', '/scopes');
+  emit(deps, values.json, result, table(
+    ['ID', 'SCOPE', 'ROLE'], result.scopes.map((item: any) => [item.id, item.scope, item.role]),
+  ));
 }
 
 async function commandPromote(args: string[], client: ApiClient, deps: CliDependencies) {
@@ -327,7 +308,13 @@ async function commandAgentsMd(args: string[], client: ApiClient, deps: CliDepen
   const limit = integer(values.limit, '--limit', 1, 200);
   if (limit !== undefined) query.set('limit', String(limit));
   const markdown = await client.text('GET', `/agents-md?${query}`);
-  emit(deps, values.json, { markdown }, markdown.endsWith('\n') ? markdown : `${markdown}\n`);
+  const safeMarkdown = terminalDocument(markdown);
+  emit(
+    deps,
+    values.json,
+    { markdown: safeMarkdown },
+    safeMarkdown.endsWith('\n') ? safeMarkdown : `${safeMarkdown}\n`,
+  );
 }
 
 export async function runCli(argv: string[], dependencies: Partial<CliDependencies> = {}): Promise<number> {
