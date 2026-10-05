@@ -54,9 +54,13 @@ describe('selectGapCandidates', () => {
     for (const query of ['zeta gap', 'alpha gap', 'middle gap']) {
       await recordRead(pool, { principalId: principal.id, query, metadata: { hits: 0 }, memories: [] });
     }
-    await pool.query(`UPDATE audit_log SET at = '2026-10-04T00:00:00Z'`);
+    const { rows: clockRows } = await pool.query<{ database_now: Date }>(
+      `SELECT CURRENT_TIMESTAMP AS database_now`,
+    );
+    const databaseNow = clockRows[0].database_now;
+    await pool.query(`UPDATE audit_log SET at = $1`, [databaseNow]);
     const result = await selectGapCandidates(pool, {
-      since: new Date(Date.now() - 86_400_000), scanLimit: 50,
+      since: new Date(databaseNow.getTime() - 86_400_000), scanLimit: 50,
       candidateLimit: 2, maxQueryChars: 2_000,
     });
     expect(result.truncated).toBe(true);
