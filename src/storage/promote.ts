@@ -9,6 +9,7 @@ import {
 } from '../scopes/access.js';
 import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
 import { computeExpiry } from './expiry.js';
+import { stripTrustedActivityMetadata } from '../capture/metadata.js';
 
 export interface PromoteResult {
   source: Memory;
@@ -88,7 +89,7 @@ async function promoteOperation(
     throw new PromoteError(`principal lacks ${roleName} role on target scope`, 403);
   }
 
-  const destinationMetadata = { ...source.metadata };
+  const destinationMetadata = stripTrustedActivityMetadata(source.metadata);
   delete destinationMetadata.related;
   const destination = await createMemory(client, {
     scopeId: destinationScope.id,

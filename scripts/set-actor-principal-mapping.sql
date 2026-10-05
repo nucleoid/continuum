@@ -28,18 +28,8 @@ WITH inserted AS (
   )
   ON CONFLICT (authority, external_actor_id) DO NOTHING
   RETURNING authority, external_actor_id, principal_id
-), audited AS (
-  INSERT INTO audit_log (principal_id, action, metadata)
-  SELECT :'admin_principal_id'::uuid, 'write', jsonb_build_object(
-    'operation', 'set_actor_principal_mapping',
-    'authority', authority,
-    'external_actor_id', external_actor_id,
-    'principal_id', principal_id
-  )
-  FROM inserted
-  RETURNING 1
 )
-SELECT count(*) = 1 AS mapping_set FROM audited
+SELECT count(*) = 1 AS mapping_set FROM inserted
 \gset
 
 \if :mapping_set

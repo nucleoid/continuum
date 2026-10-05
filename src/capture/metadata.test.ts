@@ -27,6 +27,7 @@ describe('capture activity metadata', () => {
   });
 
   it.each([
+    { _continuum_activity_provenance: 'capture-v1' },
     { actor_principal_id: 'display-name' },
     { actor_principal_id: '11111111-1111-4111-8111-111111111111' },
     { actor_principal_id: '11111111-1111-4111-8111-111111111111', thread_key: 'missing-actor' },

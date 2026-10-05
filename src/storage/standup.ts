@@ -43,7 +43,8 @@ function mapRow(row: StandupRow): StandupMemory {
 }
 
 const AUTHORIZED_ACTIVITY = `
-  m.metadata->>'actor_principal_id' = $1::text
+  m.metadata->>'_continuum_activity_provenance' = 'capture-v1'
+  AND m.metadata->>'actor_principal_id' = $1::text
   AND (
     (s.kind = 'user' AND s.owner_principal_id = $1::uuid)
     OR (s.kind = 'project' AND EXISTS (
@@ -105,6 +106,7 @@ export async function listOpenStandupThreads(
               m.metadata->>'thread_owner_principal_id',
               m.metadata->>'actor_principal_id'
             ) = $1::text
+        AND m.metadata->>'_continuum_activity_provenance' = 'capture-v1'
         AND (
           (s.kind = 'user' AND s.owner_principal_id = $1::uuid)
           OR (s.kind = 'project' AND EXISTS (
@@ -129,6 +131,7 @@ export async function listOpenStandupThreads(
                  )
              AND closing.created_at >= m.created_at
              AND closing.created_at < $4
+             AND closing.metadata->>'_continuum_activity_provenance' = 'capture-v1'
              AND (
                (closing_scope.kind = 'user' AND closing_scope.owner_principal_id = $1::uuid)
                OR (closing_scope.kind = 'project' AND EXISTS (

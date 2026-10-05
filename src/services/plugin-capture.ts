@@ -26,6 +26,10 @@ function sameIdentity(
   return left.authority === right.authority && left.externalId === right.externalId;
 }
 
+export function authenticatedActorAuthority(pluginId: string, principalId: string): string {
+  return `${pluginId}.${principalId}`;
+}
+
 export async function capturePluginEvent(
   pool: pg.Pool,
   embeddingProvider: EmbeddingProvider | null,
@@ -38,15 +42,26 @@ export async function capturePluginEvent(
   const plugin = registry.get(pluginId);
   if (!plugin) throw new UnknownPluginError(pluginId);
 
-  const identity = plugin.actorIdentity?.(event) ?? null;
+  const claimedIdentity = plugin.actorIdentity?.(event) ?? null;
+  const activityNamespace = plugin.authenticatedActorNamespace
+    ? authenticatedActorAuthority(pluginId, ingestionPrincipal.id)
+    : undefined;
+  const identity = claimedIdentity && activityNamespace
+    ? { authority: activityNamespace, externalId: claimedIdentity.externalId }
+    : claimedIdentity;
   const actorPrincipalId = identity
     ? await resolveActorPrincipalId(pool, identity)
     : null;
   const inputs = plugin.transform(event, {
     defaultProjectName: options.defaultProjectName,
-    resolveUserScope: options.resolveUserScope,
+    activityNamespace,
+    resolveUserScope: (candidate) => (
+      identity && claimedIdentity && sameIdentity(claimedIdentity, candidate)
+        ? options.resolveUserScope?.(identity) ?? null
+        : null
+    ),
     resolveActorPrincipalId: (candidate) => (
-      identity && actorPrincipalId && sameIdentity(identity, candidate)
+      identity && claimedIdentity && actorPrincipalId && sameIdentity(claimedIdentity, candidate)
         ? actorPrincipalId
         : null
     ),

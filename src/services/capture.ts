@@ -18,7 +18,10 @@ import {
   validateRelationThreshold,
 } from './relations.js';
 import type { Queryable } from '../storage/queryable.js';
-import { validateCaptureMetadata } from '../capture/metadata.js';
+import {
+  markTrustedActivityMetadata,
+  validateCaptureMetadata,
+} from '../capture/metadata.js';
 import type { ExternalActorIdentity } from '../capture/plugin.js';
 import { resolveActorPrincipalId } from '../storage/actor-identities.js';
 
@@ -328,6 +331,7 @@ async function captureMemoryInternal(
         );
       }
     }
+    const persistedMetadata = markTrustedActivityMetadata(input.metadata);
 
     const memoryId = randomUUID();
     const route = asEmbeddingRouter(embeddingRouting).resolve({
@@ -425,7 +429,7 @@ async function captureMemoryInternal(
         source: input.source,
         sourceRef: input.sourceRef ?? null,
         tags: input.tags,
-        metadata: { ...input.metadata, related: [] },
+        metadata: { ...persistedMetadata, related: [] },
       });
 
       let embedded = false;

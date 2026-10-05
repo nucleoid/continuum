@@ -26,7 +26,7 @@ describe('terminal-summary plugin', () => {
     expect(m.sourceRef).toBe('session://6ccfbaa8-c912-4f3a-91b0-664d77a8c1aa');
     expect(m.tags).toEqual(['session', 'terminal']);
     expect(m.metadata?.closes_thread_keys).toEqual([
-      'terminal-session:6ccfbaa8-c912-4f3a-91b0-664d77a8c1aa',
+      'terminal-summary:terminal-session:6ccfbaa8-c912-4f3a-91b0-664d77a8c1aa',
     ]);
   });
 
@@ -93,17 +93,26 @@ describe('terminal-summary plugin', () => {
       actorPrincipalId: '22222222-2222-4222-8222-222222222222',
       actorAuthority: 'terminal', actorExternalId: 'immutable-terminal-user-7',
     } as TerminalSummaryPayload & { actorPrincipalId: string };
-    const out = terminalSummaryPlugin.transform(event, {
+    const out = terminalSummaryPlugin.transform({
+      ...event,
+      threadKey: 'github-pr:other/repo#1',
+      closesThreadKeys: ['github-pr:other/repo#2'],
+    }, {
+      activityNamespace: 'terminal-summary.authenticated-service',
       resolveActorPrincipalId: (identity) => identity.externalId === 'immutable-terminal-user-7'
         ? '11111111-1111-4111-8111-111111111111'
         : null,
     });
     expect(terminalSummaryPlugin.actorIdentity?.(event)).toEqual({
-      authority: 'terminal', externalId: 'immutable-terminal-user-7',
+      authority: 'terminal-summary', externalId: 'immutable-terminal-user-7',
     });
     expect(out[0].metadata).toMatchObject({
       actor_principal_id: '11111111-1111-4111-8111-111111111111',
       thread_owner_principal_id: '11111111-1111-4111-8111-111111111111',
+      thread_key: 'terminal-summary.authenticated-service:terminal-session:6ccfbaa8-c912-4f3a-91b0-664d77a8c1aa',
+      closes_thread_keys: [
+        'terminal-summary.authenticated-service:terminal-session:6ccfbaa8-c912-4f3a-91b0-664d77a8c1aa',
+      ],
     });
   });
 });

@@ -1061,6 +1061,31 @@ describe('shared services', () => {
     });
   });
 
+  it('does not re-date trusted or forged standup activity during promotion', async () => {
+    const { principal, team } = await seedWriter();
+    const project = await createScope(pool, { kind: 'project', name: 'promotion-activity' });
+    await addMembership(pool, principal.id, project.id, 'writer');
+    const source = await createMemory(pool, {
+      scopeId: team.id, scopeKind: team.kind, type: 'context', title: 'Old activity',
+      body: 'Promotion is knowledge movement, not a new activity event.',
+      authorId: principal.id, source: 'terminal-summary',
+      metadata: {
+        owner: 'payments', actor: 'actor-label', actor_principal_id: principal.id,
+        thread_owner_principal_id: principal.id, thread_key: 'terminal:old',
+        closes_thread_keys: ['terminal:older'],
+        _continuum_activity_provenance: 'capture-v1',
+      },
+    });
+
+    const result = await promoteForPrincipal(
+      pool, principal, source.id, { kind: 'project', name: 'promotion-activity' },
+    );
+
+    expect(result.destination.metadata).toEqual({
+      owner: 'payments', promoted_from: source.id,
+    });
+  });
+
   it('denies an author whose source membership is revoked before authorization', async () => {
     const { principal, team } = await seedWriter();
     const source = await createMemory(pool, {

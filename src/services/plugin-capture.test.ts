@@ -100,22 +100,34 @@ describe('plugin capture to standup attribution', () => {
     await addMembership(pool, service.id, project.id, 'writer');
     await addMembership(pool, actor.id, project.id, 'reader');
     await mapActorIdentity(pool, {
-      authority: 'azure-devops', externalActorId: 'aad-42', principalId: actor.id,
+      authority: `deploy-event.${service.id}`, externalActorId: 'aad-42', principalId: actor.id,
       mappedByPrincipalId: mapper.id,
     });
 
     const [mapped] = await capturePluginEvent(pool, null, service, 'deploy-event', {
       project: 'continuum', environment: 'prod', version: 'v1', status: 'success',
-      actor: 'Deploy User', actorAuthority: 'azure-devops', actorExternalId: 'aad-42',
+      actor: 'Deploy User', actorAuthority: 'forged-authority', actorExternalId: 'aad-42',
+      threadKey: 'github-pr:other/repo#1', closesThreadKeys: ['github-pr:other/repo#2'],
     });
     const [withoutActor] = await capturePluginEvent(pool, null, service, 'deploy-event', {
       project: 'continuum', environment: 'prod', version: 'v2', status: 'success',
     });
+    const otherService = await createPrincipal(pool, {
+      externalId: 'svc:other-deploy-ingestion', kind: 'service', displayName: 'Other deploy ingestion',
+    });
+    await addMembership(pool, otherService.id, project.id, 'writer');
+    const [otherProducer] = await capturePluginEvent(pool, null, otherService, 'deploy-event', {
+      project: 'continuum', environment: 'prod', version: 'v3', status: 'success',
+      actor: 'Deploy User', actorAuthority: 'forged-authority', actorExternalId: 'aad-42',
+    });
     expect(mapped.memory.metadata).toMatchObject({
       actor_principal_id: actor.id, thread_owner_principal_id: actor.id,
+      thread_key: `deploy-event.${service.id}:deploy:continuum:prod:v1`,
+      closes_thread_keys: [],
     });
     expect(withoutActor.memory.metadata).not.toHaveProperty('actor');
     expect(withoutActor.memory.metadata).not.toHaveProperty('actor_principal_id');
+    expect(otherProducer.memory.metadata).not.toHaveProperty('actor_principal_id');
 
     const standup = await standupForPrincipal(pool, actor, { sinceHours: 24 }, {
       now: new Date(Date.now() + 1_000),
@@ -165,19 +177,23 @@ describe('plugin capture to standup attribution', () => {
     await addMembership(pool, service.id, scope.id, 'writer');
     await addMembership(pool, actor.id, scope.id, 'reader');
     await mapActorIdentity(pool, {
-      authority: 'terminal', externalActorId: 'subject-42', principalId: actor.id,
+      authority: `terminal-summary.${service.id}`, externalActorId: 'subject-42', principalId: actor.id,
       mappedByPrincipalId: admin.id,
     });
 
     const [captured] = await capturePluginEvent(pool, null, service, 'terminal-summary', {
       actor: 'renamable-terminal-label', actorAuthority: 'terminal', actorExternalId: 'subject-42',
       sessionId: '7ccfbaa8-c912-4f3a-91b0-664d77a8c1bb', summary: 'Mapped session summary.',
+      threadKey: 'github-pr:other/repo#1', closesThreadKeys: ['github-pr:other/repo#2'],
     }, { resolveUserScope: () => 'mapped-terminal' });
 
     expect(captured.memory.metadata).toMatchObject({
       actor: 'renamable-terminal-label', actor_principal_id: actor.id,
       thread_owner_principal_id: actor.id,
-      closes_thread_keys: ['terminal-session:7ccfbaa8-c912-4f3a-91b0-664d77a8c1bb'],
+      thread_key: `terminal-summary.${service.id}:terminal-session:7ccfbaa8-c912-4f3a-91b0-664d77a8c1bb`,
+      closes_thread_keys: [
+        `terminal-summary.${service.id}:terminal-session:7ccfbaa8-c912-4f3a-91b0-664d77a8c1bb`,
+      ],
     });
   });
 

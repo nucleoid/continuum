@@ -70,7 +70,7 @@ describe('deploy-event plugin', () => {
     expect(() => validateCaptureMetadata(out[0].metadata)).not.toThrow();
   });
 
-  it('only resolves an actor from an explicit authority and external id', () => {
+  it('uses an authenticated producer namespace and ignores caller thread authority', () => {
     const resolver = vi.fn(() => '11111111-1111-4111-8111-111111111111');
     const unresolved = deployEventPlugin.transform(deploy(), {
       resolveActorPrincipalId: resolver,
@@ -81,13 +81,20 @@ describe('deploy-event plugin', () => {
     const resolved = deployEventPlugin.transform(deploy({
       actorAuthority: 'azure-devops',
       actorExternalId: 'aad-object-id-123',
-    }), { resolveActorPrincipalId: resolver });
+      threadKey: 'github-pr:other/repo#1',
+      closesThreadKeys: ['github-pr:other/repo#2'],
+    }), {
+      activityNamespace: 'deploy-event.authenticated-service',
+      resolveActorPrincipalId: resolver,
+    });
     expect(resolver).toHaveBeenCalledWith({
-      authority: 'azure-devops', externalId: 'aad-object-id-123',
+      authority: 'deploy-event', externalId: 'aad-object-id-123',
     });
     expect(resolved[0].metadata).toMatchObject({
       actor_principal_id: '11111111-1111-4111-8111-111111111111',
       thread_owner_principal_id: '11111111-1111-4111-8111-111111111111',
+      thread_key: 'deploy-event.authenticated-service:deploy:booking-engine:prod:v1.42.0',
+      closes_thread_keys: [],
     });
   });
 

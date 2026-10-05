@@ -189,6 +189,7 @@ describe('MCP server', () => {
       metadata: {
         actor_principal_id: me.id, actor: 'mcp-user',
         thread_key: 'terminal-session:source-1', closes_thread_keys: [],
+        _continuum_activity_provenance: 'capture-v1',
       },
     });
     await pool.query(

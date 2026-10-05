@@ -4,6 +4,16 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const MAX_THREAD_KEYS = 50;
 const MAX_THREAD_KEY_LENGTH = 500;
 const MAX_ACTOR_LENGTH = 200;
+export const ACTIVITY_PROVENANCE_KEY = '_continuum_activity_provenance';
+export const ACTIVITY_PROVENANCE_VALUE = 'capture-v1';
+export const TRUSTED_ACTIVITY_METADATA_KEYS = [
+  'actor',
+  'actor_principal_id',
+  'thread_owner_principal_id',
+  'thread_key',
+  'closes_thread_keys',
+  ACTIVITY_PROVENANCE_KEY,
+] as const;
 
 function boundedString(value: unknown, name: string, max: number): asserts value is string {
   if (typeof value !== 'string' || value.length === 0 || value.length > max) {
@@ -12,6 +22,12 @@ function boundedString(value: unknown, name: string, max: number): asserts value
 }
 
 export function validateCaptureMetadata(metadata: Record<string, unknown> = {}): void {
+  if (Object.hasOwn(metadata, ACTIVITY_PROVENANCE_KEY)) {
+    throw new ServiceError(
+      'INVALID_INPUT',
+      `metadata.${ACTIVITY_PROVENANCE_KEY} is reserved by Continuum`,
+    );
+  }
   if (Object.hasOwn(metadata, 'actor_principal_id')) {
     for (const required of ['actor', 'thread_key']) {
       if (!Object.hasOwn(metadata, required)) {
@@ -76,4 +92,21 @@ export function validateCaptureMetadata(metadata: Record<string, unknown> = {}):
   if (Object.hasOwn(metadata, 'merged_by') && metadata.merged_by !== null) {
     boundedString(metadata.merged_by, 'metadata.merged_by', MAX_ACTOR_LENGTH);
   }
+}
+
+export function markTrustedActivityMetadata(
+  metadata: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return typeof metadata.actor_principal_id === 'string'
+      && typeof metadata.thread_key === 'string'
+    ? { ...metadata, [ACTIVITY_PROVENANCE_KEY]: ACTIVITY_PROVENANCE_VALUE }
+    : metadata;
+}
+
+export function stripTrustedActivityMetadata(
+  metadata: Record<string, unknown>,
+): Record<string, unknown> {
+  const sanitized = { ...metadata };
+  for (const key of TRUSTED_ACTIVITY_METADATA_KEYS) delete sanitized[key];
+  return sanitized;
 }

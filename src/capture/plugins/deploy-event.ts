@@ -28,13 +28,14 @@ const STATUS_VERB: Record<DeployStatus, string> = {
 };
 
 function deployActorIdentity(event: DeployEventPayload) {
-  return event.actorAuthority && event.actorExternalId
-    ? { authority: event.actorAuthority, externalId: event.actorExternalId }
+  return event.actorExternalId
+    ? { authority: 'deploy-event', externalId: event.actorExternalId }
     : null;
 }
 
 export const deployEventPlugin: CapturePlugin<DeployEventPayload> = {
   id: 'deploy-event',
+  authenticatedActorNamespace: true,
 
   actorIdentity: deployActorIdentity,
 
@@ -56,6 +57,7 @@ export const deployEventPlugin: CapturePlugin<DeployEventPayload> = {
       lines.push(event.notes);
     }
 
+    const threadKey = `${ctx.activityNamespace ?? 'deploy-event'}:deploy:${event.project}:${event.environment}:${event.version}`;
     return [
       {
         scope: { kind: 'project', name: event.project },
@@ -75,9 +77,8 @@ export const deployEventPlugin: CapturePlugin<DeployEventPayload> = {
           ...(event.actor ? { actor: event.actor } : {}),
           ...(actorPrincipalId ? { actor_principal_id: actorPrincipalId } : {}),
           ...(actorPrincipalId ? { thread_owner_principal_id: actorPrincipalId } : {}),
-          thread_key: event.threadKey
-            ?? `deploy:${event.project}:${event.environment}:${event.version}`,
-          closes_thread_keys: event.closesThreadKeys ?? [],
+          thread_key: threadKey,
+          closes_thread_keys: [],
           startedAt: event.startedAt ?? null,
           finishedAt: event.finishedAt ?? null,
         },

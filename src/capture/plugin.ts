@@ -5,6 +5,7 @@ export interface CaptureContext {
   resolveUserScope?: (identity: ExternalActorIdentity) => string | null;
   resolveActorPrincipalId?: (identity: ExternalActorIdentity) => string | null;
   now?: () => Date;
+  activityNamespace?: string;
 }
 
 export interface ExternalActorIdentity {
@@ -14,6 +15,7 @@ export interface ExternalActorIdentity {
 
 export interface CapturePlugin<TEvent = unknown> {
   readonly id: string;
+  readonly authenticatedActorNamespace?: boolean;
   actorIdentity?(event: TEvent): ExternalActorIdentity | null;
   transform(event: TEvent, ctx?: CaptureContext): CaptureInput[];
 }

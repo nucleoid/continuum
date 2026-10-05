@@ -43,6 +43,16 @@ describe('actor identity mappings', () => {
       authority: 'github', externalActorId: 'opaque-1', principalId: user.id,
       mappedByPrincipalId: admin.id,
     });
+    const audit = await pool.query(
+      "SELECT principal_id, action, metadata FROM audit_log WHERE metadata->>'operation' = 'set_actor_principal_mapping'",
+    );
+    expect(audit.rows).toEqual([expect.objectContaining({
+      principal_id: admin.id,
+      action: 'write',
+      metadata: expect.objectContaining({
+        authority: 'github', external_actor_id: 'opaque-1', principal_id: user.id,
+      }),
+    })]);
     expect(await resolveActorPrincipalId(pool, {
       authority: 'github', externalId: 'opaque-1',
     })).toBe(user.id);
@@ -52,6 +62,13 @@ describe('actor identity mappings', () => {
     await expect(pool.query(
       "UPDATE principals SET kind = 'service' WHERE id = $1", [user.id],
     )).rejects.toThrow(/must remain a user/);
+    await expect(pool.query(
+      "UPDATE actor_principal_mappings SET principal_id = $1 WHERE authority = 'github' AND external_actor_id = 'opaque-1'",
+      [admin.id],
+    )).rejects.toThrow(/immutable/);
+    await expect(pool.query(
+      "DELETE FROM actor_principal_mappings WHERE authority = 'github' AND external_actor_id = 'opaque-1'",
+    )).rejects.toThrow(/immutable/);
   });
 
   it('does not infer a mapping from scope ownership or display names', async () => {

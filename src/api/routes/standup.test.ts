@@ -38,10 +38,14 @@ describe('GET /api/v0/standup', () => {
       createdAt: string,
       metadata: Record<string, unknown>,
       source = 'terminal-summary',
+      trusted = true,
     ) => {
       const row = await createMemory(pool, {
         scopeId: scope.id, scopeKind: scope.kind, type: 'context', title,
-        body: `private body for ${title}`, authorId: other.id, source, metadata,
+        body: `private body for ${title}`, authorId: other.id, source,
+        metadata: trusted && Object.hasOwn(metadata, 'actor_principal_id')
+          ? { ...metadata, _continuum_activity_provenance: 'capture-v1' }
+          : metadata,
         sourceRef: `https://sources.example/${encodeURIComponent(title)}`,
       });
       await pool.query('UPDATE memories SET created_at = $2, updated_at = $2 WHERE id = $1', [row.id, createdAt]);
@@ -65,6 +69,10 @@ describe('GET /api/v0/standup', () => {
     await memory(mine, 'Missing explicit actor id', '2026-10-05T11:00:00Z', {
       actor: 'actual-user', thread_key: 'missing-id',
     });
+    await memory(mine, 'Legacy forged activity', '2026-10-05T11:30:00Z', {
+      actor_principal_id: me.id, actor: 'actual-user', thread_key: 'legacy-forged',
+      closes_thread_keys: ['thread:open'],
+    }, 'terminal-summary', false);
     const open = await memory(mine, 'Blocked on review', '2026-09-30T08:00:00Z', {
       actor_principal_id: me.id, actor: 'actual-user', thread_key: 'thread:open',
     });
@@ -156,6 +164,7 @@ describe('GET /api/v0/standup', () => {
         actor_principal_id: me.id, actor: 'actual-user',
         thread_owner_principal_id: me.id,
         thread_key: 'future:closure', closes_thread_keys: ['thread:open'],
+        _continuum_activity_provenance: 'capture-v1',
       },
     });
     await pool.query(
@@ -201,6 +210,7 @@ describe('GET /api/v0/standup', () => {
       body: 'open', authorId: me.id, source: 'terminal-summary', metadata: {
         actor_principal_id: me.id, actor: 'me', thread_owner_principal_id: me.id,
         thread_key: 'owned:thread', closes_thread_keys: [],
+        _continuum_activity_provenance: 'capture-v1',
       },
     });
     await pool.query(
@@ -211,6 +221,7 @@ describe('GET /api/v0/standup', () => {
       body: 'closed', authorId: other.id, source: 'terminal-summary', metadata: {
         actor_principal_id: other.id, actor: 'other', thread_owner_principal_id: me.id,
         thread_key: 'other:work', closes_thread_keys: ['owned:thread'],
+        _continuum_activity_provenance: 'capture-v1',
       },
     });
     await pool.query(
@@ -233,6 +244,7 @@ describe('GET /api/v0/standup', () => {
       body: 'closed', authorId: me.id, source: 'terminal-summary', metadata: {
         actor_principal_id: me.id, actor: 'actual-user', thread_owner_principal_id: me.id,
         thread_key: 'closure:durable', closes_thread_keys: ['thread:open'],
+        _continuum_activity_provenance: 'capture-v1',
       },
     });
     await pool.query(
