@@ -122,11 +122,11 @@ describe('recall expiry enforcement', () => {
     let resolveFirst!: (vectors: number[][]) => void;
     let resolveSecond!: (vectors: number[][]) => void;
     const first = {
-      id: 'provider:first', dim: 2,
+      id: 'provider:first', dim: 768,
       embed: vi.fn(() => new Promise<number[][]>((resolve) => { resolveFirst = resolve; })),
     };
     const second = {
-      id: 'provider:second', dim: 2,
+      id: 'provider:second', dim: 768,
       embed: vi.fn(() => new Promise<number[][]>((resolve) => { resolveSecond = resolve; })),
     };
     const pending = recall(pool, {
@@ -137,24 +137,26 @@ describe('recall expiry enforcement', () => {
         { scopeIds: [scope.id], provider: second },
       ],
     });
-    await new Promise((resolve) => setImmediate(resolve));
+    for (let attempt = 0; attempt < 100 && second.embed.mock.calls.length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
     try {
       expect(first.embed).toHaveBeenCalledOnce();
       expect(second.embed).toHaveBeenCalledOnce();
     } finally {
-      resolveFirst([[0, 0]]);
-      resolveSecond([[0, 0]]);
+      resolveFirst?.([Array(768).fill(0)]);
+      resolveSecond?.([Array(768).fill(0)]);
     }
     await expect(pending).resolves.toMatchObject({ diagnostics: { vector: 'used' } });
   });
 
   it('returns settled provider results when another group exceeds the shared deadline', async () => {
     const { scope } = await seedMemory('shared deadline');
-    const fast = { id: 'provider:fast', dim: 2, async embed() { return [[0, 0]]; } };
-    const stuck = { id: 'provider:stuck', dim: 2, async embed() { return new Promise<number[][]>(() => undefined); } };
+    const fast = { id: 'provider:fast', dim: 768, async embed() { return [Array(768).fill(0)]; } };
+    const stuck = { id: 'provider:stuck', dim: 768, async embed() { return new Promise<number[][]>(() => undefined); } };
     const recalled = await recall(pool, {
       query: 'shared deadline', scopeIds: [scope.id], limit: 10,
-      embeddingDeadlineMs: 10,
+      embeddingDeadlineMs: 100,
       embeddingGroups: [
         { scopeIds: [scope.id], provider: fast },
         { scopeIds: [scope.id], provider: stuck },
@@ -163,8 +165,8 @@ describe('recall expiry enforcement', () => {
     expect(recalled.diagnostics).toEqual({
       vector: 'partial',
       groups: [
-        { provider: 'provider:fast', dim: 2, status: 'used' },
-        { provider: 'provider:stuck', dim: 2, status: 'failed', errorCode: 'EMBEDDING_TIMEOUT' },
+        { provider: 'provider:fast', dim: 768, status: 'used' },
+        { provider: 'provider:stuck', dim: 768, status: 'failed', errorCode: 'EMBEDDING_TIMEOUT' },
       ],
     });
   });

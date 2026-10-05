@@ -32,11 +32,87 @@ recorded in durable backfill state, audited once, and never retried even after
 audit retention removes the audit event. To retry known failures after fixing
 the underlying data or provider, use `--retry-failures` with an explicit
 `--provider`; an optional `--scope` limits which durable failure rows are
-cleared. Retry clearing is unavailable in count or dry-run modes. The last completed or audited memory is
-checkpointed before an exhausted error budget stops the command. Provider-wide authentication,
-rate-limit, 5xx, network, timeout, and invalid-response failures stop immediately.
+cleared. Retry clearing is unavailable in count or dry-run modes. The last
+completed or audited memory is checkpointed before an exhausted error budget
+stops the command. Authentication,
+rate-limit, network, and timeout failures stop that provider immediately. Ambiguous
+5xx, invalid-response, non-JSON limit, and unrecognized request failures receive a
+bounded diagnostic bisection. A row is marked failed only when another item from
+the same batch succeeds. If every diagnostic leaf fails, the result remains a
+provider outage and no row is suppressed. Diagnostic probing is capped at 64
+sub-batch requests per failed batch.
+
+The JSON report includes `providerReports`, preserving each provider's counters,
+cursor, completion state, and sanitized `errorCode`. A provider failure does not
+prevent later routed providers from running. Any incomplete provider or provider
+error makes the CLI exit nonzero after printing the report.
+
 `--cursor UUID` requires `--provider`. Saved and explicit cursors wrap once at
 the end of the UUID range, and completion is reported only after the lower
-range has also been scanned. A nonzero exit indicates invalid configuration, lock
-contention, database failure, or an exhausted error budget. The command never
-falls back from a local-only route to a hosted provider.
+range has also been scanned. Use `--no-wrap` with an explicit cursor when an
+operator intentionally wants only the upper UUID range. If one ambiguous row
+cannot be diagnosed because no surrounding row succeeds, use
+`--provider ID --mark-failed UUID` after verifying the provider is healthy. This
+records the same durable failure and audit without calling the provider. It
+cannot be combined with preview, retry, or cursor controls. Do not use it during
+a provider-wide outage. The command never falls back from a local-only route to
+a hosted provider.
+
+## Migration 0010 rollout and rollback
+
+Migration `0010_provider_embeddings_backfill.sql` builds the new unique index
+concurrently, then attaches it as the primary key. The migrator runs this file
+without a transaction because PostgreSQL forbids concurrent index creation in a
+transaction block.
+
+Before applying 0010, drain every process running the old write path. Old writers
+use the former `memory_id` conflict target and are incompatible after the primary
+key changes to `(memory_id, provider, dim)`. Keep old writers drained until every
+API, MCP, lifecycle, and maintenance process is running the new version. The
+table remains readable throughout the concurrent index build, but the short
+constraint swap takes a table lock.
+
+To roll back, first stop all embedding writers and take a database backup. Choose
+the one provider row to retain for each memory, then deduplicate before restoring
+the former key. The checked script
+`scripts/rollback-embedding-provider-key.sql` keeps the newest row and uses
+provider and dimension as deterministic ties. Review that ordering for the
+deployment before running it. To prefer a specific provider, add a leading
+`(provider = 'provider-id') DESC` term to the script's window ordering.
+
+```sql
+WITH ranked AS (
+  SELECT ctid,
+         row_number() OVER (
+           PARTITION BY memory_id
+           ORDER BY embedded_at DESC, provider, dim
+         ) AS position
+    FROM memory_embeddings
+)
+DELETE FROM memory_embeddings e
+ USING ranked r
+ WHERE e.ctid = r.ctid
+   AND r.position > 1;
+DROP INDEX CONCURRENTLY IF EXISTS memory_embeddings_memory_id_rollback_idx;
+CREATE UNIQUE INDEX CONCURRENTLY memory_embeddings_memory_id_rollback_idx
+  ON memory_embeddings (memory_id);
+
+BEGIN;
+ALTER TABLE memory_embeddings DROP CONSTRAINT memory_embeddings_pkey;
+ALTER TABLE memory_embeddings
+  ADD CONSTRAINT memory_embeddings_pkey PRIMARY KEY
+  USING INDEX memory_embeddings_memory_id_rollback_idx;
+COMMIT;
+```
+
+Verify that no memory has more than one row before starting old binaries:
+
+```sql
+SELECT memory_id, count(*)
+  FROM memory_embeddings
+ GROUP BY memory_id
+HAVING count(*) > 1;
+```
+
+An empty result is required. The checkpoint and durable-failure tables may remain
+in place during rollback; old binaries do not access them.

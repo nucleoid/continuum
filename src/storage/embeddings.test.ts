@@ -69,7 +69,7 @@ describe('provider-qualified storage', () => {
 
     const [sql] = vi.mocked(db.query).mock.calls[0] as [string, unknown[]];
     expect(sql).toContain("m.state = 'live'");
-    expect(sql).toContain('m.expires_at IS NULL OR m.expires_at > now()');
+    expect(sql).toContain('m.expires_at IS NULL OR m.expires_at > clock_timestamp()');
     expect(sql).toContain('FOR SHARE OF m');
     expect(sql).toContain('RETURNING memory_id');
   });

@@ -31,7 +31,7 @@ export async function storeMemoryEmbeddingVector(
        FROM memories m
       WHERE m.id = $1
         AND m.state = 'live'
-        AND (m.expires_at IS NULL OR m.expires_at > now())
+        AND (m.expires_at IS NULL OR m.expires_at > clock_timestamp())
       FOR SHARE OF m
      ON CONFLICT (memory_id, provider, dim) DO UPDATE
        SET embedding = EXCLUDED.embedding,
@@ -71,7 +71,7 @@ export async function vectorSearchMemoryIds(
        JOIN memories m ON m.id = e.memory_id
       WHERE m.scope_id = ANY($2::uuid[])
         AND m.state = 'live'
-        AND (m.expires_at IS NULL OR m.expires_at > now())
+        AND (m.expires_at IS NULL OR m.expires_at > clock_timestamp())
         AND e.provider = $3
         AND e.dim = $4
         ${typeFilter}
@@ -106,7 +106,7 @@ export async function vectorSearchRelatedMemories(
        JOIN memories m ON m.id = e.memory_id
       WHERE m.scope_id = ANY($2::uuid[])
         AND m.state = 'live'
-        AND (m.expires_at IS NULL OR m.expires_at > now())
+        AND (m.expires_at IS NULL OR m.expires_at > clock_timestamp())
         AND e.provider = $3
         AND e.dim = $4
         AND m.id <> $5::uuid

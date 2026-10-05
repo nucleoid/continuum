@@ -46,7 +46,7 @@ describe('runMigrations', () => {
     );
     expect(keySwap.trimStart()).toMatch(/^-- continuum:no-transaction/);
     expect(keySwap).toMatch(/CREATE UNIQUE INDEX CONCURRENTLY/i);
-    expect(keySwap).toMatch(/PRIMARY KEY USING INDEX/i);
+    expect(keySwap).toMatch(/PRIMARY KEY\s+USING INDEX/i);
 
     const failureSeed = await readFile(
       join(process.cwd(), 'migrations/0011_embedding_backfill_failures.sql'),
@@ -90,6 +90,45 @@ describe('runMigrations', () => {
     );
     expect(uniqueIndex.trimStart()).toMatch(/^-- continuum:no-transaction/);
     expect(uniqueIndex).toMatch(/CREATE UNIQUE INDEX CONCURRENTLY memories_supersedes_unique_idx/i);
+  });
+
+  it('deduplicates provider rows before restoring the rollback memory key', async () => {
+    const schema = `migrator_embedding_rollback_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const rollbackSql = await readFile(
+      new URL('../../scripts/rollback-embedding-provider-key.sql', import.meta.url),
+      'utf8',
+    );
+    const directory = await migrationDirectory(rollbackSql);
+    const memoryId = '22222222-2222-4222-8222-222222222222';
+    try {
+      await pool.query(`
+        CREATE TABLE memory_embeddings (
+          memory_id UUID NOT NULL,
+          provider TEXT NOT NULL,
+          dim INT NOT NULL,
+          embedded_at TIMESTAMPTZ NOT NULL,
+          PRIMARY KEY (memory_id, provider, dim)
+        );
+        INSERT INTO memory_embeddings VALUES
+          ('${memoryId}', 'older', 2, '2026-01-01T00:00:00Z'),
+          ('${memoryId}', 'newer', 2, '2026-01-02T00:00:00Z');
+      `);
+
+      await expect(runMigrations(pool, directory)).resolves.toHaveLength(1);
+      expect((await pool.query(
+        'SELECT provider FROM memory_embeddings WHERE memory_id = $1', [memoryId],
+      )).rows).toEqual([{ provider: 'newer' }]);
+      await expect(pool.query(
+        `INSERT INTO memory_embeddings VALUES ($1, 'duplicate', 3, clock_timestamp())`,
+        [memoryId],
+      )).rejects.toMatchObject({ code: '23505' });
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
   });
 
   it('runs marked concurrent-index migrations outside a transaction', async () => {

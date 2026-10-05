@@ -163,9 +163,13 @@ provider. A scope pinned to `local-only` is never sent to a hosted provider.
 Progress is checkpointed by provider, dimension, and optional `--scope` in
 stable memory-ID order. A provider-specific advisory lock prevents concurrent
 runs, successful writes are idempotent, and poison records are isolated with
-bounded retries and sanitized audit entries. Use `--cursor UUID` together with
-`--provider` for an explicit restart point. A completed sweep clears its
-cursor so a later run can retry records that previously failed.
+bounded diagnostics and sanitized durable failure entries. Use `--cursor UUID`
+together with `--provider` for an explicit restart point. The JSON report keeps
+per-provider cursors and safe error codes, continues healthy providers, and
+exits nonzero if any provider is incomplete. Known failures are retried only
+with the explicit provider-scoped `--retry-failures` control. See
+[`docs/embedding-backfill.md`](./docs/embedding-backfill.md) for no-wrap,
+mark-failed, rollout, deduplication, and rollback procedures.
 
 ## License
 

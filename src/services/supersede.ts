@@ -130,7 +130,6 @@ async function embedSuccessor(
   try {
     await client.query('BEGIN');
     await storeMemoryEmbeddingVector(client, result.successor.id, vector, provider);
-    await client.query('DELETE FROM memory_embeddings WHERE memory_id = $1', [result.predecessor.id]);
     await recordEmbeddingOutcome(client, result, provider, 'succeeded');
     await client.query('COMMIT');
     return { embedded: true };

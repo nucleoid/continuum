@@ -233,7 +233,8 @@ Content-Type: application/json
 Response includes ranked memories with `score`, `scope`, `type`, `source_ref`, and a short `excerpt`. Reading is logged to `audit_log` per principal.
 
 Search is hybrid: vector similarity on `memory_embeddings` plus full-text on `memories.body`, fused by reciprocal rank fusion. Scope filter is applied pre-rank.
-Each routed vector arm is bounded by its provider timeout. A provider or vector
+Routed vector arms run concurrently under one shared overall deadline, while
+each provider also retains its local request timeout. A provider or vector
 query failure degrades only that arm to full-text search and is returned as
 sanitized retrieval diagnostics. AGENTS.md generation remains deterministic
 scope-ordered retrieval and does not depend on embedding availability.
@@ -354,8 +355,9 @@ candidates remain advisory and never authorize or trigger supersession. After
 commit, provider I/O embeds the new chain head outside the write transaction.
 The successor vector, archived-vector removal, and a bounded provider/status
 audit then commit together. Provider, post-commit pool, vector-storage, or
-derived-audit failure returns `EMBEDDING_FAILED`, retains the archived vector,
-and leaves the live successor available to full-text recall. A failed outcome
+derived-audit failure returns `EMBEDDING_FAILED`; the archived vector is already
+deleted transactionally with supersession, and the live successor remains
+available to full-text recall. A failed outcome
 audit is best-effort because the database failure may also make observability
 unavailable. If a local-only route has no local provider, a best-effort derived
 audit records `embedding_policy: "local-only-unavailable"`; the successor stays

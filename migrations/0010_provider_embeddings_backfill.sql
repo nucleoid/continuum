@@ -1,8 +1,13 @@
-ALTER TABLE memory_embeddings DROP CONSTRAINT memory_embeddings_pkey;
+-- continuum:no-transaction
+DROP INDEX CONCURRENTLY IF EXISTS memory_embeddings_provider_dim_unique_idx;
+CREATE UNIQUE INDEX CONCURRENTLY memory_embeddings_provider_dim_unique_idx
+  ON memory_embeddings (memory_id, provider, dim);
+ALTER TABLE memory_embeddings DROP CONSTRAINT IF EXISTS memory_embeddings_pkey;
 ALTER TABLE memory_embeddings
-  ADD PRIMARY KEY (memory_id, provider, dim);
+  ADD CONSTRAINT memory_embeddings_pkey PRIMARY KEY
+  USING INDEX memory_embeddings_provider_dim_unique_idx;
 
-CREATE TABLE embedding_backfill_checkpoints (
+CREATE TABLE IF NOT EXISTS embedding_backfill_checkpoints (
   provider      TEXT NOT NULL,
   dim           INT NOT NULL,
   scope_filter  TEXT NOT NULL DEFAULT '',

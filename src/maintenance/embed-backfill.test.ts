@@ -484,9 +484,17 @@ describe('embedding backfill', () => {
       },
     };
 
-    await expect(runEmbeddingBackfill(pool, provider, {
+    const exhausted = await runEmbeddingBackfill(pool, provider, {
       batchSize: 3, maxRows: 10, maxErrors: 1,
-    })).rejects.toThrow(/error budget/i);
+    });
+    expect(exhausted).toMatchObject({
+      completed: false, failed: 1, errorCodes: ['BACKFILL_ERROR_BUDGET'],
+      providerReports: [expect.objectContaining({
+        provider: provider.id,
+        errorCode: 'BACKFILL_ERROR_BUDGET',
+        cursor: memories[1]!.id,
+      })],
+    });
 
     const checkpoint = await pool.query(
       `SELECT cursor FROM embedding_backfill_checkpoints
@@ -724,10 +732,11 @@ describe('embedding backfill', () => {
       headers: { 'content-type': 'application/json' },
     })) as typeof fetch;
 
-    await expect(runEmbeddingBackfill(pool, createProvider(fetchImpl), {
+    const report = await runEmbeddingBackfill(pool, createProvider(fetchImpl), {
       batchSize: 4, maxRows: 10,
-    })).rejects.toMatchObject({ code: 'EMBEDDING_FAILED', failureScope: 'provider' });
+    });
 
+    expect(report).toMatchObject({ completed: false, errorCodes: ['EMBEDDING_FAILED'] });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect((await pool.query('SELECT count(*)::int AS count FROM memory_embeddings')).rows[0].count).toBe(0);
     expect((await pool.query(
@@ -737,24 +746,25 @@ describe('embedding backfill', () => {
   });
 
   it.each([
-    ['timeout', new EmbeddingProviderError('EMBEDDING_TIMEOUT', 'private timeout detail'), 'EMBEDDING_TIMEOUT'],
-    ['network', new EmbeddingProviderError('EMBEDDING_NETWORK', 'private network detail'), 'EMBEDDING_NETWORK'],
-    ['authentication', new EmbeddingProviderError('EMBEDDING_AUTH', 'private auth detail'), 'EMBEDDING_AUTH'],
-    ['rate limit', new EmbeddingProviderError('EMBEDDING_RATE_LIMIT', 'private quota detail'), 'EMBEDDING_RATE_LIMIT'],
-    ['server outage', new EmbeddingProviderError('EMBEDDING_SERVER', 'private upstream detail'), 'EMBEDDING_SERVER'],
-    ['unknown provider outage', new Error('private unknown outage detail'), 'EMBEDDING_FAILED'],
-  ])('fails a whole batch once on a provider-wide %s without delay or item audits', async (_label, failure, code) => {
+    ['timeout', new EmbeddingProviderError('EMBEDDING_TIMEOUT', 'private timeout detail'), 'EMBEDDING_TIMEOUT', 1],
+    ['network', new EmbeddingProviderError('EMBEDDING_NETWORK', 'private network detail'), 'EMBEDDING_NETWORK', 1],
+    ['authentication', new EmbeddingProviderError('EMBEDDING_AUTH', 'private auth detail'), 'EMBEDDING_AUTH', 1],
+    ['rate limit', new EmbeddingProviderError('EMBEDDING_RATE_LIMIT', 'private quota detail'), 'EMBEDDING_RATE_LIMIT', 1],
+    ['server outage', new EmbeddingProviderError('EMBEDDING_SERVER', 'private upstream detail'), 'EMBEDDING_SERVER', 7],
+    ['unknown provider outage', new Error('private unknown outage detail'), 'EMBEDDING_FAILED', 7],
+  ])('reports a provider-wide %s without item audits', async (_label, failure, code, expectedCalls) => {
     await seed('project', `outage-${_label}`, ['one', 'two', 'three', 'four']);
     const embed = vi.fn(async () => { throw failure; });
     const provider: EmbeddingProvider = {
       id: 'ollama:outage', dim: 768, local: true, embed,
     };
 
-    await expect(runEmbeddingBackfill(pool, provider, {
+    const report = await runEmbeddingBackfill(pool, provider, {
       batchSize: 4, maxRows: 10,
-    })).rejects.toMatchObject({ code, failureScope: 'provider' });
+    });
 
-    expect(embed).toHaveBeenCalledTimes(1);
+    expect(report).toMatchObject({ completed: false, errorCodes: [code] });
+    expect(embed).toHaveBeenCalledTimes(expectedCalls);
     expect(embed.mock.calls[0]?.[0]).toHaveLength(4);
     expect((await pool.query('SELECT count(*)::int AS count FROM memory_embeddings')).rows[0].count).toBe(0);
     expect((await pool.query(

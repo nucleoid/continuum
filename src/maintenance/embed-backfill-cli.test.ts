@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseEmbedBackfillCliOptions } from './embed-backfill-cli.js';
+import { embedBackfillExitCode, parseEmbedBackfillCliOptions } from './embed-backfill-cli.js';
 
 describe('parseEmbedBackfillCliOptions', () => {
   it('parses bounded operational controls', () => {
@@ -38,5 +38,16 @@ describe('parseEmbedBackfillCliOptions', () => {
     expect(() => parseEmbedBackfillCliOptions([
       '--provider', 'ollama:model', '--retry-failures', '--dry-run',
     ])).toThrow(/cannot be used/i);
+  });
+
+  it('returns nonzero after printing a partial report or preserved provider error', () => {
+    const base = {
+      scanned: 1, eligible: 1, embedded: 0, failed: 1, failuresCleared: 0,
+      providers: 1, completed: true, cursor: null, dryRun: false, countOnly: false,
+      providerReports: [], errorCodes: [],
+    };
+    expect(embedBackfillExitCode(base)).toBe(0);
+    expect(embedBackfillExitCode({ ...base, completed: false })).toBe(1);
+    expect(embedBackfillExitCode({ ...base, errorCodes: ['BACKFILL_ERROR_BUDGET'] })).toBe(1);
   });
 });

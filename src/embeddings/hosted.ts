@@ -22,11 +22,56 @@ interface HostedOptions {
 
 const DEFAULT_BATCH_SIZE = 32;
 const MAX_BATCH_SIZE = 1_000;
+const SUCCESS_BODY_BASE_BYTES = 16 * 1024;
+const SUCCESS_VECTOR_VALUE_BYTES = 32;
+const MAX_SUCCESS_BODY_BYTES = 64 * 1024 * 1024;
 
 interface EmbeddingItem { index?: number; embedding?: unknown }
 
 function invalidResponse(message: string, cause?: unknown): EmbeddingProviderError {
-  return new EmbeddingProviderError('EMBEDDING_INVALID_RESPONSE', message, { cause });
+  return new EmbeddingProviderError(
+    'EMBEDDING_INVALID_RESPONSE', message, { cause, diagnostic: true },
+  );
+}
+
+function successBodyLimit(count: number, dim: number): number {
+  return Math.min(
+    MAX_SUCCESS_BODY_BYTES,
+    SUCCESS_BODY_BASE_BYTES + count * dim * SUCCESS_VECTOR_VALUE_BYTES,
+  );
+}
+
+async function boundedSuccessJson(response: Response, count: number, dim: number): Promise<unknown> {
+  // Test doubles may expose json() without a web stream. Real fetch responses
+  // always take the bounded stream path.
+  if (!response.body) return response.json() as Promise<unknown>;
+  const maximum = successBodyLimit(count, dim);
+  const declaredLength = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declaredLength) && declaredLength > maximum) {
+    await response.body.cancel().catch(() => undefined);
+    throw invalidResponse('Embedding provider returned an oversized response');
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  while (true) {
+    const next = await reader.read();
+    if (next.done) break;
+    length += next.value.byteLength;
+    if (length > maximum) {
+      await reader.cancel().catch(() => undefined);
+      throw invalidResponse('Embedding provider returned an oversized response');
+    }
+    chunks.push(next.value);
+  }
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try { return JSON.parse(new TextDecoder().decode(bytes)) as unknown; }
+  catch (error) { throw invalidResponse('Embedding provider returned invalid JSON', error); }
 }
 
 function validateHostedEndpoint(endpoint: string): string {
@@ -109,8 +154,11 @@ abstract class HostedEmbeddingProvider implements EmbeddingProvider {
         }
         if (!response.ok) throw await embeddingProviderHttpError(response, this.httpProvider);
         let json: unknown;
-        try { json = await response.json() as unknown; }
-        catch (error) { throw invalidResponse('Embedding provider returned invalid JSON', error); }
+        try { json = await boundedSuccessJson(response, texts.length, this.dim); }
+        catch (error) {
+          if (error instanceof EmbeddingProviderError) throw error;
+          throw invalidResponse('Embedding provider returned invalid JSON', error);
+        }
         if (json === null || typeof json !== 'object' || Array.isArray(json)) {
           throw invalidResponse('Embedding provider returned an invalid response');
         }

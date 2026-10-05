@@ -17,6 +17,7 @@ const DEFAULT_BATCH_SIZE = 32;
 const DEFAULT_MAX_ROWS = 1_000;
 const DEFAULT_MAX_ERRORS = 25;
 const MAX_BATCH_SIZE = 1_000;
+const MAX_DIAGNOSTIC_PROBES = 64;
 
 interface Candidate {
   id: string;
@@ -35,6 +36,21 @@ export interface EmbeddingBackfillOptions {
   countOnly?: boolean;
   maxErrors?: number;
   retryFailures?: boolean;
+  noWrap?: boolean;
+  markFailed?: string;
+}
+
+export interface EmbeddingBackfillProviderReport {
+  provider: string;
+  dim: number;
+  scanned: number;
+  eligible: number;
+  embedded: number;
+  failed: number;
+  failuresCleared: number;
+  completed: boolean;
+  cursor: string | null;
+  errorCode?: string;
 }
 
 export interface EmbeddingBackfillReport {
@@ -48,6 +64,27 @@ export interface EmbeddingBackfillReport {
   cursor: string | null;
   dryRun: boolean;
   countOnly: boolean;
+  providerReports: EmbeddingBackfillProviderReport[];
+  errorCodes: string[];
+}
+
+type ProviderRunResult = Pick<EmbeddingBackfillReport,
+  'scanned' | 'eligible' | 'embedded' | 'failed' | 'failuresCleared'
+  | 'completed' | 'cursor'>;
+
+class ProviderRunError extends Error {
+  constructor(
+    readonly code: string,
+    readonly report: ProviderRunResult,
+    cause: unknown,
+  ) {
+    super('Embedding provider backfill failed', { cause });
+    this.name = 'ProviderRunError';
+  }
+}
+
+class BackfillControlError extends Error {
+  readonly code = 'BACKFILL_ERROR_BUDGET';
 }
 
 function integer(value: number, name: string, minimum: number, maximum: number): number {
@@ -68,12 +105,16 @@ function sameProvider(left: EmbeddingProvider | null, right: EmbeddingProvider):
 
 function validateVectors(vectors: number[][], expected: number, provider: EmbeddingProvider): void {
   if (!Array.isArray(vectors) || vectors.length !== expected) {
-    throw new Error('Embedding provider returned unexpected cardinality');
+    throw new EmbeddingProviderError(
+      'EMBEDDING_INVALID_RESPONSE', 'Embedding provider returned unexpected cardinality',
+    );
   }
   for (const vector of vectors) {
     if (!Array.isArray(vector) || vector.length !== provider.dim
       || !vector.every((value) => typeof value === 'number' && Number.isFinite(value))) {
-      throw new Error('Embedding provider returned an invalid vector');
+      throw new EmbeddingProviderError(
+        'EMBEDDING_INVALID_RESPONSE', 'Embedding provider returned an invalid vector',
+      );
     }
   }
 }
@@ -157,8 +198,9 @@ async function runProvider(
   provider: EmbeddingProvider,
   options: Required<Pick<EmbeddingBackfillOptions,
     'batchSize' | 'maxRows' | 'dryRun' | 'countOnly' | 'maxErrors'>>
-    & Pick<EmbeddingBackfillOptions, 'cursor' | 'scope' | 'retryFailures'>,
-): Promise<Omit<EmbeddingBackfillReport, 'providers' | 'dryRun' | 'countOnly'>> {
+    & Pick<EmbeddingBackfillOptions,
+      'cursor' | 'scope' | 'retryFailures' | 'noWrap' | 'markFailed'>,
+): Promise<ProviderRunResult> {
   const router = asEmbeddingRouter(routing);
   const client = await pool.connect();
   const filter = scopeKey(options.scope);
@@ -167,7 +209,7 @@ async function runProvider(
   let locked = false;
   let destroyClient = false;
   let cursor: string | null = options.cursor ?? null;
-  let wrapCursor = cursor !== null;
+  let wrapCursor = cursor !== null && !options.noWrap;
   let wrapBoundary = cursor;
   let wrapped = false;
   let scanned = 0;
@@ -205,7 +247,7 @@ async function runProvider(
           [provider.id, provider.dim, filter],
         );
         cursor = saved.rows[0]?.cursor ?? null;
-        wrapCursor = cursor !== null;
+        wrapCursor = cursor !== null && !options.noWrap;
         wrapBoundary = cursor;
       }
     }
@@ -228,36 +270,127 @@ async function runProvider(
       return { scanned, eligible, embedded, failed, failuresCleared, completed, cursor };
     }
 
+    if (options.markFailed) {
+      const marked = await client.query<{
+        id: string; title: string; body: string; kind: ScopeKind; name: string;
+      }>(
+        `SELECT m.id, m.title, m.body, s.kind, s.name
+           FROM memories m
+           JOIN scopes s ON s.id = m.scope_id
+          WHERE m.id = $1
+            AND m.state = 'live'
+            AND (m.expires_at IS NULL OR m.expires_at > clock_timestamp())
+            AND m.scope_id = ANY($2::uuid[])
+            AND NOT EXISTS (
+              SELECT 1 FROM memory_embeddings e
+               WHERE e.memory_id = m.id AND e.provider = $3 AND e.dim = $4
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM embedding_backfill_failures f
+               WHERE f.memory_id = m.id AND f.provider = $3 AND f.dim = $4
+            )`,
+        [options.markFailed, routedScopeIds, provider.id, provider.dim],
+      );
+      const row = marked.rows[0];
+      if (!row) throw new Error('markFailed memory is not eligible for this provider');
+      const item: Candidate = {
+        id: row.id, title: row.title, body: row.body,
+        scope: { kind: row.kind, name: row.name },
+      };
+      if (!sameProvider(router.resolve(item.scope).provider, provider)) {
+        throw new Error('markFailed memory is not routed to this provider');
+      }
+      await recordFailure(client, provider, item);
+      failed = 1;
+      cursor = item.id;
+      await checkpoint(client, provider, filter, cursor);
+      return { scanned: 1, eligible: 1, embedded, failed, failuresCleared, completed: true, cursor };
+    }
+
     const processItems = async (items: Candidate[]): Promise<boolean> => {
       if (items.length === 0) return true;
-      let vectors: number[][];
-      try {
-        vectors = await provider.embed(items.map(memoryEmbeddingText));
-        validateVectors(vectors, items.length, provider);
-      } catch (error) {
-        if (error instanceof EmbeddingProviderError) throw error;
-        if (!isEmbeddingItemError(error)) {
+      const attempt = async (part: Candidate[]): Promise<void> => {
+        let vectors: number[][];
+        try {
+          vectors = await provider.embed(part.map(memoryEmbeddingText));
+          validateVectors(vectors, part.length, provider);
+        } catch (error) {
+          if (error instanceof EmbeddingProviderError || isEmbeddingItemError(error)) throw error;
           throw new EmbeddingProviderError(
-            'EMBEDDING_FAILED',
-            'Embedding backfill provider failed',
-            { cause: error },
+            'EMBEDDING_FAILED', 'Embedding backfill provider failed',
+            { cause: error, diagnostic: true },
           );
         }
-        if (items.length > 1) {
-          const middle = Math.floor(items.length / 2);
-          if (!await processItems(items.slice(0, middle))) return false;
-          return processItems(items.slice(middle));
-        }
+        // Keep database failures distinct from provider failures. A concurrent archive
+        // is a safe no-op and must not recreate derived vectors for tombstoned memory.
+        embedded += await storeBatch(client, provider, part, vectors);
+      };
+      const mark = async (item: Candidate): Promise<boolean> => {
         failed += 1;
-        await recordFailure(client, provider, items[0]!);
-        cursor = items[0]!.id;
+        await recordFailure(client, provider, item);
         return failed < options.maxErrors;
+      };
+      try {
+        await attempt(items);
+        cursor = items.at(-1)!.id;
+        return true;
+      } catch (initialError) {
+        if (isEmbeddingItemError(initialError)) {
+          if (items.length > 1) {
+            const middle = Math.floor(items.length / 2);
+            if (!await processItems(items.slice(0, middle))) return false;
+            return processItems(items.slice(middle));
+          }
+          const canContinue = await mark(items[0]!);
+          cursor = items[0]!.id;
+          return canContinue;
+        }
+        if (!(initialError instanceof EmbeddingProviderError)
+          || !['EMBEDDING_SERVER', 'EMBEDDING_INVALID_RESPONSE', 'EMBEDDING_FAILED']
+            .includes(initialError.code)
+          || initialError.diagnostic === false
+          || items.length === 1) throw initialError;
+
+        const ambiguous: Candidate[] = [];
+        let successes = 0;
+        let canContinue = true;
+        let diagnosticProbes = 0;
+        const diagnose = async (part: Candidate[]): Promise<void> => {
+          diagnosticProbes += 1;
+          if (diagnosticProbes > MAX_DIAGNOSTIC_PROBES) throw initialError;
+          try {
+            await attempt(part);
+            successes += part.length;
+            return;
+          } catch (error) {
+            if (isEmbeddingItemError(error) && part.length === 1) {
+              canContinue &&= await mark(part[0]!);
+              return;
+            }
+            if (error instanceof EmbeddingProviderError
+              && ['EMBEDDING_SERVER', 'EMBEDDING_INVALID_RESPONSE', 'EMBEDDING_FAILED']
+                .includes(error.code)
+              && error.diagnostic !== false) {
+              if (part.length === 1) {
+                ambiguous.push(part[0]!);
+                return;
+              }
+              const middle = Math.floor(part.length / 2);
+              await diagnose(part.slice(0, middle));
+              await diagnose(part.slice(middle));
+              return;
+            }
+            throw error;
+          }
+        };
+        const middle = Math.floor(items.length / 2);
+        await diagnose(items.slice(0, middle));
+        await diagnose(items.slice(middle));
+        if (successes === 0 && ambiguous.length > 0) throw initialError;
+        for (const item of ambiguous) canContinue &&= await mark(item);
+        cursor = items.at(-1)!.id;
+        return canContinue;
       }
-      // Keep database failures distinct from provider failures. A concurrent archive
-      // is a safe no-op and must not recreate derived vectors for tombstoned memory.
-      embedded += await storeBatch(client, provider, items, vectors);
-      cursor = items.at(-1)!.id;
-      return true;
     };
 
     while (eligible < options.maxRows || options.countOnly) {
@@ -279,7 +412,7 @@ async function runProvider(
           WHERE ($1::uuid IS NULL OR m.id > $1::uuid)
             AND ($5::uuid IS NULL OR m.id <= $5::uuid)
             AND m.state = 'live'
-            AND (m.expires_at IS NULL OR m.expires_at > now())
+            AND (m.expires_at IS NULL OR m.expires_at > clock_timestamp())
             AND m.scope_id = ANY($4::uuid[])
             AND NOT EXISTS (
               SELECT 1 FROM memory_embeddings e
@@ -325,7 +458,7 @@ async function runProvider(
           const canContinue = await processItems(batch.splice(0));
           await checkpoint(client, provider, filter, cursor);
           if (!canContinue) {
-            throw new Error('Embedding backfill exceeded its error budget');
+            throw new BackfillControlError('Embedding backfill exceeded its error budget');
           }
         }
         if (!options.countOnly && eligible >= options.maxRows) break;
@@ -333,12 +466,20 @@ async function runProvider(
       const canContinue = batch.length === 0 || await processItems(batch);
       if (!options.dryRun && !options.countOnly) await checkpoint(client, provider, filter, cursor);
       if (!canContinue) {
-        throw new Error('Embedding backfill exceeded its error budget');
+        throw new BackfillControlError('Embedding backfill exceeded its error budget');
       }
       if (!options.countOnly && eligible >= options.maxRows) break;
     }
 
     return { scanned, eligible, embedded, failed, failuresCleared, completed, cursor };
+  } catch (error) {
+    if (error instanceof EmbeddingProviderError || error instanceof BackfillControlError) {
+      throw new ProviderRunError(error.code, {
+        scanned, eligible, embedded, failed, failuresCleared,
+        completed: false, cursor,
+      }, error);
+    }
+    throw error;
   } finally {
     if (locked) {
       try {
@@ -365,6 +506,12 @@ export async function runEmbeddingBackfill(
   const maxErrors = integer(options.maxErrors ?? DEFAULT_MAX_ERRORS, 'maxErrors', 1, 10_000);
   if (options.dryRun && options.countOnly) throw new Error('dryRun and countOnly are mutually exclusive');
   if (options.cursor && !options.providerId) throw new Error('cursor requires providerId');
+  if (options.noWrap && !options.cursor) throw new Error('noWrap requires cursor');
+  if (options.markFailed && !options.providerId) throw new Error('markFailed requires providerId');
+  if (options.markFailed && (options.cursor || options.retryFailures
+    || options.dryRun || options.countOnly)) {
+    throw new Error('markFailed cannot be combined with cursor, retryFailures, dryRun, or countOnly');
+  }
   if (options.retryFailures && !options.providerId) throw new Error('retryFailures requires providerId');
   if (options.retryFailures && (options.dryRun || options.countOnly)) {
     throw new Error('retryFailures cannot be used with dryRun or countOnly');
@@ -382,31 +529,41 @@ export async function runEmbeddingBackfill(
     scanned: 0, eligible: 0, embedded: 0, failed: 0, failuresCleared: 0,
     providers: providers.length, completed: true, cursor: null,
     dryRun: options.dryRun ?? false, countOnly: options.countOnly ?? false,
+    providerReports: [], errorCodes: [],
   };
-  let remaining = maxRows;
   for (const provider of providers) {
-    if (remaining <= 0 && !options.countOnly) {
-      report.completed = false;
-      break;
+    let result;
+    let errorCode: string | undefined;
+    try {
+      result = await runProvider(pool, routing, provider, {
+        batchSize: Math.min(batchSize, provider.batchSize ?? batchSize),
+        maxRows,
+        dryRun: options.dryRun ?? false,
+        countOnly: options.countOnly ?? false,
+        maxErrors,
+        cursor: options.cursor,
+        scope: options.scope,
+        retryFailures: options.retryFailures,
+        noWrap: options.noWrap,
+        markFailed: options.markFailed,
+      });
+    } catch (error) {
+      if (!(error instanceof ProviderRunError)) throw error;
+      errorCode = error.code;
+      result = error.report;
+      report.errorCodes.push(error.code);
     }
-    const result = await runProvider(pool, routing, provider, {
-      batchSize,
-      maxRows: options.countOnly ? maxRows : remaining,
-      dryRun: options.dryRun ?? false,
-      countOnly: options.countOnly ?? false,
-      maxErrors,
-      cursor: options.cursor,
-      scope: options.scope,
-      retryFailures: options.retryFailures,
-    });
     report.scanned += result.scanned;
     report.eligible += result.eligible;
     report.embedded += result.embedded;
     report.failed += result.failed;
     report.failuresCleared += result.failuresCleared;
     report.completed &&= result.completed;
-    report.cursor = result.cursor;
-    remaining -= result.eligible;
+    report.cursor = providers.length === 1 ? result.cursor : null;
+    report.providerReports.push({
+      provider: provider.id, dim: provider.dim, ...result,
+      ...(errorCode ? { errorCode } : {}),
+    });
   }
   return report;
 }

@@ -1,6 +1,8 @@
 export interface EmbeddingProvider {
   readonly id: string;
   readonly dim: number;
+  /** Maximum input count accepted by one provider request, when known. */
+  readonly batchSize?: number;
   /** Explicit data-residency capability. Never infer this from an endpoint URL. */
   readonly local?: boolean;
   embed(texts: string[], options?: { signal?: AbortSignal }): Promise<number[][]>;
@@ -17,14 +19,16 @@ export type EmbeddingProviderErrorCode =
 
 export class EmbeddingProviderError extends Error {
   readonly failureScope = 'provider';
+  readonly diagnostic: boolean | undefined;
 
   constructor(
     readonly code: EmbeddingProviderErrorCode,
     message: string,
-    options: { cause?: unknown } = {},
+    options: { cause?: unknown; diagnostic?: boolean } = {},
   ) {
     super(message, options);
     this.name = 'EmbeddingProviderError';
+    this.diagnostic = options.diagnostic;
   }
 }
 
@@ -152,13 +156,30 @@ function isExplicitItemFailure(provider: EmbeddingHttpProvider, body: unknown): 
       || VOYAGE_SUBMITTED_BATCH_MESSAGE.test(message))));
 }
 
+function isExplicitProviderFailure(body: unknown): boolean {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+  const root = body as Record<string, unknown>;
+  const nested = root.error && typeof root.error === 'object' && !Array.isArray(root.error)
+    ? root.error as Record<string, unknown>
+    : root;
+  const code = stringField(nested.code)?.toLowerCase() ?? null;
+  const type = stringField(nested.type)?.toLowerCase() ?? null;
+  const message = stringField(nested.message)
+    ?? stringField(root.detail)
+    ?? stringField(root.error);
+  return (code !== null && PROVIDER_ERROR_CODES.has(code))
+    || (type !== null && PROVIDER_ERROR_CODES.has(type))
+    || (message !== null && PROVIDER_FAILURE_MESSAGE.test(message));
+}
+
 export async function embeddingProviderHttpError(
   response: Response,
   provider: EmbeddingHttpProvider,
 ): Promise<EmbeddingProviderError | EmbeddingItemError> {
   const status = response.status;
+  let body: unknown = null;
   if (ITEM_HTTP_STATUSES.has(status)) {
-    const body = await boundedErrorBody(response);
+    body = await boundedErrorBody(response);
     if (isExplicitItemFailure(provider, body)) {
       return new EmbeddingItemError(`Embedding provider rejected input with status ${status}`);
     }
@@ -170,5 +191,12 @@ export async function embeddingProviderHttpError(
       : status >= 500
         ? 'EMBEDDING_SERVER'
         : 'EMBEDDING_FAILED';
-  return new EmbeddingProviderError(code, `Embedding provider request failed with status ${status}`);
+  return new EmbeddingProviderError(
+    code,
+    `Embedding provider request failed with status ${status}`,
+    {
+      diagnostic: status >= 500
+        || (ITEM_HTTP_STATUSES.has(status) && !isExplicitProviderFailure(body)),
+    },
+  );
 }

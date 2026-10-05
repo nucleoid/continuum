@@ -18,6 +18,8 @@ export interface RecallOptions {
     scopeIds: string[];
     status: 'succeeded' | 'failed';
   }) => void;
+  /** One wall-clock budget shared by all routed embedding groups. */
+  embeddingDeadlineMs?: number;
 }
 
 export type VectorDiagnosticStatus = 'used' | 'disabled' | 'failed' | 'partial';
@@ -84,7 +86,7 @@ async function ftsHits(
        FROM memories
       WHERE scope_id = ANY($2::uuid[])
         AND state = 'live'
-        AND (expires_at IS NULL OR expires_at > now())
+        AND (expires_at IS NULL OR expires_at > clock_timestamp())
         AND to_tsvector('english', title || ' ' || body) @@ plainto_tsquery('english', $1)
         ${typeFilter}
       ORDER BY score DESC
@@ -128,7 +130,7 @@ async function hydrate(
       WHERE id = ANY($1::uuid[])
         AND scope_id = ANY($2::uuid[])
         AND state = 'live'
-        AND (expires_at IS NULL OR expires_at > now())
+        AND (expires_at IS NULL OR expires_at > clock_timestamp())
         ${typeFilter}`,
     params,
   );
@@ -161,53 +163,86 @@ export async function recall(
     ?? (opts.embeddingProvider
       ? [{ scopeIds: opts.scopeIds, provider: opts.embeddingProvider }]
       : []);
-  const vectorLists: Array<Array<{ id: string; rank: number; distance: number }>> = [];
-  const diagnosticGroups: RecallDiagnostics['groups'] = [];
-  for (const group of groups) {
-    let queryVec: number[];
-    try {
-      [queryVec] = await group.provider.embed([opts.query]);
-      assertEmbeddingVectorDimension(queryVec, group.provider);
-    } catch (error) {
-      // An outage degrades only this provider group to full-text search.
-      opts.onEmbeddingGroupResult?.({
-        provider: group.provider, scopeIds: group.scopeIds, status: 'failed',
-      });
-      vectorLists.push([]);
-      diagnosticGroups.push({
-        provider: group.provider.id,
-        dim: group.provider.dim,
-        status: 'failed',
-        errorCode: (error as { code?: unknown })?.code === 'EMBEDDING_TIMEOUT'
-          ? 'EMBEDDING_TIMEOUT'
-          : 'EMBEDDING_FAILED',
-      });
-      continue;
-    }
-    try {
-      const hits = await vectorSearchMemoryIds(
-        pool, queryVec, group.scopeIds, group.provider, overFetch, opts.types,
-      );
-      vectorLists.push(hits.map((hit, index) => ({
-        id: hit.id, rank: index + 1, distance: hit.distance,
-      })));
-      diagnosticGroups.push({
-        provider: group.provider.id, dim: group.provider.dim, status: 'used',
-      });
-      opts.onEmbeddingGroupResult?.({
-        provider: group.provider, scopeIds: group.scopeIds, status: 'succeeded',
-      });
-    } catch {
-      vectorLists.push([]);
-      diagnosticGroups.push({
-        provider: group.provider.id, dim: group.provider.dim,
-        status: 'failed', errorCode: 'VECTOR_SEARCH_FAILED',
-      });
-      opts.onEmbeddingGroupResult?.({
-        provider: group.provider, scopeIds: group.scopeIds, status: 'failed',
-      });
-    }
+  const deadlineMs = opts.embeddingDeadlineMs ?? 10_000;
+  if (!Number.isSafeInteger(deadlineMs) || deadlineMs < 1 || deadlineMs > 300_000) {
+    throw new Error('embeddingDeadlineMs must be an integer from 1 to 300000');
   }
+  type GroupResult = {
+    list: Array<{ id: string; rank: number; distance: number }>;
+    diagnostic: RecallDiagnostics['groups'][number];
+  };
+  const controller = new AbortController();
+  let deadlineTimer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<'deadline'>((resolve) => {
+    deadlineTimer = setTimeout(() => {
+      controller.abort(new Error('Embedding recall deadline exceeded'));
+      resolve('deadline');
+    }, deadlineMs);
+  });
+  const tasks = groups.map(async (group): Promise<GroupResult> => {
+    const work = (async (): Promise<GroupResult> => {
+      let queryVec: number[];
+      try {
+        [queryVec] = await group.provider.embed([opts.query], { signal: controller.signal });
+        assertEmbeddingVectorDimension(queryVec, group.provider);
+      } catch (error) {
+        return {
+          list: [],
+          diagnostic: {
+            provider: group.provider.id, dim: group.provider.dim, status: 'failed',
+            errorCode: (error as { code?: unknown })?.code === 'EMBEDDING_TIMEOUT'
+              || controller.signal.aborted
+              ? 'EMBEDDING_TIMEOUT'
+              : 'EMBEDDING_FAILED',
+          },
+        };
+      }
+      try {
+        const hits = await vectorSearchMemoryIds(
+          pool, queryVec, group.scopeIds, group.provider, overFetch, opts.types,
+        );
+        return {
+          list: hits.map((hit, index) => ({
+            id: hit.id, rank: index + 1, distance: hit.distance,
+          })),
+          diagnostic: {
+            provider: group.provider.id, dim: group.provider.dim, status: 'used',
+          },
+        };
+      } catch {
+        return {
+          list: [],
+          diagnostic: {
+            provider: group.provider.id, dim: group.provider.dim,
+            status: 'failed', errorCode: 'VECTOR_SEARCH_FAILED',
+          },
+        };
+      }
+    })();
+    const settled = await Promise.race([work, deadline]);
+    if (settled === 'deadline') {
+      return {
+        list: [],
+        diagnostic: {
+          provider: group.provider.id, dim: group.provider.dim,
+          status: 'failed', errorCode: 'EMBEDDING_TIMEOUT',
+        },
+      };
+    }
+    return settled;
+  });
+  const settledGroups = await Promise.all(tasks);
+  if (deadlineTimer) clearTimeout(deadlineTimer);
+  const vectorLists = settledGroups.map((result) => result.list);
+  const diagnosticGroups = settledGroups.map((result, index) => {
+    const group = groups[index]!;
+    opts.onEmbeddingGroupResult?.({
+      provider: group.provider,
+      scopeIds: group.scopeIds,
+      status: result.diagnostic.status === 'used' ? 'succeeded' : 'failed',
+    });
+    return result.diagnostic;
+  });
 
   const fused = fuse(fts, ...vectorLists);
   const ranked = Array.from(fused.entries())
