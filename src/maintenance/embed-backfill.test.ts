@@ -132,6 +132,92 @@ describe('embedding backfill', () => {
     )).rows[0].count).toBe(0);
   });
 
+  it('serializes behind lifecycle archival and does not recreate its deleted vector', async () => {
+    const { memories } = await seed('project', 'archive-lock-race', ['archive me']);
+    const memoryId = memories[0]!.id;
+    const lifecycle = await pool.connect();
+    const writer = await pool.connect();
+    const provider = { id: 'ollama:archive-lock-race', dim: 768 };
+    const vector = (await vectors.embed(['archive me']))[0]!;
+    const lockKey = 34_065;
+    const backend = await writer.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+    const writerPid = backend.rows[0]!.pid;
+
+    try {
+      await pool.query(
+        `CREATE FUNCTION test_block_embedding_insert() RETURNS trigger
+         LANGUAGE plpgsql AS $body$
+         BEGIN
+           PERFORM pg_advisory_lock(${lockKey});
+           PERFORM pg_advisory_unlock(${lockKey});
+           RETURN NEW;
+         END
+         $body$`,
+      );
+      await pool.query(
+        `CREATE TRIGGER test_block_embedding_insert
+         BEFORE INSERT ON memory_embeddings
+         FOR EACH ROW EXECUTE FUNCTION test_block_embedding_insert()`,
+      );
+      await lifecycle.query('SELECT pg_advisory_lock($1)', [lockKey]);
+      await lifecycle.query('BEGIN');
+      await lifecycle.query(
+        `UPDATE memories SET state = 'archived', updated_at = now() WHERE id = $1`,
+        [memoryId],
+      );
+      await lifecycle.query('DELETE FROM memory_embeddings WHERE memory_id = $1', [memoryId]);
+      const write = storeMemoryEmbeddingVector(writer, memoryId, vector, provider);
+      let waiting = false;
+      for (let attempt = 0; attempt < 100 && !waiting; attempt += 1) {
+        const activity = await pool.query<{ waiting: boolean }>(
+          `SELECT wait_event_type = 'Lock' AS waiting
+             FROM pg_stat_activity WHERE pid = $1`,
+          [writerPid],
+        );
+        waiting = activity.rows[0]?.waiting === true;
+        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(waiting).toBe(true);
+      await lifecycle.query('COMMIT');
+      await lifecycle.query('SELECT pg_advisory_unlock($1)', [lockKey]);
+
+      await expect(write).resolves.toBe(false);
+      expect((await pool.query(
+        'SELECT count(*)::int AS count FROM memory_embeddings WHERE memory_id = $1',
+        [memoryId],
+      )).rows[0].count).toBe(0);
+    } finally {
+      await lifecycle.query('ROLLBACK').catch(() => undefined);
+      await lifecycle.query('SELECT pg_advisory_unlock($1)', [lockKey]).catch(() => undefined);
+      lifecycle.release();
+      writer.release();
+      await pool.query('DROP TRIGGER IF EXISTS test_block_embedding_insert ON memory_embeddings');
+      await pool.query('DROP FUNCTION IF EXISTS test_block_embedding_insert()');
+    }
+  });
+
+  it('does not store a vector when a memory expires during provider work', async () => {
+    const { memories } = await seed('project', 'expiry-race', ['expire me']);
+    const provider: EmbeddingProvider = {
+      id: 'ollama:expiry-race', dim: 768, local: true,
+      async embed(texts) {
+        await pool.query(
+          `UPDATE memories SET expires_at = clock_timestamp() - interval '1 second' WHERE id = $1`,
+          [memories[0]!.id],
+        );
+        return vectors.embed(texts);
+      },
+    };
+
+    const report = await runEmbeddingBackfill(pool, provider, { maxRows: 10 });
+
+    expect(report).toMatchObject({ embedded: 0, failed: 0, completed: true });
+    expect((await pool.query(
+      'SELECT count(*)::int AS count FROM memory_embeddings WHERE memory_id = $1',
+      [memories[0]!.id],
+    )).rows[0].count).toBe(0);
+  });
+
   it('rejects a concurrent run for the same provider advisory lock', async () => {
     await seed('project', 'locked', ['waiting']);
     const provider: EmbeddingProvider = {
@@ -344,9 +430,34 @@ describe('embedding backfill', () => {
       [provider.id, provider.dim, upper!.id],
     );
 
-    const report = await runEmbeddingBackfill(pool, provider, { batchSize: 2, maxRows: 10 });
+    const originalConnect = pool.connect.bind(pool);
+    const wrappedBoundaries: unknown[] = [];
+    let restoreQuery = () => undefined;
+    const connect = vi.spyOn(pool, 'connect').mockImplementation(async () => {
+      const client = await originalConnect();
+      const originalQuery = client.query.bind(client);
+      const query = vi.spyOn(client, 'query').mockImplementation(async (...args: unknown[]) => {
+        if (String(args[0]).includes('FROM memories m')) {
+          const params = args[1] as unknown[];
+          if (params[0] === null) wrappedBoundaries.push(params[4]);
+        }
+        return originalQuery(...args as [never]);
+      });
+      restoreQuery = () => query.mockRestore();
+      return client;
+    });
+
+    const report = await (async () => {
+      try {
+        return await runEmbeddingBackfill(pool, provider, { batchSize: 2, maxRows: 10 });
+      } finally {
+        restoreQuery();
+        connect.mockRestore();
+      }
+    })();
 
     expect(report).toMatchObject({ embedded: 2, failed: 0, completed: true, cursor: null });
+    expect(wrappedBoundaries).toContain(upper!.id);
     expect((await pool.query(
       'SELECT memory_id FROM memory_embeddings ORDER BY memory_id',
     )).rows.map((row) => row.memory_id)).toEqual([lower!.id, upper!.id].sort());

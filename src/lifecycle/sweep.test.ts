@@ -45,6 +45,14 @@ describe('lifecycle sweeper', () => {
     return { memory, scope, author };
   }
 
+  async function seedEmbeddingBeforeExpiry(memoryId: string, expiresAt: Date): Promise<void> {
+    await pool.query('UPDATE memories SET expires_at = NULL WHERE id = $1', [memoryId]);
+    await expect(storeMemoryEmbeddingVector(
+      pool, memoryId, new Array(768).fill(0), { id: 'stub', dim: 768 },
+    )).resolves.toBe(true);
+    await pool.query('UPDATE memories SET expires_at = $2 WHERE id = $1', [memoryId, expiresAt]);
+  }
+
   it('transitions only expired live lifecycle types at the exact boundary', async () => {
     const context = await seed('context', now);
     const fact = await seed('fact', new Date(now.getTime() - 1));
@@ -52,9 +60,7 @@ describe('lifecycle sweeper', () => {
     const future = await seed('fact', new Date(now.getTime() + 1));
     const decision = await seed('decision', new Date(now.getTime() - 1));
     const playbook = await seed('playbook', new Date(now.getTime() - 1));
-    await storeMemoryEmbeddingVector(
-      pool, context.memory.id, new Array(768).fill(0), { id: 'stub', dim: 768 },
-    );
+    await seedEmbeddingBeforeExpiry(context.memory.id, now);
 
     const result = await sweepLifecycleBatch(pool, { now, batchSize: 20 });
 
@@ -155,9 +161,7 @@ describe('lifecycle sweeper', () => {
 
   it('rolls back state and embedding deletion when an audit insert fails', async () => {
     const context = await seed('context', now);
-    await storeMemoryEmbeddingVector(
-      pool, context.memory.id, new Array(768).fill(0), { id: 'stub', dim: 768 },
-    );
+    await seedEmbeddingBeforeExpiry(context.memory.id, now);
     await pool.query(`
       CREATE OR REPLACE FUNCTION reject_lifecycle_audit() RETURNS trigger AS $$
       BEGIN

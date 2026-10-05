@@ -29,7 +29,10 @@ export async function storeMemoryEmbeddingVector(
     `INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
      SELECT m.id, $2, $3, $4::vector
        FROM memories m
-      WHERE m.id = $1 AND m.state = 'live'
+      WHERE m.id = $1
+        AND m.state = 'live'
+        AND (m.expires_at IS NULL OR m.expires_at > now())
+      FOR SHARE OF m
      ON CONFLICT (memory_id, provider, dim) DO UPDATE
        SET embedding = EXCLUDED.embedding,
            embedded_at = now()

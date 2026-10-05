@@ -42,9 +42,13 @@ function validateHostedEndpoint(endpoint: string): string {
   return endpoint;
 }
 
-function validateVectors(items: EmbeddingItem[], count: number, dim: number): number[][] {
+function validateVectors(items: unknown, count: number, dim: number): number[][] {
   if (!Array.isArray(items) || items.length !== count) throw invalidResponse('Provider returned invalid embedding count');
-  const indexed = items.map((item, position) => ({ ...item, index: item.index ?? position }));
+  if (items.some((item) => item === null || typeof item !== 'object' || Array.isArray(item))) {
+    throw invalidResponse('Provider returned an invalid embedding item');
+  }
+  const indexed = (items as EmbeddingItem[])
+    .map((item, position) => ({ ...item, index: item.index ?? position }));
   indexed.sort((a, b) => a.index! - b.index!);
   if (indexed.some((item, index) => item.index !== index)) throw invalidResponse('Provider returned invalid embedding indexes');
   return indexed.map((item) => {
@@ -104,10 +108,15 @@ abstract class HostedEmbeddingProvider implements EmbeddingProvider {
           );
         }
         if (!response.ok) throw await embeddingProviderHttpError(response, this.httpProvider);
-        let json: { data?: EmbeddingItem[] };
-        try { json = await response.json() as { data?: EmbeddingItem[] }; }
+        let json: unknown;
+        try { json = await response.json() as unknown; }
         catch (error) { throw invalidResponse('Embedding provider returned invalid JSON', error); }
-        return validateVectors(json.data ?? [], texts.length, this.dim);
+        if (json === null || typeof json !== 'object' || Array.isArray(json)) {
+          throw invalidResponse('Embedding provider returned an invalid response');
+        }
+        return validateVectors(
+          (json as { data?: unknown }).data ?? [], texts.length, this.dim,
+        );
       });
     } catch (error) {
       if (signal?.aborted) throw signal.reason ?? error;

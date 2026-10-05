@@ -168,7 +168,7 @@ async function runProvider(
   let destroyClient = false;
   let cursor: string | null = options.cursor ?? null;
   let wrapCursor = cursor !== null;
-  const wrapBoundary = cursor;
+  let wrapBoundary = cursor;
   let wrapped = false;
   let scanned = 0;
   let eligible = 0;
@@ -206,6 +206,7 @@ async function runProvider(
         );
         cursor = saved.rows[0]?.cursor ?? null;
         wrapCursor = cursor !== null;
+        wrapBoundary = cursor;
       }
     }
 

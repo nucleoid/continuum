@@ -59,7 +59,7 @@ describe('provider-qualified storage', () => {
     expect(sql).toContain('ON CONFLICT (memory_id, provider, dim)');
   });
 
-  it('only inserts or updates vectors while the memory is live', async () => {
+  it('locks the memory before writing and requires it to remain live and unexpired', async () => {
     const db = queryable();
     vi.mocked(db.query).mockResolvedValue({ rows: [], rowCount: 0 } as never);
 
@@ -69,6 +69,8 @@ describe('provider-qualified storage', () => {
 
     const [sql] = vi.mocked(db.query).mock.calls[0] as [string, unknown[]];
     expect(sql).toContain("m.state = 'live'");
+    expect(sql).toContain('m.expires_at IS NULL OR m.expires_at > now()');
+    expect(sql).toContain('FOR SHARE OF m');
     expect(sql).toContain('RETURNING memory_id');
   });
 });

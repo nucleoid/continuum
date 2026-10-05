@@ -37,6 +37,25 @@ describe('hosted embedding providers', () => {
   });
 
   it.each([
+    ['null response body', null],
+    ['null embedding item', { data: [null] }],
+  ])('classifies a malformed hosted %s as an invalid response', async (_label, body) => {
+    const provider = new OpenAIEmbeddingProvider({
+      apiKey: 'private-openai-key', model: 'm', dim: 2,
+      fetchImpl: vi.fn(async () => ({
+        ok: true, json: async () => body,
+      }) as Response),
+    });
+
+    const error = await provider.embed(['private input']).catch((cause: unknown) => cause as Error);
+    expect(error).toMatchObject({
+      code: 'EMBEDDING_INVALID_RESPONSE', failureScope: 'provider',
+    });
+    expect(error.message).not.toContain('private-openai-key');
+    expect(error.message).not.toContain('private input');
+  });
+
+  it.each([
     [401, 'EMBEDDING_AUTH'],
     [429, 'EMBEDDING_RATE_LIMIT'],
     [500, 'EMBEDDING_SERVER'],
