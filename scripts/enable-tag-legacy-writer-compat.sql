@@ -5,6 +5,7 @@
 BEGIN;
 
 SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
 LOCK TABLE memories IN EXCLUSIVE MODE;
 
 CREATE OR REPLACE FUNCTION enforce_memory_tag_vocabulary()
@@ -59,6 +60,14 @@ BEGIN
     INTO active_tags, legacy_tags
     FROM classified;
 
+  -- Current writers and promotion already provide canonical, unique tags.
+  -- Leaving those rows byte-for-byte unchanged preserves trusted migration
+  -- provenance and prevents this compatibility trigger from recursively
+  -- treating its own metadata as a new conflict on unrelated updates.
+  IF original_tags IS NOT DISTINCT FROM active_tags THEN
+    RETURN NEW;
+  END IF;
+
   NEW.tags := active_tags;
   NEW.metadata :=
     CASE
@@ -67,6 +76,7 @@ BEGIN
           - 'continuum_legacy_tags'
           - 'continuum_legacy_metadata'
           - 'continuum_tag_migration'
+          - 'continuum_tag_rollback_compat'
           - 'continuum_migration_conflicts'
       ELSE '{}'::jsonb
     END
@@ -77,13 +87,14 @@ BEGIN
       THEN jsonb_build_object('continuum_legacy_tags', legacy_tags)
       ELSE '{}'::jsonb END
     || jsonb_build_object(
-      'continuum_tag_migration',
+      'continuum_tag_rollback_compat',
       jsonb_build_object('version', 1, 'original_tags', to_jsonb(original_tags))
     )
     || CASE WHEN jsonb_typeof(original_metadata) = 'object' AND (
          original_metadata ? 'continuum_legacy_tags'
       OR original_metadata ? 'continuum_legacy_metadata'
       OR original_metadata ? 'continuum_tag_migration'
+      OR original_metadata ? 'continuum_tag_rollback_compat'
       OR original_metadata ? 'continuum_migration_conflicts'
     ) THEN jsonb_build_object(
       'continuum_migration_conflicts',
@@ -98,6 +109,10 @@ BEGIN
         || CASE WHEN original_metadata ? 'continuum_tag_migration'
           THEN jsonb_build_array(jsonb_build_object(
             'key', 'continuum_tag_migration', 'value', original_metadata->'continuum_tag_migration'))
+          ELSE '[]'::jsonb END
+        || CASE WHEN original_metadata ? 'continuum_tag_rollback_compat'
+          THEN jsonb_build_array(jsonb_build_object(
+            'key', 'continuum_tag_rollback_compat', 'value', original_metadata->'continuum_tag_rollback_compat'))
           ELSE '[]'::jsonb END
         || CASE WHEN original_metadata ? 'continuum_migration_conflicts'
           THEN jsonb_build_array(jsonb_build_object(

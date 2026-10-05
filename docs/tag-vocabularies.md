@@ -28,9 +28,10 @@ versioned `metadata.continuum_tag_migration` provenance marker. Non-object
 metadata inserted outside the application is preserved under
 `metadata.continuum_legacy_metadata`.
 
-All four migration namespaces (`continuum_legacy_tags`,
-`continuum_legacy_metadata`, `continuum_tag_migration`, and
-`continuum_migration_conflicts`) are reserved. If a historical row already
+All five migration namespaces (`continuum_legacy_tags`,
+`continuum_legacy_metadata`, `continuum_tag_migration`,
+`continuum_tag_rollback_compat`, and `continuum_migration_conflicts`) are
+reserved. If a historical row already
 used one, its exact value is moved to the ordered
 `continuum_migration_conflicts` array rather than being merged with or trusted
 as migration output. Capture, ingest, MCP, and supersession inputs cannot set
@@ -61,6 +62,8 @@ Use this mixed-version webhook rollout sequence:
 
 The migration's first statement sets a five-second `lock_timeout`, so waits on
 principal foreign-key dependencies as well as the later table lock are bounded.
+It also sets a 60-second `statement_timeout` before any DDL, bounding the full
+transaction and therefore the time the exclusive lock can remain held.
 It then takes an `EXCLUSIVE` lock on `memories` before one materialized,
 grouped/windowed scan rewrites changed rows and installs the database trigger
 in the same transaction. `EXCLUSIVE` drains
@@ -95,19 +98,51 @@ exact procedure:
      -f scripts/enable-tag-legacy-writer-compat.sql
    ```
 
+    In PowerShell, from that same package root, run:
+
+    ```powershell
+    psql "$env:CONTINUUM_DATABASE_URL" -v ON_ERROR_STOP=1 `
+      -f ".\scripts\enable-tag-legacy-writer-compat.sql"
+    ```
+
 3. Roll back every application instance, then resume webhook intake.
 4. Replay retained events with the original delivery identities and payloads.
 
 The rollback trigger applies to every source, including REST, MCP, webhook,
 supersession, promotion, and direct legacy database writers. It normalizes
 unique allowed tags, quarantines unknown and duplicate original values, records
-the exact original array with versioned provenance, and moves attempted
+the exact original array under distinct `continuum_tag_rollback_compat`
+provenance, and moves attempted
 reserved-namespace values into the conflict array. This is intentionally
 write-compatible rather than strict so no tagged write is silently dropped
 during rollback. It takes an `EXCLUSIVE` lock with the same five-second timeout,
-so reads continue and failure is atomic. A later forward application deployment
-may leave this compatibility trigger installed: current application validation
-remains strict before persistence, while the trigger protects legacy writers.
+so reads continue and failure is atomic. Canonical unique allowed tags return
+unchanged, preserving migration and promotion provenance on current-writer and
+unrelated legacy updates.
+
+### Forward deployment after rollback
+
+Compatibility mode must not remain the database boundary. To deploy the
+vocabulary-aware application again:
+
+1. Pause webhook intake and drain all memory writers.
+2. Deploy the vocabulary-aware application to every instance.
+3. From the installed package root, restore strict enforcement:
+
+   ```sh
+   psql "$CONTINUUM_DATABASE_URL" -v ON_ERROR_STOP=1 \
+     -f scripts/restore-tag-strict-enforcement.sql
+   ```
+
+   PowerShell:
+
+   ```powershell
+   psql "$env:CONTINUUM_DATABASE_URL" -v ON_ERROR_STOP=1 `
+     -f ".\scripts\restore-tag-strict-enforcement.sql"
+   ```
+
+4. Resume webhook intake and replay retained events with their original
+   identities and payloads.
 
 Legacy values remain private to each memory instead of entering the shared
 scope-kind vocabulary. Promotion deliberately copies source metadata,

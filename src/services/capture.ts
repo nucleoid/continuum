@@ -37,6 +37,7 @@ export const RESERVED_MEMORY_METADATA_KEYS = [
   'continuum_legacy_tags',
   'continuum_legacy_metadata',
   'continuum_tag_migration',
+  'continuum_tag_rollback_compat',
   'continuum_migration_conflicts',
 ] as const;
 

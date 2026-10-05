@@ -112,7 +112,7 @@ describe('tag vocabulary schema', () => {
           'fact', 'Plugin legacy', 'Keep plugin dimensions privately',
           '10000000-0000-4000-8000-000000000001', 'ado-workitem',
           ARRAY['ado', 'private-project', 'System.AreaPath=Secret Team'],
-          '{"continuum_legacy_tags":"pre-existing","continuum_legacy_metadata":{"forged":true},"continuum_tag_migration":{"version":999},"continuum_migration_conflicts":"forged","keep":"yes"}'::jsonb
+          '{"continuum_legacy_tags":"pre-existing","continuum_legacy_metadata":{"forged":true},"continuum_tag_migration":{"version":999},"continuum_tag_rollback_compat":{"version":999},"continuum_migration_conflicts":"forged","keep":"yes"}'::jsonb
         ), (
           '30000000-0000-4000-8000-000000000003',
           '20000000-0000-4000-8000-000000000001',
@@ -180,6 +180,7 @@ describe('tag vocabulary schema', () => {
               { key: 'continuum_legacy_tags', value: 'pre-existing' },
               { key: 'continuum_legacy_metadata', value: { forged: true } },
               { key: 'continuum_tag_migration', value: { version: 999 } },
+              { key: 'continuum_tag_rollback_compat', value: { version: 999 } },
               { key: 'continuum_migration_conflicts', value: 'forged' },
             ],
             keep: 'yes',

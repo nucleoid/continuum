@@ -1,6 +1,7 @@
 -- This must be the first migration statement: principal creation and other
 -- pre-lock DDL can otherwise wait indefinitely on principals/memories FKs.
 SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
 
 CREATE TABLE tag_vocabularies (
   scope_kind  TEXT NOT NULL CHECK (scope_kind IN ('org', 'team', 'project', 'user', 'role')),
@@ -83,6 +84,7 @@ WITH expanded AS MATERIALIZED (
                  - 'continuum_legacy_tags'
                  - 'continuum_legacy_metadata'
                  - 'continuum_tag_migration'
+                 - 'continuum_tag_rollback_compat'
                  - 'continuum_migration_conflicts'
              ELSE '{}'::jsonb
            END
@@ -100,6 +102,7 @@ WITH expanded AS MATERIALIZED (
                 original_metadata ? 'continuum_legacy_tags'
              OR original_metadata ? 'continuum_legacy_metadata'
              OR original_metadata ? 'continuum_tag_migration'
+             OR original_metadata ? 'continuum_tag_rollback_compat'
              OR original_metadata ? 'continuum_migration_conflicts'
            ) THEN jsonb_build_object(
              'continuum_migration_conflicts',
@@ -115,6 +118,10 @@ WITH expanded AS MATERIALIZED (
                  THEN jsonb_build_array(jsonb_build_object(
                    'key', 'continuum_tag_migration', 'value', original_metadata->'continuum_tag_migration'))
                  ELSE '[]'::jsonb END
+               || CASE WHEN original_metadata ? 'continuum_tag_rollback_compat'
+                 THEN jsonb_build_array(jsonb_build_object(
+                   'key', 'continuum_tag_rollback_compat', 'value', original_metadata->'continuum_tag_rollback_compat'))
+                 ELSE '[]'::jsonb END
                || CASE WHEN original_metadata ? 'continuum_migration_conflicts'
                  THEN jsonb_build_array(jsonb_build_object(
                    'key', 'continuum_migration_conflicts', 'value', original_metadata->'continuum_migration_conflicts'))
@@ -126,7 +133,8 @@ WITH expanded AS MATERIALIZED (
       OR jsonb_typeof(original_metadata) <> 'object'
       OR original_metadata ?| ARRAY[
         'continuum_legacy_tags', 'continuum_legacy_metadata',
-        'continuum_tag_migration', 'continuum_migration_conflicts'
+        'continuum_tag_migration', 'continuum_tag_rollback_compat',
+        'continuum_migration_conflicts'
       ]
 )
 UPDATE memories AS memory
