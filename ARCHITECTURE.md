@@ -332,11 +332,17 @@ indistinguishable, while a caller who can read the predecessor but lacks writer
 or admin membership receives a forbidden response. It locks the live
 predecessor, creates one linked decision in the same scope, archives the
 predecessor, and writes both audits in one transaction. The schema prevents
-self-links and branching. After commit, the archived embedding is removed and
-the new chain head is embedded. Recall and AGENTS.md serve only the live head
-and may expose its predecessor ID, never the archived content. Decision history
-is read-authorized, audited, cycle-safe, and returned oldest to newest with the
-current head ID.
+self-links and branching. Supersession stores Continuum-owned `related: []`
+metadata and rejects caller-supplied `metadata.related`; issue #15 relation
+candidates remain advisory and never authorize or trigger supersession. After
+commit, provider I/O embeds the new chain head outside the write transaction.
+The successor vector, archived-vector removal, and a bounded provider/status
+audit then commit together. Provider or vector-storage failure returns
+`EMBEDDING_FAILED`, writes a failed embedding audit, retains the archived vector
+for recovery, and leaves the live successor available to full-text recall.
+Recall and AGENTS.md serve only the live head and may expose its predecessor ID,
+never the archived content. Decision history is read-authorized, audited,
+cycle-safe, and returned oldest to newest with the current head ID.
 
 ### Transport error and audit contracts
 

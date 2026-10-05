@@ -6,6 +6,8 @@ import { createPrincipal } from '../storage/principals.js';
 import { createScope } from '../storage/scopes.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { decisionHistoryForPrincipal, supersedeForPrincipal } from './supersede.js';
+import { StubEmbeddingProvider } from '../embeddings/stub.js';
+import { storeMemoryEmbedding } from '../storage/embeddings.js';
 
 describe('decision history service', () => {
   let pool: pg.Pool;
@@ -115,5 +117,77 @@ describe('decision history service', () => {
       code: 'CONFLICT', status: 409, publicMessage: 'Decision is not live',
     });
     expect((await pool.query('SELECT 1 FROM audit_log')).rowCount).toBe(0);
+  });
+
+  it('durably records successor embedding failure and retains the archived vector', async () => {
+    const scope = await createScope(pool, { kind: 'project', name: 'embedding-failure' });
+    await addMembership(pool, author.id, scope.id, 'writer');
+    const predecessor = await createMemory(pool, {
+      scopeId: scope.id, scopeKind: scope.kind, type: 'decision', title: 'Original',
+      body: 'Original body', authorId: author.id, source: 'manual',
+    });
+    await storeMemoryEmbedding(pool, predecessor.id, 'original vector', new StubEmbeddingProvider());
+    const provider = {
+      id: 'failing-provider', dim: 768,
+      async embed(): Promise<number[][]> { throw new Error('deterministic provider failure'); },
+    };
+
+    const result = await supersedeForPrincipal(pool, provider, author, {
+      supersededId: predecessor.id, title: 'Replacement', body: 'Replacement body',
+    });
+
+    expect(result).toMatchObject({ embedded: false, embedErrorCode: 'EMBEDDING_FAILED' });
+    expect((await pool.query(
+      'SELECT memory_id FROM memory_embeddings ORDER BY memory_id',
+    )).rows).toEqual([{ memory_id: predecessor.id }]);
+    const embeddingAudit = await pool.query(
+      `SELECT memory_id, metadata FROM audit_log
+        WHERE metadata->>'record_kind' = 'embedding'`,
+    );
+    expect(embeddingAudit.rows).toEqual([{
+      memory_id: result.successor.id,
+      metadata: expect.objectContaining({
+        embedded: false,
+        embedding_error_code: 'EMBEDDING_FAILED',
+        embedding: { provider: 'failing-provider', dim: 768, status: 'failed' },
+      }),
+    }]);
+  });
+
+  it('stores Continuum-owned empty related metadata and rejects caller forgery', async () => {
+    const scope = await createScope(pool, { kind: 'project', name: 'related-contract' });
+    await addMembership(pool, author.id, scope.id, 'writer');
+    const predecessor = await createMemory(pool, {
+      scopeId: scope.id, scopeKind: scope.kind, type: 'decision', title: 'Original',
+      body: 'Original body', authorId: author.id, source: 'manual',
+    });
+
+    await expect(supersedeForPrincipal(pool, null, author, {
+      supersededId: predecessor.id, title: 'Forged', body: 'Forged body',
+      metadata: { related: [{ id: 'forged' }] },
+    })).rejects.toMatchObject({
+      code: 'INVALID_INPUT', publicMessage: 'metadata.related is reserved by Continuum',
+    });
+
+    const result = await supersedeForPrincipal(pool, null, author, {
+      supersededId: predecessor.id, title: 'Replacement', body: 'Replacement body',
+      metadata: { reason: 'latency' },
+    });
+    expect(result.successor.metadata).toEqual({ reason: 'latency', related: [] });
+  });
+
+  it('maps pool connection outages to dependency unavailable', async () => {
+    const unavailablePool = {
+      connect: async () => { throw new Error('database offline'); },
+    } as unknown as pg.Pool;
+    const input = {
+      supersededId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      title: 'Replacement', body: 'Replacement body',
+    };
+
+    await expect(supersedeForPrincipal(unavailablePool, null, author, input))
+      .rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE', status: 503 });
+    await expect(decisionHistoryForPrincipal(unavailablePool, author, input.supersededId))
+      .rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE', status: 503 });
   });
 });

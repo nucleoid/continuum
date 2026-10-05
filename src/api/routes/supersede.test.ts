@@ -107,6 +107,13 @@ describe('decision supersession REST API', () => {
     expect(response.body.embedded).toBe(true);
     const embeddings = await pool.query('SELECT memory_id FROM memory_embeddings ORDER BY memory_id');
     expect(embeddings.rows).toEqual([{ memory_id: response.body.successorId }]);
+    const embeddingAudit = await pool.query(
+      `SELECT metadata FROM audit_log WHERE metadata->>'record_kind' = 'embedding'`,
+    );
+    expect(embeddingAudit.rows[0].metadata).toMatchObject({
+      embedded: true,
+      embedding: { provider: provider.id, dim: provider.dim, status: 'succeeded' },
+    });
   });
 
   it('returns history oldest-to-newest from any chain member', async () => {

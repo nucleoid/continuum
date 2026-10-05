@@ -34,7 +34,18 @@ BEGIN
   END IF;
 END $$;
 
-ALTER TABLE memories ADD CONSTRAINT memories_supersedes_not_self
-  CHECK (supersedes_id IS NULL OR supersedes_id <> id);
-CREATE UNIQUE INDEX memories_supersedes_unique_idx ON memories (supersedes_id)
-  WHERE supersedes_id IS NOT NULL;
+-- Preview deployments may already have the constraint from the superseded
+-- 0005 migration name. Keep their upgrade path idempotent while fresh installs
+-- add it without scanning the table under the stronger ADD CONSTRAINT lock.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conrelid = 'memories'::regclass
+       AND conname = 'memories_supersedes_not_self'
+  ) THEN
+    ALTER TABLE memories ADD CONSTRAINT memories_supersedes_not_self
+      CHECK (supersedes_id IS NULL OR supersedes_id <> id) NOT VALID;
+  END IF;
+END $$;
+ALTER TABLE memories VALIDATE CONSTRAINT memories_supersedes_not_self;

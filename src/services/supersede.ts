@@ -1,12 +1,17 @@
 import type pg from 'pg';
 import { asEmbeddingRouter, type EmbeddingRouting } from '../embeddings/router.js';
+import type { EmbeddingProvider } from '../embeddings/provider.js';
 import type { Memory, Principal } from '../types.js';
 import { validateCaptureContent } from './capture.js';
-import { asServiceError, ServiceError } from './errors.js';
-import { getScope } from '../storage/scopes.js';
+import { asServiceError, dependencyUnavailable, ServiceError } from './errors.js';
 import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
-import { getDecisionHistory, supersedeDecision, SupersedeStorageError } from '../storage/supersede.js';
-import { recordRead as recordReadAudit } from '../audit/log.js';
+import {
+  getDecisionHistory,
+  supersedeDecision,
+  SupersedeStorageError,
+  type SupersedeWriteResult,
+} from '../storage/supersede.js';
+import { record as recordAudit, recordRead as recordReadAudit } from '../audit/log.js';
 
 export interface SupersedeInput {
   supersededId: string; title: string; body: string; tags?: string[]; source?: string;
@@ -25,6 +30,77 @@ function mapStorageError(error: SupersedeStorageError): ServiceError {
     case 'successor_exists': return new ServiceError('CONFLICT', 'Decision has already been superseded', {
       details: error.successorId ? { successorId: error.successorId } : undefined,
     });
+    case 'dependency_unavailable': return dependencyUnavailable(error);
+  }
+}
+
+async function recordEmbeddingOutcome(
+  queryable: pg.Pool | pg.PoolClient,
+  result: SupersedeWriteResult,
+  provider: Pick<EmbeddingProvider, 'id' | 'dim'>,
+  status: 'succeeded' | 'failed',
+): Promise<void> {
+  await recordAudit(queryable, {
+    principalId: result.successor.authorId,
+    action: 'write',
+    memoryId: result.successor.id,
+    scopeId: result.successor.scopeId,
+    metadata: {
+      record_kind: 'embedding',
+      source: result.successor.source,
+      type: result.successor.type,
+      embedded: status === 'succeeded',
+      embedding: { provider: provider.id, dim: provider.dim, status },
+      ...(status === 'failed' ? { embedding_error_code: 'EMBEDDING_FAILED' } : {}),
+    },
+  });
+}
+
+async function embedSuccessor(
+  pool: pg.Pool,
+  embeddingRouting: EmbeddingRouting,
+  result: SupersedeWriteResult,
+): Promise<{ embedded: boolean; embedErrorCode?: 'EMBEDDING_FAILED' }> {
+  const provider = asEmbeddingRouter(embeddingRouting).resolve({
+    kind: result.scope.kind,
+    name: result.scope.name,
+  }).provider;
+  if (!provider) return { embedded: false };
+
+  let vector: number[];
+  try {
+    [vector] = await provider.embed([
+      `${result.successor.title}\n\n${result.successor.body}`,
+    ]);
+  } catch {
+    await recordEmbeddingOutcome(pool, result, provider, 'failed');
+    return { embedded: false, embedErrorCode: 'EMBEDDING_FAILED' };
+  }
+
+  let client: pg.PoolClient;
+  try {
+    client = await pool.connect();
+  } catch (error) {
+    throw dependencyUnavailable(error);
+  }
+  let destroyClient = false;
+  try {
+    await client.query('BEGIN');
+    await storeMemoryEmbeddingVector(client, result.successor.id, vector, provider);
+    await client.query('DELETE FROM memory_embeddings WHERE memory_id = $1', [result.predecessor.id]);
+    await recordEmbeddingOutcome(client, result, provider, 'succeeded');
+    await client.query('COMMIT');
+    return { embedded: true };
+  } catch {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      destroyClient = true;
+    }
+    await recordEmbeddingOutcome(pool, result, provider, 'failed');
+    return { embedded: false, embedErrorCode: 'EMBEDDING_FAILED' };
+  } finally {
+    client.release(destroyClient);
   }
 }
 
@@ -42,22 +118,8 @@ export async function supersedeForPrincipal(
       if (error instanceof SupersedeStorageError) throw mapStorageError(error);
       throw error;
     }
-    let embedded = false;
-    let embedErrorCode: 'EMBEDDING_FAILED' | undefined;
-    try {
-      await pool.query('DELETE FROM memory_embeddings WHERE memory_id = $1', [result.predecessor.id]);
-      const scope = await getScope(pool, result.successor.scopeId);
-      if (!scope) throw new Error('superseded decision scope no longer exists');
-      const provider = asEmbeddingRouter(embeddingRouting).resolve({
-        kind: scope.kind, name: scope.name,
-      }).provider;
-      if (provider) {
-        const [vector] = await provider.embed([`${input.title}\n\n${input.body}`]);
-        await storeMemoryEmbeddingVector(pool, result.successor.id, vector, provider);
-        embedded = true;
-      }
-    } catch { embedErrorCode = 'EMBEDDING_FAILED'; }
-    return { ...result, embedded, ...(embedErrorCode ? { embedErrorCode } : {}) };
+    const embedding = await embedSuccessor(pool, embeddingRouting, result);
+    return { predecessor: result.predecessor, successor: result.successor, ...embedding };
   } catch (error) { throw asServiceError(error); }
 }
 
@@ -94,6 +156,7 @@ export async function decisionHistoryForPrincipal(
     if (client) {
       try { await client.query('ROLLBACK'); } catch { destroyClient = true; }
     }
+    if (!client) throw dependencyUnavailable(error);
     throw asServiceError(error);
   } finally {
     client?.release(destroyClient);

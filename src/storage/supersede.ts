@@ -1,5 +1,5 @@
 import type pg from 'pg';
-import type { Memory } from '../types.js';
+import type { Memory, Scope } from '../types.js';
 import { record as recordAudit } from '../audit/log.js';
 import { canMutateScope } from '../scopes/access.js';
 import { createMemory } from './memories.js';
@@ -9,7 +9,7 @@ import { getScope } from './scopes.js';
 
 export class SupersedeStorageError extends Error {
   constructor(
-    readonly kind: 'not_found' | 'forbidden' | 'not_decision' | 'not_live' | 'successor_exists',
+    readonly kind: 'not_found' | 'forbidden' | 'not_decision' | 'not_live' | 'successor_exists' | 'dependency_unavailable',
     readonly successorId?: string,
   ) { super(kind); this.name = 'SupersedeStorageError'; }
 }
@@ -26,10 +26,15 @@ export interface SupersedeWriteInput {
   auditMetadata?: Record<string, unknown>;
 }
 
-export interface SupersedeWriteResult { predecessor: Memory; successor: Memory; }
+export interface SupersedeWriteResult { predecessor: Memory; successor: Memory; scope: Scope; }
 
 export async function supersedeDecision(pool: pg.Pool, input: SupersedeWriteInput): Promise<SupersedeWriteResult> {
-  const client = await pool.connect();
+  let client: pg.PoolClient;
+  try {
+    client = await pool.connect();
+  } catch {
+    throw new SupersedeStorageError('dependency_unavailable');
+  }
   let destroy = false;
   try {
     await client.query('BEGIN');
@@ -73,7 +78,8 @@ async function supersedeInTransaction(client: pg.PoolClient, input: SupersedeWri
   const successor = await createMemory(client, {
     scopeId: scope.id, scopeKind: scope.kind, type: 'decision', title: input.title,
     body: input.body, authorId: input.principalId, source: input.source,
-    sourceRef: input.sourceRef, tags: input.tags, metadata: input.metadata,
+    sourceRef: input.sourceRef, tags: input.tags,
+    metadata: { ...input.metadata, related: [] },
     supersedesId: predecessor.id,
   });
   const archived = await client.query(
@@ -84,13 +90,19 @@ async function supersedeInTransaction(client: pg.PoolClient, input: SupersedeWri
   if (!archived.rows[0]) throw new SupersedeStorageError('not_live');
   await recordAudit(client, {
     principalId: input.principalId, action: 'write', memoryId: successor.id, scopeId: scope.id,
-    metadata: { source: input.source, type: 'decision', supersedes_id: predecessor.id, ...input.auditMetadata },
+    metadata: {
+      source: input.source,
+      type: 'decision',
+      supersedes_id: predecessor.id,
+      embedded: false,
+      ...input.auditMetadata,
+    },
   });
   await recordAudit(client, {
     principalId: input.principalId, action: 'archive', memoryId: predecessor.id, scopeId: scope.id,
     metadata: { successor_id: successor.id, ...input.auditMetadata },
   });
-  return { predecessor: rowToMemory(archived.rows[0]), successor };
+  return { predecessor: rowToMemory(archived.rows[0]), successor, scope };
 }
 
 export async function getDecisionHistory(
