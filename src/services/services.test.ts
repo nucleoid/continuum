@@ -20,6 +20,7 @@ import {
 } from './lifecycle.js';
 import { ensureScopeForPrincipal } from './scopes.js';
 import { standupForPrincipal } from './standup.js';
+import { mapActorIdentity } from '../storage/actor-identities.js';
 
 describe('shared services', () => {
   let pool: pg.Pool;
@@ -1065,7 +1066,18 @@ describe('shared services', () => {
   it('preserves trusted standup activity at its original time and strips forged legacy metadata', async () => {
     const { principal, team } = await seedWriter();
     const project = await createScope(pool, { kind: 'project', name: 'promotion-activity' });
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    await addMembership(pool, principal.id, org!.id, 'admin');
     await addMembership(pool, principal.id, project.id, 'writer');
+    await mapActorIdentity(pool, {
+      authority: 'terminal-summary.producer', externalActorId: 'promotion-actor',
+      principalId: principal.id, mappedByPrincipalId: principal.id,
+    });
+    const mapping = await pool.query<{ mapping_id: string }>(
+      `SELECT mapping_id FROM actor_principal_mappings
+        WHERE authority = 'terminal-summary.producer' AND external_actor_id = 'promotion-actor'`,
+    );
+    const mappingId = mapping.rows[0]!.mapping_id;
     const source = await createMemory(pool, {
       scopeId: team.id, scopeKind: team.kind, type: 'context', title: 'Old activity',
       body: 'Promotion is knowledge movement, not a new activity event.',
@@ -1075,7 +1087,7 @@ describe('shared services', () => {
         thread_owner_principal_id: principal.id, thread_key: 'terminal:old',
         closes_thread_keys: ['terminal:older'],
         _continuum_activity_provenance: 'capture-v1',
-        _continuum_actor_mapping_id: '11111111-1111-4111-8111-111111111111',
+        _continuum_actor_mapping_id: mappingId,
         _continuum_actor_mapping_authority: 'terminal-summary.producer',
       },
     });
@@ -1096,7 +1108,7 @@ describe('shared services', () => {
       closes_thread_keys: ['terminal:older'],
       _continuum_activity_provenance: 'capture-v1',
       _continuum_activity_epoch_ms: activityAt.getTime(),
-      _continuum_actor_mapping_id: '11111111-1111-4111-8111-111111111111',
+      _continuum_actor_mapping_id: mappingId,
       _continuum_actor_mapping_authority: 'terminal-summary.producer',
     });
     const standup = await standupForPrincipal(pool, principal, { sinceHours: 24 }, {

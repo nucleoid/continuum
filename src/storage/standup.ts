@@ -42,9 +42,27 @@ function mapRow(row: StandupRow): StandupMemory {
   };
 }
 
+function mappingStillAuthorizes(alias: string): string {
+  return `(
+    (
+      NOT ${alias}.metadata ? '_continuum_actor_mapping_id'
+      AND NOT ${alias}.metadata ? '_continuum_actor_mapping_authority'
+    )
+    OR EXISTS (
+      SELECT 1
+        FROM actor_principal_mappings mapping
+       WHERE mapping.mapping_id::text = ${alias}.metadata->>'_continuum_actor_mapping_id'
+         AND mapping.authority = ${alias}.metadata->>'_continuum_actor_mapping_authority'
+         AND mapping.principal_id::text = ${alias}.metadata->>'actor_principal_id'
+         AND mapping.revoked_at IS NULL
+    )
+  )`;
+}
+
 const AUTHORIZED_ACTIVITY = `
   m.metadata->>'_continuum_activity_provenance' = 'capture-v1'
   AND m.metadata->>'actor_principal_id' = $1::text
+  AND ${mappingStillAuthorizes('m')}
   AND (
     (s.kind = 'user' AND s.owner_principal_id = $1::uuid)
     OR (s.kind = 'project' AND EXISTS (
@@ -126,6 +144,7 @@ export async function listOpenStandupThreads(
         AND m.type = 'context' AND m.state = 'live'
         AND (m.expires_at IS NULL OR m.expires_at > now())
         AND m.metadata ? 'thread_key' AND m.metadata ? 'actor'
+        AND ${mappingStillAuthorizes('m')}
         AND ${activityAt('m')} < $2 AND ${activityAt('m')} >= $3
         AND NOT EXISTS (
           SELECT 1
@@ -141,6 +160,7 @@ export async function listOpenStandupThreads(
              AND ${activityAt('closing')} >= ${activityAt('m')}
              AND ${activityAt('closing')} < $4
              AND closing.metadata->>'_continuum_activity_provenance' = 'capture-v1'
+             AND ${mappingStillAuthorizes('closing')}
              AND (
                (closing_scope.kind = 'user' AND closing_scope.owner_principal_id = $1::uuid)
                OR (closing_scope.kind = 'project' AND EXISTS (
