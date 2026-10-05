@@ -125,13 +125,15 @@ export async function runMigrations(
 
   try {
     const unlockError = cleanupErrors[0];
+    const lockError = !lockAcquired && runFailed ? runError : undefined;
+    const releaseError = unlockError ?? lockError;
     client.release(
-      unlockError instanceof Error
-        ? unlockError
-        : unlockError === undefined
+      releaseError instanceof Error
+        ? releaseError
+        : releaseError === undefined
           ? undefined
-          : new Error('Migration advisory lock cleanup failed', {
-              cause: unlockError,
+          : new Error('Migration advisory lock connection is unsafe', {
+              cause: releaseError,
             }),
     );
   } catch (error) {

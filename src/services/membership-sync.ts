@@ -128,7 +128,9 @@ export async function provisionEntraGroupBinding(
          approved_at = now(),
          approval_revoked_by = NULL,
          approval_revoked_at = NULL,
-         deactivated_at = NULL`,
+         deactivated_at = NULL,
+         quarantined_at = NULL,
+         quarantine_reason = NULL`,
       [externalId, displayName, scopeId, input.role, actor.id],
     );
     await client.query(
@@ -231,6 +233,7 @@ async function quarantineBinding(
   client: pg.PoolClient,
   externalId: string,
   result: MembershipSyncResult,
+  reason: string,
 ): Promise<number> {
   const memberships = await client.query(
     `UPDATE scope_memberships
@@ -249,6 +252,12 @@ async function quarantineBinding(
     [externalId],
   );
   result.groupsDeactivated += group.rowCount ?? 0;
+  await client.query(
+    `UPDATE entra_groups
+        SET quarantined_at = COALESCE(quarantined_at, now()), quarantine_reason = $2
+      WHERE external_id = $1`,
+    [externalId, reason],
+  );
   return count;
 }
 
@@ -281,6 +290,7 @@ interface BindingRow {
   role: MembershipRole;
   active: boolean;
   approval_revoked_at: Date | null;
+  quarantined_at: Date | null;
 }
 
 interface PreparedSnapshot {
@@ -352,11 +362,19 @@ export async function syncEntraMemberships(
   let transactionOpen = false;
   let authoritativePhase = false;
   let durableQuarantine = result;
+  let lockAcquired = false;
+  let primaryError: unknown;
   try {
     await client.query('SELECT pg_advisory_lock($1::bigint)', [SYNC_LOCK_ID]);
-    if (normalizedSnapshots.length > MAX_SYNC_GROUPS) {
+    lockAcquired = true;
+    let membershipResults = 0;
+    const exceedsMembershipLimit = normalizedSnapshots.some((snapshot) => {
+      membershipResults += Array.isArray(snapshot.memberObjectIds) ? snapshot.memberObjectIds.length : 0;
+      return membershipResults > MAX_SYNC_MEMBERSHIPS;
+    });
+    if (normalizedSnapshots.length > MAX_SYNC_GROUPS || exceedsMembershipLimit) {
       await rejectOversizedSnapshot(client, actor);
-      throw new ServiceError('PAYLOAD_TOO_LARGE', 'too many Entra group results');
+      throw new ServiceError('PAYLOAD_TOO_LARGE', 'Entra snapshot exceeds the whole-run limit');
     }
 
     // Commit input-driven quarantines before applying authoritative changes.
@@ -365,7 +383,7 @@ export async function syncEntraMemberships(
     transactionOpen = true;
     await requireOrgAdmin(client, actor.id);
     const bindings = await client.query<BindingRow>(
-      `SELECT external_id, scope_id, role, active, approval_revoked_at FROM entra_groups
+      `SELECT external_id, scope_id, role, active, approval_revoked_at, quarantined_at FROM entra_groups
         WHERE approved_by IS NOT NULL ORDER BY external_id FOR UPDATE`,
     );
     const byId = new Map(bindings.rows.map((row) => [row.external_id, row]));
@@ -373,10 +391,8 @@ export async function syncEntraMemberships(
     for (const snapshot of normalizedSnapshots) {
       if (UUID.test(snapshot.id)) idCounts.set(snapshot.id, (idCounts.get(snapshot.id) ?? 0) + 1);
     }
-    const duplicateReported = new Set<string>();
     const quarantined = new Set<string>();
     const prepared: PreparedSnapshot[] = [];
-    let total = 0;
     const definitiveMissing: string[] = [];
 
     for (const snapshot of normalizedSnapshots) {
@@ -386,31 +402,32 @@ export async function syncEntraMemberships(
       }
       const binding = byId.get(snapshot.id);
       if ((idCounts.get(snapshot.id) ?? 0) > 1) {
-        if (duplicateReported.has(snapshot.id)) skip(result, 'DUPLICATE_GROUP_ID');
-        else duplicateReported.add(snapshot.id);
+        skip(result, 'DUPLICATE_GROUP_ID');
         if (binding && !binding.approval_revoked_at && !quarantined.has(snapshot.id)) {
-          await quarantineBinding(client, snapshot.id, result);
+          await quarantineBinding(client, snapshot.id, result, 'DUPLICATE_GROUP_ID');
           quarantined.add(snapshot.id);
         }
         continue;
       }
       if (!binding) { skip(result, 'UNBOUND_GROUP'); continue; }
       if (binding.approval_revoked_at) { skip(result, 'REVOKED_GROUP'); continue; }
+      if (binding.quarantined_at) { skip(result, 'QUARANTINED_GROUP'); continue; }
       if (snapshot.status === 'invalid') {
-        skip(result, snapshot.errorCode ?? 'INVALID_GROUP');
-        await quarantineBinding(client, snapshot.id, result);
+        const code = snapshot.errorCode ?? 'INVALID_GROUP';
+        skip(result, code);
+        await quarantineBinding(client, snapshot.id, result, code);
         continue;
       }
       if (snapshot.status === 'missing') { definitiveMissing.push(snapshot.id); continue; }
       if (typeof snapshot.displayName !== 'string' || snapshot.displayName.length > 256
         || !Array.isArray(snapshot.memberObjectIds)) {
         skip(result, 'MALFORMED_GROUP');
-        await quarantineBinding(client, snapshot.id, result);
+        await quarantineBinding(client, snapshot.id, result, 'MALFORMED_GROUP');
         continue;
       }
       if (snapshot.memberObjectIds.length > MAX_GROUP_MEMBERS) {
         skip(result, 'GROUP_TOO_LARGE');
-        await quarantineBinding(client, snapshot.id, result);
+        await quarantineBinding(client, snapshot.id, result, 'GROUP_TOO_LARGE');
         continue;
       }
       const unique = new Set<string>();
@@ -419,12 +436,11 @@ export async function syncEntraMemberships(
         if (!UUID.test(memberId) || unique.has(memberId)) { malformed = true; break; }
         unique.add(memberId);
       }
-      if (malformed || total + unique.size > MAX_SYNC_MEMBERSHIPS) {
-        skip(result, malformed ? 'MALFORMED_MEMBERS' : 'SNAPSHOT_TOO_LARGE');
-        await quarantineBinding(client, snapshot.id, result);
+      if (malformed) {
+        skip(result, 'MALFORMED_MEMBERS');
+        await quarantineBinding(client, snapshot.id, result, 'MALFORMED_MEMBERS');
         continue;
       }
-      total += unique.size;
       prepared.push({
         snapshot: { ...snapshot, displayName: snapshot.displayName, memberObjectIds: [...unique] },
         binding,
@@ -447,7 +463,7 @@ export async function syncEntraMemberships(
     transactionOpen = true;
     await requireOrgAdmin(client, actor.id);
     const currentBindings = await client.query<BindingRow>(
-      `SELECT external_id, scope_id, role, active, approval_revoked_at FROM entra_groups
+      `SELECT external_id, scope_id, role, active, approval_revoked_at, quarantined_at FROM entra_groups
         WHERE approved_by IS NOT NULL ORDER BY external_id FOR UPDATE`,
     );
     const currentById = new Map(currentBindings.rows.map((row) => [row.external_id, row]));
@@ -460,11 +476,12 @@ export async function syncEntraMemberships(
     for (const candidate of prepared) {
       const { snapshot } = candidate;
       const binding = currentById.get(snapshot.id);
-      if (!binding || binding.approval_revoked_at || quarantined.has(snapshot.id)) continue;
+      if (!binding || binding.approval_revoked_at || binding.quarantined_at
+        || quarantined.has(snapshot.id)) continue;
       const reactivated = await client.query(
         `UPDATE entra_groups SET display_name = $2, last_seen_at = now(), active = TRUE,
                                  deactivated_at = NULL
-          WHERE external_id = $1`,
+          WHERE external_id = $1 AND quarantined_at IS NULL`,
         [snapshot.id, snapshot.displayName],
       );
       if (!candidate.binding.active && reactivated.rowCount) result.groupsReactivated += 1;
@@ -500,7 +517,8 @@ export async function syncEntraMemberships(
       authoritativeDeactivations += removed;
     }
 
-    const activeCount = currentBindings.rows.filter((row) => row.active && !row.approval_revoked_at).length;
+    const activeCount = currentBindings.rows.filter((row) => row.active
+      && !row.approval_revoked_at && !row.quarantined_at).length;
     const missingActive = definitiveMissing.filter((id) => currentById.get(id)?.active);
     const deactivationPercent = activeCount === 0 ? 0 : (missingActive.length * 100) / activeCount;
     if (missingActive.length > 0 && deactivationPercent > maxPercent
@@ -554,14 +572,38 @@ export async function syncEntraMemberships(
     transactionOpen = false;
     return result;
   } catch (error) {
-    if (transactionOpen) {
-      await client.query('ROLLBACK');
-      transactionOpen = false;
-      if (authoritativePhase) await auditRejectedSync(client, actor, error, durableQuarantine);
+    try {
+      if (transactionOpen) {
+        await client.query('ROLLBACK');
+        transactionOpen = false;
+        if (authoritativePhase) await auditRejectedSync(client, actor, error, durableQuarantine);
+      }
+      primaryError = error;
+      throw error;
+    } catch (handledError) {
+      primaryError = handledError;
+      throw handledError;
     }
-    throw error;
   } finally {
-    try { await client.query('SELECT pg_advisory_unlock($1::bigint)', [SYNC_LOCK_ID]); }
-    finally { client.release(); }
+    let cleanupError: unknown;
+    if (lockAcquired) {
+      try {
+        const unlocked = await client.query<{ unlocked: boolean }>(
+          'SELECT pg_advisory_unlock($1::bigint) AS unlocked', [SYNC_LOCK_ID],
+        );
+        if (unlocked.rows[0]?.unlocked !== true) {
+          throw new Error('Entra membership sync advisory lock was not held');
+        }
+      } catch (error) { cleanupError = error; }
+    }
+    const unsafe = cleanupError ?? (!lockAcquired ? primaryError : undefined);
+    client.release(unsafe instanceof Error ? unsafe
+      : unsafe === undefined ? undefined : new Error('Membership sync connection is unsafe', { cause: unsafe }));
+    if (cleanupError !== undefined) {
+      if (primaryError !== undefined) {
+        throw new AggregateError([primaryError, cleanupError], 'Membership sync failed and lock cleanup failed');
+      }
+      throw cleanupError;
+    }
   }
 }

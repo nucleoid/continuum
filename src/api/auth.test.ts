@@ -12,7 +12,7 @@ import { getScopeByRef } from '../storage/scopes.js';
 describe('authentication configuration and Entra claims', () => {
   let pool: pg.Pool;
   const contract = {
-    tenant: '22222222-2222-4222-8222-222222222222',
+    tenant: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
     userScope: 'Continuum.User', serviceAppRole: 'Continuum.Service',
     allowedClientIds: ['44444444-4444-4444-8444-444444444444'],
   };
@@ -26,7 +26,7 @@ describe('authentication configuration and Entra claims', () => {
       CONTINUUM_ENTRA_TENANT: contract.tenant, CONTINUUM_ENTRA_AUDIENCE: 'api',
     })).toThrow(/user scope/);
     expect(entraConfigFromEnv({
-      CONTINUUM_ENTRA_TENANT: contract.tenant,
+      CONTINUUM_ENTRA_TENANT: contract.tenant.toUpperCase(),
       CONTINUUM_ENTRA_AUDIENCE: 'api://continuum',
       CONTINUUM_ENTRA_USER_SCOPE: contract.userScope,
       CONTINUUM_ENTRA_SERVICE_APP_ROLE: contract.serviceAppRole,

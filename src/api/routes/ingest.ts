@@ -7,6 +7,7 @@ import { defaultCaptureRegistry } from '../../capture/index.js';
 import type { CaptureContext, CaptureRegistry } from '../../capture/plugin.js';
 import type { CaptureInput } from '../../types.js';
 import { authenticateIngest } from '../../ingest/auth.js';
+import type { Authenticator } from '../auth.js';
 import type { IngestConfig, IngestPluginId } from '../../ingest/config.js';
 import { ServiceError } from '../../services/errors.js';
 import { captureOne, embedCapturedMemory } from '../../services/capture.js';
@@ -164,6 +165,7 @@ export function ingestRouter(
   config: IngestConfig,
   registry: CaptureRegistry = defaultCaptureRegistry(),
   relationThreshold = DEFAULT_RELATION_THRESHOLD,
+  authenticator?: Authenticator,
 ): Router {
   const router = Router();
   router.post('/ingest/:pluginId', async (req, res) => {
@@ -173,7 +175,7 @@ export function ingestRouter(
       throw new ServiceError('NOT_FOUND', 'Ingestion plugin not found');
     }
 
-    const principal = await authenticateIngest(pool, req, pluginConfig);
+    const principal = await authenticateIngest(pool, req, pluginConfig, pluginId, authenticator);
     req.principal = principal;
     const parsed = schemas[pluginId].safeParse(req.body);
     if (!parsed.success) throw new ServiceError('INVALID_INPUT', 'Invalid webhook payload');

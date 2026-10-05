@@ -1,11 +1,11 @@
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type pg from 'pg';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { createPrincipal } from '../storage/principals.js';
 import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { addMembership, hasRole, removeMembership } from '../storage/memberships.js';
 import {
-  listBoundEntraGroupIds, MAX_SYNC_GROUPS, provisionEntraGroupBinding,
+  listBoundEntraGroupIds, MAX_SYNC_GROUPS, MAX_SYNC_MEMBERSHIPS, provisionEntraGroupBinding,
   revokeEntraGroupBinding, syncEntraMemberships,
 } from './membership-sync.js';
 
@@ -258,7 +258,7 @@ describe('Entra membership sync', () => {
       { id: lower, status: 'present', displayName: 'canonical', memberObjectIds: [user.externalId] },
       { id: lower.toUpperCase(), status: 'present', displayName: 'canonical', memberObjectIds: [user.externalId] },
     ]);
-    expect(duplicate).toMatchObject({ groupsSeen: 0, skipCodes: { DUPLICATE_GROUP_ID: 1 } });
+    expect(duplicate).toMatchObject({ groupsSeen: 0, skipCodes: { DUPLICATE_GROUP_ID: 2 } });
     expect(await hasRole(pool, user.id, alpha.id, 'reader')).toBe(false);
   });
 
@@ -501,10 +501,99 @@ describe('Entra membership sync', () => {
 
     const result = await syncEntraMemberships(pool, admin, [snapshot, snapshot]);
     expect(result).toMatchObject({
-      groupsSeen: 0, groupsSkipped: 1, membershipsDeactivated: 1,
-      skipCodes: { DUPLICATE_GROUP_ID: 1 },
+      groupsSeen: 0, groupsSkipped: 2, membershipsDeactivated: 1,
+      skipCodes: { DUPLICATE_GROUP_ID: 2 },
     });
     expect(await hasRole(pool, user.id, alpha.id, 'reader')).toBe(false);
+  });
+
+  it('keeps an invalid-input quarantine inactive until an administrator explicitly reprovisions it', async () => {
+    const alpha = await createScope(pool, { kind: 'team', name: 'quarantine' });
+    const user = await createPrincipal(pool, {
+      externalId: '11111111-1111-4111-8111-111111111111', kind: 'user', displayName: 'User',
+    });
+    const groupId = '22222222-2222-4222-8222-222222222222';
+    await provisionEntraGroupBinding(pool, admin, { externalId: groupId, scopeId: alpha.id, role: 'reader' });
+    await syncEntraMemberships(pool, admin, [{
+      id: groupId, status: 'invalid', errorCode: 'MALFORMED_GROUP',
+    }]);
+
+    const returned = await syncEntraMemberships(pool, admin, [{
+      id: groupId, status: 'present', displayName: 'valid-again', memberObjectIds: [user.externalId],
+    }]);
+    expect(returned).toMatchObject({
+      groupsSeen: 0, groupsSkipped: 1, groupsReactivated: 0,
+      skipCodes: { QUARANTINED_GROUP: 1 },
+    });
+    expect(await hasRole(pool, user.id, alpha.id, 'reader')).toBe(false);
+
+    await provisionEntraGroupBinding(pool, admin, {
+      externalId: groupId, scopeId: alpha.id, role: 'reader', displayName: 'operator-approved',
+    });
+    await syncEntraMemberships(pool, admin, [{
+      id: groupId, status: 'present', displayName: 'valid-again', memberObjectIds: [user.externalId],
+    }]);
+    expect(await hasRole(pool, user.id, alpha.id, 'reader')).toBe(true);
+  });
+
+  it('rejects more than the whole-run membership cap without deactivating any binding', async () => {
+    const alpha = await createScope(pool, { kind: 'team', name: 'whole-run-cap' });
+    const user = await createPrincipal(pool, {
+      externalId: '11111111-1111-4111-8111-111111111111', kind: 'user', displayName: 'User',
+    });
+    const groupIds = Array.from({ length: 6 }, (_, index) =>
+      `${String(index + 2).padStart(8, '0')}-0000-4000-8000-000000000000`);
+    for (const groupId of groupIds) {
+      await provisionEntraGroupBinding(pool, admin, { externalId: groupId, scopeId: alpha.id, role: 'reader' });
+    }
+    await syncEntraMemberships(pool, admin, [{
+      id: groupIds[0], status: 'present', displayName: 'seed', memberObjectIds: [user.externalId],
+    }]);
+    const snapshots = groupIds.map((id, index) => ({
+      id, status: 'present' as const, displayName: `group-${index}`,
+      memberObjectIds: Array(index === groupIds.length - 1 ? 1 : MAX_SYNC_MEMBERSHIPS / 5)
+        .fill(user.externalId),
+    }));
+
+    await expect(syncEntraMemberships(pool, admin, snapshots)).rejects
+      .toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
+    expect(await hasRole(pool, user.id, alpha.id, 'reader')).toBe(true);
+    expect((await pool.query(
+      'SELECT count(*)::int AS count FROM entra_groups WHERE active',
+    )).rows[0].count).toBe(groupIds.length);
+  });
+
+  it('destroys the dedicated connection when session lock acquisition fails', async () => {
+    const release = vi.fn();
+    const client = { query: vi.fn().mockRejectedValue(new Error('lock failed')), release };
+    await expect(syncEntraMemberships(
+      { connect: vi.fn().mockResolvedValue(client) } as unknown as pg.Pool,
+      admin,
+      [],
+    )).rejects.toThrow('lock failed');
+    expect(release).toHaveBeenCalledWith(expect.any(Error));
+  });
+
+  it('destroys the dedicated connection and preserves both errors when unlock fails', async () => {
+    const release = vi.fn();
+    const client = {
+      query: vi.fn(async (query: string) => {
+        if (query.includes('pg_advisory_unlock')) throw new Error('unlock failed');
+        return { rowCount: 0, rows: [] };
+      }),
+      release,
+    };
+    const error = await syncEntraMemberships(
+      { connect: vi.fn().mockResolvedValue(client) } as unknown as pg.Pool,
+      admin,
+      [],
+    ).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AggregateError);
+    expect((error as AggregateError).errors).toEqual([
+      expect.objectContaining({ code: 'FORBIDDEN' }),
+      expect.objectContaining({ message: 'unlock failed' }),
+    ]);
+    expect(release).toHaveBeenCalledWith(expect.objectContaining({ message: 'unlock failed' }));
   });
 
   it('cannot remove the synchronizing principal when it is the last org admin', async () => {

@@ -251,6 +251,8 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
     opts.relationThreshold ?? DEFAULT_RELATION_THRESHOLD,
   );
   const ingestConfig = opts.ingestConfig ?? ingestConfigFromEnv();
+  const authenticator = opts.authenticator
+    ?? (process.env.NODE_ENV === 'test' ? createAuthenticator(pool, 'dev') : undefined);
   if (!Number.isFinite(readinessTimeoutMs) || readinessTimeoutMs <= 0) {
     throw new Error('readinessTimeoutMs must be positive');
   }
@@ -293,8 +295,8 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   });
 
   const v0 = express.Router();
-  v0.use(ingestRouter(pool, provider, ingestConfig, undefined, relationThreshold));
-  v0.use(bearerAuth(pool, opts.authenticator));
+  v0.use(ingestRouter(pool, provider, ingestConfig, undefined, relationThreshold, authenticator));
+  v0.use(bearerAuth(pool, authenticator));
   v0.use(captureRouter(pool, provider, relationThreshold));
   v0.use(recallRouter(pool, provider));
   v0.use(memoriesRouter(pool));

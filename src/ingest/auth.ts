@@ -6,6 +6,7 @@ import { getPrincipalByExternalId } from '../storage/principals.js';
 import { ServiceError } from '../services/errors.js';
 import type { IngestPluginConfig } from './config.js';
 import { isLifecyclePrincipal } from '../lifecycle/principal.js';
+import type { Authenticator } from '../api/auth.js';
 
 function equalSecret(left: string, right: string): boolean {
   const leftDigest = createHash('sha256').update(left).digest();
@@ -30,6 +31,8 @@ export async function authenticateIngest(
   pool: pg.Pool,
   req: Request,
   config: IngestPluginConfig,
+  pluginId: string,
+  authenticator?: Authenticator,
 ): Promise<Principal> {
   const auth = config.auth;
   if (auth.kind === 'github-hmac') {
@@ -58,9 +61,25 @@ export async function authenticateIngest(
   }
 
   const header = req.header('authorization') ?? '';
-  const match = /^Bearer\s+(.+)$/i.exec(header);
+  const match = /^(Bearer|ApiKey)\s+([^\s]+)$/i.exec(header);
   if (!match) unauthorized();
-  const principal = await getPrincipalByExternalId(pool, match[1].trim());
+  if (authenticator) {
+    // Opaque principal IDs were the legacy bearer credential. Production
+    // authentication accepts only a signed Entra JWT or a hashed ctm_ key.
+    if (authenticator.mode === 'entra' && match[1].toLowerCase() === 'bearer'
+      && !match[2].startsWith('ctm_') && !match[2].includes('.')) unauthorized();
+    const authenticated = await authenticator.authenticate(match[1], match[2]);
+    if (!authenticated || authenticated.principal.kind !== 'service'
+      || isLifecyclePrincipal(authenticated.principal)) unauthorized();
+    if (authenticated.principal.externalId !== config.principalExternalId) {
+      throw new ServiceError('FORBIDDEN', 'Principal is not authorized for this plugin');
+    }
+    if (authenticated.allowedSource !== undefined && authenticated.allowedSource !== pluginId) {
+      throw new ServiceError('FORBIDDEN', 'API key is not authorized for this plugin');
+    }
+    return authenticated.principal;
+  }
+  const principal = await getPrincipalByExternalId(pool, match[2].trim());
   if (!principal || principal.kind !== 'service' || isLifecyclePrincipal(principal)) unauthorized();
   if (principal.externalId !== config.principalExternalId) {
     throw new ServiceError('FORBIDDEN', 'Principal is not authorized for this plugin');

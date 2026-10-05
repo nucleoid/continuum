@@ -8,6 +8,9 @@ import { createPrincipal } from '../../storage/principals.js';
 import { createScope } from '../../storage/scopes.js';
 import { addMembership } from '../../storage/memberships.js';
 import { EmbeddingRegistry, ScopeEmbeddingRouter } from '../../embeddings/router.js';
+import { createAuthenticator } from '../auth.js';
+import { getScopeByRef } from '../../storage/scopes.js';
+import { issueApiKey } from '../../services/api-keys.js';
 
 const requestId = 'ingest-request-id';
 const githubSecret = 'github-test-secret';
@@ -180,6 +183,35 @@ describe('webhook ingestion transport', () => {
       .set('Idempotency-Key', 'deploy-2').send(payload);
     expect(noWriter.status).toBe(403);
     expect((await pool.query('SELECT id FROM memories')).rows).toEqual([]);
+  });
+
+  it('uses hashed API keys for Entra-mode bearer ingest and rejects legacy principal IDs', async () => {
+    const allowed = await seedService('service:secure-deploy');
+    const admin = await createPrincipal(pool, { externalId: 'admin', kind: 'user', displayName: 'Admin' });
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    await addMembership(pool, admin.id, org!.id, 'admin');
+    const issued = await issueApiKey(pool, admin, allowed.principal.id, 'deploy-event');
+    const authenticator = createAuthenticator(pool, 'entra', {
+      tenant: '22222222-2222-4222-8222-222222222222', audience: 'api://continuum',
+      userScope: 'Continuum.User', serviceAppRole: 'Continuum.Service',
+      allowedClientIds: ['44444444-4444-4444-8444-444444444444'],
+    });
+    const target = createApp(pool, {
+      authenticator,
+      requestIdFactory: () => requestId,
+      logger: { info() {}, error() {} },
+      ingestConfig: { plugins: { 'deploy-event': {
+        enabled: true, auth: { kind: 'bearer' }, principalExternalId: allowed.principal.externalId,
+      } } },
+    });
+    const payload = { project: 'booking-engine', environment: 'prod', version: 'v1', status: 'success' };
+
+    expect((await request(target).post('/api/v0/ingest/deploy-event')
+      .set('Authorization', `Bearer ${allowed.principal.externalId}`)
+      .set('Idempotency-Key', 'legacy-id').send(payload)).status).toBe(401);
+    expect((await request(target).post('/api/v0/ingest/deploy-event')
+      .set('Authorization', `Bearer ${issued.key}`)
+      .set('Idempotency-Key', 'hashed-key').send(payload)).status).toBe(202);
   });
 
   it('resolves aliases and captures multi-record terminal events atomically', async () => {

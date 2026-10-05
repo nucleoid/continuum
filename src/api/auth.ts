@@ -29,6 +29,7 @@ export interface EntraAuthConfig {
   fetcher?: typeof globalThis.fetch;
 }
 export interface Authenticator {
+  readonly mode: AuthMode;
   authenticate(scheme: string, credential: string): Promise<AuthenticatedPrincipal | null>;
 }
 
@@ -50,12 +51,12 @@ export function warnOnDevAuthMode(
 }
 
 export function entraConfigFromEnv(env: NodeJS.ProcessEnv = process.env): EntraAuthConfig {
-  const tenant = env.CONTINUUM_ENTRA_TENANT?.trim() ?? '';
+  const tenant = env.CONTINUUM_ENTRA_TENANT?.trim().toLowerCase() ?? '';
   const audience = env.CONTINUUM_ENTRA_AUDIENCE?.trim() ?? '';
   const userScope = env.CONTINUUM_ENTRA_USER_SCOPE?.trim() ?? '';
   const serviceAppRole = env.CONTINUUM_ENTRA_SERVICE_APP_ROLE?.trim() ?? '';
   const allowedClientIds = (env.CONTINUUM_ENTRA_ALLOWED_CLIENT_IDS ?? '')
-    .split(',').map((value) => value.trim()).filter(Boolean);
+    .split(',').map((value) => value.trim().toLowerCase()).filter(Boolean);
   if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(tenant)
     || audience.length === 0 || audience.length > 256
     || !/^[A-Za-z0-9._:-]{1,128}$/.test(userScope)
@@ -101,6 +102,7 @@ export function createAuthenticator(
 ): Authenticator {
   if (mode === 'dev') {
     return {
+      mode,
       async authenticate(scheme, credential) {
         if (scheme.toLowerCase() !== 'bearer') return null;
         const principal = await getPrincipalByExternalId(pool, credential);
@@ -136,6 +138,7 @@ export function createAuthenticator(
     return metadataPromise;
   };
   return {
+    mode,
     async authenticate(scheme, credential) {
       if (scheme.toLowerCase() === 'apikey'
         || (scheme.toLowerCase() === 'bearer' && credential.startsWith('ctm_'))) {

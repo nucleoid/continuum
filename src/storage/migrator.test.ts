@@ -168,7 +168,10 @@ describe('runMigrations', () => {
            FROM scope_memberships WHERE source_kind = 'entra'`,
       )).rows).toEqual([{ active: false, deactivated: true }]);
       await pool.query(
-        'UPDATE entra_groups SET active = TRUE, deactivated_at = NULL WHERE external_id = $1',
+        `UPDATE entra_groups
+            SET active = TRUE, deactivated_at = NULL,
+                quarantined_at = NULL, quarantine_reason = NULL
+          WHERE external_id = $1`,
         [groupId],
       );
       await pool.query(
@@ -232,10 +235,10 @@ describe('runMigrations', () => {
       await runMigrations(pool, directory);
 
       expect((await pool.query(
-        `SELECT external_id, active FROM entra_groups ORDER BY external_id`,
+        `SELECT external_id, active, quarantine_reason FROM entra_groups ORDER BY external_id`,
       )).rows).toEqual([
-        { external_id: collision, active: false },
-        { external_id: ordinary, active: true },
+        { external_id: collision, active: false, quarantine_reason: 'LEGACY_INACTIVE_REVIEW' },
+        { external_id: ordinary, active: true, quarantine_reason: null },
       ]);
       expect((await pool.query(
         `SELECT source_id, active FROM scope_memberships
@@ -322,7 +325,7 @@ describe('runMigrations', () => {
     expect(release).toHaveBeenCalledTimes(1);
   });
 
-  it('releases the client when lock acquisition fails', async () => {
+  it('destroys the client when lock acquisition fails', async () => {
     const release = vi.fn();
     const client = {
       query: vi.fn(async () => {
@@ -337,7 +340,7 @@ describe('runMigrations', () => {
       runMigrations(pool as unknown as pg.Pool, directory),
     ).rejects.toThrow('lock unavailable');
     expect(client.query).toHaveBeenCalledTimes(1);
-    expect(release).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledWith(expect.any(Error));
   });
 
   it('preserves migration and unlock errors while still releasing the client', async () => {

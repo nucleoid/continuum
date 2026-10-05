@@ -4,6 +4,10 @@ import { MAX_GROUP_MEMBERS, MAX_SYNC_GROUPS, MAX_SYNC_MEMBERSHIPS } from '../ser
 interface GraphPage { value?: unknown; '@odata.nextLink'?: unknown }
 type Fetch = typeof globalThis.fetch;
 const DEFAULT_TIMEOUT_MS = 10_000;
+const GRAPH_PAGE_SIZE = 999;
+const MAX_MEMBER_PAGES = Math.ceil(MAX_GROUP_MEMBERS / GRAPH_PAGE_SIZE);
+
+class MembershipSnapshotTooLargeError extends Error {}
 
 export class GraphSnapshotUnavailableError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -106,16 +110,22 @@ export async function fetchMembershipSnapshot(
       }
       const members: string[] = [];
       let next: URL | undefined = new URL(
-        `https://graph.microsoft.com/v1.0/groups/${encodeURIComponent(id)}/members/microsoft.graph.user?$select=id&$top=999`,
+        `https://graph.microsoft.com/v1.0/groups/${encodeURIComponent(id)}/members/microsoft.graph.user?$select=id&$top=${GRAPH_PAGE_SIZE}`,
       );
+      const visited = new Set<string>();
+      let pages = 0;
       while (next) {
+        if (visited.has(next.href)) throw new Error('PAGINATION_CYCLE');
+        if (++pages > MAX_MEMBER_PAGES) throw new Error('PAGINATION_LIMIT');
+        visited.add(next.href);
         const current = await page(fetcher, next, token, timeoutMs);
         for (const raw of current.value as unknown[]) {
           const memberId = (raw as { id?: unknown }).id;
           if (typeof memberId !== 'string') throw new Error('MALFORMED_MEMBERS');
           members.push(memberId.toLowerCase());
-          if (members.length > MAX_GROUP_MEMBERS || total + members.length > MAX_SYNC_MEMBERSHIPS) {
-            throw new Error('GROUP_TOO_LARGE');
+          if (members.length > MAX_GROUP_MEMBERS) throw new Error('GROUP_TOO_LARGE');
+          if (total + members.length > MAX_SYNC_MEMBERSHIPS) {
+            throw new MembershipSnapshotTooLargeError('membership snapshot exceeds sync limit');
           }
         }
         next = typeof current['@odata.nextLink'] === 'string'
@@ -124,7 +134,8 @@ export async function fetchMembershipSnapshot(
       snapshots.push({ id, status: 'present', displayName: group.displayName, memberObjectIds: members });
       total += members.length;
     } catch (error) {
-      if (error instanceof GraphSnapshotUnavailableError) throw error;
+      if (error instanceof GraphSnapshotUnavailableError
+        || error instanceof MembershipSnapshotTooLargeError) throw error;
       const raw = error instanceof Error ? error.message : 'GRAPH_FAILURE';
       const errorCode = /^[A-Z0-9_]+$/.test(raw) ? raw : 'GRAPH_FAILURE';
       snapshots.push({ id, status: 'invalid', errorCode });

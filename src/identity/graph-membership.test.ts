@@ -78,4 +78,16 @@ describe('Microsoft Graph membership snapshot', () => {
     await expect(fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher))
       .rejects.toBeInstanceOf(GraphSnapshotUnavailableError);
   });
+
+  it('bounds member pagination and rejects a repeating next link', async () => {
+    const next = `https://graph.microsoft.com/v1.0/groups/${groupId}/members/microsoft.graph.user?$skiptoken=repeat`;
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: groupId, displayName: 'group' })))
+      .mockImplementation(async () => new Response(JSON.stringify({ value: [], '@odata.nextLink': next })));
+
+    expect(await fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher)).toEqual([{
+      id: groupId, status: 'invalid', errorCode: 'PAGINATION_CYCLE',
+    }]);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
 });

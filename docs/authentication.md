@@ -43,6 +43,10 @@ updates display metadata, and a principal cannot change kind. Stdio MCP
 sessions revalidate credentials every 30 seconds and terminate at token or API
 key expiry, rotation, or revocation.
 
+Tenant and client UUID configuration is canonicalized to lowercase at startup.
+This is a representation rule only; Entra UUID comparisons remain
+case-insensitive.
+
 ## Service API keys
 
 Service API keys contain 256 random bits and use the `ctm_` prefix. Continuum
@@ -56,6 +60,13 @@ service principal when a credential must have capture-only effective access.
 Issue, rotation, and revocation require an org administrator, and the
 credential mutation and audit commit atomically. Cleartext is returned only by
 issue or rotation.
+
+The `deploy-event` and `terminal-summary` ingest transports use this same
+database-backed API-key verifier in Entra mode. Send `Authorization: ApiKey
+ctm_...` (or the backward-compatible `Bearer ctm_...` scheme). A legacy bearer
+value containing a service principal's public `external_id` is rejected.
+Source-restricted keys must match the exact ingest plugin ID. GitHub HMAC and
+Azure DevOps Basic webhook verification are unchanged.
 
 Use the checked admin transport with `CONTINUUM_ADMIN_ACTOR` set to an existing
 org administrator:
@@ -105,6 +116,14 @@ intentionally fail-closed and takes precedence over availability: if the only
 org-admin access is sourced by a malformed, duplicate, or per-group oversized
 Entra result, that access is removed and direct database recovery is required.
 
+Quarantine is durable state, distinct from an ordinary 404 disappearance. A
+later valid Graph response cannot silently reactivate a quarantined binding;
+an org administrator must inspect the failure and run `bind-group` explicitly.
+Migration `0012_entra_quarantine_state.sql` conservatively marks every inactive,
+approved, unrevoked pre-upgrade binding as `LEGACY_INACTIVE_REVIEW`, because old
+rows did not record whether inactivity came from a 404 or invalid input. Review
+and explicitly reprovision those bindings after the upgrade.
+
 The job reads all approved bindings, including currently missing groups, then fetches each directly by
 immutable ID. It does not perform name-based group discovery. A Graph 404 is a
 definitive disappearance. If that immutable ID returns, its still-approved
@@ -115,9 +134,12 @@ affected approved binding. That quarantine commits before valid results are
 applied, so a later global threshold or administrator guard cannot restore
 stale invalid access. Unbound and revoked IDs cannot confer access. Valid bound
 groups remain authoritative, so removed memberships from those groups are
-deactivated. A snapshot exceeding the whole-run bound is rejected and audited
-without changing existing bindings or memberships; one unexpected extra result
-must not quarantine an otherwise valid tenant.
+deactivated. A snapshot containing more than 500 group results or more than
+50,000 total membership entries is rejected and audited as a whole before
+screening, without changing existing bindings or memberships. One unexpected
+extra result must not quarantine an otherwise valid tenant. Duplicate group
+result accounting counts every unusable result while deactivating each affected
+binding only once.
 
 Graph authentication, authorization, rate-limit, service, timeout, transport,
 response-body timeout/drop/truncation, and non-JSON body failures abort snapshot
@@ -126,6 +148,9 @@ They do not convert every approved group into malformed input or quarantine
 the last successfully synchronized access set. The job reports failure so the
 scheduler can retry. Invalid Graph payloads and untrusted pagination links are
 still contained to the affected binding and quarantined fail-closed.
+Member pagination is restricted to trusted Microsoft Graph v1.0 URLs, rejects
+cycles, and permits at most 11 pages per group (enough for the 10,000-member
+per-group bound at the requested 999-member page size).
 
 Empty snapshots fail closed. By default, a run that would deactivate more than
 25 percent of active bindings rolls back. After investigation, an operator may
@@ -143,7 +168,9 @@ normally from successful first sign-in, before group membership becomes active.
 
 This release does not support a mixed-version rolling deployment. Stop every
 API, MCP, admin, and membership-sync process built from the old version, then
-apply the migrations, then start only the new binaries. The database trigger
+apply all migrations through `0012_entra_quarantine_state.sql`, review its
+conservatively quarantined legacy inactive bindings, then start only the new
+binaries. The database trigger
 enforces the approved binding's immutable UUID, target scope, role, lifecycle,
 and 500-binding cardinality on membership and binding writes. Binding changes
 that would orphan active sourced memberships are rejected; the audited
