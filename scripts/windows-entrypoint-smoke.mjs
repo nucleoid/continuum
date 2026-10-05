@@ -121,5 +121,43 @@ async function smokeMcpValidation() {
   process.stdout.write('MCP compiled entrypoint reached principal validation\n');
 }
 
+async function runToExit(relativePath, env) {
+  const child = spawnEntrypoint(relativePath, env);
+  const output = captureOutput(child);
+  const [code, signal] = await once(child, 'exit');
+  return { code, signal, ...output };
+}
+
+async function smokeDisabledAuditRetention() {
+  const env = {
+    ...process.env,
+    CONTINUUM_AUDIT_RETENTION_BATCH_SIZE: 'malformed-but-disabled',
+    CONTINUUM_AUDIT_RETENTION_EXPORT_DIR: 'relative-but-disabled',
+  };
+  delete env.CONTINUUM_AUDIT_RETENTION_DAYS;
+  const result = await runToExit('dist/maintenance/audit-retention-cli.js', env);
+  if (result.code !== 0 || result.stdout.trim() !== '{"status":"disabled"}') {
+    throw new Error(`Disabled retention smoke failed: ${JSON.stringify(result)}`);
+  }
+  process.stdout.write('Audit retention disabled entrypoint ignored inactive tuning\n');
+}
+
+async function smokeWindowsAuditExportRejection() {
+  if (process.platform !== 'win32') return;
+  const result = await runToExit('dist/maintenance/audit-retention-cli.js', {
+    ...process.env,
+    CONTINUUM_AUDIT_RETENTION_DAYS: '30',
+    CONTINUUM_AUDIT_RETENTION_PRINCIPAL_EXTERNAL_ID: 'smoke-admin',
+    CONTINUUM_AUDIT_RETENTION_EXPORT_DIR: root,
+    CONTINUUM_DATABASE_URL: 'postgres://continuum:continuum@127.0.0.1:1/continuum',
+  });
+  if (result.code === 0 || !result.stderr.includes('Durable audit export is not supported on Windows')) {
+    throw new Error(`Windows audit export did not fail clearly: ${JSON.stringify(result)}`);
+  }
+  process.stdout.write('Audit retention rejected unsupported Windows export before database access\n');
+}
+
 await smokeApi();
 await smokeMcpValidation();
+await smokeDisabledAuditRetention();
+await smokeWindowsAuditExportRejection();

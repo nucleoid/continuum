@@ -18,7 +18,9 @@
     "mcp": "node dist/api/mcp.js",
     "mcp:dev": "tsx src/api/mcp.ts",
     "sweep": "node dist/lifecycle/sweep-cli.js",
-    "sweep:dev": "tsx src/lifecycle/sweep-cli.ts"
+    "sweep:dev": "tsx src/lifecycle/sweep-cli.ts",
+    "audit-retention": "node dist/maintenance/audit-retention-cli.js",
+    "audit-retention:dev": "tsx src/maintenance/audit-retention-cli.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
