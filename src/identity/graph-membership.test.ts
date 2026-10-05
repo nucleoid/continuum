@@ -54,4 +54,28 @@ describe('Microsoft Graph membership snapshot', () => {
     await expect(fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher))
       .rejects.toBeInstanceOf(GraphSnapshotUnavailableError);
   });
+
+  it.each([
+    ['body timeout', new DOMException('timed out', 'TimeoutError')],
+    ['connection drop', new TypeError('terminated')],
+    ['truncated or non-JSON body', new SyntaxError('Unexpected end of JSON input')],
+  ])('aborts the whole snapshot on %s while reading a successful response', async (_name, failure) => {
+    const response = {
+      ok: true, status: 200, json: vi.fn().mockRejectedValue(failure),
+    } as unknown as Response;
+    const fetcher = vi.fn().mockResolvedValue(response);
+    await expect(fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher))
+      .rejects.toBeInstanceOf(GraphSnapshotUnavailableError);
+  });
+
+  it('aborts when a member-page body is truncated instead of quarantining the group', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: groupId, displayName: 'group' })))
+      .mockResolvedValueOnce({
+        ok: true, status: 200,
+        json: vi.fn().mockRejectedValue(new SyntaxError('Unexpected end of JSON input')),
+      } as unknown as Response);
+    await expect(fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher))
+      .rejects.toBeInstanceOf(GraphSnapshotUnavailableError);
+  });
 });

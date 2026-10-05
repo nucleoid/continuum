@@ -24,6 +24,20 @@ and tokens from unlisted or role-unassigned applications are rejected.
 All credential, JOSE, JWKS, key, and claim failures return an authentication
 failure without exposing provider details.
 
+Set **Assignment required?** to **Yes** on Continuum's Entra enterprise
+application, then assign only approved users and groups. The API client used to
+obtain delegated tokens must also be present in
+`CONTINUUM_ENTRA_ALLOWED_CLIENT_IDS`; tenant membership by itself is never an
+authorization grant. Continuum admits both member tokens (`acct=0`) and guest
+tokens (`acct=1`) under the same rule: the immutable `oid` must already have at
+least one active Continuum scope membership. Missing `acct` is accepted because
+it is an optional Entra claim, but any other value is rejected. A first valid
+sign-in registers the immutable principal but returns 401 until membership sync
+activates an approved group binding. Deactivation makes later REST requests fail
+authentication immediately; long-lived MCP sessions revalidate on their normal
+30-second interval. This database check is defense in depth and does not replace
+the required enterprise-application assignment.
+
 The immutable `oid` claim owns principal identity. A changed `name` only
 updates display metadata, and a principal cannot change kind. Stdio MCP
 sessions revalidate credentials every 30 seconds and terminate at token or API
@@ -70,6 +84,11 @@ again. A tenant user cannot create a privileged group with a matching name and
 self-escalate. Renames only update display metadata and never alter the approved
 scope or role. At most 500 bindings may be approved and unrevoked at once;
 provisioning the 501st is rejected without changing an existing binding.
+Group and member object IDs are stored as lowercase canonical UUIDs. Migration
+normalizes legacy mixed-case rows. If multiple legacy bindings differ only by
+case, their sourced access is quarantined, duplicate rows are consolidated, and
+the retained inactive binding requires explicit operator review and `bind-group`
+reprovisioning.
 
 ## Membership sync
 
@@ -100,8 +119,9 @@ deactivated. A snapshot exceeding the whole-run bound is rejected and audited
 without changing existing bindings or memberships; one unexpected extra result
 must not quarantine an otherwise valid tenant.
 
-Graph authentication, authorization, rate-limit, service, timeout, and
-transport failures abort snapshot collection before synchronization starts.
+Graph authentication, authorization, rate-limit, service, timeout, transport,
+response-body timeout/drop/truncation, and non-JSON body failures abort snapshot
+collection before synchronization starts.
 They do not convert every approved group into malformed input or quarantine
 the last successfully synchronized access set. The job reports failure so the
 scheduler can retry. Invalid Graph payloads and untrusted pagination links are

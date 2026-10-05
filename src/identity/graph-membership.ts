@@ -47,6 +47,17 @@ function requireSuccessfulResponse(response: Response): void {
   }
 }
 
+async function readJson(response: Response): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch (error) {
+    throw new GraphSnapshotUnavailableError(
+      'Microsoft Graph response body was unavailable',
+      { cause: error },
+    );
+  }
+}
+
 async function page(
   fetcher: Fetch,
   url: URL,
@@ -55,7 +66,7 @@ async function page(
 ): Promise<GraphPage> {
   const response = await request(fetcher, url, token, timeoutMs);
   requireSuccessfulResponse(response);
-  const body = await response.json() as GraphPage;
+  const body = await readJson(response) as GraphPage;
   if (!Array.isArray(body.value)) throw new Error('Microsoft Graph returned an invalid page');
   return body;
 }
@@ -74,7 +85,8 @@ export async function fetchMembershipSnapshot(
   }
   const snapshots: EntraGroupSnapshot[] = [];
   let total = 0;
-  for (const id of boundGroupIds) {
+  for (const rawId of boundGroupIds) {
+    const id = rawId.toLowerCase();
     try {
       const groupResponse = await request(
         fetcher,
@@ -87,8 +99,9 @@ export async function fetchMembershipSnapshot(
         continue;
       }
       requireSuccessfulResponse(groupResponse);
-      const group = await groupResponse.json() as { id?: unknown; displayName?: unknown };
-      if (group.id !== id || typeof group.displayName !== 'string' || group.displayName.length > 256) {
+      const group = await readJson(groupResponse) as { id?: unknown; displayName?: unknown };
+      if (typeof group.id !== 'string' || group.id.toLowerCase() !== id
+        || typeof group.displayName !== 'string' || group.displayName.length > 256) {
         throw new Error('MALFORMED_GROUP');
       }
       const members: string[] = [];
@@ -100,7 +113,7 @@ export async function fetchMembershipSnapshot(
         for (const raw of current.value as unknown[]) {
           const memberId = (raw as { id?: unknown }).id;
           if (typeof memberId !== 'string') throw new Error('MALFORMED_MEMBERS');
-          members.push(memberId);
+          members.push(memberId.toLowerCase());
           if (members.length > MAX_GROUP_MEMBERS || total + members.length > MAX_SYNC_MEMBERSHIPS) {
             throw new Error('GROUP_TOO_LARGE');
           }

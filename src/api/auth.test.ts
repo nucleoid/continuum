@@ -6,6 +6,8 @@ import {
 } from './auth.js';
 import { createApp } from './server.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
+import { addMembership } from '../storage/memberships.js';
+import { getScopeByRef } from '../storage/scopes.js';
 
 describe('authentication configuration and Entra claims', () => {
   let pool: pg.Pool;
@@ -40,18 +42,51 @@ describe('authentication configuration and Entra claims', () => {
     expect(write).toHaveBeenCalledWith(expect.stringMatching(/WARNING.*untrusted network/));
   });
 
-  it('accepts only tenant user access tokens with the configured delegated scope', async () => {
+  it('admits tenant members and guests only through an allow-listed client with active membership', async () => {
     const oid = '11111111-1111-4111-8111-111111111111';
     const valid = { oid, name: 'User', tid: contract.tenant, ver: '2.0', idtyp: 'user',
       azp: contract.allowedClientIds[0],
-      scp: `openid ${contract.userScope}`, exp: 2_000_000_000 };
+      scp: `openid ${contract.userScope}`, acct: 0, exp: 2_000_000_000 };
+    expect(await principalFromClaims(pool, valid, contract)).toBeNull();
+    const principal = (await pool.query(
+      'SELECT id FROM principals WHERE external_id = $1', [oid],
+    )).rows[0];
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    await addMembership(pool, principal.id, org!.id, 'reader');
     expect((await principalFromClaims(pool, valid, contract))?.principal.kind).toBe('user');
+    expect((await principalFromClaims(pool, { ...valid, acct: 1 }, contract))?.principal.kind)
+      .toBe('user');
+    await pool.query('UPDATE scope_memberships SET active = FALSE WHERE principal_id = $1', [principal.id]);
+    expect(await principalFromClaims(pool, { ...valid, acct: 1 }, contract)).toBeNull();
+    await pool.query('UPDATE scope_memberships SET active = TRUE WHERE principal_id = $1', [principal.id]);
+    await pool.query('UPDATE scope_memberships SET active = FALSE WHERE principal_id = $1', [principal.id]);
+    expect(await principalFromClaims(pool, { ...valid, acct: 1 }, contract)).toBeNull();
+    await pool.query('UPDATE scope_memberships SET active = TRUE WHERE principal_id = $1', [principal.id]);
     for (const claims of [
       { ...valid, tid: '33333333-3333-4333-8333-333333333333' },
       { ...valid, scp: 'openid profile' },
       { ...valid, azp: '55555555-5555-4555-8555-555555555555' },
       { ...valid, idtyp: undefined },
+      { ...valid, acct: 2 },
     ]) expect(await principalFromClaims(pool, claims, contract)).toBeNull();
+  });
+
+  it('normalizes Entra object IDs before principal lookup', async () => {
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    const lower = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const existing = (await pool.query(
+      `INSERT INTO principals (id, external_id, kind, display_name)
+       VALUES (gen_random_uuid(), $1, 'user', 'Existing') RETURNING id`, [lower],
+    )).rows[0];
+    await addMembership(pool, existing.id, org!.id, 'reader');
+    const result = await principalFromClaims(pool, {
+      oid: lower.toUpperCase(), tid: contract.tenant, ver: '2.0', idtyp: 'user', acct: 0,
+      azp: contract.allowedClientIds[0], scp: contract.userScope,
+    }, contract);
+    expect(result?.principal.id).toBe(existing.id);
+    expect((await pool.query(
+      'SELECT count(*)::int AS count FROM principals WHERE lower(external_id) = $1', [lower],
+    )).rows[0].count).toBe(1);
   });
 
   it('accepts only service access tokens assigned the configured app role', async () => {

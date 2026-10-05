@@ -5,7 +5,8 @@ import { createPrincipal } from '../storage/principals.js';
 import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { addMembership, hasRole, removeMembership } from '../storage/memberships.js';
 import {
-  MAX_SYNC_GROUPS, provisionEntraGroupBinding, revokeEntraGroupBinding, syncEntraMemberships,
+  listBoundEntraGroupIds, MAX_SYNC_GROUPS, provisionEntraGroupBinding,
+  revokeEntraGroupBinding, syncEntraMemberships,
 } from './membership-sync.js';
 
 describe('Entra membership sync', () => {
@@ -210,6 +211,55 @@ describe('Entra membership sync', () => {
       'entra_group_binding_provisioned', 'entra_group_binding_reactivated',
       'entra_group_binding_updated',
     ]);
+  });
+
+  it('rolls back a rebind that removes the actor or the last active org administrator', async () => {
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    const team = await createScope(pool, { kind: 'team', name: 'rebind-target' });
+    const groupId = '22222222-2222-4222-8222-222222222222';
+    await pool.query('UPDATE principals SET external_id = $2 WHERE id = $1', [
+      admin.id, '11111111-1111-4111-8111-111111111111',
+    ]);
+    admin.externalId = '11111111-1111-4111-8111-111111111111';
+    await provisionEntraGroupBinding(pool, admin, {
+      externalId: groupId, scopeId: org!.id, role: 'admin',
+    });
+    await syncEntraMemberships(pool, admin, [{
+      id: groupId, status: 'present', displayName: 'admins', memberObjectIds: [admin.externalId],
+    }]);
+    await removeMembership(pool, admin.id, org!.id);
+
+    await expect(provisionEntraGroupBinding(pool, admin, {
+      externalId: groupId, scopeId: team.id, role: 'reader',
+    })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(await hasRole(pool, admin.id, org!.id, 'admin')).toBe(true);
+    expect((await pool.query(
+      'SELECT scope_id, role FROM entra_groups WHERE external_id = $1', [groupId],
+    )).rows[0]).toEqual({ scope_id: org!.id, role: 'admin' });
+  });
+
+  it('canonicalizes group and scope UUIDs and treats mixed-case snapshots as one binding', async () => {
+    const alpha = await createScope(pool, { kind: 'team', name: 'canonical' });
+    const user = await createPrincipal(pool, {
+      externalId: '11111111-1111-4111-8111-111111111111', kind: 'user', displayName: 'User',
+    });
+    const lower = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    await provisionEntraGroupBinding(pool, admin, {
+      externalId: lower.toUpperCase(), scopeId: alpha.id.toUpperCase(), role: 'reader',
+    });
+    expect(await listBoundEntraGroupIds(pool)).toEqual([lower]);
+    await syncEntraMemberships(pool, admin, [{
+      id: lower.toUpperCase(), status: 'present', displayName: 'canonical',
+      memberObjectIds: [user.externalId.toUpperCase()],
+    }]);
+    expect(await hasRole(pool, user.id, alpha.id, 'reader')).toBe(true);
+
+    const duplicate = await syncEntraMemberships(pool, admin, [
+      { id: lower, status: 'present', displayName: 'canonical', memberObjectIds: [user.externalId] },
+      { id: lower.toUpperCase(), status: 'present', displayName: 'canonical', memberObjectIds: [user.externalId] },
+    ]);
+    expect(duplicate).toMatchObject({ groupsSeen: 0, skipCodes: { DUPLICATE_GROUP_ID: 1 } });
+    expect(await hasRole(pool, user.id, alpha.id, 'reader')).toBe(false);
   });
 
   it('rejects a 501st approved and unrevoked binding', async () => {

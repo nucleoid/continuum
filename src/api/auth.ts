@@ -166,7 +166,7 @@ export async function principalFromClaims(
   claims: JWTPayload,
   contract: Pick<EntraAuthConfig, 'tenant' | 'userScope' | 'serviceAppRole' | 'allowedClientIds'>,
 ): Promise<AuthenticatedPrincipal | null> {
-  const oid = typeof claims.oid === 'string' ? claims.oid : '';
+  const oid = typeof claims.oid === 'string' ? claims.oid.toLowerCase() : '';
   if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(oid)) return null;
   const name = typeof claims.name === 'string' ? claims.name.trim().slice(0, 256) : '';
   const clientId = typeof claims.azp === 'string' ? claims.azp
@@ -179,7 +179,8 @@ export async function principalFromClaims(
   }
   if (claims.idtyp === 'user') {
     const scopes = typeof claims.scp === 'string' ? claims.scp.split(/\s+/) : [];
-    if (!scopes.includes(contract.userScope)) return null;
+    if (!scopes.includes(contract.userScope)
+      || (claims.acct !== undefined && claims.acct !== 0 && claims.acct !== 1)) return null;
     kind = 'user';
   } else if (claims.idtyp === 'app') {
     const roles = Array.isArray(claims.roles)
@@ -196,6 +197,13 @@ export async function principalFromClaims(
   } catch (error) {
     if (error instanceof PrincipalKindConflictError) return null;
     throw error;
+  }
+  if (kind === 'user') {
+    const membership = await pool.query(
+      'SELECT 1 FROM scope_memberships WHERE principal_id = $1 AND active LIMIT 1',
+      [principal.id],
+    );
+    if (!membership.rowCount) return null;
   }
   return {
     principal,
