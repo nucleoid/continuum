@@ -9,6 +9,7 @@ import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { getScopeByRef } from '../storage/scopes.js';
 import {
   AUDIT_RETENTION_LOCK_KEY,
+  assertAuditExportPlatform,
   exportAuditRows,
   runAuditRetention,
   validateAuditExportDirectory,
@@ -115,6 +116,33 @@ describe('audit retention', () => {
     expect([first, second]).not.toContain(third);
   });
 
+  it('computes the transaction-clock cutoff in UTC under an Auckland session timezone', async () => {
+    const admin = await seedPrincipal('svc:retention', 'admin');
+    const shouldRemain = await insertAudit(admin.id, new Date(cutoff.getTime() + 6 * 60 * 60 * 1_000));
+    const client = await pool.connect();
+    const wrapped = new Proxy(client, {
+      get(target, property) {
+        if (property === 'query') {
+          return async (text: string, values?: unknown[]) => {
+            const result = await target.query(text, values);
+            if (text.startsWith('BEGIN ISOLATION LEVEL')) {
+              await target.query("SET LOCAL TIME ZONE 'Pacific/Auckland'");
+            }
+            return result;
+          };
+        }
+        const value = Reflect.get(target, property);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const result = await runAuditRetention({ connect: async () => wrapped } as pg.Pool, options());
+
+    expect(Date.parse(result.cutoff)).toBeLessThan(Date.now() - 29 * 86_400_000);
+    expect(await pool.query('SELECT 1 FROM audit_log WHERE id = $1', [shouldRemain]))
+      .toMatchObject({ rowCount: 1 });
+  });
+
   it('processes multiple batches, respects max rows, and handles an empty rerun', async () => {
     const admin = await seedPrincipal('svc:retention', 'admin');
     for (let index = 0; index < 5; index += 1) {
@@ -172,7 +200,7 @@ describe('audit retention', () => {
       expect((await exportAuditRows(rows, cutoff.toISOString(), directory, 'run-two', 1))).toEqual({
         ...first, reused: true,
       });
-      expect(sync).toHaveBeenCalledTimes(1);
+      expect(sync).toHaveBeenCalledTimes(2);
     } finally {
       sync.mockRestore();
     }
@@ -219,6 +247,13 @@ describe('audit retention', () => {
     await symlink(directory, linked);
     directories.push(linked);
     await expect(validateAuditExportDirectory(linked)).rejects.toThrow('symlinks');
+  });
+
+  it('fails clearly instead of claiming durable Windows export support', () => {
+    expect(() => assertAuditExportPlatform('win32')).toThrow('not supported on Windows');
+    if (process.platform !== 'win32') {
+      expect(() => assertAuditExportPlatform(process.platform)).not.toThrow();
+    }
   });
 
   it('does not delete when export fails and safely reuses a crash-complete export', async () => {
@@ -282,6 +317,45 @@ describe('audit retention', () => {
       [inserted.rows[0].id],
     );
     expect(restored.rows[0]).toEqual({ at: line.at, metadata: line.metadata_json });
+  });
+
+  it('exports and summarizes negative-infinity timestamps without converting them to null', async () => {
+    const admin = await seedPrincipal('svc:retention', 'admin');
+    await pool.query(
+      `INSERT INTO audit_log (at, principal_id, action)
+       VALUES ('-infinity'::timestamptz, $1, 'read')`,
+      [admin.id],
+    );
+    const directory = await exportDirectory();
+
+    const result = await runAuditRetention(pool, { ...options(), exportDirectory: directory });
+
+    expect(result).toMatchObject({ deleted: 1, exports: 1 });
+    const exportName = (await readdir(directory)).find((name) => name.endsWith('.jsonl'));
+    expect(exportName).toBeDefined();
+    const line = JSON.parse(await readFile(path.join(directory, exportName!), 'utf8')) as { at: string };
+    expect(line.at).toBe('-infinity');
+    const summary = await pool.query<{ first_at: string; last_at: string }>(
+      `SELECT metadata->>'first_at' AS first_at, metadata->>'last_at' AS last_at
+         FROM audit_log WHERE action = 'archive'`,
+    );
+    expect(summary.rows[0]).toEqual({ first_at: '-infinity', last_at: '-infinity' });
+  });
+
+  it('rolls back when an audit row changes after export and before delete', async () => {
+    const admin = await seedPrincipal('svc:retention', 'admin');
+    const id = await insertAudit(admin.id, new Date('2026-01-01T00:00:00Z'), { query: 'original' });
+    const directory = await exportDirectory();
+
+    await expect(runAuditRetention(pool, {
+      ...options(), exportDirectory: directory,
+      afterExport: async () => {
+        await pool.query("UPDATE audit_log SET query = 'changed' WHERE id = $1", [id]);
+      },
+    })).rejects.toThrow('changed after export');
+
+    expect(await pool.query<{ query: string }>('SELECT query FROM audit_log WHERE id = $1', [id]))
+      .toMatchObject({ rows: [{ query: 'changed' }], rowCount: 1 });
   });
 
   it('uses one repeatable database snapshot for cutoff and dry-run count', async () => {
@@ -398,6 +472,31 @@ describe('audit retention', () => {
       ...options(),
       afterCutoff: async () => { throw new Error('primary retention failure'); },
     })).rejects.toThrow('primary retention failure');
+  });
+
+  it('destroys the connection when setup rollback fails', async () => {
+    await seedPrincipal('svc:retention', 'admin');
+    const client = await pool.connect();
+    const release = vi.fn((destroy?: boolean) => client.release(destroy));
+    const wrapped = new Proxy(client, {
+      get(target, property) {
+        if (property === 'query') {
+          return (text: string, values?: unknown[]) => {
+            if (text === 'ROLLBACK') return Promise.reject(new Error('simulated rollback failure'));
+            return target.query(text, values);
+          };
+        }
+        if (property === 'release') return release;
+        const value = Reflect.get(target, property);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    await expect(runAuditRetention({ connect: async () => wrapped } as pg.Pool, {
+      ...options(),
+      afterCutoff: async () => { throw new Error('setup failure'); },
+    })).rejects.toThrow('setup failure');
+    expect(release).toHaveBeenCalledWith(true);
   });
 
   it('uses the existing time index for a bounded cutoff scan at scale', async () => {

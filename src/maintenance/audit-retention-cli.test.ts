@@ -9,6 +9,19 @@ describe('audit-retention CLI options', () => {
     },
   );
 
+  it('ignores malformed tuning when retention is disabled', () => {
+    expect(parseAuditRetentionCliOptions(['--batch-size'], {
+      CONTINUUM_AUDIT_RETENTION_BATCH_SIZE: 'not-a-number',
+      CONTINUUM_AUDIT_RETENTION_MAX_BATCHES: '-1',
+      CONTINUUM_AUDIT_RETENTION_MAX_ROWS: '1.5',
+      CONTINUUM_AUDIT_RETENTION_EXPORT_DIR: 'relative/path',
+    })).toEqual({ enabled: false });
+  });
+
+  it('still rejects unknown arguments when retention is disabled', () => {
+    expect(() => parseAuditRetentionCliOptions(['--unknown'], {})).toThrow('Unknown argument');
+  });
+
   it('accepts strict bounded environment configuration', () => {
     expect(parseAuditRetentionCliOptions([], {
       CONTINUUM_AUDIT_RETENTION_DAYS: '90',
@@ -41,9 +54,6 @@ describe('audit-retention CLI options', () => {
   });
 
   it.each([
-    { CONTINUUM_AUDIT_RETENTION_BATCH_SIZE: '0' },
-    { CONTINUUM_AUDIT_RETENTION_MAX_BATCHES: '1001' },
-    { CONTINUUM_AUDIT_RETENTION_MAX_ROWS: '1.5' },
     { CONTINUUM_AUDIT_RETENTION_DAYS: '0' },
     { CONTINUUM_AUDIT_RETENTION_DAYS: '-1' },
     { CONTINUUM_AUDIT_RETENTION_DAYS: '1.5' },

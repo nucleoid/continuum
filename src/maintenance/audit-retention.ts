@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
-import { lstat, link, open, readdir, realpath, unlink } from 'node:fs/promises';
+import { lstat, link, open, realpath, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import type pg from 'pg';
 
@@ -79,8 +79,10 @@ function serializeRows(rows: AuditRow[]): Buffer {
   return Buffer.from(`${lines.join('\n')}\n`, 'utf8');
 }
 
-function cutoffLabel(cutoff: string): string {
-  return cutoff.replace(/[-:.]/g, '');
+export function assertAuditExportPlatform(platform: NodeJS.Platform = process.platform): void {
+  if (platform === 'win32') {
+    throw new Error('Durable audit export is not supported on Windows; run without an export directory');
+  }
 }
 
 async function rejectSymlinkComponents(directory: string): Promise<void> {
@@ -94,6 +96,7 @@ async function rejectSymlinkComponents(directory: string): Promise<void> {
 }
 
 export async function validateAuditExportDirectory(directory: string): Promise<string> {
+  assertAuditExportPlatform();
   if (!path.isAbsolute(directory) || path.normalize(directory) !== directory) {
     throw new Error('Audit export directory must be an absolute normalized path');
   }
@@ -119,27 +122,25 @@ export async function validateAuditExportDirectory(directory: string): Promise<s
 
 export async function exportAuditRows(
   rows: AuditRow[],
-  cutoff: string,
+  _cutoff: string,
   directory: string,
   runId: string,
   batchNumber: number,
 ): Promise<AuditExportResult> {
+  assertAuditExportPlatform();
   if (rows.length === 0) throw new Error('Cannot export an empty audit batch');
   const bytes = serializeRows(rows);
   const sha256 = createHash('sha256').update(bytes).digest('hex');
   const first = rows[0];
   const last = rows[rows.length - 1];
-  const retrySuffix = `-${first.id}-${last.id}-${sha256}.jsonl`;
-  const retryCandidates = (await readdir(directory))
-    .filter((name) => name.startsWith('audit-') && name.endsWith(retrySuffix))
-    .sort();
-  for (const candidate of retryCandidates) {
-    const candidatePath = path.join(directory, candidate);
-    await verifyAndSyncExistingExport(candidatePath, candidate, bytes, sha256);
-    return { filename: candidate, sha256, reused: true };
-  }
-  const filename = `audit-${cutoffLabel(cutoff)}-${first.id}-${last.id}-${sha256}.jsonl`;
+  const filename = `audit-${first.id}-${last.id}-${sha256}.jsonl`;
   const finalPath = path.join(directory, filename);
+  try {
+    await verifyAndSyncExistingExport(finalPath, filename, bytes, sha256, directory);
+    return { filename, sha256, reused: true };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
   const runLabel = createHash('sha256').update(runId).digest('hex').slice(0, 16);
   const tempPath = path.join(directory, `.audit-${runLabel}-${batchNumber}-${randomUUID()}.tmp`);
   let handle;
@@ -157,7 +158,7 @@ export async function exportAuditRows(
       return { filename, sha256, reused: false };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      await verifyAndSyncExistingExport(finalPath, filename, bytes, sha256);
+      await verifyAndSyncExistingExport(finalPath, filename, bytes, sha256, directory);
       return { filename, sha256, reused: true };
     }
   } finally {
@@ -173,6 +174,7 @@ async function verifyAndSyncExistingExport(
   displayName: string,
   expected: Buffer,
   expectedDigest: string,
+  directory: string,
 ): Promise<void> {
   const pathInfo = await lstat(filename);
   if (!pathInfo.isFile() || pathInfo.isSymbolicLink()) {
@@ -195,12 +197,10 @@ async function verifyAndSyncExistingExport(
   } finally {
     await handle.close();
   }
+  await syncDirectory(directory);
 }
 
 async function syncDirectory(directory: string): Promise<void> {
-  // Node cannot open directory handles with Windows' backup-semantics flag.
-  // The file itself was flushed before the NTFS no-replace hard-link publish.
-  if (process.platform === 'win32') return;
   const directoryHandle = await open(directory, fsConstants.O_RDONLY);
   try {
     await directoryHandle.sync();
@@ -208,6 +208,12 @@ async function syncDirectory(directory: string): Promise<void> {
     await directoryHandle.close();
   }
 }
+
+const AUDIT_TIMESTAMP_SQL = `CASE
+  WHEN at = '-infinity'::timestamptz THEN '-infinity'
+  WHEN at = 'infinity'::timestamptz THEN 'infinity'
+  ELSE to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+END`;
 
 async function authorizedPrincipalId(client: pg.PoolClient, externalId: string): Promise<string> {
   const result = await client.query<{ id: string }>(
@@ -227,7 +233,7 @@ async function authorizedPrincipalId(client: pg.PoolClient, externalId: string):
 async function selectRows(client: pg.PoolClient, cutoff: string, limit: number): Promise<AuditRow[]> {
   const result = await client.query<AuditRow>(
     `SELECT id::text,
-            to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at,
+            ${AUDIT_TIMESTAMP_SQL} AS at,
             principal_id, action, memory_id, scope_id, query, metadata::text AS metadata_json
        FROM audit_log
       WHERE at < $1
@@ -236,6 +242,21 @@ async function selectRows(client: pg.PoolClient, cutoff: string, limit: number):
     [cutoff, limit],
   );
   return result.rows;
+}
+
+class UnusableAuditRetentionConnectionError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : 'Audit retention transaction failed', { cause });
+  }
+}
+
+function sameRows(left: AuditRow[], right: AuditRow[]): boolean {
+  const byId = (a: AuditRow, b: AuditRow) => {
+    const leftId = BigInt(a.id);
+    const rightId = BigInt(b.id);
+    return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+  };
+  return serializeRows([...left].sort(byId)).equals(serializeRows([...right].sort(byId)));
 }
 
 async function deleteBatch(
@@ -252,15 +273,21 @@ async function deleteBatch(
   try {
     await client.query('BEGIN');
     const principalId = await authorizedPrincipalId(client, principalExternalId);
-    const deletion = await client.query<{ id: string }>(
+    const deletion = await client.query<AuditRow>(
       `DELETE FROM audit_log
         WHERE id = ANY($1::bigint[])
           AND at < $2
-      RETURNING id::text`,
+      RETURNING id::text,
+                ${AUDIT_TIMESTAMP_SQL} AS at,
+                principal_id, action, memory_id, scope_id, query,
+                metadata::text AS metadata_json`,
       [rows.map((row) => row.id), cutoff],
     );
     if (deletion.rowCount !== rows.length) {
       throw new Error('Audit retention delete count did not match the selected batch');
+    }
+    if (!sameRows(deletion.rows, rows)) {
+      throw new Error('Audit retention row changed after export; delete rolled back');
     }
     const first = rows[0];
     const last = rows[rows.length - 1];
@@ -290,7 +317,7 @@ async function deleteBatch(
     } catch {
       destroyClient = true;
     }
-    if (destroyClient) throw new Error('Audit retention transaction cleanup failed', { cause: error });
+    if (destroyClient) throw new UnusableAuditRetentionConnectionError(error);
     throw error;
   }
 }
@@ -322,6 +349,7 @@ export async function runAuditRetention(
     : await validateAuditExportDirectory(options.exportDirectory);
   const client = await pool.connect();
   let lockHeld = false;
+  let destroyClient = false;
   let primaryError: unknown;
   try {
     let cutoff: string;
@@ -335,7 +363,7 @@ export async function runAuditRetention(
       lockHeld = lock.rows[0]?.acquired === true;
       const cutoffResult = await client.query<{ cutoff: string }>(
         `SELECT to_char(
-           transaction_timestamp() - make_interval(days => $1::int),
+           (transaction_timestamp() - make_interval(days => $1::int)) AT TIME ZONE 'UTC',
            'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
          ) AS cutoff`,
         [retentionDays],
@@ -351,7 +379,11 @@ export async function runAuditRetention(
       if (options.dryRun) {
         const preview = await client.query<{ eligible: number; oldest_at: string | null }>(
           `SELECT count(*)::int AS eligible,
-                  to_char(min(at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS oldest_at
+                  CASE
+                    WHEN min(at) = '-infinity'::timestamptz THEN '-infinity'
+                    WHEN min(at) = 'infinity'::timestamptz THEN 'infinity'
+                    ELSE to_char(min(at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+                  END AS oldest_at
              FROM audit_log WHERE at < $1`,
           [cutoff],
         );
@@ -365,7 +397,11 @@ export async function runAuditRetention(
       }
       await client.query('COMMIT');
     } catch (error) {
-      await client.query('ROLLBACK').catch(() => undefined);
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        destroyClient = true;
+      }
       throw error;
     }
 
@@ -407,10 +443,10 @@ export async function runAuditRetention(
       exports, reusedExports, exhausted,
     };
   } catch (error) {
+    if (error instanceof UnusableAuditRetentionConnectionError) destroyClient = true;
     primaryError = error;
     throw error;
   } finally {
-    let destroyClient = false;
     let unlockFailed = false;
     if (lockHeld) {
       const unlocked = await client.query<{ unlocked: boolean }>(

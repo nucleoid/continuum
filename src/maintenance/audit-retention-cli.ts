@@ -40,6 +40,19 @@ export function parseAuditRetentionCliOptions(
   args: string[],
   env: NodeJS.ProcessEnv = process.env,
 ): AuditRetentionCliOptions {
+  const rawDays = env.CONTINUUM_AUDIT_RETENTION_DAYS;
+  if (rawDays === undefined || rawDays === '') {
+    for (let index = 0; index < args.length; index += 1) {
+      const arg = args[index];
+      if (arg === '--dry-run') continue;
+      if (arg === '--batch-size' || arg === '--max-batches' || arg === '--max-rows') {
+        if (args[index + 1] !== undefined) index += 1;
+        continue;
+      }
+      throw new Error(`Unknown argument: ${arg}`);
+    }
+    return { enabled: false };
+  }
   let batchSize = env.CONTINUUM_AUDIT_RETENTION_BATCH_SIZE === undefined
     ? DEFAULT_AUDIT_RETENTION_BATCH_SIZE
     : parsePositiveInteger(
@@ -82,8 +95,6 @@ export function parseAuditRetentionCliOptions(
     index += 1;
   }
   const exportDirectory = parseExportDirectory(env.CONTINUUM_AUDIT_RETENTION_EXPORT_DIR);
-  const rawDays = env.CONTINUUM_AUDIT_RETENTION_DAYS;
-  if (rawDays === undefined || rawDays === '') return { enabled: false };
   const retentionDays = parsePositiveInteger(rawDays, 'CONTINUUM_AUDIT_RETENTION_DAYS');
   const principalExternalId = env.CONTINUUM_AUDIT_RETENTION_PRINCIPAL_EXTERNAL_ID;
   if (!principalExternalId) {
