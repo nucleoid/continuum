@@ -39,6 +39,46 @@ afterEach(async () => {
 });
 
 describe('runMigrations', () => {
+  it('seeds Entra freshness from durable successful-sync evidence, never migration time', async () => {
+    const schema = `migrator_entra_freshness_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const migration = await readFile(
+      join(process.cwd(), 'migrations/0014_entra_sync_freshness.sql'),
+      'utf8',
+    );
+    const directory = await migrationDirectory(migration);
+    try {
+      await pool.query(
+        `CREATE TABLE scope_memberships (
+           source_kind TEXT NOT NULL, active BOOLEAN NOT NULL, synced_at TIMESTAMPTZ
+         );
+         CREATE TABLE audit_log (
+           at TIMESTAMPTZ NOT NULL, metadata JSONB
+         );
+         INSERT INTO scope_memberships (source_kind, active, synced_at)
+         VALUES ('entra', TRUE, now());
+         INSERT INTO audit_log (at, metadata)
+         VALUES (now() - interval '72 hours', '{"operation":"entra_membership_sync"}')`,
+      );
+
+      await runMigrations(pool, directory);
+
+      expect((await pool.query(
+        `SELECT last_success_at = (
+           SELECT max(at) FROM audit_log
+            WHERE metadata->>'operation' = 'entra_membership_sync'
+         ) AS derived,
+         now() >= last_success_at + max_staleness AS stale
+         FROM entra_sync_state WHERE singleton`,
+      )).rows).toEqual([{ derived: true, stale: true }]);
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  });
+
   it('ships decision constraints after ingestion with nonblocking validation and indexing', async () => {
     const migrations = (await readdir(join(process.cwd(), 'migrations')))
       .filter((file) => file.endsWith('.sql'))

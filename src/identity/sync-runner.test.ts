@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type pg from 'pg';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { createPrincipal } from '../storage/principals.js';
@@ -59,5 +59,35 @@ describe('membership sync CLI runner', () => {
       `SELECT metadata->>'reason' AS reason
          FROM audit_log WHERE metadata->>'operation' = 'entra_membership_sync_rejected'`,
     )).rows).toEqual([{ reason: 'SNAPSHOT_TOO_LARGE' }]);
+  });
+
+  it('rejects a non-manual sync actor before making a Graph request', async () => {
+    const breakGlass = await createPrincipal(pool, {
+      externalId: 'break-glass', kind: 'user', displayName: 'Break glass',
+    });
+    const actor = await createPrincipal(pool, {
+      externalId: '11111111-1111-4111-8111-111111111111', kind: 'user', displayName: 'Entra admin',
+    });
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await addMembership(pool, breakGlass.id, org.id, 'admin');
+    const groupId = '22222222-2222-4222-8222-222222222222';
+    await provisionEntraGroupBinding(pool, breakGlass, {
+      externalId: groupId, scopeId: org.id, role: 'admin',
+    });
+    await syncEntraMemberships(pool, breakGlass, [{
+      id: groupId, status: 'present', displayName: 'Entra admins',
+      memberObjectIds: [actor.externalId],
+    }]);
+    const fetchSnapshot = vi.fn(async () => []);
+
+    await expect(runMembershipSync(pool, {
+      CONTINUUM_ENTRA_MEMBERSHIP_SYNC: 'true',
+      CONTINUUM_GRAPH_ACCESS_TOKEN: 'x'.repeat(32),
+      CONTINUUM_MEMBERSHIP_SYNC_ACTOR: actor.externalId,
+    }, fetchSnapshot)).rejects.toMatchObject({
+      code: 'FORBIDDEN',
+      publicMessage: 'membership sync actor must be an active manually managed org administrator',
+    });
+    expect(fetchSnapshot).not.toHaveBeenCalled();
   });
 });

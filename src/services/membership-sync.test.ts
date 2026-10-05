@@ -5,7 +5,8 @@ import { createPrincipal } from '../storage/principals.js';
 import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { addMembership, hasRole, removeMembership } from '../storage/memberships.js';
 import {
-  listBoundEntraGroupIds, MAX_SYNC_GROUPS, MAX_SYNC_MEMBERSHIPS, provisionEntraGroupBinding,
+  DEFAULT_MAX_STALENESS_HOURS, listBoundEntraGroupIds, MAX_SYNC_GROUPS, MAX_SYNC_MEMBERSHIPS,
+  provisionEntraGroupBinding,
   rejectEntraMembershipSync, revokeEntraGroupBinding, syncEntraMemberships,
 } from './membership-sync.js';
 import { ServiceError } from './errors.js';
@@ -283,6 +284,77 @@ describe('Entra membership sync', () => {
       `SELECT count(*)::int AS count FROM entra_groups
         WHERE approved_by IS NOT NULL AND approval_revoked_at IS NULL`,
     )).rows[0].count).toBe(MAX_SYNC_GROUPS);
+  });
+
+  it('updates and recovers an existing approved binding at the 500-binding limit', async () => {
+    const alpha = await createScope(pool, { kind: 'team', name: 'cardinality-update' });
+    const beta = await createScope(pool, { kind: 'team', name: 'cardinality-recovery' });
+    await pool.query(
+      `INSERT INTO entra_groups
+         (external_id, display_name, scope_id, role, active, approved_by, approved_at)
+       SELECT lpad(n::text, 8, '0') || '-0000-4000-8000-' || lpad(n::text, 12, '0'),
+              'approved-' || n, $1, 'reader', TRUE, $2, now()
+         FROM generate_series(1, $3) n`,
+      [alpha.id, admin.id, MAX_SYNC_GROUPS],
+    );
+    const existing = '00000001-0000-4000-8000-000000000001';
+
+    await provisionEntraGroupBinding(pool, admin, {
+      externalId: existing, scopeId: beta.id, role: 'writer', displayName: 'updated',
+    });
+    await pool.query(
+      `UPDATE entra_groups SET active = FALSE, deactivated_at = now()
+        WHERE external_id = $1`,
+      [existing],
+    );
+    expect(await provisionEntraGroupBinding(pool, admin, {
+      externalId: existing, scopeId: beta.id, role: 'writer', displayName: 'reactivated',
+    })).toEqual({ created: false, reactivated: true });
+    await pool.query(
+      `UPDATE entra_groups
+          SET active = FALSE, deactivated_at = now(),
+              quarantined_at = now(), quarantine_reason = 'TEST_QUARANTINE'
+        WHERE external_id = $1`,
+      [existing],
+    );
+    expect(await provisionEntraGroupBinding(pool, admin, {
+      externalId: existing, scopeId: beta.id, role: 'admin', displayName: 'recovered',
+    })).toEqual({ created: false, reactivated: true });
+
+    expect((await pool.query(
+      `SELECT scope_id, role, active, quarantined_at, quarantine_reason
+         FROM entra_groups WHERE external_id = $1`, [existing],
+    )).rows[0]).toEqual({
+      scope_id: beta.id, role: 'admin', active: true,
+      quarantined_at: null, quarantine_reason: null,
+    });
+    expect((await pool.query(
+      `SELECT count(*)::int AS count FROM entra_groups
+        WHERE approved_by IS NOT NULL AND approval_revoked_at IS NULL`,
+    )).rows[0].count).toBe(MAX_SYNC_GROUPS);
+  });
+
+  it('uses a two-day default freshness window for a nightly scheduler', () => {
+    expect(DEFAULT_MAX_STALENESS_HOURS).toBe(48);
+  });
+
+  it('provisions only bounded authoritative Graph members before granting membership', async () => {
+    const alpha = await createScope(pool, { kind: 'team', name: 'bounded-provisioning' });
+    const groupId = '22222222-2222-4222-8222-222222222222';
+    const memberId = '11111111-1111-4111-8111-111111111111';
+    await provisionEntraGroupBinding(pool, admin, {
+      externalId: groupId, scopeId: alpha.id, role: 'reader',
+    });
+
+    await syncEntraMemberships(pool, admin, [{
+      id: groupId, status: 'present', displayName: 'Bounded group', memberObjectIds: [memberId],
+    }]);
+
+    const principal = (await pool.query(
+      `SELECT id, kind, display_name FROM principals WHERE external_id = $1`, [memberId],
+    )).rows[0];
+    expect(principal).toMatchObject({ kind: 'user', display_name: memberId });
+    expect(await hasRole(pool, principal.id, alpha.id, 'reader')).toBe(true);
   });
 
   it('database-enforces immutable group IDs and approved binding cardinality', async () => {

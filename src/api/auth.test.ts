@@ -48,8 +48,12 @@ describe('authentication configuration and Entra claims', () => {
       azp: contract.allowedClientIds[0],
       scp: `openid ${contract.userScope}`, acct: 0, exp: 2_000_000_000 };
     expect(await principalFromClaims(pool, valid, contract)).toBeNull();
+    expect((await pool.query(
+      'SELECT count(*)::int AS count FROM principals WHERE external_id = $1', [oid],
+    )).rows[0].count).toBe(0);
     const principal = (await pool.query(
-      'SELECT id FROM principals WHERE external_id = $1', [oid],
+      `INSERT INTO principals (id, external_id, kind, display_name)
+       VALUES (gen_random_uuid(), $1, 'user', $1) RETURNING id`, [oid],
     )).rows[0];
     const org = await getScopeByRef(pool, { kind: 'org', name: '' });
     await addMembership(pool, principal.id, org!.id, 'reader');
