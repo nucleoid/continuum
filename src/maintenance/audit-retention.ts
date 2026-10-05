@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
-import { lstat, link, open, readFile, readdir, realpath, unlink } from 'node:fs/promises';
+import { lstat, link, open, readdir, realpath, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import type pg from 'pg';
 
@@ -20,20 +20,20 @@ export interface AuditRetentionOptions {
   principalExternalId: string;
   exportDirectory?: string;
   dryRun?: boolean;
-  now?: Date;
   runId?: string;
+  afterCutoff?: (cutoff: string) => Promise<void>;
   afterExport?: (batch: number) => Promise<void>;
 }
 
-interface AuditRow {
+export interface AuditRow {
   id: string;
-  at: Date;
+  at: string;
   principal_id: string;
   action: string;
   memory_id: string | null;
   scope_id: string | null;
   query: string | null;
-  metadata: unknown;
+  metadata_json: string | null;
 }
 
 export interface AuditExportResult {
@@ -64,34 +64,23 @@ function checkedInteger(value: number, name: string, maximum?: number): number {
   return value;
 }
 
-function stableValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stableValue);
-  if (value !== null && typeof value === 'object') {
-    const result: Record<string, unknown> = {};
-    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-      result[key] = stableValue((value as Record<string, unknown>)[key]);
-    }
-    return result;
-  }
-  return value;
-}
-
 function serializeRows(rows: AuditRow[]): Buffer {
   const lines = rows.map((row) => JSON.stringify({
+    archive_format: 'continuum-audit-v1',
     id: row.id,
-    at: row.at.toISOString(),
+    at: row.at,
     principal_id: row.principal_id,
     action: row.action,
     memory_id: row.memory_id,
     scope_id: row.scope_id,
     query: row.query,
-    metadata: stableValue(row.metadata),
+    metadata_json: row.metadata_json,
   }));
   return Buffer.from(`${lines.join('\n')}\n`, 'utf8');
 }
 
-function cutoffLabel(cutoff: Date): string {
-  return cutoff.toISOString().replace(/[-:.]/g, '');
+function cutoffLabel(cutoff: string): string {
+  return cutoff.replace(/[-:.]/g, '');
 }
 
 async function rejectSymlinkComponents(directory: string): Promise<void> {
@@ -130,7 +119,7 @@ export async function validateAuditExportDirectory(directory: string): Promise<s
 
 export async function exportAuditRows(
   rows: AuditRow[],
-  cutoff: Date,
+  cutoff: string,
   directory: string,
   runId: string,
   batchNumber: number,
@@ -146,14 +135,7 @@ export async function exportAuditRows(
     .sort();
   for (const candidate of retryCandidates) {
     const candidatePath = path.join(directory, candidate);
-    const candidateInfo = await lstat(candidatePath);
-    if (!candidateInfo.isFile() || candidateInfo.isSymbolicLink()) {
-      throw new Error(`Refusing unsafe existing audit export: ${candidate}`);
-    }
-    const existing = await readFile(candidatePath);
-    if (!existing.equals(bytes)) {
-      throw new Error(`Existing audit export does not match selected rows: ${candidate}`);
-    }
+    await verifyAndSyncExistingExport(candidatePath, candidate, bytes, sha256);
     return { filename: candidate, sha256, reused: true };
   }
   const filename = `audit-${cutoffLabel(cutoff)}-${first.id}-${last.id}-${sha256}.jsonl`;
@@ -171,24 +153,11 @@ export async function exportAuditRows(
     try {
       await link(tempPath, finalPath);
       await unlink(tempPath);
-      const directoryHandle = await open(directory, fsConstants.O_RDONLY);
-      try {
-        await directoryHandle.sync();
-      } finally {
-        await directoryHandle.close();
-      }
+      await syncDirectory(directory);
       return { filename, sha256, reused: false };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      const finalInfo = await lstat(finalPath);
-      if (!finalInfo.isFile() || finalInfo.isSymbolicLink()) {
-        throw new Error(`Refusing unsafe existing audit export: ${filename}`);
-      }
-      const existing = await readFile(finalPath);
-      const existingDigest = createHash('sha256').update(existing).digest('hex');
-      if (existingDigest !== sha256 || !existing.equals(bytes)) {
-        throw new Error(`Existing audit export does not match selected rows: ${filename}`);
-      }
+      await verifyAndSyncExistingExport(finalPath, filename, bytes, sha256);
       return { filename, sha256, reused: true };
     }
   } finally {
@@ -196,6 +165,47 @@ export async function exportAuditRows(
     await unlink(tempPath).catch((error: NodeJS.ErrnoException) => {
       if (error.code !== 'ENOENT') throw error;
     });
+  }
+}
+
+async function verifyAndSyncExistingExport(
+  filename: string,
+  displayName: string,
+  expected: Buffer,
+  expectedDigest: string,
+): Promise<void> {
+  const pathInfo = await lstat(filename);
+  if (!pathInfo.isFile() || pathInfo.isSymbolicLink()) {
+    throw new Error(`Refusing unsafe existing audit export: ${displayName}`);
+  }
+  const handle = await open(filename, fsConstants.O_RDONLY);
+  try {
+    const info = await handle.stat();
+    if (!info.isFile() || (pathInfo.ino !== 0 && info.ino !== pathInfo.ino)
+      || (pathInfo.dev !== 0 && info.dev !== pathInfo.dev)) {
+      throw new Error(`Refusing unsafe existing audit export: ${displayName}`);
+    }
+    const existing = await handle.readFile();
+    const existingDigest = createHash('sha256').update(existing).digest('hex');
+    if (existingDigest !== expectedDigest || !existing.equals(expected)) {
+      throw new Error(`Existing audit export does not match selected rows: ${displayName}`);
+    }
+    // A reused file is just as deletion-critical as a newly written one.
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function syncDirectory(directory: string): Promise<void> {
+  // Node cannot open directory handles with Windows' backup-semantics flag.
+  // The file itself was flushed before the NTFS no-replace hard-link publish.
+  if (process.platform === 'win32') return;
+  const directoryHandle = await open(directory, fsConstants.O_RDONLY);
+  try {
+    await directoryHandle.sync();
+  } finally {
+    await directoryHandle.close();
   }
 }
 
@@ -214,9 +224,11 @@ async function authorizedPrincipalId(client: pg.PoolClient, externalId: string):
   return id;
 }
 
-async function selectRows(client: pg.PoolClient, cutoff: Date, limit: number): Promise<AuditRow[]> {
+async function selectRows(client: pg.PoolClient, cutoff: string, limit: number): Promise<AuditRow[]> {
   const result = await client.query<AuditRow>(
-    `SELECT id::text, at, principal_id, action, memory_id, scope_id, query, metadata
+    `SELECT id::text,
+            to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at,
+            principal_id, action, memory_id, scope_id, query, metadata::text AS metadata_json
        FROM audit_log
       WHERE at < $1
       ORDER BY at ASC, id ASC
@@ -230,7 +242,7 @@ async function deleteBatch(
   client: pg.PoolClient,
   rows: AuditRow[],
   principalExternalId: string,
-  cutoff: Date,
+  cutoff: string,
   retentionDays: number,
   runId: string,
   batchNumber: number,
@@ -257,12 +269,12 @@ async function deleteBatch(
        VALUES ($1, 'archive', $2::jsonb)`,
       [principalId, JSON.stringify({
         source: 'audit-retention',
-        cutoff: cutoff.toISOString(),
+        cutoff,
         retention_days: retentionDays,
         first_id: first.id,
         last_id: last.id,
-        first_at: first.at.toISOString(),
-        last_at: last.at.toISOString(),
+        first_at: first.at,
+        last_at: last.at,
         deleted_count: rows.length,
         export_mode: exported ? 'jsonl' : 'none',
         export_filename: exported?.filename ?? null,
@@ -304,39 +316,57 @@ export async function runAuditRetention(
     MAX_AUDIT_RETENTION_MAX_ROWS,
   );
   if (!options.principalExternalId) throw new Error('principalExternalId is required');
-  const now = options.now ?? new Date();
-  if (!Number.isFinite(now.getTime())) throw new RangeError('now must be a valid date');
-  const cutoff = new Date(now.getTime() - retentionDays * 86_400_000);
-  if (!Number.isFinite(cutoff.getTime())) throw new RangeError('retentionDays produces an invalid cutoff');
   const runId = options.runId ?? randomUUID();
   const exportDirectory = options.exportDirectory === undefined
     ? undefined
     : await validateAuditExportDirectory(options.exportDirectory);
   const client = await pool.connect();
   let lockHeld = false;
+  let primaryError: unknown;
   try {
-    await authorizedPrincipalId(client, options.principalExternalId);
-    const lock = await client.query<{ acquired: boolean }>(
-      'SELECT pg_try_advisory_lock($1::bigint) AS acquired',
-      [AUDIT_RETENTION_LOCK_KEY],
-    );
-    lockHeld = lock.rows[0]?.acquired === true;
-    if (!lockHeld) {
-      return { status: 'busy', cutoff: cutoff.toISOString(), runId, batches: 0, deleted: 0 };
-    }
-
-    if (options.dryRun) {
+    let cutoff: string;
+    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
+    try {
       await authorizedPrincipalId(client, options.principalExternalId);
-      const preview = await client.query<{ eligible: number; oldest_at: Date | null }>(
-        `SELECT count(*)::int AS eligible, min(at) AS oldest_at FROM audit_log WHERE at < $1`,
-        [cutoff],
+      const lock = await client.query<{ acquired: boolean }>(
+        'SELECT pg_try_advisory_lock($1::bigint) AS acquired',
+        [AUDIT_RETENTION_LOCK_KEY],
       );
-      return {
-        status: 'dry-run', cutoff: cutoff.toISOString(), runId,
-        eligible: preview.rows[0]?.eligible ?? 0,
-        oldestAt: preview.rows[0]?.oldest_at?.toISOString() ?? null,
-        batches: 0, deleted: 0,
-      };
+      lockHeld = lock.rows[0]?.acquired === true;
+      const cutoffResult = await client.query<{ cutoff: string }>(
+        `SELECT to_char(
+           transaction_timestamp() - make_interval(days => $1::int),
+           'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+         ) AS cutoff`,
+        [retentionDays],
+      );
+      cutoff = cutoffResult.rows[0].cutoff;
+      await options.afterCutoff?.(cutoff);
+
+      if (!lockHeld) {
+        await client.query('COMMIT');
+        return { status: 'busy', cutoff, runId, batches: 0, deleted: 0 };
+      }
+
+      if (options.dryRun) {
+        const preview = await client.query<{ eligible: number; oldest_at: string | null }>(
+          `SELECT count(*)::int AS eligible,
+                  to_char(min(at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS oldest_at
+             FROM audit_log WHERE at < $1`,
+          [cutoff],
+        );
+        await client.query('COMMIT');
+        return {
+          status: 'dry-run', cutoff, runId,
+          eligible: preview.rows[0]?.eligible ?? 0,
+          oldestAt: preview.rows[0]?.oldest_at ?? null,
+          batches: 0, deleted: 0,
+        };
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
     }
 
     let batches = 0;
@@ -373,20 +403,28 @@ export async function runAuditRetention(
       }
     }
     return {
-      status: 'completed', cutoff: cutoff.toISOString(), runId, batches, deleted,
+      status: 'completed', cutoff, runId, batches, deleted,
       exports, reusedExports, exhausted,
     };
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
+    let destroyClient = false;
+    let unlockFailed = false;
     if (lockHeld) {
       const unlocked = await client.query<{ unlocked: boolean }>(
         'SELECT pg_advisory_unlock($1::bigint) AS unlocked',
         [AUDIT_RETENTION_LOCK_KEY],
       ).catch(() => ({ rows: [{ unlocked: false }] }));
       if (unlocked.rows[0]?.unlocked !== true) {
-        client.release(true);
-        throw new Error('Audit retention advisory lock cleanup failed');
+        destroyClient = true;
+        unlockFailed = true;
       }
     }
-    client.release();
+    client.release(destroyClient);
+    if (unlockFailed && primaryError === undefined) {
+      throw new Error('Audit retention advisory lock cleanup failed');
+    }
   }
 }

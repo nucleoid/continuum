@@ -1,7 +1,7 @@
-import { chmod, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, open, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type pg from 'pg';
 import { addMembership } from '../storage/memberships.js';
 import { createPrincipal } from '../storage/principals.js';
@@ -17,12 +17,14 @@ import {
 describe('audit retention', () => {
   let pool: pg.Pool;
   const directories: string[] = [];
-  const now = new Date('2026-10-04T12:00:00.000Z');
-  const cutoff = new Date('2026-09-04T12:00:00.000Z');
+  let databaseNow: Date;
+  let cutoff: Date;
 
   beforeEach(async () => {
     pool ??= await makeTestPool();
     await resetData(pool);
+    databaseNow = (await pool.query<{ now: Date }>('SELECT transaction_timestamp() AS now')).rows[0].now;
+    cutoff = new Date(databaseNow.getTime() - 30 * 86_400_000);
   });
 
   afterEach(async () => {
@@ -73,7 +75,7 @@ describe('audit retention', () => {
   function options(principalExternalId = 'svc:retention') {
     return {
       retentionDays: 30, batchSize: 2, maxBatches: 10, maxRows: 100,
-      principalExternalId, now, runId: '11111111-1111-4111-8111-111111111111',
+      principalExternalId, runId: '11111111-1111-4111-8111-111111111111',
     };
   }
 
@@ -93,10 +95,16 @@ describe('audit retention', () => {
     const first = await insertAudit(admin.id, sameTime);
     const second = await insertAudit(admin.id, sameTime);
     const third = await insertAudit(admin.id, new Date('2026-02-01T00:00:00Z'));
-    const boundary = await insertAudit(admin.id, cutoff);
-    const newer = await insertAudit(admin.id, new Date(cutoff.getTime() + 1));
+    let boundary = '';
+    let newer = '';
 
-    const result = await runAuditRetention(pool, { ...options(), maxBatches: 1 });
+    const result = await runAuditRetention(pool, {
+      ...options(), maxBatches: 1,
+      afterCutoff: async (databaseCutoff) => {
+        boundary = await insertAudit(admin.id, new Date(databaseCutoff));
+        newer = await insertAudit(admin.id, new Date(Date.parse(databaseCutoff) + 1));
+      },
+    });
 
     expect(result).toMatchObject({ status: 'completed', batches: 1, deleted: 2, exhausted: false });
     const remaining = await pool.query<{ id: string }>(
@@ -125,12 +133,12 @@ describe('audit retention', () => {
     const admin = await seedPrincipal('svc:retention', 'admin');
     await insertAudit(admin.id, new Date('2026-01-02T00:00:00Z'));
     await insertAudit(admin.id, new Date('2026-01-01T00:00:00Z'));
-    await insertAudit(admin.id, cutoff);
+    await insertAudit(admin.id, new Date(cutoff.getTime() + 60_000));
 
     const result = await runAuditRetention(pool, { ...options(), dryRun: true });
 
     expect(result).toMatchObject({
-      status: 'dry-run', eligible: 2, oldestAt: '2026-01-01T00:00:00.000Z',
+      status: 'dry-run', eligible: 2, oldestAt: '2026-01-01T00:00:00.000000Z',
       batches: 0, deleted: 0,
     });
     expect((await pool.query('SELECT count(*)::int AS count FROM audit_log')).rows[0].count).toBe(3);
@@ -139,38 +147,65 @@ describe('audit retention', () => {
   it('exports complete deterministic JSONL with escaping and reuses an identical final file', async () => {
     const directory = await exportDirectory();
     const rows = [{
-      id: '9223372036854775806', at: new Date('2026-01-01T00:00:00Z'),
+      id: '9223372036854775806', at: '2026-01-01T00:00:00.123456Z',
       principal_id: '00000000-0000-4000-8000-000000000001', action: 'read',
       memory_id: '00000000-0000-4000-8000-000000000002',
       scope_id: '00000000-0000-4000-8000-000000000003',
-      query: 'line one\n"line two"', metadata: { z: 'last', a: { y: 2, x: 1 } },
+      query: 'line one\n"line two"',
+      metadata_json: '{"a":{"__proto__":{"polluted":true},"precise":0.123456789012345678901234567890},"huge":92233720368547758061234567890}',
     }];
 
-    const first = await exportAuditRows(rows, cutoff, directory, 'run-one', 1);
+    const first = await exportAuditRows(rows, cutoff.toISOString(), directory, 'run-one', 1);
     const bytes = await readFile(path.join(directory, first.filename), 'utf8');
     expect(bytes.endsWith('\n')).toBe(true);
     expect(bytes.split('\n')).toHaveLength(2);
     expect(JSON.parse(bytes.trim())).toEqual({
-      id: rows[0].id, at: rows[0].at.toISOString(), principal_id: rows[0].principal_id,
+      archive_format: 'continuum-audit-v1', id: rows[0].id, at: rows[0].at,
+      principal_id: rows[0].principal_id,
       action: 'read', memory_id: rows[0].memory_id, scope_id: rows[0].scope_id,
-      query: rows[0].query, metadata: { a: { x: 1, y: 2 }, z: 'last' },
+      query: rows[0].query, metadata_json: rows[0].metadata_json,
     });
-    expect((await exportAuditRows(rows, cutoff, directory, 'run-two', 1))).toEqual({
-      ...first, reused: true,
-    });
+    const probe = await open(path.join(directory, first.filename), 'r');
+    const sync = vi.spyOn(Object.getPrototypeOf(probe) as { sync: () => Promise<void> }, 'sync');
+    await probe.close();
+    try {
+      expect((await exportAuditRows(rows, cutoff.toISOString(), directory, 'run-two', 1))).toEqual({
+        ...first, reused: true,
+      });
+      expect(sync).toHaveBeenCalledTimes(1);
+    } finally {
+      sync.mockRestore();
+    }
+  });
+
+  it('atomically publishes one no-replace file under concurrent writers', async () => {
+    const directory = await exportDirectory();
+    const rows = [{
+      id: '1', at: '2026-01-01T00:00:00.123456Z',
+      principal_id: '00000000-0000-4000-8000-000000000001', action: 'read',
+      memory_id: null, scope_id: null, query: null, metadata_json: '{"safe":true}',
+    }];
+    const results = await Promise.all([
+      exportAuditRows(rows, cutoff.toISOString(), directory, 'run-one', 1),
+      exportAuditRows(rows, cutoff.toISOString(), directory, 'run-two', 1),
+    ]);
+    expect(results.map((result) => result.reused).sort()).toEqual([false, true]);
+    expect((await readdir(directory)).filter((name) => name.endsWith('.jsonl'))).toHaveLength(1);
+    expect(JSON.parse((await readFile(path.join(directory, results[0].filename), 'utf8')).trim()))
+      .toMatchObject({ id: '1', metadata_json: '{"safe":true}' });
   });
 
   it('refuses a mismatched final file and cleans temporary files', async () => {
     const directory = await exportDirectory();
     const rows = [{
-      id: '1', at: new Date('2026-01-01T00:00:00Z'),
+      id: '1', at: '2026-01-01T00:00:00.123456Z',
       principal_id: '00000000-0000-4000-8000-000000000001', action: 'read',
-      memory_id: null, scope_id: null, query: null, metadata: null,
+      memory_id: null, scope_id: null, query: null, metadata_json: null,
     }];
-    const first = await exportAuditRows(rows, cutoff, directory, 'run-one', 1);
+    const first = await exportAuditRows(rows, cutoff.toISOString(), directory, 'run-one', 1);
     await writeFile(path.join(directory, first.filename), 'corrupt\n');
 
-    await expect(exportAuditRows(rows, cutoff, directory, 'run-two', 1))
+    await expect(exportAuditRows(rows, cutoff.toISOString(), directory, 'run-two', 1))
       .rejects.toThrow('does not match');
     expect((await readdir(directory)).filter((name) => name.endsWith('.tmp'))).toEqual([]);
   });
@@ -207,9 +242,59 @@ describe('audit retention', () => {
     await writeFile(finalPath, original);
 
     const retried = await runAuditRetention(pool, {
-      ...options(), now: new Date(now.getTime() + 1_000), exportDirectory: directory,
+      ...options(), exportDirectory: directory,
     });
     expect(retried).toMatchObject({ deleted: 1, exports: 1, reusedExports: 1 });
+  });
+
+  it('round-trips microsecond timestamps, precise JSON numbers, and malicious keys losslessly', async () => {
+    const admin = await seedPrincipal('svc:retention', 'admin');
+    const metadata = '{"__proto__":{"polluted":true},"huge":92233720368547758061234567890,"precise":0.123456789012345678901234567890}';
+    const inserted = await pool.query<{ id: string }>(
+      `INSERT INTO audit_log (at, principal_id, action, metadata)
+       VALUES ('2026-01-01T00:00:00.123456Z', $1, 'read', $2::jsonb)
+       RETURNING id::text`,
+      [admin.id, metadata],
+    );
+    const directory = await exportDirectory();
+    const result = await runAuditRetention(pool, { ...options(), exportDirectory: directory });
+    expect(result).toMatchObject({ deleted: 1, exports: 1 });
+
+    const line = JSON.parse((await readFile(
+      path.join(directory, (await readdir(directory))[0]), 'utf8',
+    )).trim()) as Record<string, unknown>;
+    expect(line.archive_format).toBe('continuum-audit-v1');
+    expect(line.at).toBe('2026-01-01T00:00:00.123456Z');
+    expect(line.metadata_json).toContain('92233720368547758061234567890');
+    expect(line.metadata_json).toContain('0.123456789012345678901234567890');
+    expect(Object.prototype.polluted).toBeUndefined();
+
+    await pool.query(
+      `INSERT INTO audit_log (id, at, principal_id, action, memory_id, scope_id, query, metadata)
+       VALUES ($1::bigint, $2::timestamptz, $3::uuid, $4, $5::uuid, $6::uuid, $7, $8::jsonb)`,
+      [line.id, line.at, line.principal_id, line.action, line.memory_id, line.scope_id,
+        line.query, line.metadata_json],
+    );
+    const restored = await pool.query<{ at: string; metadata: string }>(
+      `SELECT to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at,
+              metadata::text AS metadata
+         FROM audit_log WHERE id = $1`,
+      [inserted.rows[0].id],
+    );
+    expect(restored.rows[0]).toEqual({ at: line.at, metadata: line.metadata_json });
+  });
+
+  it('uses one repeatable database snapshot for cutoff and dry-run count', async () => {
+    const admin = await seedPrincipal('svc:retention', 'admin');
+    await insertAudit(admin.id, new Date('2026-01-01T00:00:00Z'));
+    const result = await runAuditRetention(pool, {
+      ...options(), dryRun: true,
+      afterCutoff: async () => {
+        await insertAudit(admin.id, new Date('2026-01-02T00:00:00Z'));
+      },
+    });
+    expect(result).toMatchObject({ status: 'dry-run', eligible: 1 });
+    expect((await pool.query('SELECT count(*)::int AS count FROM audit_log')).rows[0].count).toBe(2);
   });
 
   it('rolls back all deletes on a count mismatch and writes no summary', async () => {
@@ -288,6 +373,31 @@ describe('audit retention', () => {
       await lockClient.query('SELECT pg_advisory_unlock($1::bigint)', [AUDIT_RETENTION_LOCK_KEY]);
       lockClient.release();
     }
+  });
+
+  it('does not let advisory unlock failure mask the primary error', async () => {
+    await seedPrincipal('svc:retention', 'admin');
+    const client = await pool.connect();
+    const wrapped = new Proxy(client, {
+      get(target, property) {
+        if (property === 'query') {
+          return (text: string, values?: unknown[]) => {
+            if (text.includes('pg_advisory_unlock')) {
+              return Promise.reject(new Error('simulated unlock failure'));
+            }
+            return target.query(text, values);
+          };
+        }
+        const value = Reflect.get(target, property);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const wrappedPool = { connect: async () => wrapped } as pg.Pool;
+
+    await expect(runAuditRetention(wrappedPool, {
+      ...options(),
+      afterCutoff: async () => { throw new Error('primary retention failure'); },
+    })).rejects.toThrow('primary retention failure');
   });
 
   it('uses the existing time index for a bounded cutoff scan at scale', async () => {
