@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
+import { asEmbeddingRouter, type EmbeddingRouting } from '../embeddings/router.js';
 import type { CaptureInput, Principal } from '../types.js';
 import { record } from '../audit/log.js';
 import {
@@ -10,6 +11,7 @@ import {
 import { requireOrgAdmin } from './access.js';
 import { asServiceError, ServiceError } from './errors.js';
 import { MAX_GAP_CLUSTER_CANDIDATES } from '../insights/gaps.js';
+import { getScopes } from '../storage/scopes.js';
 
 export interface GapOptions {
   sinceDays: number;
@@ -54,12 +56,25 @@ export interface GapReport {
   candidateCount: number;
   truncated: boolean;
   semanticClustering: boolean;
+  embedding: {
+    status: 'not-requested' | 'succeeded' | 'partial' | 'degraded';
+    attemptedGroups: number;
+    succeededGroups: number;
+    failedGroups: number;
+    skippedCandidates: number;
+    providers: Array<{ provider: string; dim: number; status: 'succeeded' | 'failed' }>;
+  };
   scopeFidelity: 'exact' | 'unknown';
   gaps: KnowledgeGap[];
 }
 
 interface Cluster {
   members: GapCandidate[];
+}
+
+interface CandidateEmbeddingGroup {
+  provider: EmbeddingProvider;
+  candidates: GapCandidate[];
 }
 
 function compareText(left: string, right: string): number {
@@ -115,6 +130,48 @@ function semanticClusters(candidates: GapCandidate[], vectors: number[][], thres
 
 function exactClusters(candidates: GapCandidate[]): Cluster[] {
   return candidates.map((candidate) => ({ members: [candidate] }));
+}
+
+async function routeCandidatesForEmbedding(
+  pool: pg.Pool,
+  routing: EmbeddingRouting,
+  candidates: GapCandidate[],
+): Promise<{ groups: CandidateEmbeddingGroup[]; skipped: GapCandidate[] }> {
+  const router = asEmbeddingRouter(routing);
+  const groups = new Map<string, CandidateEmbeddingGroup>();
+  const skipped: GapCandidate[] = [];
+  const scopesById = await getScopes(
+    pool,
+    candidates.flatMap((candidate) => candidate.scopeIds),
+  );
+  for (const candidate of candidates) {
+    // A query can cross a provider boundary only when every originally searched
+    // scope is known and resolves to the same provider. Legacy, empty, missing,
+    // disabled, local-only-unavailable, and mixed-provider sets stay exact-only.
+    if (candidate.scopeFidelity !== 'exact' || candidate.scopeIds.length === 0) {
+      skipped.push(candidate);
+      continue;
+    }
+    const scopes = candidate.scopeIds.map((scopeId) => scopesById.get(scopeId) ?? null);
+    if (scopes.some((scope) => scope === null)) {
+      skipped.push(candidate);
+      continue;
+    }
+    const routes = scopes.map((scope) => router.resolve({
+      kind: scope!.kind, name: scope!.name,
+    }));
+    const first = routes[0]?.provider;
+    if (!first || routes.some((route) =>
+      !route.provider || route.provider.id !== first.id || route.provider.dim !== first.dim)) {
+      skipped.push(candidate);
+      continue;
+    }
+    const key = `${first.id}\u0000${first.dim}`;
+    const group = groups.get(key) ?? { provider: first, candidates: [] };
+    group.candidates.push(candidate);
+    groups.set(key, group);
+  }
+  return { groups: [...groups.values()], skipped };
 }
 
 async function embedWithDeadline(
@@ -189,7 +246,7 @@ function mergedCluster(cluster: Cluster) {
 
 export async function getKnowledgeGaps(
   pool: pg.Pool,
-  provider: EmbeddingProvider | null,
+  embeddingRouting: EmbeddingRouting,
   principal: Principal,
   options: GapOptions,
 ): Promise<GapReport> {
@@ -206,29 +263,54 @@ export async function getKnowledgeGaps(
       maxQueryChars: options.maxQueryChars,
     });
     const candidates = selection.candidates.filter((item) => item.frequency >= options.minFrequency);
-    let clusters = exactClusters(candidates);
-    let semanticClustering = false;
-    if (provider && candidates.length > 0) {
+    const routed = await routeCandidatesForEmbedding(pool, embeddingRouting, candidates);
+    let clusters = exactClusters(routed.skipped);
+    let succeededGroups = 0;
+    let failedGroups = 0;
+    const providerResults: GapReport['embedding']['providers'] = [];
+    for (const group of routed.groups) {
       try {
         const vectors = await embedWithDeadline(
-          provider,
-          candidates.map((item) => item.representative),
+          group.provider,
+          group.candidates.map((item) => item.representative),
           embeddingTimeoutMs,
         );
         const dimensions = vectors[0]?.length ?? 0;
         if (
-          vectors.length !== candidates.length
+          vectors.length !== group.candidates.length
           || dimensions === 0
-          || dimensions !== provider.dim
+          || dimensions !== group.provider.dim
           || vectors.some((vector) =>
             vector.length !== dimensions || vector.some((value) => !Number.isFinite(value)))
         ) throw new Error('invalid embedding result');
-        clusters = semanticClusters(candidates, vectors, options.threshold);
-        semanticClustering = true;
+        clusters.push(...semanticClusters(group.candidates, vectors, options.threshold));
+        succeededGroups += 1;
+        providerResults.push({
+          provider: group.provider.id, dim: group.provider.dim, status: 'succeeded',
+        });
       } catch {
-        clusters = exactClusters(candidates);
+        clusters.push(...exactClusters(group.candidates));
+        failedGroups += 1;
+        providerResults.push({
+          provider: group.provider.id, dim: group.provider.dim, status: 'failed',
+        });
       }
     }
+    const attemptedGroups = routed.groups.length;
+    const embeddingStatus: GapReport['embedding']['status'] = attemptedGroups === 0
+      ? 'not-requested'
+      : failedGroups > 0
+        ? 'degraded'
+        : routed.skipped.length > 0 ? 'partial' : 'succeeded';
+    const embedding: GapReport['embedding'] = {
+      status: embeddingStatus,
+      attemptedGroups,
+      succeededGroups,
+      failedGroups,
+      skippedCandidates: routed.skipped.length,
+      providers: providerResults,
+    };
+    const semanticClustering = succeededGroups > 0;
 
     const merged = clusters.map(mergedCluster)
       .sort((a, b) => b.score - a.score
@@ -281,6 +363,7 @@ export async function getKnowledgeGaps(
       candidateCount: candidates.length,
       truncated: selection.truncated || merged.length < clusters.length,
       semanticClustering,
+      embedding,
       scopeFidelity,
       gaps,
     };
@@ -289,7 +372,7 @@ export async function getKnowledgeGaps(
       action: 'read',
       metadata: {
         view: 'insights-gaps', transport: options.transport,
-        resultCount: gaps.length, semanticClustering,
+        resultCount: gaps.length, semanticClustering, embedding,
       },
     });
     return report;

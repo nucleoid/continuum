@@ -2,6 +2,7 @@ import type pg from 'pg';
 import type { MemoryType, RecallResult } from '../types.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import { vectorSearchMemoryIds } from './embeddings.js';
+import { assertEmbeddingVectorDimension } from './schema.js';
 import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
 import type { Queryable } from './queryable.js';
 
@@ -11,6 +12,12 @@ export interface RecallOptions {
   types?: MemoryType[];
   limit: number;
   embeddingProvider?: EmbeddingProvider | null;
+  embeddingGroups?: Array<{ scopeIds: string[]; provider: EmbeddingProvider }>;
+  onEmbeddingGroupResult?: (result: {
+    provider: EmbeddingProvider;
+    scopeIds: string[];
+    status: 'succeeded' | 'failed';
+  }) => void;
 }
 
 export class EmbeddingProviderUnavailableError extends Error {
@@ -129,26 +136,36 @@ export async function recall(
   const overFetch = Math.min(opts.limit * 5, 100);
   const fts = await ftsHits(pool, opts.query, opts.scopeIds, opts.types, overFetch);
 
-  let vec: Array<{ id: string; rank: number; distance: number }> = [];
-  if (opts.embeddingProvider) {
+  const groups = opts.embeddingGroups
+    ?? (opts.embeddingProvider
+      ? [{ scopeIds: opts.scopeIds, provider: opts.embeddingProvider }]
+      : []);
+  const vectorLists: Array<Array<{ id: string; rank: number; distance: number }>> = [];
+  for (const group of groups) {
     let queryVec: number[];
     try {
-      [queryVec] = await opts.embeddingProvider.embed([opts.query]);
-    } catch (error) {
-      throw new EmbeddingProviderUnavailableError(error);
+      [queryVec] = await group.provider.embed([opts.query]);
+      assertEmbeddingVectorDimension(queryVec, group.provider);
+    } catch {
+      // An outage degrades only this provider group to full-text search.
+      opts.onEmbeddingGroupResult?.({
+        provider: group.provider, scopeIds: group.scopeIds, status: 'failed',
+      });
+      vectorLists.push([]);
+      continue;
     }
     const hits = await vectorSearchMemoryIds(
-      pool,
-      queryVec,
-      opts.scopeIds,
-      opts.embeddingProvider,
-      overFetch,
-      opts.types,
+      pool, queryVec, group.scopeIds, group.provider, overFetch, opts.types,
     );
-    vec = hits.map((h, i) => ({ id: h.id, rank: i + 1, distance: h.distance }));
+    vectorLists.push(hits.map((hit, index) => ({
+      id: hit.id, rank: index + 1, distance: hit.distance,
+    })));
+    opts.onEmbeddingGroupResult?.({
+      provider: group.provider, scopeIds: group.scopeIds, status: 'succeeded',
+    });
   }
 
-  const fused = fuse(fts, vec);
+  const fused = fuse(fts, ...vectorLists);
   const ranked = Array.from(fused.entries())
     .sort(([, a], [, b]) => b - a)
     .map(([id]) => id)

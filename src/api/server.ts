@@ -9,8 +9,9 @@ import { agentsMdRouter } from './routes/agents-md.js';
 import { auditRouter } from './routes/audit.js';
 import { insightsRouter } from './routes/insights.js';
 import { gapConfigFromEnv, type GapConfig } from '../insights/gaps.js';
-import type { EmbeddingProvider } from '../embeddings/provider.js';
-import { makeEmbeddingProviderFromEnv } from '../embeddings/factory.js';
+import { makeEmbeddingRouterFromEnv } from '../embeddings/factory.js';
+import { warnOnMissingEmbeddingRoutingScopes } from '../embeddings/router.js';
+import { asEmbeddingRouter, type EmbeddingRouting } from '../embeddings/router.js';
 import { isDirectEntrypoint } from './entrypoint.js';
 import { assertEmbeddingProviderDimension } from '../storage/schema.js';
 import { asServiceError, ServiceError, type ServiceLogger } from '../services/errors.js';
@@ -48,7 +49,7 @@ export interface OperationalLogger extends ServiceLogger {
 }
 
 export interface AppOptions {
-  embeddingProvider?: EmbeddingProvider | null;
+  embeddingProvider?: EmbeddingRouting;
   logger?: OperationalLogger;
   requestIdFactory?: () => string;
   clock?: () => number;
@@ -88,14 +89,16 @@ function safeLogPath(req: express.Request): string {
   return '/:unmatched';
 }
 
-function embeddingStatus(provider: EmbeddingProvider | null): {
+function embeddingStatus(routing: EmbeddingRouting): {
   configured: boolean;
   provider: string | null;
 } {
-  if (!provider) return { configured: false, provider: null };
+  const providers = asEmbeddingRouter(routing).providers();
+  if (providers.length === 0) return { configured: false, provider: null };
+  const provider = providers.length === 1 ? providers[0]! : null;
   return {
     configured: true,
-    provider: SAFE_PROVIDER_ID.test(provider.id) ? provider.id : 'configured',
+    provider: provider && SAFE_PROVIDER_ID.test(provider.id) ? provider.id : 'routed',
   };
 }
 
@@ -229,7 +232,9 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   if (!Number.isFinite(readinessTimeoutMs) || readinessTimeoutMs <= 0) {
     throw new Error('readinessTimeoutMs must be positive');
   }
-  if (provider) assertEmbeddingProviderDimension(provider);
+  for (const configuredProvider of asEmbeddingRouter(provider).providers()) {
+    assertEmbeddingProviderDimension(configuredProvider);
+  }
 
   app.use(requestContext(
     logger,
@@ -310,8 +315,10 @@ async function main(): Promise<void> {
   const shutdownTimeoutMs = positiveIntegerEnv('CONTINUUM_SHUTDOWN_TIMEOUT_MS', 10_000);
   const pool = getPool();
   const readiness = createReadinessState();
+  const embeddingProvider = makeEmbeddingRouterFromEnv();
+  await warnOnMissingEmbeddingRoutingScopes(pool, embeddingProvider);
   const app = createApp(pool, {
-    embeddingProvider: makeEmbeddingProviderFromEnv(),
+    embeddingProvider,
     readiness,
     readinessTimeoutMs,
     reviewHorizonDays: configuredReviewHorizonDays(),

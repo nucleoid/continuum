@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type pg from 'pg';
 import request from 'supertest';
 import { makeTestPool, resetData } from '../../storage/test-helpers.js';
@@ -8,6 +8,8 @@ import { createScope, getScopeByRef } from '../../storage/scopes.js';
 import { addMembership } from '../../storage/memberships.js';
 import { createMemory } from '../../storage/memories.js';
 import type { EmbeddingProvider } from '../../embeddings/provider.js';
+import { EmbeddingRegistry, ScopeEmbeddingRouter } from '../../embeddings/router.js';
+import { OllamaEmbeddingProvider } from '../../embeddings/ollama.js';
 
 describe('POST /api/v0/recall', () => {
   let pool: pg.Pool;
@@ -250,7 +252,7 @@ describe('POST /api/v0/recall', () => {
     });
   });
 
-  it('maps provider failures to a safe dependency error', async () => {
+  it('degrades provider failures to audited full-text recall without leaking details', async () => {
     const privateMessage = 'provider endpoint private-provider-host';
     const failingProvider: EmbeddingProvider = {
       id: 'test:failing', dim: 768,
@@ -264,12 +266,72 @@ describe('POST /api/v0/recall', () => {
       .set('Authorization', 'Bearer entra:user:recall')
       .send({ query: 'checkout' });
 
-    expect(res.status).toBe(503);
-    expect(res.body).toEqual({
-      code: 'DEPENDENCY_UNAVAILABLE',
-      error: 'A required dependency is unavailable',
-      requestId: expect.any(String),
-    });
+    expect(res.status).toBe(200);
+    expect(res.body.results.length).toBeGreaterThan(0);
     expect(JSON.stringify(res.body)).not.toContain(privateMessage);
+    const { rows } = await pool.query(
+      `SELECT metadata::text AS metadata
+         FROM audit_log
+        WHERE action = 'read' AND query = 'checkout' AND memory_id IS NULL`,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].metadata).toContain('test:failing');
+    expect(JSON.parse(rows[0].metadata)).toMatchObject({
+      embedded: false,
+      embedding_groups: [{ provider: 'test:failing', dim: 768, scopes: expect.any(Number), status: 'failed' }],
+    });
+    expect(rows[0].metadata).not.toContain(privateMessage);
+  });
+
+  it('audits local-only unavailability as degraded rather than not-requested', async () => {
+    const router = new ScopeEmbeddingRouter(
+      new EmbeddingRegistry([]),
+      { default: 'local-only', rules: [] },
+    );
+    app = createApp(pool, { embeddingProvider: router });
+    const { me } = await seedWorld();
+
+    await request(app)
+      .post('/api/v0/recall')
+      .set('Authorization', 'Bearer entra:user:recall')
+      .send({ query: 'checkout' })
+      .expect(200);
+
+    const { rows } = await pool.query(
+      `SELECT metadata FROM audit_log
+        WHERE principal_id = $1 AND action = 'read' AND memory_id IS NULL
+        ORDER BY id DESC LIMIT 1`,
+      [me.id],
+    );
+    expect(rows[0].metadata).toMatchObject({
+      embedded: false,
+      embedding_status: 'degraded',
+      local_only_unavailable_scopes: expect.any(Number),
+    });
+  });
+
+  it('degrades recall promptly when Ollama stalls after response headers', async () => {
+    let observedSignal: AbortSignal | undefined;
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      observedSignal = init?.signal as AbortSignal;
+      return {
+        ok: true,
+        json: async () => new Promise((_resolve, reject) => {
+          observedSignal?.addEventListener('abort', () => reject(observedSignal?.reason), { once: true });
+        }),
+      } as Response;
+    });
+    app = createApp(pool, { embeddingProvider: new OllamaEmbeddingProvider({
+      baseUrl: 'http://localhost:11434', model: 'm', dim: 768, timeoutMs: 20, fetchImpl,
+    }) });
+    await seedWorld();
+
+    await request(app)
+      .post('/api/v0/recall')
+      .set('Authorization', 'Bearer entra:user:recall')
+      .send({ query: 'checkout' })
+      .expect(200);
+
+    expect(observedSignal?.aborted).toBe(true);
   });
 });

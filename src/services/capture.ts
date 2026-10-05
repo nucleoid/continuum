@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import type { CaptureInput, Memory, Principal } from '../types.js';
-import type { EmbeddingProvider } from '../embeddings/provider.js';
+import { asEmbeddingRouter, type EmbeddingRouting } from '../embeddings/router.js';
 import { createMemory, updateMemoryMetadata } from '../storage/memories.js';
 import { getScopeByRef } from '../storage/scopes.js';
 import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
@@ -32,7 +32,7 @@ export interface CaptureOptions {
 
 export async function captureMemory(
   pool: pg.Pool,
-  embeddingProvider: EmbeddingProvider | null,
+  embeddingRouting: EmbeddingRouting,
   principal: Principal,
   input: CaptureInput,
   auditMetadata: Record<string, unknown> = {},
@@ -56,6 +56,10 @@ export async function captureMemory(
     }
 
     const memoryId = randomUUID();
+    const route = asEmbeddingRouter(embeddingRouting).resolve({
+      kind: scope.kind, name: scope.name,
+    });
+    const embeddingProvider = route.provider;
     let embeddingVector: number[] | undefined;
     let related: RelatedMemory[] = [];
     let embedErrorCode: 'EMBEDDING_FAILED' | undefined;
@@ -168,8 +172,18 @@ export async function captureMemory(
           source: input.source,
           type: input.type,
           embedded,
+          ...(embeddingProvider ? {
+            embedding: {
+              provider: embeddingProvider.id,
+              dim: embeddingProvider.dim,
+              status: embedded ? 'succeeded' : 'failed',
+            },
+          } : {}),
           ...(embedErrorCode ? { embedding_error_code: embedErrorCode } : {}),
           ...(relationErrorCode ? { relation_error_code: relationErrorCode } : {}),
+          ...(route.policy === 'local-only-unavailable'
+            ? { embedding_policy: 'local-only-unavailable' }
+            : {}),
           ...auditMetadata,
         },
       });

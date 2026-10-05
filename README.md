@@ -42,6 +42,79 @@ active provider. Changing models therefore leaves existing embedding rows
 untouched and temporarily makes their memories full-text-only until they are
 re-embedded. Switching back to the old model makes those rows usable again.
 
+For per-scope routing, set `CONTINUUM_EMBEDDING_CONFIG` to a JSON object with
+provider definitions and a routing policy:
+
+```json
+{
+  "providers": [
+    {
+      "alias": "local",
+      "kind": "ollama",
+      "model": "nomic-embed-text",
+      "dim": 768,
+      "endpoint": "http://localhost:11434",
+      "local": true
+    },
+    {
+      "alias": "hosted",
+      "kind": "openai",
+      "model": "text-embedding-3-small",
+      "dim": 768,
+      "local": false
+    }
+  ],
+  "routing": {
+    "default": "hosted",
+    "rules": [
+      { "match": { "kind": "user" }, "provider": "local-only" },
+      { "match": { "kind": "team", "name": "security" }, "provider": "local-only" }
+    ]
+  }
+}
+```
+
+Exact `kind` plus `name` rules take precedence over `kind` rules, then the
+default applies. `local-only` selects the single provider explicitly marked
+`local: true`. If none is configured or it is unavailable, capture and recall
+remain full-text-only for those scopes and never fall back to a hosted
+provider. Provider outages affect only their routed vector group. Full-text
+recall remains available and vector searches retain exact provider and
+dimension filters.
+
+Every provider HTTP call has a validated deadline (`timeout_ms` per provider,
+or `CONTINUUM_EMBEDDING_TIMEOUT_MS` for the legacy Ollama configuration). The
+default is 10000 ms and the maximum is 300000 ms. Cancellation is forwarded to
+`fetch`; a provider implementation that ignores cancellation is still bounded
+by the local deadline.
+
+OpenAI and Voyage credentials are read only from `OPENAI_API_KEY` and
+`VOYAGE_API_KEY`. Inline credentials are rejected. Ollama definitions must
+explicitly declare locality; a non-loopback endpoint marked local emits a
+startup warning because locality is a deployment assertion, not a URL guess.
+The legacy `CONTINUUM_EMBEDDING_PROVIDER` variables remain supported as a
+single-provider policy. Existing vectors are never automatically sent to a new
+provider. Re-embedding, especially to a hosted provider, must be an explicit
+operator action.
+
+The v0 `vector(768)` schema supports OpenAI `text-embedding-3-small` and
+`text-embedding-3-large` with an explicit 768-dimensional output. Current
+Voyage text models document only 256, 512, 1024, or 2048 dimensions, so Voyage
+configuration is rejected at startup instead of accepting a configuration that
+will fail on its first response. Voyage becomes configurable when storage gains
+a supported dimension; the client remains available for that migration.
+
+Knowledge-gap semantic clustering applies the same routing policy to the exact
+scope IDs recorded by each zero-hit recall. A candidate is sent only when every
+scope still exists and all scopes resolve to the same provider. Mixed-provider,
+empty, malformed, unknown, or legacy scope fidelity remains exact-text-only;
+in particular, a query involving any local-only scope cannot fall through to a
+hosted provider. This restriction applies to offline gap clustering of one
+historical recall candidate. Live recall still routes each readable scope to
+its provider group and safely fuses the separate results. Provider outages
+degrade to exact/FTS behavior with explicit, content-free status and counts in
+the report audit.
+
 ## License
 
 Continuum is licensed under the [MIT License](./LICENSE).

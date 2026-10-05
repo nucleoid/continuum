@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type pg from 'pg';
 import { makeTestPool, resetData } from './test-helpers.js';
 import {
@@ -7,6 +7,7 @@ import {
   getOrCreateScope,
   getScope,
   getScopeByRef,
+  getScopes,
   listScopesByKind,
 } from './scopes.js';
 
@@ -28,6 +29,18 @@ describe('scopes repository', () => {
     const byRef = await getScopeByRef(pool, { kind: 'team', name: 'payments' });
     expect(byId?.id).toBe(s.id);
     expect(byRef?.id).toBe(s.id);
+  });
+
+  it('loads a deduplicated scope set in one batch', async () => {
+    const first = await createScope(pool, { kind: 'team', name: 'first' });
+    const second = await createScope(pool, { kind: 'project', name: 'second' });
+    const query = vi.spyOn(pool, 'query');
+
+    const scopes = await getScopes(pool, [first.id, second.id, first.id]);
+
+    expect(scopes.get(first.id)?.name).toBe('first');
+    expect(scopes.get(second.id)?.name).toBe('second');
+    expect(query).toHaveBeenCalledTimes(1);
   });
 
   it('rejects org scope with a name', async () => {

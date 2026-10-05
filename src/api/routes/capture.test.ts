@@ -7,6 +7,7 @@ import { createPrincipal } from '../../storage/principals.js';
 import { createScope } from '../../storage/scopes.js';
 import { addMembership } from '../../storage/memberships.js';
 import type { EmbeddingProvider } from '../../embeddings/provider.js';
+import { OllamaEmbeddingProvider } from '../../embeddings/ollama.js';
 import { captureSources } from '../../capture/source.js';
 
 describe('POST /api/v0/capture', () => {
@@ -151,6 +152,58 @@ describe('POST /api/v0/capture', () => {
     expect(rows[0].metadata).toContain('EMBEDDING_FAILED');
     expect(rows[0].metadata).not.toContain(privateMessage);
     expect(rows[0].metadata).not.toContain('private-rest-memory-text');
+  });
+
+  it('audits provider identity and outcome without captured content', async () => {
+    const provider: EmbeddingProvider = {
+      id: 'ollama:audit-safe', dim: 768, local: true,
+      async embed() { throw new Error('private captured body'); },
+    };
+    app = createApp(pool, { embeddingProvider: provider });
+    await seedActor();
+
+    const res = await request(app)
+      .post('/api/v0/capture')
+      .set('Authorization', 'Bearer entra:user:capture')
+      .send({
+        scope: { kind: 'team', name: 'payments' }, type: 'fact',
+        title: 'private title', body: 'private captured body', source: 'manual',
+      })
+      .expect(201);
+    const { rows } = await pool.query(
+      'SELECT metadata FROM audit_log WHERE memory_id = $1', [res.body.id],
+    );
+    expect(rows[0].metadata).toMatchObject({
+      embedding: { provider: 'ollama:audit-safe', dim: 768, status: 'failed' },
+    });
+    expect(JSON.stringify(rows[0].metadata)).not.toContain('private captured body');
+    expect(JSON.stringify(rows[0].metadata)).not.toContain('private title');
+  });
+
+  it('degrades capture promptly when Ollama stalls after response headers', async () => {
+    let observedSignal: AbortSignal | undefined;
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      observedSignal = init?.signal as AbortSignal;
+      return {
+        ok: true,
+        json: async () => new Promise((_resolve, reject) => {
+          observedSignal?.addEventListener('abort', () => reject(observedSignal?.reason), { once: true });
+        }),
+      } as Response;
+    });
+    app = createApp(pool, { embeddingProvider: new OllamaEmbeddingProvider({
+      baseUrl: 'http://localhost:11434', model: 'm', dim: 768, timeoutMs: 20, fetchImpl,
+    }) });
+    await seedActor();
+
+    await request(app)
+      .post('/api/v0/capture')
+      .set('Authorization', 'Bearer entra:user:capture')
+      .send({ scope: { kind: 'team', name: 'payments' }, type: 'fact',
+        title: 'stalled', body: 'private', source: 'manual' })
+      .expect(201);
+
+    expect(observedSignal?.aborted).toBe(true);
   });
 
   it('rejects writes to a scope that does not exist', async () => {

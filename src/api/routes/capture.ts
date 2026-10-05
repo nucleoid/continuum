@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import type pg from 'pg';
 import { z } from 'zod';
-import type { EmbeddingProvider } from '../../embeddings/provider.js';
+import type { EmbeddingRouting } from '../../embeddings/router.js';
 import { captureMemory } from '../../services/capture.js';
 import { DEFAULT_RELATION_THRESHOLD } from '../../services/relations.js';
 
@@ -21,7 +21,7 @@ const captureSchema = z.object({
 
 export function captureRouter(
   pool: pg.Pool,
-  embeddingProvider: EmbeddingProvider | null = null,
+  embeddingProvider: EmbeddingRouting = null,
   relationThreshold = DEFAULT_RELATION_THRESHOLD,
 ): Router {
   const router = Router();

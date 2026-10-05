@@ -1,9 +1,15 @@
 import type { EmbeddingProvider } from './provider.js';
+import {
+  DEFAULT_EMBEDDING_TIMEOUT_MS,
+  validateEmbeddingTimeout,
+  withEmbeddingTimeout,
+} from './timeout.js';
 
 export interface OllamaProviderOptions {
   baseUrl: string;
   model: string;
   dim: number;
+  timeoutMs?: number;
   fetchImpl?: typeof fetch;
 }
 
@@ -15,9 +21,11 @@ interface OllamaEmbedResponse {
 export class OllamaEmbeddingProvider implements EmbeddingProvider {
   readonly id: string;
   readonly dim: number;
+  readonly local = true;
   private readonly baseUrl: string;
   private readonly model: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly timeoutMs: number;
 
   constructor(opts: OllamaProviderOptions) {
     this.id = `ollama:${opts.model}`;
@@ -25,30 +33,35 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
     this.baseUrl = opts.baseUrl.replace(/\/$/, '');
     this.model = opts.model;
     this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.timeoutMs = validateEmbeddingTimeout(opts.timeoutMs ?? DEFAULT_EMBEDDING_TIMEOUT_MS);
   }
 
   async embed(texts: string[], options: { signal?: AbortSignal } = {}): Promise<number[][]> {
     const out: number[][] = [];
     for (const text of texts) {
       options.signal?.throwIfAborted();
-      const res = await this.fetchImpl(`${this.baseUrl}/api/embeddings`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ model: this.model, prompt: text }),
-        signal: options.signal,
+      const vec = await withEmbeddingTimeout(this.timeoutMs, options.signal, async (signal) => {
+        const res = await this.fetchImpl(`${this.baseUrl}/api/embeddings`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ model: this.model, prompt: text }),
+          signal,
+        });
+        if (!res.ok) {
+          throw new Error(
+            `Ollama embed failed: ${res.status} ${res.statusText}`,
+          );
+        }
+        const json = (await res.json()) as OllamaEmbedResponse;
+        const embedding = json.embedding ?? json.embeddings?.[0];
+        if (!embedding || embedding.length !== this.dim
+          || embedding.some((value) => typeof value !== 'number' || !Number.isFinite(value))) {
+          throw new Error(
+            `Ollama returned invalid embedding dim ${embedding?.length} (expected ${this.dim})`,
+          );
+        }
+        return embedding;
       });
-      if (!res.ok) {
-        throw new Error(
-          `Ollama embed failed: ${res.status} ${res.statusText}`,
-        );
-      }
-      const json = (await res.json()) as OllamaEmbedResponse;
-      const vec = json.embedding ?? json.embeddings?.[0];
-      if (!vec || vec.length !== this.dim) {
-        throw new Error(
-          `Ollama returned unexpected embedding dim ${vec?.length} (expected ${this.dim})`,
-        );
-      }
       out.push(vec);
     }
     return out;

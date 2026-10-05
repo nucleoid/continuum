@@ -8,6 +8,9 @@ import { recordRead } from '../audit/log.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import { getKnowledgeGaps } from './gaps.js';
 import { createMemory } from '../storage/memories.js';
+import { createScope } from '../storage/scopes.js';
+import { EmbeddingRegistry, ScopeEmbeddingRouter } from '../embeddings/router.js';
+import { OllamaEmbeddingProvider } from '../embeddings/ollama.js';
 
 describe('getKnowledgeGaps', () => {
   let pool: pg.Pool;
@@ -24,11 +27,14 @@ describe('getKnowledgeGaps', () => {
 
   it('batches unique candidates, clusters deterministically, ranks, and records one non-recursive audit', async () => {
     const me = await admin();
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
     const other = await createPrincipal(pool, { externalId: 'other', kind: 'user', displayName: 'Other' });
     for (const [principalId, query] of [
       [me.id, 'deploy rollback'], [other.id, 'deployment rollback'], [me.id, 'deploy rollback'],
       [other.id, 'lunch menu'],
-    ]) await recordRead(pool, { principalId, query, metadata: { hits: 0 }, memories: [] });
+    ]) await recordRead(pool, {
+      principalId, query, metadata: { hits: 0, scope_ids: [org.id] }, memories: [],
+    });
     const embed = vi.fn(async (texts: string[]) => texts.map((text) =>
       text.includes('rollback') ? [1, 0] : [0, 1]));
     const provider: EmbeddingProvider = { id: 'test', dim: 2, embed };
@@ -53,7 +59,11 @@ describe('getKnowledgeGaps', () => {
 
   it('falls back to exact groups without leaking provider errors', async () => {
     const me = await admin();
-    await recordRead(pool, { principalId: me.id, query: 'token=private-value', metadata: { hits: 0 }, memories: [] });
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await recordRead(pool, {
+      principalId: me.id, query: 'token=private-value',
+      metadata: { hits: 0, scope_ids: [org.id] }, memories: [],
+    });
     const provider: EmbeddingProvider = {
       id: 'fail', dim: 2,
       async embed() { throw new Error('provider failed on token=private-value'); },
@@ -64,14 +74,100 @@ describe('getKnowledgeGaps', () => {
       now: new Date('2026-10-04T12:00:00Z'),
     });
     expect(report.semanticClustering).toBe(false);
+    expect(report.embedding).toMatchObject({
+      status: 'degraded', attemptedGroups: 1, succeededGroups: 0, failedGroups: 1,
+    });
     expect(report.gaps).toHaveLength(1);
     expect(JSON.stringify(report)).not.toContain('provider failed');
+    const { rows } = await pool.query(
+      `SELECT metadata FROM audit_log WHERE metadata->>'view' = 'insights-gaps'`,
+    );
+    expect(rows[0].metadata).toMatchObject({
+      semanticClustering: false,
+      embedding: { status: 'degraded', attemptedGroups: 1, succeededGroups: 0, failedGroups: 1 },
+    });
+    expect(JSON.stringify(rows[0].metadata)).not.toContain('private-value');
+  });
+
+  it('routes exact-scope candidates independently and never sends local-only queries hosted', async () => {
+    const me = await admin();
+    const localScope = await createScope(pool, { kind: 'team', name: 'security' });
+    const hostedScope = await createScope(pool, { kind: 'project', name: 'public-docs' });
+    await recordRead(pool, {
+      principalId: me.id, query: 'local secret query',
+      metadata: { hits: 0, scope_ids: [localScope.id] }, memories: [],
+    });
+    await recordRead(pool, {
+      principalId: me.id, query: 'hosted safe query',
+      metadata: { hits: 0, scope_ids: [hostedScope.id] }, memories: [],
+    });
+    const localEmbed = vi.fn(async (texts: string[]) => texts.map(() => [1, 0]));
+    const hostedEmbed = vi.fn(async (texts: string[]) => texts.map(() => [0, 1]));
+    const local: EmbeddingProvider = { id: 'ollama:local', dim: 2, local: true, embed: localEmbed };
+    const hosted: EmbeddingProvider = { id: 'openai:hosted', dim: 2, local: false, embed: hostedEmbed };
+    const router = new ScopeEmbeddingRouter(new EmbeddingRegistry([
+      ['local', local], ['hosted', hosted],
+    ]), {
+      default: 'hosted',
+      rules: [{ match: { kind: 'team', name: 'security' }, provider: 'local-only' }],
+    });
+
+    const report = await getKnowledgeGaps(pool, router, me, {
+      sinceDays: 30, limit: 10, minFrequency: 1, threshold: 0.9,
+      candidateLimit: 20, scanLimit: 100, maxQueryChars: 2_000,
+      now: new Date('2026-10-04T12:00:00Z'),
+    });
+
+    expect(localEmbed).toHaveBeenCalledWith(['local secret query'], expect.anything());
+    expect(hostedEmbed).toHaveBeenCalledWith(['hosted safe query'], expect.anything());
+    expect(JSON.stringify(hostedEmbed.mock.calls)).not.toContain('local secret query');
+    expect(report.embedding).toMatchObject({ status: 'succeeded', attemptedGroups: 2 });
+  });
+
+  it.each([
+    ['mixed local and hosted scopes', 'mixed private query', 'mixed'],
+    ['legacy unknown scope fidelity', 'legacy private query', 'legacy'],
+  ] as const)('fails closed before hosted embedding for %s', async (_label, query, mode) => {
+    const me = await admin();
+    const localScope = await createScope(pool, { kind: 'team', name: 'security' });
+    const hostedScope = await createScope(pool, { kind: 'project', name: 'public-docs' });
+    await recordRead(pool, {
+      principalId: me.id, query,
+      metadata: mode === 'mixed'
+        ? { hits: 0, scope_ids: [localScope.id, hostedScope.id] }
+        : { hits: 0 },
+      memories: [],
+    });
+    const hostedEmbed = vi.fn(async () => [[1, 0]]);
+    const localEmbed = vi.fn(async () => [[0, 1]]);
+    const router = new ScopeEmbeddingRouter(new EmbeddingRegistry([
+      ['local', { id: 'ollama:local', dim: 2, local: true, embed: localEmbed }],
+      ['hosted', { id: 'openai:hosted', dim: 2, local: false, embed: hostedEmbed }],
+    ]), {
+      default: 'hosted',
+      rules: [{ match: { kind: 'team', name: 'security' }, provider: 'local-only' }],
+    });
+
+    const report = await getKnowledgeGaps(pool, router, me, {
+      sinceDays: 30, limit: 10, minFrequency: 1, threshold: 0.9,
+      candidateLimit: 20, scanLimit: 100, maxQueryChars: 2_000,
+      now: new Date('2026-10-04T12:00:00Z'),
+    });
+
+    expect(hostedEmbed).not.toHaveBeenCalled();
+    expect(localEmbed).not.toHaveBeenCalled();
+    expect(report.embedding).toMatchObject({
+      status: 'not-requested', attemptedGroups: 0, skippedCandidates: 1,
+    });
+    expect(report.semanticClustering).toBe(false);
   });
 
   it('falls back before clustering when provider vectors differ from provider.dim', async () => {
     const me = await admin();
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
     await recordRead(pool, {
-      principalId: me.id, query: 'dimension mismatch', metadata: { hits: 0 }, memories: [],
+      principalId: me.id, query: 'dimension mismatch',
+      metadata: { hits: 0, scope_ids: [org.id] }, memories: [],
     });
     const provider: EmbeddingProvider = {
       id: 'wrong-dimension', dim: 3,
@@ -109,8 +205,10 @@ describe('getKnowledgeGaps', () => {
 
   it('bounds semantic embedding by a report deadline and aborts the provider work', async () => {
     const me = await admin();
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
     await recordRead(pool, {
-      principalId: me.id, query: 'slow semantic query', metadata: { hits: 0 }, memories: [],
+      principalId: me.id, query: 'slow semantic query',
+      metadata: { hits: 0, scope_ids: [org.id] }, memories: [],
     });
     let observedSignal: AbortSignal | undefined;
     const provider: EmbeddingProvider = {
@@ -131,6 +229,37 @@ describe('getKnowledgeGaps', () => {
     expect(observedSignal?.aborted).toBe(true);
     expect(report.semanticClustering).toBe(false);
     expect(report.gaps).toHaveLength(1);
+  });
+
+  it('degrades gaps promptly when Ollama stalls after response headers', async () => {
+    const me = await admin();
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await recordRead(pool, {
+      principalId: me.id, query: 'stalled body gap',
+      metadata: { hits: 0, scope_ids: [org.id] }, memories: [],
+    });
+    let observedSignal: AbortSignal | undefined;
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      observedSignal = init?.signal as AbortSignal;
+      return {
+        ok: true,
+        json: async () => new Promise((_resolve, reject) => {
+          observedSignal?.addEventListener('abort', () => reject(observedSignal?.reason), { once: true });
+        }),
+      } as Response;
+    });
+    const provider = new OllamaEmbeddingProvider({
+      baseUrl: 'http://localhost:11434', model: 'm', dim: 2, timeoutMs: 20, fetchImpl,
+    });
+
+    const report = await getKnowledgeGaps(pool, provider, me, {
+      sinceDays: 30, limit: 10, minFrequency: 1, threshold: 0.9,
+      candidateLimit: 20, scanLimit: 100, maxQueryChars: 2_000,
+      embeddingTimeoutMs: 1_000, now: new Date('2026-10-04T12:00:00Z'),
+    });
+
+    expect(observedSignal?.aborted).toBe(true);
+    expect(report.embedding.status).toBe('degraded');
   });
 
   it('rejects an unsafe direct candidate cap before querying or clustering', async () => {
