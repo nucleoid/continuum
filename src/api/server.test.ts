@@ -1,4 +1,5 @@
 import { Server } from 'node:http';
+import { readFile } from 'node:fs/promises';
 import { describe, expect, it, vi } from 'vitest';
 import type express from 'express';
 import type pg from 'pg';
@@ -24,6 +25,11 @@ function appOptions(overrides: Parameters<typeof createApp>[1] = {}) {
 }
 
 describe('createApp operational middleware', () => {
+  it('lists every known operational log path once', async () => {
+    const source = await readFile(new URL('./server.ts', import.meta.url), 'utf8');
+    expect(source.match(/'\/api\/v0\/scopes'/g)).toHaveLength(1);
+  });
+
   it('is pure and creates no listener, signal handler, query, worker, or provider side effect', () => {
     const listen = vi.spyOn(Server.prototype, 'listen');
     const processOn = vi.spyOn(process, 'on');

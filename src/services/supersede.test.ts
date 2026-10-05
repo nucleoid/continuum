@@ -8,6 +8,7 @@ import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { decisionHistoryForPrincipal, supersedeForPrincipal } from './supersede.js';
 import { StubEmbeddingProvider } from '../embeddings/stub.js';
 import { storeMemoryEmbedding } from '../storage/embeddings.js';
+import { EmbeddingRegistry, ScopeEmbeddingRouter } from '../embeddings/router.js';
 
 describe('decision history service', () => {
   let pool: pg.Pool;
@@ -150,6 +151,93 @@ describe('decision history service', () => {
         embedded: false,
         embedding_error_code: 'EMBEDDING_FAILED',
         embedding: { provider: 'failing-provider', dim: 768, status: 'failed' },
+      }),
+    }]);
+  });
+
+  it('returns the committed supersession when post-commit pool connection fails', async () => {
+    const scope = await createScope(pool, { kind: 'project', name: 'post-commit-connect' });
+    await addMembership(pool, author.id, scope.id, 'writer');
+    const predecessor = await createMemory(pool, {
+      scopeId: scope.id, scopeKind: scope.kind, type: 'decision', title: 'Original',
+      body: 'Original body', authorId: author.id, source: 'manual',
+    });
+    const provider = new StubEmbeddingProvider();
+    let connects = 0;
+    const postCommitUnavailable = {
+      connect: async () => {
+        connects += 1;
+        if (connects > 1) throw new Error('post-commit database outage');
+        return pool.connect();
+      },
+      query: pool.query.bind(pool),
+    } as unknown as pg.Pool;
+
+    const result = await supersedeForPrincipal(postCommitUnavailable, provider, author, {
+      supersededId: predecessor.id, title: 'Replacement', body: 'Replacement body',
+    });
+
+    expect(result).toMatchObject({ embedded: false, embedErrorCode: 'EMBEDDING_FAILED' });
+    expect((await pool.query('SELECT state FROM memories WHERE id = $1', [predecessor.id])).rows[0])
+      .toEqual({ state: 'archived' });
+    expect((await pool.query('SELECT state FROM memories WHERE id = $1', [result.successor.id])).rows[0])
+      .toEqual({ state: 'live' });
+  });
+
+  it('returns the committed supersession when embedding outcome auditing fails', async () => {
+    const scope = await createScope(pool, { kind: 'project', name: 'post-commit-audit' });
+    await addMembership(pool, author.id, scope.id, 'writer');
+    const predecessor = await createMemory(pool, {
+      scopeId: scope.id, scopeKind: scope.kind, type: 'decision', title: 'Original',
+      body: 'Original body', authorId: author.id, source: 'manual',
+    });
+    const provider = {
+      id: 'failing-provider', dim: 768,
+      async embed(): Promise<number[][]> { throw new Error('provider unavailable'); },
+    };
+    const auditUnavailable = {
+      connect: pool.connect.bind(pool),
+      query: async (query: string, values?: unknown[]) => {
+        if (query.includes('INSERT INTO audit_log')) throw new Error('audit unavailable');
+        return pool.query(query, values);
+      },
+    } as unknown as pg.Pool;
+
+    const result = await supersedeForPrincipal(auditUnavailable, provider, author, {
+      supersededId: predecessor.id, title: 'Replacement', body: 'Replacement body',
+    });
+
+    expect(result).toMatchObject({ embedded: false, embedErrorCode: 'EMBEDDING_FAILED' });
+    expect((await pool.query('SELECT state FROM memories WHERE id = $1', [predecessor.id])).rows[0])
+      .toEqual({ state: 'archived' });
+  });
+
+  it('audits unavailable local-only routing without using a hosted provider', async () => {
+    const scope = await createScope(pool, { kind: 'project', name: 'local-only-unavailable' });
+    await addMembership(pool, author.id, scope.id, 'writer');
+    const predecessor = await createMemory(pool, {
+      scopeId: scope.id, scopeKind: scope.kind, type: 'decision', title: 'Original',
+      body: 'Original body', authorId: author.id, source: 'manual',
+    });
+    const routing = new ScopeEmbeddingRouter(
+      new EmbeddingRegistry([]),
+      { default: 'local-only' },
+    );
+
+    const result = await supersedeForPrincipal(pool, routing, author, {
+      supersededId: predecessor.id, title: 'Replacement', body: 'Replacement body',
+    });
+
+    expect(result.embedded).toBe(false);
+    const { rows } = await pool.query(
+      `SELECT metadata FROM audit_log
+        WHERE memory_id = $1 AND metadata->>'record_kind' = 'embedding'`,
+      [result.successor.id],
+    );
+    expect(rows).toEqual([{
+      metadata: expect.objectContaining({
+        embedded: false,
+        embedding_policy: 'local-only-unavailable',
       }),
     }]);
   });

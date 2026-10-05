@@ -44,7 +44,8 @@ describe('runMigrations', () => {
       .filter((file) => file.endsWith('.sql'))
       .sort();
     expect(migrations).toContain('0007_decision_supersession_constraints.sql');
-    expect(migrations).toContain('0008_decision_supersession_unique_index.sql');
+    expect(migrations).toContain('0008_decision_supersession_validation.sql');
+    expect(migrations).toContain('0009_decision_supersession_unique_index.sql');
     expect(migrations.filter((file) => file.startsWith('0005_'))).toEqual([
       '0005_webhook_ingestion.sql',
     ]);
@@ -54,11 +55,19 @@ describe('runMigrations', () => {
       'utf8',
     );
     expect(constraints).toMatch(/ADD CONSTRAINT memories_supersedes_not_self[\s\S]+NOT VALID/i);
-    expect(constraints).toMatch(/VALIDATE CONSTRAINT memories_supersedes_not_self/i);
+    expect(constraints).not.toMatch(/VALIDATE CONSTRAINT memories_supersedes_not_self/i);
     expect(constraints).not.toMatch(/CREATE\s+UNIQUE\s+INDEX/i);
 
+    const validation = await readFile(
+      join(process.cwd(), 'migrations/0008_decision_supersession_validation.sql'),
+      'utf8',
+    );
+    expect(validation).toMatch(/VALIDATE CONSTRAINT memories_supersedes_not_self/i);
+    expect(validation).not.toMatch(/ADD CONSTRAINT/i);
+    expect(validation).not.toMatch(/CREATE\s+UNIQUE\s+INDEX/i);
+
     const uniqueIndex = await readFile(
-      join(process.cwd(), 'migrations/0008_decision_supersession_unique_index.sql'),
+      join(process.cwd(), 'migrations/0009_decision_supersession_unique_index.sql'),
       'utf8',
     );
     expect(uniqueIndex.trimStart()).toMatch(/^-- continuum:no-transaction/);
