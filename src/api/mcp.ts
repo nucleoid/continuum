@@ -23,7 +23,11 @@ import {
   VERIFICATION_NOTE_MAX_LENGTH,
   verifyForPrincipal,
 } from '../services/lifecycle.js';
-import { renderAgentsMdForPrincipal } from '../services/agents-md.js';
+import {
+  auditAgentsMdRead,
+  prepareAgentsMdForPrincipal,
+  renderAgentsMdForPrincipal,
+} from '../services/agents-md.js';
 import { ensureScopeForPrincipal, validateScopeRef } from '../services/scopes.js';
 import { assertEmbeddingProviderDimension } from '../storage/schema.js';
 import {
@@ -328,8 +332,8 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       description:
         'Render the AGENTS.md bootstrap bundle for the calling principal. Always includes org and any role scopes; optionally includes a specific project and/or team scope.',
       inputSchema: {
-        project: z.string().optional(),
-        team: z.string().optional(),
+        project: z.string().max(500).optional(),
+        team: z.string().max(500).optional(),
         limit: z.number().int().min(1).max(200).optional(),
       },
     },
@@ -341,6 +345,39 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           limit: args.limit,
         }, { transport: 'mcp' });
         return textResult(md);
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'continuum.agents_md_fresh',
+    {
+      description:
+        'Check whether a stored AGENTS.md SHA-256 hash matches the current bundle for the calling principal and selected scopes.',
+      inputSchema: {
+        hash: z.string().regex(/^[0-9a-f]{64}$/),
+        project: z.string().max(500).optional(),
+        team: z.string().max(500).optional(),
+        limit: z.number().int().min(1).max(200).optional(),
+      },
+    },
+    async (args) => {
+      try {
+        const input = {
+          project: args.project,
+          team: args.team,
+          limit: args.limit,
+        };
+        const bundle = await prepareAgentsMdForPrincipal(pool, principal, input);
+        const fresh = bundle.hash === args.hash;
+        await auditAgentsMdRead(pool, principal, input, bundle, false, {
+          transport: 'mcp',
+          view: 'agents-md-freshness',
+          fresh,
+        });
+        return jsonResult({ fresh });
       } catch (error) {
         return errorResult(error);
       }

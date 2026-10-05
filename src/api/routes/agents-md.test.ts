@@ -1,4 +1,5 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 import type pg from 'pg';
 import request from 'supertest';
 import { makeTestPool, resetData } from '../../storage/test-helpers.js';
@@ -133,6 +134,148 @@ describe('GET /api/v0/agents-md', () => {
     expect(res.text).toContain('Payments on\\-call runbook');
     expect(res.text).toContain('## project:booking\\-engine');
     expect(res.text).toContain('Booking\\-engine deploy host');
+  });
+
+  it('returns a private deterministic ETag for the exact rendered bytes', async () => {
+    await seed();
+    const response = await request(app)
+      .get('/api/v0/agents-md?project=booking-engine&team=payments')
+      .set('Authorization', 'Bearer entra:user:bundle');
+    const digest = createHash('sha256').update(response.text, 'utf8').digest('hex');
+
+    expect(response.status).toBe(200);
+    expect(response.headers.etag).toBe(`"${digest}"`);
+    expect(response.headers['cache-control']).toBe('private, no-cache');
+    expect(response.headers.vary).toContain('Authorization');
+  });
+
+  it.each([
+    ['strong', (etag: string) => etag],
+    ['weak', (etag: string) => `W/${etag}`],
+    ['multiple', (etag: string) => `"unrelated", W/${etag}, "other"`],
+    ['wildcard', () => '*'],
+  ])('returns 304 for a matching %s If-None-Match validator', async (_name, header) => {
+    await seed();
+    const initial = await request(app)
+      .get('/api/v0/agents-md?team=payments')
+      .set('Authorization', 'Bearer entra:user:bundle');
+    const conditional = await request(app)
+      .get('/api/v0/agents-md?team=payments')
+      .set('Authorization', 'Bearer entra:user:bundle')
+      .set('If-None-Match', header(initial.headers.etag));
+
+    expect(conditional.status).toBe(304);
+    expect(conditional.text).toBe('');
+    expect(conditional.headers.etag).toBe(initial.headers.etag);
+    expect(conditional.headers['cache-control']).toBe('private, no-cache');
+  });
+
+  it.each([
+    '"unrelated"',
+    'W/"unrelated", malformed',
+    'not-a-tag',
+    'W/',
+    '*, "unrelated"',
+  ])('returns the full body for a non-matching or malformed validator: %s', async (header) => {
+    await seed();
+    const response = await request(app)
+      .get('/api/v0/agents-md?team=payments')
+      .set('Authorization', 'Bearer entra:user:bundle')
+      .set('If-None-Match', header);
+
+    expect(response.status).toBe(200);
+    expect(response.text).toContain('Payments on\\-call runbook');
+  });
+
+  it('checks freshness against the same rendered-content hash', async () => {
+    const seeded = await seed();
+    const rendered = await request(app)
+      .get('/api/v0/agents-md?project=booking-engine&team=payments')
+      .set('Authorization', 'Bearer entra:user:bundle');
+    const hash = rendered.headers.etag.slice(1, -1);
+
+    const fresh = await request(app)
+      .get('/api/v0/agents-md/freshness')
+      .query({ project: 'booking-engine', team: 'payments', hash })
+      .set('Authorization', 'Bearer entra:user:bundle');
+    expect(fresh.status).toBe(200);
+    expect(fresh.body).toEqual({ fresh: true });
+    expect(fresh.headers['cache-control']).toBe('private, no-store');
+
+    await pool.query(
+      `UPDATE memories SET body = body || ' changed' WHERE id = $1`,
+      [seeded.projectMemory.id],
+    );
+    const stale = await request(app)
+      .get('/api/v0/agents-md/freshness')
+      .query({ project: 'booking-engine', team: 'payments', hash })
+      .set('Authorization', 'Bearer entra:user:bundle');
+    expect(stale.status).toBe(200);
+    expect(stale.body).toEqual({ fresh: false });
+  });
+
+  it('does not let inaccessible memory changes affect the caller bundle hash', async () => {
+    const seeded = await seed();
+    const rendered = await request(app)
+      .get('/api/v0/agents-md?team=payments')
+      .set('Authorization', 'Bearer entra:user:bundle');
+    const hash = rendered.headers.etag.slice(1, -1);
+    await pool.query('UPDATE memories SET body = body || $2 WHERE id = $1', [
+      seeded.secretMemory.id, ' changed outside caller ACL',
+    ]);
+
+    const response = await request(app)
+      .get('/api/v0/agents-md/freshness')
+      .query({ team: 'payments', hash })
+      .set('Authorization', 'Bearer entra:user:bundle');
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ fresh: true });
+  });
+
+  it('audits a 304 as a summary-only read without delivered memory IDs', async () => {
+    await seed();
+    const initial = await request(app)
+      .get('/api/v0/agents-md?team=payments')
+      .set('Authorization', 'Bearer entra:user:bundle');
+    await request(app)
+      .get('/api/v0/agents-md?team=payments')
+      .set('Authorization', 'Bearer entra:user:bundle')
+      .set('If-None-Match', initial.headers.etag)
+      .expect(304);
+
+    const { rows } = await pool.query(
+      `SELECT memory_id, metadata FROM audit_log WHERE action = 'read' ORDER BY id`,
+    );
+    const summary = rows.filter((row) => row.metadata.record_kind === 'summary').at(-1);
+    expect(summary).toMatchObject({
+      memory_id: null,
+      metadata: { view: 'agents-md', hits: 0, not_modified: true, transport: 'rest' },
+    });
+    expect(rows.some((row) =>
+      row.memory_id !== null
+      && row.metadata.request_id === summary.metadata.request_id)).toBe(false);
+  });
+
+  it.each([
+    '',
+    'abc',
+    'A'.repeat(64),
+    '0'.repeat(63),
+    '0'.repeat(65),
+    '"' + '0'.repeat(64) + '"',
+  ])('rejects an invalid freshness hash without rendering: %s', async (hash) => {
+    await seed();
+    const before = await pool.query('SELECT count(*)::int AS count FROM audit_log');
+    const response = await request(app)
+      .get('/api/v0/agents-md/freshness')
+      .query({ hash })
+      .set('Authorization', 'Bearer entra:user:bundle');
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({ code: 'INVALID_INPUT', error: 'Invalid query' });
+    const after = await pool.query('SELECT count(*)::int AS count FROM audit_log');
+    expect(after.rows[0].count).toBe(before.rows[0].count);
   });
 
   it('silently omits requested scopes the caller cannot read', async () => {

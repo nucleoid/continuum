@@ -230,6 +230,17 @@ Memory selection is tuned for "bootstrap an agent": prefers `playbook` and `deci
 
 Output is plain markdown. No vendor-specific tokens. Suitable to drop at the root of any repo and have any agent read first.
 
+The authenticated REST response carries a private, deterministic ETag equal to
+the quoted lowercase SHA-256 digest of the exact rendered UTF-8 bytes. It
+honours strong, weak, multiple, and wildcard `If-None-Match` validators for
+bodyless 304 responses. The authenticated freshness endpoint and
+`continuum.agents_md_fresh` MCP tool compare a caller-supplied digest with the
+current bundle and return only `{ "fresh": boolean }`. They use the same scope
+selection, ACLs, expiry rules, type filters, limits, and rendering path as the
+document. Historical manifests and repository writes are not part of this
+contract; repository automation remains an external authenticated consumer.
+See [docs/agents-md-freshness.md](./docs/agents-md-freshness.md).
+
 The generated document treats memory content as contributed reference data, not
 as system policy. Every entry carries its scope, memory ID, source, author ID,
 and source reference. Titles, provenance values, and bodies are rendered with
@@ -268,6 +279,8 @@ Methods:
 - `continuum.promote(memory_id, target_scope)`
 - `continuum.verify(memory_id, still_true: bool, note?)`
 - `continuum.list_scopes()`
+- `continuum.agents_md(project?, team?, limit?)`
+- `continuum.agents_md_fresh(hash, project?, team?, limit?)`
 - `continuum.gaps(since?, limit?, min_frequency?, threshold?)`
 
 ACLs are enforced server-side from the bearer token's principal. The MCP client never sees memories outside its caller's read set.
