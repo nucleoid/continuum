@@ -2,7 +2,13 @@ import { randomUUID } from 'node:crypto';
 import express from 'express';
 import type pg from 'pg';
 import { getPool, closePool } from '../storage/pool.js';
-import { bearerAuth } from './auth.js';
+import {
+  authModeFromEnv,
+  bearerAuth,
+  createAuthenticator,
+  entraConfigFromEnv,
+  type Authenticator,
+} from './auth.js';
 import { captureRouter } from './routes/capture.js';
 import { recallRouter } from './routes/recall.js';
 import { agentsMdRouter } from './routes/agents-md.js';
@@ -65,6 +71,7 @@ export interface AppOptions {
   gapConfig?: GapConfig;
   relationThreshold?: number;
   ingestConfig?: IngestConfig;
+  authenticator?: Authenticator;
 }
 
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
@@ -286,7 +293,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
 
   const v0 = express.Router();
   v0.use(ingestRouter(pool, provider, ingestConfig, undefined, relationThreshold));
-  v0.use(bearerAuth(pool));
+  v0.use(bearerAuth(pool, opts.authenticator));
   v0.use(captureRouter(pool, provider, relationThreshold));
   v0.use(recallRouter(pool, provider));
   v0.use(memoriesRouter(pool));
@@ -337,6 +344,12 @@ async function main(): Promise<void> {
   const readinessTimeoutMs = positiveIntegerEnv('CONTINUUM_READINESS_TIMEOUT_MS', 1_000);
   const shutdownTimeoutMs = positiveIntegerEnv('CONTINUUM_SHUTDOWN_TIMEOUT_MS', 10_000);
   const pool = getPool();
+  const authMode = authModeFromEnv();
+  const authenticator = createAuthenticator(
+    pool,
+    authMode,
+    authMode === 'entra' ? entraConfigFromEnv() : undefined,
+  );
   const readiness = createReadinessState();
   const embeddingProvider = makeEmbeddingRouterFromEnv();
   await warnOnMissingEmbeddingRoutingScopes(pool, embeddingProvider);
@@ -346,6 +359,7 @@ async function main(): Promise<void> {
     readinessTimeoutMs,
     reviewHorizonDays: configuredReviewHorizonDays(),
     relationThreshold: relationThresholdFromEnv(),
+    authenticator,
   });
   await startRuntime(app, { port, readiness, closePool, shutdownTimeoutMs });
   console.log(`Continuum API listening on :${port}`);

@@ -32,7 +32,7 @@ WITH admins AS MATERIALIZED (
     FROM scope_memberships sm
     JOIN scopes s ON s.id = sm.scope_id
    WHERE s.kind = 'org' AND s.name = ''
-     AND sm.role = 'admin'
+     AND sm.role = 'admin' AND sm.active
    FOR UPDATE OF sm
 ), target AS (
   SELECT principal_id, scope_id
@@ -43,7 +43,8 @@ WITH admins AS MATERIALIZED (
      SET role = :'replacement_role'
     FROM target t
    WHERE sm.principal_id = t.principal_id AND sm.scope_id = t.scope_id
-     AND (SELECT count(*) FROM admins) > 1
+     AND (SELECT count(DISTINCT principal_id) FROM admins) > 1
+     AND sm.source_kind = 'manual' AND sm.source_id = 'manual' AND sm.active
   RETURNING sm.principal_id
 )
 SELECT count(*) = 1 AS demote_succeeded FROM changed \gset

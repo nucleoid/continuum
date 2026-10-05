@@ -39,6 +39,7 @@ import {
   reviewQueueForPrincipal,
 } from '../services/review-queue.js';
 import { isLifecyclePrincipal } from '../lifecycle/principal.js';
+import { authModeFromEnv, createAuthenticator, entraConfigFromEnv } from './auth.js';
 import { gapConfigFromEnv, renderGapMarkdown, type GapConfig } from '../insights/gaps.js';
 import { getKnowledgeGaps } from '../services/gaps.js';
 import {
@@ -66,6 +67,7 @@ export interface McpDeps {
   gapConfig?: GapConfig;
   now?: () => Date;
   relationThreshold?: number;
+  allowedSource?: string;
 }
 
 function textResult(text: string): {
@@ -177,6 +179,12 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     },
     async (args) => {
       try {
+        if (deps.allowedSource && deps.allowedSource !== args.source) {
+          throw new ServiceError(
+            'FORBIDDEN',
+            'credential is not allowed for this source',
+          );
+        }
         const ref = { kind: args.scope_kind as ScopeKind, name: args.scope_name };
         const result = await captureMemory(
           pool,
@@ -627,7 +635,12 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   const pool = getPool();
-  const principal = await getPrincipalByExternalId(pool, tokenEnv);
+  const authMode = authModeFromEnv();
+  const authenticator = createAuthenticator(
+    pool, authMode, authMode === 'entra' ? entraConfigFromEnv() : undefined,
+  );
+  const authenticated = await authenticator.authenticate('Bearer', tokenEnv);
+  const principal = authenticated?.principal ?? null;
   if (!principal || isLifecyclePrincipal(principal)) {
     process.stderr.write('continuum-mcp: unknown principal\n');
     process.exit(1);
@@ -640,6 +653,7 @@ async function main(): Promise<void> {
     principal,
     reviewHorizonDays: configuredReviewHorizonDays(),
     relationThreshold: relationThresholdFromEnv(),
+    allowedSource: authenticated?.allowedSource,
   });
   const transport = new StdioServerTransport();
   await server.connect(transport);

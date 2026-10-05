@@ -27,6 +27,7 @@ WITH target AS (
    WHERE sm.principal_id = t.id
      AND sm.scope_id = s.id
      AND s.kind = 'org' AND s.name = ''
+     AND sm.source_kind = 'manual' AND sm.source_id = 'manual'
 ), rotated AS (
   UPDATE principals p
      SET external_id = gen_random_uuid()::text || gen_random_uuid()::text

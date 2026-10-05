@@ -21,7 +21,7 @@ WITH admins AS MATERIALIZED (
     FROM scope_memberships sm
     JOIN scopes s ON s.id = sm.scope_id
    WHERE s.kind = 'org' AND s.name = ''
-     AND sm.role = 'admin'
+     AND sm.role = 'admin' AND sm.active
    FOR UPDATE OF sm
 ), removed AS (
   DELETE FROM scope_memberships sm
@@ -29,7 +29,8 @@ WITH admins AS MATERIALIZED (
    WHERE sm.principal_id = :'principal_id'
      AND sm.principal_id = a.principal_id
      AND sm.scope_id = a.scope_id
-     AND (SELECT count(*) FROM admins) > 1
+     AND (SELECT count(DISTINCT principal_id) FROM admins) > 1
+     AND sm.source_kind = 'manual' AND sm.source_id = 'manual'
   RETURNING sm.principal_id
 )
 SELECT count(*) = 1 AS remove_succeeded FROM removed \gset

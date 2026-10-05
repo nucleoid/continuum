@@ -22,11 +22,12 @@ WITH target AS (
     JOIN scopes s ON s.kind = 'org' AND s.name = ''
    WHERE p.id = :'principal_id'
 ), restored AS (
-  INSERT INTO scope_memberships (principal_id, scope_id, role)
-  SELECT principal_id, scope_id, 'admin' FROM target
-  ON CONFLICT (principal_id, scope_id)
-  DO UPDATE SET role = 'admin'
-    WHERE scope_memberships.role IN ('reader', 'writer')
+  INSERT INTO scope_memberships
+    (principal_id, scope_id, role, source_kind, source_id, active, deactivated_at)
+  SELECT principal_id, scope_id, 'admin', 'manual', 'manual', TRUE, NULL FROM target
+  ON CONFLICT (principal_id, scope_id, source_kind, source_id)
+  DO UPDATE SET role = 'admin', active = TRUE, deactivated_at = NULL
+    WHERE scope_memberships.role IN ('reader', 'writer') OR NOT scope_memberships.active
   RETURNING principal_id
 )
 SELECT (
@@ -36,7 +37,7 @@ SELECT (
       FROM scope_memberships sm
       JOIN target t
         ON t.principal_id = sm.principal_id AND t.scope_id = sm.scope_id
-     WHERE sm.role = 'admin'
+     WHERE sm.role = 'admin' AND sm.active
   )
 ) AS restore_succeeded
 \gset

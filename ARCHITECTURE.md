@@ -366,9 +366,20 @@ Five interfaces. Engram and any future system integrate through these. Continuum
 
 ## Authentication
 
-- End-user auth: Entra ID SSO (OIDC). Token cached server-side, refreshed on demand.
-- Service accounts: long-lived API keys, rotated quarterly, scoped to specific capture plugins.
+- End-user auth: Entra ID SSO (OIDC). Discovery and JWKS validation enforce
+  signature, tenant issuer, audience, and expiry. The immutable `oid` claim is
+  principal identity; `name` is mutable display metadata.
+- Service accounts: high-entropy API keys are stored only as SHA-256 hashes,
+  expire after the quarterly rotation window, and can be restricted to one
+  capture source.
 - All tokens map to a `principal` row. Audit log references principals, never raw tokens.
+
+Entra groups are bound by immutable object ID to a scope and role on first
+sync. Renames only update group display metadata. Missing groups and missing
+members soft-deactivate only their Entra-sourced membership rows, retaining
+history and preserving manual or differently sourced grants. Sync is bounded,
+org-admin controlled, serialized, and atomically audited. See
+`docs/authentication.md` for the operational contract.
 
 ## What is explicitly out of scope for v0
 

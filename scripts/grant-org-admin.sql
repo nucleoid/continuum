@@ -15,11 +15,12 @@ WITH target AS (
      AND p.kind = 'service'
      AND p.display_name = 'Scope Provisioning Operator'
 ), granted AS (
-  INSERT INTO scope_memberships (principal_id, scope_id, role)
-  SELECT principal_id, scope_id, 'admin'
+  INSERT INTO scope_memberships
+    (principal_id, scope_id, role, source_kind, source_id, active, deactivated_at)
+  SELECT principal_id, scope_id, 'admin', 'manual', 'manual', TRUE, NULL
     FROM target
-  ON CONFLICT (principal_id, scope_id)
-  DO NOTHING
+  ON CONFLICT (principal_id, scope_id, source_kind, source_id)
+  DO UPDATE SET role = 'admin', active = TRUE, deactivated_at = NULL
   RETURNING principal_id, scope_id
 )
 SELECT (
@@ -29,7 +30,7 @@ SELECT (
       FROM scope_memberships sm
       JOIN target t
         ON t.principal_id = sm.principal_id AND t.scope_id = sm.scope_id
-     WHERE sm.role = 'admin'
+     WHERE sm.role = 'admin' AND sm.active
   )
 ) AS grant_succeeded
 \gset

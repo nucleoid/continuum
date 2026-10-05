@@ -61,15 +61,16 @@ export async function upsertPrincipalByExternalId(
   pool: pg.Pool,
   input: NewPrincipal,
 ): Promise<Principal> {
-  const existing = await getPrincipalByExternalId(pool, input.externalId);
-  if (existing) {
-    if (existing.displayName === input.displayName) return existing;
-    const { rows } = await pool.query(
-      `UPDATE principals SET display_name = $2 WHERE id = $1
-       RETURNING id, external_id, kind, display_name, created_at`,
-      [existing.id, input.displayName],
-    );
-    return rowToPrincipal(rows[0]);
-  }
-  return createPrincipal(pool, input);
+  const id = randomUUID();
+  const { rows } = await pool.query(
+    `INSERT INTO principals (id, external_id, kind, display_name)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (external_id) DO UPDATE
+       SET display_name = EXCLUDED.display_name
+       WHERE principals.kind = EXCLUDED.kind
+     RETURNING id, external_id, kind, display_name, created_at`,
+    [id, input.externalId, input.kind, input.displayName],
+  );
+  if (!rows[0]) throw new Error('principal kind conflicts with established identity');
+  return rowToPrincipal(rows[0]);
 }

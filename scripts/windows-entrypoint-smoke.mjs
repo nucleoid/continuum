@@ -80,6 +80,7 @@ async function terminate(child) {
 async function smokeApi() {
   const child = spawnEntrypoint('dist/api/server.js', {
     ...process.env,
+    CONTINUUM_AUTH_MODE: 'dev',
     CONTINUUM_API_PORT: '0',
     CONTINUUM_DATABASE_URL: 'postgres://continuum:continuum@127.0.0.1:1/continuum',
   });

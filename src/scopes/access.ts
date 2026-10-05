@@ -63,7 +63,8 @@ export async function hasExplicitRoleForMutation(
   const { rows } = await queryable.query(
     `SELECT role
        FROM scope_memberships
-      WHERE principal_id = $1 AND scope_id = $2
+      WHERE principal_id = $1 AND scope_id = $2 AND active
+      ORDER BY CASE role WHEN 'admin' THEN 3 WHEN 'writer' THEN 2 ELSE 1 END DESC
       FOR UPDATE`,
     [principalId, scopeId],
   );

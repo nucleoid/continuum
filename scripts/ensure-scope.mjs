@@ -33,7 +33,12 @@ const client = new Client({ name: 'continuum-scope-operator', version: '0.1.0' }
 const transport = new StdioClientTransport({
   command: process.execPath,
   args: [mcpEntrypoint],
-  env: process.env,
+  env: {
+    ...process.env,
+    // Supplying the legacy external-id credential to this trusted operator
+    // script is an explicit request for the development identity mode.
+    CONTINUUM_AUTH_MODE: process.env.CONTINUUM_AUTH_MODE ?? 'dev',
+  },
   stderr: 'pipe',
 });
 

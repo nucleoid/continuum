@@ -24,6 +24,7 @@ WITH matches AS (
      AND p.id = :'principal_id'
      AND s.kind = 'org' AND s.name = ''
      AND sm.role = 'admin'
+     AND sm.active
 )
 SELECT count(*) = 1 AS verify_succeeded FROM matches \gset
 
@@ -36,7 +37,8 @@ SELECT count(*) = 1 AS verify_succeeded FROM matches \gset
      AND p.display_name = 'Scope Provisioning Operator'
      AND p.id = :'principal_id'
      AND s.kind = 'org' AND s.name = ''
-     AND sm.role = 'admin';
+     AND sm.role = 'admin'
+     AND sm.active;
 \else
   \echo 'The requested dedicated operator is not an active org admin.'
   SELECT 1 / 0 AS scope_operator_verification_failed;
