@@ -1,8 +1,4 @@
-<<<<<<< HEAD
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-=======
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
->>>>>>> 01b36f6 (fix: persist embedding backfill failure state)
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pg from 'pg';
