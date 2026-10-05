@@ -11,6 +11,8 @@ import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
 import { computeExpiry } from './expiry.js';
 import { activityMetadataForPromotion } from '../capture/metadata.js';
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 export interface PromoteResult {
   source: Memory;
   destination: Memory;
@@ -89,7 +91,10 @@ async function promoteOperation(
     throw new PromoteError(`principal lacks ${roleName} role on target scope`, 403);
   }
 
-  const destinationMetadata = activityMetadataForPromotion(source.metadata, source.createdAt);
+  const mappingAuthorized = await activityMappingIsAuthorized(client, source.metadata);
+  const destinationMetadata = activityMetadataForPromotion(
+    source.metadata, source.createdAt, mappingAuthorized,
+  );
   delete destinationMetadata.related;
   const destination = await createMemory(client, {
     scopeId: destinationScope.id,
@@ -188,6 +193,30 @@ async function verifyOperation(
   );
   if (!rows[0]) throw new PromoteError('memory is in a terminal state', 409);
   return rowToMemory(rows[0]);
+}
+
+async function activityMappingIsAuthorized(
+  client: pg.PoolClient,
+  metadata: Record<string, unknown>,
+): Promise<boolean> {
+  const mappingId = metadata._continuum_actor_mapping_id;
+  const authority = metadata._continuum_actor_mapping_authority;
+  const principalId = metadata.actor_principal_id;
+  if (typeof mappingId !== 'string'
+      || typeof authority !== 'string'
+      || typeof principalId !== 'string'
+      || !UUID.test(mappingId)) return false;
+  const { rows } = await client.query(
+    `SELECT 1
+       FROM actor_principal_mappings mapping
+      WHERE mapping.mapping_id = $1::uuid
+        AND mapping.authority = $2
+        AND mapping.principal_id::text = $3
+        AND mapping.revoked_at IS NULL
+      FOR SHARE OF mapping`,
+    [mappingId, authority, principalId],
+  );
+  return rows.length === 1;
 }
 
 async function getMemoryForUpdate(

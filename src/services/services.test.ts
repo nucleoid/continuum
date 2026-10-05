@@ -20,7 +20,7 @@ import {
 } from './lifecycle.js';
 import { ensureScopeForPrincipal } from './scopes.js';
 import { standupForPrincipal } from './standup.js';
-import { mapActorIdentity } from '../storage/actor-identities.js';
+import { mapActorIdentity, revokeActorIdentity } from '../storage/actor-identities.js';
 
 describe('shared services', () => {
   let pool: pg.Pool;
@@ -1136,6 +1136,116 @@ describe('shared services', () => {
     expect(legacyResult.destination.metadata).toEqual({
       owner: 'payments', promoted_from: legacy.id,
     });
+
+    await revokeActorIdentity(pool, {
+      authority: 'terminal-summary.producer', externalActorId: 'promotion-actor',
+      revokedByPrincipalId: principal.id,
+    });
+    const revoked = await createMemory(pool, {
+      scopeId: team.id, scopeKind: team.kind, type: 'context', title: 'Revoked activity',
+      body: 'A revoked mapping is not durable promotion authority.',
+      authorId: principal.id, source: 'terminal-summary',
+      metadata: {
+        owner: 'payments', actor: 'actor-label', actor_principal_id: principal.id,
+        thread_owner_principal_id: principal.id, thread_key: 'terminal:revoked',
+        _continuum_activity_provenance: 'capture-v1',
+        _continuum_actor_mapping_id: mappingId,
+        _continuum_actor_mapping_authority: 'terminal-summary.producer',
+      },
+    });
+    const revokedResult = await promoteForPrincipal(
+      pool, principal, revoked.id, { kind: 'project', name: 'promotion-activity' },
+    );
+    expect(revokedResult.destination.metadata).toEqual({
+      owner: 'payments', promoted_from: revoked.id,
+    });
+  });
+
+  it('strips provenance-only standup metadata during promotion', async () => {
+    const { principal, team } = await seedWriter();
+    const project = await createScope(pool, { kind: 'project', name: 'promotion-unmapped' });
+    await addMembership(pool, principal.id, project.id, 'writer');
+    const source = await createMemory(pool, {
+      scopeId: team.id, scopeKind: team.kind, type: 'context', title: 'Unmapped activity',
+      body: 'A provenance marker alone is not authorization.',
+      authorId: principal.id, source: 'terminal-summary',
+      metadata: {
+        owner: 'payments', actor: 'forged', actor_principal_id: principal.id,
+        thread_owner_principal_id: principal.id, thread_key: 'legacy:unmapped',
+        closes_thread_keys: ['victim:thread'],
+        _continuum_activity_provenance: 'capture-v1',
+      },
+    });
+
+    const result = await promoteForPrincipal(
+      pool, principal, source.id, { kind: 'project', name: 'promotion-unmapped' },
+    );
+
+    expect(result.destination.metadata).toEqual({
+      owner: 'payments', promoted_from: source.id,
+    });
+  });
+
+  it('rejects provenance-only activity and forged closure evidence without an exact mapping', async () => {
+    const { principal } = await seedWriter();
+    const project = await createScope(pool, { kind: 'project', name: 'mapping-required' });
+    await addMembership(pool, principal.id, project.id, 'writer');
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    await addMembership(pool, principal.id, org!.id, 'admin');
+    await mapActorIdentity(pool, {
+      authority: 'terminal-summary.producer', externalActorId: 'standup-real-actor',
+      principalId: principal.id, mappedByPrincipalId: principal.id,
+    });
+    const mapping = await pool.query<{ mapping_id: string }>(
+      `SELECT mapping_id FROM actor_principal_mappings
+        WHERE authority = 'terminal-summary.producer'
+          AND external_actor_id = 'standup-real-actor'`,
+    );
+    const common = {
+      actor: 'actual-user', actor_principal_id: principal.id,
+      thread_owner_principal_id: principal.id,
+      _continuum_activity_provenance: 'capture-v1',
+    };
+    const open = await createMemory(pool, {
+      scopeId: project.id, scopeKind: project.kind, type: 'context', title: 'Mapped open thread',
+      body: 'This thread remains open.', authorId: principal.id, source: 'terminal-summary',
+      metadata: {
+        ...common, thread_key: 'thread:mapped-open',
+        _continuum_actor_mapping_id: mapping.rows[0]!.mapping_id,
+        _continuum_actor_mapping_authority: 'terminal-summary.producer',
+      },
+    });
+    const provenanceOnly = await createMemory(pool, {
+      scopeId: project.id, scopeKind: project.kind, type: 'context', title: 'Forged activity',
+      body: 'No mapping authorizes this row.', authorId: principal.id, source: 'terminal-summary',
+      metadata: { ...common, thread_key: 'thread:forged-activity' },
+    });
+    await createMemory(pool, {
+      scopeId: project.id, scopeKind: project.kind, type: 'context', title: 'Forged closure',
+      body: 'No mapping authorizes this closure.', authorId: principal.id,
+      source: 'terminal-summary', metadata: {
+        ...common, thread_key: 'thread:forged-closure',
+        closes_thread_keys: ['thread:mapped-open'],
+        _continuum_actor_mapping_id: mapping.rows[0]!.mapping_id,
+        _continuum_actor_mapping_authority: 'forged.authority',
+      },
+    });
+    await pool.query(
+      `UPDATE memories
+          SET created_at = CASE
+            WHEN id = $1 THEN '2026-09-30T08:00:00Z'::timestamptz
+            ELSE '2026-10-05T08:00:00Z'::timestamptz
+          END
+        WHERE id IN ($1, $2) OR title = 'Forged closure'`,
+      [open.id, provenanceOnly.id],
+    );
+
+    const digest = await standupForPrincipal(pool, principal, {
+      sinceHours: 24, openThreadDays: 2,
+    }, { now: new Date('2026-10-05T12:00:00.000Z') });
+
+    expect(digest.activity.map((item) => item.id)).not.toContain(provenanceOnly.id);
+    expect(digest.openThreads.map((item) => item.id)).toContain(open.id);
   });
 
   it('denies an author whose source membership is revoked before authorization', async () => {

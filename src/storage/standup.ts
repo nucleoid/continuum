@@ -43,19 +43,18 @@ function mapRow(row: StandupRow): StandupMemory {
 }
 
 function mappingStillAuthorizes(alias: string): string {
-  return `(
-    (
-      NOT ${alias}.metadata ? '_continuum_actor_mapping_id'
-      AND NOT ${alias}.metadata ? '_continuum_actor_mapping_authority'
-    )
-    OR EXISTS (
-      SELECT 1
-        FROM actor_principal_mappings mapping
-       WHERE mapping.mapping_id::text = ${alias}.metadata->>'_continuum_actor_mapping_id'
-         AND mapping.authority = ${alias}.metadata->>'_continuum_actor_mapping_authority'
-         AND mapping.principal_id::text = ${alias}.metadata->>'actor_principal_id'
-         AND mapping.revoked_at IS NULL
-    )
+  return `EXISTS (
+    SELECT 1
+      FROM actor_principal_mappings mapping
+     WHERE mapping.mapping_id = CASE
+             WHEN ${alias}.metadata->>'_continuum_actor_mapping_id'
+                    ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
+             THEN (${alias}.metadata->>'_continuum_actor_mapping_id')::uuid
+             ELSE NULL
+           END
+       AND mapping.authority = ${alias}.metadata->>'_continuum_actor_mapping_authority'
+       AND mapping.principal_id::text = ${alias}.metadata->>'actor_principal_id'
+       AND mapping.revoked_at IS NULL
   )`;
 }
 
@@ -169,8 +168,9 @@ export async function listOpenStandupThreads(
                     AND closing_sm.principal_id = $1::uuid
                ))
              )
-             AND COALESCE(closing.metadata->'closes_thread_keys', '[]'::jsonb)
-                   @> to_jsonb(ARRAY[m.metadata->>'thread_key'])
+             AND closing.metadata ? 'closes_thread_keys'
+             AND closing.metadata->'closes_thread_keys'
+                   @> jsonb_build_array(m.metadata->>'thread_key')
         )
       ORDER BY ${activityAt('m')} ASC, m.id ASC
       LIMIT $5`,

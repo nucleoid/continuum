@@ -130,9 +130,11 @@ export function hasTrustedActivityMetadata(metadata: Record<string, unknown> = {
 export function activityMetadataForPromotion(
   metadata: Record<string, unknown>,
   createdAt: Date,
+  mappingAuthorized = false,
 ): Record<string, unknown> {
   const sanitized = stripTrustedActivityMetadata(metadata);
-  if (metadata[ACTIVITY_PROVENANCE_KEY] !== ACTIVITY_PROVENANCE_VALUE) return sanitized;
+  if (!mappingAuthorized
+      || metadata[ACTIVITY_PROVENANCE_KEY] !== ACTIVITY_PROVENANCE_VALUE) return sanitized;
   for (const key of TRUSTED_ACTIVITY_METADATA_KEYS) {
     if (key !== ACTIVITY_EPOCH_MS_KEY && Object.hasOwn(metadata, key)) {
       sanitized[key] = metadata[key];

@@ -15,6 +15,7 @@ import { captureSources } from '../capture/source.js';
 import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
 import { LIFECYCLE_PRINCIPAL_ID } from '../lifecycle/principal.js';
 import { recordRead } from '../audit/log.js';
+import { mapActorIdentity } from '../storage/actor-identities.js';
 
 interface CallToolResult {
   content: Array<{ type: string; text?: string }>;
@@ -179,7 +180,17 @@ describe('MCP server', () => {
 
   it('renders a deterministic source-cited standup for explicitly attributed activity', async () => {
     const fixedNow = new Date('2026-10-05T12:00:00Z');
-    const { client, me } = await connectClient(null, pool, undefined, () => fixedNow);
+    const { client, me, org } = await connectClient(null, pool, undefined, () => fixedNow);
+    await addMembership(pool, me.id, org.id, 'admin');
+    await mapActorIdentity(pool, {
+      authority: 'terminal-summary.mcp-test', externalActorId: me.id,
+      principalId: me.id, mappedByPrincipalId: me.id,
+    });
+    const mapping = await pool.query<{ mapping_id: string }>(
+      `SELECT mapping_id FROM actor_principal_mappings
+        WHERE authority = 'terminal-summary.mcp-test' AND external_actor_id = $1`,
+      [me.id],
+    );
     const personal = await createScope(pool, { kind: 'user', name: 'opaque-mcp-user' }, me.id);
     await addMembership(pool, me.id, personal.id, 'reader');
     const memory = await createMemory(pool, {
@@ -190,6 +201,8 @@ describe('MCP server', () => {
         actor_principal_id: me.id, actor: 'mcp-user',
         thread_key: 'terminal-session:source-1', closes_thread_keys: [],
         _continuum_activity_provenance: 'capture-v1',
+        _continuum_actor_mapping_id: mapping.rows[0]!.mapping_id,
+        _continuum_actor_mapping_authority: 'terminal-summary.mcp-test',
       },
     });
     await pool.query(

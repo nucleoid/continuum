@@ -3,9 +3,10 @@ import type pg from 'pg';
 import request from 'supertest';
 import { makeTestPool, resetData } from '../../storage/test-helpers.js';
 import { createPrincipal } from '../../storage/principals.js';
-import { createScope } from '../../storage/scopes.js';
+import { createScope, getScopeByRef } from '../../storage/scopes.js';
 import { addMembership } from '../../storage/memberships.js';
 import { createMemory } from '../../storage/memories.js';
+import { mapActorIdentity } from '../../storage/actor-identities.js';
 import { createApp } from '../server.js';
 
 describe('GET /api/v0/standup', () => {
@@ -31,6 +32,38 @@ describe('GET /api/v0/standup', () => {
     await addMembership(pool, me.id, mine.id, 'reader');
     await addMembership(pool, me.id, unowned.id, 'reader');
     await addMembership(pool, me.id, project.id, 'reader');
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await addMembership(pool, me.id, org.id, 'admin');
+    const mappings = new Map<string, { id: string; authority: string }>();
+    const trustedMetadata = async (
+      metadata: Record<string, unknown>,
+      source = 'terminal-summary',
+    ): Promise<Record<string, unknown>> => {
+      const actorId = metadata.actor_principal_id;
+      if (typeof actorId !== 'string') return metadata;
+      const authority = `${source}.standup-test`;
+      const key = `${authority}:${actorId}`;
+      let mapping = mappings.get(key);
+      if (!mapping) {
+        await mapActorIdentity(pool, {
+          authority, externalActorId: actorId,
+          principalId: actorId, mappedByPrincipalId: me.id,
+        });
+        const result = await pool.query<{ mapping_id: string }>(
+          `SELECT mapping_id FROM actor_principal_mappings
+            WHERE authority = $1 AND external_actor_id = $2 AND revoked_at IS NULL`,
+          [authority, actorId],
+        );
+        mapping = { id: result.rows[0]!.mapping_id, authority };
+        mappings.set(key, mapping);
+      }
+      return {
+        ...metadata,
+        _continuum_activity_provenance: 'capture-v1',
+        _continuum_actor_mapping_id: mapping.id,
+        _continuum_actor_mapping_authority: mapping.authority,
+      };
+    };
 
     const memory = async (
       scope: typeof mine,
@@ -44,7 +77,7 @@ describe('GET /api/v0/standup', () => {
         scopeId: scope.id, scopeKind: scope.kind, type: 'context', title,
         body: `private body for ${title}`, authorId: other.id, source,
         metadata: trusted && Object.hasOwn(metadata, 'actor_principal_id')
-          ? { ...metadata, _continuum_activity_provenance: 'capture-v1' }
+          ? await trustedMetadata(metadata, source)
           : metadata,
         sourceRef: `https://sources.example/${encodeURIComponent(title)}`,
       });
@@ -79,7 +112,7 @@ describe('GET /api/v0/standup', () => {
     await memory(mine, 'Old closed thread', '2026-09-29T08:00:00Z', {
       actor_principal_id: me.id, actor: 'actual-user', thread_key: 'thread:closed',
     });
-    return { me, included, projectActivity, open };
+    return { me, included, projectActivity, open, trustedMetadata };
   }
 
   it('fails closed to explicit ownership and actor attribution, closes threads explicitly, and audits', async () => {
@@ -153,19 +186,18 @@ describe('GET /api/v0/standup', () => {
   });
 
   it('uses database time for expiry and does not let future records close historical threads', async () => {
-    const { me, open } = await seed();
+    const { me, open, trustedMetadata } = await seed();
     await pool.query(
       "UPDATE memories SET expires_at = now() - interval '1 second' WHERE title = 'Worked on digest'",
     );
     const futureClosure = await createMemory(pool, {
       scopeId: open.scopeId, scopeKind: 'user', type: 'context',
       title: 'Future closure', body: 'future', authorId: me.id,
-      source: 'terminal-summary', metadata: {
+      source: 'terminal-summary', metadata: await trustedMetadata({
         actor_principal_id: me.id, actor: 'actual-user',
         thread_owner_principal_id: me.id,
         thread_key: 'future:closure', closes_thread_keys: ['thread:open'],
-        _continuum_activity_provenance: 'capture-v1',
-      },
+      }),
     });
     await pool.query(
       "UPDATE memories SET created_at = '2026-10-06T00:00:00Z' WHERE id = $1",
@@ -198,7 +230,7 @@ describe('GET /api/v0/standup', () => {
   });
 
   it('allows a different actual actor to close a thread only with explicit matching ownership', async () => {
-    const { me } = await seed();
+    const { me, trustedMetadata } = await seed();
     const other = await createPrincipal(pool, {
       externalId: 'entra:thread-closer', kind: 'user', displayName: 'Thread Closer',
     });
@@ -207,22 +239,20 @@ describe('GET /api/v0/standup', () => {
     );
     const opened = await createMemory(pool, {
       scopeId: mine.rows[0].id, scopeKind: 'user', type: 'context', title: 'Explicitly owned thread',
-      body: 'open', authorId: me.id, source: 'terminal-summary', metadata: {
+      body: 'open', authorId: me.id, source: 'terminal-summary', metadata: await trustedMetadata({
         actor_principal_id: me.id, actor: 'me', thread_owner_principal_id: me.id,
         thread_key: 'owned:thread', closes_thread_keys: [],
-        _continuum_activity_provenance: 'capture-v1',
-      },
+      }),
     });
     await pool.query(
       "UPDATE memories SET created_at = '2026-09-29T09:00:00Z' WHERE id = $1", [opened.id],
     );
     const closed = await createMemory(pool, {
       scopeId: mine.rows[0].id, scopeKind: 'user', type: 'context', title: 'Closed by teammate',
-      body: 'closed', authorId: other.id, source: 'terminal-summary', metadata: {
+      body: 'closed', authorId: other.id, source: 'terminal-summary', metadata: await trustedMetadata({
         actor_principal_id: other.id, actor: 'other', thread_owner_principal_id: me.id,
         thread_key: 'other:work', closes_thread_keys: ['owned:thread'],
-        _continuum_activity_provenance: 'capture-v1',
-      },
+      }),
     });
     await pool.query(
       "UPDATE memories SET created_at = '2026-10-04T09:00:00Z' WHERE id = $1", [closed.id],
@@ -238,14 +268,13 @@ describe('GET /api/v0/standup', () => {
   it.each(['archived', 'expired'])('keeps a thread closed after its closure is %s', async (
     closureState,
   ) => {
-    const { me, open } = await seed();
+    const { me, open, trustedMetadata } = await seed();
     const closure = await createMemory(pool, {
       scopeId: open.scopeId, scopeKind: 'user', type: 'context', title: 'Durable closure',
-      body: 'closed', authorId: me.id, source: 'terminal-summary', metadata: {
+      body: 'closed', authorId: me.id, source: 'terminal-summary', metadata: await trustedMetadata({
         actor_principal_id: me.id, actor: 'actual-user', thread_owner_principal_id: me.id,
         thread_key: 'closure:durable', closes_thread_keys: ['thread:open'],
-        _continuum_activity_provenance: 'capture-v1',
-      },
+      }),
     });
     await pool.query(
       `UPDATE memories

@@ -23,6 +23,9 @@ Standup-eligible captures use these reserved metadata fields:
   attribution authorization; capture callers cannot supply it.
 - `_continuum_activity_epoch_ms`: internal original activity time carried only
   when trusted activity is promoted; capture callers cannot supply it.
+- `_continuum_actor_mapping_id`: UUID of the exact mapping that authorized capture.
+- `_continuum_actor_mapping_authority`: authenticated producer namespace on
+  that exact mapping.
 - `merged_by` and `reviewers`: optional PR participants, distinct from `actor`.
 
 The GitHub PR plugin uses the PR author as `actor`; a merger remains
@@ -47,10 +50,11 @@ and is never used as a fallback. An absent mapping, missing deploy actor ID, or
 mapping to anything other than an existing user stores a normal non-standup
 record without `actor_principal_id`. A mapped event does not need a caller
 label: the displayed actor is loaded solely from the mapped principal. Missing
-ownership, actor ID, thread key, or the internal provenance marker makes a record ineligible rather
-than triggering a display-name guess. Pre-migration rows are deliberately not
-backfilled because their reserved metadata was caller-controlled and cannot be
-retrospectively authenticated.
+ownership, actor ID, thread key, provenance, mapping UUID, mapping authority,
+or an active exact mapping for that authority and principal makes a record
+ineligible rather than triggering a display-name guess. Pre-migration rows are
+never backfilled because their reserved metadata was caller-controlled and
+cannot be retrospectively authenticated.
 
 Raw REST and MCP capture reject every actor, thread, closure, provenance, and
 activity-time field for both users and services. Service ingestion must use
@@ -135,10 +139,33 @@ other actors' records are excluded.
 
 Promotion moves knowledge between scopes but is not a new activity event.
 Promoted copies preserve activity metadata only when the source has Continuum's
-internal provenance marker, and carry the original activity time so the digest
-does not re-date the work. Legacy rows without that marker lose actor, thread,
-closure, provenance, and activity-time fields during promotion. Expired
-promoted activity remains excluded.
+internal provenance marker and its exact mapping UUID, authority, and principal
+still identify an active mapping. Promotion holds a shared lock on that mapping
+through the destination write and carries the original activity time so the
+digest does not re-date the work. Legacy, forged, or revoked-mapping rows lose
+actor, thread, closure, provenance, mapping, and activity-time fields during
+promotion. Expired promoted activity remains excluded.
+
+## Mapping-enforcement rollout
+
+Migration `0010_standup_mapping_enforcement.sql` strips all reserved activity,
+thread, closure, provenance, and mapping keys from rows that do not match one
+active mapping UUID, authority, and actor principal. It retains the memory body
+and all ordinary metadata. This cleanup is intentionally fail-closed: legacy
+reserved fields are not copied into a quarantine metadata object where an old
+reader or later promotion could treat them as active semantics.
+
+For a mixed-version deployment, first deploy the `0009` mapping-aware capture
+writers everywhere and verify that no older writer can create standup rows
+without mapping UUID and authority. Then drain old application instances (or
+quiesce capture, promotion, and standup reads), apply `0010`, deploy the strict
+reader/promotion version to every instance, and resume traffic. Do not let an
+older promotion worker overlap the cleanup because it can copy a provenance-only
+legacy row after the migration has scanned it. If instances run migrations at
+startup, use a maintenance rollout so the first strict instance applies `0010`
+only after old instances are drained. The migration is safe to rerun during
+verification: already stripped rows remain ordinary memories and valid mapped
+rows remain unchanged.
 
 ## Existing user-scope backfill
 
