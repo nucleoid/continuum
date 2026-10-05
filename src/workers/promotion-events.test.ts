@@ -235,6 +235,76 @@ describe('PromotionEventWorker', () => {
     expect(store.release).toHaveBeenCalledOnce();
   });
 
+  it('durably acknowledges a successful callback that settles during shutdown', async () => {
+    const entered = deferred();
+    const releaseCallback = deferred();
+    const registry = new PromotionWebhookRegistry();
+    registry.register({
+      id: 'hook',
+      onPromoted: async () => {
+        entered.resolve();
+        await releaseCallback.promise;
+      },
+    });
+    const store = mockStore({ claim: vi.fn().mockResolvedValue([claimedDelivery]) });
+    const instance = new PromotionEventWorker(pool, registry, workerOptions(), store);
+
+    const draining = instance.drainOnce();
+    await entered.promise;
+    const stopping = instance.stop('SIGTERM');
+    releaseCallback.resolve();
+
+    await expect(draining).resolves.toBe(1);
+    await expect(stopping).resolves.toBeUndefined();
+    expect(store.complete).toHaveBeenCalledOnce();
+    expect(store.complete).toHaveBeenCalledWith(pool, 'event-1', 'hook', 'worker-test');
+    expect(store.complete).toHaveResolvedWith(true);
+    expect(store.complete).toHaveBeenCalledBefore(store.release as ReturnType<typeof vi.fn>);
+  });
+
+  it('bounds lease renewal and shutdown when a callback ignores abort', async () => {
+    vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
+    const releaseCallback = deferred();
+    try {
+      const entered = deferred();
+      const aborted = deferred();
+      const registry = new PromotionWebhookRegistry();
+      registry.register({
+        id: 'hook',
+        onPromoted: async (_event, { signal }) => {
+          entered.resolve();
+          signal.addEventListener('abort', () => aborted.resolve(), { once: true });
+          await releaseCallback.promise;
+        },
+      });
+      const store = mockStore({ claim: vi.fn().mockResolvedValue([claimedDelivery]) });
+      const instance = new PromotionEventWorker(
+        pool,
+        registry,
+        workerOptions({ leaseMs: 90, callbackTimeoutMs: 60, shutdownWaitMs: 40 }),
+        store,
+      );
+
+      const draining = instance.drainOnce();
+      await entered.promise;
+      const stopping = instance.stop('SIGTERM');
+      await vi.advanceTimersByTimeAsync(40);
+      await aborted.promise;
+
+      await expect(stopping).resolves.toBeUndefined();
+      await expect(draining).resolves.toBe(1);
+      expect(store.renew).toHaveBeenCalledOnce();
+      expect(store.release).toHaveBeenCalledOnce();
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(store.renew).toHaveBeenCalledOnce();
+    } finally {
+      releaseCallback.resolve();
+      await vi.runAllTimersAsync();
+      vi.useRealTimers();
+    }
+  });
+
   it('renews a shutdown lease so another worker cannot duplicate an active callback', async () => {
     vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
     try {
