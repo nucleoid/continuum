@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pg from 'pg';
@@ -23,7 +23,7 @@ function schemaPool(schema: string): pg.Pool {
   const pool = new pg.Pool({
     connectionString: DATABASE_URL,
     max: 1,
-    options: `-c search_path=${schema}`,
+    options: `-c search_path=${schema},public`,
   });
   pools.push(pool);
   return pool;
@@ -72,6 +72,47 @@ describe('runMigrations', () => {
     );
     expect(uniqueIndex.trimStart()).toMatch(/^-- continuum:no-transaction/);
     expect(uniqueIndex).toMatch(/CREATE UNIQUE INDEX CONCURRENTLY memories_supersedes_unique_idx/i);
+  });
+
+  it('deactivates pre-approval Entra memberships during the approval migration', async () => {
+    const schema = `migrator_entra_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-entra-migrations-'));
+    directories.push(directory);
+    const source = new URL('../../migrations/', import.meta.url);
+    const files = (await readdir(source)).filter((file) => file.endsWith('.sql')).sort();
+    for (const file of files.filter((name) => name <= '0005_entra_auth.sql')) {
+      await copyFile(new URL(file, source), join(directory, file));
+    }
+
+    try {
+      await runMigrations(pool, directory);
+      const scope = (await pool.query("SELECT id FROM scopes WHERE kind = 'org' AND name = ''")).rows[0].id;
+      const principal = (await pool.query(
+        "INSERT INTO principals (id, external_id, kind, display_name) VALUES (gen_random_uuid(), 'legacy-user', 'user', 'Legacy') RETURNING id",
+      )).rows[0].id;
+      const groupId = '22222222-2222-4222-8222-222222222222';
+      await pool.query(
+        "INSERT INTO entra_groups (external_id, display_name, scope_id, role) VALUES ($1, 'continuum-org-admin', $2, 'admin')",
+        [groupId, scope],
+      );
+      await pool.query(
+        "INSERT INTO scope_memberships (principal_id, scope_id, role, source_kind, source_id) VALUES ($1, $2, 'admin', 'entra', $3)",
+        [principal, scope, groupId],
+      );
+      for (const file of files.filter((name) => name > '0005_entra_auth.sql')) {
+        await copyFile(new URL(file, source), join(directory, file));
+      }
+      await runMigrations(pool, directory);
+      expect((await pool.query(
+        "SELECT active, deactivated_at IS NOT NULL AS deactivated FROM scope_memberships WHERE source_kind = 'entra'",
+      )).rows).toEqual([{ active: false, deactivated: true }]);
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
   });
 
   it('runs marked concurrent-index migrations outside a transaction', async () => {

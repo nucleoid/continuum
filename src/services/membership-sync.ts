@@ -95,6 +95,8 @@ export async function provisionEntraGroupBinding(
          active = TRUE,
          approved_by = EXCLUDED.approved_by,
          approved_at = now(),
+         approval_revoked_by = NULL,
+         approval_revoked_at = NULL,
          deactivated_at = NULL`,
       [input.externalId, displayName, input.scopeId, input.role, actor.id],
     );
@@ -118,9 +120,67 @@ export async function provisionEntraGroupBinding(
   } finally { client.release(); }
 }
 
+/** Revokes a binding and all access sourced from it in one audited transaction. */
+export async function revokeEntraGroupBinding(
+  pool: pg.Pool,
+  actor: Principal,
+  externalId: string,
+): Promise<boolean> {
+  uuid(externalId, 'group id');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await requireOrgAdmin(client, actor.id);
+    const revoked = await client.query(
+      `UPDATE entra_groups
+          SET active = FALSE, deactivated_at = COALESCE(deactivated_at, now()),
+              approval_revoked_by = $2, approval_revoked_at = now()
+        WHERE external_id = $1 AND approved_by IS NOT NULL
+          AND approval_revoked_at IS NULL
+        RETURNING scope_id, role`,
+      [externalId, actor.id],
+    );
+    if (!revoked.rowCount) {
+      await client.query('ROLLBACK');
+      return false;
+    }
+    const memberships = await client.query(
+      `UPDATE scope_memberships
+          SET active = FALSE, deactivated_at = COALESCE(deactivated_at, now()), synced_at = now()
+        WHERE source_kind = 'entra' AND source_id = $1 AND active
+        RETURNING principal_id`,
+      [externalId],
+    );
+    await requireOrgAdmin(client, actor.id);
+    const admins = await client.query(
+      `SELECT count(DISTINCT m.principal_id)::int AS count
+         FROM scope_memberships m JOIN scopes s ON s.id = m.scope_id
+        WHERE s.kind = 'org' AND s.name = '' AND m.active AND m.role = 'admin'`,
+    );
+    if ((admins.rows[0]?.count ?? 0) < 1) {
+      throw new ServiceError('CONFLICT', 'binding revocation cannot remove the last org administrator');
+    }
+    await client.query(
+      `INSERT INTO audit_log (principal_id, action, scope_id, metadata)
+       VALUES ($1, 'write', $2, $3::jsonb)`,
+      [actor.id, revoked.rows[0].scope_id, JSON.stringify({
+        operation: 'entra_group_binding_revoked', group_id: externalId,
+        role: revoked.rows[0].role, memberships_deactivated: memberships.rowCount ?? 0,
+      })],
+    );
+    await client.query('COMMIT');
+    return true;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
+}
+
 export async function listBoundEntraGroupIds(pool: pg.Pool): Promise<string[]> {
   const { rows } = await pool.query(
-    'SELECT external_id FROM entra_groups WHERE approved_by IS NOT NULL ORDER BY external_id',
+    `SELECT external_id FROM entra_groups
+      WHERE approved_by IS NOT NULL AND approval_revoked_at IS NULL
+      ORDER BY external_id`,
   );
   return rows.map((row) => row.external_id as string);
 }
@@ -130,6 +190,79 @@ function skip(result: MembershipSyncResult, code: string): void {
   result.skipCodes[code] = (result.skipCodes[code] ?? 0) + 1;
 }
 
+async function quarantineBinding(
+  client: pg.PoolClient,
+  externalId: string,
+  result: MembershipSyncResult,
+): Promise<number> {
+  const group = await client.query(
+    `UPDATE entra_groups
+        SET active = FALSE, deactivated_at = COALESCE(deactivated_at, now())
+      WHERE external_id = $1 AND active
+      RETURNING external_id`,
+    [externalId],
+  );
+  result.groupsDeactivated += group.rowCount ?? 0;
+  const memberships = await client.query(
+    `UPDATE scope_memberships
+        SET active = FALSE, deactivated_at = COALESCE(deactivated_at, now()), synced_at = now()
+      WHERE source_kind = 'entra' AND source_id = $1 AND active
+      RETURNING principal_id`,
+    [externalId],
+  );
+  const count = memberships.rowCount ?? 0;
+  result.membershipsDeactivated += count;
+  return count;
+}
+
+async function quarantineOversizedSnapshot(pool: pg.Pool, actor: Principal): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [SYNC_LOCK_ID]);
+    await requireOrgAdmin(client, actor.id);
+    const groups = await client.query(
+      `UPDATE entra_groups
+          SET active = FALSE, deactivated_at = COALESCE(deactivated_at, now())
+        WHERE approved_by IS NOT NULL AND approval_revoked_at IS NULL AND active
+        RETURNING external_id`,
+    );
+    const memberships = await client.query(
+      `UPDATE scope_memberships m
+          SET active = FALSE, deactivated_at = COALESCE(m.deactivated_at, now()), synced_at = now()
+        WHERE m.source_kind = 'entra' AND m.active
+          AND EXISTS (
+            SELECT 1 FROM entra_groups g
+             WHERE g.external_id = m.source_id
+               AND g.approved_by IS NOT NULL AND g.approval_revoked_at IS NULL
+          )
+        RETURNING principal_id`,
+    );
+    await requireOrgAdmin(client, actor.id);
+    const admins = await client.query(
+      `SELECT count(DISTINCT m.principal_id)::int AS count
+         FROM scope_memberships m JOIN scopes s ON s.id = m.scope_id
+        WHERE s.kind = 'org' AND s.name = '' AND m.active AND m.role = 'admin'`,
+    );
+    if ((admins.rows[0]?.count ?? 0) < 1) {
+      throw new ServiceError('CONFLICT', 'membership sync cannot remove the last org administrator');
+    }
+    await client.query(
+      `INSERT INTO audit_log (principal_id, action, metadata)
+       VALUES ($1, 'write', $2::jsonb)`,
+      [actor.id, JSON.stringify({
+        operation: 'entra_membership_sync_rejected', reason: 'SNAPSHOT_TOO_LARGE',
+        groups_deactivated: groups.rowCount ?? 0,
+        memberships_deactivated: memberships.rowCount ?? 0,
+      })],
+    );
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
+}
+
 export async function syncEntraMemberships(
   pool: pg.Pool,
   actor: Principal,
@@ -137,6 +270,7 @@ export async function syncEntraMemberships(
   options: MembershipSyncOptions = {},
 ): Promise<MembershipSyncResult> {
   if (snapshots.length > MAX_SYNC_GROUPS) {
+    await quarantineOversizedSnapshot(pool, actor);
     throw new ServiceError('PAYLOAD_TOO_LARGE', 'too many Entra group results');
   }
   const maxPercent = options.maxDeactivationPercent ?? DEFAULT_MAX_DEACTIVATION_PERCENT;
@@ -153,7 +287,7 @@ export async function syncEntraMemberships(
     await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [SYNC_LOCK_ID]);
     await requireOrgAdmin(client, actor.id);
     const bindings = await client.query(
-      `SELECT external_id, scope_id, role, active FROM entra_groups
+      `SELECT external_id, scope_id, role, active, approval_revoked_at FROM entra_groups
         WHERE approved_by IS NOT NULL ORDER BY external_id FOR UPDATE`,
     );
     const activeMembershipsBefore = await client.query(
@@ -163,24 +297,41 @@ export async function syncEntraMemberships(
     const byId = new Map(bindings.rows.map((row) => [row.external_id as string, row]));
     const received = new Set<string>();
     let total = 0;
+    let quarantinedMemberships = 0;
     const definitiveMissing: string[] = [];
 
     for (const snapshot of snapshots) {
-      if (!UUID.test(snapshot.id) || received.has(snapshot.id)) {
-        skip(result, received.has(snapshot.id) ? 'DUPLICATE_GROUP_ID' : 'INVALID_GROUP_ID');
+      if (!UUID.test(snapshot.id)) {
+        skip(result, 'INVALID_GROUP_ID');
+        continue;
+      }
+      const binding = byId.get(snapshot.id);
+      if (received.has(snapshot.id)) {
+        skip(result, 'DUPLICATE_GROUP_ID');
+        if (binding && !binding.approval_revoked_at) {
+          quarantinedMemberships += await quarantineBinding(client, snapshot.id, result);
+        }
         continue;
       }
       received.add(snapshot.id);
-      const binding = byId.get(snapshot.id);
       if (!binding) { skip(result, 'UNBOUND_GROUP'); continue; }
-      if (snapshot.status === 'invalid') { skip(result, snapshot.errorCode ?? 'INVALID_GROUP'); continue; }
+      if (binding.approval_revoked_at) { skip(result, 'REVOKED_GROUP'); continue; }
+      if (snapshot.status === 'invalid') {
+        skip(result, snapshot.errorCode ?? 'INVALID_GROUP');
+        quarantinedMemberships += await quarantineBinding(client, snapshot.id, result);
+        continue;
+      }
       if (snapshot.status === 'missing') { definitiveMissing.push(snapshot.id); continue; }
       if (typeof snapshot.displayName !== 'string' || snapshot.displayName.length > 256
         || !Array.isArray(snapshot.memberObjectIds)) {
-        skip(result, 'MALFORMED_GROUP'); continue;
+        skip(result, 'MALFORMED_GROUP');
+        quarantinedMemberships += await quarantineBinding(client, snapshot.id, result);
+        continue;
       }
       if (snapshot.memberObjectIds.length > MAX_GROUP_MEMBERS) {
-        skip(result, 'GROUP_TOO_LARGE'); continue;
+        skip(result, 'GROUP_TOO_LARGE');
+        quarantinedMemberships += await quarantineBinding(client, snapshot.id, result);
+        continue;
       }
       const unique = new Set<string>();
       let malformed = false;
@@ -190,6 +341,7 @@ export async function syncEntraMemberships(
       }
       if (malformed || total + unique.size > MAX_SYNC_MEMBERSHIPS) {
         skip(result, malformed ? 'MALFORMED_MEMBERS' : 'SNAPSHOT_TOO_LARGE');
+        quarantinedMemberships += await quarantineBinding(client, snapshot.id, result);
         continue;
       }
       total += unique.size;
@@ -230,7 +382,7 @@ export async function syncEntraMemberships(
       result.membershipsDeactivated += deactivated.rowCount ?? 0;
     }
 
-    const activeCount = bindings.rows.filter((row) => row.active).length;
+    const activeCount = bindings.rows.filter((row) => row.active && !row.approval_revoked_at).length;
     const missingActive = definitiveMissing.filter((id) => byId.get(id)?.active);
     const deactivationPercent = activeCount === 0 ? 0 : (missingActive.length * 100) / activeCount;
     if (missingActive.length > 0 && deactivationPercent > maxPercent
@@ -256,9 +408,10 @@ export async function syncEntraMemberships(
     }
 
     const priorMembershipCount = activeMembershipsBefore.rows[0]?.count ?? 0;
+    const authoritativeDeactivations = result.membershipsDeactivated - quarantinedMemberships;
     const membershipDeactivationPercent = priorMembershipCount === 0 ? 0
-      : (result.membershipsDeactivated * 100) / priorMembershipCount;
-    if (result.membershipsDeactivated >= DEFAULT_MASS_MEMBERSHIP_DEACTIVATION_COUNT
+      : (authoritativeDeactivations * 100) / priorMembershipCount;
+    if (authoritativeDeactivations >= DEFAULT_MASS_MEMBERSHIP_DEACTIVATION_COUNT
       && membershipDeactivationPercent > maxPercent && !options.allowMassDeactivation) {
       throw new ServiceError('CONFLICT', 'suspicious Entra membership deactivation threshold exceeded');
     }

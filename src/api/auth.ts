@@ -6,6 +6,8 @@ import { getPrincipalByExternalId, upsertPrincipalByExternalId } from '../storag
 import type { AuthenticatedPrincipal, Principal, PrincipalKind } from '../types.js';
 import { isLifecyclePrincipal } from '../lifecycle/principal.js';
 
+const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+
 declare module 'express-serve-static-core' {
   interface Request {
     principal?: Principal;
@@ -19,6 +21,7 @@ export interface EntraAuthConfig {
   audience: string;
   userScope: string;
   serviceAppRole: string;
+  allowedClientIds: readonly string[];
   discoveryTimeoutMs?: number;
   jwksTimeoutMs?: number;
   fetcher?: typeof globalThis.fetch;
@@ -40,13 +43,17 @@ export function entraConfigFromEnv(env: NodeJS.ProcessEnv = process.env): EntraA
   const audience = env.CONTINUUM_ENTRA_AUDIENCE?.trim() ?? '';
   const userScope = env.CONTINUUM_ENTRA_USER_SCOPE?.trim() ?? '';
   const serviceAppRole = env.CONTINUUM_ENTRA_SERVICE_APP_ROLE?.trim() ?? '';
+  const allowedClientIds = (env.CONTINUUM_ENTRA_ALLOWED_CLIENT_IDS ?? '')
+    .split(',').map((value) => value.trim()).filter(Boolean);
   if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(tenant)
     || audience.length === 0 || audience.length > 256
     || !/^[A-Za-z0-9._:-]{1,128}$/.test(userScope)
-    || !/^[A-Za-z0-9._:-]{1,128}$/.test(serviceAppRole)) {
-    throw new Error('Entra mode requires tenant, audience, user scope, and service app role');
+    || !/^[A-Za-z0-9._:-]{1,128}$/.test(serviceAppRole)
+    || allowedClientIds.length === 0
+    || allowedClientIds.some((value) => !UUID.test(value))) {
+    throw new Error('Entra mode requires tenant, audience, user scope, service app role, and allowed client IDs');
   }
-  return { tenant, audience, userScope, serviceAppRole };
+  return { tenant, audience, userScope, serviceAppRole, allowedClientIds: [...new Set(allowedClientIds)] };
 }
 
 async function authenticateApiKey(
@@ -146,13 +153,19 @@ export function createAuthenticator(
 export async function principalFromClaims(
   pool: pg.Pool,
   claims: JWTPayload,
-  contract: Pick<EntraAuthConfig, 'tenant' | 'userScope' | 'serviceAppRole'>,
+  contract: Pick<EntraAuthConfig, 'tenant' | 'userScope' | 'serviceAppRole' | 'allowedClientIds'>,
 ): Promise<AuthenticatedPrincipal | null> {
   const oid = typeof claims.oid === 'string' ? claims.oid : '';
   if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(oid)) return null;
   const name = typeof claims.name === 'string' ? claims.name.trim().slice(0, 256) : '';
+  const clientId = typeof claims.azp === 'string' ? claims.azp
+    : typeof claims.appid === 'string' ? claims.appid : '';
   let kind: PrincipalKind;
-  if (claims.tid !== contract.tenant || claims.ver !== '2.0') return null;
+  if (claims.tid !== contract.tenant || claims.ver !== '2.0'
+    || !UUID.test(clientId)
+    || !contract.allowedClientIds.some((allowed) => allowed.toLowerCase() === clientId.toLowerCase())) {
+    return null;
+  }
   if (claims.idtyp === 'user') {
     const scopes = typeof claims.scp === 'string' ? claims.scp.split(/\s+/) : [];
     if (!scopes.includes(contract.userScope)) return null;
@@ -160,10 +173,8 @@ export async function principalFromClaims(
   } else if (claims.idtyp === 'app') {
     const roles = Array.isArray(claims.roles)
       ? claims.roles.filter((value): value is string => typeof value === 'string') : [];
-    const clientId = typeof claims.azp === 'string' ? claims.azp
-      : typeof claims.appid === 'string' ? claims.appid : '';
     if (typeof claims.scp === 'string' || !roles.includes(contract.serviceAppRole)
-      || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(clientId)) return null;
+      || !UUID.test(clientId)) return null;
     kind = 'service';
   } else return null;
   const principal = await upsertPrincipalByExternalId(pool, {

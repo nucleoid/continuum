@@ -1,7 +1,7 @@
 import { getPool } from '../storage/pool.js';
 import { getPrincipalByExternalId } from '../storage/principals.js';
 import { issueApiKey, revokeApiKey, rotateApiKey } from '../services/api-keys.js';
-import { provisionEntraGroupBinding } from '../services/membership-sync.js';
+import { provisionEntraGroupBinding, revokeEntraGroupBinding } from '../services/membership-sync.js';
 import type { MembershipRole } from '../types.js';
 
 async function main(): Promise<void> {
@@ -21,6 +21,11 @@ async function main(): Promise<void> {
         externalId: groupId, scopeId, role: bindingRole as MembershipRole, displayName,
       });
       process.stdout.write(`${JSON.stringify({ operation, groupId, ...result })}\n`);
+    } else if (operation === 'revoke-group') {
+      const [groupId] = args;
+      if (!groupId) throw new Error('usage: revoke-group <group-id>');
+      const revoked = await revokeEntraGroupBinding(pool, actor, groupId);
+      process.stdout.write(`${JSON.stringify({ operation, groupId, revoked })}\n`);
     } else if (operation === 'issue-key') {
       const [serviceExternalId, allowedSource] = args;
       if (!serviceExternalId) throw new Error('usage: issue-key <service-external-id> [allowed-source]');
@@ -34,7 +39,7 @@ async function main(): Promise<void> {
       if (!args[0]) throw new Error('usage: revoke-key <key-id>');
       await revokeApiKey(pool, actor, args[0]);
       process.stdout.write(`${JSON.stringify({ operation, keyId: args[0], revoked: true })}\n`);
-    } else throw new Error('operation must be bind-group, issue-key, rotate-key, or revoke-key');
+    } else throw new Error('operation must be bind-group, revoke-group, issue-key, rotate-key, or revoke-key');
   } finally { await pool.end(); }
 }
 

@@ -10,6 +10,7 @@ describe('authentication configuration and Entra claims', () => {
   const contract = {
     tenant: '22222222-2222-4222-8222-222222222222',
     userScope: 'Continuum.User', serviceAppRole: 'Continuum.Service',
+    allowedClientIds: ['44444444-4444-4444-8444-444444444444'],
   };
   beforeEach(async () => { pool ??= await makeTestPool(); await resetData(pool); });
   afterAll(async () => { await pool?.end(); });
@@ -25,17 +26,20 @@ describe('authentication configuration and Entra claims', () => {
       CONTINUUM_ENTRA_AUDIENCE: 'api://continuum',
       CONTINUUM_ENTRA_USER_SCOPE: contract.userScope,
       CONTINUUM_ENTRA_SERVICE_APP_ROLE: contract.serviceAppRole,
+      CONTINUUM_ENTRA_ALLOWED_CLIENT_IDS: contract.allowedClientIds[0],
     })).toMatchObject(contract);
   });
 
   it('accepts only tenant user access tokens with the configured delegated scope', async () => {
     const oid = '11111111-1111-4111-8111-111111111111';
     const valid = { oid, name: 'User', tid: contract.tenant, ver: '2.0', idtyp: 'user',
+      azp: contract.allowedClientIds[0],
       scp: `openid ${contract.userScope}`, exp: 2_000_000_000 };
     expect((await principalFromClaims(pool, valid, contract))?.principal.kind).toBe('user');
     for (const claims of [
       { ...valid, tid: '33333333-3333-4333-8333-333333333333' },
       { ...valid, scp: 'openid profile' },
+      { ...valid, azp: '55555555-5555-4555-8555-555555555555' },
       { ...valid, idtyp: undefined },
     ]) expect(await principalFromClaims(pool, claims, contract)).toBeNull();
   });
@@ -47,11 +51,15 @@ describe('authentication configuration and Entra claims', () => {
     expect((await principalFromClaims(pool, valid, contract))?.principal.kind).toBe('service');
     expect(await principalFromClaims(pool, { ...valid, roles: ['Other.Role'] }, contract)).toBeNull();
     expect(await principalFromClaims(pool, { ...valid, azp: 'unauthorized' }, contract)).toBeNull();
+    expect(await principalFromClaims(pool, {
+      ...valid, azp: '55555555-5555-4555-8555-555555555555',
+    }, contract)).toBeNull();
   });
 
   it('upserts immutable oid identity and rejects a kind change', async () => {
     const oid = '11111111-1111-4111-8111-111111111111';
-    const userClaims = { oid, tid: contract.tenant, ver: '2.0', idtyp: 'user', scp: contract.userScope };
+    const userClaims = { oid, tid: contract.tenant, ver: '2.0', idtyp: 'user',
+      azp: contract.allowedClientIds[0], scp: contract.userScope };
     const first = await principalFromClaims(pool, { ...userClaims, name: 'Old Name' }, contract);
     const renamed = await principalFromClaims(pool, { ...userClaims, name: 'New Name' }, contract);
     expect(renamed?.principal.id).toBe(first?.principal.id);

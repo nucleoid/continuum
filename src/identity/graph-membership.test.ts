@@ -14,6 +14,7 @@ describe('Microsoft Graph membership snapshot', () => {
     }]);
     expect(String(fetcher.mock.calls[0][0])).toContain(`/groups/${groupId}?`);
     expect(String(fetcher.mock.calls[1][0])).toContain('/members/microsoft.graph.user');
+    expect(fetcher.mock.calls[0][1].headers.authorization).toBe(`Bearer ${'x'.repeat(32)}`);
     expect(fetcher.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
   });
 

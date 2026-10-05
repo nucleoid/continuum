@@ -4,7 +4,9 @@ import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { createPrincipal } from '../storage/principals.js';
 import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { addMembership, hasRole, removeMembership } from '../storage/memberships.js';
-import { provisionEntraGroupBinding, syncEntraMemberships } from './membership-sync.js';
+import {
+  MAX_SYNC_GROUPS, provisionEntraGroupBinding, revokeEntraGroupBinding, syncEntraMemberships,
+} from './membership-sync.js';
 
 describe('Entra membership sync', () => {
   let pool: pg.Pool;
@@ -97,7 +99,7 @@ describe('Entra membership sync', () => {
     ]);
   });
 
-  it('skips malformed and failed bound groups without preserving removed access in valid groups', async () => {
+  it('fails closed for malformed and failed bound groups while valid groups remain authoritative', async () => {
     const alpha = await createScope(pool, { kind: 'team', name: 'alpha' });
     const beta = await createScope(pool, { kind: 'team', name: 'beta' });
     const user = await createPrincipal(pool, {
@@ -117,8 +119,76 @@ describe('Entra membership sync', () => {
       { id: 'not-a-uuid', status: 'present', displayName: 'bad', memberObjectIds: [] },
     ]);
     expect(await hasRole(pool, user.id, alpha.id, 'reader')).toBe(false);
-    expect(await hasRole(pool, user.id, beta.id, 'reader')).toBe(true);
-    expect(result).toMatchObject({ membershipsDeactivated: 1, groupsSkipped: 2 });
+    expect(await hasRole(pool, user.id, beta.id, 'reader')).toBe(false);
+    expect(result).toMatchObject({ membershipsDeactivated: 2, groupsSkipped: 2,
+      skipCodes: { GRAPH_FAILURE: 1, INVALID_GROUP_ID: 1 } });
+    expect((await pool.query(
+      'SELECT active FROM entra_groups WHERE external_id = $1', [failed],
+    )).rows[0].active).toBe(false);
+  });
+
+  it('audits revocation, deactivates sourced access, and never silently reprovisions it', async () => {
+    const alpha = await createScope(pool, { kind: 'team', name: 'alpha' });
+    const user = await createPrincipal(pool, {
+      externalId: '11111111-1111-4111-8111-111111111111', kind: 'user', displayName: 'User',
+    });
+    const groupId = '22222222-2222-4222-8222-222222222222';
+    await provisionEntraGroupBinding(pool, admin, { externalId: groupId, scopeId: alpha.id, role: 'writer' });
+    const snapshot = [{
+      id: groupId, status: 'present' as const, displayName: 'alpha', memberObjectIds: [user.externalId],
+    }];
+    await syncEntraMemberships(pool, admin, snapshot);
+
+    expect(await revokeEntraGroupBinding(pool, admin, groupId)).toBe(true);
+    expect(await hasRole(pool, user.id, alpha.id, 'reader')).toBe(false);
+    expect(await syncEntraMemberships(pool, admin, snapshot)).toMatchObject({
+      groupsSeen: 0, groupsSkipped: 1, skipCodes: { REVOKED_GROUP: 1 },
+    });
+    expect(await hasRole(pool, user.id, alpha.id, 'reader')).toBe(false);
+    expect((await pool.query(
+      "SELECT count(*)::int AS count FROM audit_log WHERE metadata->>'operation' = 'entra_group_binding_revoked'",
+    )).rows[0].count).toBe(1);
+  });
+
+  it('rolls back revocation that would remove the actor or last org administrator', async () => {
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    const groupId = '22222222-2222-4222-8222-222222222222';
+    await pool.query('UPDATE principals SET external_id = $2 WHERE id = $1', [
+      admin.id, '11111111-1111-4111-8111-111111111111',
+    ]);
+    admin.externalId = '11111111-1111-4111-8111-111111111111';
+    await provisionEntraGroupBinding(pool, admin, { externalId: groupId, scopeId: org!.id, role: 'admin' });
+    await syncEntraMemberships(pool, admin, [{
+      id: groupId, status: 'present', displayName: 'admins', memberObjectIds: [admin.externalId],
+    }]);
+    await removeMembership(pool, admin.id, org!.id);
+
+    await expect(revokeEntraGroupBinding(pool, admin, groupId)).rejects
+      .toMatchObject({ code: 'FORBIDDEN' });
+    expect(await hasRole(pool, admin.id, org!.id, 'admin')).toBe(true);
+    expect((await pool.query(
+      'SELECT approval_revoked_at FROM entra_groups WHERE external_id = $1', [groupId],
+    )).rows[0].approval_revoked_at).toBeNull();
+  });
+
+  it('quarantines stale Entra access when the whole snapshot exceeds its bound', async () => {
+    const alpha = await createScope(pool, { kind: 'team', name: 'alpha' });
+    const user = await createPrincipal(pool, {
+      externalId: '11111111-1111-4111-8111-111111111111', kind: 'user', displayName: 'User',
+    });
+    const groupId = '22222222-2222-4222-8222-222222222222';
+    await provisionEntraGroupBinding(pool, admin, { externalId: groupId, scopeId: alpha.id, role: 'reader' });
+    await syncEntraMemberships(pool, admin, [{
+      id: groupId, status: 'present', displayName: 'alpha', memberObjectIds: [user.externalId],
+    }]);
+    const oversized = Array.from({ length: MAX_SYNC_GROUPS + 1 }, (_, index) => ({
+      id: `${String(index).padStart(8, '0')}-0000-4000-8000-000000000000`,
+      status: 'invalid' as const, errorCode: 'GRAPH_FAILURE',
+    }));
+
+    await expect(syncEntraMemberships(pool, admin, oversized)).rejects
+      .toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
+    expect(await hasRole(pool, user.id, alpha.id, 'reader')).toBe(false);
   });
 
   it('fails closed on empty and mass-deactivation snapshots and preserves syncing authority', async () => {

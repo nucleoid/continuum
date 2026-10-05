@@ -9,15 +9,17 @@ operator process start. There is no production default:
 - `CONTINUUM_AUTH_MODE=entra` requires a tenant UUID, audience, delegated user
   scope, and application role in `CONTINUUM_ENTRA_TENANT`,
   `CONTINUUM_ENTRA_AUDIENCE`, `CONTINUUM_ENTRA_USER_SCOPE`, and
-  `CONTINUUM_ENTRA_SERVICE_APP_ROLE`.
+  `CONTINUUM_ENTRA_SERVICE_APP_ROLE`. `CONTINUUM_ENTRA_ALLOWED_CLIENT_IDS`
+  must contain one or more comma-separated application (client) UUIDs.
 
 Entra mode loads only the configured tenant's OIDC metadata and Microsoft JWKS
 over HTTPS with bounded timeouts. Rejected metadata loads are evicted so a
 later request retries. Tokens must be RS256 v2 access tokens from that tenant.
-Delegated user tokens must carry `idtyp=user` and the configured `scp` value.
-Client-credential tokens must carry `idtyp=app`, a UUID client ID, and the
-configured `roles` value. Audience, issuer, lifetime, and immutable `oid` are
-also validated. ID tokens and tokens for unassigned applications are rejected.
+Delegated user tokens must carry `idtyp=user`, the configured `scp` value, and
+an `azp`/`appid` in the client allow-list. Client-credential tokens must carry
+`idtyp=app`, an allow-listed UUID client ID, and the configured `roles` value.
+Audience, issuer, lifetime, and immutable `oid` are also validated. ID tokens
+and tokens from unlisted or role-unassigned applications are rejected.
 All credential, JOSE, JWKS, key, and claim failures return an authentication
 failure without exposing provider details.
 
@@ -52,12 +54,15 @@ ID, and role:
 
 ```text
 npm run admin -- bind-group <group-id> <scope-id> <reader|writer|admin> [display-name]
+npm run admin -- revoke-group <group-id>
 ```
 
-The same audited command updates an approved binding or reactivates one after
-investigation. A tenant user cannot create a privileged group with a matching
-name and self-escalate. Renames only update display metadata and never alter the
-approved scope or role.
+Binding and revocation are audited. Revocation atomically soft-deactivates all
+memberships sourced by that group, excludes it from future Graph fetches, and
+cannot be undone by sync. `bind-group` is the only way to explicitly approve it
+again. A tenant user cannot create a privileged group with a matching name and
+self-escalate. Renames only update display metadata and never alter the approved
+scope or role.
 
 ## Membership sync
 
@@ -72,9 +77,12 @@ The job reads all approved bindings, including currently missing groups, then fe
 immutable ID. It does not perform name-based group discovery. A Graph 404 is a
 definitive disappearance. If that immutable ID returns, its still-approved
 binding is safely reactivated. Renames outside any naming convention remain active
-and update metadata. Malformed, failed, duplicate, and unbound results are
-skipped and counted in the audit summary; valid bound groups remain
-authoritative, so removed memberships from those groups are deactivated.
+and update metadata. Malformed, failed, duplicate, and oversized results are
+counted in the audit summary and soft-deactivate access sourced by the affected
+approved binding. Unbound and revoked IDs cannot confer access. Valid bound
+groups remain authoritative, so removed memberships from those groups are
+deactivated. A snapshot exceeding the whole-run bound quarantines all active
+Entra-sourced access before the run reports failure.
 
 Empty snapshots fail closed. By default, a run that would deactivate more than
 25 percent of active bindings rolls back. After investigation, an operator may
@@ -88,7 +96,8 @@ endpoint. Nested groups are intentionally not expanded. Users are not
 provisioned by sync; an Entra user must already have a Continuum principal,
 normally from successful first sign-in, before group membership becomes active.
 
-The migration is additive for credential and binding tables and gives defaults
+The migration is additive for credential and binding tables, deactivates all
+pre-approval Entra memberships, and gives defaults
 to new membership provenance columns, so an older binary can continue writing
 manual rows during a rolling deployment. A database trigger rejects active
 Entra memberships without approval, so a pre-remediation binary cannot restore
