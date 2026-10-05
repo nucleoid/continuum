@@ -339,6 +339,46 @@ describe('REST/MCP semantic parity matrix', () => {
     expect(agents.text).not.toContain('Secret parity marker');
   });
 
+  it('uses the same AGENTS.md hash and boolean freshness semantics over REST and MCP', async () => {
+    const payments = (await getScopeByRef(pool, { kind: 'team', name: 'payments' }))!;
+    const memory = await createMemory(pool, {
+      scopeId: payments.id, scopeKind: 'team', type: 'decision',
+      title: 'Freshness parity marker', body: 'Current parity body.',
+      authorId: principal.id, source: 'manual',
+    });
+    const restRender = await request(createApp(pool))
+      .get('/api/v0/agents-md?team=payments')
+      .set('Authorization', 'Bearer entra:user:parity');
+    const mcpRender = (await client.callTool({
+      name: 'continuum.agents_md', arguments: { team: 'payments' },
+    })) as ToolResult;
+    const hash = restRender.headers.etag.slice(1, -1);
+
+    expect(mcpRender.content.map((item) => item.text ?? '').join('')).toBe(restRender.text);
+    const restFresh = await request(createApp(pool))
+      .get('/api/v0/agents-md/freshness')
+      .query({ team: 'payments', hash })
+      .set('Authorization', 'Bearer entra:user:parity');
+    const mcpFresh = toolJson((await client.callTool({
+      name: 'continuum.agents_md_fresh', arguments: { team: 'payments', hash },
+    })) as ToolResult);
+    expect(restFresh.body).toEqual({ fresh: true });
+    expect(mcpFresh).toEqual(restFresh.body);
+
+    await pool.query('UPDATE memories SET body = body || $2 WHERE id = $1', [
+      memory.id, ' changed',
+    ]);
+    const restStale = await request(createApp(pool))
+      .get('/api/v0/agents-md/freshness')
+      .query({ team: 'payments', hash })
+      .set('Authorization', 'Bearer entra:user:parity');
+    const mcpStale = toolJson((await client.callTool({
+      name: 'continuum.agents_md_fresh', arguments: { team: 'payments', hash },
+    })) as ToolResult);
+    expect(restStale.body).toEqual({ fresh: false });
+    expect(mcpStale).toEqual(restStale.body);
+  });
+
   it('grants implicit org reads across REST, MCP, and AGENTS.md', async () => {
     const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
     await createMemory(pool, {

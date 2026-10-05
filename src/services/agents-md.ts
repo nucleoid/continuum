@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto';
 import type pg from 'pg';
-import type { Principal } from '../types.js';
+import type { Memory, Principal } from '../types.js';
 import { renderAgentsMdResult } from '../agents-md/render.js';
 import { recordRead as recordReadAudit } from '../audit/log.js';
 import { asServiceError } from './errors.js';
@@ -10,12 +11,18 @@ export interface AgentsMdInput {
   limit?: number;
 }
 
-export async function renderAgentsMdForPrincipal(
+export interface AgentsMdBundle {
+  markdown: string;
+  hash: string;
+  etag: string;
+  memories: Memory[];
+}
+
+export async function prepareAgentsMdForPrincipal(
   pool: pg.Pool,
   principal: Principal,
   input: AgentsMdInput,
-  auditMetadata: Record<string, unknown> = {},
-): Promise<string> {
+): Promise<AgentsMdBundle> {
   try {
     const { markdown, memories } = await renderAgentsMdResult(pool, {
       principalId: principal.id,
@@ -23,6 +30,23 @@ export async function renderAgentsMdForPrincipal(
       team: input.team,
       perScopeLimit: input.limit,
     });
+    const hash = createHash('sha256').update(markdown, 'utf8').digest('hex');
+    return { markdown, hash, etag: `"${hash}"`, memories };
+  } catch (error) {
+    throw asServiceError(error);
+  }
+}
+
+export async function auditAgentsMdRead(
+  pool: pg.Pool,
+  principal: Principal,
+  input: AgentsMdInput,
+  bundle: AgentsMdBundle,
+  delivered: boolean,
+  auditMetadata: Record<string, unknown> = {},
+): Promise<void> {
+  try {
+    const memories = delivered ? bundle.memories : [];
     await recordReadAudit(pool, {
       principalId: principal.id,
       metadata: {
@@ -38,8 +62,18 @@ export async function renderAgentsMdForPrincipal(
         metadata: { rank: index + 1, delivery: 'agents-md' },
       })),
     });
-    return markdown;
   } catch (error) {
     throw asServiceError(error);
   }
+}
+
+export async function renderAgentsMdForPrincipal(
+  pool: pg.Pool,
+  principal: Principal,
+  input: AgentsMdInput,
+  auditMetadata: Record<string, unknown> = {},
+): Promise<string> {
+  const bundle = await prepareAgentsMdForPrincipal(pool, principal, input);
+  await auditAgentsMdRead(pool, principal, input, bundle, true, auditMetadata);
+  return bundle.markdown;
 }

@@ -64,6 +64,7 @@ const SAFE_PROVIDER_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 const KNOWN_LOG_PATHS = new Set([
   '/health', '/health/live', '/health/ready',
   '/api/v0/capture', '/api/v0/recall', '/api/v0/agents-md', '/api/v0/audit',
+  '/api/v0/agents-md/freshness',
   '/api/v0/review-queue',
   '/api/v0/insights/gaps',
 ]);

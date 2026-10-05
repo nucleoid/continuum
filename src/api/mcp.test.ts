@@ -1,4 +1,5 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import type pg from 'pg';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -293,6 +294,41 @@ describe('MCP server', () => {
       metadata: { rank: 1, record_kind: 'result', transport: 'mcp' },
     });
     expect(rows[1].metadata.request_id).toBe(rows[0].metadata.request_id);
+  });
+
+  it('checks AGENTS.md freshness with the same bounded rendered-content hash', async () => {
+    const { client, me, teamPayments } = await connectClient(null);
+    const memory = await createMemory(pool, {
+      scopeId: teamPayments.id, scopeKind: 'team', type: 'decision',
+      title: 'MCP freshness', body: 'Current reference.',
+      authorId: me.id, source: 'manual',
+    });
+    const rendered = (await client.callTool({
+      name: 'continuum.agents_md', arguments: { team: 'payments' },
+    })) as CallToolResult;
+    const hash = createHash('sha256').update(rawText(rendered), 'utf8').digest('hex');
+
+    const fresh = (await client.callTool({
+      name: 'continuum.agents_md_fresh', arguments: { team: 'payments', hash },
+    })) as CallToolResult;
+    expect(parseJsonResult(fresh)).toEqual({ fresh: true });
+
+    await pool.query('UPDATE memories SET body = body || $2 WHERE id = $1', [
+      memory.id, ' changed',
+    ]);
+    const stale = (await client.callTool({
+      name: 'continuum.agents_md_fresh', arguments: { team: 'payments', hash },
+    })) as CallToolResult;
+    expect(parseJsonResult(stale)).toEqual({ fresh: false });
+  });
+
+  it('rejects malformed AGENTS.md freshness hashes at the MCP boundary', async () => {
+    const { client } = await connectClient(null);
+    const result = (await client.callTool({
+      name: 'continuum.agents_md_fresh', arguments: { hash: 'not-a-sha256' },
+    })) as CallToolResult & { isError?: boolean };
+
+    expect(result.isError).toBe(true);
   });
 
   it('applies recall type filters before vector limiting over MCP', async () => {
