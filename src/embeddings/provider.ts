@@ -46,7 +46,10 @@ export function isEmbeddingItemError(error: unknown): error is EmbeddingItemErro
   return error instanceof EmbeddingItemError;
 }
 
-export function embeddingProviderHttpError(status: number): EmbeddingProviderError {
+export function embeddingProviderHttpError(status: number): EmbeddingProviderError | EmbeddingItemError {
+  if (status === 400 || status === 413 || status === 422) {
+    return new EmbeddingItemError(`Embedding provider rejected input with status ${status}`);
+  }
   const code: EmbeddingProviderErrorCode = status === 401 || status === 403
     ? 'EMBEDDING_AUTH'
     : status === 429

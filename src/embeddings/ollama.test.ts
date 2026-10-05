@@ -173,6 +173,19 @@ describe('OllamaEmbeddingProvider', () => {
     });
   });
 
+  it.each([400, 413, 422])(
+    'classifies HTTP %i input rejection as an item failure without response bodies',
+    async (status) => {
+      const provider = new OllamaEmbeddingProvider({
+        baseUrl: 'http://x', model: 'm', dim: 4,
+        fetchImpl: vi.fn(async () => response({ secret: 'do not leak' }, false, status)),
+      });
+      await expect(provider.embed(['private oversized input'])).rejects.toMatchObject({
+        code: 'EMBEDDING_ITEM_FAILED', failureScope: 'item',
+      });
+    },
+  );
+
   it('classifies transport failures as provider-wide network errors', async () => {
     const provider = new OllamaEmbeddingProvider({
       baseUrl: 'http://x', model: 'm', dim: 4,

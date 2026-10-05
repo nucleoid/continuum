@@ -1,4 +1,5 @@
 import {
+  EmbeddingItemError,
   EmbeddingProviderError,
   embeddingProviderHttpError,
   type EmbeddingProvider,
@@ -99,7 +100,7 @@ abstract class HostedEmbeddingProvider implements EmbeddingProvider {
       });
     } catch (error) {
       if (signal?.aborted) throw signal.reason ?? error;
-      if (error instanceof EmbeddingProviderError) throw error;
+      if (error instanceof EmbeddingProviderError || error instanceof EmbeddingItemError) throw error;
       if (error instanceof Error && /timed out/i.test(error.message)) {
         throw new EmbeddingProviderError(
           'EMBEDDING_TIMEOUT', 'Embedding provider request timed out', { cause: error },

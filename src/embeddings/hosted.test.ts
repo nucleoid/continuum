@@ -50,6 +50,24 @@ describe('hosted embedding providers', () => {
     });
   });
 
+  it.each([
+    ['OpenAI', OpenAIEmbeddingProvider, 400],
+    ['OpenAI', OpenAIEmbeddingProvider, 413],
+    ['OpenAI', OpenAIEmbeddingProvider, 422],
+    ['Voyage', VoyageEmbeddingProvider, 400],
+    ['Voyage', VoyageEmbeddingProvider, 413],
+    ['Voyage', VoyageEmbeddingProvider, 422],
+  ])('classifies $0 HTTP $2 input rejection as an item failure', async (_name, Provider, status) => {
+    const provider = new Provider({
+      apiKey: 'private-key', model: 'model', dim: 2,
+      fetchImpl: vi.fn(async () => ({ ok: false, status }) as Response),
+    });
+
+    await expect(provider.embed(['private oversized input'])).rejects.toMatchObject({
+      code: 'EMBEDDING_ITEM_FAILED', failureScope: 'item',
+    });
+  });
+
   it('enforces its deadline even when an injected fetch ignores abort', async () => {
     const fetchImpl = vi.fn(async () => new Promise<Response>(() => undefined));
     const provider = new OpenAIEmbeddingProvider({

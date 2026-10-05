@@ -5,6 +5,8 @@ import {
   EmbeddingProviderError,
   type EmbeddingProvider,
 } from '../embeddings/provider.js';
+import { OpenAIEmbeddingProvider, VoyageEmbeddingProvider } from '../embeddings/hosted.js';
+import { OllamaEmbeddingProvider } from '../embeddings/ollama.js';
 import { EmbeddingRegistry, ScopeEmbeddingRouter } from '../embeddings/router.js';
 import { StubEmbeddingProvider } from '../embeddings/stub.js';
 import { createMemory } from '../storage/memories.js';
@@ -157,6 +159,56 @@ describe('embedding backfill', () => {
     expect(audit.rows[0].metadata).toContain('EMBEDDING_FAILED');
     expect(audit.rows[0].metadata).not.toContain('private provider detail');
   });
+
+  it.each([
+    ['OpenAI', 400, (fetchImpl: typeof fetch) => new OpenAIEmbeddingProvider({
+      apiKey: 'private-key', model: 'model', dim: 768, fetchImpl,
+    })],
+    ['Voyage', 413, (fetchImpl: typeof fetch) => new VoyageEmbeddingProvider({
+      apiKey: 'private-key', model: 'model', dim: 768, fetchImpl,
+    })],
+    ['Ollama', 422, (fetchImpl: typeof fetch) => new OllamaEmbeddingProvider({
+      baseUrl: 'http://localhost:11434', model: 'model', dim: 768, fetchImpl,
+    })],
+  ])('isolates a shipped %s provider HTTP %i input rejection and embeds healthy memories',
+    async (name, status, createProvider) => {
+      const { memories } = await seed('project', `http-poison-${name}`, [
+        'healthy one', 'oversized item', 'healthy two',
+      ]);
+      const fetchImpl = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+        const payload = JSON.parse(String(init?.body)) as { input: string[] };
+        if (payload.input.some((text) => text.includes('oversized item'))) {
+          return { ok: false, status } as Response;
+        }
+        const embeddings = payload.input.map((text) => [text.length, ...Array(767).fill(0)]);
+        return {
+          ok: true,
+          json: async () => name === 'Ollama'
+            ? { embeddings }
+            : { data: embeddings.map((embedding, index) => ({ embedding, index })) },
+        } as Response;
+      }) as typeof fetch;
+      const provider = createProvider(fetchImpl);
+
+      const report = await runEmbeddingBackfill(pool, provider, {
+        batchSize: 3, maxRows: 10, maxRetries: 0,
+      });
+
+      expect(report).toMatchObject({ embedded: 2, failed: 1, completed: true });
+      expect(fetchImpl.mock.calls.length).toBeGreaterThan(1);
+      expect(fetchImpl.mock.calls.length).toBeLessThanOrEqual(5);
+      const stored = await pool.query(
+        'SELECT memory_id FROM memory_embeddings ORDER BY memory_id',
+      );
+      expect(stored.rows.map((row) => row.memory_id)).toEqual([
+        memories[0]!.id, memories[2]!.id,
+      ].sort());
+      expect((await pool.query(
+        `SELECT count(*)::int AS count FROM audit_log
+          WHERE memory_id = $1 AND metadata->>'operation' = 'embedding_backfill'`,
+        [memories[1]!.id],
+      )).rows[0].count).toBe(1);
+    });
 
   it.each([
     ['timeout', new EmbeddingProviderError('EMBEDDING_TIMEOUT', 'private timeout detail')],
