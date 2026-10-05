@@ -78,7 +78,6 @@ const KNOWN_LOG_PATHS = new Set([
   '/api/v0/insights/gaps',
   '/api/v0/ingest/:pluginId',
   '/api/v0/scopes',
-  '/api/v0/scopes',
   '/api/v0/supersede', '/api/v0/decisions/:id/history',
 ]);
 

@@ -337,9 +337,13 @@ metadata and rejects caller-supplied `metadata.related`; issue #15 relation
 candidates remain advisory and never authorize or trigger supersession. After
 commit, provider I/O embeds the new chain head outside the write transaction.
 The successor vector, archived-vector removal, and a bounded provider/status
-audit then commit together. Provider or vector-storage failure returns
-`EMBEDDING_FAILED`, writes a failed embedding audit, retains the archived vector
-for recovery, and leaves the live successor available to full-text recall.
+audit then commit together. Provider, post-commit pool, vector-storage, or
+derived-audit failure returns `EMBEDDING_FAILED`, retains the archived vector,
+and leaves the live successor available to full-text recall. A failed outcome
+audit is best-effort because the database failure may also make observability
+unavailable. If a local-only route has no local provider, a best-effort derived
+audit records `embedding_policy: "local-only-unavailable"`; the successor stays
+full-text-only and is never sent to a hosted provider.
 Recall and AGENTS.md serve only the live head and may expose its predecessor ID,
 never the archived content. Decision history is read-authorized, audited,
 cycle-safe, and returned oldest to newest with the current head ID.

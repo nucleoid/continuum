@@ -56,16 +56,59 @@ async function recordEmbeddingOutcome(
   });
 }
 
+async function tryRecordEmbeddingOutcome(
+  queryable: pg.Pool | pg.PoolClient,
+  result: SupersedeWriteResult,
+  provider: Pick<EmbeddingProvider, 'id' | 'dim'>,
+  status: 'succeeded' | 'failed',
+): Promise<void> {
+  try {
+    await recordEmbeddingOutcome(queryable, result, provider, status);
+  } catch {
+    // Supersession is already committed. Derived observability is best-effort.
+  }
+}
+
+async function tryRecordEmbeddingPolicy(
+  pool: pg.Pool,
+  result: SupersedeWriteResult,
+  policy: 'local-only-unavailable',
+): Promise<void> {
+  try {
+    await recordAudit(pool, {
+      principalId: result.successor.authorId,
+      action: 'write',
+      memoryId: result.successor.id,
+      scopeId: result.successor.scopeId,
+      metadata: {
+        record_kind: 'embedding',
+        source: result.successor.source,
+        type: result.successor.type,
+        embedded: false,
+        embedding_policy: policy,
+      },
+    });
+  } catch {
+    // Supersession is already committed. Derived observability is best-effort.
+  }
+}
+
 async function embedSuccessor(
   pool: pg.Pool,
   embeddingRouting: EmbeddingRouting,
   result: SupersedeWriteResult,
 ): Promise<{ embedded: boolean; embedErrorCode?: 'EMBEDDING_FAILED' }> {
-  const provider = asEmbeddingRouter(embeddingRouting).resolve({
+  const route = asEmbeddingRouter(embeddingRouting).resolve({
     kind: result.scope.kind,
     name: result.scope.name,
-  }).provider;
-  if (!provider) return { embedded: false };
+  });
+  const provider = route.provider;
+  if (!provider) {
+    if (route.policy === 'local-only-unavailable') {
+      await tryRecordEmbeddingPolicy(pool, result, route.policy);
+    }
+    return { embedded: false };
+  }
 
   let vector: number[];
   try {
@@ -73,15 +116,15 @@ async function embedSuccessor(
       `${result.successor.title}\n\n${result.successor.body}`,
     ]);
   } catch {
-    await recordEmbeddingOutcome(pool, result, provider, 'failed');
+    await tryRecordEmbeddingOutcome(pool, result, provider, 'failed');
     return { embedded: false, embedErrorCode: 'EMBEDDING_FAILED' };
   }
 
   let client: pg.PoolClient;
   try {
     client = await pool.connect();
-  } catch (error) {
-    throw dependencyUnavailable(error);
+  } catch {
+    return { embedded: false, embedErrorCode: 'EMBEDDING_FAILED' };
   }
   let destroyClient = false;
   try {
@@ -97,7 +140,7 @@ async function embedSuccessor(
     } catch {
       destroyClient = true;
     }
-    await recordEmbeddingOutcome(pool, result, provider, 'failed');
+    await tryRecordEmbeddingOutcome(pool, result, provider, 'failed');
     return { embedded: false, embedErrorCode: 'EMBEDDING_FAILED' };
   } finally {
     client.release(destroyClient);

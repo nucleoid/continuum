@@ -48,4 +48,3 @@ BEGIN
       CHECK (supersedes_id IS NULL OR supersedes_id <> id) NOT VALID;
   END IF;
 END $$;
-ALTER TABLE memories VALIDATE CONSTRAINT memories_supersedes_not_self;

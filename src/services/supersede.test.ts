@@ -212,6 +212,47 @@ describe('decision history service', () => {
       .toEqual({ state: 'archived' });
   });
 
+  it('degrades a successful embedding when its transactional outcome audit fails', async () => {
+    const scope = await createScope(pool, { kind: 'project', name: 'success-audit-failure' });
+    await addMembership(pool, author.id, scope.id, 'writer');
+    const predecessor = await createMemory(pool, {
+      scopeId: scope.id, scopeKind: scope.kind, type: 'decision', title: 'Original',
+      body: 'Original body', authorId: author.id, source: 'manual',
+    });
+    let connects = 0;
+    const auditUnavailable = {
+      connect: async () => {
+        const client = await pool.connect();
+        connects += 1;
+        if (connects === 1) return client;
+        return {
+          query: async (query: string, values?: unknown[]) => {
+            if (query.includes('INSERT INTO audit_log')) throw new Error('audit unavailable');
+            return client.query(query, values);
+          },
+          release: (destroy?: boolean) => client.release(destroy),
+        };
+      },
+      query: async (query: string, values?: unknown[]) => {
+        if (query.includes('INSERT INTO audit_log')) throw new Error('audit unavailable');
+        return pool.query(query, values);
+      },
+    } as unknown as pg.Pool;
+
+    const result = await supersedeForPrincipal(
+      auditUnavailable,
+      new StubEmbeddingProvider(),
+      author,
+      { supersededId: predecessor.id, title: 'Replacement', body: 'Replacement body' },
+    );
+
+    expect(result).toMatchObject({ embedded: false, embedErrorCode: 'EMBEDDING_FAILED' });
+    expect((await pool.query('SELECT state FROM memories WHERE id = $1', [result.successor.id])).rows[0])
+      .toEqual({ state: 'live' });
+    expect((await pool.query('SELECT 1 FROM memory_embeddings WHERE memory_id = $1', [result.successor.id])).rowCount)
+      .toBe(0);
+  });
+
   it('audits unavailable local-only routing without using a hosted provider', async () => {
     const scope = await createScope(pool, { kind: 'project', name: 'local-only-unavailable' });
     await addMembership(pool, author.id, scope.id, 'writer');
