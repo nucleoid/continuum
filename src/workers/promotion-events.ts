@@ -2,6 +2,7 @@ import type pg from 'pg';
 import type { RuntimeWorker } from '../api/runtime.js';
 import type { PromotionWebhookRegistry } from '../extensions/promotion.js';
 import {
+  abandonPromotionDeliveries,
   claimPromotionDeliveries,
   completePromotionDelivery,
   failPromotionDelivery,
@@ -102,6 +103,11 @@ export interface PromotionWorkerStore {
     owner: string,
     input: { maxAttempts: number; retryDelayMs: number },
   ): Promise<'pending' | 'dead_letter' | 'lost_lease'>;
+  abandon(
+    pool: pg.Pool,
+    owner: string,
+    deliveries: readonly ClaimedPromotionDelivery[],
+  ): Promise<number>;
   release(
     pool: pg.Pool,
     owner: string,
@@ -116,6 +122,7 @@ export interface PromotionWorkerStore {
 }
 
 const defaultStore: PromotionWorkerStore = {
+  abandon: abandonPromotionDeliveries,
   claim: claimPromotionDeliveries,
   complete: completePromotionDelivery,
   fail: failPromotionDelivery,
@@ -142,7 +149,6 @@ export class PromotionEventWorker implements RuntimeWorker {
   private timer?: NodeJS.Timeout;
   private leaseTimer?: NodeJS.Timeout;
   private leaseRenewal?: Promise<void>;
-  private finalReleaseStarted = false;
   private readonly active = new Set<Promise<number>>();
   private readonly controllers = new Map<AbortController, ClaimedPromotionDelivery>();
   private readonly retainedLeases = new Map<string, ClaimedPromotionDelivery>();
@@ -176,6 +182,9 @@ export class PromotionEventWorker implements RuntimeWorker {
     }
     if (options.callbackTimeoutMs >= options.leaseMs) {
       throw new Error('callbackTimeoutMs must be less than leaseMs');
+    }
+    if (options.shutdownWaitMs >= options.leaseMs) {
+      throw new Error('shutdownWaitMs must be less than leaseMs');
     }
     this.logger = options.logger ?? defaultLogger;
     this.random = options.random ?? Math.random;
@@ -215,15 +224,17 @@ export class PromotionEventWorker implements RuntimeWorker {
       excluded: [...inFlightCallbacks.values()],
     });
     if (this.stopped) {
-      // While stop() is still draining, its final release will include this claim. Once that
-      // release has begun, a claim completing behind it needs its own compensating release.
-      if (this.finalReleaseStarted) await this.releaseUnfollowedClaims();
+      await this.abandonDeliveries(deliveries, 'promotion_worker_stopped_claim_abandoned');
       return deliveries.length;
     }
     const tasks = deliveries.map((delivery) => {
       return this.deliver(delivery);
     });
-    await Promise.all(tasks);
+    const results = await Promise.allSettled(tasks);
+    const rejected = results.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    if (rejected) throw rejected.reason;
     return deliveries.length;
   }
 
@@ -258,7 +269,6 @@ export class PromotionEventWorker implements RuntimeWorker {
       await this.beforeDeadline(this.leaseRenewal, deadline);
     }
     const retained = [...this.retainedLeases.values()];
-    this.finalReleaseStarted = true;
     const release = this.store.release(this.pool, this.options.owner, retained);
     const released = await this.beforeDeadline(release, deadline);
     this.logger.info({
@@ -285,7 +295,10 @@ export class PromotionEventWorker implements RuntimeWorker {
 
   private async deliver(delivery: ClaimedPromotionDelivery): Promise<void> {
     const webhook = this.registry.get(delivery.webhookId);
-    if (!webhook) return;
+    if (!webhook) {
+      await this.abandonDeliveries([delivery], 'promotion_delivery_webhook_unavailable');
+      return;
+    }
     const event = Object.freeze({
       ...delivery.event,
       occurredAt: new Date(delivery.event.occurredAt),
@@ -294,7 +307,10 @@ export class PromotionEventWorker implements RuntimeWorker {
     const eventId = event.eventId;
     const webhookId = delivery.webhookId;
     const key = deliveryKey(delivery);
-    if (inFlightCallbacks.has(key)) return;
+    if (inFlightCallbacks.has(key)) {
+      await this.abandonDeliveries([delivery], 'promotion_delivery_in_flight_abandoned');
+      return;
+    }
     const controller = new AbortController();
     this.controllers.set(controller, delivery);
     inFlightCallbacks.set(key, delivery);
@@ -491,8 +507,16 @@ export class PromotionEventWorker implements RuntimeWorker {
       // The callback fence covers callback execution, not potentially unbounded persistence.
       // Once the callback settles, an expired lease may safely be retried at least once.
       this.finishCallback(delivery, controller);
-      if (outcome === 'success' || (outcome === 'failure' && abortReason === 'shutdown')) {
+      if (outcome === 'success') {
         await this.persistCallbackOutcome(delivery, outcome);
+      } else if (outcome === 'failure' && abortReason === 'shutdown') {
+        // A callback that rejects after this worker signalled shutdown is not evidence that the
+        // consumer failed. Return the owned claim without charging an attempt so another worker
+        // can make a clean delivery attempt.
+        await this.abandonDeliveries(
+          [delivery],
+          'promotion_delivery_shutdown_abort_abandoned',
+        );
       }
     }).catch(() => {
       this.logger.error({ event: 'promotion_delivery_late_settlement_failed' });
@@ -569,15 +593,17 @@ export class PromotionEventWorker implements RuntimeWorker {
     controller.abort();
   }
 
-  private async releaseUnfollowedClaims(): Promise<void> {
-    const retained = new Map(this.retainedLeases);
-    for (const delivery of this.controllers.values()) {
-      retained.set(deliveryKey(delivery), delivery);
-    }
+  private async abandonDeliveries(
+    deliveries: readonly ClaimedPromotionDelivery[],
+    event: string,
+  ): Promise<void> {
+    if (deliveries.length === 0) return;
     try {
-      await this.store.release(this.pool, this.options.owner, [...retained.values()]);
+      const abandoned = await this.store.abandon(this.pool, this.options.owner, deliveries);
+      this.logger.warn({ event, deliveries: deliveries.length, abandoned });
     } catch {
-      this.logger.error({ event: 'promotion_worker_post_shutdown_release_failed' });
+      this.logger.error({ event: `${event}_failed`, deliveries: deliveries.length });
+      throw new Error(event);
     }
   }
 

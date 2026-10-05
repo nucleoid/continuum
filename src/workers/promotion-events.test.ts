@@ -42,6 +42,7 @@ function mockStore(
   overrides: Partial<PromotionWorkerStore> = {},
 ): PromotionWorkerStore {
   return {
+    abandon: vi.fn().mockResolvedValue(0),
     claim: vi.fn().mockResolvedValue([]),
     complete: vi.fn().mockResolvedValue(true),
     fail: vi.fn().mockResolvedValue('pending'),
@@ -55,7 +56,7 @@ function mockStore(
 function workerOptions(overrides: Partial<PromotionWorkerOptions> = {}): PromotionWorkerOptions {
   return {
     owner: 'worker-test', pollMs: 1000, claimBatch: 10, leaseMs: 1000,
-    callbackTimeoutMs: 100, shutdownWaitMs: 100,
+    callbackTimeoutMs: 100, shutdownWaitMs: 50,
     maxAttempts: 3, baseBackoffMs: 10, maxBackoffMs: 100,
     random: () => 0.5,
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -224,6 +225,7 @@ describe('PromotionEventWorker', () => {
     await expect(draining).resolves.toBe(1);
     await expect(firstStop).resolves.toBeUndefined();
     expect(callback).not.toHaveBeenCalled();
+    expect(store.abandon).toHaveBeenCalledWith(pool, 'worker-test', [claimedDelivery]);
     expect(store.release).toHaveBeenCalledOnce();
     expect(store.release).toHaveBeenCalledWith(pool, 'worker-test', []);
     await expect(instance.drainOnce()).resolves.toBe(0);
@@ -255,8 +257,8 @@ describe('PromotionEventWorker', () => {
       claimResult.resolve([claimedDelivery]);
       await expect(draining).resolves.toBe(1);
       expect(callback).not.toHaveBeenCalled();
-      expect(store.release).toHaveBeenCalledTimes(2);
-      expect(store.release).toHaveBeenLastCalledWith(pool, 'worker-test', []);
+      expect(store.abandon).toHaveBeenCalledWith(pool, 'worker-test', [claimedDelivery]);
+      expect(store.release).toHaveBeenCalledOnce();
     } finally {
       vi.useRealTimers();
     }
@@ -316,14 +318,20 @@ describe('PromotionEventWorker', () => {
         return true;
       }),
     });
-    const instance = new PromotionEventWorker(pool, registry, workerOptions(), store);
+    const instance = new PromotionEventWorker(
+      pool,
+      registry,
+      workerOptions({ leaseMs: 20_000, callbackTimeoutMs: 10_000, shutdownWaitMs: 5_000 }),
+      store,
+    );
 
     const draining = instance.drainOnce();
-    const drainRejected = deferred();
-    void draining.catch(() => drainRejected.resolve());
+    let drainSettled = false;
+    void draining.finally(() => { drainSettled = true; }).catch(() => undefined);
     await siblingEntered.promise;
     await firstPersistenceFailed.promise;
-    await drainRejected.promise;
+    await new Promise<void>((resolve) => { setImmediate(resolve); });
+    expect(drainSettled).toBe(false);
     const stopping = instance.stop('SIGTERM');
     await new Promise<void>((resolve) => { setImmediate(resolve); });
 
@@ -333,6 +341,68 @@ describe('PromotionEventWorker', () => {
     await expect(stopping).resolves.toBeUndefined();
     expect(store.complete).toHaveBeenCalledWith(pool, 'event-2', 'hook', 'worker-test');
     expect(store.complete).toHaveBeenCalledBefore(store.release as ReturnType<typeof vi.fn>);
+  });
+
+  it('abandons a claimed delivery when its webhook is unavailable', async () => {
+    const missing = { ...claimedDelivery, webhookId: 'missing' };
+    const store = mockStore({ claim: vi.fn().mockResolvedValue([missing]) });
+    const instance = new PromotionEventWorker(
+      pool,
+      new PromotionWebhookRegistry(),
+      workerOptions(),
+      store,
+    );
+
+    await expect(instance.drainOnce()).resolves.toBe(1);
+    expect(store.abandon).toHaveBeenCalledWith(pool, 'worker-test', [missing]);
+    expect(store.complete).not.toHaveBeenCalled();
+    expect(store.fail).not.toHaveBeenCalled();
+    await instance.stop('test_complete');
+  });
+
+  it('abandons a failure caused by its own shutdown abort', async () => {
+    vi.useFakeTimers();
+    try {
+      const entered = deferred();
+      const registry = new PromotionWebhookRegistry();
+      registry.register({
+        id: 'hook',
+        onPromoted: async (_event, { signal }) => {
+          entered.resolve();
+          await new Promise<void>((_resolve, reject) => {
+            signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+          });
+        },
+      });
+      const store = mockStore({ claim: vi.fn().mockResolvedValue([claimedDelivery]) });
+      const instance = new PromotionEventWorker(
+        pool,
+        registry,
+        workerOptions({ leaseMs: 100, callbackTimeoutMs: 80, shutdownWaitMs: 40 }),
+        store,
+      );
+
+      const draining = instance.drainOnce();
+      await entered.promise;
+      const stopping = instance.stop('SIGTERM');
+      await vi.advanceTimersByTimeAsync(40);
+      await stopping;
+      await draining;
+      await vi.runAllTicks();
+
+      expect(store.abandon).toHaveBeenCalledWith(pool, 'worker-test', [claimedDelivery]);
+      expect(store.fail).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('requires shutdown grace to be shorter than the delivery lease', () => {
+    expect(() => new PromotionEventWorker(
+      pool,
+      new PromotionWebhookRegistry(),
+      workerOptions({ leaseMs: 100, callbackTimeoutMs: 50, shutdownWaitMs: 100 }),
+    )).toThrow('shutdownWaitMs must be less than leaseMs');
   });
 
   it('durably acknowledges a successful callback that settles during shutdown', async () => {

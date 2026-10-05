@@ -7,6 +7,7 @@ import { addMembership } from './memberships.js';
 import { createMemory, getMemory } from './memories.js';
 import { promoteMemoryWithAudit } from './promote.js';
 import {
+  abandonPromotionDeliveries,
   claimPromotionDeliveries,
   completePromotionDelivery,
   failPromotionDelivery,
@@ -119,6 +120,37 @@ describe('promotion outbox', () => {
     expect(reclaimed[0].attemptCount).toBe(2);
     expect(reclaimed[0].leaseRecovered).toBe(true);
     expect(consumerSeen.has(reclaimed[0].event.eventId)).toBe(true);
+  });
+
+  it('abandons unusable claims without consuming an attempt and honors in-flight exclusions', async () => {
+    const { principal, source } = await seed();
+    await promoteMemoryWithAudit(
+      pool, principal.id, source.id, { kind: 'project', name: 'destination' }, {}, ['hook'],
+    );
+    const [claimed] = await claimPromotionDeliveries(pool, {
+      owner: 'stopping', webhookIds: ['hook'], limit: 1, leaseMs: 1000, maxAttempts: 1,
+    });
+    expect(claimed.attemptCount).toBe(1);
+    expect(await abandonPromotionDeliveries(pool, 'stopping', [claimed])).toBe(1);
+
+    const [reclaimed] = await claimPromotionDeliveries(pool, {
+      owner: 'replacement', webhookIds: ['hook'], limit: 1, leaseMs: 1000,
+      maxAttempts: 1, excluded: [],
+    });
+    expect(reclaimed.attemptCount).toBe(1);
+    await pool.query(
+      `UPDATE promotion_event_deliveries SET lease_expires_at = now() - interval '1 second'`,
+    );
+    expect(await claimPromotionDeliveries(pool, {
+      owner: 'contender', webhookIds: ['hook'], limit: 1, leaseMs: 1000,
+      maxAttempts: 1, excluded: [reclaimed],
+    })).toEqual([]);
+    const { rows } = await pool.query(
+      'SELECT state, attempt_count, lease_owner FROM promotion_event_deliveries',
+    );
+    expect(rows).toEqual([{
+      state: 'pending', attempt_count: 1, lease_owner: 'replacement',
+    }]);
   });
 
   it('completes independently, dead-letters safely, and supports explicit manual retry', async () => {

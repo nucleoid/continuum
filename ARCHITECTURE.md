@@ -373,16 +373,20 @@ Five interfaces. Engram and any future system integrate through these. Continuum
    transactions, retry with bounded backoff, reclaim expired leases, and
    dead-letter after a bounded attempt count. Shutdown stops new work, renews
    exact active leases through a bounded grace period, and acknowledges
-   callbacks that succeed during that grace. At the deadline it aborts and
-   detaches non-cooperative callbacks without releasing their leases. A
+   callbacks that succeed during that grace. The grace must remain shorter
+   than the lease duration. At the deadline it aborts and detaches
+   non-cooperative callbacks without releasing their leases. A
    process-wide in-flight fence prevents replacement workers in that process
    from invoking the same callback concurrently, and a late success is
    acknowledged while its durable owner fence remains intact. Shutdown applies
    one wall-clock deadline to callback drain and database cleanup, and does not
-   rearm renewal afterward. Crashed attempts are dead-lettered at the configured
-   bound after lease recovery. Delivery is at least once, so consumers
-   deduplicate by event ID. Manual retry preserves that ID. Unknown webhook IDs
-   remain pending and observable.
+   rearm renewal afterward. Claims that cannot start after stop, registry
+   mismatches, and shutdown-abort rejections are abandoned without consuming an
+   attempt. Process exit is the bounded cross-process fence for callbacks that
+   ignore abort. Crashed attempts are dead-lettered at the configured bound
+   after lease recovery. Delivery is at least once, so consumers deduplicate by
+   event ID. Manual retry preserves that ID. Unknown webhook IDs remain pending
+   and observable.
 4. **EmbeddingProvider**: implements `embed(texts) -> vectors`. Default impls: `ollama`, `voyage`, `openai`. Sensitive scopes pin to local-only providers.
 5. **Transport**: today MCP + REST + AGENTS.md. New transports (Teams bot, Slack command) implement this and reuse all ACL/audit machinery.
 

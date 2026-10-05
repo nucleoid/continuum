@@ -103,6 +103,9 @@ stops claiming new rows and waits for any claim already in flight before
 deciding whether callbacks may start. It renews only the exact deliveries with
 active callbacks during the configured grace period. A callback that succeeds
 during that period is durably acknowledged before its lease can be released.
+`CONTINUUM_PROMOTION_SHUTDOWN_WAIT_MS` must be strictly less than
+`CONTINUUM_PROMOTION_LEASE_MS`. This leaves a bounded lease fence after the
+shutdown deadline while callbacks receive abort and the process exits.
 
 At the grace deadline, the worker signals abort and detaches callbacks that do
 not settle. `stop()` uses the same wall-clock deadline for callback drain,
@@ -110,13 +113,18 @@ renewal, and release, so a stuck database operation cannot extend shutdown.
 Leases for ambiguous deliveries are not released or renewed after stop. A
 process-wide in-flight fence excludes them from claims by replacement workers
 in the same process until the original callback settles. Late success is then
-acknowledged if the durable owner fence is still intact; late failure schedules
-the normal bounded retry. Settled callbacks are removed from both the in-flight
-and retained sets. After a crash, expiry provides at-least-once recovery, and
+acknowledged if the durable owner fence is still intact. A timeout has already
+scheduled its bounded retry; a rejection after the worker's shutdown abort is
+abandoned without charging the callback as a genuine failure. Settled callbacks
+are removed from both the in-flight and retained sets. After a crash, expiry
+provides at-least-once recovery, and
 claims that end in repeated crashes are dead-lettered at the configured attempt
 limit. Callback execution cannot be forcibly interrupted inside JavaScript, so
-process exit remains the cross-process execution boundary. Consumers must still
-deduplicate by event ID.
+process exit remains the bounded cross-process execution fence. The worker does
+not promise that abort-ignoring extension code settles in-process. Consumers
+must still deduplicate by event ID. Claims that complete after stop begins,
+callbacks unavailable in the local registry, and callbacks that reject after
+the worker's own shutdown abort are abandoned without consuming an attempt.
 
 The default registries are empty. Deployments register consumers at their
 composition boundary. Core does not import or know about downstream products.

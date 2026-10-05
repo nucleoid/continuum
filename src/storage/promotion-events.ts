@@ -116,8 +116,16 @@ export async function claimPromotionDeliveries(
           AND available_at <= now()
           AND (lease_expires_at IS NULL OR lease_expires_at <= now())
           AND webhook_id = ANY($1::text[])
-          AND attempt_count >= $2`,
-      [[...new Set(input.webhookIds)].sort(), maxAttempts],
+          AND attempt_count >= $2
+          AND (event_id, webhook_id) NOT IN (
+            SELECT * FROM unnest($3::uuid[], $4::text[])
+          )`,
+      [
+        [...new Set(input.webhookIds)].sort(),
+        maxAttempts,
+        excludedEventIds,
+        excludedWebhookIds,
+      ],
     );
     const { rows } = await client.query<PromotionEventRow & {
       webhook_id: string;
@@ -279,6 +287,29 @@ export async function releasePromotionDeliveries(
              AND retained.webhook_id = promotion_event_deliveries.webhook_id
         )`,
     [owner, retainedEventIds, retainedWebhookIds],
+  );
+  return result.rowCount ?? 0;
+}
+
+export async function abandonPromotionDeliveries(
+  queryable: Queryable,
+  owner: string,
+  deliveries: readonly Pick<ClaimedPromotionDelivery, 'webhookId' | 'event'>[],
+): Promise<number> {
+  if (deliveries.length === 0) return 0;
+  const eventIds = deliveries.map((delivery) => delivery.event.eventId);
+  const webhookIds = deliveries.map((delivery) => delivery.webhookId);
+  const result = await queryable.query(
+    `UPDATE promotion_event_deliveries
+        SET attempt_count = GREATEST(attempt_count - 1, 0),
+            lease_owner = NULL,
+            lease_expires_at = NULL,
+            available_at = now()
+      WHERE state = 'pending' AND lease_owner = $1
+        AND (event_id, webhook_id) IN (
+          SELECT * FROM unnest($2::uuid[], $3::text[])
+        )`,
+    [owner, eventIds, webhookIds],
   );
   return result.rowCount ?? 0;
 }
