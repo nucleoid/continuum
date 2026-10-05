@@ -7,6 +7,8 @@ const MAX_ACTOR_LENGTH = 200;
 export const ACTIVITY_PROVENANCE_KEY = '_continuum_activity_provenance';
 export const ACTIVITY_PROVENANCE_VALUE = 'capture-v1';
 export const ACTIVITY_EPOCH_MS_KEY = '_continuum_activity_epoch_ms';
+export const ACTOR_MAPPING_ID_KEY = '_continuum_actor_mapping_id';
+export const ACTOR_MAPPING_AUTHORITY_KEY = '_continuum_actor_mapping_authority';
 export const TRUSTED_ACTIVITY_METADATA_KEYS = [
   'actor',
   'actor_principal_id',
@@ -15,6 +17,8 @@ export const TRUSTED_ACTIVITY_METADATA_KEYS = [
   'closes_thread_keys',
   ACTIVITY_PROVENANCE_KEY,
   ACTIVITY_EPOCH_MS_KEY,
+  ACTOR_MAPPING_ID_KEY,
+  ACTOR_MAPPING_AUTHORITY_KEY,
 ] as const;
 
 function boundedString(value: unknown, name: string, max: number): asserts value is string {
@@ -25,18 +29,20 @@ function boundedString(value: unknown, name: string, max: number): asserts value
 
 export function validateCaptureMetadata(metadata: Record<string, unknown> = {}): void {
   if (Object.hasOwn(metadata, ACTIVITY_PROVENANCE_KEY)
-      || Object.hasOwn(metadata, ACTIVITY_EPOCH_MS_KEY)) {
+      || Object.hasOwn(metadata, ACTIVITY_EPOCH_MS_KEY)
+      || Object.hasOwn(metadata, ACTOR_MAPPING_ID_KEY)
+      || Object.hasOwn(metadata, ACTOR_MAPPING_AUTHORITY_KEY)) {
     throw new ServiceError(
       'INVALID_INPUT',
       'Continuum activity provenance metadata is reserved',
     );
   }
   if (Object.hasOwn(metadata, 'actor_principal_id')) {
-    for (const required of ['actor', 'thread_key']) {
+    for (const required of ['thread_key']) {
       if (!Object.hasOwn(metadata, required)) {
         throw new ServiceError(
           'INVALID_INPUT',
-          'Activity metadata requires actor_principal_id, actor, and thread_key',
+          'Activity metadata requires actor_principal_id and thread_key',
         );
       }
     }
@@ -49,6 +55,9 @@ export function validateCaptureMetadata(metadata: Record<string, unknown> = {}):
   }
   if (Object.hasOwn(metadata, 'actor')) {
     boundedString(metadata.actor, 'metadata.actor', MAX_ACTOR_LENGTH);
+  }
+  if (Object.hasOwn(metadata, 'source_actor_label')) {
+    boundedString(metadata.source_actor_label, 'metadata.source_actor_label', MAX_ACTOR_LENGTH);
   }
   if (Object.hasOwn(metadata, 'thread_owner_principal_id')) {
     boundedString(metadata.thread_owner_principal_id, 'metadata.thread_owner_principal_id', 36);

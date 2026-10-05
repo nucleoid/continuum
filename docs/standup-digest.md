@@ -32,7 +32,9 @@ that an org administrator explicitly provisioned in
 `actor_principal_mappings`. GitHub webhook `user.id` values are looked up under
 `github.<authenticated-service-principal-uuid>`; this separates GitHub.com or
 GitHub Enterprise producers whose numeric ID spaces may overlap. Mutable logins
-remain untrusted source content and do not determine the displayed actor. Deploy
+remain untrusted source content and do not determine the displayed actor. An
+unmapped label may be retained as `source_actor_label` for diagnostics, but it
+is non-authoritative and never makes a record standup-eligible. Deploy
 and terminal identities use the same immutable
 producer pattern (`<plugin-id>.<principal-uuid>`). Their
 payload `actorAuthority`, `threadKey`, and `closesThreadKeys` fields are ignored;
@@ -41,10 +43,11 @@ keys inside that authenticated source namespace.
 
 The authenticated ingestion service principal remains the capture author and
 must have writer access to the destination scope. It is not the activity actor
-and is never used as a fallback. An absent mapping, missing deploy actor, or
+and is never used as a fallback. An absent mapping, missing deploy actor ID, or
 mapping to anything other than an existing user stores a normal non-standup
-record without `actor_principal_id`. Missing ownership, actor ID, actor label,
-thread key, or the internal provenance marker makes a record ineligible rather
+record without `actor_principal_id`. A mapped event does not need a caller
+label: the displayed actor is loaded solely from the mapped principal. Missing
+ownership, actor ID, thread key, or the internal provenance marker makes a record ineligible rather
 than triggering a display-name guess. Pre-migration rows are deliberately not
 backfilled because their reserved metadata was caller-controlled and cannot be
 retrospectively authenticated.
@@ -56,7 +59,8 @@ resolves the event's immutable external identity through the admin-controlled
 mapping, and verifies that mapping again in the write transaction. Unmapped
 events and plugins not explicitly trusted for activity cannot create activity
 or close threads. Terminal and deploy producers can close only
-canonical threads generated for their own authenticated source namespace;
+canonical threads generated for their own authenticated source namespace.
+Oversized terminal session IDs use a deterministic SHA-256 thread-key suffix;
 caller-supplied closure keys are ignored. A supplied principal UUID, authority,
 or actor label is never accepted as identity or as the displayed actor.
 
@@ -94,6 +98,10 @@ authority and external ID plus a current org-admin UUID. The database stamps
 the revocation time, records a revocation audit, retains the old row, and lets
 resolution see only the single active row. Never use `display_name`, scope
 names, email labels, or a service principal's identity to infer the human actor.
+Mapping and capture audits reference the internal mapping UUID and authority;
+they do not duplicate the provider's opaque actor ID. Capture holds a shared
+mapping lock through persistence, while revocation/replacement takes an update
+lock, so a capture cannot commit against a concurrently revoked mapping.
 
 For deploy and terminal mappings, use the generated authority shown above,
 for example `terminal-summary.<authenticated-service-principal-uuid>`. This

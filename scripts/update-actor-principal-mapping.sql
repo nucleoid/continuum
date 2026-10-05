@@ -19,13 +19,19 @@
 
 BEGIN;
 
-WITH revoked AS (
-  UPDATE actor_principal_mappings
-     SET revoked_by_principal_id = :'admin_principal_id'::uuid
+WITH active_mapping AS MATERIALIZED (
+  SELECT mapping_id
+    FROM actor_principal_mappings
    WHERE authority = :'authority'
      AND external_actor_id = :'external_actor_id'
      AND revoked_at IS NULL
-  RETURNING mapping_id
+   FOR UPDATE
+), revoked AS (
+  UPDATE actor_principal_mappings mapping
+     SET revoked_by_principal_id = :'admin_principal_id'::uuid
+    FROM active_mapping
+   WHERE mapping.mapping_id = active_mapping.mapping_id
+  RETURNING mapping.mapping_id
 )
 SELECT count(*) = 1 AS mapping_revoked FROM revoked
 \gset

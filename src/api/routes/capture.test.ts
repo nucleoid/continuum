@@ -146,6 +146,10 @@ describe('POST /api/v0/capture', () => {
       }, status: 403 },
       { metadata: { _continuum_activity_provenance: 'capture-v1' }, status: 400 },
       { metadata: { _continuum_activity_epoch_ms: 1_700_000_000_000 }, status: 400 },
+      { metadata: {
+        _continuum_actor_mapping_id: '11111111-1111-4111-8111-111111111111',
+      }, status: 400 },
+      { metadata: { _continuum_actor_mapping_authority: 'github.producer' }, status: 400 },
     ];
     for (const [index, item] of cases.entries()) {
       const response = await request(app)

@@ -14,6 +14,15 @@ describe('capture activity metadata', () => {
     })).not.toThrow();
   });
 
+  it('does not require an untrusted display label for mapped attribution', () => {
+    expect(() => validateCaptureMetadata({
+      actor_principal_id: '11111111-1111-4111-8111-111111111111',
+      thread_owner_principal_id: '11111111-1111-4111-8111-111111111111',
+      thread_key: 'deploy:continuum:prod:v1',
+      closes_thread_keys: [],
+    })).not.toThrow();
+  });
+
   it('accepts well-formed non-standup plugin metadata when actor resolution is unavailable', () => {
     expect(() => validateCaptureMetadata({
       actor: 'unmapped-github-user',
@@ -30,7 +39,7 @@ describe('capture activity metadata', () => {
     { _continuum_activity_provenance: 'capture-v1' },
     { actor_principal_id: 'display-name' },
     { actor_principal_id: '11111111-1111-4111-8111-111111111111' },
-    { actor_principal_id: '11111111-1111-4111-8111-111111111111', thread_key: 'missing-actor' },
+    { _continuum_actor_mapping_id: '11111111-1111-4111-8111-111111111111' },
     { thread_owner_principal_id: '11111111-1111-4111-8111-111111111111' },
     { actor: '' },
     { thread_key: '' },

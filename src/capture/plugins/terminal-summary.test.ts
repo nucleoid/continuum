@@ -35,6 +35,18 @@ describe('terminal-summary plugin', () => {
     expect(out[0].metadata?.closes_thread_keys).toEqual([]);
   });
 
+  it('hash-bounds oversized terminal thread keys deterministically', () => {
+    const sessionId = 'session/'.repeat(100);
+    const first = terminalSummaryPlugin.transform(summary({ sessionId }))[0];
+    const second = terminalSummaryPlugin.transform(summary({ sessionId }))[0];
+    expect(first.metadata?.thread_key).toBe(second.metadata?.thread_key);
+    expect(String(first.metadata?.thread_key)).toMatch(
+      /^terminal-summary:terminal-session:sha256:[0-9a-f]{64}$/,
+    );
+    expect(String(first.metadata?.thread_key).length).toBeLessThanOrEqual(500);
+    expect(first.metadata?.closes_thread_keys).toEqual([first.metadata?.thread_key]);
+  });
+
   it('emits one extra decision memory per decision bullet', () => {
     const out = terminalSummaryPlugin.transform(
       summary({

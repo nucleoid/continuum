@@ -68,6 +68,7 @@ describe('plugin capture to standup attribution', () => {
     );
     expect(isolated.memory.metadata).not.toHaveProperty('actor_principal_id');
     expect(isolated.memory.metadata).not.toHaveProperty('thread_key');
+    expect(isolated.memory.metadata).toMatchObject({ source_actor_label: 'same-numeric-id' });
     const standup = await standupForPrincipal(pool, actor, { sinceHours: 24 }, {
       now: new Date(Date.now() + 1_000),
     });
@@ -89,6 +90,7 @@ describe('plugin capture to standup attribution', () => {
       pool, null, service, 'github-pr', mergedPr(69, 555, 'Same As Login'),
     );
     expect(captured.memory.metadata).not.toHaveProperty('actor_principal_id');
+    expect(captured.memory.metadata).toMatchObject({ source_actor_label: 'Same As Login' });
     const standup = await standupForPrincipal(pool, viewer, { sinceHours: 24 }, {
       now: new Date(Date.now() + 1_000),
     });
@@ -117,7 +119,7 @@ describe('plugin capture to standup attribution', () => {
 
     const [mapped] = await capturePluginEvent(pool, null, service, 'deploy-event', {
       project: 'continuum', environment: 'prod', version: 'v1', status: 'success',
-      actor: 'Deploy User', actorAuthority: 'forged-authority', actorExternalId: 'aad-42',
+      actorAuthority: 'forged-authority', actorExternalId: 'aad-42',
       threadKey: 'github-pr:other/repo#1', closesThreadKeys: ['github-pr:other/repo#2'],
     });
     const [withoutActor] = await capturePluginEvent(pool, null, service, 'deploy-event', {
@@ -135,10 +137,26 @@ describe('plugin capture to standup attribution', () => {
       actor: 'Deployer', actor_principal_id: actor.id, thread_owner_principal_id: actor.id,
       thread_key: `deploy-event.${service.id}:deploy:continuum:prod:v1`,
       closes_thread_keys: [],
+      _continuum_actor_mapping_id: expect.any(String),
+      _continuum_actor_mapping_authority: `deploy-event.${service.id}`,
     });
     expect(withoutActor.memory.metadata).not.toHaveProperty('actor');
     expect(withoutActor.memory.metadata).not.toHaveProperty('actor_principal_id');
     expect(otherProducer.memory.metadata).not.toHaveProperty('actor_principal_id');
+    expect(otherProducer.memory.metadata).toMatchObject({ source_actor_label: 'Deploy User' });
+
+    const captureAudit = await pool.query(
+      `SELECT metadata FROM audit_log
+        WHERE memory_id = $1 AND metadata->>'plugin' = 'deploy-event'`,
+      [mapped.memory.id],
+    );
+    expect(captureAudit.rows[0].metadata).toMatchObject({
+      actor_mapping: {
+        mapping_id: mapped.memory.metadata._continuum_actor_mapping_id,
+        authority: `deploy-event.${service.id}`,
+      },
+    });
+    expect(JSON.stringify(captureAudit.rows[0].metadata)).not.toContain('aad-42');
 
     const standup = await standupForPrincipal(pool, actor, { sinceHours: 24 }, {
       now: new Date(Date.now() + 1_000),

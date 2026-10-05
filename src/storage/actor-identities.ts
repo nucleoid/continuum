@@ -15,6 +15,12 @@ export interface ActorIdentityRevocationInput {
   revokedByPrincipalId: string;
 }
 
+export interface ResolvedActorIdentityMapping {
+  mappingId: string;
+  authority: string;
+  principalId: string;
+}
+
 export async function mapActorIdentity(
   db: Queryable,
   input: ActorIdentityMappingInput,
@@ -32,9 +38,16 @@ export async function revokeActorIdentity(
   input: ActorIdentityRevocationInput,
 ): Promise<boolean> {
   const result = await db.query(
-    `UPDATE actor_principal_mappings
+    `WITH active_mapping AS MATERIALIZED (
+       SELECT mapping_id
+         FROM actor_principal_mappings
+        WHERE authority = $1 AND external_actor_id = $2 AND revoked_at IS NULL
+        FOR UPDATE
+     )
+     UPDATE actor_principal_mappings mapping
         SET revoked_by_principal_id = $3
-      WHERE authority = $1 AND external_actor_id = $2 AND revoked_at IS NULL`,
+       FROM active_mapping
+      WHERE mapping.mapping_id = active_mapping.mapping_id`,
     [input.authority, input.externalActorId, input.revokedByPrincipalId],
   );
   return result.rowCount === 1;
@@ -68,16 +81,33 @@ export async function resolveActorPrincipalId(
   identity: ExternalActorIdentity,
   options: { lock?: boolean } = {},
 ): Promise<string | null> {
+  return (await resolveActorIdentityMapping(db, identity, options))?.principalId ?? null;
+}
+
+export async function resolveActorIdentityMapping(
+  db: pg.Pool | Queryable,
+  identity: ExternalActorIdentity,
+  options: { lock?: boolean } = {},
+): Promise<ResolvedActorIdentityMapping | null> {
   const { rows } = await db.query(
-    `SELECT mapping.principal_id
+    `SELECT mapping.mapping_id, mapping.authority, mapping.principal_id
        FROM actor_principal_mappings mapping
        JOIN principals principal ON principal.id = mapping.principal_id
       WHERE mapping.authority = $1
         AND mapping.external_actor_id = $2
         AND mapping.revoked_at IS NULL
         AND principal.kind = 'user'
-      ${options.lock ? 'FOR KEY SHARE OF mapping, principal' : ''}`,
+      ${options.lock ? 'FOR SHARE OF mapping FOR KEY SHARE OF principal' : ''}`,
     [identity.authority, identity.externalId],
   );
-  return (rows[0]?.principal_id as string | undefined) ?? null;
+  const row = rows[0] as {
+    mapping_id: string;
+    authority: string;
+    principal_id: string;
+  } | undefined;
+  return row ? {
+    mappingId: row.mapping_id,
+    authority: row.authority,
+    principalId: row.principal_id,
+  } : null;
 }

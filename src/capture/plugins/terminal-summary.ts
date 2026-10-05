@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { CaptureInput, ScopeRef } from '../../types.js';
 import type { CapturePlugin, CaptureContext } from '../plugin.js';
 
@@ -42,7 +43,11 @@ export const terminalSummaryPlugin: CapturePlugin<TerminalSummaryPayload> = {
     const actorPrincipalId = explicitIdentity
       ? ctx.resolveActorPrincipalId?.(explicitIdentity) ?? null
       : null;
-    const threadKey = `${ctx.activityNamespace ?? 'terminal-summary'}:terminal-session:${event.sessionId}`;
+    const threadPrefix = `${ctx.activityNamespace ?? 'terminal-summary'}:terminal-session:`;
+    const candidateThreadKey = `${threadPrefix}${event.sessionId}`;
+    const threadKey = candidateThreadKey.length <= 500
+      ? candidateThreadKey
+      : `${threadPrefix}sha256:${createHash('sha256').update(event.sessionId).digest('hex')}`;
     const metadata = {
       actor: event.actor,
       ...(actorPrincipalId ? { actor_principal_id: actorPrincipalId } : {}),

@@ -3,7 +3,7 @@ import { defaultCaptureRegistry, type CaptureRegistry } from '../capture/index.j
 import { UnknownPluginError } from '../capture/plugin.js';
 import type { CaptureContext, ExternalActorIdentity } from '../capture/plugin.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
-import { resolveActorPrincipalId } from '../storage/actor-identities.js';
+import { resolveActorIdentityMapping } from '../storage/actor-identities.js';
 import type { Principal } from '../types.js';
 import { stripTrustedActivityMetadata } from '../capture/metadata.js';
 import {
@@ -53,9 +53,10 @@ export async function capturePluginEvent(
   const identity = claimedIdentity && activityNamespace
     ? { authority: activityNamespace, externalId: claimedIdentity.externalId }
     : claimedIdentity;
-  const actorPrincipalId = identity
-    ? await resolveActorPrincipalId(pool, identity)
+  const actorMapping = identity
+    ? await resolveActorIdentityMapping(pool, identity)
     : null;
+  const actorPrincipalId = actorMapping?.principalId ?? null;
   const inputs = plugin.transform(event, {
     defaultProjectName: options.defaultProjectName,
     activityNamespace,
@@ -73,9 +74,13 @@ export async function capturePluginEvent(
 
   const results: CaptureResult[] = [];
   for (const transformedInput of inputs) {
+    const sourceActorLabel = transformedInput.metadata?.actor;
     const metadata = plugin.trustedActivityMetadata && actorPrincipalId
       ? { ...transformedInput.metadata }
       : stripTrustedActivityMetadata(transformedInput.metadata ?? {});
+    if (!actorPrincipalId && typeof sourceActorLabel === 'string' && sourceActorLabel.length > 0) {
+      metadata.source_actor_label = sourceActorLabel;
+    }
     if (plugin.trustedActivityMetadata && actorPrincipalId) {
       delete metadata.actor_principal_id;
       delete metadata.thread_owner_principal_id;
@@ -91,7 +96,12 @@ export async function capturePluginEvent(
           embeddingProvider,
           ingestionPrincipal,
           input,
-          { identity, principalId: actorPrincipalId },
+          {
+            identity,
+            mappingId: actorMapping!.mappingId,
+            authority: actorMapping!.authority,
+            principalId: actorPrincipalId,
+          },
           auditMetadata,
           captureOptions,
         )

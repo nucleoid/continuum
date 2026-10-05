@@ -19,12 +19,14 @@ import {
 } from './relations.js';
 import type { Queryable } from '../storage/queryable.js';
 import {
+  ACTOR_MAPPING_AUTHORITY_KEY,
+  ACTOR_MAPPING_ID_KEY,
   hasTrustedActivityMetadata,
   markTrustedActivityMetadata,
   validateCaptureMetadata,
 } from '../capture/metadata.js';
 import type { ExternalActorIdentity } from '../capture/plugin.js';
-import { resolveActorPrincipalId } from '../storage/actor-identities.js';
+import { resolveActorIdentityMapping } from '../storage/actor-identities.js';
 
 export interface CaptureResult {
   memory: Memory;
@@ -238,6 +240,8 @@ export async function embedCapturedMemory(
 
 interface MappedActorAttribution {
   identity: ExternalActorIdentity;
+  mappingId: string;
+  authority: string;
   principalId: string;
 }
 
@@ -301,8 +305,9 @@ async function captureMemoryInternal(
           || threadOwnerPrincipalId !== mappedAttribution.principalId) {
         throw new ServiceError('FORBIDDEN', 'Mapped plugin attribution does not match the event actor');
       }
-      const mappedPrincipalId = await resolveActorPrincipalId(pool, mappedAttribution.identity);
-      if (mappedPrincipalId !== mappedAttribution.principalId) {
+      const mapping = await resolveActorIdentityMapping(pool, mappedAttribution.identity);
+      if (mapping?.mappingId !== mappedAttribution.mappingId
+          || mapping.principalId !== mappedAttribution.principalId) {
         throw new ServiceError('FORBIDDEN', 'Actor mapping is missing or changed');
       }
     }
@@ -398,6 +403,8 @@ async function captureMemoryInternal(
           persistedMetadata = {
             ...persistedMetadata,
             actor: actor.rows[0].display_name as string,
+            [ACTOR_MAPPING_ID_KEY]: mappedAttribution.mappingId,
+            [ACTOR_MAPPING_AUTHORITY_KEY]: mappedAttribution.authority,
           };
         }
       }
@@ -413,10 +420,11 @@ async function captureMemoryInternal(
         }
       }
       if (mappedAttribution) {
-        const mappedPrincipalId = await resolveActorPrincipalId(
+        const mapping = await resolveActorIdentityMapping(
           client, mappedAttribution.identity, { lock: true },
         );
-        if (mappedPrincipalId !== mappedAttribution.principalId) {
+        if (mapping?.mappingId !== mappedAttribution.mappingId
+            || mapping.principalId !== mappedAttribution.principalId) {
           throw new ServiceError('FORBIDDEN', 'Actor mapping is missing or changed');
         }
       }
@@ -493,6 +501,12 @@ async function captureMemoryInternal(
             ? { embedding_policy: 'local-only-unavailable' }
             : {}),
           ...auditMetadata,
+          ...(mappedAttribution ? {
+            actor_mapping: {
+              mapping_id: mappedAttribution.mappingId,
+              authority: mappedAttribution.authority,
+            },
+          } : {}),
         },
       });
       await client.query('COMMIT');

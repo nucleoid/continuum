@@ -1075,6 +1075,8 @@ describe('shared services', () => {
         thread_owner_principal_id: principal.id, thread_key: 'terminal:old',
         closes_thread_keys: ['terminal:older'],
         _continuum_activity_provenance: 'capture-v1',
+        _continuum_actor_mapping_id: '11111111-1111-4111-8111-111111111111',
+        _continuum_actor_mapping_authority: 'terminal-summary.producer',
       },
     });
     const activityAt = new Date('2026-10-05T08:00:00.000Z');
@@ -1094,6 +1096,8 @@ describe('shared services', () => {
       closes_thread_keys: ['terminal:older'],
       _continuum_activity_provenance: 'capture-v1',
       _continuum_activity_epoch_ms: activityAt.getTime(),
+      _continuum_actor_mapping_id: '11111111-1111-4111-8111-111111111111',
+      _continuum_actor_mapping_authority: 'terminal-summary.producer',
     });
     const standup = await standupForPrincipal(pool, principal, { sinceHours: 24 }, {
       now: new Date('2026-10-05T12:00:00.000Z'),
@@ -1110,6 +1114,8 @@ describe('shared services', () => {
         owner: 'payments', actor: 'forged', actor_principal_id: principal.id,
         thread_owner_principal_id: principal.id, thread_key: 'legacy:forged',
         closes_thread_keys: ['victim:thread'],
+        _continuum_actor_mapping_id: '22222222-2222-4222-8222-222222222222',
+        _continuum_actor_mapping_authority: 'forged.authority',
       },
     });
     const legacyResult = await promoteForPrincipal(

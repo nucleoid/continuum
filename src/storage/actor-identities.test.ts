@@ -7,6 +7,7 @@ import { addMembership } from './memberships.js';
 import {
   mapActorIdentity,
   replaceActorIdentity,
+  resolveActorIdentityMapping,
   resolveActorPrincipalId,
   revokeActorIdentity,
 } from './actor-identities.js';
@@ -55,9 +56,10 @@ describe('actor identity mappings', () => {
       principal_id: admin.id,
       action: 'write',
       metadata: expect.objectContaining({
-        authority: 'github', external_actor_id: 'opaque-1', principal_id: user.id,
+        mapping_id: expect.any(String), authority: 'github', principal_id: user.id,
       }),
     })]);
+    expect(audit.rows[0].metadata).not.toHaveProperty('external_actor_id');
     expect(await resolveActorPrincipalId(pool, {
       authority: 'github', externalId: 'opaque-1',
     })).toBe(user.id);
@@ -123,7 +125,7 @@ describe('actor identity mappings', () => {
       { principal_id: second.id, revoked: false },
     ]);
     const audits = await pool.query(
-      `SELECT metadata->>'operation' AS operation
+      `SELECT metadata->>'operation' AS operation, metadata
          FROM audit_log
         WHERE metadata->>'authority' = 'github.producer-a'
         ORDER BY id`,
@@ -133,6 +135,52 @@ describe('actor identity mappings', () => {
       'revoke_actor_principal_mapping',
       'set_actor_principal_mapping',
     ]);
+    expect(audits.rows.every((row) => !Object.hasOwn(row.metadata, 'external_actor_id'))).toBe(true);
+    expect(audits.rows.every((row) => typeof row.metadata.mapping_id === 'string')).toBe(true);
+  });
+
+  it('serializes revocation behind an in-flight mapped capture lock', async () => {
+    const actor = await createPrincipal(pool, {
+      externalId: 'entra:serialized-target', kind: 'user', displayName: 'Serialized target',
+    });
+    const admin = await createPrincipal(pool, {
+      externalId: 'entra:serialized-admin', kind: 'user', displayName: 'Serialized admin',
+    });
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    await addMembership(pool, admin.id, org!.id, 'admin');
+    await mapActorIdentity(pool, {
+      authority: 'github.producer-lock', externalActorId: '84', principalId: actor.id,
+      mappedByPrincipalId: admin.id,
+    });
+
+    const captureClient = await pool.connect();
+    const revokeClient = await pool.connect();
+    try {
+      await captureClient.query('BEGIN');
+      const locked = await resolveActorIdentityMapping(captureClient, {
+        authority: 'github.producer-lock', externalId: '84',
+      }, { lock: true });
+      expect(locked?.principalId).toBe(actor.id);
+
+      await revokeClient.query('BEGIN');
+      await revokeClient.query("SET LOCAL lock_timeout = '100ms'");
+      await expect(revokeActorIdentity(revokeClient, {
+        authority: 'github.producer-lock', externalActorId: '84',
+        revokedByPrincipalId: admin.id,
+      })).rejects.toThrow(/lock timeout|canceling statement/i);
+      await revokeClient.query('ROLLBACK');
+      await captureClient.query('COMMIT');
+
+      expect(await revokeActorIdentity(pool, {
+        authority: 'github.producer-lock', externalActorId: '84',
+        revokedByPrincipalId: admin.id,
+      })).toBe(true);
+    } finally {
+      await captureClient.query('ROLLBACK').catch(() => undefined);
+      await revokeClient.query('ROLLBACK').catch(() => undefined);
+      captureClient.release();
+      revokeClient.release();
+    }
   });
 
   it('does not infer a mapping from scope ownership or display names', async () => {
