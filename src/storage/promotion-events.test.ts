@@ -169,8 +169,10 @@ describe('promotion outbox', () => {
       owner: 'worker', webhookIds: ['hook', 'other'], limit: 2, leaseMs: 1000,
     });
     const delivery = reclaimed.find((candidate) => candidate.webhookId === 'hook')!;
-    expect(await renewPromotionDeliveries(pool, 'other-worker', [delivery], 1000)).toBe(0);
-    expect(await renewPromotionDeliveries(pool, 'worker', [delivery], 1000)).toBe(1);
+    expect(await renewPromotionDeliveries(pool, 'other-worker', [delivery], 1000))
+      .toEqual({ renewed: [], terminalOwned: [], lost: [delivery] });
+    expect(await renewPromotionDeliveries(pool, 'worker', [delivery], 1000))
+      .toEqual({ renewed: [delivery], terminalOwned: [], lost: [] });
     expect(await releasePromotionDeliveries(pool, 'worker', [delivery])).toBe(1);
     const available = await claimPromotionDeliveries(pool, {
       owner: 'contender', webhookIds: ['hook', 'other'], limit: 2, leaseMs: 1000,
@@ -213,6 +215,26 @@ describe('promotion outbox', () => {
       retry_after_lease: true,
       last_error: 'callback timed out',
     }]);
+  });
+
+  it('classifies a final-attempt timeout as terminal but still owned', async () => {
+    const { principal, source } = await seed();
+    await promoteMemoryWithAudit(
+      pool, principal.id, source.id, { kind: 'project', name: 'destination' }, {}, ['hook'],
+    );
+    const [delivery] = await claimPromotionDeliveries(pool, {
+      owner: 'worker', webhookIds: ['hook'], limit: 1, leaseMs: 1000,
+    });
+    expect(await timeoutPromotionDelivery(
+      pool,
+      delivery.event.eventId,
+      delivery.webhookId,
+      'worker',
+      { maxAttempts: 1, retryDelayMs: 25 },
+    )).toBe('dead_letter');
+
+    expect(await renewPromotionDeliveries(pool, 'worker', [delivery], 1000))
+      .toEqual({ renewed: [], terminalOwned: [delivery], lost: [] });
   });
 
   it('durably acknowledges a late success while the expired lease owner is unchanged', async () => {

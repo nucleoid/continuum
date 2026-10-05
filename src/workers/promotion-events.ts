@@ -9,6 +9,7 @@ import {
   renewPromotionDeliveries,
   timeoutPromotionDelivery,
   type ClaimedPromotionDelivery,
+  type PromotionLeaseRenewalResult,
 } from '../storage/promotion-events.js';
 
 export interface PromotionWorkerLogger {
@@ -111,7 +112,7 @@ export interface PromotionWorkerStore {
     owner: string,
     deliveries: readonly ClaimedPromotionDelivery[],
     leaseMs: number,
-  ): Promise<number>;
+  ): Promise<PromotionLeaseRenewalResult | number>;
 }
 
 const defaultStore: PromotionWorkerStore = {
@@ -141,11 +142,11 @@ export class PromotionEventWorker implements RuntimeWorker {
   private timer?: NodeJS.Timeout;
   private leaseTimer?: NodeJS.Timeout;
   private leaseRenewal?: Promise<void>;
-  private renewalBlocked = false;
   private finalReleaseStarted = false;
   private readonly active = new Set<Promise<number>>();
   private readonly controllers = new Map<AbortController, ClaimedPromotionDelivery>();
   private readonly retainedLeases = new Map<string, ClaimedPromotionDelivery>();
+  private readonly ownershipLost = new Set<AbortController>();
   private readonly logger: PromotionWorkerLogger;
   private readonly random: () => number;
 
@@ -205,7 +206,6 @@ export class PromotionEventWorker implements RuntimeWorker {
   }
 
   private async drainCycle(): Promise<number> {
-    if (this.renewalBlocked) return 0;
     const deliveries = await this.store.claim(this.pool, {
       owner: this.options.owner,
       webhookIds: this.registry.ids(),
@@ -374,10 +374,14 @@ export class PromotionEventWorker implements RuntimeWorker {
           state,
           retryDelayMs: state === 'pending' ? retryDelayMs : undefined,
         });
+        // The durable timeout state controls when a pending row is claimable again. The
+        // process-local callback fence remains until settlement, but a callback that ignores
+        // abort must never cause unbounded lease extension.
+        this.stopLeaseRenewal(controller);
         return;
       }
       if (outcome === 'shutdown' || this.stopped) {
-        this.retainLease(delivery);
+        if (!this.ownershipLost.has(controller)) this.retainLease(delivery);
         lateFollower = true;
         this.followLateCallback(delivery, controller, callback, 'shutdown');
         return;
@@ -394,14 +398,14 @@ export class PromotionEventWorker implements RuntimeWorker {
   }
 
   private ensureLeaseRenewal(): void {
-    if (this.stopped || this.renewalBlocked || this.leaseTimer || this.leaseRenewal) return;
+    if (this.stopped || this.leaseTimer || this.leaseRenewal) return;
     const renewalMs = Math.max(1, Math.floor(this.options.leaseMs / 3));
     this.leaseTimer = setTimeout(() => {
       this.leaseTimer = undefined;
       const deliveries = [...this.controllers.values()];
       this.leaseRenewal = this.renewLeases(deliveries, renewalMs).finally(() => {
         this.leaseRenewal = undefined;
-        if (!this.stopped && !this.renewalBlocked && this.controllers.size > 0) {
+        if (!this.stopped && this.controllers.size > 0) {
           this.ensureLeaseRenewal();
         }
       });
@@ -422,7 +426,7 @@ export class PromotionEventWorker implements RuntimeWorker {
     ));
     const result = await Promise.race([
       operation.then(
-        (renewed) => ({ state: 'settled' as const, renewed }),
+        (renewal) => ({ state: 'settled' as const, renewal }),
         () => ({ state: 'failed' as const }),
       ),
       new Promise<{ state: 'timeout' }>((resolve) => {
@@ -430,23 +434,37 @@ export class PromotionEventWorker implements RuntimeWorker {
       }),
     ]);
     if (timer) clearTimeout(timer);
-    if (result.state === 'settled' && result.renewed === deliveries.length) return;
-
-    // Ownership is now ambiguous. Abort every affected callback and stop accepting more work
-    // until those callbacks settle; their leases are retained to avoid eager redelivery.
-    void operation.catch(() => undefined);
-    this.renewalBlocked = true;
-    const keys = new Set(deliveries.map(deliveryKey));
-    for (const [controller, delivery] of this.controllers) {
-      if (!keys.has(deliveryKey(delivery))) continue;
-      this.retainLease(delivery);
-      controller.abort();
+    if (result.state === 'settled' && typeof result.renewal !== 'number') {
+      const terminalKeys = new Set(result.renewal.terminalOwned.map(deliveryKey));
+      const lostKeys = new Set(result.renewal.lost.map(deliveryKey));
+      for (const [controller, delivery] of [...this.controllers]) {
+        const key = deliveryKey(delivery);
+        if (terminalKeys.has(key)) this.stopLeaseRenewal(controller);
+        else if (lostKeys.has(key)) this.abortForOwnershipLoss(controller);
+      }
+      if (lostKeys.size === 0) return;
+    } else if (result.state === 'settled') {
+      const activeKeys = new Set([...this.controllers.values()].map(deliveryKey));
+      if ((result.renewal as number) >= activeKeys.size) return;
+      for (const controller of [...this.controllers.keys()]) {
+        this.abortForOwnershipLoss(controller);
+      }
+    } else {
+      void operation.catch(() => undefined);
+      for (const [controller, delivery] of [...this.controllers]) {
+        this.retainLease(delivery);
+        this.abortForOwnershipLoss(controller);
+      }
     }
     this.logger.error({
       event: 'promotion_worker_lease_renewal_failed',
       reason: result.state,
       expected: deliveries.length,
-      renewed: result.state === 'settled' ? result.renewed : undefined,
+      renewed: result.state === 'settled'
+        ? typeof result.renewal === 'number'
+          ? result.renewal
+          : result.renewal.renewed.length
+        : undefined,
     });
   }
 
@@ -529,12 +547,26 @@ export class PromotionEventWorker implements RuntimeWorker {
   }
 
   private stopRenewingCallback(controller: AbortController): void {
+    this.ownershipLost.delete(controller);
     this.controllers.delete(controller);
     if (this.controllers.size === 0 && this.leaseTimer) {
       clearTimeout(this.leaseTimer);
       this.leaseTimer = undefined;
     }
-    if (this.controllers.size === 0) this.renewalBlocked = false;
+  }
+
+  private stopLeaseRenewal(controller: AbortController): void {
+    this.controllers.delete(controller);
+    if (this.controllers.size === 0 && this.leaseTimer) {
+      clearTimeout(this.leaseTimer);
+      this.leaseTimer = undefined;
+    }
+  }
+
+  private abortForOwnershipLoss(controller: AbortController): void {
+    this.ownershipLost.add(controller);
+    this.stopLeaseRenewal(controller);
+    controller.abort();
   }
 
   private async releaseUnfollowedClaims(): Promise<void> {

@@ -39,6 +39,7 @@ import {
   PromotionEventWorker,
   promotionWorkerOptionsFromEnv,
 } from '../workers/promotion-events.js';
+import { PromotionWebhookRegistry } from '../extensions/promotion.js';
 
 export { createReadinessState } from './readiness.js';
 
@@ -77,6 +78,7 @@ export interface AppOptions {
   relationThreshold?: number;
   ingestConfig?: IngestConfig;
   retrievalEnrichers?: RetrievalEnricherRegistry;
+  promotionWebhooks?: PromotionWebhookRegistry;
   enrichment?: Omit<EnrichmentOptions, 'logger'>;
 }
 
@@ -318,7 +320,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   v0.use(memoriesRouter(pool));
   v0.use(agentsMdRouter(pool));
   v0.use(auditRouter(pool));
-  v0.use(cliSupportRouter(pool));
+  v0.use(cliSupportRouter(pool, opts.promotionWebhooks));
   v0.use(reviewQueueRouter(pool, opts.reviewHorizonDays));
   v0.use(insightsRouter(pool, provider, gapConfig, () => new Date((opts.clock ?? Date.now)())));
   v0.use(supersedeRouter(pool, provider));
@@ -375,6 +377,7 @@ async function main(): Promise<void> {
     reviewHorizonDays: configuredReviewHorizonDays(),
     relationThreshold: relationThresholdFromEnv(),
     retrievalEnrichers: extensions.retrievalEnrichers,
+    promotionWebhooks: extensions.promotionWebhooks,
     enrichment: { ...enrichmentConfigFromEnv(), signal: enrichmentShutdown.signal },
   });
   const promotionWorker = new PromotionEventWorker(

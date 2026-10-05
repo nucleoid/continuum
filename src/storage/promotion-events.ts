@@ -10,6 +10,12 @@ export interface ClaimedPromotionDelivery {
   leaseRecovered: boolean;
 }
 
+export interface PromotionLeaseRenewalResult {
+  renewed: ClaimedPromotionDelivery[];
+  terminalOwned: ClaimedPromotionDelivery[];
+  lost: ClaimedPromotionDelivery[];
+}
+
 interface PromotionEventRow {
   id: string;
   source_memory_id: string;
@@ -278,25 +284,70 @@ export async function releasePromotionDeliveries(
 }
 
 export async function renewPromotionDeliveries(
-  queryable: Queryable,
+  pool: pg.Pool,
   owner: string,
-  deliveries: readonly Pick<ClaimedPromotionDelivery, 'webhookId' | 'event'>[],
+  deliveries: readonly ClaimedPromotionDelivery[],
   leaseMs: number,
-): Promise<number> {
+): Promise<PromotionLeaseRenewalResult> {
   if (!Number.isSafeInteger(leaseMs) || leaseMs < 1) {
     throw new Error('leaseMs must be positive');
   }
-  if (deliveries.length === 0) return 0;
+  if (deliveries.length === 0) return { renewed: [], terminalOwned: [], lost: [] };
   const eventIds = deliveries.map((delivery) => delivery.event.eventId);
   const webhookIds = deliveries.map((delivery) => delivery.webhookId);
-  const result = await queryable.query(
-    `UPDATE promotion_event_deliveries
-        SET lease_expires_at = now() + ($2 * interval '1 millisecond')
-      WHERE state = 'pending' AND lease_owner = $1
-        AND (event_id, webhook_id) IN (
-          SELECT * FROM unnest($3::uuid[], $4::text[])
-        )`,
-    [owner, leaseMs, eventIds, webhookIds],
-  );
-  return result.rowCount ?? 0;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query<{
+      event_id: string;
+      webhook_id: string;
+      state: string;
+      lease_owner: string | null;
+    }>(
+      `SELECT event_id, webhook_id, state, lease_owner
+         FROM promotion_event_deliveries
+        WHERE (event_id, webhook_id) IN (
+          SELECT * FROM unnest($1::uuid[], $2::text[])
+        )
+        FOR UPDATE`,
+      [eventIds, webhookIds],
+    );
+    const rowByKey = new Map(rows.map((row) => [
+      `${row.event_id}\u0000${row.webhook_id}`,
+      row,
+    ]));
+    const renewed: ClaimedPromotionDelivery[] = [];
+    const terminalOwned: ClaimedPromotionDelivery[] = [];
+    const lost: ClaimedPromotionDelivery[] = [];
+    for (const delivery of deliveries) {
+      const row = rowByKey.get(`${delivery.event.eventId}\u0000${delivery.webhookId}`);
+      if (row?.state === 'pending' && row.lease_owner === owner) renewed.push(delivery);
+      else if (row?.state !== 'pending' && row?.lease_owner === owner) {
+        terminalOwned.push(delivery);
+      } else lost.push(delivery);
+    }
+    if (renewed.length > 0) {
+      await client.query(
+        `UPDATE promotion_event_deliveries
+            SET lease_expires_at = now() + ($2 * interval '1 millisecond')
+          WHERE state = 'pending' AND lease_owner = $1
+            AND (event_id, webhook_id) IN (
+              SELECT * FROM unnest($3::uuid[], $4::text[])
+            )`,
+        [
+          owner,
+          leaseMs,
+          renewed.map((delivery) => delivery.event.eventId),
+          renewed.map((delivery) => delivery.webhookId),
+        ],
+      );
+    }
+    await client.query('COMMIT');
+    return { renewed, terminalOwned, lost };
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 }

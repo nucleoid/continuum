@@ -7,7 +7,10 @@ import { addMembership } from '../storage/memberships.js';
 import { createMemory } from '../storage/memories.js';
 import { promoteMemoryWithAudit } from '../storage/promote.js';
 import { PromotionWebhookRegistry } from '../extensions/promotion.js';
-import type { ClaimedPromotionDelivery } from '../storage/promotion-events.js';
+import type {
+  ClaimedPromotionDelivery,
+  PromotionLeaseRenewalResult,
+} from '../storage/promotion-events.js';
 import {
   PromotionEventWorker,
   type PromotionWorkerOptions,
@@ -411,6 +414,113 @@ describe('PromotionEventWorker', () => {
     }
   });
 
+  it('continues claiming after a final-attempt timeout while its callback remains hung', async () => {
+    vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
+    const releaseCallback = deferred();
+    try {
+      const entered = deferred();
+      const registry = new PromotionWebhookRegistry();
+      registry.register({
+        id: 'hook',
+        onPromoted: async () => {
+          entered.resolve();
+          await releaseCallback.promise;
+        },
+      });
+      const store = mockStore({
+        claim: vi.fn()
+          .mockResolvedValueOnce([{ ...claimedDelivery, attemptCount: 3 }])
+          .mockResolvedValue([]),
+        timeout: vi.fn().mockResolvedValue('dead_letter'),
+        renew: vi.fn().mockResolvedValue(0),
+      });
+      const instance = new PromotionEventWorker(
+        pool,
+        registry,
+        workerOptions({ leaseMs: 90, callbackTimeoutMs: 20, maxAttempts: 3 }),
+        store,
+      );
+
+      const draining = instance.drainOnce();
+      await entered.promise;
+      await vi.advanceTimersByTimeAsync(20);
+      await expect(draining).resolves.toBe(1);
+      await vi.advanceTimersByTimeAsync(40);
+      expect(store.renew).not.toHaveBeenCalled();
+
+      await expect(instance.drainOnce()).resolves.toBe(0);
+      expect(store.claim).toHaveBeenCalledTimes(2);
+    } finally {
+      releaseCallback.resolve();
+      await vi.runAllTimersAsync();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not abort a healthy callback when another delivery completes during renewal', async () => {
+    vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
+    const finishFirst = deferred();
+    const finishSecond = deferred();
+    try {
+      const secondDelivery: ClaimedPromotionDelivery = {
+        ...claimedDelivery,
+        event: { ...claimedDelivery.event, eventId: 'event-2' },
+      };
+      const renewalEntered = deferred();
+      const releaseRenewal = deferred<PromotionLeaseRenewalResult>();
+      const firstCompleted = deferred();
+      const secondAborted = vi.fn();
+      const registry = new PromotionWebhookRegistry();
+      registry.register({
+        id: 'hook',
+        onPromoted: async (event, { signal }) => {
+          if (event.eventId === 'event-1') await finishFirst.promise;
+          else {
+            signal.addEventListener('abort', secondAborted, { once: true });
+            await finishSecond.promise;
+          }
+        },
+      });
+      const store = mockStore({
+        claim: vi.fn().mockResolvedValue([claimedDelivery, secondDelivery]),
+        complete: vi.fn(async (_pool, eventId) => {
+          if (eventId === 'event-1') firstCompleted.resolve();
+          return true;
+        }),
+        renew: vi.fn(async () => {
+          renewalEntered.resolve();
+          return releaseRenewal.promise;
+        }),
+      });
+      const instance = new PromotionEventWorker(
+        pool,
+        registry,
+        workerOptions({ leaseMs: 90, callbackTimeoutMs: 80 }),
+        store,
+      );
+
+      const draining = instance.drainOnce();
+      await vi.advanceTimersByTimeAsync(30);
+      await renewalEntered.promise;
+      finishFirst.resolve();
+      await firstCompleted.promise;
+      releaseRenewal.resolve({
+        renewed: [secondDelivery], terminalOwned: [], lost: [claimedDelivery],
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(secondAborted).not.toHaveBeenCalled();
+      finishSecond.resolve();
+      await expect(draining).resolves.toBe(2);
+      expect(store.complete).toHaveBeenCalledWith(pool, 'event-2', 'hook', 'worker-test');
+    } finally {
+      finishFirst.resolve();
+      finishSecond.resolve();
+      await vi.runAllTimersAsync();
+      vi.useRealTimers();
+    }
+  });
+
   it('bounds a hung renewal and aborts callbacks fail-closed without rearming', async () => {
     vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
     const releaseCallback = deferred();
@@ -448,8 +558,8 @@ describe('PromotionEventWorker', () => {
 
       await vi.advanceTimersByTimeAsync(300);
       expect(store.renew).toHaveBeenCalledOnce();
-      await expect(instance.drainOnce()).resolves.toBe(0);
-      expect(store.claim).toHaveBeenCalledOnce();
+      await expect(instance.drainOnce()).resolves.toBe(1);
+      expect(store.claim).toHaveBeenCalledTimes(2);
     } finally {
       releaseCallback.resolve();
       await vi.runAllTimersAsync();
