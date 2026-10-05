@@ -115,6 +115,75 @@ describe('runMigrations', () => {
     }
   });
 
+  it('repairs orphaned active memberships before installing binding guards', async () => {
+    const schema = `migrator_binding_guard_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-binding-migrations-'));
+    directories.push(directory);
+    const source = new URL('../../migrations/', import.meta.url);
+    const files = (await readdir(source)).filter((file) => file.endsWith('.sql')).sort();
+    for (const file of files.filter((name) => name <= '0009_lock_entra_binding_invariant.sql')) {
+      await copyFile(new URL(file, source), join(directory, file));
+    }
+
+    try {
+      await runMigrations(pool, directory);
+      const scope = (await pool.query(
+        "INSERT INTO scopes (id, kind, name) VALUES (gen_random_uuid(), 'team', 'repair') RETURNING id",
+      )).rows[0].id;
+      const approver = (await pool.query(
+        "INSERT INTO principals (id, external_id, kind, display_name) VALUES (gen_random_uuid(), 'approver', 'user', 'Approver') RETURNING id",
+      )).rows[0].id;
+      const member = (await pool.query(
+        "INSERT INTO principals (id, external_id, kind, display_name) VALUES (gen_random_uuid(), 'member', 'user', 'Member') RETURNING id",
+      )).rows[0].id;
+      const groupId = '22222222-2222-4222-8222-222222222222';
+      await pool.query(
+        `INSERT INTO entra_groups
+           (external_id, display_name, scope_id, role, active, approved_by, approved_at)
+         VALUES ($1, 'repair', $2, 'reader', TRUE, $3, now())`,
+        [groupId, scope, approver],
+      );
+      await pool.query(
+        `INSERT INTO scope_memberships
+           (principal_id, scope_id, role, source_kind, source_id, active)
+         VALUES ($1, $2, 'reader', 'entra', $3, TRUE)`,
+        [member, scope, groupId],
+      );
+      await pool.query(
+        'UPDATE entra_groups SET active = FALSE, deactivated_at = now() WHERE external_id = $1',
+        [groupId],
+      );
+
+      for (const file of files.filter((name) => name > '0009_lock_entra_binding_invariant.sql')) {
+        await copyFile(new URL(file, source), join(directory, file));
+      }
+      await runMigrations(pool, directory);
+
+      expect((await pool.query(
+        `SELECT active, deactivated_at IS NOT NULL AS deactivated
+           FROM scope_memberships WHERE source_kind = 'entra'`,
+      )).rows).toEqual([{ active: false, deactivated: true }]);
+      await pool.query(
+        'UPDATE entra_groups SET active = TRUE, deactivated_at = NULL WHERE external_id = $1',
+        [groupId],
+      );
+      await pool.query(
+        `UPDATE scope_memberships SET active = TRUE, deactivated_at = NULL
+          WHERE source_kind = 'entra' AND source_id = $1`,
+        [groupId],
+      );
+      await expect(pool.query(
+        "UPDATE entra_groups SET role = 'writer' WHERE external_id = $1", [groupId],
+      )).rejects.toThrow(/active Entra memberships must match an approved binding/);
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  });
+
   it('runs marked concurrent-index migrations outside a transaction', async () => {
     const queries: string[] = [];
     const client = {

@@ -149,16 +149,14 @@ export async function revokeEntraGroupBinding(
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [SYNC_LOCK_ID]);
     await requireOrgAdmin(client, actor.id);
-    const revoked = await client.query(
-      `UPDATE entra_groups
-          SET active = FALSE, deactivated_at = COALESCE(deactivated_at, now()),
-              approval_revoked_by = $2, approval_revoked_at = now()
+    const binding = await client.query(
+      `SELECT scope_id, role FROM entra_groups
         WHERE external_id = $1 AND approved_by IS NOT NULL
           AND approval_revoked_at IS NULL
-        RETURNING scope_id, role`,
-      [externalId, actor.id],
+        FOR UPDATE`,
+      [externalId],
     );
-    if (!revoked.rowCount) {
+    if (!binding.rowCount) {
       await client.query('ROLLBACK');
       return false;
     }
@@ -179,11 +177,18 @@ export async function revokeEntraGroupBinding(
       throw new ServiceError('CONFLICT', 'binding revocation cannot remove the last org administrator');
     }
     await client.query(
+      `UPDATE entra_groups
+          SET active = FALSE, deactivated_at = COALESCE(deactivated_at, now()),
+              approval_revoked_by = $2, approval_revoked_at = now()
+        WHERE external_id = $1`,
+      [externalId, actor.id],
+    );
+    await client.query(
       `INSERT INTO audit_log (principal_id, action, scope_id, metadata)
        VALUES ($1, 'write', $2, $3::jsonb)`,
-      [actor.id, revoked.rows[0].scope_id, JSON.stringify({
+      [actor.id, binding.rows[0].scope_id, JSON.stringify({
         operation: 'entra_group_binding_revoked', group_id: externalId,
-        role: revoked.rows[0].role, memberships_deactivated: memberships.rowCount ?? 0,
+        role: binding.rows[0].role, memberships_deactivated: memberships.rowCount ?? 0,
       })],
     );
     await client.query('COMMIT');
@@ -213,14 +218,6 @@ async function quarantineBinding(
   externalId: string,
   result: MembershipSyncResult,
 ): Promise<number> {
-  const group = await client.query(
-    `UPDATE entra_groups
-        SET active = FALSE, deactivated_at = COALESCE(deactivated_at, now())
-      WHERE external_id = $1 AND active
-      RETURNING external_id`,
-    [externalId],
-  );
-  result.groupsDeactivated += group.rowCount ?? 0;
   const memberships = await client.query(
     `UPDATE scope_memberships
         SET active = FALSE, deactivated_at = COALESCE(deactivated_at, now()), synced_at = now()
@@ -230,40 +227,31 @@ async function quarantineBinding(
   );
   const count = memberships.rowCount ?? 0;
   result.membershipsDeactivated += count;
+  const group = await client.query(
+    `UPDATE entra_groups
+        SET active = FALSE, deactivated_at = COALESCE(deactivated_at, now())
+      WHERE external_id = $1 AND active
+      RETURNING external_id`,
+    [externalId],
+  );
+  result.groupsDeactivated += group.rowCount ?? 0;
   return count;
 }
 
-async function quarantineOversizedSnapshot(
+async function rejectOversizedSnapshot(
   client: pg.PoolClient,
   actor: Principal,
 ): Promise<void> {
   await client.query('BEGIN');
   try {
     await requireOrgAdmin(client, actor.id);
-    const groups = await client.query(
-      `UPDATE entra_groups
-          SET active = FALSE, deactivated_at = COALESCE(deactivated_at, now())
-        WHERE approved_by IS NOT NULL AND approval_revoked_at IS NULL AND active
-        RETURNING external_id`,
-    );
-    const memberships = await client.query(
-      `UPDATE scope_memberships m
-          SET active = FALSE, deactivated_at = COALESCE(m.deactivated_at, now()), synced_at = now()
-        WHERE m.source_kind = 'entra' AND m.active
-          AND EXISTS (
-            SELECT 1 FROM entra_groups g
-             WHERE g.external_id = m.source_id
-               AND g.approved_by IS NOT NULL AND g.approval_revoked_at IS NULL
-          )
-        RETURNING principal_id`,
-    );
     await client.query(
       `INSERT INTO audit_log (principal_id, action, metadata)
        VALUES ($1, 'write', $2::jsonb)`,
       [actor.id, JSON.stringify({
         operation: 'entra_membership_sync_rejected', reason: 'SNAPSHOT_TOO_LARGE',
-        groups_deactivated: groups.rowCount ?? 0,
-        memberships_deactivated: memberships.rowCount ?? 0,
+        groups_deactivated: 0,
+        memberships_deactivated: 0,
       })],
     );
     await client.query('COMMIT');
@@ -348,7 +336,7 @@ export async function syncEntraMemberships(
   try {
     await client.query('SELECT pg_advisory_lock($1::bigint)', [SYNC_LOCK_ID]);
     if (snapshots.length > MAX_SYNC_GROUPS) {
-      await quarantineOversizedSnapshot(client, actor);
+      await rejectOversizedSnapshot(client, actor);
       throw new ServiceError('PAYLOAD_TOO_LARGE', 'too many Entra group results');
     }
 
@@ -504,12 +492,6 @@ export async function syncEntraMemberships(
       throw new ServiceError('CONFLICT', 'empty Entra snapshot cannot deactivate bound groups');
     }
     if (missingActive.length > 0) {
-      const disappeared = await client.query(
-        `UPDATE entra_groups SET active = FALSE, deactivated_at = now()
-          WHERE active AND external_id = ANY($1::text[]) RETURNING external_id`,
-        [missingActive],
-      );
-      result.groupsDeactivated += disappeared.rowCount ?? 0;
       const memberships = await client.query(
         `UPDATE scope_memberships SET active = FALSE, deactivated_at = now(), synced_at = now()
           WHERE source_kind = 'entra' AND source_id = ANY($1::text[]) AND active`,
@@ -518,6 +500,12 @@ export async function syncEntraMemberships(
       const removed = memberships.rowCount ?? 0;
       result.membershipsDeactivated += removed;
       authoritativeDeactivations += removed;
+      const disappeared = await client.query(
+        `UPDATE entra_groups SET active = FALSE, deactivated_at = now()
+          WHERE active AND external_id = ANY($1::text[]) RETURNING external_id`,
+        [missingActive],
+      );
+      result.groupsDeactivated += disappeared.rowCount ?? 0;
     }
 
     const priorMembershipCount = activeMembershipsBefore.rows[0]?.count ?? 0;

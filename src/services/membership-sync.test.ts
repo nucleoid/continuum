@@ -40,8 +40,9 @@ describe('Entra membership sync', () => {
     });
     const groupId = '22222222-2222-4222-8222-222222222222';
     await pool.query(
-      `INSERT INTO entra_groups (external_id, display_name, scope_id, role, active)
-       VALUES ($1, 'continuum-team-alpha-admin', $2, 'admin', FALSE)`,
+      `INSERT INTO entra_groups
+         (external_id, display_name, scope_id, role, active, deactivated_at)
+       VALUES ($1, 'continuum-team-alpha-admin', $2, 'admin', FALSE, now())`,
       [groupId, alpha.id],
     );
     await expect(pool.query(

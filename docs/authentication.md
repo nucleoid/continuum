@@ -83,7 +83,7 @@ Run `npm run sync:memberships` from a nightly scheduler. It requires:
 Before enabling the scheduler, retain an independently managed manual org
 administrator as a break-glass identity. Invalid-input quarantine is
 intentionally fail-closed and takes precedence over availability: if the only
-org-admin access is sourced by a malformed, duplicate, or oversized
+org-admin access is sourced by a malformed, duplicate, or per-group oversized
 Entra result, that access is removed and direct database recovery is required.
 
 The job reads all approved bindings, including currently missing groups, then fetches each directly by
@@ -96,8 +96,9 @@ affected approved binding. That quarantine commits before valid results are
 applied, so a later global threshold or administrator guard cannot restore
 stale invalid access. Unbound and revoked IDs cannot confer access. Valid bound
 groups remain authoritative, so removed memberships from those groups are
-deactivated. A snapshot exceeding the whole-run bound quarantines all active
-Entra-sourced access before the run reports failure.
+deactivated. A snapshot exceeding the whole-run bound is rejected and audited
+without changing existing bindings or memberships; one unexpected extra result
+must not quarantine an otherwise valid tenant.
 
 Graph authentication, authorization, rate-limit, service, timeout, and
 transport failures abort snapshot collection before synchronization starts.
@@ -123,8 +124,15 @@ normally from successful first sign-in, before group membership becomes active.
 This release does not support a mixed-version rolling deployment. Stop every
 API, MCP, admin, and membership-sync process built from the old version, then
 apply the migrations, then start only the new binaries. The database trigger
-enforces the approved binding's immutable group ID, target scope, and role on
-inserts and relevant updates, but old binaries do not understand the complete
+enforces the approved binding's immutable UUID, target scope, role, lifecycle,
+and 500-binding cardinality on membership and binding writes. Binding changes
+that would orphan active sourced memberships are rejected; the audited
+`revoke-group` and `bind-group` operations deactivate first and support explicit
+recovery or reprovisioning. If migration reports malformed binding state or
+more than 500 approved bindings, it leaves the old schema and access unchanged.
+Use `revoke-group` (while the old processes remain stopped) to resolve excess
+valid bindings, or repair the named malformed rows under database-owner change
+control, then rerun migration. Old binaries do not understand the complete
 ID-authoritative sync and provenance contract. Pause external schedulers for
 the entire stop/migrate/start window. Treat the schema as forward-only: do not
 restart old binaries after migration and do not roll back by dropping audit,
