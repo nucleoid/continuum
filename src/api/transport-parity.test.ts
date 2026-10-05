@@ -310,7 +310,7 @@ describe('REST/MCP semantic parity matrix', () => {
     await addMembership(pool, principal.id, scope.id, 'reader');
     const memory = await createMemory(pool, {
       scopeId: scope.id, scopeKind: 'project', type: 'decision', title: 'Parity record',
-      body: 'The complete parity body.', metadata: { channel: 'both' }, tags: ['parity'],
+      body: 'The complete parity body.', metadata: { channel: 'both' }, tags: ['decision'],
       authorId: principal.id, source: 'manual', sourceRef: 'parity-ref',
     });
 

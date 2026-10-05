@@ -29,17 +29,35 @@ export async function listTagVocabulary(
   return rows.map(rowToVocabulary);
 }
 
-export async function lockAllowedTags(
+export async function lockRequestedTags(
   queryable: Queryable,
   scopeKind: ScopeKind,
+  tags: readonly string[],
 ): Promise<string[]> {
+  if (tags.length === 0) return [];
   const { rows } = await queryable.query(
     `SELECT tag
        FROM tag_vocabularies
-      WHERE scope_kind = $1
+      WHERE scope_kind = $1 AND tag = ANY($2::text[])
       ORDER BY tag
       FOR KEY SHARE`,
-    [scopeKind],
+    [scopeKind, tags],
+  );
+  return rows.map((row) => row.tag as string);
+}
+
+export async function findRequestedTags(
+  queryable: Queryable,
+  scopeKind: ScopeKind,
+  tags: readonly string[],
+): Promise<string[]> {
+  if (tags.length === 0) return [];
+  const { rows } = await queryable.query(
+    `SELECT tag
+       FROM tag_vocabularies
+      WHERE scope_kind = $1 AND tag = ANY($2::text[])
+      ORDER BY tag`,
+    [scopeKind, tags],
   );
   return rows.map((row) => row.tag as string);
 }
@@ -83,7 +101,7 @@ export async function updateTagVocabulary(
     `SELECT ${COLUMNS}
        FROM tag_vocabularies
       WHERE scope_kind = $1 AND tag = $2
-      FOR UPDATE`,
+      FOR NO KEY UPDATE`,
     [scopeKind, tag],
   );
   if (!beforeResult.rows[0]) return null;

@@ -6,7 +6,7 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "continuum-tags": "dist/cli/tag-vocabularies.js",
+    "continuum-tags": "bin/continuum-tags.mjs",
     "continuum": "bin/continuum.mjs",
     "continuum-migrate": "bin/continuum-migrate.mjs"
   },
@@ -27,6 +27,7 @@
     "docs/lifecycle.md",
     "docs/memory-api.md",
     "docs/scope-provisioning.md",
+    "docs/tag-vocabularies.md",
     "!dist/**/tenants/**",
     "migrations",
     "scripts/ensure-scope.mjs",

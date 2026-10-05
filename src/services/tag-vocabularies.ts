@@ -6,8 +6,9 @@ import { getScopeByRef } from '../storage/scopes.js';
 import {
   createTagVocabulary as createTagVocabularyRow,
   deleteTagVocabulary as deleteTagVocabularyRow,
+  findRequestedTags,
   listTagVocabulary as listTagVocabularyRows,
-  lockAllowedTags,
+  lockRequestedTags,
   lockTagVocabulary,
   tagIsInUse,
   updateTagVocabulary as updateTagVocabularyRow,
@@ -67,12 +68,14 @@ export async function validateTagsForScopeKind(
   lock = false,
 ): Promise<void> {
   if (tags.length === 0) return;
-  const allowed = lock
-    ? await lockAllowedTags(queryable, scopeKind)
-    : (await listTagVocabularyRows(queryable, scopeKind)).map((entry) => entry.tag);
-  const allowedSet = new Set(allowed);
-  const unknown = [...new Set(tags.filter((tag) => !allowedSet.has(tag)))].sort();
+  const matched = lock
+    ? await lockRequestedTags(queryable, scopeKind, tags)
+    : await findRequestedTags(queryable, scopeKind, tags);
+  const matchedSet = new Set(matched);
+  const unknown = [...new Set(tags.filter((tag) => !matchedSet.has(tag)))].sort();
   if (unknown.length > 0) {
+    const allowed = (await listTagVocabularyRows(queryable, scopeKind))
+      .map((entry) => entry.tag);
     throw new ServiceError(
       'UNKNOWN_TAGS',
       'One or more tags are not in the vocabulary for this scope kind',

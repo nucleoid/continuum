@@ -29,6 +29,23 @@ a quarantined tag to the vocabulary later does **not** put it back on existing
 memories. Back up the database before upgrading; restoring that backup is the
 only supported way to undo the rewrite.
 
+Use this rolling-deploy sequence:
+
+1. Back up the database.
+2. Run `continuum-migrate` to completion while existing application processes
+   remain online.
+3. Deploy the vocabulary-aware application version only after migration
+   `0007_tag_vocabularies.sql` is recorded in `_continuum_migrations`.
+
+The migration rewrites historical rows and installs a database trigger in one
+transaction. Once it commits, an old application process can continue writing
+empty or built-in tags, but PostgreSQL rejects any out-of-vocabulary tag with
+a check-violation error. The trigger locks only matching vocabulary rows, so a
+concurrent delete cannot remove a tag after an old writer has validated it.
+This fail-closed boundary prevents old-writer corruption during step 3. Do not
+deploy the new application before the migration, because its vocabulary
+queries require the new table.
+
 Legacy values remain private to each memory instead of entering the shared
 scope-kind vocabulary. Promotion deliberately copies source metadata,
 including `continuum_legacy_tags`, to the destination memory because promotion

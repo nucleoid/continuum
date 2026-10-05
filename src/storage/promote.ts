@@ -9,7 +9,7 @@ import {
 } from '../scopes/access.js';
 import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
 import { computeExpiry } from './expiry.js';
-import { lockAllowedTags } from './tag-vocabularies.js';
+import { listTagVocabulary, lockRequestedTags } from './tag-vocabularies.js';
 
 export interface PromoteResult {
   source: Memory;
@@ -93,10 +93,12 @@ async function promoteOperation(
     throw new PromoteError(`principal lacks ${roleName} role on target scope`, 403);
   }
 
-  const allowedTags = await lockAllowedTags(client, destinationScope.kind);
-  const allowedSet = new Set(allowedTags);
-  const unknownTags = [...new Set(source.tags.filter((tag) => !allowedSet.has(tag)))].sort();
+  const matchedTags = await lockRequestedTags(client, destinationScope.kind, source.tags);
+  const matchedSet = new Set(matchedTags);
+  const unknownTags = [...new Set(source.tags.filter((tag) => !matchedSet.has(tag)))].sort();
   if (unknownTags.length > 0) {
+    const allowedTags = (await listTagVocabulary(client, destinationScope.kind))
+      .map((entry) => entry.tag);
     throw new PromoteError(
       'One or more tags are not in the vocabulary for this scope kind',
       422,

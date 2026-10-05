@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -57,6 +57,9 @@ try {
   if (packageJson.bin?.['continuum-migrate'] !== 'bin/continuum-migrate.mjs') {
     throw new Error('Packed package does not expose the migration binary');
   }
+  if (packageJson.bin?.['continuum-tags'] !== 'bin/continuum-tags.mjs') {
+    throw new Error('Packed package does not expose the tag vocabulary binary through its wrapper');
+  }
   const installedRoot = join(temporary, 'node_modules', '@continuum', 'core');
   for (const required of [
     'migrations/0001_init.sql',
@@ -70,10 +73,28 @@ try {
     'scripts/retire-scope-operator.sql',
     'docs/audit-retention.md',
     'docs/memory-api.md',
+    'docs/tag-vocabularies.md',
   ]) {
     if (!existsSync(join(installedRoot, required))) {
       throw new Error(`Packed package is missing required runtime artifact: ${required}`);
     }
+  }
+  const installedTagLauncher = join(
+    temporary,
+    'node_modules',
+    '.bin',
+    process.platform === 'win32' ? 'continuum-tags.cmd' : 'continuum-tags',
+  );
+  const tagResult = spawnSync(installedTagLauncher, ['--invalid-smoke-argument'], {
+    cwd: temporary,
+    encoding: 'utf8',
+    shell: process.platform === 'win32',
+    env: { ...process.env, CONTINUUM_BEARER: '' },
+  });
+  if (tagResult.status !== 1 || !tagResult.stderr.startsWith('continuum-tags: Usage:')) {
+    throw new Error(
+      `Installed continuum-tags launcher did not execute: ${JSON.stringify(tagResult)}`,
+    );
   }
   for (const migrationDoc of ['README.md', 'docs/cli.md']) {
     const contents = readFileSync(join(installedRoot, migrationDoc), 'utf8');

@@ -7,6 +7,7 @@ import { createPrincipal } from '../../storage/principals.js';
 import { getScopeByRef, createScope } from '../../storage/scopes.js';
 import { addMembership } from '../../storage/memberships.js';
 import { createMemory } from '../../storage/memories.js';
+import { promoteMemory } from '../../storage/promote.js';
 import { captureMemory } from '../../services/capture.js';
 import { removeTagVocabulary } from '../../services/tag-vocabularies.js';
 import { ServiceError } from '../../services/errors.js';
@@ -192,6 +193,91 @@ describe('/api/v0/tag-vocabularies', () => {
         WHERE scope_kind = 'project' AND tag = 'race-safe'`,
     );
     expect(vocabulary.rows).toEqual([{ tag: 'race-safe' }]);
+  });
+
+  it('does not lock unrelated vocabulary rows while capture is in flight', async () => {
+    const { principal } = await actor('admin');
+    const project = await createScope(pool, { kind: 'project', name: 'narrow-locks' });
+    await addMembership(pool, principal.id, project.id, 'writer');
+    await pool.query(
+      `INSERT INTO tag_vocabularies (scope_kind, tag, description, created_by)
+       VALUES ('project', 'capture-tag', 'Used by capture', $1),
+              ('project', 'delete-tag', 'Unrelated unused tag', $1)`,
+      [principal.id],
+    );
+    const validationLocked = deferred<void>();
+    const releaseCapture = deferred<void>();
+    const capturePool = poolPausingAfterLockedTagValidation(
+      pool, validationLocked, releaseCapture,
+    );
+    const capture = captureMemory(capturePool, null, principal, {
+      scope: { kind: 'project', name: 'narrow-locks' },
+      type: 'fact', title: 'Narrow lock', body: 'Only lock the requested tag.',
+      source: 'manual', tags: ['capture-tag'],
+    });
+    await validationLocked.promise;
+
+    const deletion = removeTagVocabulary(
+      pool,
+      principal,
+      { scopeKind: 'project', tag: 'delete-tag' },
+    );
+    const outcome = await Promise.race([
+      deletion.then(() => 'deleted' as const),
+      new Promise<'timed-out'>((resolve) => setTimeout(() => resolve('timed-out'), 250)),
+    ]);
+    releaseCapture.resolve();
+    await capture;
+    await deletion;
+
+    expect(outcome).toBe('deleted');
+  });
+
+  it('does not lock unrelated destination vocabulary rows during promotion', async () => {
+    const { principal } = await actor('admin');
+    const team = await createScope(pool, { kind: 'team', name: 'promotion-source' });
+    const project = await createScope(pool, { kind: 'project', name: 'promotion-target' });
+    await addMembership(pool, principal.id, team.id, 'writer');
+    await addMembership(pool, principal.id, project.id, 'writer');
+    await pool.query(
+      `INSERT INTO tag_vocabularies (scope_kind, tag, description, created_by)
+       VALUES ('team', 'promote-tag', 'Source tag', $1),
+              ('project', 'promote-tag', 'Destination tag', $1),
+              ('project', 'delete-tag', 'Unrelated unused tag', $1)`,
+      [principal.id],
+    );
+    const source = await createMemory(pool, {
+      scopeId: team.id, scopeKind: 'team', type: 'decision', title: 'Promote narrowly',
+      body: 'Only lock the destination tag being copied.', authorId: principal.id,
+      source: 'manual', tags: ['promote-tag'],
+    });
+    const validationLocked = deferred<void>();
+    const releasePromotion = deferred<void>();
+    const promotionPool = poolPausingAfterLockedTagValidation(
+      pool, validationLocked, releasePromotion,
+    );
+    const promotion = promoteMemory(
+      promotionPool,
+      principal.id,
+      source.id,
+      { kind: 'project', name: 'promotion-target' },
+    );
+    await validationLocked.promise;
+
+    const deletion = removeTagVocabulary(
+      pool,
+      principal,
+      { scopeKind: 'project', tag: 'delete-tag' },
+    );
+    const outcome = await Promise.race([
+      deletion.then(() => 'deleted' as const),
+      new Promise<'timed-out'>((resolve) => setTimeout(() => resolve('timed-out'), 250)),
+    ]);
+    releasePromotion.resolve();
+    await promotion;
+    await deletion;
+
+    expect(outcome).toBe('deleted');
   });
 });
 

@@ -2,10 +2,11 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type pg from 'pg';
 import { makeTestPool, resetData } from './test-helpers.js';
 import { runMigrations } from './migrator.js';
+import { updateTagVocabulary } from './tag-vocabularies.js';
 
 const DATABASE_URL = process.env.CONTINUUM_TEST_DATABASE_URL
   ?? 'postgres://continuum:***@localhost:5433/continuum';
@@ -194,5 +195,53 @@ describe('tag vocabulary schema', () => {
       `INSERT INTO tag_vocabularies (scope_kind, tag, description, is_system)
        VALUES ('team', 'deploy', 'duplicate', true)`,
     )).rejects.toMatchObject({ code: '23505' });
+  });
+
+  it('rejects unknown tags at the database boundary during rolling deploys', async () => {
+    await pool.query(`
+      INSERT INTO principals (id, external_id, kind, display_name)
+      VALUES ('10000000-0000-4000-8000-000000000010', 'rolling:writer', 'user', 'Old Writer');
+      INSERT INTO scopes (id, kind, name)
+      VALUES ('20000000-0000-4000-8000-000000000010', 'project', 'rolling');
+    `);
+
+    await expect(pool.query(`
+      INSERT INTO memories (
+        id, scope_id, type, title, body, author_id, source, tags
+      ) VALUES (
+        '30000000-0000-4000-8000-000000000010',
+        '20000000-0000-4000-8000-000000000010',
+        'fact', 'Old writer', 'Must fail closed',
+        '10000000-0000-4000-8000-000000000010', 'manual', ARRAY['not-in-vocabulary']
+      )
+    `)).rejects.toMatchObject({ code: '23514' });
+
+    await expect(pool.query(`
+      INSERT INTO memories (
+        id, scope_id, type, title, body, author_id, source, tags
+      ) VALUES (
+        '30000000-0000-4000-8000-000000000011',
+        '20000000-0000-4000-8000-000000000010',
+        'fact', 'Old writer', 'Known tags still work',
+        '10000000-0000-4000-8000-000000000010', 'manual', ARRAY['deploy']
+      )
+    `)).resolves.toMatchObject({ rowCount: 1 });
+  });
+
+  it('uses a no-key update lock for description-only changes', async () => {
+    const query = vi.fn()
+      .mockResolvedValueOnce({ rows: [{
+        scope_kind: 'project', tag: 'deploy', description: 'Before', created_by: null,
+        is_system: true, created_at: new Date(0), updated_at: new Date(0),
+      }] })
+      .mockResolvedValueOnce({ rows: [{
+        scope_kind: 'project', tag: 'deploy', description: 'After', created_by: null,
+        is_system: true, created_at: new Date(0), updated_at: new Date(1),
+      }] });
+
+    await updateTagVocabulary({ query } as never, 'project', 'deploy', 'After');
+
+    expect(query.mock.calls[0][0]).toContain('FOR NO KEY UPDATE');
+    expect(query.mock.calls[0][0]).not.toContain('FOR UPDATE');
   });
 });

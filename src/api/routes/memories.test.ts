@@ -30,7 +30,7 @@ describe('memory REST routes', () => {
     await addMembership(pool, reader.id, visible.id, 'reader');
     const memory = await createMemory(pool, {
       scopeId: visible.id, scopeKind: 'team', type: 'fact', title: 'Full record',
-      body: 'complete body', metadata: { safe: true }, tags: ['tag'],
+      body: 'complete body', metadata: { safe: true }, tags: ['session'],
       authorId: author.id, source: 'manual', sourceRef: 'ref',
     });
     const privateMemory = await createMemory(pool, {
@@ -50,7 +50,7 @@ describe('memory REST routes', () => {
     expect(fetched.status).toBe(200);
     expect(fetched.body).toMatchObject({
       id: memory.id, scope: 'team:visible', body: 'complete body',
-      metadata: { safe: true }, tags: ['tag'], authorId: author.id,
+      metadata: { safe: true }, tags: ['session'], authorId: author.id,
       authorDisplayName: 'REST Author', sourceRef: 'ref',
       expiresAt: expect.any(String), createdAt: expect.any(String), updatedAt: expect.any(String),
     });

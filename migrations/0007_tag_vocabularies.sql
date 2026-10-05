@@ -109,3 +109,56 @@ UPDATE memories AS memory
      GROUP BY id
   ) AS classified
  WHERE memory.id = classified.id;
+
+-- Install the database boundary in the same transaction as the rewrite. This
+-- makes a migration-first rolling deploy fail closed for old writers: values
+-- outside the vocabulary are rejected even before every application process
+-- runs vocabulary-aware code. Lock matching rows so deletion still serializes
+-- with those old writers as well as with current capture and promotion paths.
+CREATE FUNCTION enforce_memory_tag_vocabulary()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  memory_scope_kind TEXT;
+  unknown_count INTEGER;
+BEGIN
+  IF cardinality(NEW.tags) = 0 THEN
+    RETURN NEW;
+  END IF;
+
+  SELECT kind INTO STRICT memory_scope_kind
+    FROM scopes
+   WHERE id = NEW.scope_id;
+
+  PERFORM 1
+    FROM tag_vocabularies
+   WHERE scope_kind = memory_scope_kind
+     AND tag = ANY(NEW.tags)
+   FOR KEY SHARE;
+
+  SELECT count(*)::integer INTO unknown_count
+    FROM unnest(NEW.tags) AS requested(tag)
+   WHERE requested.tag IS NULL
+      OR NOT EXISTS (
+        SELECT 1
+          FROM tag_vocabularies AS vocabulary
+         WHERE vocabulary.scope_kind = memory_scope_kind
+           AND vocabulary.tag = requested.tag
+      );
+
+  IF unknown_count > 0 THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '23514',
+      MESSAGE = 'memory tags violate the controlled vocabulary',
+      CONSTRAINT = 'memories_tags_controlled_vocabulary';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER memories_tags_controlled_vocabulary
+BEFORE INSERT OR UPDATE OF scope_id, tags ON memories
+FOR EACH ROW
+EXECUTE FUNCTION enforce_memory_tag_vocabulary();
