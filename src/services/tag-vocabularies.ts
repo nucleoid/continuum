@@ -200,6 +200,9 @@ export async function removeTagVocabulary(
       const orgId = await requireLockedOrgAdmin(client, principal.id);
       const locked = await lockTagVocabulary(client, input.scopeKind, tag);
       if (!locked) throw new ServiceError('TAG_NOT_FOUND', 'Tag vocabulary entry not found');
+      if (locked.isSystem) {
+        throw new ServiceError('CONFLICT', 'System tags cannot be deleted');
+      }
       if (await tagIsInUse(client, input.scopeKind, tag)) {
         throw new ServiceError('CONFLICT', 'Tag is in use by memories in this scope kind');
       }

@@ -88,6 +88,20 @@ describe('tag vocabulary schema', () => {
           '10000000-0000-4000-8000-000000000001', 'ado-workitem',
           ARRAY['ado', 'private-project', 'System.AreaPath=Secret Team'],
           '{"continuum_legacy_tags":"pre-existing","keep":"yes"}'::jsonb
+        ), (
+          '30000000-0000-4000-8000-000000000003',
+          '20000000-0000-4000-8000-000000000001',
+          'fact', 'Non-object metadata', 'Preserve manually inserted metadata',
+          '10000000-0000-4000-8000-000000000001', 'manual',
+          ARRAY['private-array'],
+          '[1,2]'::jsonb
+        ), (
+          '30000000-0000-4000-8000-000000000004',
+          '20000000-0000-4000-8000-000000000001',
+          'fact', 'Null legacy metadata', 'Do not invent an extra legacy value',
+          '10000000-0000-4000-8000-000000000001', 'manual',
+          ARRAY['PR', 'pr', NULL, 'x']::text[],
+          '{"continuum_legacy_tags":null,"keep":"yes"}'::jsonb
         )
       `);
 
@@ -96,7 +110,9 @@ describe('tag vocabulary schema', () => {
         `SELECT id, tags, metadata FROM memories
           WHERE id IN (
             '30000000-0000-4000-8000-000000000001',
-            '30000000-0000-4000-8000-000000000002'
+            '30000000-0000-4000-8000-000000000002',
+            '30000000-0000-4000-8000-000000000003',
+            '30000000-0000-4000-8000-000000000004'
           )
           ORDER BY id`,
       );
@@ -117,6 +133,22 @@ describe('tag vocabulary schema', () => {
             continuum_legacy_tags: [
               'pre-existing', 'private-project', 'System.AreaPath=Secret Team',
             ],
+            keep: 'yes',
+          },
+        },
+        {
+          id: '30000000-0000-4000-8000-000000000003',
+          tags: [],
+          metadata: {
+            continuum_legacy_metadata: [1, 2],
+            continuum_legacy_tags: ['private-array'],
+          },
+        },
+        {
+          id: '30000000-0000-4000-8000-000000000004',
+          tags: ['pr'],
+          metadata: {
+            continuum_legacy_tags: [null, 'x'],
             keep: 'yes',
           },
         },

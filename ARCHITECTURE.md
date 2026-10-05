@@ -144,7 +144,7 @@ Content-Type: application/json
   "type":       "context",
   "title":      "Started branch feature/checkout-v2 off main",
   "body":       "Working on the new checkout flow. PR #4421 in flight, blocked on Security Reviewer review.",
-  "tags":       ["branch", "in-progress"],
+  "tags":       ["branch", "session"],
   "source":     "github-branch",
   "source_ref": "https://github.com/exampleorg/booking-engine/tree/feature/checkout-v2",
   "metadata":   { "branch": "feature/checkout-v2", "base": "main" }

@@ -111,18 +111,46 @@ describe('/api/v0/tag-vocabularies', () => {
   it('refuses to delete a tag used by a memory in the same scope kind', async () => {
     const { principal } = await actor('admin');
     const project = await createScope(pool, { kind: 'project', name: 'continuum' });
+    await pool.query(
+      `INSERT INTO tag_vocabularies (scope_kind, tag, description, created_by)
+       VALUES ('project', 'release-ready', 'Custom in-use tag', $1)`,
+      [principal.id],
+    );
     await createMemory(pool, {
       scopeId: project.id, scopeKind: 'project', type: 'fact', title: 'Deploy', body: 'Done',
-      authorId: principal.id, source: 'manual', tags: ['deploy'],
+      authorId: principal.id, source: 'manual', tags: ['release-ready'],
     });
 
     const response = await request(app)
-      .delete('/api/v0/tag-vocabularies/project/deploy')
+      .delete('/api/v0/tag-vocabularies/project/release-ready')
       .set('Authorization', 'Bearer entra:tags:admin');
     expect(response.status).toBe(409);
     expect(response.body).toMatchObject({
       code: 'CONFLICT', error: 'Tag is in use by memories in this scope kind',
     });
+  });
+
+  it('refuses to delete built-in tags even when they are unused', async () => {
+    await actor('admin');
+
+    const response = await request(app)
+      .delete('/api/v0/tag-vocabularies/project/knowledge-gap')
+      .set('Authorization', 'Bearer entra:tags:admin');
+
+    expect(response.status).toBe(409);
+    expect(response.body).toMatchObject({
+      code: 'CONFLICT', error: 'System tags cannot be deleted',
+    });
+    const { rows } = await pool.query(
+      `SELECT tag FROM tag_vocabularies
+        WHERE scope_kind = 'project' AND tag = 'knowledge-gap'`,
+    );
+    expect(rows).toEqual([{ tag: 'knowledge-gap' }]);
+    const audit = await pool.query(
+      `SELECT 1 FROM audit_log
+        WHERE metadata->>'operation' = 'delete_tag_vocabulary'`,
+    );
+    expect(audit.rows).toEqual([]);
   });
 
   it('cannot delete a tag after a concurrent capture has validated it', async () => {

@@ -14,10 +14,25 @@ The built-in vocabulary contains `ado`, `branch`, `decision`, `deploy`,
 Azure DevOps state and custom tags, plus deployment environment and status,
 remain available in capture metadata but are not taxonomy tags.
 
-During migration, conforming historical tags are adopted as system-owned
-entries for their existing scope kind. Nonconforming values are retained in
-`metadata.continuum_legacy_tags` and removed from active taxonomy so legacy
-data cannot block deployment or bypass future validation.
+## Upgrade behavior
+
+Migration `0005_tag_vocabularies.sql` is a one-way rewrite of historical
+memory tags. Only the ten built-in tags listed above remain active. Every other
+original value is removed from `tags` and retained, unchanged and in order, in
+`metadata.continuum_legacy_tags`; this includes well-formed private tags,
+plugin dimensions, malformed values, and null array elements. Built-in values
+are normalized and deduplicated. Non-object metadata inserted outside the
+application is preserved under `metadata.continuum_legacy_metadata`.
+
+Continuum has no memory-tag editing or automatic restoration operation. Adding
+a quarantined tag to the vocabulary later does **not** put it back on existing
+memories. Back up the database before upgrading; restoring that backup is the
+only supported way to undo the rewrite.
+
+Legacy values remain private to each memory instead of entering the shared
+scope-kind vocabulary. Promotion deliberately copies source metadata,
+including `continuum_legacy_tags`, to the destination memory because promotion
+is an explicit copy by a caller authorized for both scopes.
 
 ## REST management
 
@@ -37,9 +52,15 @@ DELETE /api/v0/tag-vocabularies/:scopeKind/:tag
 ```
 
 Create accepts `{ "scopeKind", "tag", "description"? }`. Update accepts
-`{ "description" }`. A tag cannot be deleted while any memory in the same
-scope kind uses it. Every successful mutation writes a `write` audit entry with
-the operation, actor, scope kind, tag, and bounded before/after metadata.
+`{ "description" }`. A system tag cannot be deleted. A custom tag cannot be
+deleted while any memory in the same scope kind uses it. Every successful
+mutation writes a `write` audit entry with the operation, actor, scope kind,
+tag, and bounded before/after metadata.
+
+Promotion validates active source tags against the destination scope kind's
+vocabulary. If the destination does not allow every tag, promotion returns
+`UNKNOWN_TAGS` (HTTP 422). Add the required custom tags to the destination
+vocabulary before retrying.
 
 ## CLI
 

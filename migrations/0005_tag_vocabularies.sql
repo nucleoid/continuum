@@ -23,7 +23,8 @@ SELECT scope_kind, tag, 'Built-in Continuum tag', true
 -- A vocabulary is shared by every scope of a kind. Historical private values
 -- must therefore never be adopted into it. Keep only shipped vocabulary tags
 -- active and retain every unknown original value on its memory, including
--- plugin dimensions and malformed values, without exposing them cross-scope.
+-- plugin dimensions and malformed values, without exposing them through the
+-- shared scope-kind vocabulary.
 WITH expanded AS (
   SELECT memory.id,
          existing.value,
@@ -61,12 +62,18 @@ WITH expanded AS (
 )
 UPDATE memories AS memory
    SET metadata = jsonb_set(
-         memory.metadata,
+         CASE
+           WHEN jsonb_typeof(memory.metadata) = 'object' THEN memory.metadata
+           ELSE jsonb_build_object('continuum_legacy_metadata', memory.metadata)
+         END,
          '{continuum_legacy_tags}',
          CASE
-           WHEN jsonb_typeof(memory.metadata->'continuum_legacy_tags') = 'array'
+           WHEN jsonb_typeof(memory.metadata) = 'object'
+             AND jsonb_typeof(memory.metadata->'continuum_legacy_tags') = 'array'
              THEN memory.metadata->'continuum_legacy_tags'
-           WHEN memory.metadata ? 'continuum_legacy_tags'
+           WHEN jsonb_typeof(memory.metadata) = 'object'
+             AND memory.metadata ? 'continuum_legacy_tags'
+             AND jsonb_typeof(memory.metadata->'continuum_legacy_tags') <> 'null'
              THEN jsonb_build_array(memory.metadata->'continuum_legacy_tags')
            ELSE '[]'::jsonb
          END || to_jsonb(classified.legacy_tags),
