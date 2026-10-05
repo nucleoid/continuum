@@ -127,8 +127,18 @@ describe('tag vocabulary schema', () => {
           '10000000-0000-4000-8000-000000000001', 'manual',
           ARRAY['PR', 'pr', NULL, 'x']::text[],
           '{"continuum_legacy_tags":null,"keep":"yes"}'::jsonb
+        ), (
+          '30000000-0000-4000-8000-000000000005',
+          '20000000-0000-4000-8000-000000000001',
+          'fact', 'Already canonical', 'Do not rewrite this row',
+          '10000000-0000-4000-8000-000000000001', 'manual',
+          ARRAY['decision'], '{"keep":"unchanged"}'::jsonb
         )
       `);
+      const beforeXmin = await historical.query(
+        `SELECT xmin::text AS xmin FROM memories
+          WHERE id = '30000000-0000-4000-8000-000000000005'`,
+      );
 
       await expect(runMigrations(historical, second)).resolves.toHaveLength(1);
       const memories = await historical.query(
@@ -185,6 +195,15 @@ describe('tag vocabulary schema', () => {
           ORDER BY tag`,
       );
       expect(vocabulary.rows).toEqual([]);
+      const unchanged = await historical.query(
+        `SELECT xmin::text AS xmin, tags, metadata FROM memories
+          WHERE id = '30000000-0000-4000-8000-000000000005'`,
+      );
+      expect(unchanged.rows).toEqual([{
+        xmin: beforeXmin.rows[0].xmin,
+        tags: ['decision'],
+        metadata: { keep: 'unchanged' },
+      }]);
     } finally {
       await historical.end();
       await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
@@ -196,7 +215,7 @@ describe('tag vocabulary schema', () => {
     }
   });
 
-  it('serializes the migration with old writers before scanning and installing the trigger', async () => {
+  it('drains FOR UPDATE-first writers without deadlock while reads continue', async () => {
     const suffix = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
     const schema = `tag_migration_race_${suffix}`;
     const first = await mkdtemp(join(tmpdir(), 'continuum-tags-race-before-'));
@@ -225,9 +244,13 @@ describe('tag vocabulary schema', () => {
       ]) {
         await writeFile(join(first, name), await readFile(join(MIGRATIONS, name), 'utf8'));
       }
+      const migrationSql = await readFile(join(MIGRATIONS, '0007_tag_vocabularies.sql'), 'utf8');
       await writeFile(
         join(second, '0007_tag_vocabularies.sql'),
-        await readFile(join(MIGRATIONS, '0007_tag_vocabularies.sql'), 'utf8'),
+        migrationSql.replace(
+          /LOCK TABLE memories IN [A-Z ]+ MODE;/,
+          (lock) => `${lock}\nSELECT pg_sleep(0.5);`,
+        ),
       );
       await runMigrations(writers, first);
       await writers.query(`
@@ -249,15 +272,30 @@ describe('tag vocabulary schema', () => {
       await priorWriter.query('BEGIN');
       priorWriterOpen = true;
       await priorWriter.query(`
-        UPDATE memories
-           SET tags = ARRAY['private-during-rollout']
+        SELECT id FROM memories
          WHERE id = '30000000-0000-4000-8000-000000000020'
+         FOR UPDATE
       `);
 
       migration = runMigrations(migrator, second);
       await waitForTableLock(
-        admin, `${schema}.memories`, 'ShareRowExclusiveLock', false,
+        admin, `${schema}.memories`, 'ExclusiveLock', false,
       );
+
+      await priorWriter.query(`
+        UPDATE memories
+           SET tags = ARRAY['private-during-rollout']
+         WHERE id = '30000000-0000-4000-8000-000000000020'
+      `);
+      await priorWriter.query('COMMIT');
+      priorWriterOpen = false;
+      await waitForTableLock(admin, `${schema}.memories`, 'ExclusiveLock', true);
+
+      const readDuringMigration = await writers.query(
+        `SELECT title FROM memories
+          WHERE id = '30000000-0000-4000-8000-000000000020'`,
+      );
+      expect(readDuringMigration.rows).toEqual([{ title: 'Before migration' }]);
 
       queuedWriter = await writers.connect();
       queuedInsert = queuedWriter.query(`
@@ -275,8 +313,6 @@ describe('tag vocabulary schema', () => {
       );
       await waitForTableLock(admin, `${schema}.memories`, 'RowExclusiveLock', false);
 
-      await priorWriter.query('COMMIT');
-      priorWriterOpen = false;
       await migration;
       expect(await queuedInsert).toMatchObject({ error: { code: '23514' } });
 
@@ -302,6 +338,15 @@ describe('tag vocabulary schema', () => {
         rm(second, { recursive: true, force: true }),
       ]);
     }
+  });
+
+  it('sets a bounded lock timeout before taking an EXCLUSIVE migration lock', async () => {
+    const sql = await readFile(join(MIGRATIONS, '0007_tag_vocabularies.sql'), 'utf8');
+    const timeout = sql.indexOf("SET LOCAL lock_timeout = '5s';");
+    const lock = sql.indexOf('LOCK TABLE memories IN EXCLUSIVE MODE;');
+    expect(timeout).toBeGreaterThan(-1);
+    expect(lock).toBeGreaterThan(timeout);
+    expect(sql).not.toContain('LOCK TABLE memories IN SHARE ROW EXCLUSIVE MODE;');
   });
 
   it.each([
