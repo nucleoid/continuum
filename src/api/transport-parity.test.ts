@@ -294,13 +294,155 @@ describe('REST/MCP semantic parity matrix', () => {
     expect(rest.body).toEqual({ results: [{
       id: expect.any(String), score: expect.any(Number), scope: 'project:shape',
       type: 'fact', title: 'Shape marker', excerpt: 'Exact shape marker content.',
+      bodyTruncated: false,
       sourceRef: 'shape-ref', createdAt: expect.any(String),
     }] });
     expect(toolJson(mcp)).toEqual([{
       id: expect.any(String), score: expect.any(Number), scope: 'project:shape',
       type: 'fact', title: 'Shape marker', excerpt: 'Exact shape marker content.',
+      body_truncated: false,
       source_ref: 'shape-ref', created_at: expect.any(String),
     }]);
+  });
+
+  it('returns equivalent complete point-fetch and browse records', async () => {
+    const scope = await createScope(pool, { kind: 'project', name: 'memory-parity' });
+    await addMembership(pool, principal.id, scope.id, 'reader');
+    const memory = await createMemory(pool, {
+      scopeId: scope.id, scopeKind: 'project', type: 'decision', title: 'Parity record',
+      body: 'The complete parity body.', metadata: { channel: 'both' }, tags: ['parity'],
+      authorId: principal.id, source: 'manual', sourceRef: 'parity-ref',
+    });
+
+    const restFetch = await request(createApp(pool))
+      .get(`/api/v0/memories/${memory.id}`)
+      .set('Authorization', 'Bearer entra:user:parity');
+    const mcpFetch = toolJson((await client.callTool({
+      name: 'continuum.get_memory', arguments: { memory_id: memory.id },
+    })) as ToolResult);
+    const restList = await request(createApp(pool))
+      .get('/api/v0/memories')
+      .query({ scope: 'project:memory-parity', type: 'decision', state: 'live' })
+      .set('Authorization', 'Bearer entra:user:parity');
+    const mcpList = toolJson((await client.callTool({
+      name: 'continuum.list_memories',
+      arguments: { scope: 'project:memory-parity', type: 'decision', state: 'live' },
+    })) as ToolResult);
+
+    expect(restFetch.status).toBe(200);
+    expect(restFetch.body).toMatchObject({
+      id: memory.id, scope: 'project:memory-parity', body: 'The complete parity body.',
+      authorId: principal.id, authorDisplayName: 'Parity User', sourceRef: 'parity-ref',
+    });
+    expect(mcpFetch).toMatchObject({
+      id: memory.id, scope: 'project:memory-parity', body: 'The complete parity body.',
+      author_id: principal.id, author_display_name: 'Parity User', source_ref: 'parity-ref',
+    });
+    expect(restList.body.items).toEqual([restFetch.body]);
+    expect(mcpList.items).toEqual([mcpFetch]);
+    expect(restList.body).toMatchObject({ limit: 50, offset: 0 });
+    expect(mcpList).toMatchObject({ limit: 50, offset: 0 });
+  });
+
+  it('excludes expired full bodies before REST/MCP pagination and audits each delivered identity', async () => {
+    const scope = await createScope(pool, { kind: 'project', name: 'expiry-parity' });
+    await addMembership(pool, principal.id, scope.id, 'reader');
+    const first = await createMemory(pool, {
+      scopeId: scope.id, scopeKind: 'project', type: 'fact', title: 'First active',
+      body: 'first transport secret', authorId: principal.id, source: 'manual',
+    });
+    const boundary = await createMemory(pool, {
+      scopeId: scope.id, scopeKind: 'project', type: 'fact', title: 'Boundary expired',
+      body: 'expired transport secret', authorId: principal.id, source: 'manual',
+    });
+    const second = await createMemory(pool, {
+      scopeId: scope.id, scopeKind: 'project', type: 'fact', title: 'Second active',
+      body: 'second transport secret', authorId: principal.id, source: 'manual',
+    });
+    await pool.query(
+      `UPDATE memories
+          SET updated_at = CASE id
+            WHEN $1 THEN TIMESTAMPTZ '2026-10-05 03:00:00+00'
+            WHEN $2 THEN TIMESTAMPTZ '2026-10-05 02:00:00+00'
+            ELSE TIMESTAMPTZ '2026-10-05 01:00:00+00'
+          END,
+              expires_at = CASE WHEN id = $2 THEN now() ELSE expires_at END
+        WHERE id = ANY($3::uuid[])`,
+      [first.id, boundary.id, [first.id, boundary.id, second.id]],
+    );
+
+    const restExpired = await request(createApp(pool))
+      .get(`/api/v0/memories/${boundary.id}`)
+      .set('Authorization', 'Bearer entra:user:parity');
+    const mcpExpired = (await client.callTool({
+      name: 'continuum.get_memory', arguments: { memory_id: boundary.id },
+    })) as ToolResult;
+    const restPage = await request(createApp(pool))
+      .get('/api/v0/memories')
+      .query({ scope: 'project:expiry-parity', limit: 1, offset: 0 })
+      .set('Authorization', 'Bearer entra:user:parity');
+    const mcpPage = toolJson((await client.callTool({
+      name: 'continuum.list_memories',
+      arguments: { scope: 'project:expiry-parity', limit: 1, offset: 1 },
+    })) as ToolResult);
+
+    expect(restExpired.status).toBe(404);
+    expect(restExpired.body.code).toBe('MEMORY_NOT_FOUND');
+    expect(mcpExpired.isError).toBe(true);
+    expect(toolJson(mcpExpired).error.code).toBe('MEMORY_NOT_FOUND');
+    expect(restPage.body.items.map((item: { id: string }) => item.id)).toEqual([first.id]);
+    expect(mcpPage.items.map((item: { id: string }) => item.id)).toEqual([second.id]);
+
+    const { rows } = await pool.query(
+      `SELECT memory_id, metadata FROM audit_log ORDER BY id`,
+    );
+    expect(rows).toHaveLength(4);
+    expect(rows.filter((row) => row.metadata.record_kind === 'summary')).toHaveLength(2);
+    expect(rows.filter((row) => row.metadata.record_kind === 'result')
+      .map((row) => row.memory_id)).toEqual([first.id, second.id]);
+    expect(rows.some((row) => row.memory_id === boundary.id)).toBe(false);
+    expect(JSON.stringify(rows)).not.toContain('transport secret');
+  });
+
+  it('returns typed point-fetch errors and equivalent browse validation', async () => {
+    const malformedRest = await request(createApp(pool))
+      .get('/api/v0/memories/not-a-uuid')
+      .set('Authorization', 'Bearer entra:user:parity');
+    const malformedMcp = (await client.callTool({
+      name: 'continuum.get_memory', arguments: { memory_id: 'not-a-uuid' },
+    })) as ToolResult & { isError?: boolean };
+    expect(malformedRest.status).toBe(400);
+    expect(malformedRest.body.code).toBe('INVALID_INPUT');
+    expect(malformedMcp.isError).toBe(true);
+    expect(toolJson(malformedMcp).error.code).toBe('INVALID_INPUT');
+
+    for (const [query, code] of [
+      [{ scope: 'bad' }, 'INVALID_SCOPE'],
+      [{ type: 'bogus' }, 'INVALID_INPUT'],
+      [{ state: 'bogus' }, 'INVALID_INPUT'],
+      [{ limit: 0 }, 'INVALID_INPUT'],
+      [{ limit: 101 }, 'INVALID_INPUT'],
+      [{ offset: -1 }, 'INVALID_INPUT'],
+    ] as const) {
+      const rest = await request(createApp(pool)).get('/api/v0/memories')
+        .query(query).set('Authorization', 'Bearer entra:user:parity');
+      const mcp = (await client.callTool({
+        name: 'continuum.list_memories', arguments: query,
+      })) as ToolResult & { isError?: boolean };
+      expect(rest.status).toBe(400);
+      expect(rest.body.code).toBe(code);
+      expect(mcp.isError).toBe(true);
+      expect(toolJson(mcp).error.code).toBe(code);
+    }
+
+    const restAtMax = await request(createApp(pool)).get('/api/v0/memories?limit=100')
+      .set('Authorization', 'Bearer entra:user:parity');
+    const mcpAtMax = toolJson((await client.callTool({
+      name: 'continuum.list_memories', arguments: { limit: 100 },
+    })) as ToolResult);
+    expect(restAtMax.status).toBe(200);
+    expect(restAtMax.body.limit).toBe(100);
+    expect(mcpAtMax.limit).toBe(100);
   });
 
   it('uses the same readable access set for list_scopes, recall, and AGENTS.md', async () => {

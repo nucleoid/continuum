@@ -40,6 +40,7 @@ export function recallRouter(
         type: r.memory.type,
         title: r.memory.title,
         excerpt: r.excerpt,
+        bodyTruncated: r.bodyTruncated,
         sourceRef: r.memory.sourceRef,
         createdAt: r.memory.createdAt,
       })),

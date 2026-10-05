@@ -30,6 +30,7 @@ v0 design in progress. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the schema, 
 - [AGENTS.md ETag and freshness checks](./docs/agents-md-freshness.md)
 - [Lifecycle sweeper and review queue](./docs/lifecycle.md)
 - [Audit retention operations](./docs/audit-retention.md)
+- [Memory fetch and browse API](./docs/memory-api.md)
 
 ## Embedding configuration
 

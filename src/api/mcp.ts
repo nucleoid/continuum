@@ -46,6 +46,12 @@ import {
   relationThresholdFromEnv,
   validateRelationThreshold,
 } from '../services/relations.js';
+import {
+  getMemoryForPrincipal,
+  listMemoriesForPrincipal,
+} from '../services/memories.js';
+import type { MemoryReadRecord } from '../storage/memory-reads.js';
+import type { MemoryState, MemoryType } from '../types.js';
 
 const SCOPE_KINDS = ['org', 'team', 'project', 'user', 'role'] as const;
 const MEMORY_TYPES = ['fact', 'decision', 'context', 'playbook', 'relationship'] as const;
@@ -71,6 +77,30 @@ function jsonResult(value: unknown): {
   content: Array<{ type: 'text'; text: string }>;
 } {
   return textResult(JSON.stringify(value, null, 2));
+}
+
+function mcpMemory(record: MemoryReadRecord) {
+  const { memory } = record;
+  return {
+    id: memory.id,
+    scope: record.scope,
+    type: memory.type,
+    title: memory.title,
+    body: memory.body,
+    metadata: memory.metadata,
+    tags: memory.tags,
+    state: memory.state,
+    expires_at: memory.expiresAt,
+    supersedes_id: memory.supersedesId,
+    promoted_to_id: memory.promotedToId,
+    author_id: memory.authorId,
+    author_display_name: record.authorDisplayName,
+    source: memory.source,
+    source_ref: memory.sourceRef,
+    created_at: memory.createdAt,
+    updated_at: memory.updatedAt,
+    last_verified: memory.lastVerified,
+  };
 }
 
 function serviceErrorResult(error: unknown, logger: ServiceLogger): {
@@ -207,10 +237,61 @@ export function buildMcpServer(deps: McpDeps): McpServer {
             type: r.memory.type,
             title: r.memory.title,
             excerpt: r.excerpt,
+            body_truncated: r.bodyTruncated,
             source_ref: r.memory.sourceRef,
             created_at: r.memory.createdAt,
           })),
         );
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'continuum.get_memory',
+    {
+      description: 'Fetch one complete readable memory. Missing and inaccessible IDs are both reported as not found.',
+      inputSchema: { memory_id: z.string() },
+    },
+    async (args) => {
+      try {
+        const result = await getMemoryForPrincipal(
+          pool, principal, args.memory_id, { transport: 'mcp' },
+        );
+        return jsonResult(mcpMemory(result));
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'continuum.list_memories',
+    {
+      description: 'Browse complete readable memories in stable updated-at order.',
+      inputSchema: {
+        scope: z.string().optional(),
+        type: z.string().optional(),
+        state: z.string().optional(),
+        limit: z.number().optional(),
+        offset: z.number().optional(),
+      },
+    },
+    async (args) => {
+      try {
+        const result = await listMemoriesForPrincipal(pool, principal, {
+          scope: args.scope,
+          type: args.type as MemoryType | undefined,
+          state: args.state as MemoryState | undefined,
+          limit: args.limit,
+          offset: args.offset,
+        }, { transport: 'mcp' });
+        return jsonResult({
+          items: result.items.map(mcpMemory),
+          limit: result.limit,
+          offset: result.offset,
+        });
       } catch (error) {
         return errorResult(error);
       }

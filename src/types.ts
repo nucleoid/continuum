@@ -67,4 +67,5 @@ export interface RecallResult {
   memory: Memory;
   score: number;
   excerpt: string;
+  bodyTruncated: boolean;
 }

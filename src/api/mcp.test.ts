@@ -77,6 +77,8 @@ describe('MCP server', () => {
         'continuum.list_scopes',
         'continuum.capture',
         'continuum.recall',
+        'continuum.get_memory',
+        'continuum.list_memories',
         'continuum.review_queue',
         'continuum.promote',
         'continuum.verify',

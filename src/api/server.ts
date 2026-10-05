@@ -24,6 +24,7 @@ import {
   relationThresholdFromEnv,
   validateRelationThreshold,
 } from '../services/relations.js';
+import { memoriesRouter } from './routes/memories.js';
 
 export { createReadinessState } from './readiness.js';
 
@@ -67,6 +68,7 @@ const KNOWN_LOG_PATHS = new Set([
   '/api/v0/capture', '/api/v0/recall', '/api/v0/agents-md', '/api/v0/audit',
   '/api/v0/agents-md/freshness',
   '/api/v0/review-queue',
+  '/api/v0/memories', '/api/v0/memories/:id',
   '/api/v0/insights/gaps',
 ]);
 
@@ -269,6 +271,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   v0.use(bearerAuth(pool));
   v0.use(captureRouter(pool, provider, relationThreshold));
   v0.use(recallRouter(pool, provider));
+  v0.use(memoriesRouter(pool));
   v0.use(agentsMdRouter(pool));
   v0.use(auditRouter(pool));
   v0.use(reviewQueueRouter(pool, opts.reviewHorizonDays));

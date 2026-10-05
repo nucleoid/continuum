@@ -123,6 +123,7 @@ async function hydrate(
         memory,
         score: fusedScores.get(id) ?? 0,
         excerpt: buildExcerpt(memory.body, query),
+        bodyTruncated: memory.body.length > 200,
       };
     });
 }

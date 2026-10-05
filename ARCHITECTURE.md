@@ -276,6 +276,8 @@ Each plugin lives in `src/capture/{plugin}/`, registers an id, and posts to the 
 Methods:
 - `continuum.capture(scope, type, title, body, ...)`
 - `continuum.recall(query, scopes?, types?, limit?)`
+- `continuum.get_memory(memory_id)`
+- `continuum.list_memories(scope?, type?, state?, limit?, offset?)`
 - `continuum.promote(memory_id, target_scope)`
 - `continuum.verify(memory_id, still_true: bool, note?)`
 - `continuum.list_scopes()`

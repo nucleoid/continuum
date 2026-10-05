@@ -93,4 +93,24 @@ describe('recall expiry enforcement', () => {
       client.release();
     }
   });
+
+  it.each([
+    [199, false],
+    [200, false],
+    [201, true],
+  ])('marks a %i-character body truncation as %s', async (length, expected) => {
+    const marker = 'boundary';
+    const { memory, scope } = await seedMemory(`truncate ${length}`);
+    const prefixLength = Math.floor((length - marker.length - 2) / 2);
+    const body = `${'x'.repeat(prefixLength)} ${marker} ${'y'.repeat(length - prefixLength - marker.length - 2)}`;
+    await pool.query('UPDATE memories SET body = $2 WHERE id = $1', [memory.id, body]);
+
+    const [result] = await recall(pool, {
+      query: marker, scopeIds: [scope.id], limit: 1,
+    });
+
+    expect(result.bodyTruncated).toBe(expected);
+    expect(result.memory.body).toHaveLength(length);
+    if (length > 200) expect(result.excerpt).toMatch(/^\.\.\./);
+  });
 });
