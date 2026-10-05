@@ -17,13 +17,51 @@ Standup-eligible captures use these reserved metadata fields:
 - `actor_principal_id`: UUID of the actual person who performed the activity.
 - `actor`: bounded source-system actor label for display.
 - `thread_key`: stable, source-qualified thread identity.
+- `thread_owner_principal_id`: optional explicit user UUID that owns the thread.
 - `closes_thread_keys`: explicit list of stable thread keys closed by this capture.
 - `merged_by` and `reviewers`: optional PR participants, distinct from `actor`.
 
 The GitHub PR plugin uses the PR author as `actor`; a merger remains
-`merged_by`. Deploy activity uses the deploy actor. Capture authorship is not a
-fallback for activity attribution. Missing ownership, actor ID, actor label, or
-thread key makes a record ineligible rather than triggering a name-based guess.
+`merged_by`. Deploy activity uses the deploy actor. The production
+`capturePluginEvent` path resolves only `(authority, external_actor_id)` pairs
+that an org administrator explicitly provisioned in
+`actor_principal_mappings`. GitHub logins are looked up under the `github`
+authority. Deploy producers must provide both `actorAuthority` and
+`actorExternalId`; the human-readable `actor` is never used for lookup.
+
+The authenticated ingestion service principal remains the capture author and
+must have writer access to the destination scope. It is not the activity actor
+and is never used as a fallback. An absent mapping, missing deploy actor, or
+mapping to anything other than an existing user stores a normal non-standup
+record without `actor_principal_id`. Missing ownership, actor ID, actor label,
+or thread key makes a record ineligible rather than triggering a display-name
+guess.
+
+Open threads use `thread_owner_principal_id`, falling back to the actor ID only
+for historical records. A capture by another actor may close a thread only
+when it explicitly carries the same thread owner. Closures after a requested
+historical window do not rewrite that historical view. Terminal summaries
+close their session thread by default; producers must set `keepThreadOpen`
+when the summarized session intentionally remains actionable.
+
+## Actor identity mapping
+
+Mapping is a separate org-admin authority from ingestion. Review the provider's
+immutable/opaque subject ID and the target user principal UUID, then run:
+
+```sh
+psql "$CONTINUUM_DATABASE_URL" \
+  -v authority='github' \
+  -v external_actor_id='<exact provider actor id>' \
+  -v principal_id='<user principal UUID>' \
+  -v admin_principal_id='<reviewing org-admin UUID>' \
+  -f scripts/set-actor-principal-mapping.sql
+```
+
+The database trigger requires the target to remain a user and the mapping
+authority to be an org admin. The script refuses replacement/conflicts and
+audits successful additions. Never use `display_name`, scope names, email
+labels, or a service principal's identity to infer the human actor.
 
 ## REST and MCP
 

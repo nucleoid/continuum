@@ -12,8 +12,11 @@ export interface TerminalSummaryPayload {
   transcriptHash?: string;
   scopeOverride?: ScopeRef;
   actorPrincipalId?: string;
+  actorAuthority?: string;
+  actorExternalId?: string;
   threadKey?: string;
   closesThreadKeys?: string[];
+  keepThreadOpen?: boolean;
 }
 
 export const terminalSummaryPlugin: CapturePlugin<TerminalSummaryPayload> = {
@@ -26,14 +29,20 @@ export const terminalSummaryPlugin: CapturePlugin<TerminalSummaryPayload> = {
         name: ctx.resolveUserScope?.(event.actor) ?? event.actor,
       };
 
+    const explicitIdentity = event.actorAuthority && event.actorExternalId
+      ? { authority: event.actorAuthority, externalId: event.actorExternalId }
+      : null;
     const actorPrincipalId = event.actorPrincipalId
-      ?? ctx.resolveActorPrincipalId?.(event.actor)
+      ?? (explicitIdentity ? ctx.resolveActorPrincipalId?.(explicitIdentity) : null)
       ?? null;
+    const threadKey = event.threadKey ?? `terminal-session:${event.sessionId}`;
     const metadata = {
       actor: event.actor,
       ...(actorPrincipalId ? { actor_principal_id: actorPrincipalId } : {}),
-      thread_key: event.threadKey ?? `terminal-session:${event.sessionId}`,
-      closes_thread_keys: event.closesThreadKeys ?? [],
+      ...(actorPrincipalId ? { thread_owner_principal_id: actorPrincipalId } : {}),
+      thread_key: threadKey,
+      closes_thread_keys: event.closesThreadKeys
+        ?? (event.keepThreadOpen ? [] : [threadKey]),
       sessionId: event.sessionId,
       workingDir: event.workingDir ?? null,
       startedAt: event.startedAt ?? null,

@@ -12,7 +12,8 @@ export interface DeployEventPayload {
   pr?: number;
   url?: string;
   actor?: string;
-  actorPrincipalId?: string;
+  actorAuthority?: string;
+  actorExternalId?: string;
   threadKey?: string;
   closesThreadKeys?: string[];
   startedAt?: string;
@@ -26,11 +27,23 @@ const STATUS_VERB: Record<DeployStatus, string> = {
   rollback: 'rolled back',
 };
 
+function deployActorIdentity(event: DeployEventPayload) {
+  return event.actorAuthority && event.actorExternalId
+    ? { authority: event.actorAuthority, externalId: event.actorExternalId }
+    : null;
+}
+
 export const deployEventPlugin: CapturePlugin<DeployEventPayload> = {
   id: 'deploy-event',
 
-  transform(event, _ctx: CaptureContext = {}): CaptureInput[] {
+  actorIdentity: deployActorIdentity,
+
+  transform(event, ctx: CaptureContext = {}): CaptureInput[] {
     const verb = STATUS_VERB[event.status];
+    const identity = deployActorIdentity(event);
+    const actorPrincipalId = identity
+      ? ctx.resolveActorPrincipalId?.(identity) ?? null
+      : null;
 
     const lines = [`${event.version} ${verb} on ${event.environment}.`];
     if (event.commit) lines.push(`Commit: ${event.commit}`);
@@ -59,8 +72,9 @@ export const deployEventPlugin: CapturePlugin<DeployEventPayload> = {
           status: event.status,
           commit: event.commit ?? null,
           pr: event.pr ?? null,
-          actor: event.actor ?? null,
-          ...(event.actorPrincipalId ? { actor_principal_id: event.actorPrincipalId } : {}),
+          ...(event.actor ? { actor: event.actor } : {}),
+          ...(actorPrincipalId ? { actor_principal_id: actorPrincipalId } : {}),
+          ...(actorPrincipalId ? { thread_owner_principal_id: actorPrincipalId } : {}),
           thread_key: event.threadKey
             ?? `deploy:${event.project}:${event.environment}:${event.version}`,
           closes_thread_keys: event.closesThreadKeys ?? [],

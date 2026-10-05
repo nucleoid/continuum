@@ -32,13 +32,19 @@ function projectName(repoFullName: string): string {
 export const githubPrPlugin: CapturePlugin<GitHubPrEvent> = {
   id: 'github-pr',
 
+  actorIdentity(event) {
+    return { authority: 'github', externalId: String(event.pull_request.user.id) };
+  },
+
   transform(event, ctx: CaptureContext = {}): CaptureInput[] {
     if (event.action !== 'closed' || !event.pull_request.merged) return [];
 
     const pr = event.pull_request;
     const project = ctx.defaultProjectName ?? projectName(event.repository.full_name);
     const actor = String(pr.user.id);
-    const actorPrincipalId = ctx.resolveActorPrincipalId?.(actor) ?? null;
+    const actorPrincipalId = ctx.resolveActorPrincipalId?.({
+      authority: 'github', externalId: actor,
+    }) ?? null;
     const threadKey = `github-pr:${event.repository.full_name}#${pr.number}`;
 
     const lines: string[] = [];
@@ -67,6 +73,7 @@ export const githubPrPlugin: CapturePlugin<GitHubPrEvent> = {
           mergedByLogin: pr.merged_by?.login ?? null,
           actor,
           ...(actorPrincipalId ? { actor_principal_id: actorPrincipalId } : {}),
+          ...(actorPrincipalId ? { thread_owner_principal_id: actorPrincipalId } : {}),
           merged_by: pr.merged_by?.login ?? null,
           reviewers: [...new Set((event.reviews ?? []).map((review) => review.user.login))],
           requested_reviewers: [

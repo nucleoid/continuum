@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { deployEventPlugin, type DeployEventPayload } from './deploy-event.js';
+import { validateCaptureMetadata } from '../metadata.js';
 
 function deploy(overrides: Partial<DeployEventPayload> = {}): DeployEventPayload {
   return {
@@ -66,6 +67,28 @@ describe('deploy-event plugin', () => {
     expect(out[0].body).not.toContain('PR:');
     expect(out[0].body).not.toContain('Commit:');
     expect(out[0].sourceRef).toBeUndefined();
+    expect(() => validateCaptureMetadata(out[0].metadata)).not.toThrow();
+  });
+
+  it('only resolves an actor from an explicit authority and external id', () => {
+    const resolver = vi.fn(() => '11111111-1111-4111-8111-111111111111');
+    const unresolved = deployEventPlugin.transform(deploy(), {
+      resolveActorPrincipalId: resolver,
+    });
+    expect(resolver).not.toHaveBeenCalled();
+    expect(unresolved[0].metadata).not.toHaveProperty('actor_principal_id');
+
+    const resolved = deployEventPlugin.transform(deploy({
+      actorAuthority: 'azure-devops',
+      actorExternalId: 'aad-object-id-123',
+    }), { resolveActorPrincipalId: resolver });
+    expect(resolver).toHaveBeenCalledWith({
+      authority: 'azure-devops', externalId: 'aad-object-id-123',
+    });
+    expect(resolved[0].metadata).toMatchObject({
+      actor_principal_id: '11111111-1111-4111-8111-111111111111',
+      thread_owner_principal_id: '11111111-1111-4111-8111-111111111111',
+    });
   });
 
   it('appends notes when provided', () => {

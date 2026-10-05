@@ -74,6 +74,7 @@ export async function listStandupActivity(
         AND m.metadata ? 'thread_key'
         AND m.metadata ? 'actor'
         AND m.state IN ('live', 'stale')
+        AND (m.expires_at IS NULL OR m.expires_at > now())
         AND m.created_at >= $2 AND m.created_at < $3
       ORDER BY m.created_at ASC, m.id ASC
       LIMIT $4 OFFSET $5`,
@@ -87,6 +88,7 @@ export async function listOpenStandupThreads(
   principalId: string,
   before: Date,
   notBefore: Date,
+  asOf: Date,
   limit: number,
 ): Promise<StandupMemory[]> {
   const { rows } = await pool.query<StandupRow>(
@@ -99,17 +101,36 @@ export async function listOpenStandupThreads(
             m.created_at
        FROM memories m
        JOIN scopes s ON s.id = m.scope_id
-      WHERE ${AUTHORIZED_ACTIVITY}
+      WHERE COALESCE(
+              m.metadata->>'thread_owner_principal_id',
+              m.metadata->>'actor_principal_id'
+            ) = $1::text
+        AND (
+          (s.kind = 'user' AND s.owner_principal_id = $1::uuid)
+          OR (s.kind = 'project' AND EXISTS (
+            SELECT 1 FROM scope_memberships sm
+             WHERE sm.scope_id = s.id AND sm.principal_id = $1::uuid
+          ))
+        )
         AND m.type = 'context' AND m.state = 'live'
+        AND (m.expires_at IS NULL OR m.expires_at > now())
         AND m.metadata ? 'thread_key' AND m.metadata ? 'actor'
         AND m.created_at < $2 AND m.created_at >= $3
         AND NOT EXISTS (
           SELECT 1
             FROM memories closing
             JOIN scopes closing_scope ON closing_scope.id = closing.scope_id
-           WHERE closing.metadata->>'actor_principal_id' = $1::text
+           WHERE COALESCE(
+                   closing.metadata->>'thread_owner_principal_id',
+                   closing.metadata->>'actor_principal_id'
+                 ) = COALESCE(
+                   m.metadata->>'thread_owner_principal_id',
+                   m.metadata->>'actor_principal_id'
+                 )
              AND closing.created_at >= m.created_at
+             AND closing.created_at < $4
              AND closing.state IN ('live', 'stale', 'promoted')
+             AND (closing.expires_at IS NULL OR closing.expires_at > now())
              AND (
                (closing_scope.kind = 'user' AND closing_scope.owner_principal_id = $1::uuid)
                OR (closing_scope.kind = 'project' AND EXISTS (
@@ -122,8 +143,8 @@ export async function listOpenStandupThreads(
                    @> to_jsonb(ARRAY[m.metadata->>'thread_key'])
         )
       ORDER BY m.created_at ASC, m.id ASC
-      LIMIT $4`,
-    [principalId, before, notBefore, limit],
+      LIMIT $5`,
+    [principalId, before, notBefore, asOf, limit],
   );
   return rows.map(mapRow);
 }

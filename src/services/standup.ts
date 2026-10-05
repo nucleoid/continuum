@@ -147,7 +147,7 @@ export async function standupForPrincipal(
     ));
     const openNotBefore = new Date(window.end.getTime() - OPEN_THREAD_LOOKBACK_DAYS * DAY_MS);
     const openThreads = await listOpenStandupThreads(
-      pool, principal.id, openBefore, openNotBefore, openThreadLimit,
+      pool, principal.id, openBefore, openNotBefore, window.end, openThreadLimit,
     );
     const returned = [...activity, ...openThreads];
     await recordRead(pool, {

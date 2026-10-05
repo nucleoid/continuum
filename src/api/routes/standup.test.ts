@@ -144,6 +144,70 @@ describe('GET /api/v0/standup', () => {
     expect((await request(createApp(pool)).get('/api/v0/standup')).status).toBe(401);
   });
 
+  it('uses database time for expiry and does not let future records close historical threads', async () => {
+    const { me, open } = await seed();
+    await pool.query(
+      "UPDATE memories SET expires_at = now() - interval '1 second' WHERE title = 'Worked on digest'",
+    );
+    const futureClosure = await createMemory(pool, {
+      scopeId: open.scopeId, scopeKind: 'user', type: 'context',
+      title: 'Future closure', body: 'future', authorId: me.id,
+      source: 'terminal-summary', metadata: {
+        actor_principal_id: me.id, actor: 'actual-user',
+        thread_owner_principal_id: me.id,
+        thread_key: 'future:closure', closes_thread_keys: ['thread:open'],
+      },
+    });
+    await pool.query(
+      "UPDATE memories SET created_at = '2026-10-06T00:00:00Z' WHERE id = $1",
+      [futureClosure.id],
+    );
+
+    const response = await request(createApp(pool, { clock: () => now.getTime() }))
+      .get('/api/v0/standup').query({ since: '24h', openThreadDays: 2 })
+      .set('Authorization', 'Bearer entra:standup-me');
+    expect(response.status).toBe(200);
+    expect(response.body.activity.map((item: { title: string }) => item.title))
+      .not.toContain('Worked on digest');
+    expect(response.body.openThreads.map((item: { id: string }) => item.id)).toContain(open.id);
+  });
+
+  it('allows a different actual actor to close a thread only with explicit matching ownership', async () => {
+    const { me } = await seed();
+    const other = await createPrincipal(pool, {
+      externalId: 'entra:thread-closer', kind: 'user', displayName: 'Thread Closer',
+    });
+    const mine = await pool.query(
+      "SELECT id FROM scopes WHERE kind = 'user' AND owner_principal_id = $1", [me.id],
+    );
+    const opened = await createMemory(pool, {
+      scopeId: mine.rows[0].id, scopeKind: 'user', type: 'context', title: 'Explicitly owned thread',
+      body: 'open', authorId: me.id, source: 'terminal-summary', metadata: {
+        actor_principal_id: me.id, actor: 'me', thread_owner_principal_id: me.id,
+        thread_key: 'owned:thread', closes_thread_keys: [],
+      },
+    });
+    await pool.query(
+      "UPDATE memories SET created_at = '2026-09-29T09:00:00Z' WHERE id = $1", [opened.id],
+    );
+    const closed = await createMemory(pool, {
+      scopeId: mine.rows[0].id, scopeKind: 'user', type: 'context', title: 'Closed by teammate',
+      body: 'closed', authorId: other.id, source: 'terminal-summary', metadata: {
+        actor_principal_id: other.id, actor: 'other', thread_owner_principal_id: me.id,
+        thread_key: 'other:work', closes_thread_keys: ['owned:thread'],
+      },
+    });
+    await pool.query(
+      "UPDATE memories SET created_at = '2026-10-04T09:00:00Z' WHERE id = $1", [closed.id],
+    );
+
+    const response = await request(createApp(pool, { clock: () => now.getTime() }))
+      .get('/api/v0/standup').query({ since: '24h', openThreadDays: 2 })
+      .set('Authorization', 'Bearer entra:standup-me');
+    expect(response.status).toBe(200);
+    expect(response.body.openThreads.map((item: { id: string }) => item.id)).not.toContain(opened.id);
+  });
+
   it('returns no digest when required read auditing fails', async () => {
     await seed();
     await pool.query(`

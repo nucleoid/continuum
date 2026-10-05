@@ -250,6 +250,7 @@ export async function captureMemory(
       throw new ServiceError('FORBIDDEN', 'Principal lacks writer role on scope');
     }
     const actorPrincipalId = input.metadata?.actor_principal_id;
+    const threadOwnerPrincipalId = input.metadata?.thread_owner_principal_id;
     if (typeof actorPrincipalId === 'string') {
       if (principal.kind === 'user' && actorPrincipalId !== principal.id) {
         throw new ServiceError('FORBIDDEN', 'A user can attribute activity only to itself');
@@ -257,6 +258,19 @@ export async function captureMemory(
       const actor = await pool.query('SELECT kind FROM principals WHERE id = $1', [actorPrincipalId]);
       if (actor.rows[0]?.kind !== 'user') {
         throw new ServiceError('INVALID_INPUT', 'Activity actor must be an existing user principal');
+      }
+    }
+    if (typeof threadOwnerPrincipalId === 'string') {
+      if (principal.kind === 'user' && threadOwnerPrincipalId !== principal.id) {
+        throw new ServiceError('FORBIDDEN', 'A user can own only its own activity thread');
+      }
+      const owner = await pool.query(
+        'SELECT kind FROM principals WHERE id = $1', [threadOwnerPrincipalId],
+      );
+      if (owner.rows[0]?.kind !== 'user') {
+        throw new ServiceError(
+          'INVALID_INPUT', 'Activity thread owner must be an existing user principal',
+        );
       }
     }
 
@@ -323,6 +337,17 @@ export async function captureMemory(
         );
         if (actor.rows[0]?.kind !== 'user') {
           throw new ServiceError('INVALID_INPUT', 'Activity actor must be an existing user principal');
+        }
+      }
+      if (typeof threadOwnerPrincipalId === 'string') {
+        const owner = await client.query(
+          'SELECT kind FROM principals WHERE id = $1 FOR KEY SHARE',
+          [threadOwnerPrincipalId],
+        );
+        if (owner.rows[0]?.kind !== 'user') {
+          throw new ServiceError(
+            'INVALID_INPUT', 'Activity thread owner must be an existing user principal',
+          );
         }
       }
 

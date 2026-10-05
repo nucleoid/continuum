@@ -3,12 +3,18 @@ import type { CaptureInput } from '../types.js';
 export interface CaptureContext {
   defaultProjectName?: string;
   resolveUserScope?: (externalActor: string) => string | null;
-  resolveActorPrincipalId?: (externalActor: string) => string | null;
+  resolveActorPrincipalId?: (identity: ExternalActorIdentity) => string | null;
   now?: () => Date;
+}
+
+export interface ExternalActorIdentity {
+  authority: string;
+  externalId: string;
 }
 
 export interface CapturePlugin<TEvent = unknown> {
   readonly id: string;
+  actorIdentity?(event: TEvent): ExternalActorIdentity | null;
   transform(event: TEvent, ctx?: CaptureContext): CaptureInput[];
 }
 

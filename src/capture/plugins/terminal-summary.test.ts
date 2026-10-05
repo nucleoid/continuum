@@ -25,6 +25,14 @@ describe('terminal-summary plugin', () => {
     expect(m.body).toContain('Investigated COApi Node 22 pin.');
     expect(m.sourceRef).toBe('session://6ccfbaa8-c912-4f3a-91b0-664d77a8c1aa');
     expect(m.tags).toEqual(['session', 'terminal']);
+    expect(m.metadata?.closes_thread_keys).toEqual([
+      'terminal-session:6ccfbaa8-c912-4f3a-91b0-664d77a8c1aa',
+    ]);
+  });
+
+  it('keeps a terminal thread open only when explicitly requested', () => {
+    const out = terminalSummaryPlugin.transform(summary({ keepThreadOpen: true }));
+    expect(out[0].metadata?.closes_thread_keys).toEqual([]);
   });
 
   it('emits one extra decision memory per decision bullet', () => {

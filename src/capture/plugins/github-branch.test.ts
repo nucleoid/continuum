@@ -59,6 +59,7 @@ describe('github-branch plugin', () => {
     expect(out[0].metadata).toMatchObject({
       actor: '12345',
       actor_principal_id: '11111111-1111-4111-8111-111111111111',
+      thread_owner_principal_id: '11111111-1111-4111-8111-111111111111',
     });
   });
 

@@ -12,12 +12,8 @@ function boundedString(value: unknown, name: string, max: number): asserts value
 }
 
 export function validateCaptureMetadata(metadata: Record<string, unknown> = {}): void {
-  const activityKeys = [
-    'actor_principal_id', 'actor', 'thread_key', 'closes_thread_keys',
-    'merged_by', 'reviewers',
-  ];
-  if (activityKeys.some((key) => Object.hasOwn(metadata, key))) {
-    for (const required of ['actor_principal_id', 'actor', 'thread_key']) {
+  if (Object.hasOwn(metadata, 'actor_principal_id')) {
+    for (const required of ['actor', 'thread_key']) {
       if (!Object.hasOwn(metadata, required)) {
         throw new ServiceError(
           'INVALID_INPUT',
@@ -34,6 +30,19 @@ export function validateCaptureMetadata(metadata: Record<string, unknown> = {}):
   }
   if (Object.hasOwn(metadata, 'actor')) {
     boundedString(metadata.actor, 'metadata.actor', MAX_ACTOR_LENGTH);
+  }
+  if (Object.hasOwn(metadata, 'thread_owner_principal_id')) {
+    boundedString(metadata.thread_owner_principal_id, 'metadata.thread_owner_principal_id', 36);
+    if (!UUID.test(metadata.thread_owner_principal_id)) {
+      throw new ServiceError(
+        'INVALID_INPUT', 'metadata.thread_owner_principal_id must be a UUID',
+      );
+    }
+    if (!Object.hasOwn(metadata, 'thread_key')) {
+      throw new ServiceError(
+        'INVALID_INPUT', 'metadata.thread_owner_principal_id requires thread_key',
+      );
+    }
   }
   if (Object.hasOwn(metadata, 'thread_key')) {
     boundedString(metadata.thread_key, 'metadata.thread_key', MAX_THREAD_KEY_LENGTH);

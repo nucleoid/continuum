@@ -63,13 +63,16 @@ describe('github-pr plugin', () => {
     const ev = mergedEvent({ requested_reviewers: [{ login: 'reviewer-exampleorg' }] });
     ev.reviews = [{ user: { login: 'actual-reviewer-exampleorg' } }];
     const out = githubPrPlugin.transform(ev, {
-      resolveActorPrincipalId: (actor) => actor === '1001'
+      resolveActorPrincipalId: (identity) => (
+        identity.authority === 'github' && identity.externalId === '1001'
+      )
         ? '11111111-1111-4111-8111-111111111111'
         : null,
     });
     expect(out[0].metadata).toMatchObject({
       actor: '1001',
       actor_principal_id: '11111111-1111-4111-8111-111111111111',
+      thread_owner_principal_id: '11111111-1111-4111-8111-111111111111',
       merged_by: 'scott-exampleorg',
       reviewers: ['actual-reviewer-exampleorg'],
       requested_reviewers: ['reviewer-exampleorg'],
