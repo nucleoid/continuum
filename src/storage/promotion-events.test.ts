@@ -341,6 +341,40 @@ describe('promotion outbox', () => {
     },
   );
 
+  it.each(['renew', 'release'] as const)(
+    'does not let a stale retained attempt %s a newer lease held by the same owner',
+    async (operation) => {
+      const { principal, source } = await seed();
+      await promoteMemoryWithAudit(
+        pool, principal.id, source.id, { kind: 'project', name: 'destination' }, {}, ['hook'],
+      );
+      const [first] = await claimPromotionDeliveries(pool, {
+        owner: 'worker', webhookIds: ['hook'], limit: 1, leaseMs: 1000,
+      });
+      await pool.query(
+        `UPDATE promotion_event_deliveries SET lease_expires_at = now() - interval '1 second'`,
+      );
+      const [second] = await claimPromotionDeliveries(pool, {
+        owner: 'worker', webhookIds: ['hook'], limit: 1, leaseMs: 1000,
+      });
+
+      if (operation === 'renew') {
+        await expect(renewPromotionDeliveries(pool, 'worker', [first], 1000))
+          .resolves.toEqual({ renewed: [], terminalOwned: [], lost: [first] });
+      } else {
+        await expect(releasePromotionDeliveries(pool, 'worker', [first])).resolves.toBe(1);
+      }
+      const { rows } = await pool.query(
+        `SELECT state, attempt_count, lease_owner FROM promotion_event_deliveries`,
+      );
+      expect(rows).toEqual([{
+        state: 'pending',
+        attempt_count: second.attemptCount,
+        lease_owner: operation === 'renew' ? 'worker' : null,
+      }]);
+    },
+  );
+
   it('dead-letters crash-recovered deliveries at the configured attempt bound', async () => {
     const { principal, source } = await seed();
     await promoteMemoryWithAudit(
