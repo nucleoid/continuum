@@ -5,18 +5,19 @@ PostgreSQL directly. Install the package, then run `continuum --help`.
 
 ## Configuration
 
-Configuration precedence is:
+Without a selected profile, configuration precedence is:
 
-1. `--api-url`, `--token`, `--profile`, and `--timeout` flags
-2. The selected named profile in the config file
-3. `CONTINUUM_API_URL` and `CONTINUUM_TOKEN`
-4. `http://127.0.0.1:4000` and a 10 second timeout
+1. `--api-url`, `--token`, and `--timeout` flags
+2. `CONTINUUM_API_URL` and `CONTINUUM_TOKEN`
+3. `http://127.0.0.1:4000` and a 10 second timeout
 
 The default config file is `~/.continuum/config.json`; override it with
 `--config`. Profiles may store an API URL and the **name** of an environment
-variable containing the token. Token values are rejected in the file.
-A selected profile that names `tokenEnv` fails closed when that variable is
-unset; it never falls back to `CONTINUUM_TOKEN` for a different API host.
+variable containing the token. Token values are rejected in the file. A profile
+must define both `apiUrl` and `tokenEnv`; selecting it (with `--profile` or
+`defaultProfile`) treats those values as one credential boundary. It cannot be
+combined with `--api-url` or `--token`, and never falls back to
+`CONTINUUM_API_URL` or `CONTINUUM_TOKEN` when either profile value is missing.
 
 ```json
 {

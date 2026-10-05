@@ -15,11 +15,15 @@
     "!dist/**/*.test.*",
     "!dist/**/*.spec.*",
     "docs",
+    "migrations",
+    "scripts/ensure-scope.mjs",
+    "scripts/*.sql",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
     "build": "tsc",
+    "prepack": "npm run build",
     "pretest": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",

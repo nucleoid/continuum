@@ -16,7 +16,7 @@ describe('CLI config', () => {
     expect(resolveConfig({}, env, file)).toMatchObject({
       apiUrl: 'https://profile.test', token: 'profile-token', profile: 'work',
     });
-    expect(resolveConfig({ apiUrl: 'https://flag.test/', token: 'flag-token' }, env, file))
+    expect(resolveConfig({ apiUrl: 'https://flag.test/', token: 'flag-token' }, env, null))
       .toMatchObject({ apiUrl: 'https://flag.test', token: 'flag-token' });
     expect(resolveConfig({}, env, null)).toMatchObject({
       apiUrl: 'https://env.test', token: 'env-token',
@@ -35,10 +35,39 @@ describe('CLI config', () => {
       profiles: { work: { apiUrl: 'https://work.test', tokenEnv: 'WORK_TOKEN' } },
     })).toThrow(/bearer token is required/i);
 
-    expect(resolveConfig({ token: 'explicit' }, { CONTINUUM_TOKEN: 'wrong-host-token' }, {
+  });
+
+  it('treats a selected profile as an atomic host and credential boundary', () => {
+    expect(() => resolveConfig({}, { WORK_TOKEN: 'profile-token' }, {
+      defaultProfile: 'work', profiles: { work: { tokenEnv: 'WORK_TOKEN' } },
+    })).toThrow(/apiUrl/i);
+    expect(() => resolveConfig({}, {
+      CONTINUUM_API_URL: 'https://env.test', WORK_TOKEN: 'profile-token',
+    }, {
+      defaultProfile: 'work', profiles: { work: { tokenEnv: 'WORK_TOKEN' } },
+    })).toThrow(/apiUrl/i);
+
+    expect(() => resolveConfig({}, { CONTINUUM_TOKEN: 'env-token' }, {
+      defaultProfile: 'work', profiles: { work: { apiUrl: 'https://profile.test' } },
+    })).toThrow(/tokenEnv/i);
+    expect(() => resolveConfig({ token: 'flag-token' }, {}, {
       defaultProfile: 'work',
-      profiles: { work: { apiUrl: 'https://work.test', tokenEnv: 'WORK_TOKEN' } },
-    })).toMatchObject({ token: 'explicit', apiUrl: 'https://work.test' });
+      profiles: { work: { apiUrl: 'https://profile.test', tokenEnv: 'WORK_TOKEN' } },
+    })).toThrow(/cannot be combined/i);
+    expect(() => resolveConfig({ apiUrl: 'https://flag.test' }, { WORK_TOKEN: 'profile-token' }, {
+      defaultProfile: 'work',
+      profiles: { work: { apiUrl: 'https://profile.test', tokenEnv: 'WORK_TOKEN' } },
+    })).toThrow(/cannot be combined/i);
+  });
+
+  it('validates config and profile objects and uses own profile properties', () => {
+    expect(() => resolveConfig({}, {}, { profiles: null as never })).toThrow(/profiles.*object/i);
+    expect(() => resolveConfig({}, {}, {
+      profiles: { broken: null as never }, defaultProfile: 'broken',
+    })).toThrow(/profile.*object/i);
+    expect(() => resolveConfig({}, {}, {
+      profiles: {}, defaultProfile: 'constructor',
+    })).toThrow(/unknown profile/i);
   });
 
   it('rejects an explicitly named missing config file', async () => {

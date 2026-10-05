@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -39,6 +39,36 @@ try {
   if (packageJson.bin?.continuum !== 'bin/continuum.mjs') {
     throw new Error('Packed package does not expose the continuum binary');
   }
+  const installedRoot = join(temporary, 'node_modules', '@continuum', 'core');
+  for (const required of [
+    'migrations/0001_init.sql',
+    'migrations/0004_review_queue_index.sql',
+    'scripts/ensure-scope.mjs',
+    'scripts/create-scope-operator.sql',
+    'scripts/retire-scope-operator.sql',
+  ]) {
+    if (!existsSync(join(installedRoot, required))) {
+      throw new Error(`Packed package is missing required runtime artifact: ${required}`);
+    }
+  }
+  const { pathToFileURL } = await import('node:url');
+  const { runMigrations } = await import(
+    pathToFileURL(join(installedRoot, 'dist', 'storage', 'migrator.js')).href
+  );
+  let ledgerChecks = 0;
+  const client = {
+    async query(sql) {
+      if (String(sql).includes('FROM _continuum_migrations')) {
+        ledgerChecks += 1;
+        return { rowCount: 1, rows: [] };
+      }
+      if (String(sql).includes('pg_advisory_unlock')) return { rows: [{ unlocked: true }] };
+      return { rowCount: 0, rows: [] };
+    },
+    release() {},
+  };
+  await runMigrations({ connect: async () => client });
+  if (ledgerChecks < 4) throw new Error('Packed migrator did not discover packaged migrations');
   process.stdout.write('Packed continuum CLI entrypoint passed\n');
 } finally {
   rmSync(temporary, { recursive: true, force: true });

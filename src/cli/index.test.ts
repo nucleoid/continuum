@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { runCli, type CliDependencies } from './index.js';
+import { readBoundedStdin, runCli, type CliDependencies } from './index.js';
 import { CliError } from './http.js';
 
 function harness(fetch: typeof globalThis.fetch, stdin = '', stdinIsTTY = true) {
@@ -75,7 +75,7 @@ describe('continuum CLI', () => {
     });
     filed.deps.readFile = vi.fn(async () => {
       order.push('read');
-      return 'file body';
+      return 'file body\r\n';
     });
     expect(await runCli([
       'capture', '--scope', 'org', '--type', 'fact', '--title', 'File', '--body-file', 'notes.md',
@@ -83,6 +83,36 @@ describe('continuum CLI', () => {
     expect(filed.readStdin).not.toHaveBeenCalled();
     expect(order).toEqual(['stat', 'read']);
     expect(bodies).toEqual(['flag body', 'file body']);
+  });
+
+  it('normalizes one trailing line ending for every capture body source', async () => {
+    const bodies: string[] = [];
+    const fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)).body);
+      return Response.json({ id: `memory-${bodies.length}` }, { status: 201 });
+    });
+    const flagged = harness(fetch as typeof globalThis.fetch);
+    await runCli([
+      'capture', '--scope', 'org', '--type', 'fact', '--title', 'Flag', '--body', 'flag body\n',
+    ], flagged.deps);
+    const piped = harness(fetch as typeof globalThis.fetch, 'pipe body\r\n', false);
+    await runCli([
+      'capture', '--scope', 'org', '--type', 'fact', '--title', 'Pipe',
+    ], piped.deps);
+    expect(bodies).toEqual(['flag body', 'pipe body']);
+  });
+
+  it('bounds idle stdin waits', async () => {
+    const stream = {
+      [Symbol.asyncIterator]() {
+        return {
+          next: () => new Promise<IteratorResult<Uint8Array>>(() => undefined),
+          return: async () => ({ done: true, value: undefined }),
+        };
+      },
+    };
+    await expect(readBoundedStdin(stream, { idleTimeoutMs: 5, overallTimeoutMs: 50 }))
+      .rejects.toMatchObject({ exitCode: 2, message: expect.stringMatching(/timed out/i) });
   });
 
   it('rejects oversized body files from metadata before reading them', async () => {
@@ -113,6 +143,17 @@ describe('continuum CLI', () => {
     });
     expect(await runCli(['scopes', '--config', 'missing.json'], h.deps)).toBe(2);
     expect(h.stderr()).toContain('Config file does not exist');
+  });
+
+  it('validates commands before loading authenticated configuration', async () => {
+    const h = harness(vi.fn() as typeof globalThis.fetch);
+    h.deps.env = {};
+    const readConfig = vi.fn(async () => null);
+    h.deps.readConfig = readConfig;
+    expect(await runCli(['does-not-exist'], h.deps)).toBe(2);
+    expect(h.stderr()).toContain('Unknown command: does-not-exist');
+    expect(h.stderr()).not.toContain('bearer token');
+    expect(readConfig).not.toHaveBeenCalled();
   });
 
   it('normalizes relative audit times against the injected clock', async () => {

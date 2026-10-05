@@ -8,6 +8,48 @@ const MAX_INPUT_BYTES = 1024 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MEMORY_TYPES = new Set(['fact', 'decision', 'context', 'playbook', 'relationship']);
 const AUDIT_ACTIONS = new Set(['read', 'write', 'promote', 'archive', 'verify']);
+const STDIN_IDLE_TIMEOUT_MS = 30_000;
+const STDIN_OVERALL_TIMEOUT_MS = 120_000;
+
+export async function readBoundedStdin(
+  stream: AsyncIterable<Uint8Array | string>,
+  options: { idleTimeoutMs?: number; overallTimeoutMs?: number } = {},
+): Promise<string> {
+  const idleTimeoutMs = options.idleTimeoutMs ?? STDIN_IDLE_TIMEOUT_MS;
+  const overallTimeoutMs = options.overallTimeoutMs ?? STDIN_OVERALL_TIMEOUT_MS;
+  const deadline = Date.now() + overallTimeoutMs;
+  const iterator = stream[Symbol.asyncIterator]();
+  const chunks: Buffer[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new CliError('Standard input timed out', 2);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new CliError('Standard input timed out', 2)),
+          Math.min(idleTimeoutMs, remaining),
+        );
+      });
+      let result: IteratorResult<Uint8Array | string>;
+      try {
+        result = await Promise.race([iterator.next(), timeout]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+      if (result.done) break;
+      const buffer = Buffer.isBuffer(result.value) ? result.value : Buffer.from(result.value);
+      size += buffer.byteLength;
+      if (size > MAX_INPUT_BYTES) throw new CliError('Standard input exceeds 1 MiB', 2);
+      chunks.push(buffer);
+    }
+    return Buffer.concat(chunks).toString('utf8');
+  } catch (error) {
+    await iterator.return?.().catch(() => undefined);
+    throw error;
+  }
+}
 
 export interface CliDependencies {
   env: Record<string, string | undefined>;
@@ -26,17 +68,7 @@ const defaults: CliDependencies = {
   env: process.env,
   fetch: globalThis.fetch,
   stdinIsTTY: Boolean(process.stdin.isTTY),
-  async readStdin() {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    for await (const chunk of process.stdin) {
-      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      size += buffer.byteLength;
-      if (size > MAX_INPUT_BYTES) throw new CliError('Standard input exceeds 1 MiB', 2);
-      chunks.push(buffer);
-    }
-    return Buffer.concat(chunks).toString('utf8');
-  },
+  async readStdin() { return readBoundedStdin(process.stdin); },
   readConfig: readConfigFile,
   statFile: stat,
   readFile,
@@ -147,8 +179,9 @@ async function commandCapture(args: string[], client: ApiClient, deps: CliDepend
     if (deps.stdinIsTTY) {
       throw new CliError('Capture requires --body, --body-file, or non-TTY stdin', 2);
     }
-    body = cleanInput(checkedBytes(await deps.readStdin(), 'Standard input'));
+    body = checkedBytes(await deps.readStdin(), 'Standard input');
   }
+  body = cleanInput(body ?? '');
   if (!body) throw new CliError('Capture body cannot be empty', 2);
   const type = requireString(values.type, '--type');
   if (!MEMORY_TYPES.has(type)) throw new CliError(`Invalid memory type: ${type}`, 2);
@@ -297,6 +330,12 @@ export async function runCli(argv: string[], dependencies: Partial<CliDependenci
       deps.stdout(usage());
       return 0;
     }
+    const commands: Record<string, (args: string[], client: ApiClient, deps: CliDependencies) => Promise<void>> = {
+      capture: commandCapture, recall: commandRecall, audit: commandAudit, scopes: commandScopes,
+      promote: commandPromote, verify: commandVerify, 'agents-md': commandAgentsMd,
+    };
+    const handler = commands[command];
+    if (!handler) throw new CliError(`Unknown command: ${command}`, 2);
     const args = argv.slice(1);
     const global = parseArgs({ args, allowPositionals: true, strict: false, options: commonOptions }).values;
     if (global.help) {
@@ -316,12 +355,6 @@ export async function runCli(argv: string[], dependencies: Partial<CliDependenci
       profile: globalString(global.profile), timeoutMs,
     }, deps.env, file);
     const client = new ApiClient({ ...config, fetch: deps.fetch });
-    const commands: Record<string, (args: string[], client: ApiClient, deps: CliDependencies) => Promise<void>> = {
-      capture: commandCapture, recall: commandRecall, audit: commandAudit, scopes: commandScopes,
-      promote: commandPromote, verify: commandVerify, 'agents-md': commandAgentsMd,
-    };
-    const handler = commands[command];
-    if (!handler) throw new CliError(`Unknown command: ${command}`, 2);
     await handler(args, client, deps);
     return 0;
   } catch (error) {
