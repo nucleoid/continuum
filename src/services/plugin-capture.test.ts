@@ -56,7 +56,7 @@ describe('plugin capture to standup attribution', () => {
     expect(captured.memory.metadata).toMatchObject({
       actor: 'Renamable Display Name', actor_principal_id: actor.id,
       thread_owner_principal_id: actor.id,
-      thread_key: `github.${service.id}:pr:org/continuum#68`,
+      thread_key: 'github:pr:org/continuum#68',
     });
     const otherProducer = await createPrincipal(pool, {
       externalId: 'svc:github-enterprise-webhook', kind: 'service',
@@ -73,6 +73,49 @@ describe('plugin capture to standup attribution', () => {
       now: new Date(Date.now() + 1_000),
     });
     expect(standup.activity.map((memory) => memory.id)).toEqual([captured.memory.id]);
+  });
+
+  it('keeps GitHub branch and PR threads stable across separate service principals', async () => {
+    const prService = await createPrincipal(pool, {
+      externalId: 'svc:github-pr', kind: 'service', displayName: 'GitHub PR webhook',
+    });
+    const branchService = await createPrincipal(pool, {
+      externalId: 'svc:github-branch', kind: 'service', displayName: 'GitHub branch webhook',
+    });
+    const actor = await createPrincipal(pool, {
+      externalId: 'entra:github-actor', kind: 'user', displayName: 'GitHub actor',
+    });
+    const admin = await createPrincipal(pool, {
+      externalId: 'entra:github-admin', kind: 'user', displayName: 'GitHub admin',
+    });
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    const project = await createScope(pool, { kind: 'project', name: 'continuum' });
+    const userScope = await createScope(pool, { kind: 'user', name: 'github-actor' }, actor.id);
+    await addMembership(pool, admin.id, org!.id, 'admin');
+    await addMembership(pool, prService.id, project.id, 'writer');
+    await addMembership(pool, branchService.id, userScope.id, 'writer');
+    await addMembership(pool, actor.id, project.id, 'reader');
+    await mapActorIdentity(pool, {
+      authority: 'github', externalActorId: '5150', principalId: actor.id,
+      mappedByPrincipalId: admin.id,
+    });
+
+    const [branch] = await capturePluginEvent(pool, null, branchService, 'github-branch', {
+      ref: 'feature/stable', ref_type: 'branch', master_branch: 'master',
+      repository: { full_name: 'org/continuum', name: 'continuum',
+        html_url: 'https://github.test/org/continuum' },
+      sender: { id: 5150, login: 'rename-safe' },
+    }, { resolveUserScope: () => 'github-actor' });
+    const event = mergedPr(72, 5150, 'rename-safe');
+    event.pull_request.head.ref = 'feature/stable';
+    const [pr] = await capturePluginEvent(pool, null, prService, 'github-pr', event);
+
+    const branchKey = 'github:branch:org/continuum:feature/stable';
+    expect(branch.memory.metadata.thread_key).toBe(branchKey);
+    expect(pr.memory.metadata.thread_key).toBe('github:pr:org/continuum#72');
+    expect(pr.memory.metadata.closes_thread_keys).toContain(branchKey);
+    expect(branch.memory.metadata._continuum_actor_mapping_authority).toBe('github');
+    expect(pr.memory.metadata._continuum_actor_mapping_authority).toBe('github');
   });
 
   it('excludes historical activity after its exact actor mapping is revoked or replaced', async () => {
@@ -191,8 +234,8 @@ describe('plugin capture to standup attribution', () => {
     });
     expect(mapped.memory.metadata).toMatchObject({
       actor: 'Deployer', actor_principal_id: actor.id, thread_owner_principal_id: actor.id,
-      thread_key: `deploy-event.${service.id}:deploy:continuum:prod:v1`,
-      closes_thread_keys: [],
+      thread_key: 'deploy-event:deploy:continuum:prod:v1',
+      closes_thread_keys: ['deploy-event:deploy:continuum:prod:v1'],
       _continuum_actor_mapping_id: expect.any(String),
       _continuum_actor_mapping_authority: `deploy-event.${service.id}`,
     });
@@ -275,9 +318,9 @@ describe('plugin capture to standup attribution', () => {
     expect(captured.memory.metadata).toMatchObject({
       actor: 'Terminal actor', actor_principal_id: actor.id,
       thread_owner_principal_id: actor.id,
-      thread_key: `terminal-summary.${service.id}:terminal-session:7ccfbaa8-c912-4f3a-91b0-664d77a8c1bb`,
+      thread_key: 'terminal-summary:terminal-session:7ccfbaa8-c912-4f3a-91b0-664d77a8c1bb',
       closes_thread_keys: [
-        `terminal-summary.${service.id}:terminal-session:7ccfbaa8-c912-4f3a-91b0-664d77a8c1bb`,
+        'terminal-summary:terminal-session:7ccfbaa8-c912-4f3a-91b0-664d77a8c1bb',
       ],
     });
   });

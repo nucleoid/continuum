@@ -1079,7 +1079,9 @@ describe('shared services', () => {
     );
     const mappingId = mapping.rows[0]!.mapping_id;
     const source = await createMemory(pool, {
-      scopeId: team.id, scopeKind: team.kind, type: 'context', title: 'Old activity',
+      // A decision would ordinarily never expire in the project destination. The trusted
+      // activity's source expiry must still remain an absolute ceiling after promotion.
+      scopeId: team.id, scopeKind: team.kind, type: 'decision', title: 'Old activity',
       body: 'Promotion is knowledge movement, not a new activity event.',
       authorId: principal.id, source: 'terminal-summary',
       metadata: {
@@ -1092,9 +1094,10 @@ describe('shared services', () => {
       },
     });
     const activityAt = new Date('2026-10-05T08:00:00.000Z');
+    const sourceExpiry = new Date('2026-10-07T08:00:00.000Z');
     await pool.query(
-      'UPDATE memories SET created_at = $2, updated_at = $2 WHERE id = $1',
-      [source.id, activityAt],
+      'UPDATE memories SET created_at = $2, updated_at = $2, expires_at = $3 WHERE id = $1',
+      [source.id, activityAt, sourceExpiry],
     );
 
     const result = await promoteForPrincipal(
@@ -1111,6 +1114,7 @@ describe('shared services', () => {
       _continuum_actor_mapping_id: mappingId,
       _continuum_actor_mapping_authority: 'terminal-summary.producer',
     });
+    expect(result.destination.expiresAt).toEqual(sourceExpiry);
     const standup = await standupForPrincipal(pool, principal, { sinceHours: 24 }, {
       now: new Date('2026-10-05T12:00:00.000Z'),
     });

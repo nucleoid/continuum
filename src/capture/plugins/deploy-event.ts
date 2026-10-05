@@ -79,7 +79,8 @@ export const deployEventPlugin: CapturePlugin<DeployEventPayload> = {
           ...(actorPrincipalId ? { actor_principal_id: actorPrincipalId } : {}),
           ...(actorPrincipalId ? { thread_owner_principal_id: actorPrincipalId } : {}),
           thread_key: threadKey,
-          closes_thread_keys: [],
+          // A deployment notification is a terminal observation, not ongoing work.
+          closes_thread_keys: [threadKey],
           startedAt: event.startedAt ?? null,
           finishedAt: event.finishedAt ?? null,
         },

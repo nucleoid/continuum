@@ -31,4 +31,26 @@ describe('ingest configuration', () => {
       auth: { kind: 'ado-basic', username: 'hook-user', password: 'hook-password' },
     } } });
   });
+
+  it('uses one explicit GitHub activity namespace across split service principals', () => {
+    const common = {
+      CONTINUUM_INGEST_GITHUB_PR_ENABLED: 'true',
+      CONTINUUM_INGEST_GITHUB_PR_PRINCIPAL: 'service:github-pr',
+      CONTINUUM_INGEST_GITHUB_PR_SECRET: 'pr-secret',
+      CONTINUUM_INGEST_GITHUB_BRANCH_ENABLED: 'true',
+      CONTINUUM_INGEST_GITHUB_BRANCH_PRINCIPAL: 'service:github-branch',
+      CONTINUUM_INGEST_GITHUB_BRANCH_SECRET: 'branch-secret',
+    };
+    expect(ingestConfigFromEnv(common).plugins['github-pr']?.activityNamespace)
+      .toBeUndefined();
+    expect(() => ingestConfigFromEnv({
+      ...common,
+      CONTINUUM_INGEST_GITHUB_PR_ACTIVITY_NAMESPACE: 'github.prod',
+      CONTINUUM_INGEST_GITHUB_BRANCH_ACTIVITY_NAMESPACE: 'github.other',
+    })).toThrow(/same activity namespace/);
+    expect(() => ingestConfigFromEnv({
+      ...common,
+      CONTINUUM_INGEST_GITHUB_PR_ACTIVITY_NAMESPACE: 'GitHub Invalid',
+    })).toThrow(/activity namespace/);
+  });
 });

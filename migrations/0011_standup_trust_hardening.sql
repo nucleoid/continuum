@@ -2,32 +2,6 @@
 -- caller-controlled reserved metadata cannot be distinguished from trusted
 -- capture history. New captures receive the marker only after authorization.
 
-DROP INDEX memories_standup_actor_created_idx;
-CREATE INDEX memories_standup_actor_created_idx
-  ON memories ((metadata->>'actor_principal_id'), created_at DESC, id)
-  WHERE metadata->>'_continuum_activity_provenance' = 'capture-v1'
-    AND metadata ? 'actor_principal_id';
-
-DROP INDEX memories_standup_thread_idx;
-CREATE INDEX memories_standup_thread_idx
-  ON memories ((metadata->>'thread_key'), created_at DESC, id)
-  WHERE metadata->>'_continuum_activity_provenance' = 'capture-v1'
-    AND metadata ? 'thread_key';
-
-DROP INDEX memories_standup_closures_gin;
-CREATE INDEX memories_standup_closures_gin
-  ON memories USING gin ((metadata->'closes_thread_keys'))
-  WHERE metadata->>'_continuum_activity_provenance' = 'capture-v1'
-    AND metadata ? 'closes_thread_keys';
-
-DROP INDEX memories_standup_open_threads_idx;
-CREATE INDEX memories_standup_open_threads_idx
-  ON memories ((COALESCE(metadata->>'thread_owner_principal_id',
-                         metadata->>'actor_principal_id')), created_at, id)
-  WHERE state = 'live' AND type = 'context'
-    AND metadata->>'_continuum_activity_provenance' = 'capture-v1'
-    AND metadata ? 'thread_key';
-
 DROP TRIGGER validate_actor_principal_mapping_trigger ON actor_principal_mappings;
 CREATE TRIGGER validate_actor_principal_mapping_trigger
   BEFORE INSERT ON actor_principal_mappings

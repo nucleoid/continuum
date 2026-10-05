@@ -333,13 +333,17 @@ external IDs through historical, database-audited org-admin mappings.
 Revocation retains the immutable old row; replacement atomically revokes it and
 inserts a new active row. Revoked mapping history no longer authorizes old
 standup activity, and replacement does not reactivate it. GitHub uses numeric
-webhook user IDs, never mutable logins, under a namespace containing the
-authenticated ingestion principal.
-Deploy and terminal identities and thread keys use the same producer namespace
-rule. PR authors and deploy actors are the activity actors, while mergers and
-reviewers remain separate metadata. Promotion preserves unexpired, internally
-trusted activity at its original time while stripping all activity trust fields
-from expired or untrusted legacy rows.
+webhook user IDs, never mutable logins, under one configured namespace shared
+by PR and branch ingestion even when their service principals differ. Legacy
+login aliases can temporarily route branch capture but never authorize activity.
+Deploy and terminal identities and thread keys use stable configured namespaces.
+Deploy events self-close because they are terminal facts. PR authors and deploy
+actors are the activity actors, while mergers and reviewers remain separate
+metadata. Promotion preserves unexpired, internally trusted activity at its
+original time and caps destination expiry at source expiry, while stripping all
+activity trust fields from expired or untrusted legacy rows. Large standup
+indexes are built concurrently; reserved-field cleanup is an explicit bounded
+maintenance script, not an ordinary startup migration.
 
 ## Shared service layer
 

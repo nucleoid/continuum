@@ -21,7 +21,6 @@ import type { Queryable } from '../storage/queryable.js';
 import {
   ACTOR_MAPPING_AUTHORITY_KEY,
   ACTOR_MAPPING_ID_KEY,
-  hasTrustedActivityMetadata,
   markTrustedActivityMetadata,
   validateCaptureMetadata,
 } from '../capture/metadata.js';
@@ -254,7 +253,8 @@ export async function captureMappedPluginOne(
   attribution: MappedActorAttribution,
   auditMetadata: Record<string, unknown> = {},
 ): Promise<CaptureResult> {
-  validateCapture(input);
+  validateCaptureContent(input);
+  validateScopeRef(input.scope);
   const scope = await getScopeByRef(client, input.scope);
   if (!scope) throw new ServiceError('SCOPE_NOT_FOUND', 'Scope not found');
   if (!(await canWriteScopeForMutation(client, principal.id, scope.id))) {
@@ -363,16 +363,18 @@ async function captureMemoryInternal(
   mappedAttribution?: MappedActorAttribution,
 ): Promise<CaptureResult> {
   try {
-    validateCaptureContent(input);
-    const relationThreshold = validateRelationThreshold(
-      options.relationThreshold ?? DEFAULT_RELATION_THRESHOLD,
-    );
-    if (!mappedAttribution && hasTrustedActivityMetadata(input.metadata)) {
+    if (!mappedAttribution && input.metadata
+        && ['actor', 'actor_principal_id', 'thread_owner_principal_id', 'thread_key', 'closes_thread_keys']
+          .some((key) => Object.hasOwn(input.metadata!, key))) {
       throw new ServiceError(
         'FORBIDDEN',
         'Activity attribution, threads, closure, and provenance require trusted mapped plugin capture',
       );
     }
+    validateCaptureContent(input);
+    const relationThreshold = validateRelationThreshold(
+      options.relationThreshold ?? DEFAULT_RELATION_THRESHOLD,
+    );
     validateScopeRef(input.scope);
     const scope = await getScopeByRef(pool, input.scope);
     if (!scope) throw new ServiceError('SCOPE_NOT_FOUND', 'Scope not found');

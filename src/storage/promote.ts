@@ -109,6 +109,7 @@ async function promoteOperation(
     sourceRef: source.sourceRef ?? null,
     tags: source.tags,
     metadata: { ...destinationMetadata, promoted_from: source.id },
+    expiresAtCeiling: mappingAuthorized ? source.expiresAt : null,
   });
   const { rows } = await client.query(
     `UPDATE memories

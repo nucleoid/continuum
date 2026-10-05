@@ -94,7 +94,9 @@ describe('deploy-event plugin', () => {
       actor_principal_id: '11111111-1111-4111-8111-111111111111',
       thread_owner_principal_id: '11111111-1111-4111-8111-111111111111',
       thread_key: 'deploy-event.authenticated-service:deploy:booking-engine:prod:v1.42.0',
-      closes_thread_keys: [],
+      closes_thread_keys: [
+        'deploy-event.authenticated-service:deploy:booking-engine:prod:v1.42.0',
+      ],
     });
   });
 

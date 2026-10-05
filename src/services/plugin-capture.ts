@@ -18,6 +18,7 @@ export interface PluginCaptureOptions extends CaptureOptions {
   defaultProjectName?: string;
   resolveUserScope?: CaptureContext['resolveUserScope'];
   auditMetadata?: Record<string, unknown>;
+  activityNamespace?: string;
 }
 
 function sameIdentity(
@@ -29,6 +30,18 @@ function sameIdentity(
 
 export function authenticatedActorAuthority(pluginId: string, principalId: string): string {
   return `${pluginId}.${principalId}`;
+}
+
+async function resolveCurrentOrLegacyMapping(
+  pool: pg.Pool,
+  authority: string,
+  legacyAuthority: string,
+  externalId: string,
+) {
+  return await resolveActorIdentityMapping(pool, { authority, externalId })
+    ?? (legacyAuthority === authority
+      ? null
+      : await resolveActorIdentityMapping(pool, { authority: legacyAuthority, externalId }));
 }
 
 export async function capturePluginEvent(
@@ -44,29 +57,30 @@ export async function capturePluginEvent(
   if (!plugin) throw new UnknownPluginError(pluginId);
 
   const claimedIdentity = plugin.actorIdentity?.(event) ?? null;
+  const baseAuthority = plugin.activityIdentityAuthority ?? pluginId;
   const activityNamespace = plugin.trustedActivityMetadata
-    ? authenticatedActorAuthority(
-        plugin.activityIdentityAuthority ?? pluginId,
-        ingestionPrincipal.id,
-      )
+    ? options.activityNamespace ?? baseAuthority
     : undefined;
-  const identity = claimedIdentity && activityNamespace
-    ? { authority: activityNamespace, externalId: claimedIdentity.externalId }
-    : claimedIdentity;
-  const actorMapping = identity
-    ? await resolveActorIdentityMapping(pool, identity)
+  const legacyAuthority = authenticatedActorAuthority(baseAuthority, ingestionPrincipal.id);
+  const actorMapping = claimedIdentity && activityNamespace
+    ? await resolveCurrentOrLegacyMapping(
+        pool, activityNamespace, legacyAuthority, claimedIdentity.externalId,
+      )
     : null;
+  const identity = actorMapping && claimedIdentity
+    ? { authority: actorMapping.authority, externalId: claimedIdentity.externalId }
+    : claimedIdentity;
   const actorPrincipalId = actorMapping?.principalId ?? null;
   const inputs = plugin.transform(event, {
     defaultProjectName: options.defaultProjectName,
     activityNamespace,
     resolveUserScope: (candidate) => (
-      identity && claimedIdentity && sameIdentity(claimedIdentity, candidate)
-        ? options.resolveUserScope?.(identity) ?? null
+      claimedIdentity && sameIdentity(claimedIdentity, candidate)
+        ? options.resolveUserScope?.(claimedIdentity) ?? null
         : null
     ),
     resolveActorPrincipalId: (candidate) => (
-      identity && claimedIdentity && actorPrincipalId && sameIdentity(claimedIdentity, candidate)
+      claimedIdentity && actorPrincipalId && sameIdentity(claimedIdentity, candidate)
         ? actorPrincipalId
         : null
     ),

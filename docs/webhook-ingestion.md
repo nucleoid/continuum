@@ -24,14 +24,23 @@ principal. Every transformed target scope must already exist and the service
 principal must have an explicit `writer` or `admin` membership.
 
 Standup attribution resolves actors through `actor_principal_mappings` under a
-producer-specific authority such as `github.<service-principal-uuid>`. GitHub
-uses the immutable numeric webhook user ID as the external actor. A mutable
-login is display-only and is never an identity or user-scope fallback. Deploy
+stable configured activity namespace (`github`, `deploy-event`, or
+`terminal-summary` by default). GitHub PR and branch ingestion fail startup if
+configured with different namespaces, so separate service principals cannot
+silently fragment one thread. GitHub uses the immutable numeric webhook user ID
+as the external actor. During numeric-alias rollout, a login alias may still
+route branch capture to the existing user scope, but it cannot authorize
+standup activity; all new aliases and mappings use numeric `sender.id`. Deploy
 and terminal producers likewise require an explicit opaque actor ID. Missing
 mappings store ordinary non-standup memories after reserved activity metadata
 is removed. Every selected scope, including an override, still requires writer
 or admin access by the configured service principal. Ingestion never creates
 scopes.
+
+`deploy-event.actorExternalId` and `terminal-summary.actorExternalId` are
+non-empty strings capped at 500 characters. `terminal-summary.keepThreadOpen`
+is an optional boolean. Terminal summaries self-close unless that flag is true;
+deploy facts always self-close their canonical thread.
 
 ## Responses and replay
 

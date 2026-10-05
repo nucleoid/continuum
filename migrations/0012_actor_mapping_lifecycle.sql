@@ -57,15 +57,6 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-UPDATE audit_log audit
-   SET metadata = (audit.metadata - 'external_actor_id')
-       || jsonb_build_object('mapping_id', mapping.mapping_id)
-  FROM actor_principal_mappings mapping
- WHERE audit.metadata->>'operation' = 'set_actor_principal_mapping'
-   AND audit.metadata->>'authority' = mapping.authority
-   AND audit.metadata->>'external_actor_id' = mapping.external_actor_id
-   AND audit.metadata->>'principal_id' = mapping.principal_id::text;
-
 DROP TRIGGER reject_actor_principal_mapping_mutation_trigger
   ON actor_principal_mappings;
 DROP FUNCTION reject_actor_principal_mapping_mutation();

@@ -159,6 +159,33 @@ describe('webhook ingestion transport', () => {
     expect(response.body.memoryIds).toHaveLength(1);
   });
 
+  it('bounds production actor identities and requires boolean terminal closure policy', async () => {
+    const { principal } = await seedService('service:schema-bounds');
+    const target = app({ plugins: {
+      'deploy-event': {
+        enabled: true, auth: { kind: 'bearer' }, principalExternalId: principal.externalId,
+      },
+      'terminal-summary': {
+        enabled: true, auth: { kind: 'bearer' }, principalExternalId: principal.externalId,
+      },
+    } });
+    await request(target).post('/api/v0/ingest/deploy-event')
+      .set('Authorization', `Bearer ${principal.externalId}`)
+      .set('Idempotency-Key', 'deploy-oversized-actor')
+      .send({
+        project: 'booking-engine', environment: 'prod', version: 'v1', status: 'success',
+        actorExternalId: 'x'.repeat(501),
+      }).expect(400);
+    await request(target).post('/api/v0/ingest/terminal-summary')
+      .set('Authorization', `Bearer ${principal.externalId}`)
+      .set('Idempotency-Key', 'terminal-invalid-policy')
+      .send({
+        actor: 'actor', actorExternalId: 'subject', sessionId: 'session', summary: 'summary',
+        keepThreadOpen: 'yes',
+      }).expect(400);
+    expect((await pool.query('SELECT id FROM memories')).rows).toEqual([]);
+  });
+
   it('requires the configured bearer service principal and explicit writer membership', async () => {
     const allowed = await seedService('service:deploy');
     const other = await createPrincipal(pool, {
@@ -209,6 +236,87 @@ describe('webhook ingestion transport', () => {
     expect(response.body.memoryIds).toHaveLength(3);
     expect((await pool.query('SELECT id FROM memories')).rows).toHaveLength(3);
     expect((await pool.query('SELECT id FROM audit_log')).rows).toHaveLength(3);
+  });
+
+  it('persists mapped terminal and deploy webhooks through the standup digest', async () => {
+    const terminalService = await createPrincipal(pool, {
+      externalId: 'service:e2e-terminal', kind: 'service', displayName: 'Terminal hook',
+    });
+    const deployService = await createPrincipal(pool, {
+      externalId: 'service:e2e-deploy', kind: 'service', displayName: 'Deploy hook',
+    });
+    const actor = await createPrincipal(pool, {
+      externalId: 'entra:e2e-actor', kind: 'user', displayName: 'Actual Actor',
+    });
+    const admin = await createPrincipal(pool, {
+      externalId: 'entra:e2e-admin', kind: 'user', displayName: 'Identity Admin',
+    });
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    const userScope = await createScope(pool, { kind: 'user', name: actor.externalId }, actor.id);
+    const project = await createScope(pool, { kind: 'project', name: 'booking-engine' });
+    await addMembership(pool, admin.id, org!.id, 'admin');
+    await addMembership(pool, actor.id, userScope.id, 'reader');
+    await addMembership(pool, actor.id, project.id, 'reader');
+    await addMembership(pool, terminalService.id, userScope.id, 'writer');
+    await addMembership(pool, deployService.id, project.id, 'writer');
+    await pool.query(
+      `INSERT INTO principal_aliases (provider, external_actor, principal_id)
+       VALUES ('terminal', 'terminal-subject-77', $1)`,
+      [actor.id],
+    );
+    await mapActorIdentity(pool, {
+      authority: 'terminal-summary', externalActorId: 'terminal-subject-77',
+      principalId: actor.id, mappedByPrincipalId: admin.id,
+    });
+    await mapActorIdentity(pool, {
+      authority: 'deploy-event', externalActorId: 'deploy-subject-77',
+      principalId: actor.id, mappedByPrincipalId: admin.id,
+    });
+    const target = app({ plugins: {
+      'terminal-summary': {
+        enabled: true, auth: { kind: 'bearer' },
+        principalExternalId: terminalService.externalId,
+      },
+      'deploy-event': {
+        enabled: true, auth: { kind: 'bearer' },
+        principalExternalId: deployService.externalId,
+      },
+    } });
+
+    await request(target).post('/api/v0/ingest/terminal-summary')
+      .set('Authorization', `Bearer ${terminalService.externalId}`)
+      .set('Idempotency-Key', 'terminal-e2e-1')
+      .send({
+        actor: 'caller-controlled-label', actorExternalId: 'terminal-subject-77',
+        sessionId: 'session-e2e-1', summary: 'Implemented standup ingestion.',
+        keepThreadOpen: true,
+      }).expect(202);
+    await request(target).post('/api/v0/ingest/deploy-event')
+      .set('Authorization', `Bearer ${deployService.externalId}`)
+      .set('Idempotency-Key', 'deploy-e2e-1')
+      .send({
+        project: 'booking-engine', environment: 'prod', version: 'v68', status: 'success',
+        actor: 'caller-controlled-label', actorExternalId: 'deploy-subject-77',
+      }).expect(202);
+
+    const digest = await request(target).get('/api/v0/standup?since=24h')
+      .set('Authorization', `Bearer ${actor.externalId}`);
+    expect(digest.status).toBe(200);
+    expect(digest.body.activity.map((item: { title: string }) => item.title).sort()).toEqual([
+      'Session session- summary',
+      'v68 deployed on prod',
+    ]);
+    // Current-window activity is not backlog, and the deploy's self-closing fact
+    // must never appear as a permanent open thread.
+    expect(digest.body.openThreads).toEqual([]);
+    const { rows } = await pool.query(
+      `SELECT source, metadata->'closes_thread_keys' AS closes
+         FROM memories ORDER BY source`,
+    );
+    expect(rows).toEqual([
+      { source: 'deploy-event', closes: ['deploy-event:deploy:booking-engine:prod:v68'] },
+      { source: 'terminal-summary', closes: [] },
+    ]);
   });
 
   it('requires terminal actor aliases and service-principal ACLs for scope overrides', async () => {
@@ -280,6 +388,63 @@ describe('webhook ingestion transport', () => {
     expect((await pool.query('SELECT id FROM memories')).rows).toEqual([]);
   });
 
+  it('accepts a legacy GitHub login alias while rolling out numeric identity', async () => {
+    const service = await createPrincipal(pool, {
+      externalId: 'service:branch-rollout', kind: 'service', displayName: 'Branch hook',
+    });
+    const user = await createPrincipal(pool, {
+      externalId: 'entra:branch-rollout', kind: 'user', displayName: 'Branch User',
+    });
+    const admin = await createPrincipal(pool, {
+      externalId: 'entra:branch-admin', kind: 'user', displayName: 'Identity Admin',
+    });
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    const userScope = await createScope(pool, { kind: 'user', name: user.externalId }, user.id);
+    await addMembership(pool, admin.id, org!.id, 'admin');
+    await addMembership(pool, service.id, userScope.id, 'writer');
+    await pool.query(
+      `INSERT INTO principal_aliases (provider, external_actor, principal_id)
+       VALUES ('github', 'legacy-login', $1)`,
+      [user.id],
+    );
+    const target = app({ plugins: { 'github-branch': {
+      enabled: true, auth: { kind: 'github-hmac', secret: githubSecret, event: 'create' },
+      principalExternalId: service.externalId,
+    } } });
+    const send = async (ref: string) => {
+      const raw = JSON.stringify({
+        ref, ref_type: 'branch', master_branch: 'master',
+        repository: { full_name: 'nucleoid/continuum', name: 'continuum',
+          html_url: 'https://github.com/nucleoid/continuum' },
+        sender: { id: 7654321, login: 'legacy-login' },
+      });
+      return request(target).post('/api/v0/ingest/github-branch')
+        .set('Content-Type', 'application/json').set('X-Hub-Signature-256', sign(raw))
+        .set('X-GitHub-Event', 'create').set('X-GitHub-Delivery', ref).send(raw);
+    };
+
+    await send('legacy-alias-capture').then((response) => expect(response.status).toBe(202));
+    let rows = (await pool.query('SELECT metadata FROM memories')).rows;
+    expect(rows[0].metadata).not.toHaveProperty('actor_principal_id');
+    await pool.query(
+      `INSERT INTO principal_aliases (provider, external_actor, principal_id)
+       VALUES ('github', '7654321', $1)`,
+      [user.id],
+    );
+    await mapActorIdentity(pool, {
+      authority: 'github', externalActorId: '7654321', principalId: user.id,
+      mappedByPrincipalId: admin.id,
+    });
+    await send('numeric-alias-capture').then((response) => expect(response.status).toBe(202));
+    rows = (await pool.query('SELECT metadata FROM memories ORDER BY created_at, id')).rows;
+    expect(rows).toHaveLength(2);
+    expect(rows[1].metadata).toMatchObject({
+      actor: 'Branch User', actor_principal_id: user.id,
+      thread_key: 'github:branch:nucleoid/continuum:numeric-alias-capture',
+      _continuum_actor_mapping_authority: 'github',
+    });
+  });
+
   it('attributes GitHub actors through the producer namespace and immutable numeric ID', async () => {
     const principal = await createPrincipal(pool, {
       externalId: 'service:branch-id', kind: 'service', displayName: 'Branch hook',
@@ -325,8 +490,8 @@ describe('webhook ingestion transport', () => {
     expect(rows.map((row) => row.metadata._continuum_actor_mapping_authority))
       .toEqual([`github.${principal.id}`, `github.${principal.id}`]);
     expect(rows.map((row) => row.metadata.thread_key).sort()).toEqual([
-      `github.${principal.id}:branch:nucleoid/continuum:feature/old-login`,
-      `github.${principal.id}:branch:nucleoid/continuum:feature/renamed-login`,
+      'github:branch:nucleoid/continuum:feature/old-login',
+      'github:branch:nucleoid/continuum:feature/renamed-login',
     ].sort());
   });
 

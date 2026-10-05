@@ -33,16 +33,29 @@ The GitHub PR plugin uses the PR author as `actor`; a merger remains
 `capturePluginEvent` path resolves only `(authority, external_actor_id)` pairs
 that an org administrator explicitly provisioned in
 `actor_principal_mappings`. GitHub webhook `user.id` values are looked up under
-`github.<authenticated-service-principal-uuid>`; this separates GitHub.com or
-GitHub Enterprise producers whose numeric ID spaces may overlap. Mutable logins
-remain untrusted source content and do not determine the displayed actor. An
+the stable `github` authority by default. `github-pr` and `github-branch` must
+use the same configured activity namespace; startup fails when both are enabled
+with different values. This keeps branch and PR thread keys stable even when
+their webhooks use different service principals. Separate GitHub installations
+whose numeric ID spaces may overlap must configure a shared installation-specific
+namespace on both plugins. Mutable logins remain untrusted source content and
+do not determine the displayed actor. An
 unmapped label may be retained as `source_actor_label` for diagnostics, but it
 is non-authoritative and never makes a record standup-eligible. Deploy
-and terminal identities use the same immutable
-producer pattern (`<plugin-id>.<principal-uuid>`). Their
+and terminal identities use the same immutable namespace pattern (the plugin
+ID by default). Their
 payload `actorAuthority`, `threadKey`, and `closesThreadKeys` fields are ignored;
 the server uses the immutable `actorExternalId` and creates canonical thread
 keys inside that authenticated source namespace.
+
+During rollout, actor mapping lookup first checks the stable namespace and then
+the legacy `<plugin-id>.<service-principal-uuid>` authority. New thread keys
+always use the stable namespace, so accepting a legacy mapping does not fragment
+threads. For GitHub branch scope routing, Continuum first checks the numeric
+`sender.id` alias and temporarily falls back to an existing login alias. That
+fallback preserves capture availability but never grants standup attribution;
+new aliases and actor mappings must use the immutable numeric ID. Run
+`scripts/preflight-standup-rollout.sql` before removing legacy entries.
 
 The authenticated ingestion service principal remains the capture author and
 must have writer access to the destination scope. It is not the activity actor
@@ -75,6 +88,9 @@ close the thread. Closures after a requested historical window do not rewrite
 that historical view. Terminal summaries
 close their session thread by default; producers must set `keepThreadOpen`
 when the summarized session intentionally remains actionable.
+Deploy events are terminal facts and explicitly close their own canonical
+thread in the same capture. They therefore cannot become permanent open work;
+the open-thread query also considers only context memories.
 Archived or expired closure memories remain historical closure evidence and
 do not reopen a thread. Expired activity and expired open-thread candidates
 are excluded from standups using the database clock.
@@ -86,7 +102,7 @@ immutable/opaque subject ID and the target user principal UUID, then run:
 
 ```sh
 psql "$CONTINUUM_DATABASE_URL" \
-  -v authority='github.<authenticated-service-principal-uuid>' \
+  -v authority='github' \
   -v external_actor_id='<exact provider actor id>' \
   -v principal_id='<user principal UUID>' \
   -v admin_principal_id='<reviewing org-admin UUID>' \
@@ -114,9 +130,10 @@ rows, even when the replacement points to the same principal. Only captures
 written after replacement carry the new mapping UUID and become eligible.
 Memory bodies and ordinary metadata remain available through their normal ACLs.
 
-For deploy and terminal mappings, use the generated authority shown above,
-for example `terminal-summary.<authenticated-service-principal-uuid>`. This
-prevents one ingestion service from reusing another producer's actor mappings.
+For deploy and terminal mappings, use the configured activity namespace,
+`deploy-event` and `terminal-summary` by default. When multiple independent
+identity domains feed one Continuum deployment, configure a distinct validated
+namespace for each domain before creating mappings.
 
 ## REST and MCP
 
@@ -151,30 +168,39 @@ still identify an active mapping. Promotion holds a shared lock on that mapping
 through the destination write and carries the original activity time so the
 digest does not re-date the work. Legacy, forged, revoked-mapping, or already
 expired rows lose actor, thread, closure, provenance, mapping, and activity-time
-fields during promotion. A destination scope's fresh lifecycle cannot revive
-expired activity.
+fields during promotion. A trusted promoted copy also caps its expiry at the
+source expiry, even when the destination scope normally lives longer. A
+destination scope's fresh lifecycle cannot extend or revive source activity.
 
 ## Mapping-enforcement rollout
 
-Migration `0010_standup_mapping_enforcement.sql` strips all reserved activity,
-thread, closure, provenance, and mapping keys from rows that do not match one
-active mapping UUID, authority, and actor principal, or whose explicit thread
-owner is missing or differs from the actor. It retains the memory body and all
-ordinary metadata. This cleanup is intentionally fail-closed: legacy
-reserved fields are not copied into a quarantine metadata object where an old
-reader or later promotion could treat them as active semantics.
+Ordinary startup applies schema migrations `0010` through `0012`. Migration
+`0013_standup_indexes.sql` builds the four potentially large memory indexes
+with `CREATE INDEX CONCURRENTLY` outside a transaction. None of these startup
+migrations rewrites existing memory rows. Strict readers and promotion already
+fail closed for legacy or forged metadata, so destructive cleanup is not a
+correctness prerequisite.
 
-For a mixed-version deployment, first deploy the `0009` mapping-aware capture
-writers everywhere and verify that no older writer can create standup rows
-without mapping UUID and authority. Then drain old application instances (or
-quiesce capture, promotion, and standup reads), apply `0010`, deploy the strict
-reader/promotion version to every instance, and resume traffic. Do not let an
-older promotion worker overlap the cleanup because it can copy a provenance-only
-legacy row after the migration has scanned it. If instances run migrations at
-startup, use a maintenance rollout so the first strict instance applies `0010`
-only after old instances are drained. The migration is safe to rerun during
-verification: already stripped rows remain ordinary memories and valid mapped
-rows remain unchanged.
+Before rollout, run the read-only inventory and retain its output in change
+control:
+
+```sh
+psql "$CONTINUUM_DATABASE_URL" -f scripts/preflight-standup-rollout.sql
+```
+
+The `0010`-`0012` mapping-table sequence is applied under the migrator lock and
+must complete before any mapping-aware writer starts; it performs no historical
+`audit_log` rewrite. First deploy mapping-aware writers everywhere, verify
+stable namespace and numeric alias coverage, and drain old writers. Deploy
+strict readers only after that writer gate is complete. If policy requires
+removing dormant reserved metadata from a prerelease deployment, schedule a
+maintenance window and run
+`scripts/run-standup-mapping-enforcement.sql`. It strips reserved fields only,
+uses a five-second lock timeout, and processes at most 10,000 invalid rows per
+statement. Rerun the preflight and cleanup until `cleanup_candidates` reaches
+zero. Do not run the cleanup from application startup, and do not overlap it
+with older promotion workers. Already stripped rows remain ordinary memories;
+valid rows keep the exact active mapping UUID, authority, actor, and owner.
 
 ## Existing user-scope backfill
 

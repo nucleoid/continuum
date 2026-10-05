@@ -79,7 +79,7 @@ describe('standup mapping enforcement storage', () => {
     });
 
     const migration = await readFile(
-      new URL('../../migrations/0010_standup_mapping_enforcement.sql', import.meta.url),
+      new URL('../../scripts/run-standup-mapping-enforcement.sql', import.meta.url),
       'utf8',
     );
     await pool.query(migration);

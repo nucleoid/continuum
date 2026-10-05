@@ -18,6 +18,7 @@ export interface NewMemory {
   tags?: string[];
   metadata?: Record<string, unknown>;
   supersedesId?: string | null;
+  expiresAtCeiling?: Date | null;
 }
 
 export async function createMemory(
@@ -25,7 +26,13 @@ export async function createMemory(
   input: NewMemory,
 ): Promise<Memory> {
   const id = input.id ?? randomUUID();
-  const expiresAt = computeExpiry(input.type, input.scopeKind);
+  const computedExpiry = computeExpiry(input.type, input.scopeKind);
+  const expiresAt = input.expiresAtCeiling
+    ? new Date(Math.min(
+        input.expiresAtCeiling.getTime(),
+        computedExpiry?.getTime() ?? input.expiresAtCeiling.getTime(),
+      ))
+    : computedExpiry;
   const { rows } = await pool.query(
     `INSERT INTO memories
        (id, scope_id, type, title, body, metadata, tags, author_id, source, source_ref,

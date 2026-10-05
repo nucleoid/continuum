@@ -98,20 +98,3 @@ CREATE TRIGGER reject_mapped_principal_kind_change_trigger
 
 CREATE INDEX actor_principal_mappings_principal_idx
   ON actor_principal_mappings (principal_id);
-
-CREATE INDEX memories_standup_actor_created_idx
-  ON memories ((metadata->>'actor_principal_id'), created_at DESC, id)
-  WHERE metadata ? 'actor_principal_id';
-
-CREATE INDEX memories_standup_thread_idx
-  ON memories ((metadata->>'thread_key'), created_at DESC, id)
-  WHERE metadata ? 'thread_key';
-
-CREATE INDEX memories_standup_closures_gin
-  ON memories USING gin ((metadata->'closes_thread_keys'))
-  WHERE metadata ? 'closes_thread_keys';
-
-CREATE INDEX memories_standup_open_threads_idx
-  ON memories ((COALESCE(metadata->>'thread_owner_principal_id',
-                         metadata->>'actor_principal_id')), created_at, id)
-  WHERE state = 'live' AND type = 'context' AND metadata ? 'thread_key';

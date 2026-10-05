@@ -11,7 +11,12 @@ import type {
 } from '../../capture/plugin.js';
 import type { CaptureInput } from '../../types.js';
 import { authenticateIngest } from '../../ingest/auth.js';
-import type { IngestConfig, IngestPluginId } from '../../ingest/config.js';
+import {
+  defaultActivityNamespace,
+  validateIngestConfig,
+  type IngestConfig,
+  type IngestPluginId,
+} from '../../ingest/config.js';
 import { ServiceError } from '../../services/errors.js';
 import {
   captureMappedPluginOne,
@@ -96,6 +101,7 @@ const deploySchema = z.object({
   status: z.enum(['success', 'failure', 'rollback']),
   commit: optionalText(500), pr: z.number().int().nonnegative().optional(),
   url: optionalText(2_000), actor: optionalText(500),
+  actorExternalId: text(500).optional(),
   startedAt: optionalTimestamp, finishedAt: optionalTimestamp, notes: optionalText(500_000),
 });
 
@@ -108,6 +114,7 @@ const terminalSchema = z.object({
   decisions: z.array(text(100_000)).max(50).optional(),
   workingDir: optionalText(2_000), startedAt: optionalTimestamp, finishedAt: optionalTimestamp,
   transcriptHash: optionalText(500), scopeOverride: scopeSchema.optional(),
+  actorExternalId: text(500).optional(), keepThreadOpen: z.boolean().optional(),
 });
 
 const schemas: Record<IngestPluginId, z.ZodTypeAny> = {
@@ -160,10 +167,26 @@ async function captureContext(
   if (pluginId === 'github-branch') {
     if ((event as z.infer<typeof githubBranchSchema>).ref_type !== 'branch') return {};
     provider = 'github';
-    externalActor = String((event as z.infer<typeof githubBranchSchema>).sender.id);
+    const branch = event as z.infer<typeof githubBranchSchema>;
+    externalActor = String(branch.sender.id);
+    const resolved = await resolvePrincipalAlias(pool, provider, externalActor)
+      ?? await resolvePrincipalAlias(pool, provider, branch.sender.login);
+    if (!resolved || resolved.kind !== 'user') {
+      throw new ServiceError('INVALID_INPUT', 'External actor alias is not configured');
+    }
+    return { resolveUserScope: () => resolved.externalId };
   } else if (pluginId === 'terminal-summary') {
     provider = 'terminal';
-    externalActor = (event as z.infer<typeof terminalSchema>).actor;
+    const terminal = event as z.infer<typeof terminalSchema>;
+    externalActor = terminal.actorExternalId ?? terminal.actor;
+    const resolved = await resolvePrincipalAlias(pool, provider, externalActor)
+      ?? (externalActor === terminal.actor
+        ? null
+        : await resolvePrincipalAlias(pool, provider, terminal.actor));
+    if (!resolved || resolved.kind !== 'user') {
+      throw new ServiceError('INVALID_INPUT', 'External actor alias is not configured');
+    }
+    return { resolveUserScope: () => resolved.externalId };
   }
   if (!provider || !externalActor) return {};
   const resolved = await resolvePrincipalAlias(pool, provider, externalActor);
@@ -180,6 +203,7 @@ export function ingestRouter(
   registry: CaptureRegistry = defaultCaptureRegistry(),
   relationThreshold = DEFAULT_RELATION_THRESHOLD,
 ): Router {
+  validateIngestConfig(config);
   const router = Router();
   router.post('/ingest/:pluginId', async (req, res) => {
     const pluginId = req.params.pluginId as IngestPluginId;
@@ -208,15 +232,23 @@ export function ingestRouter(
     const plugin = registry.get(pluginId);
     if (!plugin) throw new ServiceError('INVALID_INPUT', 'Invalid webhook payload');
     const claimedIdentity = plugin.actorIdentity?.(event) ?? null;
+    const baseAuthority = plugin.activityIdentityAuthority ?? pluginId;
     const activityNamespace = plugin.trustedActivityMetadata
-      ? authenticatedActorAuthority(plugin.activityIdentityAuthority ?? pluginId, principal.id)
+      ? pluginConfig.activityNamespace ?? defaultActivityNamespace(pluginId)
       : undefined;
-    const identity = claimedIdentity && activityNamespace
-      ? { authority: activityNamespace, externalId: claimedIdentity.externalId }
-      : claimedIdentity;
-    const actorMapping = identity
-      ? await resolveActorIdentityMapping(pool, identity)
+    const legacyAuthority = authenticatedActorAuthority(baseAuthority, principal.id);
+    const actorMapping = claimedIdentity && activityNamespace
+      ? await resolveActorIdentityMapping(pool, {
+          authority: activityNamespace, externalId: claimedIdentity.externalId,
+        }) ?? (legacyAuthority === activityNamespace
+          ? null
+          : await resolveActorIdentityMapping(pool, {
+              authority: legacyAuthority, externalId: claimedIdentity.externalId,
+            }))
       : null;
+    const identity = actorMapping && claimedIdentity
+      ? { authority: actorMapping.authority, externalId: claimedIdentity.externalId }
+      : claimedIdentity;
     const context: CaptureContext = {
       ...scopeContext,
       activityNamespace,
