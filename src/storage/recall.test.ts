@@ -94,7 +94,6 @@ describe('recall expiry enforcement', () => {
     }
   });
 
-<<<<<<< HEAD
   it.each([
     [199, false],
     [200, false],
@@ -106,14 +105,16 @@ describe('recall expiry enforcement', () => {
     const body = `${'x'.repeat(prefixLength)} ${marker} ${'y'.repeat(length - prefixLength - marker.length - 2)}`;
     await pool.query('UPDATE memories SET body = $2 WHERE id = $1', [memory.id, body]);
 
-    const [result] = await recall(pool, {
+    const { results: [result] } = await recall(pool, {
       query: marker, scopeIds: [scope.id], limit: 1,
     });
 
+    expect(result).toBeDefined();
     expect(result.bodyTruncated).toBe(expected);
     expect(result.memory.body).toHaveLength(length);
     if (length > 200) expect(result.excerpt).toMatch(/^\.\.\./);
-=======
+  });
+
   it('degrades a vector SQL failure to FTS with bounded diagnostics', async () => {
     const { memory, scope } = await seedMemory('vector sql fallback');
     const queryable = {
@@ -138,6 +139,5 @@ describe('recall expiry enforcement', () => {
       groups: [{ provider: 'ollama:local', dim: 768, status: 'failed', errorCode: 'VECTOR_SEARCH_FAILED' }],
     });
     expect(JSON.stringify(recalled.diagnostics)).not.toContain('private');
->>>>>>> e0f9626 (feat: harden embeddings and add routed backfill)
   });
 });

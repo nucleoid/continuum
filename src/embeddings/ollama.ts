@@ -88,7 +88,7 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
               'EMBEDDING_NETWORK', 'Embedding provider network request failed', { cause: error },
             );
           }
-          if (!res.ok) throw embeddingProviderHttpError(res.status);
+          if (!res.ok) throw await embeddingProviderHttpError(res, 'ollama');
           let json: OllamaEmbedResponse;
           try {
             json = (await res.json()) as OllamaEmbedResponse;

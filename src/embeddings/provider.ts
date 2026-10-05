@@ -46,9 +46,91 @@ export function isEmbeddingItemError(error: unknown): error is EmbeddingItemErro
   return error instanceof EmbeddingItemError;
 }
 
-export function embeddingProviderHttpError(status: number): EmbeddingProviderError | EmbeddingItemError {
-  if (status === 400 || status === 413 || status === 422) {
-    return new EmbeddingItemError(`Embedding provider rejected input with status ${status}`);
+export type EmbeddingHttpProvider = 'openai' | 'voyage' | 'ollama';
+
+const MAX_ERROR_BODY_BYTES = 8 * 1024;
+const ITEM_HTTP_STATUSES = new Set([400, 413, 422]);
+const ITEM_ERROR_CODES = new Set([
+  'context_length_exceeded',
+  'input_too_large',
+  'max_tokens_per_request',
+  'payload_too_large',
+  'text_too_long',
+]);
+const ITEM_MESSAGE = /\b(?:input|text|prompt|request body)\b.{0,80}\b(?:too (?:large|long)|exceeds?|maximum|context length|token limit)\b/i;
+
+async function boundedErrorBody(response: Response): Promise<unknown> {
+  const body = response.body;
+  if (!body) return null;
+  const declaredLength = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_ERROR_BODY_BYTES) {
+    await body.cancel().catch(() => undefined);
+    return null;
+  }
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      length += next.value.byteLength;
+      if (length > MAX_ERROR_BODY_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        return null;
+      }
+      chunks.push(next.value);
+    }
+  } catch {
+    return null;
+  }
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function stringField(value: unknown): string | null {
+  return typeof value === 'string' && value.length <= 512 ? value : null;
+}
+
+function isExplicitItemFailure(provider: EmbeddingHttpProvider, body: unknown): boolean {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+  const root = body as Record<string, unknown>;
+  const nested = root.error && typeof root.error === 'object' && !Array.isArray(root.error)
+    ? root.error as Record<string, unknown>
+    : root;
+  const code = stringField(nested.code)?.toLowerCase() ?? null;
+  if (code && ITEM_ERROR_CODES.has(code)) return true;
+
+  if (provider === 'openai') {
+    const parameter = stringField(nested.param)?.toLowerCase() ?? null;
+    return parameter === 'input' || parameter?.startsWith('input[') === true;
+  }
+
+  const message = provider === 'voyage'
+    ? stringField(root.detail) ?? stringField(nested.message)
+    : stringField(root.error) ?? stringField(nested.message);
+  return message !== null && ITEM_MESSAGE.test(message);
+}
+
+export async function embeddingProviderHttpError(
+  response: Response,
+  provider: EmbeddingHttpProvider,
+): Promise<EmbeddingProviderError | EmbeddingItemError> {
+  const status = response.status;
+  if (ITEM_HTTP_STATUSES.has(status)) {
+    const body = await boundedErrorBody(response);
+    if (isExplicitItemFailure(provider, body)) {
+      return new EmbeddingItemError(`Embedding provider rejected input with status ${status}`);
+    }
   }
   const code: EmbeddingProviderErrorCode = status === 401 || status === 403
     ? 'EMBEDDING_AUTH'

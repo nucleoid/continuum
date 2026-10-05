@@ -161,24 +161,27 @@ describe('embedding backfill', () => {
   });
 
   it.each([
-    ['OpenAI', 400, (fetchImpl: typeof fetch) => new OpenAIEmbeddingProvider({
+    ['OpenAI', 400, { error: { code: 'context_length_exceeded', param: 'input' } }, (fetchImpl: typeof fetch) => new OpenAIEmbeddingProvider({
       apiKey: 'private-key', model: 'model', dim: 768, fetchImpl,
     })],
-    ['Voyage', 413, (fetchImpl: typeof fetch) => new VoyageEmbeddingProvider({
+    ['Voyage', 413, { detail: 'input exceeds maximum token limit' }, (fetchImpl: typeof fetch) => new VoyageEmbeddingProvider({
       apiKey: 'private-key', model: 'model', dim: 768, fetchImpl,
     })],
-    ['Ollama', 422, (fetchImpl: typeof fetch) => new OllamaEmbeddingProvider({
+    ['Ollama', 422, { error: 'input exceeds context length' }, (fetchImpl: typeof fetch) => new OllamaEmbeddingProvider({
       baseUrl: 'http://localhost:11434', model: 'model', dim: 768, fetchImpl,
     })],
   ])('isolates a shipped %s provider HTTP %i input rejection and embeds healthy memories',
-    async (name, status, createProvider) => {
+    async (name, status, errorBody, createProvider) => {
       const { memories } = await seed('project', `http-poison-${name}`, [
-        'healthy one', 'oversized item', 'healthy two',
+        'healthy one', 'healthy two', 'oversized item', 'healthy three',
       ]);
       const fetchImpl = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
         const payload = JSON.parse(String(init?.body)) as { input: string[] };
         if (payload.input.some((text) => text.includes('oversized item'))) {
-          return { ok: false, status } as Response;
+          return new Response(JSON.stringify(errorBody), {
+            status,
+            headers: { 'content-type': 'application/json' },
+          });
         }
         const embeddings = payload.input.map((text) => [text.length, ...Array(767).fill(0)]);
         return {
@@ -191,24 +194,54 @@ describe('embedding backfill', () => {
       const provider = createProvider(fetchImpl);
 
       const report = await runEmbeddingBackfill(pool, provider, {
-        batchSize: 3, maxRows: 10, maxRetries: 0,
+        batchSize: 4, maxRows: 10, maxRetries: 0,
       });
 
-      expect(report).toMatchObject({ embedded: 2, failed: 1, completed: true });
-      expect(fetchImpl.mock.calls.length).toBeGreaterThan(1);
-      expect(fetchImpl.mock.calls.length).toBeLessThanOrEqual(5);
+      expect(report).toMatchObject({ embedded: 3, failed: 1, completed: true });
+      expect(fetchImpl).toHaveBeenCalledTimes(5);
       const stored = await pool.query(
         'SELECT memory_id FROM memory_embeddings ORDER BY memory_id',
       );
       expect(stored.rows.map((row) => row.memory_id)).toEqual([
-        memories[0]!.id, memories[2]!.id,
+        memories[0]!.id, memories[1]!.id, memories[3]!.id,
       ].sort());
       expect((await pool.query(
         `SELECT count(*)::int AS count FROM audit_log
           WHERE memory_id = $1 AND metadata->>'operation' = 'embedding_backfill'`,
-        [memories[1]!.id],
+        [memories[2]!.id],
       )).rows[0].count).toBe(1);
     });
+
+  it.each([
+    ['OpenAI', (fetchImpl: typeof fetch) => new OpenAIEmbeddingProvider({
+      apiKey: 'test-key', model: 'model', dim: 768, fetchImpl,
+    })],
+    ['Voyage', (fetchImpl: typeof fetch) => new VoyageEmbeddingProvider({
+      apiKey: 'test-key', model: 'model', dim: 768, fetchImpl,
+    })],
+    ['Ollama', (fetchImpl: typeof fetch) => new OllamaEmbeddingProvider({
+      baseUrl: 'http://localhost:11434', model: 'model', dim: 768, fetchImpl,
+    })],
+  ])('does not bisect a shipped %s provider-wide HTTP 400', async (name, createProvider) => {
+    await seed('project', `provider-wide-400-${name}`, ['one', 'two', 'three', 'four']);
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+      error: { code: 'invalid_model_configuration', message: 'provider configuration rejected' },
+    }), {
+      status: 400,
+      headers: { 'content-type': 'application/json' },
+    })) as typeof fetch;
+
+    await expect(runEmbeddingBackfill(pool, createProvider(fetchImpl), {
+      batchSize: 4, maxRows: 10, maxRetries: 3, retryBaseMs: 1,
+    })).rejects.toMatchObject({ code: 'EMBEDDING_FAILED', failureScope: 'provider' });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect((await pool.query('SELECT count(*)::int AS count FROM memory_embeddings')).rows[0].count).toBe(0);
+    expect((await pool.query(
+      `SELECT count(*)::int AS count FROM audit_log
+        WHERE metadata->>'operation' = 'embedding_backfill'`,
+    )).rows[0].count).toBe(0);
+  });
 
   it.each([
     ['timeout', new EmbeddingProviderError('EMBEDDING_TIMEOUT', 'private timeout detail')],

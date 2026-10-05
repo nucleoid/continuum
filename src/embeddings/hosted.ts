@@ -55,6 +55,7 @@ function validateVectors(items: EmbeddingItem[], count: number, dim: number): nu
 
 abstract class HostedEmbeddingProvider implements EmbeddingProvider {
   abstract readonly id: string;
+  abstract readonly httpProvider: 'openai' | 'voyage';
   abstract embed(texts: string[], options?: { signal?: AbortSignal }): Promise<number[][]>;
   readonly local = false;
   readonly dim: number;
@@ -92,7 +93,7 @@ abstract class HostedEmbeddingProvider implements EmbeddingProvider {
             'EMBEDDING_NETWORK', 'Embedding provider network request failed', { cause: error },
           );
         }
-        if (!response.ok) throw embeddingProviderHttpError(response.status);
+        if (!response.ok) throw await embeddingProviderHttpError(response, this.httpProvider);
         let json: { data?: EmbeddingItem[] };
         try { json = await response.json() as { data?: EmbeddingItem[] }; }
         catch (error) { throw invalidResponse('Embedding provider returned invalid JSON', error); }
@@ -115,6 +116,7 @@ abstract class HostedEmbeddingProvider implements EmbeddingProvider {
 
 export class OpenAIEmbeddingProvider extends HostedEmbeddingProvider {
   readonly id: string;
+  readonly httpProvider = 'openai';
   constructor(options: HostedOptions) {
     super(options, 'https://api.openai.com/v1/embeddings');
     this.id = `openai:${options.model}`;
@@ -128,6 +130,7 @@ export class OpenAIEmbeddingProvider extends HostedEmbeddingProvider {
 
 export class VoyageEmbeddingProvider extends HostedEmbeddingProvider {
   readonly id: string;
+  readonly httpProvider = 'voyage';
   constructor(options: HostedOptions) {
     super(options, 'https://api.voyageai.com/v1/embeddings');
     this.id = `voyage:${options.model}`;

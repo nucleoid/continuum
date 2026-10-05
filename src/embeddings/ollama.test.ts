@@ -174,17 +174,35 @@ describe('OllamaEmbeddingProvider', () => {
   });
 
   it.each([400, 413, 422])(
-    'classifies HTTP %i input rejection as an item failure without response bodies',
+    'classifies HTTP %i explicit input rejection as an item failure',
     async (status) => {
       const provider = new OllamaEmbeddingProvider({
         baseUrl: 'http://x', model: 'm', dim: 4,
-        fetchImpl: vi.fn(async () => response({ secret: 'do not leak' }, false, status)),
+        fetchImpl: vi.fn(async () => new Response(
+          JSON.stringify({ error: 'input exceeds context length' }),
+          { status },
+        )),
       });
       await expect(provider.embed(['private oversized input'])).rejects.toMatchObject({
         code: 'EMBEDDING_ITEM_FAILED', failureScope: 'item',
       });
     },
   );
+
+  it('defaults an ambiguous HTTP 400 to a provider-wide failure', async () => {
+    const fetchImpl = vi.fn(async () => new Response(
+      JSON.stringify({ error: 'model configuration rejected' }),
+      { status: 400 },
+    ));
+    const provider = new OllamaEmbeddingProvider({
+      baseUrl: 'http://x', model: 'm', dim: 4, fetchImpl,
+    });
+
+    await expect(provider.embed(['one', 'two'])).rejects.toMatchObject({
+      code: 'EMBEDDING_FAILED', failureScope: 'provider',
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
 
   it('classifies transport failures as provider-wide network errors', async () => {
     const provider = new OllamaEmbeddingProvider({

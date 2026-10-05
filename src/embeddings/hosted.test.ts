@@ -51,20 +51,54 @@ describe('hosted embedding providers', () => {
   });
 
   it.each([
-    ['OpenAI', OpenAIEmbeddingProvider, 400],
-    ['OpenAI', OpenAIEmbeddingProvider, 413],
-    ['OpenAI', OpenAIEmbeddingProvider, 422],
-    ['Voyage', VoyageEmbeddingProvider, 400],
-    ['Voyage', VoyageEmbeddingProvider, 413],
-    ['Voyage', VoyageEmbeddingProvider, 422],
-  ])('classifies $0 HTTP $2 input rejection as an item failure', async (_name, Provider, status) => {
+    ['OpenAI', OpenAIEmbeddingProvider, 400, { error: { code: 'context_length_exceeded' } }],
+    ['OpenAI', OpenAIEmbeddingProvider, 413, { error: { param: 'input' } }],
+    ['OpenAI', OpenAIEmbeddingProvider, 422, { error: { code: 'input_too_large' } }],
+    ['Voyage', VoyageEmbeddingProvider, 400, { detail: 'input exceeds maximum token limit' }],
+    ['Voyage', VoyageEmbeddingProvider, 413, { detail: 'text is too large' }],
+    ['Voyage', VoyageEmbeddingProvider, 422, { code: 'text_too_long' }],
+  ])('classifies $0 HTTP $2 explicit input rejection as an item failure', async (_name, Provider, status, body) => {
     const provider = new Provider({
       apiKey: 'private-key', model: 'model', dim: 2,
-      fetchImpl: vi.fn(async () => ({ ok: false, status }) as Response),
+      fetchImpl: vi.fn(async () => new Response(JSON.stringify(body), { status })),
     });
 
     await expect(provider.embed(['private oversized input'])).rejects.toMatchObject({
       code: 'EMBEDDING_ITEM_FAILED', failureScope: 'item',
+    });
+  });
+
+  it.each([OpenAIEmbeddingProvider, VoyageEmbeddingProvider])(
+    'defaults ambiguous HTTP 400 responses from %s to provider-wide',
+    async (Provider) => {
+      const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+        error: { code: 'bad_request', message: 'request rejected' },
+      }), { status: 400 }));
+      const provider = new Provider({
+        apiKey: 'test-key', model: 'model', dim: 2, fetchImpl,
+      });
+
+      await expect(provider.embed(['one', 'two'])).rejects.toMatchObject({
+        code: 'EMBEDDING_FAILED', failureScope: 'provider',
+      });
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('does not inspect an oversized error body for item attribution', async () => {
+    const body = JSON.stringify({
+      error: { code: 'context_length_exceeded', padding: 'x'.repeat(9_000) },
+    });
+    const provider = new OpenAIEmbeddingProvider({
+      apiKey: 'test-key', model: 'model', dim: 2,
+      fetchImpl: vi.fn(async () => new Response(body, {
+        status: 400,
+        headers: { 'content-length': String(body.length) },
+      })),
+    });
+
+    await expect(provider.embed(['one', 'two'])).rejects.toMatchObject({
+      code: 'EMBEDDING_FAILED', failureScope: 'provider',
     });
   });
 
