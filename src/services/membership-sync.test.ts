@@ -121,6 +121,49 @@ describe('Entra membership sync', () => {
     }
   });
 
+  it('database-blocks binding invalidation until sourced access is deactivated', async () => {
+    const alpha = await createScope(pool, { kind: 'team', name: 'binding-guard' });
+    const user = await createPrincipal(pool, {
+      externalId: '11111111-1111-4111-8111-111111111111', kind: 'user', displayName: 'User',
+    });
+    const groupId = '22222222-2222-4222-8222-222222222222';
+    await provisionEntraGroupBinding(pool, admin, {
+      externalId: groupId, scopeId: alpha.id, role: 'reader',
+    });
+    await syncEntraMemberships(pool, admin, [{
+      id: groupId, status: 'present', displayName: 'binding-guard',
+      memberObjectIds: [user.externalId],
+    }]);
+
+    const mutations = [
+      ['UPDATE entra_groups SET active = FALSE, deactivated_at = now() WHERE external_id = $1'],
+      ["UPDATE entra_groups SET role = 'writer' WHERE external_id = $1"],
+      ['DELETE FROM entra_groups WHERE external_id = $1'],
+    ];
+    for (const [sql] of mutations) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await expect(client.query(sql, [groupId]))
+          .rejects.toThrow(/active Entra memberships must match an approved binding/);
+      } finally {
+        await client.query('ROLLBACK');
+        client.release();
+      }
+    }
+
+    expect(await revokeEntraGroupBinding(pool, admin, groupId)).toBe(true);
+    expect(await hasRole(pool, user.id, alpha.id, 'reader')).toBe(false);
+    await provisionEntraGroupBinding(pool, admin, {
+      externalId: groupId, scopeId: alpha.id, role: 'writer',
+    });
+    await syncEntraMemberships(pool, admin, [{
+      id: groupId, status: 'present', displayName: 'binding-guard-renamed',
+      memberObjectIds: [user.externalId],
+    }]);
+    expect(await hasRole(pool, user.id, alpha.id, 'writer')).toBe(true);
+  });
+
   it('uses an audited explicit binding, treats rename as metadata, and safely reactivates', async () => {
     const alpha = await createScope(pool, { kind: 'team', name: 'alpha' });
     const beta = await createScope(pool, { kind: 'team', name: 'beta' });
@@ -188,6 +231,30 @@ describe('Entra membership sync', () => {
       `SELECT count(*)::int AS count FROM entra_groups
         WHERE approved_by IS NOT NULL AND approval_revoked_at IS NULL`,
     )).rows[0].count).toBe(MAX_SYNC_GROUPS);
+  });
+
+  it('database-enforces immutable group IDs and approved binding cardinality', async () => {
+    const alpha = await createScope(pool, { kind: 'team', name: 'database-cardinality' });
+    await expect(pool.query(
+      `INSERT INTO entra_groups
+         (external_id, display_name, scope_id, role, active, approved_by, approved_at)
+       VALUES ('not-a-graph-id', 'invalid', $1, 'reader', TRUE, $2, now())`,
+      [alpha.id, admin.id],
+    )).rejects.toThrow();
+    await pool.query(
+      `INSERT INTO entra_groups
+         (external_id, display_name, scope_id, role, active, approved_by, approved_at)
+       SELECT lpad(n::text, 8, '0') || '-0000-4000-8000-' || lpad(n::text, 12, '0'),
+              'approved-' || n, $1, 'reader', TRUE, $2, now()
+         FROM generate_series(1, $3) n`,
+      [alpha.id, admin.id, MAX_SYNC_GROUPS],
+    );
+    await expect(pool.query(
+      `INSERT INTO entra_groups
+         (external_id, display_name, scope_id, role, active, approved_by, approved_at)
+       VALUES ('ffffffff-ffff-4fff-8fff-ffffffffffff', 'extra', $1, 'reader', TRUE, $2, now())`,
+      [alpha.id, admin.id],
+    )).rejects.toThrow(/cannot approve more than 500 Entra group bindings/);
   });
 
   it('fails closed for malformed and failed bound groups while valid groups remain authoritative', async () => {
@@ -262,7 +329,7 @@ describe('Entra membership sync', () => {
     )).rows[0].approval_revoked_at).toBeNull();
   });
 
-  it('quarantines stale Entra access when the whole snapshot exceeds its bound', async () => {
+  it('rejects an oversized snapshot without quarantining valid tenant access', async () => {
     const alpha = await createScope(pool, { kind: 'team', name: 'alpha' });
     const user = await createPrincipal(pool, {
       externalId: '11111111-1111-4111-8111-111111111111', kind: 'user', displayName: 'User',
@@ -279,13 +346,13 @@ describe('Entra membership sync', () => {
 
     await expect(syncEntraMemberships(pool, admin, oversized)).rejects
       .toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
-    expect(await hasRole(pool, user.id, alpha.id, 'reader')).toBe(false);
+    expect(await hasRole(pool, user.id, alpha.id, 'reader')).toBe(true);
     expect((await pool.query(
       `SELECT metadata FROM audit_log
         WHERE metadata->>'operation' = 'entra_membership_sync_rejected'
         ORDER BY id DESC LIMIT 1`,
     )).rows[0].metadata).toMatchObject({
-      reason: 'SNAPSHOT_TOO_LARGE', groups_deactivated: 1, memberships_deactivated: 1,
+      reason: 'SNAPSHOT_TOO_LARGE', groups_deactivated: 0, memberships_deactivated: 0,
     });
   });
 
