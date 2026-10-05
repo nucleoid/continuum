@@ -1,3 +1,7 @@
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { readBoundedStdin, runCli, type CliDependencies } from './index.js';
 import { CliError } from './http.js';
@@ -107,12 +111,33 @@ describe('continuum CLI', () => {
       [Symbol.asyncIterator]() {
         return {
           next: () => new Promise<IteratorResult<Uint8Array>>(() => undefined),
-          return: async () => ({ done: true, value: undefined }),
+          return: () => new Promise<IteratorResult<Uint8Array>>(() => undefined),
         };
       },
     };
     await expect(readBoundedStdin(stream, { idleTimeoutMs: 5, overallTimeoutMs: 50 }))
       .rejects.toMatchObject({ exitCode: 2, message: expect.stringMatching(/timed out/i) });
+  });
+
+  it('terminates a real Node stdin pipe after its deadline', async () => {
+    const moduleUrl = pathToFileURL(resolve('dist/cli/index.js')).href;
+    const script = [
+      `import { readBoundedStdin } from ${JSON.stringify(moduleUrl)};`,
+      'try { await readBoundedStdin(process.stdin, { idleTimeoutMs: 20, overallTimeoutMs: 100 }); }',
+      "catch (error) { process.stderr.write(error.message); process.exitCode = 2; }",
+    ].join('\n');
+    const child = spawn(process.execPath, ['--input-type=module', '--eval', script], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    const exit = once(child, 'exit');
+    const guard = setTimeout(() => child.kill(), 1_000);
+    const [code] = await exit;
+    clearTimeout(guard);
+    expect(code).toBe(2);
+    expect(stderr).toMatch(/timed out/i);
   });
 
   it('rejects oversized body files from metadata before reading them', async () => {
@@ -175,5 +200,21 @@ describe('continuum CLI', () => {
     ], h.deps)).toBe(4);
     expect(h.stdout()).toBe('');
     expect(h.stderr()).toContain('memory not found');
+  });
+
+  it('emits structured JSON errors and sanitizes dynamic human output', async () => {
+    const failure = harness(vi.fn() as typeof globalThis.fetch);
+    expect(await runCli(['does-not-exist', '--json'], failure.deps)).toBe(2);
+    expect(failure.stdout()).toBe('');
+    expect(JSON.parse(failure.stderr())).toEqual({
+      error: { message: 'Unknown command: does-not-exist', exitCode: 2 },
+    });
+
+    const success = harness(async () => Response.json({ id: 'memory\u001b[31m\nforged' }, { status: 201 }));
+    expect(await runCli([
+      'capture', '--scope', 'org', '--type', 'fact', '--title', 'Safe', '--body', 'body',
+    ], success.deps)).toBe(0);
+    expect(success.stdout()).toBe('Captured memory [31m forged\n');
+    expect(success.stdout()).not.toContain('\u001b');
   });
 });

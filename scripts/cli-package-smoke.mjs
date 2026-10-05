@@ -20,6 +20,14 @@ try {
       `Packed package contains compiled tests: ${compiledTests.map(({ path }) => path).join(', ')}`,
     );
   }
+  const forbidden = packed[0].files.filter(
+    ({ path }) => path === 'docs/internal-security-brief.md' || /(?:^|\/)tenants?(?:\/|$)/i.test(path),
+  );
+  if (forbidden.length > 0) {
+    throw new Error(
+      `Packed package contains internal or tenant-specific material: ${forbidden.map(({ path }) => path).join(', ')}`,
+    );
+  }
   execFileSync(
     'npm', ['install', '--prefix', temporary, '--ignore-scripts', '--no-audit', '--no-fund', tarball],
     { cwd: root, stdio: 'pipe', shell: process.platform === 'win32' },
@@ -39,10 +47,14 @@ try {
   if (packageJson.bin?.continuum !== 'bin/continuum.mjs') {
     throw new Error('Packed package does not expose the continuum binary');
   }
+  if (packageJson.bin?.['continuum-migrate'] !== 'bin/continuum-migrate.mjs') {
+    throw new Error('Packed package does not expose the migration binary');
+  }
   const installedRoot = join(temporary, 'node_modules', '@continuum', 'core');
   for (const required of [
     'migrations/0001_init.sql',
     'migrations/0004_review_queue_index.sql',
+    'bin/continuum-migrate.mjs',
     'scripts/ensure-scope.mjs',
     'scripts/create-scope-operator.sql',
     'scripts/retire-scope-operator.sql',

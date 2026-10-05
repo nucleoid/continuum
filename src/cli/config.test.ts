@@ -29,6 +29,46 @@ describe('CLI config', () => {
     })).toThrow(/token values/i);
   });
 
+  it('keeps each unprofiled host and credential pair in one source', () => {
+    expect(() => resolveConfig(
+      { apiUrl: 'https://flag.test' },
+      { CONTINUUM_TOKEN: 'env-token' },
+      null,
+    )).toThrow(/--api-url and --token.*together/i);
+    expect(() => resolveConfig(
+      { token: 'flag-token' },
+      { CONTINUUM_API_URL: 'https://env.test' },
+      null,
+    )).toThrow(/--api-url and --token.*together/i);
+    expect(() => resolveConfig({}, { CONTINUUM_TOKEN: 'env-token' }, null))
+      .toThrow(/CONTINUUM_API_URL and CONTINUUM_TOKEN.*together/i);
+    expect(() => resolveConfig({}, { CONTINUUM_API_URL: 'https://env.test' }, null))
+      .toThrow(/CONTINUUM_API_URL and CONTINUUM_TOKEN.*together/i);
+  });
+
+  it('lets a complete explicit flag pair override defaultProfile', () => {
+    expect(resolveConfig({ apiUrl: 'https://flag.test', token: 'flag-token' }, {}, {
+      defaultProfile: 'work',
+      profiles: { work: { apiUrl: 'https://profile.test', tokenEnv: 'WORK_TOKEN' } },
+    })).toMatchObject({ apiUrl: 'https://flag.test', token: 'flag-token' });
+  });
+
+  it('requires safe API URLs and rejects token control characters', () => {
+    for (const apiUrl of [
+      'https://example.test?tenant=one',
+      'https://example.test/#fragment',
+      'http://example.test',
+    ]) {
+      expect(() => resolveConfig({ apiUrl, token: 'token' }, {}, null)).toThrow();
+    }
+    expect(resolveConfig({ apiUrl: 'http://127.0.0.2:4000', token: 'token' }, {}, null).apiUrl)
+      .toBe('http://127.0.0.2:4000');
+    expect(resolveConfig({ apiUrl: 'http://[::1]:4000', token: 'token' }, {}, null).apiUrl)
+      .toBe('http://[::1]:4000');
+    expect(() => resolveConfig({ apiUrl: 'https://example.test', token: 'bad\r\ntoken' }, {}, null))
+      .toThrow(/control characters/i);
+  });
+
   it('does not fall back to the generic token when a profile tokenEnv is absent', () => {
     expect(() => resolveConfig({}, { CONTINUUM_TOKEN: 'wrong-host-token' }, {
       defaultProfile: 'work',
@@ -50,11 +90,11 @@ describe('CLI config', () => {
     expect(() => resolveConfig({}, { CONTINUUM_TOKEN: 'env-token' }, {
       defaultProfile: 'work', profiles: { work: { apiUrl: 'https://profile.test' } },
     })).toThrow(/tokenEnv/i);
-    expect(() => resolveConfig({ token: 'flag-token' }, {}, {
+    expect(() => resolveConfig({ profile: 'work', token: 'flag-token' }, {}, {
       defaultProfile: 'work',
       profiles: { work: { apiUrl: 'https://profile.test', tokenEnv: 'WORK_TOKEN' } },
     })).toThrow(/cannot be combined/i);
-    expect(() => resolveConfig({ apiUrl: 'https://flag.test' }, { WORK_TOKEN: 'profile-token' }, {
+    expect(() => resolveConfig({ profile: 'work', apiUrl: 'https://flag.test' }, { WORK_TOKEN: 'profile-token' }, {
       defaultProfile: 'work',
       profiles: { work: { apiUrl: 'https://profile.test', tokenEnv: 'WORK_TOKEN' } },
     })).toThrow(/cannot be combined/i);

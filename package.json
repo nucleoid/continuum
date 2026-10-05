@@ -7,14 +7,22 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "continuum": "bin/continuum.mjs"
+    "continuum": "bin/continuum.mjs",
+    "continuum-migrate": "bin/continuum-migrate.mjs"
   },
   "files": [
     "bin",
     "dist",
     "!dist/**/*.test.*",
     "!dist/**/*.spec.*",
-    "docs",
+    "docs/agents-md-freshness.md",
+    "docs/api-operations.md",
+    "docs/audit-api.md",
+    "docs/cli.md",
+    "docs/knowledge-gap-insights.md",
+    "docs/lifecycle.md",
+    "docs/scope-provisioning.md",
+    "!dist/**/tenants/**",
     "migrations",
     "scripts/ensure-scope.mjs",
     "scripts/*.sql",
@@ -22,8 +30,9 @@
     "LICENSE"
   ],
   "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "tsc",
-    "prepack": "npm run build",
+    "prepack": "npm run clean && npm run build",
     "pretest": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",

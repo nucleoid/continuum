@@ -40,6 +40,14 @@ describe('CLI HTTP client', () => {
     await expect(huge.text('GET', '/agents-md')).rejects.toBeInstanceOf(CliError);
   });
 
+  it('treats rate limiting as a transient server failure', async () => {
+    const client = new ApiClient({
+      apiUrl: 'https://example.test', token: 'x', timeoutMs: 100,
+      fetch: async () => Response.json({ error: 'try later' }, { status: 429 }),
+    });
+    await expect(client.json('GET', '/scopes')).rejects.toMatchObject({ exitCode: 5 });
+  });
+
   it('times out while waiting for headers and while streaming the body', async () => {
     const headers = new ApiClient({
       apiUrl: 'https://example.test', token: 'x', timeoutMs: 10,

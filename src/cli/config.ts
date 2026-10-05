@@ -1,9 +1,9 @@
 import { readFile } from 'node:fs/promises';
+import { isIP } from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { CliError } from './http.js';
 
-export const DEFAULT_API_URL = 'http://127.0.0.1:4000';
 export const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_CONFIG_BYTES = 64 * 1024;
 
@@ -91,7 +91,26 @@ function cleanUrl(value: string): string {
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
     throw new CliError('API URL must be HTTP(S) without credentials', 2);
   }
+  if (url.search || url.hash) {
+    throw new CliError('API URL must not contain a query or fragment', 2);
+  }
+  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  const ipVersion = isIP(hostname);
+  const loopback = hostname === 'localhost'
+    || (ipVersion === 4 && hostname.startsWith('127.'))
+    || (ipVersion === 6 && hostname === '::1');
+  if (url.protocol !== 'https:' && !loopback) {
+    throw new CliError('API URL must use HTTPS except for loopback hosts', 2);
+  }
   return url.href.replace(/\/$/, '');
+}
+
+function cleanToken(value: string | undefined): string {
+  if (!value?.trim()) throw new CliError('Continuum bearer token is required', 2);
+  if (/[\u0000-\u001f\u007f]/.test(value)) {
+    throw new CliError('Continuum bearer token must not contain control characters', 2);
+  }
+  return value;
 }
 
 export function resolveConfig(
@@ -100,7 +119,13 @@ export function resolveConfig(
   file: FileConfig | null,
 ): ResolvedConfig {
   const validated = file === null ? null : validateFileConfig(file);
-  const profileName = flags.profile ?? validated?.defaultProfile;
+  const hasFlagApiUrl = flags.apiUrl !== undefined;
+  const hasFlagToken = flags.token !== undefined;
+  const hasCredentialFlag = hasFlagApiUrl || hasFlagToken;
+  if (flags.profile !== undefined && hasCredentialFlag) {
+    throw new CliError('A profile cannot be combined with --api-url or --token', 2);
+  }
+  const profileName = flags.profile ?? (hasCredentialFlag ? undefined : validated?.defaultProfile);
   const profiles = validated?.profiles;
   const profile = profileName === undefined || profiles === undefined
     || !Object.hasOwn(profiles, profileName)
@@ -108,9 +133,6 @@ export function resolveConfig(
     : profiles[profileName];
   if (profileName !== undefined && profile === undefined) {
     throw new CliError(`Unknown profile: ${profileName}`, 2);
-  }
-  if (profile !== undefined && (flags.apiUrl !== undefined || flags.token !== undefined)) {
-    throw new CliError('A profile cannot be combined with --api-url or --token', 2);
   }
   if (profile !== undefined && (typeof profile.apiUrl !== 'string' || !profile.apiUrl.trim())) {
     throw new CliError(`Profile ${profileName} apiUrl is required`, 2);
@@ -122,18 +144,33 @@ export function resolveConfig(
   if (tokenEnv !== undefined && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(tokenEnv)) {
     throw new CliError('Profile tokenEnv is invalid', 2);
   }
-  const token = profile === undefined
-    ? flags.token ?? env.CONTINUUM_TOKEN
-    : env[tokenEnv!];
-  if (!token?.trim()) throw new CliError('Continuum bearer token is required', 2);
+  let apiUrl: string;
+  let token: string;
+  if (profile !== undefined) {
+    apiUrl = profile.apiUrl!;
+    token = cleanToken(env[tokenEnv!]);
+  } else if (hasCredentialFlag) {
+    if (!hasFlagApiUrl || !hasFlagToken) {
+      throw new CliError('--api-url and --token must be provided together', 2);
+    }
+    apiUrl = flags.apiUrl!;
+    token = cleanToken(flags.token);
+  } else {
+    const hasEnvApiUrl = env.CONTINUUM_API_URL !== undefined;
+    const hasEnvToken = env.CONTINUUM_TOKEN !== undefined;
+    if (hasEnvApiUrl !== hasEnvToken) {
+      throw new CliError('CONTINUUM_API_URL and CONTINUUM_TOKEN must be provided together', 2);
+    }
+    if (!hasEnvApiUrl) throw new CliError('Continuum bearer token is required', 2);
+    apiUrl = env.CONTINUUM_API_URL!;
+    token = cleanToken(env.CONTINUUM_TOKEN);
+  }
   const timeoutMs = flags.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) {
     throw new CliError('Timeout must be between 1 and 120000 milliseconds', 2);
   }
   return {
-    apiUrl: cleanUrl(profile === undefined
-      ? flags.apiUrl ?? env.CONTINUUM_API_URL ?? DEFAULT_API_URL
-      : profile.apiUrl!),
+    apiUrl: cleanUrl(apiUrl),
     token,
     timeoutMs,
     ...(profileName === undefined ? {} : { profile: profileName }),

@@ -23,6 +23,7 @@ const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,64}$/;
 function statusExit(status: number): ExitCode {
   if (status === 401 || status === 403) return 3;
   if (status === 404 || status === 409) return 4;
+  if (status === 429) return 5;
   if (status >= 400 && status < 500) return 2;
   return 5;
 }

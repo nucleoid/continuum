@@ -5,11 +5,18 @@ PostgreSQL directly. Install the package, then run `continuum --help`.
 
 ## Configuration
 
-Without a selected profile, configuration precedence is:
+Without an explicitly selected profile, configuration precedence is:
 
-1. `--api-url`, `--token`, and `--timeout` flags
-2. `CONTINUUM_API_URL` and `CONTINUUM_TOKEN`
-3. `http://127.0.0.1:4000` and a 10 second timeout
+1. A complete `--api-url` plus `--token` pair
+2. `defaultProfile`, when configured
+3. A complete `CONTINUUM_API_URL` plus `CONTINUUM_TOKEN` pair
+
+Host and token values are atomic credential boundaries. The CLI never combines
+a flag with an environment value. Supplying either credential flag requires
+the other, and supplying either generic environment variable requires the
+other. A complete flag pair overrides `defaultProfile`; explicit `--profile`
+cannot be combined with either credential flag. The default timeout is 10
+seconds and `--timeout` may override it independently.
 
 The default config file is `~/.continuum/config.json`; override it with
 `--config`. Profiles may store an API URL and the **name** of an environment
@@ -32,7 +39,9 @@ combined with `--api-url` or `--token`, and never falls back to
 ```
 
 Bearer tokens are opaque. The CLI does not decode them or include them in
-errors. Avoid `--token` in shared shell history; environment variables are the
+errors. ASCII control characters are rejected. API URLs must not contain a
+query or fragment and must use HTTPS, except for loopback development hosts.
+Avoid `--token` in shared shell history; environment variables are the
 recommended path.
 
 ## Commands
@@ -58,9 +67,24 @@ bounded. API errors include a safe request ID when the server provides one.
 `audit --since 24h` is converted to a UTC RFC 3339 timestamp; explicit
 timestamps must include `Z` or an offset.
 
-All commands accept `--json`. JSON mode writes exactly one JSON document to
-stdout. Human output is deterministic and strips terminal control characters.
+All commands accept `--json`. On success, JSON mode writes exactly one JSON
+document to stdout. On failure, stdout is empty and stderr contains one document
+with the shape `{ "error": { "message": string, "exitCode": number } }`.
+Human output is deterministic and strips terminal control characters.
 Diagnostics go to stderr.
+
+## Installed-package migrations
+
+The npm package includes every SQL migration and exposes an installed migration
+entrypoint. Set `DATABASE_URL` for the target PostgreSQL database, then run:
+
+```text
+continuum-migrate
+```
+
+The migrator takes a PostgreSQL advisory lock, applies pending packaged
+migrations in filename order, and exits nonzero on failure. Run it as a trusted
+operator before starting a newly installed application version.
 
 ## Exit codes
 

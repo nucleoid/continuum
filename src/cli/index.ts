@@ -2,7 +2,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { ApiClient, CliError } from './http.js';
 import { readConfigFile, resolveConfig, type FileConfig } from './config.js';
-import { jsonDocument, table } from './output.js';
+import { humanText, jsonDocument, table } from './output.js';
 
 const MAX_INPUT_BYTES = 1024 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -46,7 +46,14 @@ export async function readBoundedStdin(
     }
     return Buffer.concat(chunks).toString('utf8');
   } catch (error) {
-    await iterator.return?.().catch(() => undefined);
+    const destroy = (stream as { destroy?: () => void }).destroy;
+    if (typeof destroy === 'function') {
+      try { destroy.call(stream); } catch { /* best-effort stream termination */ }
+    }
+    try {
+      const cleanup = iterator.return?.();
+      if (cleanup) void Promise.resolve(cleanup).catch(() => undefined);
+    } catch { /* best-effort iterator cleanup */ }
     throw error;
   }
 }
@@ -203,7 +210,7 @@ async function commandCapture(args: string[], client: ApiClient, deps: CliDepend
     ...(values['source-ref'] ? { sourceRef: values['source-ref'] } : {}),
     ...(metadata ? { metadata } : {}),
   });
-  emit(deps, values.json, result, `Captured ${result.id}\n`);
+  emit(deps, values.json, result, `Captured ${humanText(result.id)}\n`);
 }
 
 async function commandRecall(args: string[], client: ApiClient, deps: CliDependencies) {
@@ -279,8 +286,8 @@ async function commandScopes(args: string[], client: ApiClient, deps: CliDepende
     ? await client.json('PUT', path, { role })
     : await client.json('DELETE', path);
   emit(deps, values.json, result, action === 'grant'
-    ? `Granted ${role} on ${scopeLabel} to ${principalId}\n`
-    : `Revoked membership on ${scopeLabel} from ${principalId}\n`);
+    ? `Granted ${humanText(role)} on ${humanText(scopeLabel)} to ${humanText(principalId)}\n`
+    : `Revoked membership on ${humanText(scopeLabel)} from ${humanText(principalId)}\n`);
 }
 
 async function commandPromote(args: string[], client: ApiClient, deps: CliDependencies) {
@@ -291,7 +298,7 @@ async function commandPromote(args: string[], client: ApiClient, deps: CliDepend
   const result = await client.json('POST', `/memories/${positionals[0]}/promote`, {
     targetScope: scopeRef(requireString(values.to, '--to')),
   });
-  emit(deps, values.json, result, `Promoted ${result.sourceId} to ${result.destinationId}\n`);
+  emit(deps, values.json, result, `Promoted ${humanText(result.sourceId)} to ${humanText(result.destinationId)}\n`);
 }
 
 async function commandVerify(args: string[], client: ApiClient, deps: CliDependencies) {
@@ -305,7 +312,7 @@ async function commandVerify(args: string[], client: ApiClient, deps: CliDepende
   const result = await client.json('POST', `/memories/${positionals[0]}/verify`, {
     stillTrue: Boolean(values['still-true']), ...(values.note ? { note: values.note } : {}),
   });
-  emit(deps, values.json, result, `Verified ${result.id}: ${result.state}\n`);
+  emit(deps, values.json, result, `Verified ${humanText(result.id)}: ${humanText(result.state)}\n`);
 }
 
 async function commandAgentsMd(args: string[], client: ApiClient, deps: CliDependencies) {
@@ -324,6 +331,13 @@ async function commandAgentsMd(args: string[], client: ApiClient, deps: CliDepen
 
 export async function runCli(argv: string[], dependencies: Partial<CliDependencies> = {}): Promise<number> {
   const deps = { ...defaults, ...dependencies } as CliDependencies;
+  const jsonErrors = argv.includes('--json');
+  const fail = (message: string, exitCode: 2 | 3 | 4 | 5): number => {
+    deps.stderr(jsonErrors
+      ? jsonDocument({ error: { message, exitCode } })
+      : `continuum: ${humanText(message)}\n`);
+    return exitCode;
+  };
   try {
     const command = argv[0];
     if (!command || command === '--help' || command === '-h') {
@@ -359,18 +373,15 @@ export async function runCli(argv: string[], dependencies: Partial<CliDependenci
     return 0;
   } catch (error) {
     if (error instanceof CliError) {
-      deps.stderr(`continuum: ${error.message}\n`);
-      return error.exitCode;
+      return fail(error.message, error.exitCode);
     }
     if (
       error instanceof TypeError
       && typeof (error as NodeJS.ErrnoException).code === 'string'
       && (error as NodeJS.ErrnoException).code!.startsWith('ERR_PARSE_ARGS_')
     ) {
-      deps.stderr(`continuum: ${error.message}\n`);
-      return 2;
+      return fail(error.message, 2);
     }
-    deps.stderr('continuum: unexpected failure\n');
-    return 5;
+    return fail('unexpected failure', 5);
   }
 }
