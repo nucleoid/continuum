@@ -57,9 +57,26 @@ const ITEM_ERROR_CODES = new Set([
   'payload_too_large',
   'text_too_long',
 ]);
+const PROVIDER_ERROR_CODES = new Set([
+  'authentication_error',
+  'invalid_api_key',
+  'invalid_authentication',
+  'invalid_json',
+  'invalid_model',
+  'invalid_model_configuration',
+  'invalid_request_format',
+  'malformed_request',
+  'model_not_found',
+  'permission_denied',
+  'unauthorized',
+]);
 const ITEM_MESSAGE = /\b(?:input|text|prompt|request body)\b.{0,80}\b(?:too (?:large|long)|exceeds?|maximum|context length|token limit)\b/i;
 const OPENAI_CONTEXT_MESSAGE = /\bmaximum context length\b.{0,160}\b(?:requested|resulted in)\b.{0,80}\btokens?\b/i;
+const OPENAI_REQUEST_TOKEN_MESSAGE = /\brequested\s+\d+\s+tokens?\b.{0,80}\bmax(?:imum)?\s+\d+\s+tokens?\s+per\s+request\b/i;
 const VOYAGE_REQUEST_TOKEN_MESSAGE = /\b(?:total number of tokens|tokens? in the batch)\b.{0,120}\b(?:exceeds?|maximum|max allowed)\b.{0,80}\b(?:tokens? per request|request token limit)\b/i;
+const VOYAGE_EXAMPLE_TOKEN_MESSAGE = /\bexample at index\s+\d+\b.{0,160}\b(?:too many tokens?|context window)\b/i;
+const VOYAGE_SUBMITTED_BATCH_MESSAGE = /\bmax(?:imum)? allowed tokens? per submitted batch\b/i;
+const PROVIDER_FAILURE_MESSAGE = /\b(?:invalid api key|authentication failed|unauthorized|permission denied|invalid (?:json|input format|request format)|malformed (?:json|request|payload)|model (?:not found|unavailable|does not support embeddings?))\b/i;
 
 async function boundedErrorBody(response: Response): Promise<unknown> {
   const body = response.body;
@@ -110,21 +127,29 @@ function isExplicitItemFailure(provider: EmbeddingHttpProvider, body: unknown): 
     ? root.error as Record<string, unknown>
     : root;
   const code = stringField(nested.code)?.toLowerCase() ?? null;
+  const type = stringField(nested.type)?.toLowerCase() ?? null;
+  if ((code && PROVIDER_ERROR_CODES.has(code))
+    || (type && PROVIDER_ERROR_CODES.has(type))) return false;
   if (code && ITEM_ERROR_CODES.has(code)) return true;
 
   if (provider === 'openai') {
     const parameter = stringField(nested.param)?.toLowerCase() ?? null;
     const message = stringField(nested.message);
+    if (message !== null && PROVIDER_FAILURE_MESSAGE.test(message)) return false;
     return parameter === 'input'
       || parameter?.startsWith('input[') === true
-      || (message !== null && OPENAI_CONTEXT_MESSAGE.test(message));
+      || (message !== null && (OPENAI_CONTEXT_MESSAGE.test(message)
+        || OPENAI_REQUEST_TOKEN_MESSAGE.test(message)));
   }
 
   const message = provider === 'voyage'
     ? stringField(root.detail) ?? stringField(nested.message)
     : stringField(root.error) ?? stringField(nested.message);
+  if (message !== null && PROVIDER_FAILURE_MESSAGE.test(message)) return false;
   return message !== null && (ITEM_MESSAGE.test(message)
-    || (provider === 'voyage' && VOYAGE_REQUEST_TOKEN_MESSAGE.test(message)));
+    || (provider === 'voyage' && (VOYAGE_REQUEST_TOKEN_MESSAGE.test(message)
+      || VOYAGE_EXAMPLE_TOKEN_MESSAGE.test(message)
+      || VOYAGE_SUBMITTED_BATCH_MESSAGE.test(message))));
 }
 
 export async function embeddingProviderHttpError(

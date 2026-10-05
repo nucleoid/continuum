@@ -150,7 +150,10 @@ async function runProvider(
   // Scope-filtered and unfiltered runs overlap, so they must share one provider lock.
   const lockName = `continuum:embed-backfill:${provider.id}:${provider.dim}`;
   let locked = false;
+  let destroyClient = false;
   let cursor: string | null = options.cursor ?? null;
+  let wrapSavedCursor = false;
+  let wrapped = false;
   let scanned = 0;
   let eligible = 0;
   let embedded = 0;
@@ -172,6 +175,7 @@ async function runProvider(
           [provider.id, provider.dim, filter],
         );
         cursor = saved.rows[0]?.cursor ?? null;
+        wrapSavedCursor = cursor !== null;
       }
     }
 
@@ -243,11 +247,27 @@ async function runProvider(
               SELECT 1 FROM memory_embeddings e
                WHERE e.memory_id = m.id AND e.provider = $2 AND e.dim = $3
             )
+            AND NOT EXISTS (
+              SELECT 1 FROM audit_log a
+               WHERE a.memory_id = m.id
+                 AND a.action = 'write'
+                 AND a.metadata->>'operation' = 'embedding_backfill'
+                 AND a.metadata->>'provider' = $2
+                 AND a.metadata->>'dim' = $3::text
+            )
           ORDER BY m.id
           LIMIT $${limitIndex}`,
         params,
       );
       if (rows.rows.length === 0) {
+        if (wrapSavedCursor && !wrapped) {
+          cursor = null;
+          wrapped = true;
+          if (!options.dryRun && !options.countOnly) {
+            await checkpoint(client, provider, filter, null);
+          }
+          continue;
+        }
         completed = true;
         cursor = null;
         if (!options.dryRun && !options.countOnly) await checkpoint(client, provider, filter, null);
@@ -288,10 +308,17 @@ async function runProvider(
     return { scanned, eligible, embedded, failed, completed, cursor };
   } finally {
     if (locked) {
-      await client.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [lockName])
-        .catch(() => undefined);
+      try {
+        const unlock = await client.query<{ unlocked: boolean }>(
+          'SELECT pg_advisory_unlock(hashtextextended($1, 0)) AS unlocked',
+          [lockName],
+        );
+        destroyClient = unlock.rows[0]?.unlocked !== true;
+      } catch {
+        destroyClient = true;
+      }
     }
-    client.release();
+    client.release(destroyClient);
   }
 }
 

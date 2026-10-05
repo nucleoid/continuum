@@ -116,6 +116,76 @@ describe('hosted embedding providers', () => {
     });
   });
 
+  it.each([
+    ['Voyage indexed example token limit', VoyageEmbeddingProvider, {
+      detail: 'The example at index 1 has too many tokens for the model context window.',
+    }],
+    ['Voyage submitted-batch token limit', VoyageEmbeddingProvider, {
+      detail: 'The max allowed tokens per submitted batch is 120000. Your batch has 130001 tokens.',
+    }],
+    ['OpenAI per-request token limit', OpenAIEmbeddingProvider, {
+      error: {
+        message: 'Requested 300001 tokens, max 300000 tokens per request',
+        type: 'invalid_request_error', param: null, code: null,
+      },
+    }],
+  ])('classifies the realistic %s payload as item-scoped', async (_name, Provider, body) => {
+    const provider = new Provider({
+      apiKey: '***', model: 'model', dim: 2,
+      fetchImpl: vi.fn(async () => new Response(JSON.stringify(body), { status: 400 })),
+    });
+
+    await expect(provider.embed(['one', 'two'])).rejects.toMatchObject({
+      code: 'EMBEDDING_ITEM_FAILED', failureScope: 'item',
+    });
+  });
+
+  it.each([
+    ['authentication', 401, {
+      error: { message: 'Requested 300001 tokens, max 300000 tokens per request' },
+    }, 'EMBEDDING_AUTH'],
+    ['format', 400, {
+      error: { code: 'invalid_request_format', message: 'Requested 300001 tokens, max 300000 tokens per request' },
+    }, 'EMBEDDING_FAILED'],
+    ['provider configuration', 400, {
+      error: { code: 'invalid_model_configuration', message: 'Requested 300001 tokens, max 300000 tokens per request' },
+    }, 'EMBEDDING_FAILED'],
+  ])('does not misclassify an OpenAI %s failure', async (_name, status, body, code) => {
+    const provider = new OpenAIEmbeddingProvider({
+      apiKey: '***', model: 'model', dim: 2,
+      fetchImpl: vi.fn(async () => new Response(JSON.stringify(body), { status })),
+    });
+
+    await expect(provider.embed(['one', 'two'])).rejects.toMatchObject({
+      code, failureScope: 'provider',
+    });
+  });
+
+  it.each([
+    ['Voyage format failure', VoyageEmbeddingProvider, {
+      detail: 'Invalid input format: text exceeds maximum field width.',
+    }],
+    ['Voyage provider failure', VoyageEmbeddingProvider, {
+      code: 'invalid_model_configuration',
+      detail: 'The max allowed tokens per submitted batch is unavailable for this model.',
+    }],
+    ['OpenAI malformed request', OpenAIEmbeddingProvider, {
+      error: {
+        message: 'Malformed request: Requested 300001 tokens, max 300000 tokens per request',
+        type: 'invalid_request_error', param: null, code: null,
+      },
+    }],
+  ])('keeps the %s provider-wide', async (_name, Provider, body) => {
+    const provider = new Provider({
+      apiKey: '***', model: 'model', dim: 2,
+      fetchImpl: vi.fn(async () => new Response(JSON.stringify(body), { status: 400 })),
+    });
+
+    await expect(provider.embed(['one', 'two'])).rejects.toMatchObject({
+      code: 'EMBEDDING_FAILED', failureScope: 'provider',
+    });
+  });
+
   it('honors hosted per-request batch size while preserving result order', async () => {
     const fetchImpl = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
       const payload = JSON.parse(String(init?.body)) as { input: string[] };

@@ -250,6 +250,64 @@ describe('embedding backfill', () => {
         WHERE memory_id = $1 AND metadata->>'operation' = 'embedding_backfill'`,
       [memories[1]!.id],
     )).rows[0].count).toBe(1);
+
+    const settled = await runEmbeddingBackfill(pool, provider, {
+      batchSize: 3, maxRows: 10, maxErrors: 1,
+    });
+    expect(settled).toMatchObject({ embedded: 0, failed: 0, completed: true, cursor: null });
+    expect((await pool.query(
+      `SELECT count(*)::int AS count FROM audit_log
+        WHERE memory_id = $1 AND metadata->>'operation' = 'embedding_backfill'`,
+      [memories[1]!.id],
+    )).rows[0].count).toBe(1);
+  });
+
+  it('wraps a saved cursor once so lower UUID work is not falsely reported complete', async () => {
+    const { memories } = await seed('project', 'resume-wrap', ['lower UUID', 'cursor row']);
+    const [lower, upper] = [...memories].sort((left, right) => left.id.localeCompare(right.id));
+    const provider: EmbeddingProvider = {
+      id: 'ollama:resume-wrap', dim: 768, local: true,
+      embed: (texts) => vectors.embed(texts),
+    };
+    await pool.query(
+      `INSERT INTO embedding_backfill_checkpoints (provider, dim, scope_filter, cursor)
+       VALUES ($1, $2, '', $3)`,
+      [provider.id, provider.dim, upper!.id],
+    );
+
+    const report = await runEmbeddingBackfill(pool, provider, { batchSize: 2, maxRows: 10 });
+
+    expect(report).toMatchObject({ embedded: 2, failed: 0, completed: true, cursor: null });
+    expect((await pool.query(
+      'SELECT memory_id FROM memory_embeddings ORDER BY memory_id',
+    )).rows.map((row) => row.memory_id)).toEqual([lower!.id, upper!.id].sort());
+  });
+
+  it('destroys the pooled client when advisory unlock cannot be confirmed', async () => {
+    await seed('project', 'unlock-failure', ['one']);
+    const provider: EmbeddingProvider = {
+      id: 'ollama:unlock-failure', dim: 768, local: true,
+      embed: (texts) => vectors.embed(texts),
+    };
+    const originalConnect = pool.connect.bind(pool);
+    let release: ReturnType<typeof vi.spyOn> | undefined;
+    const connect = vi.spyOn(pool, 'connect').mockImplementation(async () => {
+      const client = await originalConnect();
+      const originalQuery = client.query.bind(client);
+      vi.spyOn(client, 'query').mockImplementation(async (...args: unknown[]) => {
+        if (String(args[0]).includes('pg_advisory_unlock')) {
+          throw new Error('simulated unlock failure');
+        }
+        return originalQuery(...args as [never]);
+      });
+      release = vi.spyOn(client, 'release');
+      return client;
+    });
+
+    await expect(runEmbeddingBackfill(pool, provider, { maxRows: 10 }))
+      .resolves.toMatchObject({ embedded: 1 });
+    expect(release).toHaveBeenCalledWith(true);
+    connect.mockRestore();
   });
 
   it('does not wrap database storage failures as provider failures', async () => {
