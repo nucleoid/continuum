@@ -30,6 +30,7 @@ import { ingestConfigFromEnv, type IngestConfig } from '../ingest/config.js';
 import { cliSupportRouter } from './routes/cli.js';
 import { supersedeRouter } from './routes/supersede.js';
 import { tagVocabulariesRouter } from './routes/tag-vocabularies.js';
+import type { CaptureRegistry } from '../capture/plugin.js';
 
 export { createReadinessState } from './readiness.js';
 
@@ -66,6 +67,7 @@ export interface AppOptions {
   gapConfig?: GapConfig;
   relationThreshold?: number;
   ingestConfig?: IngestConfig;
+  captureRegistry?: CaptureRegistry;
 }
 
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
@@ -287,7 +289,13 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   });
 
   const v0 = express.Router();
-  v0.use(ingestRouter(pool, provider, ingestConfig, undefined, relationThreshold));
+  v0.use(ingestRouter(
+    pool,
+    provider,
+    ingestConfig,
+    opts.captureRegistry,
+    relationThreshold,
+  ));
   v0.use(bearerAuth(pool));
   v0.use(captureRouter(pool, provider, relationThreshold));
   v0.use(recallRouter(pool, provider));
