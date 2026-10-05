@@ -41,6 +41,8 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
+      - run: npm pack --dry-run
+      - run: npm run smoke:cli-package
 
   windows:
     name: Windows build and entrypoint test
@@ -55,4 +57,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npx vitest run src/api/entrypoint.test.ts src/api/entrypoint-callers.test.ts
+      - run: npx vitest run src/cli/config.test.ts src/cli/http.test.ts src/cli/index.test.ts
       - run: node scripts/windows-entrypoint-smoke.mjs
+      - run: npm pack --dry-run
+      - run: npm run smoke:cli-package

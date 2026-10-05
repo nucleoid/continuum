@@ -27,6 +27,7 @@ import {
 import { memoriesRouter } from './routes/memories.js';
 import { ingestRouter } from './routes/ingest.js';
 import { ingestConfigFromEnv, type IngestConfig } from '../ingest/config.js';
+import { cliSupportRouter } from './routes/cli.js';
 
 export { createReadinessState } from './readiness.js';
 
@@ -75,6 +76,7 @@ const KNOWN_LOG_PATHS = new Set([
   '/api/v0/memories', '/api/v0/memories/:id',
   '/api/v0/insights/gaps',
   '/api/v0/ingest/:pluginId',
+  '/api/v0/scopes',
 ]);
 
 const defaultLogger: OperationalLogger = {
@@ -287,6 +289,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   v0.use(memoriesRouter(pool));
   v0.use(agentsMdRouter(pool));
   v0.use(auditRouter(pool));
+  v0.use(cliSupportRouter(pool));
   v0.use(reviewQueueRouter(pool, opts.reviewHorizonDays));
   v0.use(insightsRouter(pool, provider, gapConfig, () => new Date((opts.clock ?? Date.now)())));
   app.use('/api/v0', v0);

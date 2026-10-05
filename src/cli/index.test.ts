@@ -1,0 +1,299 @@
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { describe, expect, it, vi } from 'vitest';
+import { readBoundedStdin, runCli, type CliDependencies } from './index.js';
+import { CliError } from './http.js';
+
+function harness(fetch: typeof globalThis.fetch, stdin = '', stdinIsTTY = true) {
+  let stdout = '';
+  let stderr = '';
+  const readStdin = vi.fn(async () => stdin);
+  const deps: CliDependencies = {
+    env: { CONTINUUM_API_URL: 'https://example.test', CONTINUUM_TOKEN: 'opaque' },
+    fetch, stdinIsTTY, readStdin,
+    stdout: (value: string) => { stdout += value; },
+    stderr: (value: string) => { stderr += value; },
+    readConfig: async () => null,
+    statFile: async () => ({ size: 0, isFile: () => false }),
+    readFile: async () => { throw new Error('unexpected file read'); },
+    now: () => new Date('2026-10-04T12:00:00Z'),
+  };
+  return {
+    deps,
+    stdout: () => stdout,
+    stderr: () => stderr,
+    readStdin,
+  };
+}
+
+describe('continuum CLI', () => {
+  it('captures from non-TTY stdin and emits one JSON document', async () => {
+    const fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      expect(JSON.parse(String(init?.body))).toMatchObject({
+        scope: { kind: 'project', name: 'continuum' }, body: 'from pipe', source: 'manual',
+      });
+      return Response.json({ id: 'memory-1', scopeId: 'scope-1', expiresAt: null }, { status: 201 });
+    });
+    const h = harness(fetch as typeof globalThis.fetch, 'from pipe\n', false);
+    expect(await runCli([
+      'capture', '--scope', 'project:continuum', '--type', 'fact', '--title', 'Pipe', '--json',
+    ], h.deps)).toBe(0);
+    expect(JSON.parse(h.stdout())).toMatchObject({ id: 'memory-1' });
+    expect(h.stderr()).toBe('');
+  });
+
+  it('rejects missing or ambiguous capture bodies before any request', async () => {
+    const fetch = vi.fn();
+    const tty = harness(fetch as typeof globalThis.fetch);
+    expect(await runCli([
+      'capture', '--scope', 'org', '--type', 'fact', '--title', 'No body',
+    ], tty.deps)).toBe(2);
+    expect(fetch).not.toHaveBeenCalled();
+
+    const ambiguous = harness(fetch as typeof globalThis.fetch, 'pipe', false);
+    expect(await runCli([
+      'capture', '--scope', 'org', '--type', 'fact', '--title', 'Two',
+      '--body', 'flag', '--body-file', 'notes.md',
+    ], ambiguous.deps)).toBe(2);
+  });
+
+  it.each([
+    ['scope', ['capture', '--type', 'fact', '--title', 'Missing scope']],
+    ['type', ['capture', '--scope', 'org', '--title', 'Missing type']],
+    ['title', ['capture', '--scope', 'org', '--type', 'fact']],
+  ])('validates required capture %s before reading redirected stdin', async (_label, argv) => {
+    const h = harness(vi.fn() as typeof globalThis.fetch, 'must not be consumed', false);
+    expect(await runCli(argv, h.deps)).toBe(2);
+    expect(h.readStdin).not.toHaveBeenCalled();
+  });
+
+  it('uses explicit flag and file bodies in non-TTY scripts without reading stdin', async () => {
+    const bodies: string[] = [];
+    const fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)).body);
+      return Response.json({ id: `memory-${bodies.length}` }, { status: 201 });
+    });
+    const flagged = harness(fetch as typeof globalThis.fetch, 'ignored pipe', false);
+    expect(await runCli([
+      'capture', '--scope', 'org', '--type', 'fact', '--title', 'Flag', '--body', 'flag body',
+    ], flagged.deps)).toBe(0);
+    expect(flagged.readStdin).not.toHaveBeenCalled();
+
+    const order: string[] = [];
+    const filed = harness(fetch as typeof globalThis.fetch, 'ignored pipe', false);
+    filed.deps.statFile = vi.fn(async () => {
+      order.push('stat');
+      return { size: 9, isFile: () => true };
+    });
+    filed.deps.readFile = vi.fn(async () => {
+      order.push('read');
+      return 'file body\r\n';
+    });
+    expect(await runCli([
+      'capture', '--scope', 'org', '--type', 'fact', '--title', 'File', '--body-file', 'notes.md',
+    ], filed.deps)).toBe(0);
+    expect(filed.readStdin).not.toHaveBeenCalled();
+    expect(order).toEqual(['stat', 'read']);
+    expect(bodies).toEqual(['flag body', 'file body']);
+  });
+
+  it('normalizes one trailing line ending for every capture body source', async () => {
+    const bodies: string[] = [];
+    const fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)).body);
+      return Response.json({ id: `memory-${bodies.length}` }, { status: 201 });
+    });
+    const flagged = harness(fetch as typeof globalThis.fetch);
+    await runCli([
+      'capture', '--scope', 'org', '--type', 'fact', '--title', 'Flag', '--body', 'flag body\n',
+    ], flagged.deps);
+    const piped = harness(fetch as typeof globalThis.fetch, 'pipe body\r\n', false);
+    await runCli([
+      'capture', '--scope', 'org', '--type', 'fact', '--title', 'Pipe',
+    ], piped.deps);
+    expect(bodies).toEqual(['flag body', 'pipe body']);
+  });
+
+  it('bounds idle stdin waits', async () => {
+    const stream = {
+      [Symbol.asyncIterator]() {
+        return {
+          next: () => new Promise<IteratorResult<Uint8Array>>(() => undefined),
+          return: () => new Promise<IteratorResult<Uint8Array>>(() => undefined),
+        };
+      },
+    };
+    await expect(readBoundedStdin(stream, { idleTimeoutMs: 5, overallTimeoutMs: 50 }))
+      .rejects.toMatchObject({ exitCode: 2, message: expect.stringMatching(/timed out/i) });
+  });
+
+  it('terminates a real Node stdin pipe after its deadline', async () => {
+    const moduleUrl = pathToFileURL(resolve('dist/cli/index.js')).href;
+    const script = [
+      `import { readBoundedStdin } from ${JSON.stringify(moduleUrl)};`,
+      'try { await readBoundedStdin(process.stdin, { idleTimeoutMs: 20, overallTimeoutMs: 100 }); }',
+      "catch (error) { process.stderr.write(error.message); process.exitCode = 2; }",
+    ].join('\n');
+    const child = spawn(process.execPath, ['--input-type=module', '--eval', script], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    const exit = once(child, 'exit');
+    const guard = setTimeout(() => child.kill(), 1_000);
+    const [code] = await exit;
+    clearTimeout(guard);
+    expect(code).toBe(2);
+    expect(stderr).toMatch(/timed out/i);
+  });
+
+  it('rejects oversized body files from metadata before reading them', async () => {
+    const h = harness(vi.fn() as typeof globalThis.fetch);
+    const readFile = vi.fn();
+    h.deps.statFile = vi.fn(async () => ({ size: 1024 * 1024 + 1, isFile: () => true }));
+    h.deps.readFile = readFile;
+    expect(await runCli([
+      'capture', '--scope', 'org', '--type', 'fact', '--title', 'Large', '--body-file', 'large.md',
+    ], h.deps)).toBe(2);
+    expect(readFile).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['unknown option', ['recall', 'query', '--does-not-exist']],
+    ['missing option value', ['recall', 'query', '--timeout']],
+  ])('maps every parseArgs %s error to usage exit 2', async (_label, argv) => {
+    const h = harness(vi.fn() as typeof globalThis.fetch);
+    expect(await runCli(argv, h.deps)).toBe(2);
+    expect(h.stderr()).toMatch(/^continuum: /);
+  });
+
+  it('treats an explicitly missing config file as a usage error', async () => {
+    const h = harness(vi.fn() as typeof globalThis.fetch);
+    h.deps.readConfig = vi.fn(async (_path?: string, required?: boolean) => {
+      expect(required).toBe(true);
+      throw new CliError('Config file does not exist', 2);
+    });
+    expect(await runCli(['scopes', '--config', 'missing.json'], h.deps)).toBe(2);
+    expect(h.stderr()).toContain('Config file does not exist');
+  });
+
+  it('validates commands before loading authenticated configuration', async () => {
+    const h = harness(vi.fn() as typeof globalThis.fetch);
+    h.deps.env = {};
+    const readConfig = vi.fn(async () => null);
+    h.deps.readConfig = readConfig;
+    expect(await runCli(['does-not-exist'], h.deps)).toBe(2);
+    expect(h.stderr()).toContain('Unknown command: does-not-exist');
+    expect(h.stderr()).not.toContain('bearer token');
+    expect(readConfig).not.toHaveBeenCalled();
+  });
+
+  it('normalizes relative audit times against the injected clock', async () => {
+    const fetch = vi.fn(async (url: string | URL | Request) => {
+      expect(String(url)).toContain('since=2026-10-03T12%3A00%3A00.000Z');
+      return Response.json({ count: 0, orgAdmin: false, entries: [] });
+    });
+    const h = harness(fetch as typeof globalThis.fetch);
+    expect(await runCli(['audit', '--since', '24h', '--json'], h.deps)).toBe(0);
+    expect(JSON.parse(h.stdout())).toMatchObject({ count: 0, entries: [] });
+  });
+
+  it('anchors every relative audit bound to one clock reading', async () => {
+    const fetch = vi.fn(async (url: string | URL | Request) => {
+      const parsed = new URL(String(url));
+      expect(parsed.searchParams.get('since')).toBe('2026-10-04T11:00:00.000Z');
+      expect(parsed.searchParams.get('until')).toBe('2026-10-04T12:00:00.000Z');
+      return Response.json({ count: 0, orgAdmin: false, entries: [] });
+    });
+    const h = harness(fetch as typeof globalThis.fetch);
+    h.deps.now = vi.fn()
+      .mockReturnValueOnce(new Date('2026-10-04T13:00:00Z'))
+      .mockReturnValueOnce(new Date('2026-10-05T13:00:00Z'));
+
+    expect(await runCli([
+      'audit', '--since', '2h', '--until', '1h', '--json',
+    ], h.deps)).toBe(0);
+    expect(h.deps.now).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns documented status codes and keeps diagnostics on stderr', async () => {
+    const h = harness(async () => Response.json(
+      { code: 'MEMORY_NOT_FOUND', error: 'memory not found' }, { status: 404 },
+    ));
+    expect(await runCli([
+      'verify', '00000000-0000-4000-8000-000000000099', '--still-true',
+    ], h.deps)).toBe(4);
+    expect(h.stdout()).toBe('');
+    expect(h.stderr()).toContain('memory not found');
+  });
+
+  it('emits structured JSON errors and sanitizes dynamic human output', async () => {
+    const failure = harness(vi.fn() as typeof globalThis.fetch);
+    expect(await runCli(['does-not-exist', '--json'], failure.deps)).toBe(2);
+    expect(failure.stdout()).toBe('');
+    expect(JSON.parse(failure.stderr())).toEqual({
+      error: { message: 'Unknown command: does-not-exist', exitCode: 2 },
+    });
+
+    const success = harness(async () => Response.json({ id: 'memory\u001b[31m\nforged' }, { status: 201 }));
+    expect(await runCli([
+      'capture', '--scope', 'org', '--type', 'fact', '--title', 'Safe', '--body', 'body',
+    ], success.deps)).toBe(0);
+    expect(success.stdout()).toBe('Captured memory [31m forged\n');
+    expect(success.stdout()).not.toContain('\u001b');
+  });
+
+  it('strips C1 controls from tables and human and JSON error output', async () => {
+    const recall = harness(async () => Response.json({
+      results: [{
+        id: 'memory-1', scope: 'org', type: 'fact', score: 1,
+        title: 'safe\u009b31m', excerpt: 'also\u0085safe',
+      }],
+    }));
+    expect(await runCli(['recall', 'query'], recall.deps)).toBe(0);
+    expect(recall.stdout()).toContain('safe 31m');
+    expect(recall.stdout()).toContain('also safe');
+    expect(recall.stdout()).not.toMatch(/[\u0080-\u009f]/);
+
+    const humanError = harness(async () => Response.json(
+      { error: 'denied\u009b31m\nforged' }, { status: 403 },
+    ));
+    expect(await runCli(['scopes'], humanError.deps)).toBe(3);
+    expect(humanError.stderr()).toBe('continuum: denied 31m forged\n');
+    expect(humanError.stderr()).not.toMatch(/[\u0080-\u009f]/);
+
+    const jsonError = harness(async () => Response.json(
+      { error: 'denied\u009b31m' }, { status: 403 },
+    ));
+    expect(await runCli(['scopes', '--json'], jsonError.deps)).toBe(3);
+    expect(JSON.parse(jsonError.stderr())).toEqual({
+      error: { message: 'denied 31m', exitCode: 3 },
+    });
+    expect(jsonError.stderr()).not.toMatch(/[\u0080-\u009f]/);
+  });
+
+  it('keeps scope access read-only and sanitizes agents-md terminal output', async () => {
+    const mutation = harness(vi.fn() as typeof globalThis.fetch);
+    expect(await runCli([
+      'scopes', 'grant', '00000000-0000-4000-8000-000000000099', 'org', 'admin',
+    ], mutation.deps)).toBe(2);
+    expect(mutation.stderr()).toContain('read-only listing');
+    expect(mutation.deps.fetch).not.toHaveBeenCalled();
+
+    const agents = harness(async () => new Response(
+      '# Safe\r\nbody\u001b]0;forged\u0007\nnext\u009b31m\n',
+      { headers: { 'content-type': 'text/markdown' } },
+    ));
+    expect(await runCli(['agents-md'], agents.deps)).toBe(0);
+    expect(agents.stdout()).toBe('# Safe\nbody]0;forged\nnext31m\n');
+    expect(agents.stdout()).not.toMatch(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/);
+
+    const agentsJson = harness(async () => new Response('safe\u009b31m'));
+    expect(await runCli(['agents-md', '--json'], agentsJson.deps)).toBe(0);
+    expect(JSON.parse(agentsJson.stdout())).toEqual({ markdown: 'safe31m' });
+    expect(agentsJson.stdout()).not.toContain('\u009b');
+  });
+});

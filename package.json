@@ -6,8 +6,37 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "continuum": "bin/continuum.mjs",
+    "continuum-migrate": "bin/continuum-migrate.mjs"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "!dist/**/*.test.*",
+    "!dist/**/*.spec.*",
+    "!dist/**/test-helpers.*",
+    "!dist/**/*.map",
+    "docs/agents-md-freshness.md",
+    "docs/api-operations.md",
+    "docs/audit-api.md",
+    "docs/audit-retention.md",
+    "docs/cli.md",
+    "docs/knowledge-gap-insights.md",
+    "docs/lifecycle.md",
+    "docs/memory-api.md",
+    "docs/scope-provisioning.md",
+    "!dist/**/tenants/**",
+    "migrations",
+    "scripts/ensure-scope.mjs",
+    "scripts/*.sql",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "tsc",
+    "prepack": "npm run clean && npm run build",
     "pretest": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -20,7 +49,8 @@
     "sweep": "node dist/lifecycle/sweep-cli.js",
     "sweep:dev": "tsx src/lifecycle/sweep-cli.ts",
     "audit-retention": "node dist/maintenance/audit-retention-cli.js",
-    "audit-retention:dev": "tsx src/maintenance/audit-retention-cli.ts"
+    "audit-retention:dev": "tsx src/maintenance/audit-retention-cli.ts",
+    "smoke:cli-package": "node scripts/cli-package-smoke.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
