@@ -415,12 +415,14 @@ describe('MCP server', () => {
       error: {
         code: 'UNKNOWN_TAGS',
         message: 'One or more tags are not in the vocabulary for this scope kind',
-        scopeKind: 'team',
-        unknownTags: ['unknown-tag'],
-        allowedTags: [
-          'ado', 'branch', 'decision', 'deploy', 'github', 'knowledge-gap', 'merged', 'pr',
-          'session', 'terminal',
-        ],
+        details: {
+          scopeKind: 'team',
+          unknownTags: ['unknown-tag'],
+          allowedTags: [
+            'ado', 'branch', 'decision', 'deploy', 'github', 'knowledge-gap', 'merged', 'pr',
+            'session', 'terminal',
+          ],
+        },
       },
     });
     expect(embed).not.toHaveBeenCalled();
@@ -571,12 +573,14 @@ describe('MCP server', () => {
       error: {
         code: 'UNKNOWN_TAGS',
         message: 'One or more tags are not in the vocabulary for this scope kind',
-        scopeKind: 'project',
-        unknownTags: ['team-only'],
-        allowedTags: [
-          'ado', 'branch', 'decision', 'deploy', 'github', 'knowledge-gap', 'merged', 'pr',
-          'session', 'terminal',
-        ],
+        details: {
+          scopeKind: 'project',
+          unknownTags: ['team-only'],
+          allowedTags: [
+            'ado', 'branch', 'decision', 'deploy', 'github', 'knowledge-gap', 'merged', 'pr',
+            'session', 'terminal',
+          ],
+        },
       },
     });
   });

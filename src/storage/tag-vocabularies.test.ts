@@ -87,8 +87,8 @@ describe('tag vocabulary schema', () => {
         await writeFile(join(first, name), await readFile(join(MIGRATIONS, name), 'utf8'));
       }
       await writeFile(
-        join(second, '0007_tag_vocabularies.sql'),
-        await readFile(join(MIGRATIONS, '0007_tag_vocabularies.sql'), 'utf8'),
+        join(second, '0010_tag_vocabularies.sql'),
+        await readFile(join(MIGRATIONS, '0010_tag_vocabularies.sql'), 'utf8'),
       );
       await runMigrations(historical, first);
       await historical.query(`
@@ -244,9 +244,9 @@ describe('tag vocabulary schema', () => {
       ]) {
         await writeFile(join(first, name), await readFile(join(MIGRATIONS, name), 'utf8'));
       }
-      const migrationSql = await readFile(join(MIGRATIONS, '0007_tag_vocabularies.sql'), 'utf8');
+      const migrationSql = await readFile(join(MIGRATIONS, '0010_tag_vocabularies.sql'), 'utf8');
       await writeFile(
-        join(second, '0007_tag_vocabularies.sql'),
+        join(second, '0010_tag_vocabularies.sql'),
         migrationSql.replace(
           /LOCK TABLE memories IN [A-Z ]+ MODE;/,
           (lock) => `${lock}\nSELECT pg_sleep(0.5);`,
@@ -341,12 +341,89 @@ describe('tag vocabulary schema', () => {
   });
 
   it('sets a bounded lock timeout before taking an EXCLUSIVE migration lock', async () => {
-    const sql = await readFile(join(MIGRATIONS, '0007_tag_vocabularies.sql'), 'utf8');
+    const sql = await readFile(join(MIGRATIONS, '0010_tag_vocabularies.sql'), 'utf8');
     const timeout = sql.indexOf("SET LOCAL lock_timeout = '5s';");
     const lock = sql.indexOf('LOCK TABLE memories IN EXCLUSIVE MODE;');
     expect(timeout).toBeGreaterThan(-1);
     expect(lock).toBeGreaterThan(timeout);
     expect(sql).not.toContain('LOCK TABLE memories IN SHARE ROW EXCLUSIVE MODE;');
+  });
+
+  it('rolls back cleanly when the bounded table-lock wait expires', async () => {
+    const suffix = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const schema = `tag_migration_timeout_${suffix}`;
+    const first = await mkdtemp(join(tmpdir(), 'continuum-tags-timeout-before-'));
+    const second = await mkdtemp(join(tmpdir(), 'continuum-tags-timeout-after-'));
+    const PgPool = (await import('pg')).default.Pool;
+    const admin = new PgPool({ connectionString: DATABASE_URL });
+    const writerPool = new PgPool({
+      connectionString: DATABASE_URL,
+      options: `-c search_path=${schema},public`,
+    });
+    const migrator = new PgPool({
+      connectionString: DATABASE_URL,
+      options: `-c search_path=${schema},public`,
+    });
+    let writer: pg.PoolClient | undefined;
+    try {
+      await admin.query(`CREATE SCHEMA ${schema}`);
+      for (const name of [
+        '0001_init.sql', '0002_lifecycle_principal.sql',
+        '0003_lifecycle_expiry_index.sql', '0004_review_queue_index.sql',
+      ]) {
+        await writeFile(join(first, name), await readFile(join(MIGRATIONS, name), 'utf8'));
+      }
+      const migrationSql = await readFile(join(MIGRATIONS, '0010_tag_vocabularies.sql'), 'utf8');
+      await writeFile(
+        join(second, '0010_tag_vocabularies.sql'),
+        migrationSql.replace("SET LOCAL lock_timeout = '5s';", "SET LOCAL lock_timeout = '150ms';"),
+      );
+      await runMigrations(writerPool, first);
+      await writerPool.query(`
+        INSERT INTO principals (id, external_id, kind, display_name)
+        VALUES ('10000000-0000-4000-8000-000000000040', 'timeout:writer', 'user', 'Writer');
+        INSERT INTO scopes (id, kind, name)
+        VALUES ('20000000-0000-4000-8000-000000000040', 'project', 'timeout');
+        INSERT INTO memories (
+          id, scope_id, type, title, body, author_id, source, tags
+        ) VALUES (
+          '30000000-0000-4000-8000-000000000040',
+          '20000000-0000-4000-8000-000000000040',
+          'fact', 'Locked', 'Hold a row lock',
+          '10000000-0000-4000-8000-000000000040', 'manual', ARRAY['decision']
+        )
+      `);
+      writer = await writerPool.connect();
+      await writer.query('BEGIN');
+      await writer.query(`
+        SELECT id FROM memories
+         WHERE id = '30000000-0000-4000-8000-000000000040'
+         FOR UPDATE
+      `);
+
+      const started = Date.now();
+      await expect(runMigrations(migrator, second)).rejects.toThrow(/lock timeout/i);
+      expect(Date.now() - started).toBeLessThan(2_000);
+
+      const rollback = await writerPool.query(
+        `SELECT to_regclass('${schema}.tag_vocabularies') AS vocabulary,
+                EXISTS (
+                  SELECT 1 FROM _continuum_migrations
+                   WHERE name = '0010_tag_vocabularies.sql'
+                ) AS recorded`,
+      );
+      expect(rollback.rows).toEqual([{ vocabulary: null, recorded: false }]);
+    } finally {
+      await writer?.query('ROLLBACK').catch(() => undefined);
+      writer?.release();
+      await Promise.all([writerPool.end(), migrator.end()]);
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+      await admin.end();
+      await Promise.all([
+        rm(first, { recursive: true, force: true }),
+        rm(second, { recursive: true, force: true }),
+      ]);
+    }
   });
 
   it.each([

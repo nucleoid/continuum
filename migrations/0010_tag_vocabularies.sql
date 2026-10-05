@@ -22,9 +22,12 @@ SELECT scope_kind, tag, 'Built-in Continuum tag', true
 
 -- Drain writers that started before this migration, then keep later writers
 -- paused until the historical rewrite and enforcement trigger commit together.
--- SHARE ROW EXCLUSIVE permits reads but conflicts with the ROW EXCLUSIVE lock
--- taken by INSERT, UPDATE, and DELETE on memories.
-LOCK TABLE memories IN SHARE ROW EXCLUSIVE MODE;
+-- EXCLUSIVE conflicts with the ROW SHARE lock taken by SELECT ... FOR UPDATE,
+-- so promote/verify writers drain before the migration can block their later
+-- write-lock upgrade. ACCESS SHARE remains compatible, so reads continue.
+-- Fail instead of waiting forever when an operator has not drained writers.
+SET LOCAL lock_timeout = '5s';
+LOCK TABLE memories IN EXCLUSIVE MODE;
 
 -- A vocabulary is shared by every scope of a kind. Historical private values
 -- must therefore never be adopted into it. Keep only shipped vocabulary tags
@@ -114,7 +117,8 @@ UPDATE memories AS memory
       FROM shipped
      GROUP BY id
   ) AS classified
- WHERE memory.id = classified.id;
+ WHERE memory.id = classified.id
+   AND memory.tags IS DISTINCT FROM classified.tags;
 
 -- Install the database boundary in the same transaction as the rewrite. This
 -- makes a migration-first rolling deploy fail closed for old writers: values

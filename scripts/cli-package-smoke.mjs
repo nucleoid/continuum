@@ -67,10 +67,12 @@ try {
     'migrations/0007_decision_supersession_constraints.sql',
     'migrations/0008_decision_supersession_validation.sql',
     'migrations/0009_decision_supersession_unique_index.sql',
+    'migrations/0010_tag_vocabularies.sql',
     'bin/continuum-migrate.mjs',
     'scripts/ensure-scope.mjs',
     'scripts/create-scope-operator.sql',
     'scripts/retire-scope-operator.sql',
+    'scripts/enable-tag-legacy-writer-compat.sql',
     'docs/audit-retention.md',
     'docs/memory-api.md',
     'docs/tag-vocabularies.md',
@@ -122,7 +124,7 @@ try {
     release() {},
   };
   await runMigrations({ connect: async () => client });
-  if (ledgerChecks < 8) throw new Error('Packed migrator did not discover packaged migrations');
+  if (ledgerChecks < 10) throw new Error('Packed migrator did not discover packaged migrations');
   process.stdout.write('Packed continuum CLI entrypoint passed\n');
 } finally {
   rmSync(temporary, { recursive: true, force: true });
