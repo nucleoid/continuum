@@ -800,6 +800,105 @@ describe('PromotionEventWorker', () => {
     }
   });
 
+  it('uses each webhook available capacity instead of a shared minimum throttle', async () => {
+    vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
+    const releaseSlow = deferred();
+    try {
+      const slowEntered = deferred();
+      const slowRegistry = new PromotionWebhookRegistry();
+      slowRegistry.register({
+        id: 'slow',
+        onPromoted: async () => {
+          slowEntered.resolve();
+          await releaseSlow.promise;
+        },
+      });
+      const healthyRegistry = new PromotionWebhookRegistry();
+      healthyRegistry.register({ id: 'healthy', onPromoted: async () => undefined });
+      healthyRegistry.register({ id: 'slow', onPromoted: async () => undefined });
+      const store = mockStore({
+        claim: vi.fn().mockResolvedValueOnce([{
+          ...claimedDelivery, webhookId: 'slow',
+        }]).mockResolvedValue([]),
+      });
+      const slowWorker = new PromotionEventWorker(
+        pool,
+        slowRegistry,
+        workerOptions({ owner: 'slow-owner', claimBatch: 2, leaseMs: 90, callbackTimeoutMs: 20 }),
+        store,
+      );
+      const slowDrain = slowWorker.drainOnce();
+      await slowEntered.promise;
+      await vi.advanceTimersByTimeAsync(20);
+      await slowDrain;
+      (store.claim as ReturnType<typeof vi.fn>).mockClear();
+
+      const instance = new PromotionEventWorker(
+        pool,
+        healthyRegistry,
+        workerOptions({ claimBatch: 2, leaseMs: 90, callbackTimeoutMs: 20 }),
+        store,
+      );
+      await instance.drainOnce();
+      const inputs = (store.claim as ReturnType<typeof vi.fn>).mock.calls
+        .map((call) => call[1]);
+      expect(inputs.reduce((sum, input) => sum + input.limit, 0)).toBe(3);
+      expect(inputs.map((input) => [input.webhookIds, input.limit])).toEqual([
+        [['healthy'], 2],
+        [['slow'], 1],
+      ]);
+    } finally {
+      releaseSlow.resolve();
+      await vi.runAllTimersAsync();
+      vi.useRealTimers();
+    }
+  });
+
+  it('releases per-webhook admission after each abort-honoring timeout', async () => {
+    vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
+    try {
+      const secondDelivery: ClaimedPromotionDelivery = {
+        ...claimedDelivery,
+        event: { ...claimedDelivery.event, eventId: 'event-2' },
+      };
+      const callback = vi.fn(async (
+        _event: ClaimedPromotionDelivery['event'],
+        { signal }: { signal: AbortSignal },
+      ) => {
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(new Error('timed out')), { once: true });
+        });
+      });
+      const registry = new PromotionWebhookRegistry();
+      registry.register({ id: 'hook', onPromoted: callback });
+      const store = mockStore({
+        claim: vi.fn()
+          .mockResolvedValueOnce([claimedDelivery])
+          .mockResolvedValueOnce([secondDelivery]),
+      });
+      const instance = new PromotionEventWorker(
+        pool,
+        registry,
+        workerOptions({ claimBatch: 1, leaseMs: 90, callbackTimeoutMs: 20 }),
+        store,
+      );
+
+      const first = instance.drainOnce();
+      await vi.advanceTimersByTimeAsync(20);
+      await first;
+      await vi.runAllTicks();
+      const second = instance.drainOnce();
+      await vi.advanceTimersByTimeAsync(20);
+      await second;
+
+      expect(callback).toHaveBeenCalledTimes(2);
+      expect(store.claim).toHaveBeenCalledTimes(2);
+    } finally {
+      await vi.runAllTimersAsync();
+      vi.useRealTimers();
+    }
+  });
+
   it('does not abort a healthy callback when another delivery completes during renewal', async () => {
     vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
     const finishFirst = deferred();
@@ -905,6 +1004,134 @@ describe('PromotionEventWorker', () => {
       expect(store.claim).toHaveBeenCalledTimes(2);
     } finally {
       releaseCallback.resolve();
+      await vi.runAllTimersAsync();
+      vi.useRealTimers();
+    }
+  });
+
+  it('abandons an uncertain last-attempt renewal without consuming or dead-lettering it', async () => {
+    vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
+    try {
+      const entered = deferred();
+      const registry = new PromotionWebhookRegistry();
+      registry.register({
+        id: 'hook',
+        onPromoted: async (_event, { signal }) => {
+          entered.resolve();
+          await new Promise<void>((_resolve, reject) => {
+            signal.addEventListener('abort', () => reject(new Error('renewal unknown')), {
+              once: true,
+            });
+          });
+        },
+      });
+      const store = mockStore({
+        claim: vi.fn().mockResolvedValue([{ ...claimedDelivery, attemptCount: 3 }]),
+        renew: vi.fn().mockRejectedValue(new Error('database unavailable')),
+      });
+      const instance = new PromotionEventWorker(
+        pool,
+        registry,
+        workerOptions({ leaseMs: 90, callbackTimeoutMs: 80, maxAttempts: 3 }),
+        store,
+      );
+
+      const draining = instance.drainOnce();
+      await entered.promise;
+      await vi.advanceTimersByTimeAsync(30);
+      await expect(draining).resolves.toBe(1);
+      await vi.runAllTicks();
+
+      expect(store.abandon).toHaveBeenCalledOnce();
+      expect(store.fail).not.toHaveBeenCalled();
+      expect(store.timeout).not.toHaveBeenCalled();
+    } finally {
+      await vi.runAllTimersAsync();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps renewing a timed-out abort-ignoring callback against replica redelivery', async () => {
+    vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
+    const releaseCallback = deferred();
+    try {
+      let owner: string | undefined;
+      let leaseExpiresAt = 0;
+      const store = mockStore({
+        claim: vi.fn(async (_pool, input) => {
+          if (owner && leaseExpiresAt > Date.now()) return [];
+          owner = input.owner;
+          leaseExpiresAt = Date.now() + input.leaseMs;
+          return [claimedDelivery];
+        }),
+        renew: vi.fn(async (_pool, claimant, deliveries, leaseMs) => {
+          if (owner !== claimant || deliveries.length === 0) return 0;
+          leaseExpiresAt = Date.now() + leaseMs;
+          return 1;
+        }),
+      });
+      const entered = deferred();
+      const registry = new PromotionWebhookRegistry();
+      registry.register({
+        id: 'hook',
+        onPromoted: async () => {
+          entered.resolve();
+          await releaseCallback.promise;
+        },
+      });
+      const instance = new PromotionEventWorker(
+        pool,
+        registry,
+        workerOptions({ leaseMs: 90, callbackTimeoutMs: 20, databaseTimeoutMs: 15 }),
+        store,
+      );
+
+      const draining = instance.drainOnce();
+      await entered.promise;
+      await vi.advanceTimersByTimeAsync(20);
+      await draining;
+      await vi.advanceTimersByTimeAsync(100);
+
+      await expect(store.claim(pool, {
+        owner: 'replica', webhookIds: ['hook'], limit: 1, perWebhookLimit: 1,
+        leaseMs: 90, maxAttempts: 3, excluded: [],
+      })).resolves.toEqual([]);
+      expect(store.renew).toHaveBeenCalled();
+    } finally {
+      releaseCallback.resolve();
+      await vi.runAllTimersAsync();
+      vi.useRealTimers();
+    }
+  });
+
+  it('retains a successful callback lease across acknowledgement error and stop', async () => {
+    vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
+    try {
+      const registry = new PromotionWebhookRegistry();
+      registry.register({ id: 'hook', onPromoted: async () => undefined });
+      const store = mockStore({
+        claim: vi.fn().mockResolvedValue([claimedDelivery]),
+        complete: vi.fn().mockRejectedValue(new Error('ack unavailable')),
+        renew: vi.fn().mockResolvedValue({
+          renewed: [claimedDelivery], terminalOwned: [], lost: [],
+        }),
+      });
+      const instance = new PromotionEventWorker(
+        pool,
+        registry,
+        workerOptions({ leaseMs: 90, callbackTimeoutMs: 80, databaseTimeoutMs: 20 }),
+        store,
+      );
+
+      await expect(instance.drainOnce()).resolves.toBe(1);
+      await vi.advanceTimersByTimeAsync(30);
+      expect(store.complete).toHaveBeenCalledTimes(2);
+
+      const stopping = instance.stop('SIGTERM');
+      await vi.advanceTimersByTimeAsync(50);
+      await stopping;
+      expect(store.release).toHaveBeenCalledWith(pool, 'worker-test', [claimedDelivery]);
+    } finally {
       await vi.runAllTimersAsync();
       vi.useRealTimers();
     }

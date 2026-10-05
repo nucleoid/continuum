@@ -146,6 +146,42 @@ describe('promotion outbox', () => {
     expect(claimed.map(({ webhookId }) => webhookId).sort()).toEqual(['healthy', 'hung']);
   });
 
+  it('admits each webhook fairly before taking a second item from an older backlog', async () => {
+    const { principal, source, sourceScope } = await seed();
+    const sources = [source];
+    for (let index = 0; index < 2; index += 1) {
+      sources.push(await createMemory(pool, {
+        scopeId: sourceScope.id, scopeKind: sourceScope.kind, type: 'decision',
+        title: `Old backlog ${index}`, body: 'Slow consumer backlog.',
+        authorId: principal.id, source: 'manual',
+      }));
+    }
+    for (const memory of sources) {
+      await promoteMemoryWithAudit(
+        pool, principal.id, memory.id, { kind: 'project', name: 'destination' }, {}, ['slow'],
+      );
+    }
+    const healthySource = await createMemory(pool, {
+      scopeId: sourceScope.id, scopeKind: sourceScope.kind, type: 'decision',
+      title: 'Healthy delivery', body: 'Must not starve.', authorId: principal.id, source: 'manual',
+    });
+    await promoteMemoryWithAudit(
+      pool, principal.id, healthySource.id, { kind: 'project', name: 'destination' }, {}, ['healthy'],
+    );
+    await pool.query(
+      `UPDATE promotion_event_deliveries
+          SET available_at = now() - interval '1 hour'
+        WHERE webhook_id = 'slow'`,
+    );
+
+    const claimed = await claimPromotionDeliveries(pool, {
+      owner: 'worker', webhookIds: ['healthy', 'slow'], limit: 2,
+      perWebhookLimit: 2, leaseMs: 1000,
+    });
+
+    expect(claimed.map(({ webhookId }) => webhookId).sort()).toEqual(['healthy', 'slow']);
+  });
+
   it('abandons unusable claims without consuming an attempt and honors in-flight exclusions', async () => {
     const { principal, source } = await seed();
     await promoteMemoryWithAudit(
