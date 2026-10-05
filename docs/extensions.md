@@ -95,9 +95,13 @@ not dead-lettered.
 - `CONTINUUM_PROMOTION_BASE_BACKOFF_MS`, default `1000`
 - `CONTINUUM_PROMOTION_MAX_BACKOFF_MS`, default `300000`
 
-On shutdown the worker stops claiming new rows, waits for active callbacks,
-signals abort at its deadline, and releases its leases before the runtime closes
-the database pool. Released work is safe to retry in another process.
+On shutdown the worker stops claiming new rows and waits for any claim already
+in flight before deciding whether callbacks may start. It keeps owned leases
+renewed while active callbacks drain, signals abort at its callback-drain
+deadline, and does not resolve `stop()` or release leases until those callbacks
+actually settle. The runtime's global shutdown deadline remains the final bound
+for an extension that ignores its abort signal. Released work is then safe to
+retry in another process.
 
 The default registries are empty. Deployments register consumers at their
 composition boundary. Core does not import or know about downstream products.

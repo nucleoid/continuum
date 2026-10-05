@@ -6,6 +6,7 @@ import {
   completePromotionDelivery,
   failPromotionDelivery,
   releasePromotionDeliveries,
+  renewPromotionDeliveries,
   type ClaimedPromotionDelivery,
 } from '../storage/promotion-events.js';
 
@@ -67,11 +68,44 @@ const defaultLogger: PromotionWorkerLogger = {
   error: (event) => { console.error(JSON.stringify(event)); },
 };
 
+export interface PromotionWorkerStore {
+  claim(
+    pool: pg.Pool,
+    input: { owner: string; webhookIds: readonly string[]; limit: number; leaseMs: number },
+  ): Promise<ClaimedPromotionDelivery[]>;
+  complete(
+    pool: pg.Pool,
+    eventId: string,
+    webhookId: string,
+    owner: string,
+  ): Promise<boolean>;
+  fail(
+    pool: pg.Pool,
+    eventId: string,
+    webhookId: string,
+    owner: string,
+    input: { maxAttempts: number; retryDelayMs: number; error: unknown },
+  ): Promise<'pending' | 'dead_letter' | 'lost_lease'>;
+  release(pool: pg.Pool, owner: string): Promise<number>;
+  renew(pool: pg.Pool, owner: string, leaseMs: number): Promise<number>;
+}
+
+const defaultStore: PromotionWorkerStore = {
+  claim: claimPromotionDeliveries,
+  complete: completePromotionDelivery,
+  fail: failPromotionDelivery,
+  release: releasePromotionDeliveries,
+  renew: renewPromotionDeliveries,
+};
+
 export class PromotionEventWorker implements RuntimeWorker {
   private stopped = false;
   private started = false;
+  private stopPromise?: Promise<void>;
   private timer?: NodeJS.Timeout;
-  private readonly active = new Set<Promise<void>>();
+  private leaseTimer?: NodeJS.Timeout;
+  private leaseRenewal?: Promise<void>;
+  private readonly active = new Set<Promise<number>>();
   private readonly controllers = new Set<AbortController>();
   private readonly logger: PromotionWorkerLogger;
   private readonly random: () => number;
@@ -80,6 +114,7 @@ export class PromotionEventWorker implements RuntimeWorker {
     private readonly pool: pg.Pool,
     private readonly registry: PromotionWebhookRegistry,
     private readonly options: PromotionWorkerOptions,
+    private readonly store: PromotionWorkerStore = defaultStore,
   ) {
     for (const [name, value] of Object.entries({
       pollMs: options.pollMs,
@@ -112,27 +147,40 @@ export class PromotionEventWorker implements RuntimeWorker {
     void this.runLoop();
   }
 
-  async drainOnce(): Promise<number> {
-    if (this.stopped) return 0;
-    const deliveries = await claimPromotionDeliveries(this.pool, {
+  drainOnce(): Promise<number> {
+    if (this.stopped) return Promise.resolve(0);
+    const operation = this.drainCycle();
+    this.active.add(operation);
+    void operation.then(
+      () => this.active.delete(operation),
+      () => this.active.delete(operation),
+    );
+    return operation;
+  }
+
+  stop(reason: string): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
+    this.stopped = true;
+    this.stopPromise = this.stopWorker(reason);
+    return this.stopPromise;
+  }
+
+  private async drainCycle(): Promise<number> {
+    const deliveries = await this.store.claim(this.pool, {
       owner: this.options.owner,
       webhookIds: this.registry.ids(),
       limit: this.options.claimBatch,
       leaseMs: this.options.leaseMs,
     });
+    if (this.stopped) return deliveries.length;
     const tasks = deliveries.map((delivery) => {
-      const task = this.deliver(delivery);
-      this.active.add(task);
-      void task.finally(() => this.active.delete(task));
-      return task;
+      return this.deliver(delivery);
     });
     await Promise.all(tasks);
     return deliveries.length;
   }
 
-  async stop(reason: string): Promise<void> {
-    if (this.stopped) return;
-    this.stopped = true;
+  private async stopWorker(reason: string): Promise<void> {
     if (this.timer) clearTimeout(this.timer);
     let timeout: NodeJS.Timeout | undefined;
     const outcome = await Promise.race([
@@ -148,10 +196,12 @@ export class PromotionEventWorker implements RuntimeWorker {
       this.logger.warn({
         event: 'promotion_worker_shutdown_timeout',
         reason,
-        active: this.active.size,
+        active: this.controllers.size,
       });
     }
-    const released = await releasePromotionDeliveries(this.pool, this.options.owner);
+    if (this.leaseTimer) clearTimeout(this.leaseTimer);
+    await this.leaseRenewal;
+    const released = await this.store.release(this.pool, this.options.owner);
     this.logger.info({ event: 'promotion_worker_stopped', reason, released });
   }
 
@@ -180,6 +230,7 @@ export class PromotionEventWorker implements RuntimeWorker {
     const webhookId = delivery.webhookId;
     const controller = new AbortController();
     this.controllers.add(controller);
+    this.ensureLeaseRenewal();
     this.logger.info({
       event: 'promotion_delivery_claimed',
       eventId,
@@ -207,8 +258,15 @@ export class PromotionEventWorker implements RuntimeWorker {
       const outcome = await Promise.race([callback, timeout, shutdown]);
       if (timer) clearTimeout(timer);
 
+      if (outcome === 'timeout' || outcome === 'shutdown') {
+        controller.abort();
+        await callback;
+      }
+
+      if (this.stopped) return;
+
       if (outcome === 'success') {
-        const acknowledged = await completePromotionDelivery(
+        const acknowledged = await this.store.complete(
           this.pool,
           eventId,
           webhookId,
@@ -223,10 +281,8 @@ export class PromotionEventWorker implements RuntimeWorker {
         });
         return;
       }
-      if (outcome === 'shutdown' && this.stopped) return;
-
       const retryDelayMs = this.retryDelay(delivery.attemptCount);
-      const state = await failPromotionDelivery(
+      const state = await this.store.fail(
         this.pool,
         eventId,
         webhookId,
@@ -249,7 +305,29 @@ export class PromotionEventWorker implements RuntimeWorker {
     } finally {
       if (timer) clearTimeout(timer);
       this.controllers.delete(controller);
+      if (this.controllers.size === 0 && this.leaseTimer) {
+        clearTimeout(this.leaseTimer);
+        this.leaseTimer = undefined;
+      }
     }
+  }
+
+  private ensureLeaseRenewal(): void {
+    if (this.leaseTimer || this.leaseRenewal) return;
+    const renewalMs = Math.max(1, Math.floor(this.options.leaseMs / 3));
+    this.leaseTimer = setTimeout(() => {
+      this.leaseTimer = undefined;
+      this.leaseRenewal = this.store.renew(
+        this.pool,
+        this.options.owner,
+        this.options.leaseMs,
+      ).then(() => undefined, () => {
+        this.logger.error({ event: 'promotion_worker_lease_renewal_failed' });
+      }).finally(() => {
+        this.leaseRenewal = undefined;
+        if (this.controllers.size > 0) this.ensureLeaseRenewal();
+      });
+    }, renewalMs);
   }
 
   private retryDelay(attempt: number): number {

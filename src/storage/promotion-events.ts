@@ -204,3 +204,20 @@ export async function releasePromotionDeliveries(
   );
   return result.rowCount ?? 0;
 }
+
+export async function renewPromotionDeliveries(
+  queryable: Queryable,
+  owner: string,
+  leaseMs: number,
+): Promise<number> {
+  if (!Number.isSafeInteger(leaseMs) || leaseMs < 1) {
+    throw new Error('leaseMs must be positive');
+  }
+  const result = await queryable.query(
+    `UPDATE promotion_event_deliveries
+        SET lease_expires_at = now() + ($2 * interval '1 millisecond')
+      WHERE state = 'pending' AND lease_owner = $1`,
+    [owner, leaseMs],
+  );
+  return result.rowCount ?? 0;
+}

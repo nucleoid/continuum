@@ -12,6 +12,7 @@ import {
   failPromotionDelivery,
   manualRetryPromotionDelivery,
   releasePromotionDeliveries,
+  renewPromotionDeliveries,
 } from './promotion-events.js';
 
 describe('promotion outbox', () => {
@@ -148,6 +149,25 @@ describe('promotion outbox', () => {
     expect(retried[0].event.eventId).toBe(bad.event.eventId);
     expect(retried[0].attemptCount).toBe(1);
     expect(await releasePromotionDeliveries(pool, 'retry')).toBe(1);
+  });
+
+  it('renews only leases owned by the stopping worker', async () => {
+    const { principal, source } = await seed();
+    await promoteMemoryWithAudit(
+      pool, principal.id, source.id, { kind: 'project', name: 'destination' }, {}, ['hook'],
+    );
+    await claimPromotionDeliveries(pool, {
+      owner: 'worker', webhookIds: ['hook'], limit: 1, leaseMs: 1000,
+    });
+    await pool.query(
+      `UPDATE promotion_event_deliveries SET lease_expires_at = now() - interval '1 second'`,
+    );
+
+    expect(await renewPromotionDeliveries(pool, 'other-worker', 1000)).toBe(0);
+    expect(await renewPromotionDeliveries(pool, 'worker', 1000)).toBe(1);
+    expect(await claimPromotionDeliveries(pool, {
+      owner: 'contender', webhookIds: ['hook'], limit: 1, leaseMs: 1000,
+    })).toEqual([]);
   });
 
   it('leaves deliveries for unregistered webhook IDs pending and observable', async () => {

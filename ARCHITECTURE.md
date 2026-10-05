@@ -369,8 +369,11 @@ Five interfaces. Engram and any future system integrate through these. Continuum
    event ID after a worker claims its delivery. The event and one delivery per
    registered webhook are inserted in the same transaction as destination
    creation, source mutation, and promotion audit. Workers claim with leases,
-   invoke callbacks outside database transactions, retry with bounded backoff,
-   reclaim expired leases, and dead-letter after a bounded attempt count.
+   renew them while callbacks drain, invoke callbacks outside database
+   transactions, retry with bounded backoff, reclaim expired leases, and
+   dead-letter after a bounded attempt count. Shutdown waits for in-flight
+   claims and callbacks before releasing leases, so no callback begins or
+   remains active after worker stop resolves.
    Delivery is at least once, so consumers deduplicate by event ID. Manual retry
    preserves that ID. Unknown webhook IDs remain pending and observable.
 4. **EmbeddingProvider**: implements `embed(texts) -> vectors`. Default impls: `ollama`, `voyage`, `openai`. Sensitive scopes pin to local-only providers.

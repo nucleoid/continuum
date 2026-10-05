@@ -7,12 +7,56 @@ import { addMembership } from '../storage/memberships.js';
 import { createMemory } from '../storage/memories.js';
 import { promoteMemoryWithAudit } from '../storage/promote.js';
 import { PromotionWebhookRegistry } from '../extensions/promotion.js';
-import { PromotionEventWorker } from './promotion-events.js';
+import type { ClaimedPromotionDelivery } from '../storage/promotion-events.js';
+import {
+  PromotionEventWorker,
+  type PromotionWorkerOptions,
+  type PromotionWorkerStore,
+} from './promotion-events.js';
 
 function deferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
   const promise = new Promise<T>((done) => { resolve = done; });
   return { promise, resolve };
+}
+
+const claimedDelivery: ClaimedPromotionDelivery = {
+  event: {
+    eventId: 'event-1',
+    sourceId: 'source-1',
+    destinationId: 'destination-1',
+    destinationScopeId: 'scope-1',
+    destinationScope: { kind: 'project', name: 'test' },
+    principalId: 'principal-1',
+    occurredAt: new Date('2026-01-01T00:00:00.000Z'),
+  },
+  webhookId: 'hook',
+  attemptCount: 1,
+  leaseRecovered: false,
+};
+
+function mockStore(
+  overrides: Partial<PromotionWorkerStore> = {},
+): PromotionWorkerStore {
+  return {
+    claim: vi.fn().mockResolvedValue([]),
+    complete: vi.fn().mockResolvedValue(true),
+    fail: vi.fn().mockResolvedValue('pending'),
+    release: vi.fn().mockResolvedValue(0),
+    renew: vi.fn().mockResolvedValue(0),
+    ...overrides,
+  };
+}
+
+function workerOptions(overrides: Partial<PromotionWorkerOptions> = {}): PromotionWorkerOptions {
+  return {
+    owner: 'worker-test', pollMs: 1000, claimBatch: 10, leaseMs: 1000,
+    callbackTimeoutMs: 100, shutdownWaitMs: 100,
+    maxAttempts: 3, baseBackoffMs: 10, maxBackoffMs: 100,
+    random: () => 0.5,
+    logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    ...overrides,
+  };
 }
 
 describe('PromotionEventWorker', () => {
@@ -45,14 +89,7 @@ describe('PromotionEventWorker', () => {
   }
 
   function worker(registry: PromotionWebhookRegistry, overrides = {}) {
-    return new PromotionEventWorker(pool, registry, {
-      owner: 'worker-test', pollMs: 1000, claimBatch: 10, leaseMs: 1000,
-      callbackTimeoutMs: 100, shutdownWaitMs: 100,
-      maxAttempts: 3, baseBackoffMs: 10, maxBackoffMs: 100,
-      random: () => 0.5,
-      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-      ...overrides,
-    });
+    return new PromotionEventWorker(pool, registry, workerOptions(overrides));
   }
 
   it('delivers callbacks outside the claim transaction and isolates webhook failures', async () => {
@@ -139,6 +176,136 @@ describe('PromotionEventWorker', () => {
         'SELECT state, lease_owner, lease_expires_at FROM promotion_event_deliveries',
       );
       expect(rows).toEqual([{ state: 'pending', lease_owner: null, lease_expires_at: null }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('waits for an in-flight claim, launches no callback, and stops idempotently', async () => {
+    const claimEntered = deferred();
+    const claimResult = deferred<ClaimedPromotionDelivery[]>();
+    const store = mockStore({
+      claim: vi.fn(async () => {
+        claimEntered.resolve();
+        return claimResult.promise;
+      }),
+    });
+    const callback = vi.fn();
+    const registry = new PromotionWebhookRegistry();
+    registry.register({ id: 'hook', onPromoted: callback });
+    const instance = new PromotionEventWorker(pool, registry, workerOptions(), store);
+
+    const draining = instance.drainOnce();
+    await claimEntered.promise;
+    const firstStop = instance.stop('SIGTERM');
+    const secondStop = instance.stop('again');
+    expect(secondStop).toBe(firstStop);
+    claimResult.resolve([claimedDelivery]);
+
+    await expect(draining).resolves.toBe(1);
+    await expect(firstStop).resolves.toBeUndefined();
+    expect(callback).not.toHaveBeenCalled();
+    expect(store.release).toHaveBeenCalledOnce();
+    await expect(instance.drainOnce()).resolves.toBe(0);
+  });
+
+  it('does not resolve stop until an already-started callback has settled', async () => {
+    const entered = deferred();
+    const release = deferred();
+    const registry = new PromotionWebhookRegistry();
+    const callback = vi.fn(async () => {
+      entered.resolve();
+      await release.promise;
+    });
+    registry.register({ id: 'hook', onPromoted: callback });
+    const store = mockStore({ claim: vi.fn().mockResolvedValue([claimedDelivery]) });
+    const instance = new PromotionEventWorker(pool, registry, workerOptions(), store);
+
+    const draining = instance.drainOnce();
+    await entered.promise;
+    let stopped = false;
+    const stopping = instance.stop('SIGTERM').then(() => { stopped = true; });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+    release.resolve();
+
+    await draining;
+    await stopping;
+    expect(callback).toHaveBeenCalledOnce();
+    expect(store.release).toHaveBeenCalledOnce();
+  });
+
+  it('renews a shutdown lease so another worker cannot duplicate an active callback', async () => {
+    vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
+    try {
+      let owner: string | undefined;
+      let leaseExpiresAt = 0;
+      let delivered = false;
+      const store = mockStore({
+        claim: vi.fn(async (_pool, input) => {
+          if (delivered || (owner && leaseExpiresAt > Date.now())) return [];
+          owner = input.owner;
+          leaseExpiresAt = Date.now() + input.leaseMs;
+          return [claimedDelivery];
+        }),
+        complete: vi.fn(async (_pool, _eventId, _webhookId, claimant) => {
+          if (owner !== claimant) return false;
+          delivered = true;
+          owner = undefined;
+          return true;
+        }),
+        release: vi.fn(async (_pool, claimant) => {
+          if (owner !== claimant) return 0;
+          owner = undefined;
+          leaseExpiresAt = 0;
+          return 1;
+        }),
+        renew: vi.fn(async (_pool, claimant, leaseMs) => {
+          if (owner !== claimant) return 0;
+          leaseExpiresAt = Date.now() + leaseMs;
+          return 1;
+        }),
+      });
+      const firstEntered = deferred();
+      const firstRelease = deferred();
+      const firstRegistry = new PromotionWebhookRegistry();
+      const firstCallback = vi.fn(async () => {
+        firstEntered.resolve();
+        await firstRelease.promise;
+      });
+      firstRegistry.register({ id: 'hook', onPromoted: firstCallback });
+      const first = new PromotionEventWorker(
+        pool,
+        firstRegistry,
+        workerOptions({
+          owner: 'first', leaseMs: 90, callbackTimeoutMs: 60, shutdownWaitMs: 10,
+        }),
+        store,
+      );
+      const firstDrain = first.drainOnce();
+      await firstEntered.promise;
+      const stopping = first.stop('SIGTERM');
+
+      await vi.advanceTimersByTimeAsync(100);
+      expect(store.renew).toHaveBeenCalled();
+      const secondRegistry = new PromotionWebhookRegistry();
+      const secondCallback = vi.fn();
+      secondRegistry.register({ id: 'hook', onPromoted: secondCallback });
+      const second = new PromotionEventWorker(
+        pool,
+        secondRegistry,
+        workerOptions({ owner: 'second', leaseMs: 90, callbackTimeoutMs: 60 }),
+        store,
+      );
+      await expect(second.drainOnce()).resolves.toBe(0);
+      expect(secondCallback).not.toHaveBeenCalled();
+
+      firstRelease.resolve();
+      await firstDrain;
+      await stopping;
+      await expect(second.drainOnce()).resolves.toBe(1);
+      expect(secondCallback).toHaveBeenCalledOnce();
+      await second.stop('test_complete');
     } finally {
       vi.useRealTimers();
     }

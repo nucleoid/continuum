@@ -166,10 +166,37 @@ describe('runtime startup failures', () => {
   it('closes the listener and preserves a worker start failure', async () => {
     const failure = new Error('worker bootstrap failed');
     const closePool = vi.fn(() => { throw new Error('pool cleanup failed'); });
-    await expect(startRuntime(express(), {
+    const startedEntered = deferred();
+    const failedEntered = deferred();
+    const finishStarting = deferred();
+    const startedWorker = {
+      start: vi.fn(async () => {
+        startedEntered.resolve();
+        await finishStarting.promise;
+      }),
+      stop: vi.fn(),
+    };
+    const failedWorker = {
+      start: vi.fn(async () => {
+        failedEntered.resolve();
+        throw failure;
+      }),
+      stop: vi.fn(),
+    };
+    const starting = startRuntime(express(), {
       port: 0, host: '127.0.0.1', closePool,
-      workers: [{ start: vi.fn().mockRejectedValue(failure), stop: vi.fn() }],
-    })).rejects.toBe(failure);
+      workers: [startedWorker, failedWorker],
+    });
+    await Promise.all([startedEntered.promise, failedEntered.promise]);
+    expect(startedWorker.stop).not.toHaveBeenCalled();
+    expect(closePool).not.toHaveBeenCalled();
+    finishStarting.resolve();
+
+    await expect(starting).rejects.toBe(failure);
+    expect(startedWorker.stop).toHaveBeenCalledOnce();
+    expect(startedWorker.stop).toHaveBeenCalledWith('startup_failed');
+    expect(failedWorker.stop).toHaveBeenCalledOnce();
+    expect(failedWorker.stop).toHaveBeenCalledWith('startup_failed');
     expect(closePool).toHaveBeenCalledOnce();
   });
 });
