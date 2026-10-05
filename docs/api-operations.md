@@ -56,6 +56,44 @@ decision workflow must reauthorize candidate IDs for the current caller and
 revalidate scope, state, expiry, provider, dimension, and relation before use.
 Stored candidates never auto-supersede, reject, or mutate memory state.
 
+## Decision supersession rollout
+
+`POST /api/v0/supersede` and `continuum.supersede` replace one readable,
+writable, live decision with a linked live successor in the same scope. The
+predecessor archive, successor insert, and required write/archive audits are
+atomic. PostgreSQL connection acquisition failures before that transaction
+return `DEPENDENCY_UNAVAILABLE`; failures in optional embedding work after the
+commit degrade to `EMBEDDING_FAILED`. A stale decision must be verified back to
+live before it can be superseded.
+
+Supersession preserves the issue #15 metadata boundary: callers cannot provide
+`metadata.related`, and successors store Continuum-owned `related: []` without
+acting on advisory candidates. Embedding provider I/O runs only after the
+supersession transaction commits. On success, the successor vector replaces the
+archived vector and a derived audit records provider, dimension, and
+`status: "succeeded"` in one short database transaction. On provider, pool
+connection, vector storage, or derived-audit failure, the committed supersession
+still succeeds and reports `EMBEDDING_FAILED`; the archived vector is retained.
+Continuum makes a best-effort attempt to record a bounded failed outcome audit,
+but an unavailable database can prevent that derived audit. A local-only route
+with no local provider records `embedding_policy: "local-only-unavailable"`
+best-effort and remains full-text-only without falling through to a hosted
+provider. The live successor remains searchable through full-text recall.
+
+Deploy migrations before routing traffic to the new endpoints. Migration
+`0007_decision_supersession_constraints.sql` follows the existing ingestion
+migrations and adds the self-link check as `NOT VALID`. Migration
+`0008_decision_supersession_validation.sql` validates it only after the add
+migration has committed and released its `ACCESS EXCLUSIVE` lock, so the scan
+does not retain that stronger lock. Migration
+`0009_decision_supersession_unique_index.sql` runs outside a transaction and
+builds the branching-prevention index with `CREATE UNIQUE INDEX CONCURRENTLY`.
+Fresh databases apply `0001` through `0009` in lexical order. Databases that
+ran the preview `0005_decision_supersession.sql` are also supported: `0007`
+recognizes its existing check, `0008` validates it, and `0009` safely rebuilds
+its index before the new migration names are recorded. All three migration
+files are included in the npm package and discovered by `continuum-migrate`.
+
 Every response carries `X-Request-Id`. A conservative inbound ID is preserved;
 other values are replaced with a generated UUID. JSON errors also include the
 request ID in the existing REST envelope:

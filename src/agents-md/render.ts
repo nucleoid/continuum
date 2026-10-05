@@ -69,6 +69,9 @@ export function renderMemoryEntry(memory: Memory, scope: string): string[] {
     `- **Title:** ${escapeAgentsMdData(memory.title)}`,
     `- **Scope:** ${escapeAgentsMdData(scope)}`,
     `- **Memory ID:** ${escapeAgentsMdData(memory.id)}`,
+    ...(memory.supersedesId === null
+      ? []
+      : [`- **Supersedes memory ID:** ${escapeAgentsMdData(memory.supersedesId)}`]),
     `- **Source:** ${escapeAgentsMdData(memory.source)}`,
     `- **Author ID:** ${escapeAgentsMdData(memory.authorId)}`,
     `- **Source reference:** ${

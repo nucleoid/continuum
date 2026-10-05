@@ -29,12 +29,14 @@ export class ServiceError extends Error {
   constructor(
     readonly code: ServiceErrorCode,
     readonly publicMessage: string,
-    options: { cause?: unknown; status?: number } = {},
+    options: { cause?: unknown; status?: number; details?: Record<string, unknown> } = {},
   ) {
     super(publicMessage, { cause: options.cause });
     this.name = 'ServiceError';
     this.status = options.status ?? STATUS_BY_CODE[code];
+    this.details = options.details;
   }
+  readonly details?: Record<string, unknown>;
 }
 
 export function asServiceError(error: unknown): ServiceError {
@@ -66,7 +68,7 @@ export function logInternalServiceError(
 }
 
 export function serviceErrorBody(error: ServiceError): {
-  error: { code: ServiceErrorCode; message: string };
+  error: { code: ServiceErrorCode; message: string; details?: Record<string, unknown> };
 } {
-  return { error: { code: error.code, message: error.publicMessage } };
+  return { error: { code: error.code, message: error.publicMessage, ...(error.details ? { details: error.details } : {}) } };
 }

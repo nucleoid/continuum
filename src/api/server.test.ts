@@ -1,4 +1,5 @@
 import { Server } from 'node:http';
+import { readFile } from 'node:fs/promises';
 import { describe, expect, it, vi } from 'vitest';
 import type express from 'express';
 import type pg from 'pg';
@@ -24,6 +25,11 @@ function appOptions(overrides: Parameters<typeof createApp>[1] = {}) {
 }
 
 describe('createApp operational middleware', () => {
+  it('lists every known operational log path once', async () => {
+    const source = await readFile(new URL('./server.ts', import.meta.url), 'utf8');
+    expect(source.match(/'\/api\/v0\/scopes'/g)).toHaveLength(1);
+  });
+
   it('is pure and creates no listener, signal handler, query, worker, or provider side effect', () => {
     const listen = vi.spyOn(Server.prototype, 'listen');
     const processOn = vi.spyOn(process, 'on');
@@ -246,6 +252,34 @@ describe('REST error middleware', () => {
       next,
     );
     expect(next).toHaveBeenCalledWith(expect.any(Error));
+  });
+
+  it('does not allow service error details to replace stable REST envelope fields', () => {
+    const json = vi.fn();
+    const response = {
+      headersSent: false,
+      status: vi.fn().mockReturnThis(),
+      json,
+    } as unknown as express.Response;
+    const middleware = errorMiddleware({ info: vi.fn(), error: vi.fn() });
+
+    middleware(
+      new ServiceError('CONFLICT', 'Stable message', {
+        details: {
+          code: 'INTERNAL', error: 'unsafe replacement', requestId: 'unsafe-request',
+          successorId: 'safe-successor',
+        },
+      }),
+      { requestId: fixedRequestId } as express.Request,
+      response,
+      vi.fn(),
+    );
+
+    expect(response.status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({
+      code: 'CONFLICT', error: 'Stable message', requestId: fixedRequestId,
+      successorId: 'safe-successor',
+    });
   });
 
   it('preserves safe exposed parser statuses', () => {

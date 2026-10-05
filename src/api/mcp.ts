@@ -52,6 +52,7 @@ import {
 } from '../services/memories.js';
 import type { MemoryReadRecord } from '../storage/memory-reads.js';
 import type { MemoryState, MemoryType } from '../types.js';
+import { decisionHistoryForPrincipal, supersedeForPrincipal } from '../services/supersede.js';
 
 const SCOPE_KINDS = ['org', 'team', 'project', 'user', 'role'] as const;
 const MEMORY_TYPES = ['fact', 'decision', 'context', 'playbook', 'relationship'] as const;
@@ -109,7 +110,11 @@ function serviceErrorResult(error: unknown, logger: ServiceLogger): {
 } {
   const mapped = asServiceError(error);
   logInternalServiceError(logger, 'MCP', mapped);
-  return { ...jsonResult(serviceErrorBody(mapped)), isError: true };
+  const body = serviceErrorBody(mapped);
+  if (typeof body.error.details?.successorId === 'string') {
+    body.error.details = { successor_id: body.error.details.successorId };
+  }
+  return { ...jsonResult(body), isError: true };
 }
 
 export function buildMcpServer(deps: McpDeps): McpServer {
@@ -239,6 +244,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
             excerpt: r.excerpt,
             body_truncated: r.bodyTruncated,
             source_ref: r.memory.sourceRef,
+            ...(r.memory.supersedesId ? { supersedes_id: r.memory.supersedesId } : {}),
             created_at: r.memory.createdAt,
           })),
         );
@@ -291,6 +297,64 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           items: result.items.map(mcpMemory),
           limit: result.limit,
           offset: result.offset,
+        });
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'continuum.supersede',
+    {
+      description: 'Supersede a live decision with a new linked decision in the same scope.',
+      inputSchema: {
+        superseded_id: z.string().uuid(),
+        title: z.string().min(1).max(500),
+        body: z.string().min(1),
+        tags: z.array(z.string()).optional(),
+        source: z.string().min(1).default('manual'),
+        source_ref: z.string().optional(),
+        metadata: z.record(z.unknown()).optional(),
+      },
+    },
+    async (args) => {
+      try {
+        const result = await supersedeForPrincipal(pool, embeddingProvider, principal, {
+          supersededId: args.superseded_id, title: args.title, body: args.body,
+          tags: args.tags, source: args.source, sourceRef: args.source_ref, metadata: args.metadata,
+        }, { transport: 'mcp' });
+        return jsonResult({
+          superseded_id: result.predecessor.id, successor_id: result.successor.id,
+          scope_id: result.successor.scopeId, predecessor_state: result.predecessor.state,
+          embedded: result.embedded,
+          ...(result.embedErrorCode ? { embedding_error_code: result.embedErrorCode } : {}),
+        });
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'continuum.decision_history',
+    {
+      description: 'Return a decision supersession chain from oldest to newest.',
+      inputSchema: { decision_id: z.string().uuid() },
+    },
+    async (args) => {
+      try {
+        const result = await decisionHistoryForPrincipal(
+          pool, principal, args.decision_id, { transport: 'mcp' },
+        );
+        return jsonResult({
+          current_id: result.currentId,
+          decisions: result.decisions.map((memory) => ({
+            id: memory.id, title: memory.title, body: memory.body, tags: memory.tags,
+            metadata: memory.metadata, author_id: memory.authorId, source: memory.source,
+            source_ref: memory.sourceRef, state: memory.state,
+            supersedes_id: memory.supersedesId, created_at: memory.createdAt,
+          })),
         });
       } catch (error) {
         return errorResult(error);

@@ -291,6 +291,8 @@ Methods:
 - `continuum.recall(query, scopes?, types?, limit?)`
 - `continuum.get_memory(memory_id)`
 - `continuum.list_memories(scope?, type?, state?, limit?, offset?)`
+- `continuum.supersede(superseded_id, title, body, ...)`
+- `continuum.decision_history(decision_id)`
 - `continuum.promote(memory_id, target_scope)`
 - `continuum.verify(memory_id, still_true: bool, note?)`
 - `continuum.list_scopes()`
@@ -321,6 +323,30 @@ a high-entropy identity and requires trusted-network REST restriction.
 REST, MCP, and the AGENTS.md generator share canonical scope and access resolution under `src/services/`. Transport adapters parse protocol-specific input and serialize their existing wire formats. Services own scope validation, ACL decisions, persistence orchestration, and audit policy.
 
 The org scope is implicitly readable by every authenticated principal across recall and AGENTS.md generation. Other scopes require membership for every read path. Every source mutation requires an explicit `writer` or `admin` membership on that source scope: this includes verification updates (`state`, `last_verified`, and `expires_at`) and promotion (`state` and `promoted_to_id`). Authorship, implicit org access, and explicit `reader` membership are read-only. Promotion additionally requires `admin` on an org destination or `writer`/`admin` on any other destination. Lifecycle authorization is checked inside the mutation transaction with membership rows locked so concurrent revocation has deterministic ordering. Verification and promotion lock the memory row before locking source membership, so they serialize with one another and concurrent membership changes without reversing lock order. Verification checks source membership before reporting a terminal-state conflict, preventing unauthorized callers from learning whether a memory is promoted or archived. It rejects terminal states so it cannot overwrite a concurrent promotion or archive. For a live or stale memory, `still_true=true` moves the memory to `live` and renews its expiry from the verification instant; this is the recovery path for a stale memory that its owner re-confirms. `still_true=false` moves it to `stale` without renewing expiry. Capture commits the memory mutation and required write audit in one transaction. The embedding provider network call happens before `BEGIN`; the vector insert and advisory relation metadata update use separate transaction savepoints so candidate failures cannot roll back a valid embedding. A provider or embedding-storage failure is reduced to the safe `EMBEDDING_FAILED` code. A candidate probe or metadata-storage failure is reduced to `RELATION_DETECTION_FAILED`. In either case the memory and its audit may still commit together. Recall auditing is required; results are not returned when its audit entry cannot be persisted. Service errors retain internal causes for server-side diagnostics but transports serialize only stable codes and safe public messages.
+
+Decision supersession requires explicit writer or admin membership on the
+decision scope. Only a `live` decision may be superseded; a `stale` decision
+must first be verified back to `live`, and attempting to supersede it returns a
+conflict. The write path makes missing and unreadable predecessor IDs
+indistinguishable, while a caller who can read the predecessor but lacks writer
+or admin membership receives a forbidden response. It locks the live
+predecessor, creates one linked decision in the same scope, archives the
+predecessor, and writes both audits in one transaction. The schema prevents
+self-links and branching. Supersession stores Continuum-owned `related: []`
+metadata and rejects caller-supplied `metadata.related`; issue #15 relation
+candidates remain advisory and never authorize or trigger supersession. After
+commit, provider I/O embeds the new chain head outside the write transaction.
+The successor vector, archived-vector removal, and a bounded provider/status
+audit then commit together. Provider, post-commit pool, vector-storage, or
+derived-audit failure returns `EMBEDDING_FAILED`, retains the archived vector,
+and leaves the live successor available to full-text recall. A failed outcome
+audit is best-effort because the database failure may also make observability
+unavailable. If a local-only route has no local provider, a best-effort derived
+audit records `embedding_policy: "local-only-unavailable"`; the successor stays
+full-text-only and is never sent to a hosted provider.
+Recall and AGENTS.md serve only the live head and may expose its predecessor ID,
+never the archived content. Decision history is read-authorized, audited,
+cycle-safe, and returned oldest to newest with the current head ID.
 
 ### Transport error and audit contracts
 

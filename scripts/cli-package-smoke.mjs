@@ -61,6 +61,9 @@ try {
   for (const required of [
     'migrations/0001_init.sql',
     'migrations/0004_review_queue_index.sql',
+    'migrations/0007_decision_supersession_constraints.sql',
+    'migrations/0008_decision_supersession_validation.sql',
+    'migrations/0009_decision_supersession_unique_index.sql',
     'bin/continuum-migrate.mjs',
     'scripts/ensure-scope.mjs',
     'scripts/create-scope-operator.sql',
@@ -98,7 +101,7 @@ try {
     release() {},
   };
   await runMigrations({ connect: async () => client });
-  if (ledgerChecks < 4) throw new Error('Packed migrator did not discover packaged migrations');
+  if (ledgerChecks < 8) throw new Error('Packed migrator did not discover packaged migrations');
   process.stdout.write('Packed continuum CLI entrypoint passed\n');
 } finally {
   rmSync(temporary, { recursive: true, force: true });

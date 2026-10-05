@@ -1,4 +1,5 @@
 export * from './types.js';
+export * from './services/supersede.js';
 export { parseScopeString, scopeToString, sortScopesForRead } from './scopes/model.js';
 export { computeExpiry } from './storage/expiry.js';
 export { runMigrations } from './storage/migrator.js';

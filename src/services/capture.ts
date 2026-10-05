@@ -31,14 +31,23 @@ export interface CaptureOptions {
   relationThreshold?: number;
 }
 
-function validateCapture(input: CaptureInput): void {
-  if (input.metadata && Object.hasOwn(input.metadata, 'related')) {
-    throw new ServiceError('INVALID_INPUT', 'metadata.related is reserved by Continuum');
+export function validateCaptureContent(input: Pick<CaptureInput,
+  'title' | 'body' | 'tags' | 'source' | 'sourceRef' | 'metadata'>): void {
+  if (input.title.length === 0 || input.title.length > 500 || input.body.length === 0) {
+    throw new ServiceError('INVALID_INPUT', 'Invalid memory content');
   }
   if (!isCaptureSource(input.source)) {
     throw new ServiceError('INVALID_INPUT', 'Unknown capture source');
   }
-  validateScopeRef(input.scope);
+  if (input.tags && input.tags.some((tag) => typeof tag !== 'string')) {
+    throw new ServiceError('INVALID_INPUT', 'Invalid memory tags');
+  }
+  if (input.metadata && (Array.isArray(input.metadata) || input.metadata === null)) {
+    throw new ServiceError('INVALID_INPUT', 'Invalid memory metadata');
+  }
+  if (input.metadata && Object.hasOwn(input.metadata, 'related')) {
+    throw new ServiceError('INVALID_INPUT', 'metadata.related is reserved by Continuum');
+  }
 }
 
 /** Insert one capture into a caller-owned transaction. */
@@ -49,7 +58,8 @@ export async function captureOne(
   input: CaptureInput,
   auditMetadata: Record<string, unknown> = {},
 ): Promise<CaptureResult> {
-  validateCapture(input);
+  validateCaptureContent(input);
+  validateScopeRef(input.scope);
   const scope = await getScopeByRef(client, input.scope);
   if (!scope) throw new ServiceError('SCOPE_NOT_FOUND', 'Scope not found');
   if (!(await canWriteScopeForMutation(client, principal.id, scope.id))) {
@@ -227,15 +237,10 @@ export async function captureMemory(
   options: CaptureOptions = {},
 ): Promise<CaptureResult> {
   try {
+    validateCaptureContent(input);
     const relationThreshold = validateRelationThreshold(
       options.relationThreshold ?? DEFAULT_RELATION_THRESHOLD,
     );
-    if (input.metadata && Object.hasOwn(input.metadata, 'related')) {
-      throw new ServiceError('INVALID_INPUT', 'metadata.related is reserved by Continuum');
-    }
-    if (!isCaptureSource(input.source)) {
-      throw new ServiceError('INVALID_INPUT', 'Unknown capture source');
-    }
     validateScopeRef(input.scope);
     const scope = await getScopeByRef(pool, input.scope);
     if (!scope) throw new ServiceError('SCOPE_NOT_FOUND', 'Scope not found');

@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pg from 'pg';
@@ -39,6 +39,41 @@ afterEach(async () => {
 });
 
 describe('runMigrations', () => {
+  it('ships decision constraints after ingestion with nonblocking validation and indexing', async () => {
+    const migrations = (await readdir(join(process.cwd(), 'migrations')))
+      .filter((file) => file.endsWith('.sql'))
+      .sort();
+    expect(migrations).toContain('0007_decision_supersession_constraints.sql');
+    expect(migrations).toContain('0008_decision_supersession_validation.sql');
+    expect(migrations).toContain('0009_decision_supersession_unique_index.sql');
+    expect(migrations.filter((file) => file.startsWith('0005_'))).toEqual([
+      '0005_webhook_ingestion.sql',
+    ]);
+
+    const constraints = await readFile(
+      join(process.cwd(), 'migrations/0007_decision_supersession_constraints.sql'),
+      'utf8',
+    );
+    expect(constraints).toMatch(/ADD CONSTRAINT memories_supersedes_not_self[\s\S]+NOT VALID/i);
+    expect(constraints).not.toMatch(/VALIDATE CONSTRAINT memories_supersedes_not_self/i);
+    expect(constraints).not.toMatch(/CREATE\s+UNIQUE\s+INDEX/i);
+
+    const validation = await readFile(
+      join(process.cwd(), 'migrations/0008_decision_supersession_validation.sql'),
+      'utf8',
+    );
+    expect(validation).toMatch(/VALIDATE CONSTRAINT memories_supersedes_not_self/i);
+    expect(validation).not.toMatch(/ADD CONSTRAINT/i);
+    expect(validation).not.toMatch(/CREATE\s+UNIQUE\s+INDEX/i);
+
+    const uniqueIndex = await readFile(
+      join(process.cwd(), 'migrations/0009_decision_supersession_unique_index.sql'),
+      'utf8',
+    );
+    expect(uniqueIndex.trimStart()).toMatch(/^-- continuum:no-transaction/);
+    expect(uniqueIndex).toMatch(/CREATE UNIQUE INDEX CONCURRENTLY memories_supersedes_unique_idx/i);
+  });
+
   it('runs marked concurrent-index migrations outside a transaction', async () => {
     const queries: string[] = [];
     const client = {
