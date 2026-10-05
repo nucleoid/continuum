@@ -384,6 +384,62 @@ describe('REST/MCP semantic parity matrix', () => {
     });
   });
 
+  it('keeps REST and MCP supersede authorization and stale-state errors in parity', async () => {
+    const readable = await createScope(pool, { kind: 'project', name: 'supersede-readable' });
+    const hidden = await createScope(pool, { kind: 'project', name: 'supersede-hidden' });
+    await addMembership(pool, principal.id, readable.id, 'reader');
+    const readableDecision = await createMemory(pool, {
+      scopeId: readable.id, scopeKind: readable.kind, type: 'decision', title: 'Readable',
+      body: 'Readable body', authorId: principal.id, source: 'manual',
+    });
+    const hiddenDecision = await createMemory(pool, {
+      scopeId: hidden.id, scopeKind: hidden.kind, type: 'decision', title: 'Hidden',
+      body: 'Hidden body', authorId: principal.id, source: 'manual',
+    });
+    const missingId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const restCall = (id: string) => request(createApp(pool)).post('/api/v0/supersede')
+      .set('Authorization', 'Bearer entra:user:parity')
+      .send({ supersededId: id, title: 'Replacement', body: 'Replacement body' });
+    const mcpCall = (id: string) => client.callTool({
+      name: 'continuum.supersede',
+      arguments: { superseded_id: id, title: 'Replacement', body: 'Replacement body' },
+    }) as Promise<ToolResult>;
+
+    for (const id of [hiddenDecision.id, missingId]) {
+      const [rest, mcp] = await Promise.all([restCall(id), mcpCall(id)]);
+      expect(rest.status).toBe(404);
+      expect(rest.body).toMatchObject({ code: 'MEMORY_NOT_FOUND', error: 'Memory not found' });
+      expect(mcp.isError).toBe(true);
+      expect(toolJson(mcp)).toEqual({
+        error: { code: 'MEMORY_NOT_FOUND', message: 'Memory not found' },
+      });
+    }
+
+    const [restForbidden, mcpForbidden] = await Promise.all([
+      restCall(readableDecision.id), mcpCall(readableDecision.id),
+    ]);
+    expect(restForbidden.status).toBe(403);
+    expect(restForbidden.body.code).toBe('FORBIDDEN');
+    expect(mcpForbidden.isError).toBe(true);
+    expect(toolJson(mcpForbidden).error.code).toBe('FORBIDDEN');
+
+    await pool.query(`UPDATE memories SET state = 'stale' WHERE id = $1`, [readableDecision.id]);
+    await pool.query(
+      `UPDATE scope_memberships SET role = 'writer'
+        WHERE principal_id = $1 AND scope_id = $2`,
+      [principal.id, readable.id],
+    );
+    const [restStale, mcpStale] = await Promise.all([
+      restCall(readableDecision.id), mcpCall(readableDecision.id),
+    ]);
+    expect(restStale.status).toBe(409);
+    expect(restStale.body).toMatchObject({ code: 'CONFLICT', error: 'Decision is not live' });
+    expect(mcpStale.isError).toBe(true);
+    expect(toolJson(mcpStale)).toEqual({
+      error: { code: 'CONFLICT', message: 'Decision is not live' },
+    });
+  });
+
   it('excludes expired full bodies before REST/MCP pagination and audits each delivered identity', async () => {
     const scope = await createScope(pool, { kind: 'project', name: 'expiry-parity' });
     await addMembership(pool, principal.id, scope.id, 'reader');

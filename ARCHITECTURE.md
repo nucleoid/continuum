@@ -325,13 +325,18 @@ REST, MCP, and the AGENTS.md generator share canonical scope and access resoluti
 The org scope is implicitly readable by every authenticated principal across recall and AGENTS.md generation. Other scopes require membership for every read path. Every source mutation requires an explicit `writer` or `admin` membership on that source scope: this includes verification updates (`state`, `last_verified`, and `expires_at`) and promotion (`state` and `promoted_to_id`). Authorship, implicit org access, and explicit `reader` membership are read-only. Promotion additionally requires `admin` on an org destination or `writer`/`admin` on any other destination. Lifecycle authorization is checked inside the mutation transaction with membership rows locked so concurrent revocation has deterministic ordering. Verification and promotion lock the memory row before locking source membership, so they serialize with one another and concurrent membership changes without reversing lock order. Verification checks source membership before reporting a terminal-state conflict, preventing unauthorized callers from learning whether a memory is promoted or archived. It rejects terminal states so it cannot overwrite a concurrent promotion or archive. For a live or stale memory, `still_true=true` moves the memory to `live` and renews its expiry from the verification instant; this is the recovery path for a stale memory that its owner re-confirms. `still_true=false` moves it to `stale` without renewing expiry. Capture commits the memory mutation and required write audit in one transaction. The embedding provider network call happens before `BEGIN`; the vector insert and advisory relation metadata update use separate transaction savepoints so candidate failures cannot roll back a valid embedding. A provider or embedding-storage failure is reduced to the safe `EMBEDDING_FAILED` code. A candidate probe or metadata-storage failure is reduced to `RELATION_DETECTION_FAILED`. In either case the memory and its audit may still commit together. Recall auditing is required; results are not returned when its audit entry cannot be persisted. Service errors retain internal causes for server-side diagnostics but transports serialize only stable codes and safe public messages.
 
 Decision supersession requires explicit writer or admin membership on the
-decision scope. It locks the live predecessor, creates one linked decision in
-the same scope, archives the predecessor, and writes both audits in one
-transaction. The schema prevents self-links and branching. After commit, the
-archived embedding is removed and the new chain head is embedded. Recall and
-AGENTS.md serve only the live head and may expose its predecessor ID, never the
-archived content. Decision history is read-authorized, audited, cycle-safe, and
-returned oldest to newest with the current head ID.
+decision scope. Only a `live` decision may be superseded; a `stale` decision
+must first be verified back to `live`, and attempting to supersede it returns a
+conflict. The write path makes missing and unreadable predecessor IDs
+indistinguishable, while a caller who can read the predecessor but lacks writer
+or admin membership receives a forbidden response. It locks the live
+predecessor, creates one linked decision in the same scope, archives the
+predecessor, and writes both audits in one transaction. The schema prevents
+self-links and branching. After commit, the archived embedding is removed and
+the new chain head is embedded. Recall and AGENTS.md serve only the live head
+and may expose its predecessor ID, never the archived content. Decision history
+is read-authorized, audited, cycle-safe, and returned oldest to newest with the
+current head ID.
 
 ### Transport error and audit contracts
 

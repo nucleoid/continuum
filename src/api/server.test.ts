@@ -248,6 +248,34 @@ describe('REST error middleware', () => {
     expect(next).toHaveBeenCalledWith(expect.any(Error));
   });
 
+  it('does not allow service error details to replace stable REST envelope fields', () => {
+    const json = vi.fn();
+    const response = {
+      headersSent: false,
+      status: vi.fn().mockReturnThis(),
+      json,
+    } as unknown as express.Response;
+    const middleware = errorMiddleware({ info: vi.fn(), error: vi.fn() });
+
+    middleware(
+      new ServiceError('CONFLICT', 'Stable message', {
+        details: {
+          code: 'INTERNAL', error: 'unsafe replacement', requestId: 'unsafe-request',
+          successorId: 'safe-successor',
+        },
+      }),
+      { requestId: fixedRequestId } as express.Request,
+      response,
+      vi.fn(),
+    );
+
+    expect(response.status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({
+      code: 'CONFLICT', error: 'Stable message', requestId: fixedRequestId,
+      successorId: 'safe-successor',
+    });
+  });
+
   it('preserves safe exposed parser statuses', () => {
     expect(mapRestError({
       type: 'request.aborted', status: 400, expose: true, message: 'request aborted',

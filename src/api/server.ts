@@ -225,9 +225,9 @@ export function errorMiddleware(logger: OperationalLogger): express.ErrorRequest
       });
     }
     res.status(serviceError.status).json({
+      ...(serviceError.details ?? {}),
       code: serviceError.code,
       error: serviceError.publicMessage,
-      ...(serviceError.details ?? {}),
       requestId: req.requestId,
     });
   };

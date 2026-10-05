@@ -142,6 +142,51 @@ describe('decision supersession REST API', () => {
     expect(history.body.currentId).toBe(decisionId);
   });
 
+  it('masks unreadable predecessors like missing while preserving forbidden for readers', async () => {
+    const hidden = await createScope(pool, { kind: 'project', name: 'hidden-supersede' });
+    const privateDecision = await createMemory(pool, {
+      scopeId: hidden.id, scopeKind: hidden.kind, type: 'decision', title: 'Private',
+      body: 'Private body', authorId: principalId, source: 'manual',
+    });
+    const reader = await createPrincipal(pool, {
+      externalId: 'entra:user:supersede-reader', kind: 'user', displayName: 'Reader',
+    });
+    await addMembership(pool, reader.id, scopeId, 'reader');
+    const app = createApp(pool);
+    const post = (id: string) => request(app).post('/api/v0/supersede')
+      .set('Authorization', 'Bearer entra:user:supersede-reader')
+      .send({ supersededId: id, title: 'Replacement', body: 'Replacement body' });
+
+    const inaccessible = await post(privateDecision.id);
+    const missing = await post('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+    const readable = await post(decisionId);
+
+    expect(inaccessible.status).toBe(404);
+    expect(missing.status).toBe(404);
+    expect(inaccessible.body).toMatchObject({
+      code: 'MEMORY_NOT_FOUND', error: 'Memory not found',
+    });
+    expect(missing.body).toMatchObject({
+      code: inaccessible.body.code, error: inaccessible.body.error,
+    });
+    expect(readable.status).toBe(403);
+    expect(readable.body).toMatchObject({
+      code: 'FORBIDDEN', error: 'Principal lacks writer role on scope',
+    });
+  });
+
+  it('rejects a stale decision until verification restores it to live', async () => {
+    await pool.query(`UPDATE memories SET state = 'stale' WHERE id = $1`, [decisionId]);
+
+    const response = await request(createApp(pool)).post('/api/v0/supersede')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ supersededId: decisionId, title: 'Replacement', body: 'Replacement body' });
+
+    expect(response.status).toBe(409);
+    expect(response.body).toMatchObject({ code: 'CONFLICT', error: 'Decision is not live' });
+    expect((await pool.query('SELECT count(*)::int AS count FROM memories')).rows[0].count).toBe(1);
+  });
+
   it('masks inaccessible and missing history anchors with identical REST errors', async () => {
     const hidden = await createScope(pool, { kind: 'project', name: 'hidden-decisions' });
     const privateDecision = await createMemory(pool, {

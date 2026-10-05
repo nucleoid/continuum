@@ -44,7 +44,21 @@ export async function supersedeDecision(pool: pg.Pool, input: SupersedeWriteInpu
 
 async function supersedeInTransaction(client: pg.PoolClient, input: SupersedeWriteInput): Promise<SupersedeWriteResult> {
   const { rows } = await client.query(
-    `SELECT ${MEMORY_COLUMNS} FROM memories WHERE id = $1 FOR UPDATE`, [input.supersededId],
+    `SELECT ${MEMORY_COLUMNS}
+       FROM memories m
+      WHERE m.id = $1
+        AND EXISTS (
+          SELECT 1
+            FROM scopes s
+           WHERE s.id = m.scope_id
+             AND (s.kind = 'org' OR EXISTS (
+               SELECT 1
+                 FROM scope_memberships sm
+                WHERE sm.principal_id = $2 AND sm.scope_id = m.scope_id
+             ))
+        )
+      FOR UPDATE`,
+    [input.supersededId, input.principalId],
   );
   if (!rows[0]) throw new SupersedeStorageError('not_found');
   const predecessor = rowToMemory(rows[0]);

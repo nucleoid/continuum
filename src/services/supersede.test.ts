@@ -5,7 +5,7 @@ import { createMemory } from '../storage/memories.js';
 import { createPrincipal } from '../storage/principals.js';
 import { createScope } from '../storage/scopes.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
-import { decisionHistoryForPrincipal } from './supersede.js';
+import { decisionHistoryForPrincipal, supersedeForPrincipal } from './supersede.js';
 
 describe('decision history service', () => {
   let pool: pg.Pool;
@@ -67,6 +67,53 @@ describe('decision history service', () => {
         code: 'MEMORY_NOT_FOUND', status: 404, publicMessage: 'Memory not found',
       });
     }
+    expect((await pool.query('SELECT 1 FROM audit_log')).rowCount).toBe(0);
+  });
+
+  it('masks unreadable supersede predecessors as missing but preserves forbidden for readers', async () => {
+    const hidden = await createScope(pool, { kind: 'project', name: 'hidden-supersede' });
+    const readable = await createScope(pool, { kind: 'project', name: 'readable-supersede' });
+    await addMembership(pool, reader.id, readable.id, 'reader');
+    const hiddenDecision = await createMemory(pool, {
+      scopeId: hidden.id, scopeKind: hidden.kind, type: 'decision', title: 'Hidden',
+      body: 'Hidden body', authorId: author.id, source: 'manual',
+    });
+    const readableDecision = await createMemory(pool, {
+      scopeId: readable.id, scopeKind: readable.kind, type: 'decision', title: 'Readable',
+      body: 'Readable body', authorId: author.id, source: 'manual',
+    });
+    const input = { title: 'Replacement', body: 'Replacement body' };
+
+    for (const supersededId of [
+      hiddenDecision.id,
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    ]) {
+      await expect(supersedeForPrincipal(pool, null, reader, {
+        supersededId, ...input,
+      })).rejects.toMatchObject({
+        code: 'MEMORY_NOT_FOUND', status: 404, publicMessage: 'Memory not found',
+      });
+    }
+    await expect(supersedeForPrincipal(pool, null, reader, {
+      supersededId: readableDecision.id, ...input,
+    })).rejects.toMatchObject({ code: 'FORBIDDEN', status: 403 });
+    expect((await pool.query('SELECT 1 FROM audit_log')).rowCount).toBe(0);
+  });
+
+  it('rejects stale decisions until they are verified back to live', async () => {
+    const scope = await createScope(pool, { kind: 'project', name: 'stale-supersede' });
+    await addMembership(pool, author.id, scope.id, 'writer');
+    const stale = await createMemory(pool, {
+      scopeId: scope.id, scopeKind: scope.kind, type: 'decision', title: 'Stale',
+      body: 'Stale body', authorId: author.id, source: 'manual',
+    });
+    await pool.query(`UPDATE memories SET state = 'stale' WHERE id = $1`, [stale.id]);
+
+    await expect(supersedeForPrincipal(pool, null, author, {
+      supersededId: stale.id, title: 'Replacement', body: 'Replacement body',
+    })).rejects.toMatchObject({
+      code: 'CONFLICT', status: 409, publicMessage: 'Decision is not live',
+    });
     expect((await pool.query('SELECT 1 FROM audit_log')).rowCount).toBe(0);
   });
 });
