@@ -66,7 +66,7 @@ function mockStore(
 function workerOptions(overrides: Partial<PromotionWorkerOptions> = {}): PromotionWorkerOptions {
   return {
     owner: 'worker-test', pollMs: 1000, claimBatch: 10, leaseMs: 1000,
-    callbackTimeoutMs: 100, shutdownWaitMs: 50,
+    callbackTimeoutMs: 100, databaseTimeoutMs: 80, shutdownWaitMs: 50,
     maxAttempts: 3, baseBackoffMs: 10, maxBackoffMs: 100,
     random: () => 0.5,
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -241,7 +241,7 @@ describe('PromotionEventWorker', () => {
     await expect(instance.drainOnce()).resolves.toBe(0);
   });
 
-  it('releases a claim that finishes after the bounded shutdown deadline', async () => {
+  it('does not adopt a claim that finishes after its database deadline', async () => {
     vi.useFakeTimers();
     try {
       const claimEntered = deferred();
@@ -265,9 +265,9 @@ describe('PromotionEventWorker', () => {
       expect(store.release).toHaveBeenCalledOnce();
 
       claimResult.resolve([claimedDelivery]);
-      await expect(draining).resolves.toBe(1);
+      await expect(draining).rejects.toThrow('promotion database operation timed out');
       expect(callback).not.toHaveBeenCalled();
-      expect(store.abandon).toHaveBeenCalledWith(pool, 'worker-test', [claimedDelivery]);
+      expect(store.abandon).not.toHaveBeenCalled();
       expect(store.release).toHaveBeenCalledOnce();
     } finally {
       vi.useRealTimers();
@@ -375,7 +375,7 @@ describe('PromotionEventWorker', () => {
     releaseSibling.resolve();
     await expect(draining).rejects.toThrow('complete write failed');
     await expect(stopping).resolves.toBeUndefined();
-    expect(store.complete).toHaveBeenCalledWith(pool, 'event-2', 'hook', 'worker-test');
+    expect(store.complete).toHaveBeenCalledWith(pool, 'event-2', 'hook', 'worker-test', 1);
     expect(store.complete).toHaveBeenCalledBefore(store.release as ReturnType<typeof vi.fn>);
   });
 
@@ -466,6 +466,14 @@ describe('PromotionEventWorker', () => {
     )).toThrow('shutdownWaitMs must be less than leaseMs');
   });
 
+  it('requires the database deadline to be shorter than the delivery lease', () => {
+    expect(() => new PromotionEventWorker(
+      pool,
+      new PromotionWebhookRegistry(),
+      workerOptions({ leaseMs: 100, callbackTimeoutMs: 50, databaseTimeoutMs: 100 }),
+    )).toThrow('databaseTimeoutMs must be less than leaseMs');
+  });
+
   it('durably acknowledges a successful callback that settles during shutdown', async () => {
     const entered = deferred();
     const releaseCallback = deferred();
@@ -488,7 +496,7 @@ describe('PromotionEventWorker', () => {
     await expect(draining).resolves.toBe(1);
     await expect(stopping).resolves.toBeUndefined();
     expect(store.complete).toHaveBeenCalledOnce();
-    expect(store.complete).toHaveBeenCalledWith(pool, 'event-1', 'hook', 'worker-test');
+    expect(store.complete).toHaveBeenCalledWith(pool, 'event-1', 'hook', 'worker-test', 1);
     expect(store.complete).toHaveResolvedWith(true);
     expect(store.complete).toHaveBeenCalledBefore(store.release as ReturnType<typeof vi.fn>);
   });
@@ -518,6 +526,7 @@ describe('PromotionEventWorker', () => {
           if (!exactAttemptRetained) owned = false;
           return exactAttemptRetained ? 0 : 1;
         }),
+        renew: vi.fn().mockResolvedValue(1),
       });
       const registry = new PromotionWebhookRegistry();
       registry.register({
@@ -557,7 +566,7 @@ describe('PromotionEventWorker', () => {
   it.each([
     { outcome: 'complete', callback: async () => undefined },
     { outcome: 'fail', callback: async () => { throw new Error('expected'); } },
-  ])('removes the callback fence while $outcome persistence is in flight', async ({
+  ])('keeps the exact callback attempt fenced while $outcome persistence is in flight', async ({
     outcome, callback,
   }) => {
     const persistenceEntered = deferred();
@@ -589,7 +598,7 @@ describe('PromotionEventWorker', () => {
     );
     await expect(contender.drainOnce()).resolves.toBe(0);
     expect((contenderStore.claim as ReturnType<typeof vi.fn>).mock.calls[0]?.[1].excluded)
-      .toEqual([]);
+      .toEqual([claimedDelivery]);
 
     persistenceResult.resolve(outcome === 'complete' ? true : 'pending');
     await expect(draining).resolves.toBe(1);
@@ -791,7 +800,7 @@ describe('PromotionEventWorker', () => {
       expect(secondAborted).not.toHaveBeenCalled();
       finishSecond.resolve();
       await expect(draining).resolves.toBe(2);
-      expect(store.complete).toHaveBeenCalledWith(pool, 'event-2', 'hook', 'worker-test');
+      expect(store.complete).toHaveBeenCalledWith(pool, 'event-2', 'hook', 'worker-test', 1);
     } finally {
       finishFirst.resolve();
       finishSecond.resolve();

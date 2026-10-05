@@ -165,9 +165,12 @@ describe('promotion outbox', () => {
     });
     const good = claimed.find((item) => item.webhookId === 'good')!;
     const bad = claimed.find((item) => item.webhookId === 'bad')!;
-    expect(await completePromotionDelivery(pool, good.event.eventId, 'good', 'worker')).toBe(true);
+    expect(await completePromotionDelivery(
+      pool, good.event.eventId, 'good', 'worker', good.attemptCount,
+    )).toBe(true);
     expect(await failPromotionDelivery(pool, bad.event.eventId, 'bad', 'worker', {
       maxAttempts: 1, retryDelayMs: 25, error: new Error('token=secret-value'),
+      attemptCount: bad.attemptCount,
     })).toBe('dead_letter');
     const { rows } = await pool.query(
       `SELECT webhook_id, state, last_error FROM promotion_event_deliveries ORDER BY webhook_id`,
@@ -234,7 +237,7 @@ describe('promotion outbox', () => {
       delivery.event.eventId,
       delivery.webhookId,
       'worker',
-      { maxAttempts: 3, retryDelayMs: 25 },
+      { maxAttempts: 3, retryDelayMs: 25, attemptCount: delivery.attemptCount },
     )).toBe('pending');
     const { rows } = await pool.query(
       `SELECT state, lease_owner, lease_expires_at IS NOT NULL AS lease_retained,
@@ -263,7 +266,7 @@ describe('promotion outbox', () => {
       delivery.event.eventId,
       delivery.webhookId,
       'worker',
-      { maxAttempts: 1, retryDelayMs: 25 },
+      { maxAttempts: 1, retryDelayMs: 25, attemptCount: delivery.attemptCount },
     )).toBe('dead_letter');
 
     expect(await renewPromotionDeliveries(pool, 'worker', [delivery], 1000))
@@ -283,7 +286,7 @@ describe('promotion outbox', () => {
     );
 
     await expect(completePromotionDelivery(
-      pool, delivery.event.eventId, delivery.webhookId, 'worker',
+      pool, delivery.event.eventId, delivery.webhookId, 'worker', delivery.attemptCount,
     )).resolves.toBe(true);
     const { rows } = await pool.query(
       `SELECT state, lease_owner, lease_expires_at FROM promotion_event_deliveries`,
@@ -374,6 +377,37 @@ describe('promotion outbox', () => {
       }]);
     },
   );
+
+  it('fences a stale write when manual retry reuses the same owner and attempt number', async () => {
+    const { principal, source } = await seed();
+    await promoteMemoryWithAudit(
+      pool, principal.id, source.id, { kind: 'project', name: 'destination' }, {}, ['hook'],
+    );
+    const [first] = await claimPromotionDeliveries(pool, {
+      owner: 'worker', webhookIds: ['hook'], limit: 1, leaseMs: 1000,
+    });
+    await expect(timeoutPromotionDelivery(
+      pool, first.event.eventId, first.webhookId, 'worker',
+      { maxAttempts: 1, retryDelayMs: 25, attemptCount: first.attemptCount },
+    )).resolves.toBe('dead_letter');
+    await expect(manualRetryPromotionDelivery(
+      pool, first.event.eventId, first.webhookId,
+    )).resolves.toBe(true);
+    const [second] = await claimPromotionDeliveries(pool, {
+      owner: 'worker', webhookIds: ['hook'], limit: 1, leaseMs: 1000,
+    });
+    expect(second.attemptCount).toBe(first.attemptCount);
+
+    await expect(completePromotionDelivery(
+      pool, first.event.eventId, first.webhookId, 'worker', first.attemptCount,
+    )).resolves.toBe(false);
+    const { rows } = await pool.query(
+      `SELECT state, attempt_count, lease_owner FROM promotion_event_deliveries`,
+    );
+    expect(rows).toEqual([{
+      state: 'pending', attempt_count: second.attemptCount, lease_owner: 'worker',
+    }]);
+  });
 
   it('dead-letters crash-recovered deliveries at the configured attempt bound', async () => {
     const { principal, source } = await seed();
