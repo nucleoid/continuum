@@ -288,6 +288,53 @@ describe('PromotionEventWorker', () => {
     expect(store.release).toHaveBeenCalledOnce();
   });
 
+  it('tracks every sibling callback when one delivery persistence rejects', async () => {
+    const siblingEntered = deferred();
+    const releaseSibling = deferred();
+    const firstPersistenceFailed = deferred();
+    const secondDelivery: ClaimedPromotionDelivery = {
+      ...claimedDelivery,
+      event: { ...claimedDelivery.event, eventId: 'event-2' },
+    };
+    const registry = new PromotionWebhookRegistry();
+    registry.register({
+      id: 'hook',
+      onPromoted: async (event) => {
+        if (event.eventId === 'event-2') {
+          siblingEntered.resolve();
+          await releaseSibling.promise;
+        }
+      },
+    });
+    const store = mockStore({
+      claim: vi.fn().mockResolvedValue([claimedDelivery, secondDelivery]),
+      complete: vi.fn(async (_pool, eventId) => {
+        if (eventId === 'event-1') {
+          firstPersistenceFailed.resolve();
+          throw new Error('complete write failed');
+        }
+        return true;
+      }),
+    });
+    const instance = new PromotionEventWorker(pool, registry, workerOptions(), store);
+
+    const draining = instance.drainOnce();
+    const drainRejected = deferred();
+    void draining.catch(() => drainRejected.resolve());
+    await siblingEntered.promise;
+    await firstPersistenceFailed.promise;
+    await drainRejected.promise;
+    const stopping = instance.stop('SIGTERM');
+    await new Promise<void>((resolve) => { setImmediate(resolve); });
+
+    expect(store.release).not.toHaveBeenCalled();
+    releaseSibling.resolve();
+    await expect(draining).rejects.toThrow('complete write failed');
+    await expect(stopping).resolves.toBeUndefined();
+    expect(store.complete).toHaveBeenCalledWith(pool, 'event-2', 'hook', 'worker-test');
+    expect(store.complete).toHaveBeenCalledBefore(store.release as ReturnType<typeof vi.fn>);
+  });
+
   it('durably acknowledges a successful callback that settles during shutdown', async () => {
     const entered = deferred();
     const releaseCallback = deferred();
