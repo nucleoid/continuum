@@ -7,6 +7,7 @@ import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { createPrincipal } from '../storage/principals.js';
 import { getScopeByRef } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
+import { provisionEntraGroupBinding, syncEntraMemberships } from '../services/membership-sync.js';
 
 const execFileAsync = promisify(execFile);
 const script = fileURLToPath(new URL('../../scripts/ensure-scope.mjs', import.meta.url));
@@ -164,5 +165,40 @@ describe('ensure-scope operator client', () => {
       '-f', removeAdminScript,
     ]).catch((error: unknown) => error as { code: number });
     expect(lastAdminAttempt.code).not.toBe(0);
+  }, 20_000);
+
+  it.skipIf(!hasPsql)('does not count an Entra admin as manual break-glass coverage', async () => {
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    const manual = await createPrincipal(pool, {
+      externalId: 'manual-break-glass', kind: 'user', displayName: 'Manual break glass',
+    });
+    const entra = await createPrincipal(pool, {
+      externalId: '11111111-1111-4111-8111-111111111111', kind: 'user', displayName: 'Entra admin',
+    });
+    await addMembership(pool, manual.id, org.id, 'admin');
+    const groupId = '22222222-2222-4222-8222-222222222222';
+    await provisionEntraGroupBinding(pool, manual, {
+      externalId: groupId, scopeId: org.id, role: 'admin',
+    });
+    await syncEntraMemberships(pool, manual, [{
+      id: groupId, status: 'present', displayName: 'Entra admins',
+      memberObjectIds: [entra.externalId],
+    }]);
+
+    for (const [scriptPath, extra] of [
+      [demoteAdminScript, ['-v', 'replacement_role=writer']],
+      [removeAdminScript, []],
+    ] as const) {
+      const result = await execFileAsync('psql', [
+        databaseUrl, '-v', 'ON_ERROR_STOP=1', '-v', `principal_id=${manual.id}`,
+        ...extra, '-f', scriptPath,
+      ]).then(() => ({ code: 0 })).catch((error: unknown) => error as { code: number });
+      expect(result.code).not.toBe(0);
+      expect((await pool.query(
+        `SELECT role, active FROM scope_memberships
+          WHERE principal_id = $1 AND scope_id = $2 AND source_kind = 'manual'`,
+        [manual.id, org.id],
+      )).rows).toEqual([{ role: 'admin', active: true }]);
+    }
   }, 20_000);
 });

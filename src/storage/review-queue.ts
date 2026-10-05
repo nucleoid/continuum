@@ -77,6 +77,7 @@ export async function listReviewQueue(
          LEFT JOIN LATERAL (
            SELECT sm.role FROM scope_memberships sm
             WHERE sm.scope_id = m.scope_id AND sm.principal_id = $1 AND sm.active
+              AND continuum_membership_is_effective(sm.active, sm.source_kind)
             ORDER BY CASE sm.role WHEN 'admin' THEN 3 WHEN 'writer' THEN 2 ELSE 1 END DESC
             LIMIT 1
          ) membership ON TRUE

@@ -6,8 +6,9 @@ import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { addMembership, hasRole, removeMembership } from '../storage/memberships.js';
 import {
   listBoundEntraGroupIds, MAX_SYNC_GROUPS, MAX_SYNC_MEMBERSHIPS, provisionEntraGroupBinding,
-  revokeEntraGroupBinding, syncEntraMemberships,
+  rejectEntraMembershipSync, revokeEntraGroupBinding, syncEntraMemberships,
 } from './membership-sync.js';
+import { ServiceError } from './errors.js';
 
 describe('Entra membership sync', () => {
   let pool: pg.Pool;
@@ -534,6 +535,56 @@ describe('Entra membership sync', () => {
       id: groupId, status: 'present', displayName: 'valid-again', memberObjectIds: [user.externalId],
     }]);
     expect(await hasRole(pool, user.id, alpha.id, 'reader')).toBe(true);
+  });
+
+  it('denies stale sourced access at the bound and audibly deactivates it on failure', async () => {
+    const scope = await createScope(pool, { kind: 'team', name: 'stale-entra-access' });
+    const user = await createPrincipal(pool, {
+      externalId: '11111111-1111-4111-8111-111111111111', kind: 'user', displayName: 'User',
+    });
+    const groupId = '22222222-2222-4222-8222-222222222222';
+    await provisionEntraGroupBinding(pool, admin, {
+      externalId: groupId, scopeId: scope.id, role: 'reader',
+    });
+    await syncEntraMemberships(pool, admin, [{
+      id: groupId, status: 'present', displayName: 'stale group',
+      memberObjectIds: [user.externalId],
+    }], { maxStalenessHours: 24 });
+    expect(await hasRole(pool, user.id, scope.id, 'reader')).toBe(true);
+
+    await pool.query(
+      `UPDATE entra_sync_state
+          SET last_success_at = now() - interval '25 hours',
+              last_attempt_at = now() - interval '25 hours'`,
+    );
+    expect(await hasRole(pool, user.id, scope.id, 'reader')).toBe(false);
+    expect((await pool.query(
+      `SELECT active FROM scope_memberships
+        WHERE principal_id = $1 AND scope_id = $2 AND source_kind = 'entra'`,
+      [user.id, scope.id],
+    )).rows[0].active).toBe(true);
+
+    await rejectEntraMembershipSync(
+      pool,
+      admin,
+      new ServiceError('DEPENDENCY_UNAVAILABLE', 'Microsoft Graph membership snapshot is unavailable'),
+      { maxStalenessHours: 24 },
+    );
+
+    expect((await pool.query(
+      `SELECT active FROM scope_memberships
+        WHERE principal_id = $1 AND scope_id = $2 AND source_kind = 'entra'`,
+      [user.id, scope.id],
+    )).rows[0].active).toBe(false);
+    const audit = await pool.query(
+      `SELECT metadata FROM audit_log
+        WHERE metadata->>'operation' = 'entra_membership_sync_rejected'
+        ORDER BY id DESC LIMIT 1`,
+    );
+    expect(audit.rows[0].metadata).toMatchObject({
+      reason: 'DEPENDENCY_UNAVAILABLE', stale: true,
+      max_staleness_hours: 24, stale_memberships_deactivated: 1,
+    });
   });
 
   it('rejects more than the whole-run membership cap without deactivating any binding', async () => {

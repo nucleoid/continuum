@@ -203,7 +203,10 @@ export async function principalFromClaims(
   }
   if (kind === 'user') {
     const membership = await pool.query(
-      'SELECT 1 FROM scope_memberships WHERE principal_id = $1 AND active LIMIT 1',
+      `SELECT 1 FROM scope_memberships
+        WHERE principal_id = $1 AND active
+          AND continuum_membership_is_effective(active, source_kind)
+        LIMIT 1`,
       [principal.id],
     );
     if (!membership.rowCount) return null;

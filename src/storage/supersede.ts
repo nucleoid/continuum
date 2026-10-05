@@ -59,7 +59,8 @@ async function supersedeInTransaction(client: pg.PoolClient, input: SupersedeWri
              AND (s.kind = 'org' OR EXISTS (
                SELECT 1
                  FROM scope_memberships sm
-                WHERE sm.principal_id = $2 AND sm.scope_id = m.scope_id
+                WHERE sm.principal_id = $2 AND sm.scope_id = m.scope_id AND sm.active
+                  AND continuum_membership_is_effective(sm.active, sm.source_kind)
              ))
         )
       FOR UPDATE`,
@@ -118,7 +119,8 @@ export async function getDecisionHistory(
         WHERE m.id = $1
           AND (s.kind = 'org' OR EXISTS (
             SELECT 1 FROM scope_memberships sm
-             WHERE sm.principal_id = $2 AND sm.scope_id = m.scope_id
+             WHERE sm.principal_id = $2 AND sm.scope_id = m.scope_id AND sm.active
+               AND continuum_membership_is_effective(sm.active, sm.source_kind)
           ))
      ), backward AS (
        SELECT a.*, 0 AS depth, ARRAY[a.id] AS path, false AS cycle FROM anchor a

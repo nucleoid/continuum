@@ -6,11 +6,24 @@ interface GraphPage { value?: unknown; '@odata.nextLink'?: unknown }
 type Fetch = typeof globalThis.fetch;
 const DEFAULT_TIMEOUT_MS = 10_000;
 const GRAPH_PAGE_SIZE = 999;
+const DEFAULT_MAX_RETRIES = 2;
+const MAX_RETRY_DELAY_MS = 60_000;
 // Graph can return fewer rows than requested. Permit the one-member-per-page
 // worst case plus a terminating empty page, while retaining a hard request cap.
 const MAX_MEMBER_PAGES = MAX_GROUP_MEMBERS + 1;
 
-class MembershipSnapshotTooLargeError extends Error {}
+export class MembershipSnapshotTooLargeError extends ServiceError {
+  constructor() {
+    super('PAYLOAD_TOO_LARGE', 'Entra snapshot exceeds the whole-run limit');
+    this.name = 'MembershipSnapshotTooLargeError';
+  }
+}
+
+export interface GraphFetchOptions {
+  maxRetries?: number;
+  sleep?: (delayMs: number) => Promise<void>;
+  now?: () => number;
+}
 
 export class GraphSnapshotUnavailableError extends ServiceError {
   constructor(message: string, options?: ErrorOptions) {
@@ -41,16 +54,34 @@ async function request(
   url: URL,
   token: string,
   timeoutMs: number,
+  options: Required<GraphFetchOptions>,
 ): Promise<Response> {
-  try {
-    return await fetcher(url, {
-      headers: { authorization: `Bearer ${token}`, consistencyLevel: 'eventual' },
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-  } catch (error) {
-    throw new GraphSnapshotUnavailableError('Microsoft Graph request was unavailable', {
-      cause: error,
-    });
+  for (let attempt = 0; ; attempt += 1) {
+    let response: Response;
+    try {
+      response = await fetcher(url, {
+        headers: { authorization: `Bearer ${token}`, consistencyLevel: 'eventual' },
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch (error) {
+      throw new GraphSnapshotUnavailableError('Microsoft Graph request was unavailable', {
+        cause: error,
+      });
+    }
+    if (![429, 503].includes(response.status) || attempt >= options.maxRetries) return response;
+    const retryAfter = response.headers.get('retry-after');
+    let delayMs = 250 * (2 ** attempt);
+    if (retryAfter !== null) {
+      const seconds = Number(retryAfter);
+      if (Number.isFinite(seconds) && seconds >= 0) delayMs = seconds * 1_000;
+      else {
+        const retryAt = Date.parse(retryAfter);
+        if (Number.isFinite(retryAt)) delayMs = Math.max(0, retryAt - options.now());
+      }
+    }
+    delayMs = Math.min(delayMs, MAX_RETRY_DELAY_MS);
+    try { await response.body?.cancel(); } catch { /* response cleanup is best-effort */ }
+    await options.sleep(delayMs);
   }
 }
 
@@ -78,8 +109,9 @@ async function page(
   url: URL,
   token: string,
   timeoutMs: number,
+  options: Required<GraphFetchOptions>,
 ): Promise<GraphPage> {
-  const response = await request(fetcher, url, token, timeoutMs);
+  const response = await request(fetcher, url, token, timeoutMs, options);
   requireSuccessfulResponse(response);
   const body = await readJson(response) as GraphPage;
   if (body === null || typeof body !== 'object' || !Array.isArray(body.value)) {
@@ -103,12 +135,22 @@ export async function fetchMembershipSnapshot(
   token: string,
   fetcher: Fetch = globalThis.fetch,
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  fetchOptions: GraphFetchOptions = {},
 ): Promise<EntraGroupSnapshot[]> {
   if (token.length < 32 || token.length > 16_384) throw new Error('Graph access token is invalid');
   if (boundGroupIds.length > MAX_SYNC_GROUPS) throw new Error('bound group count exceeds sync limit');
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) {
     throw new Error('Graph timeout is invalid');
   }
+  const maxRetries = fetchOptions.maxRetries ?? DEFAULT_MAX_RETRIES;
+  if (!Number.isSafeInteger(maxRetries) || maxRetries < 0 || maxRetries > 5) {
+    throw new Error('Graph retry count is invalid');
+  }
+  const options: Required<GraphFetchOptions> = {
+    maxRetries,
+    sleep: fetchOptions.sleep ?? ((delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs))),
+    now: fetchOptions.now ?? Date.now,
+  };
   const snapshots: EntraGroupSnapshot[] = [];
   let total = 0;
   for (const rawId of boundGroupIds) {
@@ -119,6 +161,7 @@ export async function fetchMembershipSnapshot(
         new URL(`https://graph.microsoft.com/v1.0/groups/${encodeURIComponent(id)}?$select=id,displayName`),
         token,
         timeoutMs,
+        options,
       );
       if (groupResponse.status === 404) {
         snapshots.push({ id, status: 'missing' });
@@ -144,14 +187,14 @@ export async function fetchMembershipSnapshot(
           throw new GraphSnapshotUnavailableError('Microsoft Graph pagination limit exceeded');
         }
         visited.add(next.href);
-        const current = await page(fetcher, next, token, timeoutMs);
+        const current = await page(fetcher, next, token, timeoutMs, options);
         for (const raw of current.value as unknown[]) {
           const memberId = (raw as { id?: unknown }).id;
           if (typeof memberId !== 'string') throw new Error('MALFORMED_MEMBERS');
           members.push(memberId.toLowerCase());
           if (members.length > MAX_GROUP_MEMBERS) throw new Error('GROUP_TOO_LARGE');
           if (total + members.length > MAX_SYNC_MEMBERSHIPS) {
-            throw new MembershipSnapshotTooLargeError('membership snapshot exceeds sync limit');
+            throw new MembershipSnapshotTooLargeError();
           }
         }
         next = nextPage(current);

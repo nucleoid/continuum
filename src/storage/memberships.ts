@@ -63,6 +63,7 @@ export async function getMembership(
     `SELECT principal_id, scope_id, role, added_at, source_kind, source_id, active
        FROM scope_memberships
       WHERE principal_id = $1 AND scope_id = $2 AND active
+        AND continuum_membership_is_effective(active, source_kind)
       ORDER BY CASE role WHEN 'admin' THEN 3 WHEN 'writer' THEN 2 ELSE 1 END DESC,
                source_kind, source_id
       LIMIT 1`,
@@ -82,6 +83,7 @@ export async function getScopesForPrincipal(
        FROM scope_memberships m
        JOIN scopes s ON s.id = m.scope_id
       WHERE m.principal_id = $1 AND m.active
+        AND continuum_membership_is_effective(m.active, m.source_kind)
       GROUP BY s.id, s.kind, s.name, s.created_at`,
     [principalId],
   );
@@ -105,6 +107,7 @@ export async function getPrincipalsForScope(
        FROM scope_memberships m
        JOIN principals p ON p.id = m.principal_id
       WHERE m.scope_id = $1 AND m.active
+        AND continuum_membership_is_effective(m.active, m.source_kind)
       GROUP BY p.id, p.external_id, p.kind, p.display_name, p.created_at`,
     [scopeId],
   );

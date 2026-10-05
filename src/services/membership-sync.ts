@@ -8,6 +8,8 @@ export const MAX_GROUP_MEMBERS = 10_000;
 export const MAX_SYNC_MEMBERSHIPS = 50_000;
 export const DEFAULT_MAX_DEACTIVATION_PERCENT = 25;
 export const DEFAULT_MASS_MEMBERSHIP_DEACTIVATION_COUNT = 100;
+export const DEFAULT_MAX_STALENESS_HOURS = 24;
+export const MAX_STALENESS_HOURS = 168;
 const SYNC_LOCK_ID = '834641726154302119';
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 
@@ -22,6 +24,7 @@ export interface EntraGroupSnapshot {
 export interface MembershipSyncOptions {
   allowMassDeactivation?: boolean;
   maxDeactivationPercent?: number;
+  maxStalenessHours?: number;
 }
 
 export interface MembershipSyncResult {
@@ -282,19 +285,16 @@ async function quarantineBinding(
 async function rejectOversizedSnapshot(
   client: pg.PoolClient,
   actor: Principal,
+  maxStalenessHours: number,
 ): Promise<void> {
   await client.query('BEGIN');
   try {
-    await requireOrgAdmin(client, actor.id);
-    await requireManualOrgAdministrator(client);
-    await client.query(
-      `INSERT INTO audit_log (principal_id, action, metadata)
-       VALUES ($1, 'write', $2::jsonb)`,
-      [actor.id, JSON.stringify({
-        operation: 'entra_membership_sync_rejected', reason: 'SNAPSHOT_TOO_LARGE',
-        groups_deactivated: 0,
-        memberships_deactivated: 0,
-      })],
+    await recordRejectedAttempt(
+      client,
+      actor,
+      new ServiceError('PAYLOAD_TOO_LARGE', 'Entra snapshot exceeds the whole-run limit'),
+      maxStalenessHours,
+      { groupsDeactivated: 0, membershipsDeactivated: 0, skipCodes: {} },
     );
     await client.query('COMMIT');
   } catch (error) {
@@ -319,6 +319,7 @@ interface PreparedSnapshot {
 
 function rejectionReason(error: unknown): string {
   if (!(error instanceof ServiceError)) return 'SYNC_FAILED';
+  if (error.code === 'PAYLOAD_TOO_LARGE') return 'SNAPSHOT_TOO_LARGE';
   if (error.message.includes('empty Entra snapshot')) return 'EMPTY_SNAPSHOT';
   if (error.message.includes('group deactivation threshold')) return 'GROUP_DEACTIVATION_THRESHOLD';
   if (error.message.includes('membership deactivation threshold')) return 'MEMBERSHIP_DEACTIVATION_THRESHOLD';
@@ -327,27 +328,89 @@ function rejectionReason(error: unknown): string {
   return error.code;
 }
 
+async function recordRejectedAttempt(
+  client: pg.PoolClient,
+  actor: Principal,
+  error: unknown,
+  maxStalenessHours: number,
+  quarantine: Pick<MembershipSyncResult, 'groupsDeactivated' | 'membershipsDeactivated' | 'skipCodes'>,
+): Promise<void> {
+  await requireOrgAdmin(client, actor.id);
+  await requireManualOrgAdministrator(client);
+  const state = await client.query<{ last_success_at: Date; stale: boolean }>(
+    `UPDATE entra_sync_state
+        SET last_attempt_at = now(), last_failure_at = now(), last_failure_code = $1,
+            max_staleness = make_interval(hours => $2)
+      WHERE singleton
+      RETURNING last_success_at, now() >= last_success_at + max_staleness AS stale`,
+    [rejectionReason(error), maxStalenessHours],
+  );
+  if (!state.rows[0]) throw new Error('Entra sync freshness state is missing');
+  const staleDeactivated = state.rows[0].stale ? await client.query(
+    `UPDATE scope_memberships
+        SET active = FALSE, deactivated_at = COALESCE(deactivated_at, now()), synced_at = now()
+      WHERE source_kind = 'entra' AND active
+      RETURNING principal_id`,
+  ) : { rowCount: 0 };
+  await client.query(
+    `INSERT INTO audit_log (principal_id, action, metadata)
+     VALUES ($1, 'write', $2::jsonb)`,
+    [actor.id, JSON.stringify({
+      operation: 'entra_membership_sync_rejected',
+      reason: rejectionReason(error),
+      last_success_at: state.rows[0].last_success_at,
+      max_staleness_hours: maxStalenessHours,
+      stale: state.rows[0].stale,
+      stale_memberships_deactivated: staleDeactivated.rowCount ?? 0,
+      groups_deactivated: quarantine.groupsDeactivated,
+      memberships_deactivated: quarantine.membershipsDeactivated,
+      quarantine: {
+        groups_deactivated: quarantine.groupsDeactivated,
+        memberships_deactivated: quarantine.membershipsDeactivated,
+        skip_codes: quarantine.skipCodes,
+      },
+    })],
+  );
+}
+
+export async function rejectEntraMembershipSync(
+  pool: pg.Pool,
+  actor: Principal,
+  error: unknown,
+  options: Pick<MembershipSyncOptions, 'maxStalenessHours'> = {},
+): Promise<void> {
+  const maxStalenessHours = options.maxStalenessHours ?? DEFAULT_MAX_STALENESS_HOURS;
+  if (!Number.isSafeInteger(maxStalenessHours)
+    || maxStalenessHours < 1 || maxStalenessHours > MAX_STALENESS_HOURS) {
+    throw new ServiceError('INVALID_INPUT', 'Entra membership staleness bound is invalid');
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [SYNC_LOCK_ID]);
+    await recordRejectedAttempt(
+      client, actor, error, maxStalenessHours,
+      { groupsDeactivated: 0, membershipsDeactivated: 0, skipCodes: {} },
+    );
+    await client.query('COMMIT');
+  } catch (recordError) {
+    await client.query('ROLLBACK');
+    throw recordError;
+  } finally {
+    client.release();
+  }
+}
+
 async function auditRejectedSync(
   client: pg.PoolClient,
   actor: Principal,
   error: unknown,
   result: MembershipSyncResult,
+  maxStalenessHours: number,
 ): Promise<void> {
   await client.query('BEGIN');
   try {
-    await client.query(
-      `INSERT INTO audit_log (principal_id, action, metadata)
-       VALUES ($1, 'write', $2::jsonb)`,
-      [actor.id, JSON.stringify({
-        operation: 'entra_membership_sync_rejected',
-        reason: rejectionReason(error),
-        quarantine: {
-          groups_deactivated: result.groupsDeactivated,
-          memberships_deactivated: result.membershipsDeactivated,
-          skip_codes: result.skipCodes,
-        },
-      })],
-    );
+    await recordRejectedAttempt(client, actor, error, maxStalenessHours, result);
     await client.query('COMMIT');
   } catch (auditError) {
     await client.query('ROLLBACK');
@@ -367,6 +430,11 @@ export async function syncEntraMemberships(
   const maxPercent = options.maxDeactivationPercent ?? DEFAULT_MAX_DEACTIVATION_PERCENT;
   if (!Number.isFinite(maxPercent) || maxPercent < 0 || maxPercent > 100) {
     throw new ServiceError('INVALID_INPUT', 'mass-deactivation threshold is invalid');
+  }
+  const maxStalenessHours = options.maxStalenessHours ?? DEFAULT_MAX_STALENESS_HOURS;
+  if (!Number.isSafeInteger(maxStalenessHours)
+    || maxStalenessHours < 1 || maxStalenessHours > MAX_STALENESS_HOURS) {
+    throw new ServiceError('INVALID_INPUT', 'Entra membership staleness bound is invalid');
   }
   const normalizedSnapshots = snapshots.map((snapshot) => ({
     ...snapshot,
@@ -392,7 +460,7 @@ export async function syncEntraMemberships(
       return membershipResults > MAX_SYNC_MEMBERSHIPS;
     });
     if (normalizedSnapshots.length > MAX_SYNC_GROUPS || exceedsMembershipLimit) {
-      await rejectOversizedSnapshot(client, actor);
+      await rejectOversizedSnapshot(client, actor, maxStalenessHours);
       throw new ServiceError('PAYLOAD_TOO_LARGE', 'Entra snapshot exceeds the whole-run limit');
     }
 
@@ -584,6 +652,15 @@ export async function syncEntraMemberships(
     if ((admins.rows[0]?.count ?? 0) < 1) {
       throw new ServiceError('CONFLICT', 'membership sync cannot remove the last org administrator');
     }
+    const freshness = await client.query(
+      `UPDATE entra_sync_state
+          SET last_success_at = now(), last_attempt_at = now(),
+              last_failure_at = NULL, last_failure_code = NULL,
+              max_staleness = make_interval(hours => $1)
+        WHERE singleton`,
+      [maxStalenessHours],
+    );
+    if (!freshness.rowCount) throw new Error('Entra sync freshness state is missing');
     await client.query(
       `INSERT INTO audit_log (principal_id, action, metadata)
        VALUES ($1, 'write', $2::jsonb)`,
@@ -597,7 +674,9 @@ export async function syncEntraMemberships(
       if (transactionOpen) {
         await client.query('ROLLBACK');
         transactionOpen = false;
-        if (authoritativePhase) await auditRejectedSync(client, actor, error, durableQuarantine);
+        if (authoritativePhase) {
+          await auditRejectedSync(client, actor, error, durableQuarantine, maxStalenessHours);
+        }
       }
       primaryError = error;
       throw error;

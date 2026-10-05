@@ -48,6 +48,33 @@ describe('Microsoft Graph membership snapshot', () => {
     },
   );
 
+  it.each([429, 503])('retries Graph status %s using Retry-After before succeeding', async (status) => {
+    const sleep = vi.fn(async () => undefined);
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response('', { status, headers: { 'Retry-After': '2' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: groupId, displayName: 'group' })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ value: [] })));
+
+    await expect(fetchMembershipSnapshot(
+      [groupId], 'x'.repeat(32), fetcher, 10_000, { sleep },
+    )).resolves.toMatchObject([{ id: groupId, status: 'present' }]);
+    expect(sleep).toHaveBeenCalledOnce();
+    expect(sleep).toHaveBeenCalledWith(2_000);
+  });
+
+  it('bounds 503 retries and preserves the stable dependency code', async () => {
+    const sleep = vi.fn(async () => undefined);
+    const fetcher = vi.fn().mockResolvedValue(
+      new Response('', { status: 503, headers: { 'Retry-After': '1' } }),
+    );
+
+    await expect(fetchMembershipSnapshot(
+      [groupId], 'x'.repeat(32), fetcher, 10_000, { maxRetries: 2, sleep },
+    )).rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE' });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledTimes(2);
+  });
+
   it('aborts the whole snapshot on a transport failure', async () => {
     const fetcher = vi.fn().mockRejectedValue(new Error('socket reset'));
     await expect(fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher))

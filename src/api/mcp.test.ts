@@ -98,6 +98,34 @@ describe('MCP server', () => {
     expect(description).toContain('Authorship and read access do not grant');
   });
 
+  it('enforces a source-bound API key on MCP supersession', async () => {
+    const me = await createPrincipal(pool, {
+      externalId: 'service:source-bound', kind: 'service', displayName: 'Source bound service',
+    });
+    const scope = await createScope(pool, { kind: 'project', name: 'source-bound' });
+    await addMembership(pool, me.id, scope.id, 'writer');
+    const decision = await createMemory(pool, {
+      scopeId: scope.id, scopeKind: scope.kind, type: 'decision', title: 'Original',
+      body: 'Original body', authorId: me.id, source: 'github-pr',
+    });
+    const server = buildMcpServer({
+      pool, embeddingProvider: null, principal: me, allowedSource: 'github-pr',
+    });
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'source-bound-test', version: '0.0.1' });
+    await Promise.all([server.connect(a), client.connect(b)]);
+
+    const denied = await client.callTool({
+      name: 'continuum.supersede', arguments: {
+        superseded_id: decision.id, title: 'Denied', body: 'Denied body', source: 'manual',
+      },
+    }) as CallToolResult & { isError?: boolean };
+    expect(denied.isError).toBe(true);
+    expect(parseJsonResult(denied)).toEqual({
+      error: { code: 'FORBIDDEN', message: 'credential is not allowed for this source' },
+    });
+  });
+
   it('rejects the reserved lifecycle principal as an interactive MCP identity', async () => {
     const lifecycle = (await getPrincipal(pool, LIFECYCLE_PRINCIPAL_ID))!;
     expect(() => buildMcpServer({

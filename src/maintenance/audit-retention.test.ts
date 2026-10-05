@@ -568,23 +568,31 @@ describe('audit retention', () => {
     expect(result).toMatchObject({ batches: 1, deleted: 25 });
   });
 
-  it('rechecks admin authority after export and before delete', async () => {
+  it('blocks concurrent admin removal after export and before delete', async () => {
     const admin = await seedPrincipal('svc:retention', 'admin');
     const org = await getScopeByRef(pool, { kind: 'org', name: '' });
     if (!org) throw new Error('org scope missing');
     await insertAudit(admin.id, new Date('2026-01-01T00:00:00Z'));
     const directory = await exportDirectory();
-
-    await expect(runAuditRetention(pool, {
-      ...options(), exportDirectory: directory,
-      afterExport: async () => {
-        await pool.query(
-          'DELETE FROM scope_memberships WHERE principal_id = $1 AND scope_id = $2',
-          [admin.id, org.id],
-        );
-      },
-    })).rejects.toThrow('current org admin');
-    expect((await pool.query('SELECT count(*)::int AS count FROM audit_log')).rows[0].count).toBe(1);
+    const concurrent = await pool.connect();
+    try {
+      const result = await runAuditRetention(pool, {
+        ...options(), exportDirectory: directory,
+        afterExport: async () => {
+          await concurrent.query('BEGIN');
+          await concurrent.query("SET LOCAL lock_timeout = '100ms'");
+          await expect(concurrent.query(
+            'DELETE FROM scope_memberships WHERE principal_id = $1 AND scope_id = $2',
+            [admin.id, org.id],
+          )).rejects.toMatchObject({ code: '55P03' });
+          await concurrent.query('ROLLBACK');
+        },
+      });
+      expect(result.deleted).toBe(1);
+    } finally {
+      await concurrent.query('ROLLBACK').catch(() => undefined);
+      concurrent.release();
+    }
   });
 
   it('does not authorize retention through an inactive admin membership', async () => {
@@ -598,5 +606,30 @@ describe('audit retention', () => {
 
     await expect(runAuditRetention(pool, options())).rejects.toThrow('current org admin');
     expect((await pool.query('SELECT count(*)::int AS count FROM audit_log')).rows[0].count).toBe(1);
+  });
+
+  it('blocks a concurrent active=false update while retention holds authorization', async () => {
+    const admin = await seedPrincipal('svc:retention', 'admin');
+    await insertAudit(admin.id, new Date('2026-01-01T00:00:00Z'));
+    const concurrent = await pool.connect();
+    try {
+      const result = await runAuditRetention(pool, {
+        ...options(),
+        afterExport: async () => {
+          await concurrent.query('BEGIN');
+          await concurrent.query("SET LOCAL lock_timeout = '100ms'");
+          await expect(concurrent.query(
+            `UPDATE scope_memberships SET active = FALSE, deactivated_at = now()
+              WHERE principal_id = $1`,
+            [admin.id],
+          )).rejects.toMatchObject({ code: '55P03' });
+          await concurrent.query('ROLLBACK');
+        },
+      });
+      expect(result.deleted).toBe(1);
+    } finally {
+      await concurrent.query('ROLLBACK').catch(() => undefined);
+      concurrent.release();
+    }
   });
 });

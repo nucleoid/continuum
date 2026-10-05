@@ -17,6 +17,7 @@ export async function resetData(pool: pg.Pool): Promise<void> {
       principal_aliases,
       audit_log,
       service_api_keys,
+      entra_sync_state,
       entra_groups,
       memory_embeddings,
       memories,
@@ -34,4 +35,5 @@ export async function resetData(pool: pg.Pool): Promise<void> {
      VALUES ('00000000-0000-4000-8000-000000000011',
              NULL, 'service', 'system:lifecycle')`,
   );
+  await pool.query('INSERT INTO entra_sync_state (singleton) VALUES (TRUE)');
 }

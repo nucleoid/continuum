@@ -33,6 +33,7 @@ WITH admins AS MATERIALIZED (
     JOIN scopes s ON s.id = sm.scope_id
    WHERE s.kind = 'org' AND s.name = ''
      AND sm.role = 'admin' AND sm.active
+     AND sm.source_kind = 'manual' AND sm.source_id = 'manual'
    FOR UPDATE OF sm
 ), target AS (
   SELECT principal_id, scope_id
@@ -44,7 +45,7 @@ WITH admins AS MATERIALIZED (
     FROM target t
    WHERE sm.principal_id = t.principal_id AND sm.scope_id = t.scope_id
      AND (SELECT count(DISTINCT principal_id) FROM admins) > 1
-     AND sm.source_kind = 'manual' AND sm.source_id = 'manual' AND sm.active
+     AND sm.active
   RETURNING sm.principal_id
 )
 SELECT count(*) = 1 AS demote_succeeded FROM changed \gset
@@ -54,6 +55,6 @@ SELECT count(*) = 1 AS demote_succeeded FROM changed \gset
   \echo 'Changed principal' :principal_id 'from admin to' :replacement_role
 \else
   ROLLBACK;
-  \echo 'Expected one matching org admin and at least one other admin; nothing changed.'
+  \echo 'Expected one matching manual org admin and at least one other active manual org admin; nothing changed.'
   SELECT 1 / 0 AS org_admin_demote_failed;
 \endif

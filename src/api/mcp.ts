@@ -332,7 +332,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         const result = await supersedeForPrincipal(pool, embeddingProvider, principal, {
           supersededId: args.superseded_id, title: args.title, body: args.body,
           tags: args.tags, source: args.source, sourceRef: args.source_ref, metadata: args.metadata,
-        }, { transport: 'mcp' });
+        }, { transport: 'mcp' }, deps.allowedSource);
         return jsonResult({
           superseded_id: result.predecessor.id, successor_id: result.successor.id,
           scope_id: result.successor.scopeId, predecessor_state: result.predecessor.state,

@@ -150,9 +150,13 @@ async function embedSuccessor(
 export async function supersedeForPrincipal(
   pool: pg.Pool, embeddingRouting: EmbeddingRouting, principal: Principal,
   input: SupersedeInput, auditMetadata: Record<string, unknown> = {},
+  allowedSource?: string,
 ): Promise<SupersedeResult> {
   try {
     const source = input.source ?? 'manual';
+    if (allowedSource !== undefined && source !== allowedSource) {
+      throw new ServiceError('FORBIDDEN', 'credential is not allowed for this source');
+    }
     validateCaptureContent({ ...input, source });
     let result;
     try {

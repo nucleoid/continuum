@@ -48,6 +48,7 @@ export async function getReadableMemory(
         AND (s.kind = 'org' OR EXISTS (
           SELECT 1 FROM scope_memberships sm
            WHERE sm.principal_id = $2 AND sm.scope_id = m.scope_id AND sm.active
+             AND continuum_membership_is_effective(sm.active, sm.source_kind)
         ))`,
     [memoryId, principalId],
   );
@@ -67,6 +68,7 @@ export async function listReadableMemories(
       WHERE (s.kind = 'org' OR EXISTS (
           SELECT 1 FROM scope_memberships sm
            WHERE sm.principal_id = $1 AND sm.scope_id = m.scope_id AND sm.active
+             AND continuum_membership_is_effective(sm.active, sm.source_kind)
         ))
         AND (m.expires_at IS NULL OR m.expires_at > now())
         AND m.state = $2

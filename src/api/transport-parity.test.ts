@@ -440,6 +440,39 @@ describe('REST/MCP semantic parity matrix', () => {
     });
   });
 
+  it('keeps inactive decision access hidden across REST and MCP', async () => {
+    const scope = await createScope(pool, { kind: 'project', name: 'inactive-decision-parity' });
+    await addMembership(pool, principal.id, scope.id, 'writer');
+    const decision = await createMemory(pool, {
+      scopeId: scope.id, scopeKind: scope.kind, type: 'decision', title: 'Private decision',
+      body: 'Inactive members must not see this body', authorId: principal.id, source: 'manual',
+    });
+    await pool.query(
+      `UPDATE scope_memberships SET active = FALSE, deactivated_at = now()
+        WHERE principal_id = $1 AND scope_id = $2`,
+      [principal.id, scope.id],
+    );
+
+    const restHistory = await request(createApp(pool))
+      .get(`/api/v0/decisions/${decision.id}/history`)
+      .set('Authorization', 'Bearer entra:user:parity');
+    const mcpHistory = await client.callTool({
+      name: 'continuum.decision_history', arguments: { decision_id: decision.id },
+    }) as ToolResult;
+    const restSupersede = await request(createApp(pool)).post('/api/v0/supersede')
+      .set('Authorization', 'Bearer entra:user:parity')
+      .send({ supersededId: decision.id, title: 'Denied', body: 'Denied body' });
+    const mcpSupersede = await client.callTool({
+      name: 'continuum.supersede',
+      arguments: { superseded_id: decision.id, title: 'Denied', body: 'Denied body' },
+    }) as ToolResult;
+
+    expect(restHistory.status).toBe(404);
+    expect(restSupersede.status).toBe(404);
+    expect(toolJson(mcpHistory)).toEqual({ error: { code: 'MEMORY_NOT_FOUND', message: 'Memory not found' } });
+    expect(toolJson(mcpSupersede)).toEqual(toolJson(mcpHistory));
+  });
+
   it('revokes REST and MCP point-fetch and browse access after membership deactivation', async () => {
     const scope = await createScope(pool, { kind: 'project', name: 'deactivated-parity' });
     await addMembership(pool, principal.id, scope.id, 'reader');

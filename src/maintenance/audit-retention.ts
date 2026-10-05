@@ -236,9 +236,11 @@ async function authorizedPrincipalId(client: pg.PoolClient, externalId: string):
        FROM principals p
        JOIN scope_memberships sm ON sm.principal_id = p.id
         AND sm.role = 'admin' AND sm.active
+        AND continuum_membership_is_effective(sm.active, sm.source_kind)
        JOIN scopes s ON s.id = sm.scope_id AND s.kind = 'org' AND s.name = ''
       WHERE p.external_id = $1
-      FOR KEY SHARE OF p, sm, s`,
+      FOR KEY SHARE OF p, s
+      FOR SHARE OF sm`,
     [externalId],
   );
   const id = result.rows[0]?.id;
@@ -284,11 +286,13 @@ async function deleteBatch(
   runId: string,
   batchNumber: number,
   exported: AuditExportResult | undefined,
+  afterExport?: (batchNumber: number) => Promise<void>,
 ): Promise<void> {
   let destroyClient = false;
   try {
     await client.query('BEGIN');
     const principalId = await authorizedPrincipalId(client, principalExternalId);
+    await afterExport?.(batchNumber);
     const deletion = await client.query<AuditRow>(
       `DELETE FROM audit_log
         WHERE id = ANY($1::bigint[])
@@ -444,10 +448,9 @@ export async function runAuditRetention(
         exports += 1;
         if (exported.reused) reusedExports += 1;
       }
-      await options.afterExport?.(batchNumber);
       await deleteBatch(
         client, rows, options.principalExternalId, cutoff, retentionDays,
-        runId, batchNumber, exported,
+        runId, batchNumber, exported, options.afterExport,
       );
       batches += 1;
       deleted += rows.length;

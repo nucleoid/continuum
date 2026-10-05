@@ -53,12 +53,12 @@ case-insensitive.
 
 Service API keys contain 256 random bits and use the `ctm_` prefix. Continuum
 stores only SHA-256 hashes plus a display prefix and final four characters.
-Keys can be restricted to one capture source and expire 90 days after issue or
+Keys can be restricted to one write source and expire 90 days after issue or
 rotation. `allowed-source` is an exact match against the caller-supplied
-`source` field on REST and MCP capture operations. It does not make the key
-capture-only and does not narrow recall or other operations; those continue to
+`source` field on REST and MCP capture and supersede operations. It does not
+make the key write-only and does not narrow read operations; those continue to
 use the service principal's scope memberships. Use a dedicated least-privilege
-service principal when a credential must have capture-only effective access.
+service principal when a credential must have narrower effective access.
 Issue, rotation, and revocation require an org administrator, and the
 credential mutation and audit commit atomically. Cleartext is returned only by
 issue or rotation.
@@ -112,6 +112,8 @@ mass-deactivation investigation. It requires:
 - `CONTINUUM_ENTRA_MEMBERSHIP_SYNC=true`
 - `CONTINUUM_GRAPH_ACCESS_TOKEN`
 - `CONTINUUM_MEMBERSHIP_SYNC_ACTOR`, the external ID of an org admin
+- `CONTINUUM_ENTRA_MAX_STALENESS_HOURS`, an integer from 1 through 168
+  (default 24)
 - the normal database configuration
 
 Before enabling the scheduler, retain an independently managed, active manual
@@ -151,9 +153,23 @@ Graph authentication, authorization, rate-limit, service, timeout, transport,
 response-body timeout/drop/truncation, non-JSON body, malformed pagination,
 untrusted next-link, cycle, and page-cap exhaustion failures abort snapshot
 collection before synchronization starts.
-They do not convert every approved group into malformed input or quarantine
-the last successfully synchronized access set. The job reports the safe
-`DEPENDENCY_UNAVAILABLE` code so a scheduler or on-demand operator can retry.
+HTTP 429 and 503 responses receive at most two bounded retries. The job honors
+`Retry-After` seconds or dates, capped at 60 seconds per retry. Failures do not
+convert every approved group into malformed input or quarantine the binding.
+The job records a durable rejection audit and reports the safe
+`DEPENDENCY_UNAVAILABLE` code. A whole-run overflow is recorded before the CLI
+returns the stable `PAYLOAD_TOO_LARGE` code.
+
+Continuum records the last successful snapshot and the configured staleness
+bound in `entra_sync_state`. Every authorization query still requires
+`scope_memberships.active`; Entra-sourced rows are additionally denied once
+the durable last-success deadline expires, even if the scheduler has stopped.
+On the next failed attempt after expiry, all still-active Entra-sourced rows are
+soft-deactivated and the count is included in the rejection audit. A later
+successful authoritative snapshot may reactivate valid rows and resets the
+deadline. Manual and other sourced memberships are not affected. Operators
+must alert on rejection audits and on a deadline approaching expiry rather
+than silently preserving stale access.
 Deterministically invalid group identity or membership data remains contained
 to the affected binding and quarantined fail-closed. Member pagination is
 restricted to trusted Microsoft Graph v1.0 URLs, rejects cycles, stops at the
@@ -176,7 +192,7 @@ normally from successful first sign-in, before group membership becomes active.
 
 This release does not support a mixed-version rolling deployment. Stop every
 API, MCP, admin, and membership-sync process built from the old version, then
-apply all migrations through `0013_canonicalize_principal_external_ids.sql`,
+apply all migrations through `0014_entra_sync_freshness.sql`,
 review the inactive bindings conservatively quarantined by
 `0012_entra_quarantine_state.sql`, then start only the new binaries. The
 database trigger
