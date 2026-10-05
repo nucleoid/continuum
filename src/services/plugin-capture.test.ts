@@ -4,7 +4,7 @@ import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { createPrincipal } from '../storage/principals.js';
 import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
-import { mapActorIdentity } from '../storage/actor-identities.js';
+import { mapActorIdentity, revokeActorIdentity } from '../storage/actor-identities.js';
 import { capturePluginEvent } from './plugin-capture.js';
 import { standupForPrincipal } from './standup.js';
 import type { GitHubPrEvent } from '../capture/plugins/github-pr.js';
@@ -73,6 +73,52 @@ describe('plugin capture to standup attribution', () => {
       now: new Date(Date.now() + 1_000),
     });
     expect(standup.activity.map((memory) => memory.id)).toEqual([captured.memory.id]);
+  });
+
+  it('excludes historical activity after its exact actor mapping is revoked or replaced', async () => {
+    const service = await createPrincipal(pool, {
+      externalId: 'svc:revoked-github-webhook', kind: 'service', displayName: 'GitHub webhook',
+    });
+    const actor = await createPrincipal(pool, {
+      externalId: 'entra:revoked-actor', kind: 'user', displayName: 'Revoked actor',
+    });
+    const admin = await createPrincipal(pool, {
+      externalId: 'entra:revocation-admin', kind: 'user', displayName: 'Identity Admin',
+    });
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    const project = await createScope(pool, { kind: 'project', name: 'continuum' });
+    await addMembership(pool, admin.id, org!.id, 'admin');
+    await addMembership(pool, service.id, project.id, 'writer');
+    await addMembership(pool, actor.id, project.id, 'reader');
+    const authority = `github.${service.id}`;
+    await mapActorIdentity(pool, {
+      authority, externalActorId: '4242', principalId: actor.id,
+      mappedByPrincipalId: admin.id,
+    });
+
+    const [captured] = await capturePluginEvent(
+      pool, null, service, 'github-pr', mergedPr(70, 4242, 'renamed-login'),
+    );
+    const now = new Date('2026-10-05T12:00:00.000Z');
+    await pool.query(
+      `UPDATE memories SET created_at = $2, updated_at = $2 WHERE id = $1`,
+      [captured.memory.id, '2026-10-05T10:00:00.000Z'],
+    );
+    const standup = async () => standupForPrincipal(
+      pool, actor, { sinceHours: 24 }, { now },
+    );
+    expect((await standup()).activity.map((memory) => memory.id)).toEqual([captured.memory.id]);
+
+    await expect(revokeActorIdentity(pool, {
+      authority, externalActorId: '4242', revokedByPrincipalId: admin.id,
+    })).resolves.toBe(true);
+    expect((await standup()).activity).toEqual([]);
+
+    await mapActorIdentity(pool, {
+      authority, externalActorId: '4242', principalId: actor.id,
+      mappedByPrincipalId: admin.id,
+    });
+    expect((await standup()).activity).toEqual([]);
   });
 
   it('stores an unmapped GitHub PR safely but fails closed for standup eligibility', async () => {
