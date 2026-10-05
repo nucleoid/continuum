@@ -55,7 +55,9 @@ describe('OllamaEmbeddingProvider', () => {
       fetchImpl: vi.fn(async () => response(body)),
     });
 
-    await expect(provider.embed(['one', 'two'])).rejects.toThrow(/Ollama/i);
+    await expect(provider.embed(['one', 'two'])).rejects.toMatchObject({
+      code: 'EMBEDDING_INVALID_RESPONSE', failureScope: 'provider',
+    });
   });
 
   it('normalizes its request deadline to a typed timeout error', async () => {
@@ -156,11 +158,28 @@ describe('OllamaEmbeddingProvider', () => {
     }
   });
 
-  it('reports bounded HTTP failures without response bodies', async () => {
+  it.each([
+    [401, 'EMBEDDING_AUTH'],
+    [403, 'EMBEDDING_AUTH'],
+    [429, 'EMBEDDING_RATE_LIMIT'],
+    [503, 'EMBEDDING_SERVER'],
+  ])('classifies HTTP %i as provider-wide %s without response bodies', async (status, code) => {
     const provider = new OllamaEmbeddingProvider({
       baseUrl: 'http://x', model: 'm', dim: 4,
-      fetchImpl: vi.fn(async () => response({ secret: 'do not leak' }, false, 503)),
+      fetchImpl: vi.fn(async () => response({ secret: 'do not leak' }, false, status)),
     });
-    await expect(provider.embed(['private input'])).rejects.toThrow('Ollama embed failed: 503 ERR');
+    await expect(provider.embed(['private input'])).rejects.toMatchObject({
+      code, failureScope: 'provider',
+    });
+  });
+
+  it('classifies transport failures as provider-wide network errors', async () => {
+    const provider = new OllamaEmbeddingProvider({
+      baseUrl: 'http://x', model: 'm', dim: 4,
+      fetchImpl: vi.fn(async () => { throw new TypeError('private socket detail'); }),
+    });
+    await expect(provider.embed(['private input'])).rejects.toMatchObject({
+      code: 'EMBEDDING_NETWORK', failureScope: 'provider',
+    });
   });
 });

@@ -27,6 +27,15 @@ describe('makeEmbeddingProviderFromEnv', () => {
   it.each([
     ['CONTINUUM_EMBEDDING_TIMEOUT_MS', '0'],
     ['CONTINUUM_EMBEDDING_TIMEOUT_MS', '1.5'],
+  ])('rejects invalid %s', (name, value) => {
+    expect(() => makeEmbeddingProviderFromEnv({
+      CONTINUUM_EMBEDDING_PROVIDER: 'ollama',
+      CONTINUUM_EMBEDDING_DIM: '768',
+      [name]: value,
+    })).toThrow(/timeout.*between 1 and 300000/i);
+  });
+
+  it.each([
     ['CONTINUUM_EMBEDDING_BATCH_SIZE', '0'],
     ['CONTINUUM_EMBEDDING_BATCH_SIZE', '1001'],
   ])('rejects invalid %s', (name, value) => {

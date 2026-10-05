@@ -1,4 +1,8 @@
-import type { EmbeddingProvider } from './provider.js';
+import {
+  EmbeddingProviderError,
+  embeddingProviderHttpError,
+  type EmbeddingProvider,
+} from './provider.js';
 import {
   DEFAULT_EMBEDDING_TIMEOUT_MS,
   validateEmbeddingTimeout,
@@ -21,15 +25,13 @@ interface OllamaEmbedResponse {
   embeddings?: unknown;
 }
 
-export class EmbeddingTimeoutError extends Error {
-  readonly code = 'EMBEDDING_TIMEOUT';
-
+export class EmbeddingTimeoutError extends EmbeddingProviderError {
   constructor(
     readonly providerId: string,
     readonly timeoutMs: number,
     options: { cause?: unknown } = {},
   ) {
-    super(`Embedding request to ${providerId} exceeded ${timeoutMs} ms`, options);
+    super('EMBEDDING_TIMEOUT', `Embedding request to ${providerId} timed out after ${timeoutMs} ms`, options);
     this.name = 'EmbeddingTimeoutError';
   }
 }
@@ -72,31 +74,56 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
       const chunk = texts.slice(offset, offset + this.batchSize);
       try {
         const vectors = await withEmbeddingTimeout(this.timeoutMs, options.signal, async (signal) => {
-          const res = await this.fetchImpl(`${this.baseUrl}/api/embed`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ model: this.model, input: chunk }),
-          signal,
-        });
-        if (!res.ok) {
-          throw new Error(`Ollama embed failed: ${res.status} ${res.statusText}`);
-        }
-        const json = (await res.json()) as OllamaEmbedResponse;
-        if (!Array.isArray(json.embeddings) || json.embeddings.length !== chunk.length) {
-          throw new Error(`Ollama returned unexpected embedding cardinality (expected ${chunk.length})`);
-        }
-        return json.embeddings.map((candidate, index) => {
-          if (!Array.isArray(candidate) || candidate.length !== this.dim) {
-            throw new Error(`Ollama returned unexpected embedding dimension at index ${index} (expected ${this.dim})`);
+          let res: Response;
+          try {
+            res = await this.fetchImpl(`${this.baseUrl}/api/embed`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ model: this.model, input: chunk }),
+              signal,
+            });
+          } catch (error) {
+            if (signal.aborted) throw signal.reason ?? error;
+            throw new EmbeddingProviderError(
+              'EMBEDDING_NETWORK', 'Embedding provider network request failed', { cause: error },
+            );
           }
-          if (!candidate.every((value) => typeof value === 'number' && Number.isFinite(value))) {
-            throw new Error(`Ollama returned an invalid embedding at index ${index}`);
+          if (!res.ok) throw embeddingProviderHttpError(res.status);
+          let json: OllamaEmbedResponse;
+          try {
+            json = (await res.json()) as OllamaEmbedResponse;
+          } catch (error) {
+            throw new EmbeddingProviderError(
+              'EMBEDDING_INVALID_RESPONSE',
+              'Ollama returned invalid JSON',
+              { cause: error },
+            );
           }
-          return candidate as number[];
-        });
+          if (!Array.isArray(json.embeddings) || json.embeddings.length !== chunk.length) {
+            throw new EmbeddingProviderError(
+              'EMBEDDING_INVALID_RESPONSE',
+              `Ollama returned unexpected embedding cardinality (expected ${chunk.length})`,
+            );
+          }
+          return json.embeddings.map((candidate, index) => {
+            if (!Array.isArray(candidate) || candidate.length !== this.dim) {
+              throw new EmbeddingProviderError(
+                'EMBEDDING_INVALID_RESPONSE',
+                `Ollama returned unexpected embedding dimension at index ${index} (expected ${this.dim})`,
+              );
+            }
+            if (!candidate.every((value) => typeof value === 'number' && Number.isFinite(value))) {
+              throw new EmbeddingProviderError(
+                'EMBEDDING_INVALID_RESPONSE', `Ollama returned an invalid embedding at index ${index}`,
+              );
+            }
+            return candidate as number[];
+          });
         });
         out.push(...vectors);
       } catch (error) {
+        if (options.signal?.aborted) throw options.signal.reason ?? error;
+        if (error instanceof EmbeddingProviderError) throw error;
         if (error instanceof Error && /timed out/i.test(error.message)) {
           throw new EmbeddingTimeoutError(this.id, this.timeoutMs, { cause: error });
         }

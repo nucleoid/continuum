@@ -1,6 +1,10 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type pg from 'pg';
-import type { EmbeddingProvider } from '../embeddings/provider.js';
+import {
+  EmbeddingItemError,
+  EmbeddingProviderError,
+  type EmbeddingProvider,
+} from '../embeddings/provider.js';
 import { EmbeddingRegistry, ScopeEmbeddingRouter } from '../embeddings/router.js';
 import { StubEmbeddingProvider } from '../embeddings/stub.js';
 import { createMemory } from '../storage/memories.js';
@@ -130,7 +134,9 @@ describe('embedding backfill', () => {
     const provider: EmbeddingProvider = {
       id: 'ollama:poison', dim: 768, local: true,
       async embed(texts) {
-        if (texts.some((text) => text.includes('poison item'))) throw new Error('private provider detail');
+        if (texts.some((text) => text.includes('poison item'))) {
+          throw new EmbeddingItemError('private provider detail');
+        }
         return vectors.embed(texts);
       },
     };
@@ -150,6 +156,54 @@ describe('embedding backfill', () => {
     );
     expect(audit.rows[0].metadata).toContain('EMBEDDING_FAILED');
     expect(audit.rows[0].metadata).not.toContain('private provider detail');
+  });
+
+  it.each([
+    ['timeout', new EmbeddingProviderError('EMBEDDING_TIMEOUT', 'private timeout detail')],
+    ['network', new EmbeddingProviderError('EMBEDDING_NETWORK', 'private network detail')],
+    ['authentication', new EmbeddingProviderError('EMBEDDING_AUTH', 'private auth detail')],
+    ['rate limit', new EmbeddingProviderError('EMBEDDING_RATE_LIMIT', 'private quota detail')],
+    ['server outage', new EmbeddingProviderError('EMBEDDING_SERVER', 'private upstream detail')],
+    ['unknown provider outage', new Error('private unknown outage detail')],
+  ])('fails a whole batch once on a provider-wide %s without delay or item audits', async (_label, failure) => {
+    await seed('project', `outage-${_label}`, ['one', 'two', 'three', 'four']);
+    const sleep = vi.fn(async () => undefined);
+    const embed = vi.fn(async () => { throw failure; });
+    const provider: EmbeddingProvider = {
+      id: 'ollama:outage', dim: 768, local: true, embed,
+    };
+
+    await expect(runEmbeddingBackfill(pool, provider, {
+      batchSize: 4, maxRows: 10, maxRetries: 3, retryBaseMs: 1, sleep,
+    })).rejects.toMatchObject({ code: 'EMBEDDING_FAILED' });
+
+    expect(embed).toHaveBeenCalledTimes(1);
+    expect(embed.mock.calls[0]?.[0]).toHaveLength(4);
+    expect(sleep).not.toHaveBeenCalled();
+    expect((await pool.query('SELECT count(*)::int AS count FROM memory_embeddings')).rows[0].count).toBe(0);
+    expect((await pool.query(
+      `SELECT count(*)::int AS count FROM audit_log
+        WHERE metadata->>'operation' = 'embedding_backfill'`,
+    )).rows[0].count).toBe(0);
+  });
+
+  it('treats an invalid whole-batch response as provider-wide without recursive calls', async () => {
+    await seed('project', 'invalid-global-response', ['one', 'two', 'three']);
+    const sleep = vi.fn(async () => undefined);
+    const embed = vi.fn(async () => [[0]]);
+    const provider: EmbeddingProvider = {
+      id: 'ollama:invalid-response', dim: 768, local: true, embed,
+    };
+
+    await expect(runEmbeddingBackfill(pool, provider, {
+      batchSize: 3, maxRows: 10, maxRetries: 3, retryBaseMs: 1, sleep,
+    })).rejects.toMatchObject({ code: 'EMBEDDING_FAILED' });
+    expect(embed).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+    expect((await pool.query(
+      `SELECT count(*)::int AS count FROM audit_log
+        WHERE metadata->>'operation' = 'embedding_backfill'`,
+    )).rows[0].count).toBe(0);
   });
 
   it('supports count-only and dry-run without embeddings or checkpoint writes', async () => {

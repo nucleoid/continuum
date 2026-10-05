@@ -1,5 +1,9 @@
 import type pg from 'pg';
-import type { EmbeddingProvider } from '../embeddings/provider.js';
+import {
+  EmbeddingProviderError,
+  isEmbeddingItemError,
+  type EmbeddingProvider,
+} from '../embeddings/provider.js';
 import {
   asEmbeddingRouter,
   type EmbeddingRouting,
@@ -200,6 +204,13 @@ async function runProvider(
         embedded += items.length;
         return;
       } catch (error) {
+        if (!isEmbeddingItemError(error)) {
+          throw new EmbeddingProviderError(
+            'EMBEDDING_FAILED',
+            'Embedding backfill provider failed',
+            { cause: error },
+          );
+        }
         if (items.length > 1) {
           const middle = Math.floor(items.length / 2);
           await processItems(items.slice(0, middle));
@@ -219,6 +230,13 @@ async function runProvider(
             embedded += 1;
             return;
           } catch (caught) {
+            if (!isEmbeddingItemError(caught)) {
+              throw new EmbeddingProviderError(
+                'EMBEDDING_FAILED',
+                'Embedding backfill provider failed',
+                { cause: caught },
+              );
+            }
             lastError = caught;
           }
         }

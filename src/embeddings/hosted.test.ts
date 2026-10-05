@@ -31,6 +31,23 @@ describe('hosted embedding providers', () => {
     const error = await provider.embed(['one']).catch((cause: unknown) => cause as Error);
     expect(error.message).toMatch(/invalid embedding/i);
     expect(error.message).not.toContain('private-voyage-key');
+    expect(error).toMatchObject({
+      code: 'EMBEDDING_INVALID_RESPONSE', failureScope: 'provider',
+    });
+  });
+
+  it.each([
+    [401, 'EMBEDDING_AUTH'],
+    [429, 'EMBEDDING_RATE_LIMIT'],
+    [500, 'EMBEDDING_SERVER'],
+  ])('classifies HTTP %i as provider-wide %s', async (status, code) => {
+    const provider = new OpenAIEmbeddingProvider({
+      apiKey: 'secret', model: 'model', dim: 2,
+      fetchImpl: vi.fn(async () => ({ ok: false, status }) as Response),
+    });
+    await expect(provider.embed(['one'])).rejects.toMatchObject({
+      code, failureScope: 'provider',
+    });
   });
 
   it('enforces its deadline even when an injected fetch ignores abort', async () => {
@@ -39,7 +56,20 @@ describe('hosted embedding providers', () => {
       apiKey: 'private', model: 'm', dim: 2, timeoutMs: 5, fetchImpl,
     });
 
-    await expect(provider.embed(['one'])).rejects.toThrow(/timed out/i);
+    await expect(provider.embed(['one'])).rejects.toMatchObject({
+      code: 'EMBEDDING_TIMEOUT', failureScope: 'provider',
+    });
+  });
+
+  it('classifies transport failures as provider-wide network errors', async () => {
+    const provider = new OpenAIEmbeddingProvider({
+      apiKey: '***', model: 'm', dim: 2,
+      fetchImpl: vi.fn(async () => { throw new TypeError('private socket detail'); }),
+    });
+
+    await expect(provider.embed(['one'])).rejects.toMatchObject({
+      code: 'EMBEDDING_NETWORK', failureScope: 'provider',
+    });
   });
 
   it('does not start a request when the caller signal is already aborted', async () => {
