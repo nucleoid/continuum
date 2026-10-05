@@ -47,6 +47,28 @@ describe('controlled-tag mixed-version operations', () => {
     expect(procedure).toContain('FOR KEY SHARE');
     expect(documentation).toContain('scripts/enable-tag-legacy-writer-compat.sql');
     expect(documentation).toMatch(/pause webhook intake[\s\S]+drain in-flight[\s\S]+application rollback/i);
+    expect(documentation).toContain('$env:CONTINUUM_DATABASE_URL');
+    expect(documentation).toContain('.\\scripts\\enable-tag-legacy-writer-compat.sql');
+  });
+
+  it('ships and documents strict trigger restoration before a forward redeploy resumes writes', async () => {
+    const procedure = await readFile(
+      join(process.cwd(), 'scripts/restore-tag-strict-enforcement.sql'),
+      'utf8',
+    );
+    const documentation = await readFile(
+      join(process.cwd(), 'docs/tag-vocabularies.md'),
+      'utf8',
+    );
+
+    expect(procedure).toContain('CREATE OR REPLACE FUNCTION enforce_memory_tag_vocabulary()');
+    expect(procedure).toContain('CREATE TRIGGER memories_tags_controlled_vocabulary');
+    expect(procedure).toContain("SET LOCAL lock_timeout = '5s';");
+    expect(procedure).toContain("SET LOCAL statement_timeout = '60s';");
+    expect(documentation).toContain('scripts/restore-tag-strict-enforcement.sql');
+    expect(documentation).toMatch(
+      /deploy the vocabulary-aware application[\s\S]+restore-tag-strict-enforcement\.sql[\s\S]+resume webhook intake/i,
+    );
   });
 
   it('quarantines unknown tags from every legacy writer without losing originals', async () => {
@@ -89,7 +111,7 @@ describe('controlled-tag mixed-version operations', () => {
         metadata: {
           keep: 'yes',
           continuum_legacy_tags: ['active', 'secret team', 'decision'],
-          continuum_tag_migration: {
+          continuum_tag_rollback_compat: {
             version: 1,
             original_tags: ['ado', 'active', 'secret team', 'decision', 'decision'],
           },
@@ -116,7 +138,7 @@ describe('controlled-tag mixed-version operations', () => {
         tags: ['deploy'],
         metadata: {
           continuum_legacy_tags: ['active', 'deploy'],
-          continuum_tag_migration: {
+          continuum_tag_rollback_compat: {
             version: 1,
             original_tags: ['Deploy', 'active', 'deploy'],
           },
@@ -125,6 +147,65 @@ describe('controlled-tag mixed-version operations', () => {
           ],
         },
       }]);
+
+      const migrationProvenance = {
+        version: 1,
+        original_tags: ['PR', 'pr', 'private-before-migration'],
+      };
+      await pool.query(`
+        INSERT INTO memories (
+          id, scope_id, type, title, body, author_id, source, tags, metadata
+        ) VALUES (
+          '30000000-0000-4000-8000-000000000032',
+          '20000000-0000-4000-8000-000000000030',
+          'fact', 'Promoted canonical memory', 'Keep true migration provenance unchanged',
+          '10000000-0000-4000-8000-000000000030', 'manual',
+          ARRAY['pr', 'decision'], $1::jsonb
+        )
+      `, [JSON.stringify({
+        keep: 'promotion',
+        continuum_legacy_tags: ['private-before-migration'],
+        continuum_tag_migration: migrationProvenance,
+      })]);
+      const promoted = await pool.query(
+        `SELECT tags, metadata FROM memories
+          WHERE id = '30000000-0000-4000-8000-000000000032'`,
+      );
+      expect(promoted.rows).toEqual([{
+        tags: ['pr', 'decision'],
+        metadata: {
+          keep: 'promotion',
+          continuum_legacy_tags: ['private-before-migration'],
+          continuum_tag_migration: migrationProvenance,
+        },
+      }]);
+
+      await pool.query(`
+        UPDATE memories
+           SET title = 'Legacy writer changed only the title'
+         WHERE id = '30000000-0000-4000-8000-000000000030'
+      `);
+      const stable = await pool.query(
+        `SELECT tags, metadata FROM memories
+          WHERE id = '30000000-0000-4000-8000-000000000030'`,
+      );
+      expect(stable.rows).toEqual(stored.rows);
+
+      const restore = await readFile(
+        join(process.cwd(), 'scripts/restore-tag-strict-enforcement.sql'),
+        'utf8',
+      );
+      await pool.query(restore);
+      await expect(pool.query(`
+        INSERT INTO memories (
+          id, scope_id, type, title, body, author_id, source, tags
+        ) VALUES (
+          '30000000-0000-4000-8000-000000000033',
+          '20000000-0000-4000-8000-000000000030',
+          'fact', 'Forward deployment', 'Strict enforcement is restored',
+          '10000000-0000-4000-8000-000000000030', 'manual', ARRAY['private-after-rollback']
+        )
+      `)).rejects.toMatchObject({ code: '23514' });
     } finally {
       await pool.end();
       await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);

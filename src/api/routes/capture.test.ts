@@ -66,6 +66,7 @@ describe('POST /api/v0/capture', () => {
     'continuum_legacy_tags',
     'continuum_legacy_metadata',
     'continuum_tag_migration',
+    'continuum_tag_rollback_compat',
     'continuum_migration_conflicts',
   ])('rejects forged migration metadata namespace %s', async (key) => {
     await seedActor();

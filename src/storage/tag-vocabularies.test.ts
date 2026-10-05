@@ -371,12 +371,15 @@ describe('tag vocabulary schema', () => {
     }
   });
 
-  it('sets a bounded lock timeout before taking an EXCLUSIVE migration lock', async () => {
+  it('bounds lock acquisition and EXCLUSIVE-lock work before taking the migration lock', async () => {
     const sql = await readFile(join(MIGRATIONS, '0010_tag_vocabularies.sql'), 'utf8');
     const timeout = sql.indexOf("SET LOCAL lock_timeout = '5s';");
+    const statementTimeout = sql.indexOf("SET LOCAL statement_timeout = '60s';");
     const lock = sql.indexOf('LOCK TABLE memories IN EXCLUSIVE MODE;');
     expect(timeout).toBeGreaterThan(-1);
     expect(sql.slice(0, timeout).replace(/--[^\n]*(?:\n|$)/g, '').trim()).toBe('');
+    expect(statementTimeout).toBeGreaterThan(timeout);
+    expect(statementTimeout).toBeLessThan(lock);
     expect(lock).toBeGreaterThan(timeout);
     expect(sql).not.toContain('LOCK TABLE memories IN SHARE ROW EXCLUSIVE MODE;');
   });

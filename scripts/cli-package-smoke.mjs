@@ -73,6 +73,7 @@ try {
     'scripts/create-scope-operator.sql',
     'scripts/retire-scope-operator.sql',
     'scripts/enable-tag-legacy-writer-compat.sql',
+    'scripts/restore-tag-strict-enforcement.sql',
     'docs/audit-retention.md',
     'docs/memory-api.md',
     'docs/tag-vocabularies.md',
