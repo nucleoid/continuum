@@ -7,6 +7,9 @@ import { createPrincipal } from '../../storage/principals.js';
 import { getScopeByRef, createScope } from '../../storage/scopes.js';
 import { addMembership } from '../../storage/memberships.js';
 import { createMemory } from '../../storage/memories.js';
+import { captureMemory } from '../../services/capture.js';
+import { removeTagVocabulary } from '../../services/tag-vocabularies.js';
+import { ServiceError } from '../../services/errors.js';
 
 describe('/api/v0/tag-vocabularies', () => {
   let pool: pg.Pool;
@@ -38,7 +41,8 @@ describe('/api/v0/tag-vocabularies', () => {
     expect(response.status).toBe(200);
     expect(response.body.scopeKind).toBe('project');
     expect(response.body.entries.map((entry: { tag: string }) => entry.tag)).toEqual([
-      'ado', 'branch', 'decision', 'deploy', 'github', 'merged', 'pr', 'session', 'terminal',
+      'ado', 'branch', 'decision', 'deploy', 'github', 'knowledge-gap', 'merged', 'pr',
+      'session', 'terminal',
     ]);
     expect(response.body.entries.every((entry: { isSystem: boolean }) => entry.isSystem)).toBe(true);
   });
@@ -120,4 +124,109 @@ describe('/api/v0/tag-vocabularies', () => {
       code: 'CONFLICT', error: 'Tag is in use by memories in this scope kind',
     });
   });
+
+  it('cannot delete a tag after a concurrent capture has validated it', async () => {
+    const { principal } = await actor('admin');
+    const project = await createScope(pool, { kind: 'project', name: 'capture-race' });
+    await addMembership(pool, principal.id, project.id, 'writer');
+    await pool.query(
+      `INSERT INTO tag_vocabularies (scope_kind, tag, description, created_by)
+       VALUES ('project', 'race-safe', 'Race regression', $1)`,
+      [principal.id],
+    );
+    const validationLocked = deferred<void>();
+    const releaseCapture = deferred<void>();
+    const capturePool = poolPausingAfterLockedTagValidation(
+      pool, validationLocked, releaseCapture,
+    );
+    const capture = captureMemory(capturePool, null, principal, {
+      scope: { kind: 'project', name: 'capture-race' },
+      type: 'fact', title: 'Concurrent capture', body: 'Must retain vocabulary.',
+      source: 'manual', tags: ['race-safe'],
+    });
+    await validationLocked.promise;
+
+    const deletePid = deferred<number>();
+    const deletion = removeTagVocabulary(
+      poolReportingClientPid(pool, deletePid),
+      principal,
+      { scopeKind: 'project', tag: 'race-safe' },
+    );
+    await waitForDatabaseLock(pool, await deletePid.promise);
+    releaseCapture.resolve();
+
+    await expect(capture).resolves.toMatchObject({ memory: { tags: ['race-safe'] } });
+    await expect(deletion).rejects.toMatchObject<ServiceError>({
+      code: 'CONFLICT', status: 409,
+    });
+    const vocabulary = await pool.query(
+      `SELECT tag FROM tag_vocabularies
+        WHERE scope_kind = 'project' AND tag = 'race-safe'`,
+    );
+    expect(vocabulary.rows).toEqual([{ tag: 'race-safe' }]);
+  });
 });
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((res) => { resolve = res; });
+  return { promise, resolve };
+}
+
+function poolPausingAfterLockedTagValidation(
+  pool: pg.Pool,
+  locked: ReturnType<typeof deferred<void>>,
+  releaseValidation: ReturnType<typeof deferred<void>>,
+): pg.Pool {
+  return {
+    query: pool.query.bind(pool),
+    connect: async () => {
+      const client = await pool.connect();
+      return new Proxy(client, {
+        get(target, property) {
+          if (property === 'query') {
+            return async (...args: unknown[]) => {
+              const result = await (target.query as (...queryArgs: unknown[]) => Promise<unknown>)(
+                ...args,
+              );
+              const sql = typeof args[0] === 'string' ? args[0] : '';
+              if (sql.includes('FROM tag_vocabularies') && sql.includes('FOR KEY SHARE')) {
+                locked.resolve();
+                await releaseValidation.promise;
+              }
+              return result;
+            };
+          }
+          const value = Reflect.get(target, property, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+    },
+  } as unknown as pg.Pool;
+}
+
+function poolReportingClientPid(
+  pool: pg.Pool,
+  connected: ReturnType<typeof deferred<number>>,
+): pg.Pool {
+  return {
+    query: pool.query.bind(pool),
+    connect: async () => {
+      const client = await pool.connect();
+      const { rows } = await client.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+      connected.resolve(rows[0].pid);
+      return client;
+    },
+  } as unknown as pg.Pool;
+}
+
+async function waitForDatabaseLock(pool: pg.Pool, pid: number): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const { rows } = await pool.query(
+      'SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1', [pid],
+    );
+    if (rows[0]?.wait_event_type === 'Lock') return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('tag deletion did not wait for capture validation');
+}

@@ -10,9 +10,14 @@ contains `code: "UNKNOWN_TAGS"`, the scope kind, sorted unknown tags, and up to
 100 allowed tags. MCP capture returns the same fields in its service error.
 
 The built-in vocabulary contains `ado`, `branch`, `decision`, `deploy`,
-`github`, `merged`, `pr`, `session`, and `terminal` for every scope kind.
+`github`, `knowledge-gap`, `merged`, `pr`, `session`, and `terminal` for every scope kind.
 Azure DevOps state and custom tags, plus deployment environment and status,
 remain available in capture metadata but are not taxonomy tags.
+
+During migration, conforming historical tags are adopted as system-owned
+entries for their existing scope kind. Nonconforming values are retained in
+`metadata.continuum_legacy_tags` and removed from active taxonomy so legacy
+data cannot block deployment or bypass future validation.
 
 ## REST management
 

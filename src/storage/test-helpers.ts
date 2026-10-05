@@ -38,7 +38,8 @@ export async function resetData(pool: pg.Pool): Promise<void> {
     SELECT scope_kind, tag, 'Built-in Continuum tag', true
       FROM unnest(ARRAY['org', 'team', 'project', 'user', 'role']) AS scope_kind
      CROSS JOIN unnest(ARRAY[
-       'pr', 'merged', 'branch', 'github', 'ado', 'deploy', 'session', 'terminal', 'decision'
+       'pr', 'merged', 'branch', 'github', 'ado', 'deploy', 'session', 'terminal', 'decision',
+       'knowledge-gap'
      ]) AS tag
   `);
 }

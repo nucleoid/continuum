@@ -1,6 +1,15 @@
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import type pg from 'pg';
 import { makeTestPool, resetData } from './test-helpers.js';
+import { runMigrations } from './migrator.js';
+
+const DATABASE_URL = process.env.CONTINUUM_TEST_DATABASE_URL
+  ?? 'postgres://continuum:***@localhost:5433/continuum';
+const MIGRATIONS = resolve(dirname(fileURLToPath(import.meta.url)), '../../migrations');
 
 describe('tag vocabulary schema', () => {
   let pool: pg.Pool;
@@ -19,12 +28,80 @@ describe('tag vocabulary schema', () => {
          FROM tag_vocabularies GROUP BY scope_kind ORDER BY scope_kind`,
     );
     expect(rows).toEqual([
-      { scope_kind: 'org', count: 9, all_system: true, no_fabricated_actor: true },
-      { scope_kind: 'project', count: 9, all_system: true, no_fabricated_actor: true },
-      { scope_kind: 'role', count: 9, all_system: true, no_fabricated_actor: true },
-      { scope_kind: 'team', count: 9, all_system: true, no_fabricated_actor: true },
-      { scope_kind: 'user', count: 9, all_system: true, no_fabricated_actor: true },
+      { scope_kind: 'org', count: 10, all_system: true, no_fabricated_actor: true },
+      { scope_kind: 'project', count: 10, all_system: true, no_fabricated_actor: true },
+      { scope_kind: 'role', count: 10, all_system: true, no_fabricated_actor: true },
+      { scope_kind: 'team', count: 10, all_system: true, no_fabricated_actor: true },
+      { scope_kind: 'user', count: 10, all_system: true, no_fabricated_actor: true },
     ]);
+    const knowledgeGap = await pool.query(
+      `SELECT scope_kind FROM tag_vocabularies
+        WHERE tag = 'knowledge-gap' ORDER BY scope_kind`,
+    );
+    expect(knowledgeGap.rows.map((row) => row.scope_kind)).toEqual([
+      'org', 'project', 'role', 'team', 'user',
+    ]);
+  });
+
+  it('adopts valid historical tags without blocking migration deployment', async () => {
+    const suffix = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const schema = `tag_migration_${suffix}`;
+    const first = await mkdtemp(join(tmpdir(), 'continuum-tags-before-'));
+    const second = await mkdtemp(join(tmpdir(), 'continuum-tags-after-'));
+    const admin = new (await import('pg')).default.Pool({ connectionString: DATABASE_URL });
+    const historical = new (await import('pg')).default.Pool({
+      connectionString: DATABASE_URL,
+      options: `-c search_path=${schema},public`,
+    });
+    try {
+      await admin.query(`CREATE SCHEMA ${schema}`);
+      for (const name of [
+        '0001_init.sql', '0002_lifecycle_principal.sql',
+        '0003_lifecycle_expiry_index.sql', '0004_review_queue_index.sql',
+      ]) {
+        await writeFile(join(first, name), await readFile(join(MIGRATIONS, name), 'utf8'));
+      }
+      await writeFile(
+        join(second, '0005_tag_vocabularies.sql'),
+        await readFile(join(MIGRATIONS, '0005_tag_vocabularies.sql'), 'utf8'),
+      );
+      await runMigrations(historical, first);
+      await historical.query(`
+        INSERT INTO principals (id, external_id, kind, display_name)
+        VALUES ('10000000-0000-4000-8000-000000000001', 'historical:user', 'user', 'Historical');
+        INSERT INTO scopes (id, kind, name)
+        VALUES ('20000000-0000-4000-8000-000000000001', 'project', 'legacy');
+        INSERT INTO memories (id, scope_id, type, title, body, author_id, source, tags)
+        VALUES (
+          '30000000-0000-4000-8000-000000000001',
+          '20000000-0000-4000-8000-000000000001',
+          'fact', 'Legacy', 'Keep its taxonomy',
+          '10000000-0000-4000-8000-000000000001', 'manual',
+          ARRAY[' Customer-Impact ', 'customer-impact', 'legacy label']
+        )
+      `);
+
+      await expect(runMigrations(historical, second)).resolves.toHaveLength(1);
+      const memory = await historical.query(
+        `SELECT tags, metadata FROM memories
+          WHERE id = '30000000-0000-4000-8000-000000000001'`,
+      );
+      expect(memory.rows[0].tags).toEqual(['customer-impact']);
+      expect(memory.rows[0].metadata).toEqual({ continuum_legacy_tags: ['legacy label'] });
+      const vocabulary = await historical.query(
+        `SELECT is_system, created_by FROM tag_vocabularies
+          WHERE scope_kind = 'project' AND tag = 'customer-impact'`,
+      );
+      expect(vocabulary.rows).toEqual([{ is_system: true, created_by: null }]);
+    } finally {
+      await historical.end();
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+      await admin.end();
+      await Promise.all([
+        rm(first, { recursive: true, force: true }),
+        rm(second, { recursive: true, force: true }),
+      ]);
+    }
   });
 
   it.each([

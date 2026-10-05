@@ -417,7 +417,10 @@ describe('MCP server', () => {
         message: 'One or more tags are not in the vocabulary for this scope kind',
         scopeKind: 'team',
         unknownTags: ['unknown-tag'],
-        allowedTags: ['ado', 'branch', 'decision', 'deploy', 'github', 'merged', 'pr', 'session', 'terminal'],
+        allowedTags: [
+          'ado', 'branch', 'decision', 'deploy', 'github', 'knowledge-gap', 'merged', 'pr',
+          'session', 'terminal',
+        ],
       },
     });
     expect(embed).not.toHaveBeenCalled();
@@ -536,6 +539,45 @@ describe('MCP server', () => {
     expect(result.isError).toBe(true);
     expect(parseJsonResult(result)).toEqual({
       error: { code: 'FORBIDDEN', message: 'principal lacks admin role on target scope' },
+    });
+  });
+
+  it('returns destination vocabulary failures in the stable MCP error envelope', async () => {
+    const { client, me, teamPayments } = await connectClient();
+    const project = await createScope(pool, { kind: 'project', name: 'tag-boundary' });
+    await addMembership(pool, me.id, project.id, 'writer');
+    await pool.query(
+      `INSERT INTO tag_vocabularies (scope_kind, tag, description, created_by)
+       VALUES ('team', 'team-only', 'Only valid for teams', $1)`,
+      [me.id],
+    );
+    const source = await createMemory(pool, {
+      scopeId: teamPayments.id, scopeKind: 'team', type: 'decision',
+      title: 'Team taxonomy', body: 'Keep destination tags controlled.',
+      authorId: me.id, source: 'manual', tags: ['team-only'],
+    });
+
+    const result = (await client.callTool({
+      name: 'continuum.promote',
+      arguments: {
+        memory_id: source.id,
+        target_scope_kind: 'project',
+        target_scope_name: 'tag-boundary',
+      },
+    })) as CallToolResult & { isError?: boolean };
+
+    expect(result.isError).toBe(true);
+    expect(parseJsonResult(result)).toEqual({
+      error: {
+        code: 'UNKNOWN_TAGS',
+        message: 'One or more tags are not in the vocabulary for this scope kind',
+        scopeKind: 'project',
+        unknownTags: ['team-only'],
+        allowedTags: [
+          'ado', 'branch', 'decision', 'deploy', 'github', 'knowledge-gap', 'merged', 'pr',
+          'session', 'terminal',
+        ],
+      },
     });
   });
 

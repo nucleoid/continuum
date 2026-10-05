@@ -8,6 +8,7 @@ import {
   deleteTagVocabulary as deleteTagVocabularyRow,
   listTagVocabulary as listTagVocabularyRows,
   lockAllowedTags,
+  lockTagVocabulary,
   tagIsInUse,
   updateTagVocabulary as updateTagVocabularyRow,
 } from '../storage/tag-vocabularies.js';
@@ -197,7 +198,8 @@ export async function removeTagVocabulary(
     const tag = normalizeTag(input.tag);
     await inMutationTransaction(pool, async (client) => {
       const orgId = await requireLockedOrgAdmin(client, principal.id);
-      await lockAllowedTags(client, input.scopeKind);
+      const locked = await lockTagVocabulary(client, input.scopeKind, tag);
+      if (!locked) throw new ServiceError('TAG_NOT_FOUND', 'Tag vocabulary entry not found');
       if (await tagIsInUse(client, input.scopeKind, tag)) {
         throw new ServiceError('CONFLICT', 'Tag is in use by memories in this scope kind');
       }

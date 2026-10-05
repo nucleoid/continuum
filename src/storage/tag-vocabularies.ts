@@ -44,6 +44,21 @@ export async function lockAllowedTags(
   return rows.map((row) => row.tag as string);
 }
 
+export async function lockTagVocabulary(
+  queryable: Queryable,
+  scopeKind: ScopeKind,
+  tag: string,
+): Promise<TagVocabulary | null> {
+  const { rows } = await queryable.query(
+    `SELECT ${COLUMNS}
+       FROM tag_vocabularies
+      WHERE scope_kind = $1 AND tag = $2
+      FOR UPDATE`,
+    [scopeKind, tag],
+  );
+  return rows[0] ? rowToVocabulary(rows[0]) : null;
+}
+
 export async function createTagVocabulary(
   queryable: Queryable,
   input: { scopeKind: ScopeKind; tag: string; description: string; createdBy: string },

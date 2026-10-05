@@ -1212,6 +1212,39 @@ describe('shared services', () => {
     expect(rows[0].count).toBe(1);
   });
 
+  it('rejects promotion when source tags are not allowed by the destination scope kind', async () => {
+    const { principal, team } = await seedWriter();
+    const project = await createScope(pool, { kind: 'project', name: 'tag-boundary' });
+    await addMembership(pool, principal.id, project.id, 'writer');
+    await pool.query(
+      `INSERT INTO tag_vocabularies (scope_kind, tag, description, created_by)
+       VALUES ('team', 'team-only', 'Only valid for teams', $1)`,
+      [principal.id],
+    );
+    const source = await createMemory(pool, {
+      scopeId: team.id, scopeKind: team.kind, type: 'decision', title: 'Scoped taxonomy',
+      body: 'Do not leak tags across vocabularies.', authorId: principal.id,
+      source: 'manual', tags: ['team-only'],
+    });
+
+    await expect(promoteForPrincipal(
+      pool, principal, source.id, { kind: 'project', name: 'tag-boundary' },
+    )).rejects.toMatchObject<ServiceError>({
+      code: 'UNKNOWN_TAGS',
+      status: 422,
+      details: {
+        scopeKind: 'project', unknownTags: ['team-only'],
+      },
+    });
+    const persisted = await pool.query(
+      `SELECT state, promoted_to_id,
+              (SELECT count(*)::int FROM memories WHERE metadata->>'promoted_from' = $2) AS copies
+         FROM memories WHERE id = $1`,
+      [source.id, source.id],
+    );
+    expect(persisted.rows[0]).toEqual({ state: 'live', promoted_to_id: null, copies: 0 });
+  });
+
   it('cannot restore live state when verify(true) races promotion', async () => {
     const { principal, team } = await seedWriter();
     const project = await createScope(pool, { kind: 'project', name: 'verify-race' });

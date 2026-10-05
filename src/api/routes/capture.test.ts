@@ -293,7 +293,10 @@ describe('POST /api/v0/capture', () => {
       error: 'One or more tags are not in the vocabulary for this scope kind',
       scopeKind: 'team',
       unknownTags: ['unknown-one', 'unknown-two'],
-      allowedTags: ['ado', 'branch', 'decision', 'deploy', 'github', 'merged', 'pr', 'session', 'terminal'],
+      allowedTags: [
+        'ado', 'branch', 'decision', 'deploy', 'github', 'knowledge-gap', 'merged', 'pr',
+        'session', 'terminal',
+      ],
       requestId: expect.any(String),
     });
     expect(embed).not.toHaveBeenCalled();

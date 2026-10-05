@@ -9,6 +9,7 @@ import {
 } from '../scopes/access.js';
 import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
 import { computeExpiry } from './expiry.js';
+import { lockAllowedTags } from './tag-vocabularies.js';
 
 export interface PromoteResult {
   source: Memory;
@@ -16,7 +17,11 @@ export interface PromoteResult {
 }
 
 export class PromoteError extends Error {
-  constructor(message: string, public readonly status: number) {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly details?: Record<string, unknown>,
+  ) {
     super(message);
     this.name = 'PromoteError';
   }
@@ -86,6 +91,21 @@ async function promoteOperation(
   ))) {
     const roleName = destinationScope.kind === 'org' ? 'admin' : 'writer';
     throw new PromoteError(`principal lacks ${roleName} role on target scope`, 403);
+  }
+
+  const allowedTags = await lockAllowedTags(client, destinationScope.kind);
+  const allowedSet = new Set(allowedTags);
+  const unknownTags = [...new Set(source.tags.filter((tag) => !allowedSet.has(tag)))].sort();
+  if (unknownTags.length > 0) {
+    throw new PromoteError(
+      'One or more tags are not in the vocabulary for this scope kind',
+      422,
+      {
+        scopeKind: destinationScope.kind,
+        unknownTags,
+        allowedTags: allowedTags.slice(0, 100),
+      },
+    );
   }
 
   const destinationMetadata = { ...source.metadata };

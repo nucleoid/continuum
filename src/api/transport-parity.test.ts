@@ -116,7 +116,7 @@ describe('REST/MCP semantic parity matrix', () => {
       {
         title: 'MCP',
         source_ref: 'mcp-ref',
-        tags: ['shared'],
+        tags: ['session'],
         metadata: { transport: 'mcp-value', related: [] },
         audit_metadata: {
           source: 'manual', type: 'fact', embedded: false, transport: 'mcp',
@@ -125,7 +125,7 @@ describe('REST/MCP semantic parity matrix', () => {
       {
         title: 'REST',
         source_ref: 'rest-ref',
-        tags: ['shared'],
+        tags: ['session'],
         metadata: { transport: 'rest-value', related: [] },
         audit_metadata: { source: 'manual', type: 'fact', embedded: false },
       },

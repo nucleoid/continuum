@@ -105,6 +105,9 @@ function mapLifecycleError(error: unknown): ServiceError {
     }
     if (error.status === 400) return new ServiceError('INVALID_INPUT', error.message);
     if (error.status === 409) return new ServiceError('CONFLICT', error.message);
+    if (error.status === 422) {
+      return new ServiceError('UNKNOWN_TAGS', error.message, { details: error.details });
+    }
   }
   return asServiceError(error);
 }
