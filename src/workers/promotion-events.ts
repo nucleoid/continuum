@@ -258,12 +258,9 @@ export class PromotionEventWorker implements RuntimeWorker {
       const outcome = await Promise.race([callback, timeout, shutdown]);
       if (timer) clearTimeout(timer);
 
-      if (outcome === 'timeout' || outcome === 'shutdown') {
+      if (outcome === 'timeout') {
         controller.abort();
-        await callback;
       }
-
-      if (this.stopped) return;
 
       if (outcome === 'success') {
         const acknowledged = await this.store.complete(
@@ -281,6 +278,7 @@ export class PromotionEventWorker implements RuntimeWorker {
         });
         return;
       }
+      if (outcome === 'shutdown' || this.stopped) return;
       const retryDelayMs = this.retryDelay(delivery.attemptCount);
       const state = await this.store.fail(
         this.pool,

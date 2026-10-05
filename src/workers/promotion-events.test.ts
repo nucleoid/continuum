@@ -305,7 +305,7 @@ describe('PromotionEventWorker', () => {
     }
   });
 
-  it('renews a shutdown lease so another worker cannot duplicate an active callback', async () => {
+  it('renews during shutdown grace and prevents redelivery after acknowledgement', async () => {
     vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
     try {
       let owner: string | undefined;
@@ -348,7 +348,7 @@ describe('PromotionEventWorker', () => {
         pool,
         firstRegistry,
         workerOptions({
-          owner: 'first', leaseMs: 90, callbackTimeoutMs: 60, shutdownWaitMs: 10,
+          owner: 'first', leaseMs: 90, callbackTimeoutMs: 60, shutdownWaitMs: 70,
         }),
         store,
       );
@@ -356,7 +356,7 @@ describe('PromotionEventWorker', () => {
       await firstEntered.promise;
       const stopping = first.stop('SIGTERM');
 
-      await vi.advanceTimersByTimeAsync(100);
+      await vi.advanceTimersByTimeAsync(40);
       expect(store.renew).toHaveBeenCalled();
       const secondRegistry = new PromotionWebhookRegistry();
       const secondCallback = vi.fn();
@@ -373,8 +373,8 @@ describe('PromotionEventWorker', () => {
       firstRelease.resolve();
       await firstDrain;
       await stopping;
-      await expect(second.drainOnce()).resolves.toBe(1);
-      expect(secondCallback).toHaveBeenCalledOnce();
+      await expect(second.drainOnce()).resolves.toBe(0);
+      expect(secondCallback).not.toHaveBeenCalled();
       await second.stop('test_complete');
     } finally {
       vi.useRealTimers();
