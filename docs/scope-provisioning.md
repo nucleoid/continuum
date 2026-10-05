@@ -15,18 +15,27 @@ callers that previously created scopes without permission.
    ```
 
    For each admin, determine whether it still writes to the org scope, creates
-   scopes with `ensure_scope`, promotes memories into org scope, or reads audit
-   entries for other principals. Use the real audit evidence: scope creation is
+   scopes with `ensure_scope`, promotes memories into org scope, reads audit
+   entries for other principals, or generates knowledge-gap reports. Use the
+   real audit evidence: scope creation is
    recorded as `action='write'` with
    `metadata->>'operation' = 'create_scope'`; promotion is recorded as
    `action='promote'` with `scope_id` equal to the singleton org scope; audit
    access is recorded as `action='read'` with
    `metadata->>'view' = 'audit'`, `metadata->>'orgAdmin' = 'true'`, and a
    `metadata->'filter'->>'principalId'` other than the caller (including null,
-   which means all principals). Inspect the callers as well as recent rows.
-   Keep `admin` when scope creation, promotion into org, or cross-principal audit
-   access is required; demote to `writer` only when org writes are the sole
-   requirement; remove the membership only when no explicit org role is needed.
+   which means all principals). Knowledge-gap reports are recorded as
+   `action='read'` with `metadata->>'view' = 'insights-gaps'`. Inspect the
+   callers as well as recent rows. In particular, REST promotion and the MCP
+   `continuum.promote` tool are audited, but library callers can invoke the
+   exported unaudited `promoteMemory` function, so absence of a promotion row
+   alone is not proof that a principal does not promote memories.
+
+   Keep `admin` when scope creation, promotion into org, cross-principal audit
+   access, or knowledge-gap reporting is required; demote to `writer` only when
+   org writes are the sole requirement; demote to `reader` when org reads are
+   the sole requirement; remove the membership only when no explicit org role
+   is needed.
    Both scripts key on the non-secret principal UUID printed by the inventory,
    refuse to change anything other than exactly one current org admin, and
    refuse to remove or demote the last org admin:
@@ -35,6 +44,7 @@ callers that previously created scopes without permission.
    psql "$CONTINUUM_DATABASE_URL" \
      -v principal_id='<principal UUID>' -v replacement_role=writer \
      -f scripts/demote-org-admin.sql
+   # Use replacement_role=reader instead when only org reads are required.
    psql "$CONTINUUM_DATABASE_URL" \
      -v principal_id='<principal UUID>' \
      -f scripts/remove-org-admin.sql

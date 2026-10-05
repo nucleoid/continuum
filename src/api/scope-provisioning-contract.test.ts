@@ -14,6 +14,10 @@ describe('scope provisioning operator contract', () => {
     expect(runbook).toContain("action='promote'");
     expect(runbook).toContain("metadata->>'operation' = 'create_scope'");
     expect(runbook).toContain("metadata->>'view' = 'audit'");
+    expect(runbook).toContain("metadata->>'view' = 'insights-gaps'");
+    expect(runbook).toContain('continuum.promote');
+    expect(runbook).toContain('promoteMemory');
+    expect(runbook).toContain('demote to `reader`');
   });
 
   it('locks only membership rows while protecting the last org admin', () => {
