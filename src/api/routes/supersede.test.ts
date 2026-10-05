@@ -43,7 +43,7 @@ describe('decision supersession REST API', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({
         supersededId: decisionId, title: 'Use gRPC', body: 'Replacement decision body',
-        tags: ['architecture'], source: 'manual', metadata: { reason: 'latency' },
+        tags: [' Decision '], source: 'manual', metadata: { reason: 'latency' },
       });
 
     expect(response.status).toBe(201);
@@ -65,6 +65,32 @@ describe('decision supersession REST API', () => {
       { action: 'write', memory_id: response.body.successorId },
       { action: 'archive', memory_id: decisionId },
     ]);
+    const successor = await pool.query('SELECT tags FROM memories WHERE id = $1', [
+      response.body.successorId,
+    ]);
+    expect(successor.rows).toEqual([{ tags: ['decision'] }]);
+  });
+
+  it('rejects unknown successor tags with the controlled vocabulary envelope', async () => {
+    const response = await request(createApp(pool))
+      .post('/api/v0/supersede')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        supersededId: decisionId,
+        title: 'Unknown taxonomy',
+        body: 'Must not create or archive anything',
+        tags: ['architecture'],
+      });
+
+    expect(response.status).toBe(422);
+    expect(response.body).toMatchObject({
+      code: 'UNKNOWN_TAGS',
+      scopeKind: 'project',
+      unknownTags: ['architecture'],
+    });
+    const memories = await pool.query('SELECT id, state FROM memories ORDER BY id');
+    expect(memories.rows).toEqual([{ id: decisionId, state: 'live' }]);
+    expect((await pool.query('SELECT 1 FROM audit_log')).rowCount).toBe(0);
   });
 
   it('returns the same successor on a repeated request without branching', async () => {
