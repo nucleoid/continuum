@@ -16,6 +16,19 @@ interface HostedOptions {
 
 interface EmbeddingItem { index?: number; embedding?: unknown }
 
+function validateHostedEndpoint(endpoint: string): string {
+  let parsed: URL;
+  try { parsed = new URL(endpoint); } catch {
+    throw new Error('Hosted embedding endpoint must be a valid URL');
+  }
+  const loopback = ['localhost', '127.0.0.1', '::1'].includes(parsed.hostname.toLowerCase());
+  if (parsed.username || parsed.password || (parsed.protocol !== 'https:'
+    && !(parsed.protocol === 'http:' && loopback))) {
+    throw new Error('Hosted embedding endpoint must use HTTPS (HTTP is allowed only for loopback)');
+  }
+  return endpoint;
+}
+
 function validateVectors(items: EmbeddingItem[], count: number, dim: number): number[][] {
   if (!Array.isArray(items) || items.length !== count) throw new Error('Provider returned invalid embedding count');
   const indexed = items.map((item, position) => ({ ...item, index: item.index ?? position }));
@@ -46,7 +59,7 @@ abstract class HostedEmbeddingProvider implements EmbeddingProvider {
     this.apiKey = options.apiKey;
     this.model = options.model;
     this.dim = options.dim;
-    this.endpoint = options.endpoint ?? defaultEndpoint;
+    this.endpoint = validateHostedEndpoint(options.endpoint ?? defaultEndpoint);
     this.timeoutMs = validateEmbeddingTimeout(options.timeoutMs ?? DEFAULT_EMBEDDING_TIMEOUT_MS);
     this.fetchImpl = options.fetchImpl ?? fetch;
   }

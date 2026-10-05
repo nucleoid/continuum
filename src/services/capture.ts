@@ -172,6 +172,13 @@ export async function captureMemory(
           source: input.source,
           type: input.type,
           embedded,
+          ...(embeddingProvider ? {
+            embedding: {
+              provider: embeddingProvider.id,
+              dim: embeddingProvider.dim,
+              status: embedded ? 'succeeded' : 'failed',
+            },
+          } : {}),
           ...(embedErrorCode ? { embedding_error_code: embedErrorCode } : {}),
           ...(relationErrorCode ? { relation_error_code: relationErrorCode } : {}),
           ...(route.policy === 'local-only-unavailable'

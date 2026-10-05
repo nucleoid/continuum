@@ -1,6 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { EmbeddingProvider } from './provider.js';
-import { EmbeddingRegistry, ScopeEmbeddingRouter } from './router.js';
+import {
+  EmbeddingRegistry,
+  ScopeEmbeddingRouter,
+  warnOnMissingEmbeddingRoutingScopes,
+} from './router.js';
 
 function provider(id: string, local: boolean): EmbeddingProvider & { local: boolean } {
   return { id, dim: 768, local, async embed() { return [Array(768).fill(0)]; } };
@@ -54,5 +58,25 @@ describe('ScopeEmbeddingRouter', () => {
       new EmbeddingRegistry([['hosted', provider('openai:model', false)]]),
       routing as never,
     )).toThrow(message);
+  });
+
+  it('warns once for an exact routing rule whose scope does not exist', async () => {
+    const router = new ScopeEmbeddingRouter(
+      new EmbeddingRegistry([['hosted', provider('openai:model', false)]]),
+      { default: 'hosted', rules: [
+        { match: { kind: 'team', name: 'missing-team' }, provider: 'hosted' },
+        { match: { kind: 'team', name: 'present-team' }, provider: 'hosted' },
+      ] },
+    );
+    const warn = vi.fn();
+    const pool = {
+      query: vi.fn(async () => ({ rows: [{ kind: 'team', name: 'present-team' }] })),
+    };
+
+    await warnOnMissingEmbeddingRoutingScopes(pool as never, router, warn);
+
+    expect(pool.query).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('team:missing-team'));
   });
 });

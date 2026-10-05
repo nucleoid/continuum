@@ -11,7 +11,7 @@ import {
 import { requireOrgAdmin } from './access.js';
 import { asServiceError, ServiceError } from './errors.js';
 import { MAX_GAP_CLUSTER_CANDIDATES } from '../insights/gaps.js';
-import { getScope } from '../storage/scopes.js';
+import { getScopes } from '../storage/scopes.js';
 
 export interface GapOptions {
   sinceDays: number;
@@ -140,6 +140,10 @@ async function routeCandidatesForEmbedding(
   const router = asEmbeddingRouter(routing);
   const groups = new Map<string, CandidateEmbeddingGroup>();
   const skipped: GapCandidate[] = [];
+  const scopesById = await getScopes(
+    pool,
+    candidates.flatMap((candidate) => candidate.scopeIds),
+  );
   for (const candidate of candidates) {
     // A query can cross a provider boundary only when every originally searched
     // scope is known and resolves to the same provider. Legacy, empty, missing,
@@ -148,7 +152,7 @@ async function routeCandidatesForEmbedding(
       skipped.push(candidate);
       continue;
     }
-    const scopes = await Promise.all(candidate.scopeIds.map((scopeId) => getScope(pool, scopeId)));
+    const scopes = candidate.scopeIds.map((scopeId) => scopesById.get(scopeId) ?? null);
     if (scopes.some((scope) => scope === null)) {
       skipped.push(candidate);
       continue;

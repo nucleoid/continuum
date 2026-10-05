@@ -78,7 +78,7 @@ export async function recallForPrincipal(
         scope_ids: scopeIds,
         hits: results.length,
         embedded: succeededEmbeddingGroups > 0,
-        embedding_status: failedEmbeddingGroups > 0
+        embedding_status: failedEmbeddingGroups > 0 || localOnlyUnavailable > 0
           ? 'degraded'
           : succeededEmbeddingGroups > 0 ? 'succeeded' : 'not-requested',
         embedding_groups: embeddingAuditGroups,

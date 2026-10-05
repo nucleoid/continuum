@@ -1,5 +1,6 @@
 import type { EmbeddingProvider } from './provider.js';
 import type { ScopeKind, ScopeRef } from '../types.js';
+import type { Queryable } from '../storage/queryable.js';
 
 export type ProviderSelection = string | 'local-only' | 'none';
 
@@ -66,6 +67,7 @@ export class EmbeddingRegistry {
 
 export class ScopeEmbeddingRouter implements EmbeddingRouter {
   private readonly exact = new Map<string, ProviderSelection>();
+  private readonly exactRefs: ScopeRef[] = [];
   private readonly kinds = new Map<ScopeKind, ProviderSelection>();
 
   constructor(
@@ -82,6 +84,7 @@ export class ScopeEmbeddingRouter implements EmbeddingRouter {
         const key = `${rule.match.kind}\u0000${rule.match.name}`;
         if (this.exact.has(key)) throw new Error('Duplicate exact embedding routing rule');
         this.exact.set(key, rule.provider);
+        this.exactRefs.push({ kind: rule.match.kind, name: rule.match.name });
       } else {
         if (this.kinds.has(rule.match.kind)) throw new Error('Duplicate kind embedding routing rule');
         this.kinds.set(rule.match.kind, rule.provider);
@@ -105,12 +108,36 @@ export class ScopeEmbeddingRouter implements EmbeddingRouter {
 
   providers(): EmbeddingProvider[] { return this.registry.values(); }
 
+  configuredExactScopes(): ScopeRef[] { return [...this.exactRefs]; }
+
   private validateSelection(selection: ProviderSelection): void {
     if (selection !== 'none' && selection !== 'local-only' && !this.registry.get(selection)) {
       throw new Error(`Unknown provider alias in embedding routing: ${selection}`);
     }
   }
 
+}
+
+export async function warnOnMissingEmbeddingRoutingScopes(
+  pool: Queryable,
+  routing: EmbeddingRouting,
+  warn: (message: string) => void = (message) => process.emitWarning(message),
+): Promise<void> {
+  const router = asEmbeddingRouter(routing);
+  if (!(router instanceof ScopeEmbeddingRouter)) return;
+  const configured = router.configuredExactScopes();
+  if (configured.length === 0) return;
+  try {
+    const { rows } = await pool.query('SELECT kind, name FROM scopes');
+    const existing = new Set(rows.map((row) => `${String(row.kind)}\u0000${String(row.name)}`));
+    for (const ref of configured) {
+      if (!existing.has(`${ref.kind}\u0000${ref.name}`)) {
+        warn(`Embedding routing rule references nonexistent scope ${ref.kind}:${ref.name}`);
+      }
+    }
+  } catch {
+    warn('Embedding routing scope validation was unavailable; exact rules will remain fail-closed until their scopes exist');
+  }
 }
 
 export function staticEmbeddingRouter(provider: EmbeddingProvider | null): EmbeddingRouter {

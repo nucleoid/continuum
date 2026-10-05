@@ -109,8 +109,11 @@ scope IDs recorded by each zero-hit recall. A candidate is sent only when every
 scope still exists and all scopes resolve to the same provider. Mixed-provider,
 empty, malformed, unknown, or legacy scope fidelity remains exact-text-only;
 in particular, a query involving any local-only scope cannot fall through to a
-hosted provider. Provider outages degrade to exact/FTS behavior with explicit,
-content-free status and counts in the report audit.
+hosted provider. This restriction applies to offline gap clustering of one
+historical recall candidate. Live recall still routes each readable scope to
+its provider group and safely fuses the separate results. Provider outages
+degrade to exact/FTS behavior with explicit, content-free status and counts in
+the report audit.
 
 ## License
 

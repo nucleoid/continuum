@@ -3,7 +3,11 @@ import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { getPrincipalByExternalId } from '../storage/principals.js';
-import { asEmbeddingRouter, type EmbeddingRouting } from '../embeddings/router.js';
+import {
+  asEmbeddingRouter,
+  warnOnMissingEmbeddingRoutingScopes,
+  type EmbeddingRouting,
+} from '../embeddings/router.js';
 import type { Principal, ScopeKind } from '../types.js';
 import { getPool } from '../storage/pool.js';
 import { makeEmbeddingRouterFromEnv } from '../embeddings/factory.js';
@@ -484,6 +488,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   const embeddingProvider = makeEmbeddingRouterFromEnv();
+  await warnOnMissingEmbeddingRoutingScopes(pool, embeddingProvider);
   const server = buildMcpServer({
     pool,
     embeddingProvider,

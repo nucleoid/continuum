@@ -54,4 +54,13 @@ describe('hosted embedding providers', () => {
       .rejects.toThrow('caller cancelled');
     expect(fetchImpl).not.toHaveBeenCalled();
   });
+
+  it('rejects insecure direct hosted endpoints except loopback development endpoints', () => {
+    expect(() => new OpenAIEmbeddingProvider({
+      apiKey: 'key', model: 'm', dim: 2, endpoint: 'http://remote.example.test/v1',
+    })).toThrow(/https/i);
+    expect(() => new OpenAIEmbeddingProvider({
+      apiKey: 'key', model: 'm', dim: 2, endpoint: 'http://127.0.0.1:8080/v1',
+    })).not.toThrow();
+  });
 });

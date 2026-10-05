@@ -486,6 +486,7 @@ describe('shared services', () => {
       embedded: true,
       audit_metadata: {
         source: 'manual', type: 'fact', embedded: true,
+        embedding: { provider: 'test:metadata-failure', dim: 768, status: 'succeeded' },
         relation_error_code: 'RELATION_DETECTION_FAILED',
       },
     }]);

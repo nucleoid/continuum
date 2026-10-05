@@ -10,6 +10,7 @@ import { getKnowledgeGaps } from './gaps.js';
 import { createMemory } from '../storage/memories.js';
 import { createScope } from '../storage/scopes.js';
 import { EmbeddingRegistry, ScopeEmbeddingRouter } from '../embeddings/router.js';
+import { OllamaEmbeddingProvider } from '../embeddings/ollama.js';
 
 describe('getKnowledgeGaps', () => {
   let pool: pg.Pool;
@@ -228,6 +229,37 @@ describe('getKnowledgeGaps', () => {
     expect(observedSignal?.aborted).toBe(true);
     expect(report.semanticClustering).toBe(false);
     expect(report.gaps).toHaveLength(1);
+  });
+
+  it('degrades gaps promptly when Ollama stalls after response headers', async () => {
+    const me = await admin();
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await recordRead(pool, {
+      principalId: me.id, query: 'stalled body gap',
+      metadata: { hits: 0, scope_ids: [org.id] }, memories: [],
+    });
+    let observedSignal: AbortSignal | undefined;
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      observedSignal = init?.signal as AbortSignal;
+      return {
+        ok: true,
+        json: async () => new Promise((_resolve, reject) => {
+          observedSignal?.addEventListener('abort', () => reject(observedSignal?.reason), { once: true });
+        }),
+      } as Response;
+    });
+    const provider = new OllamaEmbeddingProvider({
+      baseUrl: 'http://localhost:11434', model: 'm', dim: 2, timeoutMs: 20, fetchImpl,
+    });
+
+    const report = await getKnowledgeGaps(pool, provider, me, {
+      sinceDays: 30, limit: 10, minFrequency: 1, threshold: 0.9,
+      candidateLimit: 20, scanLimit: 100, maxQueryChars: 2_000,
+      embeddingTimeoutMs: 1_000, now: new Date('2026-10-04T12:00:00Z'),
+    });
+
+    expect(observedSignal?.aborted).toBe(true);
+    expect(report.embedding.status).toBe('degraded');
   });
 
   it('rejects an unsafe direct candidate cap before querying or clustering', async () => {

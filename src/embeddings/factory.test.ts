@@ -115,4 +115,31 @@ describe('makeEmbeddingProviderFromEnv', () => {
     expect(() => makeEmbeddingRouterFromEnv({ CONTINUUM_EMBEDDING_CONFIG: config(300_001) }))
       .toThrow(/timeout_ms.*between 1 and 300000/i);
   });
+
+  it('rejects insecure hosted endpoints except explicit loopback development endpoints', () => {
+    const config = (endpoint: string) => JSON.stringify({
+      providers: [{ alias: 'hosted', kind: 'openai', model: 'text-embedding-3-small',
+        dim: 768, endpoint, local: false }],
+      routing: { default: 'hosted', rules: [] },
+    });
+    expect(() => makeEmbeddingRouterFromEnv({
+      OPENAI_API_KEY: 'env-key', CONTINUUM_EMBEDDING_CONFIG: config('http://embeddings.example.test/v1'),
+    })).toThrow(/hosted.*https/i);
+    expect(() => makeEmbeddingRouterFromEnv({
+      OPENAI_API_KEY: 'env-key', CONTINUUM_EMBEDDING_CONFIG: config('http://localhost:8080/v1'),
+    })).not.toThrow();
+  });
+
+  it.each([
+    { kind: 'org', name: 'named-org' },
+    { kind: 'team', name: '' },
+  ])('rejects malformed exact routing selector $kind:$name', (match) => {
+    expect(() => makeEmbeddingRouterFromEnv({
+      CONTINUUM_EMBEDDING_CONFIG: JSON.stringify({
+        providers: [{ alias: 'local', kind: 'ollama', model: 'm', dim: 768,
+          endpoint: 'http://localhost:11434', local: true }],
+        routing: { default: 'local', rules: [{ match, provider: 'local' }] },
+      }),
+    })).toThrow(/routing.*name|org.*name|requires a name/i);
+  });
 });

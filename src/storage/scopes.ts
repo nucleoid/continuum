@@ -42,6 +42,21 @@ export async function getScope(
   return rows[0] ? rowToScope(rows[0]) : null;
 }
 
+export async function getScopes(
+  pool: Queryable,
+  ids: readonly string[],
+): Promise<Map<string, Scope>> {
+  if (ids.length === 0) return new Map();
+  const { rows } = await pool.query(
+    `SELECT id, kind, name, created_at FROM scopes WHERE id = ANY($1::uuid[])`,
+    [[...new Set(ids)]],
+  );
+  return new Map(rows.map((row) => {
+    const scope = rowToScope(row);
+    return [scope.id, scope];
+  }));
+}
+
 export async function getScopeByRef(
   pool: Queryable,
   ref: ScopeRef,

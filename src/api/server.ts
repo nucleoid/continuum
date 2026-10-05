@@ -10,6 +10,7 @@ import { auditRouter } from './routes/audit.js';
 import { insightsRouter } from './routes/insights.js';
 import { gapConfigFromEnv, type GapConfig } from '../insights/gaps.js';
 import { makeEmbeddingRouterFromEnv } from '../embeddings/factory.js';
+import { warnOnMissingEmbeddingRoutingScopes } from '../embeddings/router.js';
 import { asEmbeddingRouter, type EmbeddingRouting } from '../embeddings/router.js';
 import { isDirectEntrypoint } from './entrypoint.js';
 import { assertEmbeddingProviderDimension } from '../storage/schema.js';
@@ -314,8 +315,10 @@ async function main(): Promise<void> {
   const shutdownTimeoutMs = positiveIntegerEnv('CONTINUUM_SHUTDOWN_TIMEOUT_MS', 10_000);
   const pool = getPool();
   const readiness = createReadinessState();
+  const embeddingProvider = makeEmbeddingRouterFromEnv();
+  await warnOnMissingEmbeddingRoutingScopes(pool, embeddingProvider);
   const app = createApp(pool, {
-    embeddingProvider: makeEmbeddingRouterFromEnv(),
+    embeddingProvider,
     readiness,
     readinessTimeoutMs,
     reviewHorizonDays: configuredReviewHorizonDays(),

@@ -109,8 +109,13 @@ function providerDefinition(value: unknown): ProviderDefinition {
       const endpoint = new URL(raw.endpoint);
       if (!['http:', 'https:'].includes(endpoint.protocol)
         || endpoint.username || endpoint.password) throw new Error('unsafe endpoint');
+      if (raw.kind !== 'ollama' && endpoint.protocol !== 'https:' && !isLoopback(raw.endpoint)) {
+        throw new Error('insecure hosted endpoint');
+      }
     } catch {
-      throw new Error('Embedding provider endpoint must be an HTTP URL without credentials');
+      throw new Error(raw.kind === 'ollama'
+        ? 'Embedding provider endpoint must be an HTTP URL without credentials'
+        : 'Hosted embedding provider endpoint must use HTTPS (HTTP is allowed only for loopback)');
     }
   }
   if (raw.timeout_ms !== undefined
@@ -164,6 +169,13 @@ function routingConfig(value: unknown): EmbeddingRoutingConfig {
         || (match.name !== undefined && typeof match.name !== 'string')
         || typeof rule.provider !== 'string') {
         throw new Error('Embedding routing rule is invalid');
+      }
+      if (match.name !== undefined
+        && ((match.kind === 'org' && match.name !== '')
+          || (match.kind !== 'org' && match.name === ''))) {
+        throw new Error(match.kind === 'org'
+          ? 'Embedding routing org scope name must be empty'
+          : `Embedding routing ${String(match.kind)} scope requires a name`);
       }
       return {
         match: { kind: match.kind as ScopeKind, ...(match.name === undefined ? {} : { name: match.name }) },

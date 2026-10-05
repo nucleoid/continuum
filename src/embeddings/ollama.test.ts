@@ -1,3 +1,5 @@
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { describe, expect, it, vi } from 'vitest';
 import { OllamaEmbeddingProvider } from './ollama.js';
 
@@ -105,5 +107,64 @@ describe('OllamaEmbeddingProvider', () => {
 
     await expect(provider.embed(['private local text'])).rejects.toThrow(/timed out/i);
     expect(fetchImpl.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('aborts a stalled partial response body by its deadline and closes the socket', async () => {
+    let requestClosed!: () => void;
+    const closed = new Promise<void>((resolve) => { requestClosed = resolve; });
+    const server = createServer((request, response) => {
+      request.once('close', requestClosed);
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.write('{"embedding":[0');
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+    const provider = new OllamaEmbeddingProvider({
+      baseUrl: `http://127.0.0.1:${port}`, model: 'm', dim: 2, timeoutMs: 30,
+    });
+
+    try {
+      await expect(provider.embed(['private text'])).rejects.toThrow(/timed out/i);
+      await expect(Promise.race([
+        closed,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('socket leaked')), 500)),
+      ])).resolves.toBeUndefined();
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('aborts a stalled response body when the caller cancels and closes the socket', async () => {
+    let headersSent!: () => void;
+    let requestClosed!: () => void;
+    const sent = new Promise<void>((resolve) => { headersSent = resolve; });
+    const closed = new Promise<void>((resolve) => { requestClosed = resolve; });
+    const server = createServer((request, response) => {
+      request.once('close', requestClosed);
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.write('{"embedding":[0');
+      headersSent();
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+    const provider = new OllamaEmbeddingProvider({
+      baseUrl: `http://127.0.0.1:${port}`, model: 'm', dim: 2, timeoutMs: 2_000,
+    });
+    const controller = new AbortController();
+    const embedding = provider.embed(['private text'], { signal: controller.signal });
+
+    try {
+      await sent;
+      controller.abort(new Error('caller cancelled'));
+      await expect(embedding).rejects.toThrow('caller cancelled');
+      await expect(Promise.race([
+        closed,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('socket leaked')), 500)),
+      ])).resolves.toBeUndefined();
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
