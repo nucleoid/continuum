@@ -15,6 +15,8 @@ Configuration precedence is:
 The default config file is `~/.continuum/config.json`; override it with
 `--config`. Profiles may store an API URL and the **name** of an environment
 variable containing the token. Token values are rejected in the file.
+A selected profile that names `tokenEnv` fails closed when that variable is
+unset; it never falls back to `CONTINUUM_TOKEN` for a different API host.
 
 ```json
 {
@@ -48,9 +50,11 @@ continuum promote <memory-uuid> --to team:payments
 continuum agents-md --project booking-engine --team payments > AGENTS.md
 ```
 
-`capture` requires exactly one body source: `--body`, `--body-file`, or
-non-TTY standard input. Files, stdin, requests, responses, and timeouts are
-bounded. `audit --since 24h` is converted to a UTC RFC 3339 timestamp; explicit
+`capture` accepts `--body` or `--body-file`; when neither is supplied it reads
+non-TTY standard input. This lets scripts use explicit body options even when
+their stdin is redirected. Files, stdin, requests, responses, and timeouts are
+bounded. API errors include a safe request ID when the server provides one.
+`audit --since 24h` is converted to a UTC RFC 3339 timestamp; explicit
 timestamps must include `Z` or an offset.
 
 All commands accept `--json`. JSON mode writes exactly one JSON document to

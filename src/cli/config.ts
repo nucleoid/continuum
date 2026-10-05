@@ -34,7 +34,10 @@ export function defaultConfigPath(): string {
   return join(homedir(), '.continuum', 'config.json');
 }
 
-export async function readConfigFile(path = defaultConfigPath()): Promise<FileConfig | null> {
+export async function readConfigFile(
+  path = defaultConfigPath(),
+  required = false,
+): Promise<FileConfig | null> {
   try {
     const bytes = await readFile(path);
     if (bytes.byteLength > MAX_CONFIG_BYTES) {
@@ -46,7 +49,10 @@ export async function readConfigFile(path = defaultConfigPath()): Promise<FileCo
     }
     return parsed as FileConfig;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      if (required) throw new CliError('Config file does not exist', 2);
+      return null;
+    }
     if (error instanceof CliError) throw error;
     throw new CliError('Unable to read config file', 2);
   }
@@ -80,9 +86,9 @@ export function resolveConfig(
   if (tokenEnv !== undefined && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(tokenEnv)) {
     throw new CliError('Profile tokenEnv is invalid', 2);
   }
-  const token = flags.token
-    ?? (tokenEnv ? env[tokenEnv] : undefined)
-    ?? env.CONTINUUM_TOKEN;
+  const token = flags.token ?? (
+    tokenEnv === undefined ? env.CONTINUUM_TOKEN : env[tokenEnv]
+  );
   if (!token?.trim()) throw new CliError('Continuum bearer token is required', 2);
   const timeoutMs = flags.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) {

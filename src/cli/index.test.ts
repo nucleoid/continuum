@@ -1,21 +1,26 @@
 import { describe, expect, it, vi } from 'vitest';
-import { runCli } from './index.js';
+import { runCli, type CliDependencies } from './index.js';
+import { CliError } from './http.js';
 
 function harness(fetch: typeof globalThis.fetch, stdin = '', stdinIsTTY = true) {
   let stdout = '';
   let stderr = '';
+  const readStdin = vi.fn(async () => stdin);
+  const deps: CliDependencies = {
+    env: { CONTINUUM_API_URL: 'https://example.test', CONTINUUM_TOKEN: 'opaque' },
+    fetch, stdinIsTTY, readStdin,
+    stdout: (value: string) => { stdout += value; },
+    stderr: (value: string) => { stderr += value; },
+    readConfig: async () => null,
+    statFile: async () => ({ size: 0, isFile: () => false }),
+    readFile: async () => { throw new Error('unexpected file read'); },
+    now: () => new Date('2026-10-04T12:00:00Z'),
+  };
   return {
-    deps: {
-      env: { CONTINUUM_API_URL: 'https://example.test', CONTINUUM_TOKEN: 'opaque' },
-      fetch, stdinIsTTY, readStdin: async () => stdin,
-      stdout: (value: string) => { stdout += value; },
-      stderr: (value: string) => { stderr += value; },
-      readConfig: async () => null,
-      readFile: async () => { throw new Error('unexpected file read'); },
-      now: () => new Date('2026-10-04T12:00:00Z'),
-    },
+    deps,
     stdout: () => stdout,
     stderr: () => stderr,
+    readStdin,
   };
 }
 
@@ -43,10 +48,71 @@ describe('continuum CLI', () => {
     ], tty.deps)).toBe(2);
     expect(fetch).not.toHaveBeenCalled();
 
-    const piped = harness(fetch as typeof globalThis.fetch, 'pipe', false);
+    const ambiguous = harness(fetch as typeof globalThis.fetch, 'pipe', false);
     expect(await runCli([
-      'capture', '--scope', 'org', '--type', 'fact', '--title', 'Two', '--body', 'flag',
-    ], piped.deps)).toBe(2);
+      'capture', '--scope', 'org', '--type', 'fact', '--title', 'Two',
+      '--body', 'flag', '--body-file', 'notes.md',
+    ], ambiguous.deps)).toBe(2);
+  });
+
+  it('uses explicit flag and file bodies in non-TTY scripts without reading stdin', async () => {
+    const bodies: string[] = [];
+    const fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)).body);
+      return Response.json({ id: `memory-${bodies.length}` }, { status: 201 });
+    });
+    const flagged = harness(fetch as typeof globalThis.fetch, 'ignored pipe', false);
+    expect(await runCli([
+      'capture', '--scope', 'org', '--type', 'fact', '--title', 'Flag', '--body', 'flag body',
+    ], flagged.deps)).toBe(0);
+    expect(flagged.readStdin).not.toHaveBeenCalled();
+
+    const order: string[] = [];
+    const filed = harness(fetch as typeof globalThis.fetch, 'ignored pipe', false);
+    filed.deps.statFile = vi.fn(async () => {
+      order.push('stat');
+      return { size: 9, isFile: () => true };
+    });
+    filed.deps.readFile = vi.fn(async () => {
+      order.push('read');
+      return 'file body';
+    });
+    expect(await runCli([
+      'capture', '--scope', 'org', '--type', 'fact', '--title', 'File', '--body-file', 'notes.md',
+    ], filed.deps)).toBe(0);
+    expect(filed.readStdin).not.toHaveBeenCalled();
+    expect(order).toEqual(['stat', 'read']);
+    expect(bodies).toEqual(['flag body', 'file body']);
+  });
+
+  it('rejects oversized body files from metadata before reading them', async () => {
+    const h = harness(vi.fn() as typeof globalThis.fetch);
+    const readFile = vi.fn();
+    h.deps.statFile = vi.fn(async () => ({ size: 1024 * 1024 + 1, isFile: () => true }));
+    h.deps.readFile = readFile;
+    expect(await runCli([
+      'capture', '--scope', 'org', '--type', 'fact', '--title', 'Large', '--body-file', 'large.md',
+    ], h.deps)).toBe(2);
+    expect(readFile).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['unknown option', ['recall', 'query', '--does-not-exist']],
+    ['missing option value', ['recall', 'query', '--timeout']],
+  ])('maps every parseArgs %s error to usage exit 2', async (_label, argv) => {
+    const h = harness(vi.fn() as typeof globalThis.fetch);
+    expect(await runCli(argv, h.deps)).toBe(2);
+    expect(h.stderr()).toMatch(/^continuum: /);
+  });
+
+  it('treats an explicitly missing config file as a usage error', async () => {
+    const h = harness(vi.fn() as typeof globalThis.fetch);
+    h.deps.readConfig = vi.fn(async (_path?: string, required?: boolean) => {
+      expect(required).toBe(true);
+      throw new CliError('Config file does not exist', 2);
+    });
+    expect(await runCli(['scopes', '--config', 'missing.json'], h.deps)).toBe(2);
+    expect(h.stderr()).toContain('Config file does not exist');
   });
 
   it('normalizes relative audit times against the injected clock', async () => {

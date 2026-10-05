@@ -113,4 +113,21 @@ describe('CLI REST support routes', () => {
       'grant_membership', 'revoke_membership',
     ]);
   });
+
+  it('prevents an org admin from revoking or downgrading their own admin role', async () => {
+    const { admin, org } = await seed();
+    const app = createApp(pool);
+    const revoke = await request(app)
+      .delete(`/api/v0/scopes/${org.id}/members/${admin.id}`)
+      .set('Authorization', 'Bearer token-admin');
+    expect(revoke.status).toBe(409);
+    expect(revoke.body.error).toMatch(/own org admin role/i);
+
+    const downgrade = await request(app)
+      .put(`/api/v0/scopes/${org.id}/members/${admin.id}`)
+      .set('Authorization', 'Bearer token-admin')
+      .send({ role: 'reader' });
+    expect(downgrade.status).toBe(409);
+    expect((await getMembership(pool, admin.id, org.id))?.role).toBe('admin');
+  });
 });

@@ -17,6 +17,8 @@ export interface ApiClientOptions {
 
 const DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_REQUEST_BYTES = 1024 * 1024;
+const MAX_ERROR_DETAIL_CHARS = 512;
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,64}$/;
 
 function statusExit(status: number): ExitCode {
   if (status === 401 || status === 403) return 3;
@@ -49,45 +51,118 @@ export class ApiClient {
       throw new CliError('Request body exceeds 1 MiB', 2);
     }
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
-    let response: Response;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new CliError('Request timed out', 5));
+      }, this.options.timeoutMs);
+    });
     try {
-      response = await this.fetchImpl(`${this.options.apiUrl}/api/v0${path}`, {
-        method,
-        signal: controller.signal,
-        headers: {
-          authorization: `Bearer ${this.options.token}`,
-          accept: 'application/json, text/markdown',
-          ...(serialized === undefined ? {} : { 'content-type': 'application/json' }),
-        },
-        ...(serialized === undefined ? {} : { body: serialized }),
-      });
+      const response = await Promise.race([
+        this.fetchImpl(`${this.options.apiUrl}/api/v0${path}`, {
+          method,
+          signal: controller.signal,
+          headers: {
+            authorization: `Bearer ${this.options.token}`,
+            accept: 'application/json, text/markdown',
+            ...(serialized === undefined ? {} : { 'content-type': 'application/json' }),
+          },
+          ...(serialized === undefined ? {} : { body: serialized }),
+        }),
+        timedOut,
+      ]);
+      const declaredHeader = response.headers.get('content-length');
+      if (declaredHeader !== null && /^\d+$/.test(declaredHeader)) {
+        const declared = Number(declaredHeader);
+        if (Number.isSafeInteger(declared) && declared > this.maxResponseBytes) {
+          controller.abort();
+          await response.body?.cancel().catch(() => undefined);
+          throw new CliError('Server response exceeds the size limit', 5);
+        }
+      }
+      const bytes = await this.readResponse(response, controller, timedOut);
+      const text = new TextDecoder().decode(bytes);
+      if (!response.ok) throw this.responseError(response, text);
+      return text;
     } catch (error) {
-      const message = controller.signal.aborted ? 'Request timed out' : 'Unable to reach Continuum API';
-      throw new CliError(message, 5);
+      if (error instanceof CliError) throw error;
+      throw new CliError(
+        controller.signal.aborted ? 'Request timed out' : 'Unable to reach Continuum API',
+        5,
+      );
     } finally {
-      clearTimeout(timer);
+      if (timer !== undefined) clearTimeout(timer);
     }
-    const declared = Number(response.headers.get('content-length'));
-    if (Number.isFinite(declared) && declared > this.maxResponseBytes) {
-      throw new CliError('Server response exceeds the size limit', 5);
+  }
+
+  private async readResponse(
+    response: Response,
+    controller: AbortController,
+    timedOut: Promise<never>,
+  ): Promise<Uint8Array> {
+    if (!response.body) return new Uint8Array();
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    try {
+      while (true) {
+        const { done, value } = await Promise.race([reader.read(), timedOut]);
+        if (done) break;
+        total += value.byteLength;
+        if (total > this.maxResponseBytes) {
+          controller.abort();
+          await reader.cancel().catch(() => undefined);
+          throw new CliError('Server response exceeds the size limit', 5);
+        }
+        chunks.push(value);
+      }
+    } catch (error) {
+      if (error instanceof CliError) {
+        if (controller.signal.aborted) await reader.cancel().catch(() => undefined);
+        throw error;
+      }
+      throw new CliError(
+        controller.signal.aborted ? 'Request timed out' : 'Unable to read Continuum API response',
+        5,
+      );
+    } finally {
+      reader.releaseLock();
     }
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    if (bytes.byteLength > this.maxResponseBytes) {
-      throw new CliError('Server response exceeds the size limit', 5);
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
     }
-    const text = new TextDecoder().decode(bytes);
-    if (!response.ok) {
-      let message = `Continuum API returned HTTP ${response.status}`;
-      try {
-        const parsed = JSON.parse(text) as { error?: unknown };
-        if (typeof parsed.error === 'string') message = parsed.error;
-      } catch { /* retain deterministic status message */ }
-      const redacted = this.options.token.length === 0
-        ? message
-        : message.split(this.options.token).join('[REDACTED]');
-      throw new CliError(redacted.replace(/[\u0000-\u001f\u007f]/g, ' '), statusExit(response.status));
-    }
-    return text;
+    return bytes;
+  }
+
+  private responseError(response: Response, text: string): CliError {
+    let message = `Continuum API returned HTTP ${response.status}`;
+    let bodyRequestId: unknown;
+    try {
+      const parsed = JSON.parse(text) as { error?: unknown; requestId?: unknown };
+      if (typeof parsed.error === 'string') message = parsed.error;
+      bodyRequestId = parsed.requestId;
+    } catch { /* retain deterministic status message */ }
+    const requestIdCandidate = response.headers.get('x-request-id') ?? bodyRequestId;
+    const requestId = typeof requestIdCandidate === 'string'
+      && REQUEST_ID_PATTERN.test(requestIdCandidate)
+      ? requestIdCandidate
+      : undefined;
+    const redacted = this.redact(message)
+      .replace(/[\u0000-\u001f\u007f]/g, ' ')
+      .slice(0, MAX_ERROR_DETAIL_CHARS);
+    const detail = requestId === undefined
+      ? redacted
+      : `${redacted} (request ID: ${this.redact(requestId)})`;
+    return new CliError(detail, statusExit(response.status));
+  }
+
+  private redact(value: string): string {
+    return this.options.token.length === 0
+      ? value
+      : value.split(this.options.token).join('[REDACTED]');
   }
 }

@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { ApiClient, CliError } from './http.js';
 import { readConfigFile, resolveConfig, type FileConfig } from './config.js';
@@ -14,7 +14,8 @@ export interface CliDependencies {
   fetch: typeof globalThis.fetch;
   stdinIsTTY: boolean;
   readStdin(): Promise<string>;
-  readConfig(path?: string): Promise<FileConfig | null>;
+  readConfig(path?: string, required?: boolean): Promise<FileConfig | null>;
+  statFile(path: string): Promise<{ size: number; isFile(): boolean }>;
   readFile(path: string): Promise<string | Uint8Array>;
   stdout(value: string): void;
   stderr(value: string): void;
@@ -37,6 +38,7 @@ const defaults: CliDependencies = {
     return Buffer.concat(chunks).toString('utf8');
   },
   readConfig: readConfigFile,
+  statFile: stat,
   readFile,
   stdout: (value) => process.stdout.write(value),
   stderr: (value) => process.stderr.write(value),
@@ -96,6 +98,23 @@ function checkedBytes(value: string | Uint8Array, label: string): string {
   return bytes.toString('utf8');
 }
 
+async function readBodyFile(path: string, deps: CliDependencies): Promise<string> {
+  let file: { size: number; isFile(): boolean };
+  try {
+    file = await deps.statFile(path);
+  } catch {
+    throw new CliError('Unable to read body file', 2);
+  }
+  if (!file.isFile()) throw new CliError('Body file must be a regular file', 2);
+  if (file.size > MAX_INPUT_BYTES) throw new CliError('Body file exceeds 1 MiB', 2);
+  try {
+    return checkedBytes(await deps.readFile(path), 'Body file');
+  } catch (error) {
+    if (error instanceof CliError) throw error;
+    throw new CliError('Unable to read body file', 2);
+  }
+}
+
 function emit(deps: CliDependencies, json: boolean, value: unknown, human: string): void {
   deps.stdout(json ? jsonDocument(value) : human);
 }
@@ -118,11 +137,18 @@ async function commandCapture(args: string[], client: ApiClient, deps: CliDepend
     metadata: { type: 'string' },
   } });
   if (positionals.length) throw new CliError('capture does not accept positional arguments', 2);
-  const sources = Number(values.body !== undefined) + Number(values['body-file'] !== undefined) + Number(!deps.stdinIsTTY);
-  if (sources !== 1) throw new CliError('Capture requires exactly one of --body, --body-file, or non-TTY stdin', 2);
+  if (values.body !== undefined && values['body-file'] !== undefined) {
+    throw new CliError('Capture accepts only one of --body or --body-file', 2);
+  }
   let body = values.body;
-  if (values['body-file']) body = checkedBytes(await deps.readFile(values['body-file']), 'Body file');
-  if (!deps.stdinIsTTY) body = cleanInput(checkedBytes(await deps.readStdin(), 'Standard input'));
+  if (values['body-file'] !== undefined) {
+    body = await readBodyFile(requireString(values['body-file'], '--body-file'), deps);
+  } else if (values.body === undefined) {
+    if (deps.stdinIsTTY) {
+      throw new CliError('Capture requires --body, --body-file, or non-TTY stdin', 2);
+    }
+    body = cleanInput(checkedBytes(await deps.readStdin(), 'Standard input'));
+  }
   if (!body) throw new CliError('Capture body cannot be empty', 2);
   const type = requireString(values.type, '--type');
   if (!MEMORY_TYPES.has(type)) throw new CliError(`Invalid memory type: ${type}`, 2);
@@ -283,7 +309,8 @@ export async function runCli(argv: string[], dependencies: Partial<CliDependenci
     const timeoutMs = timeout === undefined
       ? undefined
       : integer(timeout, '--timeout', 1, 120_000);
-    const file = await deps.readConfig(globalString(global.config));
+    const configPath = globalString(global.config);
+    const file = await deps.readConfig(configPath, configPath !== undefined);
     const config = resolveConfig({
       apiUrl: globalString(global['api-url']), token: globalString(global.token),
       profile: globalString(global.profile), timeoutMs,
@@ -302,7 +329,11 @@ export async function runCli(argv: string[], dependencies: Partial<CliDependenci
       deps.stderr(`continuum: ${error.message}\n`);
       return error.exitCode;
     }
-    if (error instanceof TypeError && error.message.startsWith('Unknown option')) {
+    if (
+      error instanceof TypeError
+      && typeof (error as NodeJS.ErrnoException).code === 'string'
+      && (error as NodeJS.ErrnoException).code!.startsWith('ERR_PARSE_ARGS_')
+    ) {
       deps.stderr(`continuum: ${error.message}\n`);
       return 2;
     }

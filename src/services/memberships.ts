@@ -28,6 +28,9 @@ export async function changeMembershipForPrincipal(
     const target = await getPrincipal(client, principalId);
     if (!scope) throw new ServiceError('SCOPE_NOT_FOUND', 'scope not found');
     if (!target) throw new ServiceError('INVALID_INPUT', 'principal not found');
+    if (scope.kind === 'org' && actor.id === principalId && role !== 'admin') {
+      throw new ServiceError('CONFLICT', 'Cannot remove your own org admin role');
+    }
 
     let removed = false;
     if (role === null) {

@@ -12,6 +12,14 @@ try {
     { cwd: root, encoding: 'utf8', shell: process.platform === 'win32' },
   ));
   const tarball = join(temporary, packed[0].filename);
+  const compiledTests = packed[0].files.filter(
+    ({ path }) => /\.(?:test|spec)\.(?:js|d\.ts)(?:\.map)?$/.test(path),
+  );
+  if (compiledTests.length > 0) {
+    throw new Error(
+      `Packed package contains compiled tests: ${compiledTests.map(({ path }) => path).join(', ')}`,
+    );
+  }
   execFileSync(
     'npm', ['install', '--prefix', temporary, '--ignore-scripts', '--no-audit', '--no-fund', tarball],
     { cwd: root, stdio: 'pipe', shell: process.platform === 'win32' },

@@ -12,6 +12,8 @@
   "files": [
     "bin",
     "dist",
+    "!dist/**/*.test.*",
+    "!dist/**/*.spec.*",
     "docs",
     "README.md",
     "LICENSE"
