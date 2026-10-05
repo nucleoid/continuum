@@ -117,6 +117,22 @@ describe('makeEmbeddingProviderFromEnv', () => {
     })).toThrow(/inline credentials/i);
   });
 
+  it('forwards routed batch_size to hosted providers', () => {
+    const router = makeEmbeddingRouterFromEnv({
+      OPENAI_API_KEY: 'private-key',
+      CONTINUUM_EMBEDDING_CONFIG: JSON.stringify({
+        providers: [{
+          alias: 'hosted', kind: 'openai', model: 'text-embedding-3-small', dim: 768,
+          batch_size: 7, local: false,
+        }],
+        routing: { default: 'hosted', rules: [] },
+      }),
+    });
+
+    expect(router.resolve({ kind: 'project', name: 'shop' }).provider)
+      .toMatchObject({ batchSize: 7 });
+  });
+
   it('fails closed on provider/model/dimension combinations unsupported by v0 storage', () => {
     expect(() => makeEmbeddingRouterFromEnv({
       VOYAGE_API_KEY: 'env-key',

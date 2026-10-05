@@ -85,6 +85,54 @@ describe('hosted embedding providers', () => {
     },
   );
 
+  it('classifies the realistic OpenAI null-code maximum-context envelope as item-scoped', async () => {
+    const provider = new OpenAIEmbeddingProvider({
+      apiKey: '***', model: 'model', dim: 2,
+      fetchImpl: vi.fn(async () => new Response(JSON.stringify({
+        error: {
+          message: "This model's maximum context length is 8192 tokens, however you requested 9001 tokens (9001 in your prompt; 0 for the completion). Please reduce your prompt; or completion length.",
+          type: 'invalid_request_error',
+          param: null,
+          code: null,
+        },
+      }), { status: 400 })),
+    });
+
+    await expect(provider.embed(['private oversized input'])).rejects.toMatchObject({
+      code: 'EMBEDDING_ITEM_FAILED', failureScope: 'item',
+    });
+  });
+
+  it('classifies the realistic Voyage per-request token-limit envelope as item-scoped', async () => {
+    const provider = new VoyageEmbeddingProvider({
+      apiKey: '***', model: 'model', dim: 2,
+      fetchImpl: vi.fn(async () => new Response(JSON.stringify({
+        detail: 'The total number of tokens in the batch (130001) exceeds the max allowed tokens per request (120000).',
+      }), { status: 400 })),
+    });
+
+    await expect(provider.embed(['one', 'two'])).rejects.toMatchObject({
+      code: 'EMBEDDING_ITEM_FAILED', failureScope: 'item',
+    });
+  });
+
+  it('honors hosted per-request batch size while preserving result order', async () => {
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const payload = JSON.parse(String(init?.body)) as { input: string[] };
+      return new Response(JSON.stringify({
+        data: payload.input.map((text, index) => ({ index, embedding: [text.length, 0] })),
+      }));
+    });
+    const provider = new OpenAIEmbeddingProvider({
+      apiKey: '***', model: 'model', dim: 2, batchSize: 2, fetchImpl,
+    });
+
+    await expect(provider.embed(['a', 'bb', 'ccc'])).resolves.toEqual([
+      [1, 0], [2, 0], [3, 0],
+    ]);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
   it('does not inspect an oversized error body for item attribution', async () => {
     const body = JSON.stringify({
       error: { code: 'context_length_exceeded', padding: 'x'.repeat(9_000) },

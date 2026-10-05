@@ -13,9 +13,9 @@ export async function storeMemoryEmbedding(
   memoryId: string,
   text: string,
   provider: EmbeddingProvider,
-): Promise<void> {
+): Promise<boolean> {
   const [vector] = await provider.embed([text]);
-  await storeMemoryEmbeddingVector(pool, memoryId, vector, provider);
+  return storeMemoryEmbeddingVector(pool, memoryId, vector, provider);
 }
 
 export async function storeMemoryEmbeddingVector(
@@ -23,16 +23,20 @@ export async function storeMemoryEmbeddingVector(
   memoryId: string,
   vector: number[],
   provider: Pick<EmbeddingProvider, 'id' | 'dim'>,
-): Promise<void> {
+): Promise<boolean> {
   assertEmbeddingVectorDimension(vector, provider);
-  await pool.query(
+  const result = await pool.query(
     `INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
-     VALUES ($1, $2, $3, $4::vector)
+     SELECT m.id, $2, $3, $4::vector
+       FROM memories m
+      WHERE m.id = $1 AND m.state = 'live'
      ON CONFLICT (memory_id, provider, dim) DO UPDATE
        SET embedding = EXCLUDED.embedding,
-           embedded_at = now()`,
+           embedded_at = now()
+     RETURNING memory_id`,
     [memoryId, provider.id, provider.dim, toPgVector(vector)],
   );
+  return (result.rowCount ?? result.rows.length) > 0;
 }
 
 export async function vectorSearchMemoryIds(

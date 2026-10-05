@@ -58,6 +58,8 @@ const ITEM_ERROR_CODES = new Set([
   'text_too_long',
 ]);
 const ITEM_MESSAGE = /\b(?:input|text|prompt|request body)\b.{0,80}\b(?:too (?:large|long)|exceeds?|maximum|context length|token limit)\b/i;
+const OPENAI_CONTEXT_MESSAGE = /\bmaximum context length\b.{0,160}\b(?:requested|resulted in)\b.{0,80}\btokens?\b/i;
+const VOYAGE_REQUEST_TOKEN_MESSAGE = /\b(?:total number of tokens|tokens? in the batch)\b.{0,120}\b(?:exceeds?|maximum|max allowed)\b.{0,80}\b(?:tokens? per request|request token limit)\b/i;
 
 async function boundedErrorBody(response: Response): Promise<unknown> {
   const body = response.body;
@@ -112,13 +114,17 @@ function isExplicitItemFailure(provider: EmbeddingHttpProvider, body: unknown): 
 
   if (provider === 'openai') {
     const parameter = stringField(nested.param)?.toLowerCase() ?? null;
-    return parameter === 'input' || parameter?.startsWith('input[') === true;
+    const message = stringField(nested.message);
+    return parameter === 'input'
+      || parameter?.startsWith('input[') === true
+      || (message !== null && OPENAI_CONTEXT_MESSAGE.test(message));
   }
 
   const message = provider === 'voyage'
     ? stringField(root.detail) ?? stringField(nested.message)
     : stringField(root.error) ?? stringField(nested.message);
-  return message !== null && ITEM_MESSAGE.test(message);
+  return message !== null && (ITEM_MESSAGE.test(message)
+    || (provider === 'voyage' && VOYAGE_REQUEST_TOKEN_MESSAGE.test(message)));
 }
 
 export async function embeddingProviderHttpError(

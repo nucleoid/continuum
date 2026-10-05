@@ -6,13 +6,11 @@ describe('parseEmbedBackfillCliOptions', () => {
     expect(parseEmbedBackfillCliOptions([
       '--dry-run', '--batch-size', '8', '--max-rows', '50',
       '--provider', 'ollama:model', '--cursor', '00000000-0000-4000-8000-000000000012',
-      '--scope', 'team:security', '--max-retries', '3', '--retry-base-ms', '20',
-      '--max-errors', '4',
+      '--scope', 'team:security', '--max-errors', '4',
     ])).toEqual({
       dryRun: true, countOnly: false, batchSize: 8, maxRows: 50,
       providerId: 'ollama:model', cursor: '00000000-0000-4000-8000-000000000012',
-      scope: { kind: 'team', name: 'security' }, maxRetries: 3,
-      retryBaseMs: 20, maxErrors: 4,
+      scope: { kind: 'team', name: 'security' }, maxErrors: 4,
     });
   });
 

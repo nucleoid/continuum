@@ -58,6 +58,19 @@ describe('provider-qualified storage', () => {
     const [sql] = vi.mocked(db.query).mock.calls[0] as [string, unknown[]];
     expect(sql).toContain('ON CONFLICT (memory_id, provider, dim)');
   });
+
+  it('only inserts or updates vectors while the memory is live', async () => {
+    const db = queryable();
+    vi.mocked(db.query).mockResolvedValue({ rows: [], rowCount: 0 } as never);
+
+    await expect(storeMemoryEmbeddingVector(db, 'memory-id', Array(768).fill(0), {
+      id: 'ollama:model-b', dim: 768,
+    })).resolves.toBe(false);
+
+    const [sql] = vi.mocked(db.query).mock.calls[0] as [string, unknown[]];
+    expect(sql).toContain("m.state = 'live'");
+    expect(sql).toContain('RETURNING memory_id');
+  });
 });
 
 describe('vector search filters', () => {

@@ -61,10 +61,11 @@ Vector recall uses only rows whose provider ID and dimension exactly match the
 active provider. Changing models therefore leaves existing embedding rows
 untouched and temporarily makes their memories full-text-only until they are
 re-embedded. Switching back to the old model makes those rows usable again.
-Ollama uses the batched `/api/embed` endpoint with a 10 second per-request
-deadline and a default batch size of 32. Override these with
+Ollama uses `/api/embed`; hosted providers use their native embeddings endpoint.
+Every provider sends bounded requests with a 10 second per-request deadline and
+a default batch size of 32. Override these with
 `CONTINUUM_EMBEDDING_TIMEOUT_MS` and `CONTINUUM_EMBEDDING_BATCH_SIZE` or the
-`timeout_ms` and `batch_size` fields in a routed provider definition. Invalid,
+`timeout_ms` and `batch_size` fields in any routed provider definition. Invalid,
 non-finite, wrong-size, or wrong-cardinality responses fail the complete HTTP
 batch. Recall then returns full-text results with bounded diagnostics instead
 of failing the request.

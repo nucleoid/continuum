@@ -227,6 +227,7 @@ function instantiateProvider(
     dim: definition.dim,
     ...(definition.endpoint ? { endpoint: definition.endpoint } : {}),
     ...(definition.timeout_ms ? { timeoutMs: definition.timeout_ms } : {}),
+    ...(definition.batch_size ? { batchSize: definition.batch_size } : {}),
   };
   if (definition.kind === 'ollama') {
     const endpoint = definition.endpoint ?? 'http://localhost:11434';

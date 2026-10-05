@@ -15,8 +15,6 @@ import type { ScopeKind, ScopeRef } from '../types.js';
 
 const DEFAULT_BATCH_SIZE = 32;
 const DEFAULT_MAX_ROWS = 1_000;
-const DEFAULT_MAX_RETRIES = 2;
-const DEFAULT_RETRY_BASE_MS = 100;
 const DEFAULT_MAX_ERRORS = 25;
 const MAX_BATCH_SIZE = 1_000;
 
@@ -35,11 +33,7 @@ export interface EmbeddingBackfillOptions {
   providerId?: string;
   dryRun?: boolean;
   countOnly?: boolean;
-  maxRetries?: number;
-  retryBaseMs?: number;
   maxErrors?: number;
-  sleep?: (milliseconds: number) => Promise<void>;
-  random?: () => number;
 }
 
 export interface EmbeddingBackfillReport {
@@ -102,13 +96,17 @@ async function storeBatch(
   provider: EmbeddingProvider,
   items: Candidate[],
   vectors: number[][],
-): Promise<void> {
+): Promise<number> {
+  let stored = 0;
   await client.query('BEGIN');
   try {
     for (let index = 0; index < items.length; index += 1) {
-      await storeMemoryEmbeddingVector(client, items[index]!.id, vectors[index]!, provider);
+      if (await storeMemoryEmbeddingVector(client, items[index]!.id, vectors[index]!, provider)) {
+        stored += 1;
+      }
     }
     await client.query('COMMIT');
+    return stored;
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
@@ -143,14 +141,14 @@ async function runProvider(
   routing: EmbeddingRouting,
   provider: EmbeddingProvider,
   options: Required<Pick<EmbeddingBackfillOptions,
-    'batchSize' | 'maxRows' | 'dryRun' | 'countOnly' | 'maxRetries'
-    | 'retryBaseMs' | 'maxErrors' | 'sleep' | 'random'>>
+    'batchSize' | 'maxRows' | 'dryRun' | 'countOnly' | 'maxErrors'>>
     & Pick<EmbeddingBackfillOptions, 'cursor' | 'scope'>,
 ): Promise<Omit<EmbeddingBackfillReport, 'providers' | 'dryRun' | 'countOnly'>> {
   const router = asEmbeddingRouter(routing);
   const client = await pool.connect();
   const filter = scopeKey(options.scope);
-  const lockName = `continuum:embed-backfill:${provider.id}:${provider.dim}:${filter}`;
+  // Scope-filtered and unfiltered runs overlap, so they must share one provider lock.
+  const lockName = `continuum:embed-backfill:${provider.id}:${provider.dim}`;
   let locked = false;
   let cursor: string | null = options.cursor ?? null;
   let scanned = 0;
@@ -195,15 +193,14 @@ async function runProvider(
       return { scanned, eligible, embedded, failed, completed, cursor };
     }
 
-    const processItems = async (items: Candidate[]): Promise<void> => {
-      if (items.length === 0) return;
+    const processItems = async (items: Candidate[]): Promise<boolean> => {
+      if (items.length === 0) return true;
+      let vectors: number[][];
       try {
-        const vectors = await provider.embed(items.map(memoryEmbeddingText));
+        vectors = await provider.embed(items.map(memoryEmbeddingText));
         validateVectors(vectors, items.length, provider);
-        await storeBatch(client, provider, items, vectors);
-        embedded += items.length;
-        return;
       } catch (error) {
+        if (error instanceof EmbeddingProviderError) throw error;
         if (!isEmbeddingItemError(error)) {
           throw new EmbeddingProviderError(
             'EMBEDDING_FAILED',
@@ -213,40 +210,19 @@ async function runProvider(
         }
         if (items.length > 1) {
           const middle = Math.floor(items.length / 2);
-          await processItems(items.slice(0, middle));
-          await processItems(items.slice(middle));
-          return;
+          if (!await processItems(items.slice(0, middle))) return false;
+          return processItems(items.slice(middle));
         }
-        let lastError = error;
-        for (let retry = 0; retry < options.maxRetries; retry += 1) {
-          const delay = Math.max(1, Math.round(
-            options.retryBaseMs * (2 ** retry) * (0.75 + options.random() * 0.5),
-          ));
-          await options.sleep(delay);
-          try {
-            const vectors = await provider.embed([memoryEmbeddingText(items[0]!)]);
-            validateVectors(vectors, 1, provider);
-            await storeBatch(client, provider, items, vectors);
-            embedded += 1;
-            return;
-          } catch (caught) {
-            if (!isEmbeddingItemError(caught)) {
-              throw new EmbeddingProviderError(
-                'EMBEDDING_FAILED',
-                'Embedding backfill provider failed',
-                { cause: caught },
-              );
-            }
-            lastError = caught;
-          }
-        }
-        void lastError;
         failed += 1;
         await auditFailure(client, provider, items[0]!);
-        if (failed >= options.maxErrors) {
-          throw new Error('Embedding backfill exceeded its error budget');
-        }
+        cursor = items[0]!.id;
+        return failed < options.maxErrors;
       }
+      // Keep database failures distinct from provider failures. A concurrent archive
+      // is a safe no-op and must not recreate derived vectors for tombstoned memory.
+      embedded += await storeBatch(client, provider, items, vectors);
+      cursor = items.at(-1)!.id;
+      return true;
     };
 
     while (eligible < options.maxRows || options.countOnly) {
@@ -281,22 +257,31 @@ async function runProvider(
       const batch: Candidate[] = [];
       for (const row of rows.rows) {
         scanned += 1;
-        cursor = row.id;
         const candidate: Candidate = {
           id: row.id, title: row.title, body: row.body,
           scope: { kind: row.kind, name: row.name },
         };
-        if (!sameProvider(router.resolve(candidate.scope).provider, provider)) continue;
+        if (!sameProvider(router.resolve(candidate.scope).provider, provider)) {
+          cursor = row.id;
+          continue;
+        }
         eligible += 1;
         if (!options.dryRun && !options.countOnly) batch.push(candidate);
+        else cursor = row.id;
         if (batch.length >= options.batchSize) {
-          await processItems(batch.splice(0));
+          const canContinue = await processItems(batch.splice(0));
           await checkpoint(client, provider, filter, cursor);
+          if (!canContinue) {
+            throw new Error('Embedding backfill exceeded its error budget');
+          }
         }
         if (!options.countOnly && eligible >= options.maxRows) break;
       }
-      if (batch.length > 0) await processItems(batch);
+      const canContinue = batch.length === 0 || await processItems(batch);
       if (!options.dryRun && !options.countOnly) await checkpoint(client, provider, filter, cursor);
+      if (!canContinue) {
+        throw new Error('Embedding backfill exceeded its error budget');
+      }
       if (!options.countOnly && eligible >= options.maxRows) break;
     }
 
@@ -317,8 +302,6 @@ export async function runEmbeddingBackfill(
 ): Promise<EmbeddingBackfillReport> {
   const batchSize = integer(options.batchSize ?? DEFAULT_BATCH_SIZE, 'batchSize', 1, MAX_BATCH_SIZE);
   const maxRows = integer(options.maxRows ?? DEFAULT_MAX_ROWS, 'maxRows', 1, 1_000_000);
-  const maxRetries = integer(options.maxRetries ?? DEFAULT_MAX_RETRIES, 'maxRetries', 0, 10);
-  const retryBaseMs = integer(options.retryBaseMs ?? DEFAULT_RETRY_BASE_MS, 'retryBaseMs', 1, 60_000);
   const maxErrors = integer(options.maxErrors ?? DEFAULT_MAX_ERRORS, 'maxErrors', 1, 10_000);
   if (options.dryRun && options.countOnly) throw new Error('dryRun and countOnly are mutually exclusive');
   if (options.cursor && !options.providerId) throw new Error('cursor requires providerId');
@@ -347,11 +330,7 @@ export async function runEmbeddingBackfill(
       maxRows: options.countOnly ? maxRows : remaining,
       dryRun: options.dryRun ?? false,
       countOnly: options.countOnly ?? false,
-      maxRetries,
-      retryBaseMs,
       maxErrors,
-      sleep: options.sleep ?? (async (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))),
-      random: options.random ?? Math.random,
       cursor: options.cursor,
       scope: options.scope,
     });

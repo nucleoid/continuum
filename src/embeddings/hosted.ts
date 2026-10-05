@@ -16,8 +16,12 @@ interface HostedOptions {
   dim: number;
   endpoint?: string;
   timeoutMs?: number;
+  batchSize?: number;
   fetchImpl?: typeof fetch;
 }
+
+const DEFAULT_BATCH_SIZE = 32;
+const MAX_BATCH_SIZE = 1_000;
 
 interface EmbeddingItem { index?: number; embedding?: unknown }
 
@@ -63,6 +67,7 @@ abstract class HostedEmbeddingProvider implements EmbeddingProvider {
   protected readonly model: string;
   protected readonly endpoint: string;
   protected readonly timeoutMs: number;
+  readonly batchSize: number;
   protected readonly fetchImpl: typeof fetch;
 
   constructor(options: HostedOptions, defaultEndpoint: string) {
@@ -71,6 +76,11 @@ abstract class HostedEmbeddingProvider implements EmbeddingProvider {
     this.dim = options.dim;
     this.endpoint = validateHostedEndpoint(options.endpoint ?? defaultEndpoint);
     this.timeoutMs = validateEmbeddingTimeout(options.timeoutMs ?? DEFAULT_EMBEDDING_TIMEOUT_MS);
+    const batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE;
+    if (!Number.isSafeInteger(batchSize) || batchSize <= 0 || batchSize > MAX_BATCH_SIZE) {
+      throw new Error(`Hosted embedding batchSize must be a positive integer at most ${MAX_BATCH_SIZE}`);
+    }
+    this.batchSize = batchSize;
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
@@ -121,10 +131,15 @@ export class OpenAIEmbeddingProvider extends HostedEmbeddingProvider {
     super(options, 'https://api.openai.com/v1/embeddings');
     this.id = `openai:${options.model}`;
   }
-  embed(texts: string[], options: { signal?: AbortSignal } = {}): Promise<number[][]> {
-    return this.request(texts, { authorization: `Bearer ${this.apiKey}` }, {
-      model: this.model, input: texts, dimensions: this.dim,
-    }, options.signal);
+  async embed(texts: string[], options: { signal?: AbortSignal } = {}): Promise<number[][]> {
+    const vectors: number[][] = [];
+    for (let offset = 0; offset < texts.length; offset += this.batchSize) {
+      const chunk = texts.slice(offset, offset + this.batchSize);
+      vectors.push(...await this.request(chunk, { authorization: `Bearer ${this.apiKey}` }, {
+        model: this.model, input: chunk, dimensions: this.dim,
+      }, options.signal));
+    }
+    return vectors;
   }
 }
 
@@ -135,9 +150,14 @@ export class VoyageEmbeddingProvider extends HostedEmbeddingProvider {
     super(options, 'https://api.voyageai.com/v1/embeddings');
     this.id = `voyage:${options.model}`;
   }
-  embed(texts: string[], options: { signal?: AbortSignal } = {}): Promise<number[][]> {
-    return this.request(texts, { authorization: `Bearer ${this.apiKey}` }, {
-      model: this.model, input: texts,
-    }, options.signal);
+  async embed(texts: string[], options: { signal?: AbortSignal } = {}): Promise<number[][]> {
+    const vectors: number[][] = [];
+    for (let offset = 0; offset < texts.length; offset += this.batchSize) {
+      const chunk = texts.slice(offset, offset + this.batchSize);
+      vectors.push(...await this.request(chunk, { authorization: `Bearer ${this.apiKey}` }, {
+        model: this.model, input: chunk,
+      }, options.signal));
+    }
+    return vectors;
   }
 }

@@ -112,17 +112,38 @@ describe('embedding backfill', () => {
     expect(rows.rows).toEqual([{ provider: 'ollama:new' }, { provider: 'ollama:old' }]);
   });
 
+  it('does not reinsert a vector when a memory is archived during provider work', async () => {
+    const { memories } = await seed('project', 'archive-race', ['archive me']);
+    const provider: EmbeddingProvider = {
+      id: 'ollama:archive-race', dim: 768, local: true,
+      async embed(texts) {
+        await pool.query(`UPDATE memories SET state = 'archived' WHERE id = $1`, [memories[0]!.id]);
+        return vectors.embed(texts);
+      },
+    };
+
+    const report = await runEmbeddingBackfill(pool, provider, { maxRows: 10 });
+
+    expect(report).toMatchObject({ embedded: 0, failed: 0, completed: true });
+    expect((await pool.query(
+      'SELECT count(*)::int AS count FROM memory_embeddings WHERE memory_id = $1',
+      [memories[0]!.id],
+    )).rows[0].count).toBe(0);
+  });
+
   it('rejects a concurrent run for the same provider advisory lock', async () => {
     await seed('project', 'locked', ['waiting']);
     const provider: EmbeddingProvider = {
       id: 'ollama:locked', dim: 768, local: true,
       embed: (texts) => vectors.embed(texts),
     };
-    const lockName = 'continuum:embed-backfill:ollama:locked:768:';
+    const lockName = 'continuum:embed-backfill:ollama:locked:768';
     const client = await pool.connect();
     await client.query('SELECT pg_advisory_lock(hashtextextended($1, 0))', [lockName]);
     try {
-      await expect(runEmbeddingBackfill(pool, provider, { maxRows: 10 }))
+      await expect(runEmbeddingBackfill(pool, provider, {
+        maxRows: 10, scope: { kind: 'project', name: 'locked' },
+      }))
         .rejects.toThrow(/already running/i);
     } finally {
       await client.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [lockName]);
@@ -130,9 +151,8 @@ describe('embedding backfill', () => {
     }
   });
 
-  it('isolates a poison item, retries with bounded backoff, audits it, and continues', async () => {
+  it('isolates a deterministic poison item without retrying, audits it, and continues', async () => {
     const { memories } = await seed('project', 'poison', ['healthy one', 'poison item', 'healthy two']);
-    const sleep = vi.fn(async () => undefined);
     const provider: EmbeddingProvider = {
       id: 'ollama:poison', dim: 768, local: true,
       async embed(texts) {
@@ -144,11 +164,10 @@ describe('embedding backfill', () => {
     };
 
     const report = await runEmbeddingBackfill(pool, provider, {
-      batchSize: 3, maxRows: 10, maxRetries: 2, retryBaseMs: 1, sleep,
+      batchSize: 3, maxRows: 10,
     });
 
     expect(report).toMatchObject({ embedded: 2, failed: 1, completed: true });
-    expect(sleep).toHaveBeenCalledTimes(2);
     const stored = await pool.query('SELECT memory_id FROM memory_embeddings ORDER BY memory_id');
     expect(stored.rows.map((row) => row.memory_id)).not.toContain(memories[1]!.id);
     const audit = await pool.query(
@@ -160,8 +179,114 @@ describe('embedding backfill', () => {
     expect(audit.rows[0].metadata).not.toContain('private provider detail');
   });
 
+  it('bisects a realistic Voyage aggregate token-limit rejection and checkpoints progress', async () => {
+    const { memories } = await seed('project', 'voyage-request-limit', [
+      'healthy one', 'healthy two', 'healthy three', 'healthy four',
+    ]);
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const payload = JSON.parse(String(init?.body)) as { input: string[] };
+      if (payload.input.length > 2) {
+        return new Response(JSON.stringify({
+          detail: 'The total number of tokens in the batch (130001) exceeds the max allowed tokens per request (120000).',
+        }), { status: 400 });
+      }
+      return new Response(JSON.stringify({
+        data: payload.input.map((text, index) => ({
+          index, embedding: [text.length, ...Array(767).fill(0)],
+        })),
+      }));
+    });
+    const provider = new VoyageEmbeddingProvider({
+      apiKey: '***', model: 'model', dim: 768, fetchImpl,
+    });
+
+    const report = await runEmbeddingBackfill(pool, provider, { batchSize: 4, maxRows: 10 });
+
+    expect(report).toMatchObject({ embedded: 4, failed: 0, completed: true });
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect((await pool.query(
+      'SELECT memory_id FROM memory_embeddings ORDER BY memory_id',
+    )).rows.map((row) => row.memory_id)).toEqual(memories.map((memory) => memory.id).sort());
+    expect((await pool.query(
+      `SELECT count(*)::int AS count FROM audit_log
+        WHERE metadata->>'operation' = 'embedding_backfill'`,
+    )).rows[0].count).toBe(0);
+  });
+
+  it('checkpoints the poison item before stopping at an exhausted error budget', async () => {
+    const { memories } = await seed('project', 'error-budget-progress', [
+      'healthy one', 'poison item', 'healthy two',
+    ]);
+    const provider: EmbeddingProvider = {
+      id: 'ollama:error-budget', dim: 768, local: true,
+      async embed(texts) {
+        if (texts.some((text) => text.includes('poison item'))) {
+          throw new EmbeddingItemError('deterministic input rejection');
+        }
+        return vectors.embed(texts);
+      },
+    };
+
+    await expect(runEmbeddingBackfill(pool, provider, {
+      batchSize: 3, maxRows: 10, maxErrors: 1,
+    })).rejects.toThrow(/error budget/i);
+
+    const checkpoint = await pool.query(
+      `SELECT cursor FROM embedding_backfill_checkpoints
+        WHERE provider = $1 AND dim = $2 AND scope_filter = ''`,
+      [provider.id, provider.dim],
+    );
+    expect(checkpoint.rows[0].cursor).toBe(memories[1]!.id);
+
+    const resumed = await runEmbeddingBackfill(pool, provider, {
+      batchSize: 3, maxRows: 10, maxErrors: 1,
+    });
+    expect(resumed.failed).toBe(0);
+    expect((await pool.query(
+      'SELECT memory_id FROM memory_embeddings ORDER BY memory_id',
+    )).rows.map((row) => row.memory_id)).toEqual([memories[0]!.id, memories[2]!.id].sort());
+    expect((await pool.query(
+      `SELECT count(*)::int AS count FROM audit_log
+        WHERE memory_id = $1 AND metadata->>'operation' = 'embedding_backfill'`,
+      [memories[1]!.id],
+    )).rows[0].count).toBe(1);
+  });
+
+  it('does not wrap database storage failures as provider failures', async () => {
+    await seed('project', 'storage-failure', ['one']);
+    const provider: EmbeddingProvider = {
+      id: 'ollama:storage-failure', dim: 768, local: true,
+      embed: (texts) => vectors.embed(texts),
+    };
+    const originalConnect = pool.connect.bind(pool);
+    let restoreQuery = () => undefined;
+    const connect = vi.spyOn(pool, 'connect').mockImplementation(async () => {
+      const client = await originalConnect();
+      const originalQuery = client.query.bind(client);
+      const query = vi.spyOn(client, 'query').mockImplementation(async (...args: unknown[]) => {
+        if (String(args[0]).includes('INSERT INTO memory_embeddings')) {
+          throw new Error('synthetic database write failure');
+        }
+        return originalQuery(...args as [never]);
+      });
+      restoreQuery = () => query.mockRestore();
+      return client;
+    });
+
+    const error = await runEmbeddingBackfill(pool, provider, { maxRows: 10 })
+      .catch((cause: unknown) => cause as Error);
+
+    restoreQuery();
+    connect.mockRestore();
+    expect(error).toMatchObject({ message: 'synthetic database write failure' });
+    expect(error).not.toBeInstanceOf(EmbeddingProviderError);
+  });
+
   it.each([
-    ['OpenAI', 400, { error: { code: 'context_length_exceeded', param: 'input' } }, (fetchImpl: typeof fetch) => new OpenAIEmbeddingProvider({
+    ['OpenAI', 400, { error: {
+      message: "This model's maximum context length is 8192 tokens, however you requested 9001 tokens (9001 in your prompt; 0 for the completion). Please reduce your prompt; or completion length.",
+      type: 'invalid_request_error', param: null, code: null,
+    } }, (fetchImpl: typeof fetch) => new OpenAIEmbeddingProvider({
       apiKey: 'private-key', model: 'model', dim: 768, fetchImpl,
     })],
     ['Voyage', 413, { detail: 'input exceeds maximum token limit' }, (fetchImpl: typeof fetch) => new VoyageEmbeddingProvider({
@@ -194,7 +319,7 @@ describe('embedding backfill', () => {
       const provider = createProvider(fetchImpl);
 
       const report = await runEmbeddingBackfill(pool, provider, {
-        batchSize: 4, maxRows: 10, maxRetries: 0,
+        batchSize: 4, maxRows: 10,
       });
 
       expect(report).toMatchObject({ embedded: 3, failed: 1, completed: true });
@@ -232,7 +357,7 @@ describe('embedding backfill', () => {
     })) as typeof fetch;
 
     await expect(runEmbeddingBackfill(pool, createProvider(fetchImpl), {
-      batchSize: 4, maxRows: 10, maxRetries: 3, retryBaseMs: 1,
+      batchSize: 4, maxRows: 10,
     })).rejects.toMatchObject({ code: 'EMBEDDING_FAILED', failureScope: 'provider' });
 
     expect(fetchImpl).toHaveBeenCalledTimes(1);
@@ -244,27 +369,25 @@ describe('embedding backfill', () => {
   });
 
   it.each([
-    ['timeout', new EmbeddingProviderError('EMBEDDING_TIMEOUT', 'private timeout detail')],
-    ['network', new EmbeddingProviderError('EMBEDDING_NETWORK', 'private network detail')],
-    ['authentication', new EmbeddingProviderError('EMBEDDING_AUTH', 'private auth detail')],
-    ['rate limit', new EmbeddingProviderError('EMBEDDING_RATE_LIMIT', 'private quota detail')],
-    ['server outage', new EmbeddingProviderError('EMBEDDING_SERVER', 'private upstream detail')],
-    ['unknown provider outage', new Error('private unknown outage detail')],
-  ])('fails a whole batch once on a provider-wide %s without delay or item audits', async (_label, failure) => {
+    ['timeout', new EmbeddingProviderError('EMBEDDING_TIMEOUT', 'private timeout detail'), 'EMBEDDING_TIMEOUT'],
+    ['network', new EmbeddingProviderError('EMBEDDING_NETWORK', 'private network detail'), 'EMBEDDING_NETWORK'],
+    ['authentication', new EmbeddingProviderError('EMBEDDING_AUTH', 'private auth detail'), 'EMBEDDING_AUTH'],
+    ['rate limit', new EmbeddingProviderError('EMBEDDING_RATE_LIMIT', 'private quota detail'), 'EMBEDDING_RATE_LIMIT'],
+    ['server outage', new EmbeddingProviderError('EMBEDDING_SERVER', 'private upstream detail'), 'EMBEDDING_SERVER'],
+    ['unknown provider outage', new Error('private unknown outage detail'), 'EMBEDDING_FAILED'],
+  ])('fails a whole batch once on a provider-wide %s without delay or item audits', async (_label, failure, code) => {
     await seed('project', `outage-${_label}`, ['one', 'two', 'three', 'four']);
-    const sleep = vi.fn(async () => undefined);
     const embed = vi.fn(async () => { throw failure; });
     const provider: EmbeddingProvider = {
       id: 'ollama:outage', dim: 768, local: true, embed,
     };
 
     await expect(runEmbeddingBackfill(pool, provider, {
-      batchSize: 4, maxRows: 10, maxRetries: 3, retryBaseMs: 1, sleep,
-    })).rejects.toMatchObject({ code: 'EMBEDDING_FAILED' });
+      batchSize: 4, maxRows: 10,
+    })).rejects.toMatchObject({ code, failureScope: 'provider' });
 
     expect(embed).toHaveBeenCalledTimes(1);
     expect(embed.mock.calls[0]?.[0]).toHaveLength(4);
-    expect(sleep).not.toHaveBeenCalled();
     expect((await pool.query('SELECT count(*)::int AS count FROM memory_embeddings')).rows[0].count).toBe(0);
     expect((await pool.query(
       `SELECT count(*)::int AS count FROM audit_log
@@ -274,17 +397,15 @@ describe('embedding backfill', () => {
 
   it('treats an invalid whole-batch response as provider-wide without recursive calls', async () => {
     await seed('project', 'invalid-global-response', ['one', 'two', 'three']);
-    const sleep = vi.fn(async () => undefined);
     const embed = vi.fn(async () => [[0]]);
     const provider: EmbeddingProvider = {
       id: 'ollama:invalid-response', dim: 768, local: true, embed,
     };
 
     await expect(runEmbeddingBackfill(pool, provider, {
-      batchSize: 3, maxRows: 10, maxRetries: 3, retryBaseMs: 1, sleep,
+      batchSize: 3, maxRows: 10,
     })).rejects.toMatchObject({ code: 'EMBEDDING_FAILED' });
     expect(embed).toHaveBeenCalledTimes(1);
-    expect(sleep).not.toHaveBeenCalled();
     expect((await pool.query(
       `SELECT count(*)::int AS count FROM audit_log
         WHERE metadata->>'operation' = 'embedding_backfill'`,

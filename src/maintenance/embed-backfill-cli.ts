@@ -15,8 +15,6 @@ export interface EmbedBackfillCliOptions extends EmbeddingBackfillOptions {
   countOnly: boolean;
   batchSize: number;
   maxRows: number;
-  maxRetries: number;
-  retryBaseMs: number;
   maxErrors: number;
 }
 
@@ -40,7 +38,7 @@ function valueAfter(args: string[], index: number): string {
 export function parseEmbedBackfillCliOptions(args: string[]): EmbedBackfillCliOptions {
   const options: EmbedBackfillCliOptions = {
     dryRun: false, countOnly: false, batchSize: 32, maxRows: 1_000,
-    maxRetries: 2, retryBaseMs: 100, maxErrors: 25,
+    maxErrors: 25,
   };
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
@@ -48,8 +46,6 @@ export function parseEmbedBackfillCliOptions(args: string[]): EmbedBackfillCliOp
     else if (arg === '--count') options.countOnly = true;
     else if (arg === '--batch-size') options.batchSize = bounded(valueAfter(args, index++), arg, 1, 1_000);
     else if (arg === '--max-rows') options.maxRows = bounded(valueAfter(args, index++), arg, 1, 1_000_000);
-    else if (arg === '--max-retries') options.maxRetries = bounded(valueAfter(args, index++), arg, 0, 10);
-    else if (arg === '--retry-base-ms') options.retryBaseMs = bounded(valueAfter(args, index++), arg, 1, 60_000);
     else if (arg === '--max-errors') options.maxErrors = bounded(valueAfter(args, index++), arg, 1, 10_000);
     else if (arg === '--provider') options.providerId = valueAfter(args, index++);
     else if (arg === '--cursor') {
