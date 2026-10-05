@@ -44,7 +44,16 @@ export interface AuditExportResult {
 
 export type AuditRetentionResult =
   | { status: 'busy'; cutoff: string; runId: string; batches: 0; deleted: 0 }
-  | { status: 'dry-run'; cutoff: string; runId: string; eligible: number; oldestAt: string | null; batches: 0; deleted: 0 }
+  | {
+      status: 'dry-run';
+      cutoff: string;
+      runId: string;
+      eligible: number;
+      deletable: number;
+      oldestAt: string | null;
+      batches: 0;
+      deleted: 0;
+    }
   | {
       status: 'completed';
       cutoff: string;
@@ -144,6 +153,7 @@ export async function exportAuditRows(
   const runLabel = createHash('sha256').update(runId).digest('hex').slice(0, 16);
   const tempPath = path.join(directory, `.audit-${runLabel}-${batchNumber}-${randomUUID()}.tmp`);
   let handle;
+  let primaryError: unknown;
   try {
     handle = await open(tempPath, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY, 0o600);
     await handle.writeFile(bytes);
@@ -161,10 +171,13 @@ export async function exportAuditRows(
       await verifyAndSyncExistingExport(finalPath, filename, bytes, sha256, directory);
       return { filename, sha256, reused: true };
     }
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
     if (handle) await handle.close().catch(() => undefined);
     await unlink(tempPath).catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== 'ENOENT') throw error;
+      if (error.code !== 'ENOENT' && primaryError === undefined) throw error;
     });
   }
 }
@@ -212,6 +225,8 @@ async function syncDirectory(directory: string): Promise<void> {
 const AUDIT_TIMESTAMP_SQL = `CASE
   WHEN at = '-infinity'::timestamptz THEN '-infinity'
   WHEN at = 'infinity'::timestamptz THEN 'infinity'
+  WHEN extract(year FROM at AT TIME ZONE 'UTC') < 1
+    THEN to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z" BC')
   ELSE to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
 END`;
 
@@ -363,7 +378,7 @@ export async function runAuditRetention(
       lockHeld = lock.rows[0]?.acquired === true;
       const cutoffResult = await client.query<{ cutoff: string }>(
         `SELECT to_char(
-           (transaction_timestamp() - make_interval(days => $1::int)) AT TIME ZONE 'UTC',
+           (transaction_timestamp() - ($1::int * interval '24 hours')) AT TIME ZONE 'UTC',
            'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
          ) AS cutoff`,
         [retentionDays],
@@ -388,9 +403,11 @@ export async function runAuditRetention(
           [cutoff],
         );
         await client.query('COMMIT');
+        const eligible = preview.rows[0]?.eligible ?? 0;
         return {
           status: 'dry-run', cutoff, runId,
-          eligible: preview.rows[0]?.eligible ?? 0,
+          eligible,
+          deletable: Math.min(eligible, maxRows, batchSize * maxBatches),
           oldestAt: preview.rows[0]?.oldest_at ?? null,
           batches: 0, deleted: 0,
         };

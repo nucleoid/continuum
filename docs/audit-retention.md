@@ -69,7 +69,9 @@ filesystem and PostgreSQL transaction boundary.
 
 ## Running and scheduling
 
-Build first, then preview the exact fixed-cutoff eligible count:
+Build first, then preview the exact fixed-cutoff counts. The JSON result reports
+`eligible` as the total number of rows older than the cutoff and `deletable` as
+the maximum this invocation could delete after applying the batch and row caps:
 
 ```sh
 npm run build

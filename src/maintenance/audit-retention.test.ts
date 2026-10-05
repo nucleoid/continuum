@@ -116,19 +116,27 @@ describe('audit retention', () => {
     expect([first, second]).not.toContain(third);
   });
 
-  it('computes the transaction-clock cutoff in UTC under an Auckland session timezone', async () => {
+  it('uses exact elapsed days across the Auckland spring DST boundary', async () => {
     const admin = await seedPrincipal('svc:retention', 'admin');
-    const shouldRemain = await insertAudit(admin.id, new Date(cutoff.getTime() + 6 * 60 * 60 * 1_000));
+    const fixedDatabaseNow = '2026-10-05T00:00:00.000Z';
+    const shouldRemain = await insertAudit(admin.id, new Date('2026-09-05T00:30:00.000Z'));
     const client = await pool.connect();
     const wrapped = new Proxy(client, {
       get(target, property) {
         if (property === 'query') {
           return async (text: string, values?: unknown[]) => {
-            const result = await target.query(text, values);
             if (text.startsWith('BEGIN ISOLATION LEVEL')) {
+              const result = await target.query(text, values);
               await target.query("SET LOCAL TIME ZONE 'Pacific/Auckland'");
+              return result;
             }
-            return result;
+            if (text.includes('transaction_timestamp()') && text.includes('AS cutoff')) {
+              return target.query(
+                text.replace('transaction_timestamp()', '$2::timestamptz'),
+                [...(values ?? []), fixedDatabaseNow],
+              );
+            }
+            return target.query(text, values);
           };
         }
         const value = Reflect.get(target, property);
@@ -138,7 +146,7 @@ describe('audit retention', () => {
 
     const result = await runAuditRetention({ connect: async () => wrapped } as pg.Pool, options());
 
-    expect(Date.parse(result.cutoff)).toBeLessThan(Date.now() - 29 * 86_400_000);
+    expect(result.cutoff).toBe('2026-09-05T00:00:00.000000Z');
     expect(await pool.query('SELECT 1 FROM audit_log WHERE id = $1', [shouldRemain]))
       .toMatchObject({ rowCount: 1 });
   });
@@ -161,15 +169,19 @@ describe('audit retention', () => {
     const admin = await seedPrincipal('svc:retention', 'admin');
     await insertAudit(admin.id, new Date('2026-01-02T00:00:00Z'));
     await insertAudit(admin.id, new Date('2026-01-01T00:00:00Z'));
+    await insertAudit(admin.id, new Date('2026-01-03T00:00:00Z'));
     await insertAudit(admin.id, new Date(cutoff.getTime() + 60_000));
 
-    const result = await runAuditRetention(pool, { ...options(), dryRun: true });
+    const result = await runAuditRetention(pool, {
+      ...options(), dryRun: true, batchSize: 2, maxBatches: 1, maxRows: 1,
+    });
 
     expect(result).toMatchObject({
-      status: 'dry-run', eligible: 2, oldestAt: '2026-01-01T00:00:00.000000Z',
+      status: 'dry-run', eligible: 3, deletable: 1,
+      oldestAt: '2026-01-01T00:00:00.000000Z',
       batches: 0, deleted: 0,
     });
-    expect((await pool.query('SELECT count(*)::int AS count FROM audit_log')).rows[0].count).toBe(3);
+    expect((await pool.query('SELECT count(*)::int AS count FROM audit_log')).rows[0].count).toBe(4);
   });
 
   it('exports complete deterministic JSONL with escaping and reuses an identical final file', async () => {
@@ -340,6 +352,37 @@ describe('audit retention', () => {
          FROM audit_log WHERE action = 'archive'`,
     );
     expect(summary.rows[0]).toEqual({ first_at: '-infinity', last_at: '-infinity' });
+  });
+
+  it('exports and restores BC timestamps without losing the era', async () => {
+    const admin = await seedPrincipal('svc:retention', 'admin');
+    const inserted = await pool.query<{ id: string }>(
+      `INSERT INTO audit_log (at, principal_id, action)
+       VALUES ('0044-03-15 12:00:00.123456+00 BC'::timestamptz, $1, 'read')
+       RETURNING id::text`,
+      [admin.id],
+    );
+    const directory = await exportDirectory();
+
+    await runAuditRetention(pool, { ...options(), exportDirectory: directory });
+
+    const exportName = (await readdir(directory)).find((name) => name.endsWith('.jsonl'));
+    expect(exportName).toBeDefined();
+    const line = JSON.parse(await readFile(path.join(directory, exportName!), 'utf8')) as {
+      id: string; at: string; principal_id: string; action: string;
+    };
+    expect(line.at).toBe('0044-03-15T12:00:00.123456Z BC');
+    await pool.query(
+      `INSERT INTO audit_log (id, at, principal_id, action)
+       VALUES ($1::bigint, $2::timestamptz, $3::uuid, $4)`,
+      [line.id, line.at, line.principal_id, line.action],
+    );
+    const restored = await pool.query<{ at: string }>(
+      `SELECT to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z" BC') AS at
+         FROM audit_log WHERE id = $1`,
+      [inserted.rows[0].id],
+    );
+    expect(restored.rows[0].at).toBe(line.at);
   });
 
   it('rolls back when an audit row changes after export and before delete', async () => {
