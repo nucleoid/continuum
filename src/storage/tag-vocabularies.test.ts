@@ -159,6 +159,12 @@ describe('tag vocabulary schema', () => {
             continuum_legacy_tags: [
               ' Customer-Impact ', 'customer-impact', 'legacy label',
             ],
+            continuum_tag_migration: {
+              version: 1,
+              original_tags: [
+                'decision', ' Customer-Impact ', 'customer-impact', 'legacy label',
+              ],
+            },
           },
         },
         {
@@ -196,6 +202,9 @@ describe('tag vocabulary schema', () => {
           tags: ['pr'],
           metadata: {
             continuum_legacy_tags: [null, 'x'],
+            continuum_migration_conflicts: [
+              { key: 'continuum_legacy_tags', value: null },
+            ],
             continuum_tag_migration: {
               version: 1,
               original_tags: ['PR', 'pr', null, 'x'],
@@ -338,7 +347,13 @@ describe('tag vocabulary schema', () => {
       );
       expect(rows).toEqual([{
         tags: [],
-        metadata: { continuum_legacy_tags: ['private-during-rollout'] },
+        metadata: {
+          continuum_legacy_tags: ['private-during-rollout'],
+          continuum_tag_migration: {
+            version: 1,
+            original_tags: ['private-during-rollout'],
+          },
+        },
       }]);
     } finally {
       if (priorWriterOpen) await priorWriter?.query('ROLLBACK').catch(() => undefined);
@@ -371,6 +386,60 @@ describe('tag vocabulary schema', () => {
     expect(sql.match(/UPDATE memories AS memory/g)).toHaveLength(1);
     expect(sql).toMatch(/WITH expanded AS MATERIALIZED/i);
     expect(sql).toMatch(/row_number\(\) OVER/i);
+  });
+
+  it('bounds the principals foreign-key lock wait before any migration DDL', async () => {
+    const suffix = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const schema = `tag_migration_principal_timeout_${suffix}`;
+    const first = await mkdtemp(join(tmpdir(), 'continuum-tags-principal-before-'));
+    const second = await mkdtemp(join(tmpdir(), 'continuum-tags-principal-after-'));
+    const PgPool = (await import('pg')).default.Pool;
+    const admin = new PgPool({ connectionString: DATABASE_URL });
+    const writerPool = new PgPool({
+      connectionString: DATABASE_URL,
+      options: `-c search_path=${schema},public`,
+    });
+    const migrator = new PgPool({
+      connectionString: DATABASE_URL,
+      options: `-c search_path=${schema},public`,
+    });
+    let writer: pg.PoolClient | undefined;
+    try {
+      await admin.query(`CREATE SCHEMA ${schema}`);
+      for (const name of [
+        '0001_init.sql', '0002_lifecycle_principal.sql',
+        '0003_lifecycle_expiry_index.sql', '0004_review_queue_index.sql',
+      ]) {
+        await writeFile(join(first, name), await readFile(join(MIGRATIONS, name), 'utf8'));
+      }
+      const migrationSql = await readFile(join(MIGRATIONS, '0010_tag_vocabularies.sql'), 'utf8');
+      await writeFile(
+        join(second, '0010_tag_vocabularies.sql'),
+        migrationSql.replace("SET LOCAL lock_timeout = '5s';", "SET LOCAL lock_timeout = '150ms';"),
+      );
+      await runMigrations(writerPool, first);
+      writer = await writerPool.connect();
+      await writer.query('BEGIN');
+      await writer.query('LOCK TABLE principals IN ACCESS EXCLUSIVE MODE');
+
+      const started = Date.now();
+      await expect(runMigrations(migrator, second)).rejects.toThrow(/lock timeout/i);
+      expect(Date.now() - started).toBeLessThan(2_000);
+      const rollback = await writerPool.query(
+        `SELECT to_regclass('${schema}.tag_vocabularies') AS vocabulary`,
+      );
+      expect(rollback.rows).toEqual([{ vocabulary: null }]);
+    } finally {
+      await writer?.query('ROLLBACK').catch(() => undefined);
+      writer?.release();
+      await Promise.all([writerPool.end(), migrator.end()]);
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+      await admin.end();
+      await Promise.all([
+        rm(first, { recursive: true, force: true }),
+        rm(second, { recursive: true, force: true }),
+      ]);
+    }
   });
 
   it('rolls back cleanly when the bounded table-lock wait expires', async () => {

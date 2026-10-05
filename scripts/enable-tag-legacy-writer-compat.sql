@@ -1,7 +1,7 @@
 -- Run this procedure only after webhook intake is paused and in-flight
 -- deliveries are drained, immediately before rolling the application back to
--- a version whose ADO/deploy plugins still emit dynamic tags. It preserves
--- those values privately while every other writer remains fail-closed.
+-- any pre-vocabulary application version. It normalizes every legacy writer
+-- at the database boundary so rollback cannot silently lose tagged writes.
 BEGIN;
 
 SET LOCAL lock_timeout = '5s';
@@ -15,12 +15,9 @@ DECLARE
   memory_scope_kind TEXT;
   active_tags TEXT[];
   legacy_tags JSONB;
-  unknown_count INTEGER;
+  original_tags TEXT[] := NEW.tags;
+  original_metadata JSONB := NEW.metadata;
 BEGIN
-  IF cardinality(NEW.tags) = 0 THEN
-    RETURN NEW;
-  END IF;
-
   SELECT kind INTO STRICT memory_scope_kind
     FROM scopes
    WHERE id = NEW.scope_id;
@@ -28,78 +25,85 @@ BEGIN
   PERFORM 1
     FROM tag_vocabularies
    WHERE scope_kind = memory_scope_kind
-     AND tag = ANY(NEW.tags)
+     AND tag = ANY(
+       SELECT lower(btrim(requested.tag))
+         FROM unnest(NEW.tags) AS requested(tag)
+     )
    FOR KEY SHARE;
 
-  IF NEW.source IN ('ado-workitem', 'deploy-event') THEN
-    WITH classified AS (
-      SELECT requested.tag,
-             requested.position,
-             EXISTS (
-               SELECT 1
-                 FROM tag_vocabularies AS vocabulary
-                WHERE vocabulary.scope_kind = memory_scope_kind
-                  AND vocabulary.tag = requested.tag
-             ) AS allowed,
-             row_number() OVER (
-               PARTITION BY requested.tag ORDER BY requested.position
-             ) AS occurrence
-        FROM unnest(NEW.tags) WITH ORDINALITY AS requested(tag, position)
+  WITH expanded AS (
+    SELECT requested.tag,
+           requested.position,
+           lower(btrim(requested.tag)) AS normalized
+      FROM unnest(NEW.tags) WITH ORDINALITY AS requested(tag, position)
+  ), classified AS (
+    SELECT expanded.*,
+           EXISTS (
+             SELECT 1
+               FROM tag_vocabularies AS vocabulary
+              WHERE vocabulary.scope_kind = memory_scope_kind
+                AND vocabulary.tag = expanded.normalized
+           ) AS allowed,
+           row_number() OVER (
+             PARTITION BY normalized ORDER BY position
+           ) AS occurrence
+      FROM expanded
+  )
+  SELECT COALESCE(
+           array_agg(normalized ORDER BY position)
+             FILTER (WHERE allowed AND occurrence = 1),
+           '{}'::text[]
+         ),
+         jsonb_agg(tag ORDER BY position)
+           FILTER (WHERE NOT allowed OR occurrence > 1)
+    INTO active_tags, legacy_tags
+    FROM classified;
+
+  NEW.tags := active_tags;
+  NEW.metadata :=
+    CASE
+      WHEN jsonb_typeof(original_metadata) = 'object' THEN
+        original_metadata
+          - 'continuum_legacy_tags'
+          - 'continuum_legacy_metadata'
+          - 'continuum_tag_migration'
+          - 'continuum_migration_conflicts'
+      ELSE '{}'::jsonb
+    END
+    || CASE WHEN jsonb_typeof(original_metadata) <> 'object'
+      THEN jsonb_build_object('continuum_legacy_metadata', original_metadata)
+      ELSE '{}'::jsonb END
+    || CASE WHEN legacy_tags IS NOT NULL
+      THEN jsonb_build_object('continuum_legacy_tags', legacy_tags)
+      ELSE '{}'::jsonb END
+    || jsonb_build_object(
+      'continuum_tag_migration',
+      jsonb_build_object('version', 1, 'original_tags', to_jsonb(original_tags))
     )
-    SELECT COALESCE(
-             array_agg(tag ORDER BY position)
-               FILTER (WHERE allowed AND occurrence = 1),
-             '{}'::text[]
-           ),
-           jsonb_agg(tag ORDER BY position)
-             FILTER (WHERE NOT allowed OR occurrence > 1)
-      INTO active_tags, legacy_tags
-      FROM classified;
-
-    NEW.tags := active_tags;
-    IF legacy_tags IS NOT NULL THEN
-      NEW.metadata := jsonb_set(
-        CASE
-          WHEN jsonb_typeof(NEW.metadata) = 'object' THEN NEW.metadata
-          ELSE jsonb_build_object('continuum_legacy_metadata', NEW.metadata)
-        END,
-        '{continuum_legacy_tags}',
-        CASE
-          WHEN jsonb_typeof(NEW.metadata) = 'object'
-            AND jsonb_typeof(NEW.metadata->'continuum_legacy_tags') = 'array'
-            THEN NEW.metadata->'continuum_legacy_tags'
-          WHEN jsonb_typeof(NEW.metadata) = 'object'
-            AND NEW.metadata ? 'continuum_legacy_tags'
-            AND jsonb_typeof(NEW.metadata->'continuum_legacy_tags') <> 'null'
-            THEN jsonb_build_array(NEW.metadata->'continuum_legacy_tags')
-          ELSE '[]'::jsonb
-        END || legacy_tags,
-        true
-      );
-    END IF;
-    RETURN NEW;
-  END IF;
-
-  SELECT count(*)::integer INTO unknown_count
-    FROM unnest(NEW.tags) AS requested(tag)
-   WHERE requested.tag IS NULL
-      OR NOT EXISTS (
-        SELECT 1
-          FROM tag_vocabularies AS vocabulary
-         WHERE vocabulary.scope_kind = memory_scope_kind
-           AND vocabulary.tag = requested.tag
-      );
-
-  IF unknown_count > 0
-     OR cardinality(NEW.tags) <> (
-       SELECT count(DISTINCT requested.tag)
-         FROM unnest(NEW.tags) AS requested(tag)
-     ) THEN
-    RAISE EXCEPTION USING
-      ERRCODE = '23514',
-      MESSAGE = 'memory tags violate the controlled vocabulary',
-      CONSTRAINT = 'memories_tags_controlled_vocabulary';
-  END IF;
+    || CASE WHEN jsonb_typeof(original_metadata) = 'object' AND (
+         original_metadata ? 'continuum_legacy_tags'
+      OR original_metadata ? 'continuum_legacy_metadata'
+      OR original_metadata ? 'continuum_tag_migration'
+      OR original_metadata ? 'continuum_migration_conflicts'
+    ) THEN jsonb_build_object(
+      'continuum_migration_conflicts',
+        CASE WHEN original_metadata ? 'continuum_legacy_tags'
+          THEN jsonb_build_array(jsonb_build_object(
+            'key', 'continuum_legacy_tags', 'value', original_metadata->'continuum_legacy_tags'))
+          ELSE '[]'::jsonb END
+        || CASE WHEN original_metadata ? 'continuum_legacy_metadata'
+          THEN jsonb_build_array(jsonb_build_object(
+            'key', 'continuum_legacy_metadata', 'value', original_metadata->'continuum_legacy_metadata'))
+          ELSE '[]'::jsonb END
+        || CASE WHEN original_metadata ? 'continuum_tag_migration'
+          THEN jsonb_build_array(jsonb_build_object(
+            'key', 'continuum_tag_migration', 'value', original_metadata->'continuum_tag_migration'))
+          ELSE '[]'::jsonb END
+        || CASE WHEN original_metadata ? 'continuum_migration_conflicts'
+          THEN jsonb_build_array(jsonb_build_object(
+            'key', 'continuum_migration_conflicts', 'value', original_metadata->'continuum_migration_conflicts'))
+          ELSE '[]'::jsonb END
+    ) ELSE '{}'::jsonb END;
 
   RETURN NEW;
 END;

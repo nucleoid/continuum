@@ -89,6 +89,10 @@ describe('controlled-tag mixed-version operations', () => {
         metadata: {
           keep: 'yes',
           continuum_legacy_tags: ['active', 'secret team', 'decision'],
+          continuum_tag_migration: {
+            version: 1,
+            original_tags: ['ado', 'active', 'secret team', 'decision', 'decision'],
+          },
         },
       }]);
 
@@ -111,7 +115,7 @@ describe('controlled-tag mixed-version operations', () => {
       expect(manual.rows).toEqual([{
         tags: ['deploy'],
         metadata: {
-          continuum_legacy_tags: ['active'],
+          continuum_legacy_tags: ['active', 'deploy'],
           continuum_tag_migration: {
             version: 1,
             original_tags: ['Deploy', 'active', 'deploy'],

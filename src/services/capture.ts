@@ -32,12 +32,20 @@ export interface CaptureOptions {
   relationThreshold?: number;
 }
 
+export const RESERVED_MEMORY_METADATA_KEYS = [
+  'related',
+  'continuum_legacy_tags',
+  'continuum_legacy_metadata',
+  'continuum_tag_migration',
+  'continuum_migration_conflicts',
+] as const;
+
 export function validateCaptureContent(input: Pick<CaptureInput,
   'title' | 'body' | 'tags' | 'source' | 'sourceRef' | 'metadata'>): void {
   if (input.title.length === 0 || input.title.length > 500 || input.body.length === 0) {
     throw new ServiceError('INVALID_INPUT', 'Invalid memory content');
   }
-  for (const key of ['related', 'continuum_legacy_tags']) {
+  for (const key of RESERVED_MEMORY_METADATA_KEYS) {
     if (input.metadata && Object.hasOwn(input.metadata, key)) {
       throw new ServiceError(
         'INVALID_INPUT',

@@ -1,3 +1,7 @@
+-- This must be the first migration statement: principal creation and other
+-- pre-lock DDL can otherwise wait indefinitely on principals/memories FKs.
+SET LOCAL lock_timeout = '5s';
+
 CREATE TABLE tag_vocabularies (
   scope_kind  TEXT NOT NULL CHECK (scope_kind IN ('org', 'team', 'project', 'user', 'role')),
   tag         TEXT NOT NULL CHECK (length(tag) BETWEEN 1 AND 64),
@@ -26,7 +30,6 @@ SELECT scope_kind, tag, 'Built-in Continuum tag', true
 -- so promote/verify writers drain before the migration can block their later
 -- write-lock upgrade. ACCESS SHARE remains compatible, so reads continue.
 -- Fail instead of waiting forever when an operator has not drained writers.
-SET LOCAL lock_timeout = '5s';
 LOCK TABLE memories IN EXCLUSIVE MODE;
 
 -- A vocabulary is shared by every scope of a kind. Historical private values
@@ -34,8 +37,10 @@ LOCK TABLE memories IN EXCLUSIVE MODE;
 -- active and retain every unknown original value on its memory, including
 -- plugin dimensions and malformed values, without exposing them through the
 -- shared scope-kind vocabulary.
-WITH expanded AS (
+WITH expanded AS MATERIALIZED (
   SELECT memory.id,
+         memory.tags AS original_tags,
+         memory.metadata AS original_metadata,
          existing.value,
          existing.position,
          lower(btrim(existing.value)) AS normalized,
@@ -47,78 +52,88 @@ WITH expanded AS (
          ) AS is_shipped
     FROM memories AS memory
     JOIN scopes AS scope ON scope.id = memory.scope_id
-   CROSS JOIN LATERAL unnest(memory.tags) WITH ORDINALITY AS existing(value, position)
-), shipped AS (
-  SELECT id, normalized AS tag, min(position) AS first_position
+    LEFT JOIN LATERAL unnest(memory.tags) WITH ORDINALITY AS existing(value, position)
+      ON true
+), ranked AS MATERIALIZED (
+  SELECT expanded.*,
+         row_number() OVER (
+           PARTITION BY id, normalized ORDER BY position
+         ) AS normalized_occurrence
     FROM expanded
-   WHERE is_shipped
-   GROUP BY id, normalized
-), classified AS (
-  SELECT memory.id,
-         (
-           SELECT array_agg(shipped.tag ORDER BY shipped.first_position)
-             FROM shipped
-            WHERE shipped.id = memory.id
+), grouped AS MATERIALIZED (
+  SELECT id,
+         original_tags,
+         original_metadata,
+         COALESCE(
+           array_agg(normalized ORDER BY position)
+             FILTER (WHERE position IS NOT NULL AND is_shipped AND normalized_occurrence = 1),
+           '{}'::text[]
          ) AS active_tags,
+         jsonb_agg(value ORDER BY position)
+           FILTER (WHERE position IS NOT NULL AND NOT is_shipped) AS legacy_tags
+    FROM ranked
+   GROUP BY id, original_tags, original_metadata
+), rewritten AS MATERIALIZED (
+  SELECT id,
+         active_tags,
          (
-           SELECT array_agg(expanded.value ORDER BY expanded.position)
-             FROM expanded
-            WHERE expanded.id = memory.id
-              AND NOT expanded.is_shipped
-         ) AS legacy_tags
-    FROM memories AS memory
-   WHERE cardinality(memory.tags) > 0
+           CASE
+             WHEN jsonb_typeof(original_metadata) = 'object' THEN
+               original_metadata
+                 - 'continuum_legacy_tags'
+                 - 'continuum_legacy_metadata'
+                 - 'continuum_tag_migration'
+                 - 'continuum_migration_conflicts'
+             ELSE '{}'::jsonb
+           END
+           || CASE WHEN jsonb_typeof(original_metadata) <> 'object'
+             THEN jsonb_build_object('continuum_legacy_metadata', original_metadata)
+             ELSE '{}'::jsonb END
+           || CASE WHEN legacy_tags IS NOT NULL
+             THEN jsonb_build_object('continuum_legacy_tags', legacy_tags)
+             ELSE '{}'::jsonb END
+           || jsonb_build_object(
+             'continuum_tag_migration',
+             jsonb_build_object('version', 1, 'original_tags', to_jsonb(original_tags))
+           )
+           || CASE WHEN jsonb_typeof(original_metadata) = 'object' AND (
+                original_metadata ? 'continuum_legacy_tags'
+             OR original_metadata ? 'continuum_legacy_metadata'
+             OR original_metadata ? 'continuum_tag_migration'
+             OR original_metadata ? 'continuum_migration_conflicts'
+           ) THEN jsonb_build_object(
+             'continuum_migration_conflicts',
+               CASE WHEN original_metadata ? 'continuum_legacy_tags'
+                 THEN jsonb_build_array(jsonb_build_object(
+                   'key', 'continuum_legacy_tags', 'value', original_metadata->'continuum_legacy_tags'))
+                 ELSE '[]'::jsonb END
+               || CASE WHEN original_metadata ? 'continuum_legacy_metadata'
+                 THEN jsonb_build_array(jsonb_build_object(
+                   'key', 'continuum_legacy_metadata', 'value', original_metadata->'continuum_legacy_metadata'))
+                 ELSE '[]'::jsonb END
+               || CASE WHEN original_metadata ? 'continuum_tag_migration'
+                 THEN jsonb_build_array(jsonb_build_object(
+                   'key', 'continuum_tag_migration', 'value', original_metadata->'continuum_tag_migration'))
+                 ELSE '[]'::jsonb END
+               || CASE WHEN original_metadata ? 'continuum_migration_conflicts'
+                 THEN jsonb_build_array(jsonb_build_object(
+                   'key', 'continuum_migration_conflicts', 'value', original_metadata->'continuum_migration_conflicts'))
+                 ELSE '[]'::jsonb END
+           ) ELSE '{}'::jsonb END
+         ) AS metadata
+    FROM grouped
+   WHERE original_tags IS DISTINCT FROM active_tags
+      OR jsonb_typeof(original_metadata) <> 'object'
+      OR original_metadata ?| ARRAY[
+        'continuum_legacy_tags', 'continuum_legacy_metadata',
+        'continuum_tag_migration', 'continuum_migration_conflicts'
+      ]
 )
 UPDATE memories AS memory
-   SET metadata = jsonb_set(
-         CASE
-           WHEN jsonb_typeof(memory.metadata) = 'object' THEN memory.metadata
-           ELSE jsonb_build_object('continuum_legacy_metadata', memory.metadata)
-         END,
-         '{continuum_legacy_tags}',
-         CASE
-           WHEN jsonb_typeof(memory.metadata) = 'object'
-             AND jsonb_typeof(memory.metadata->'continuum_legacy_tags') = 'array'
-             THEN memory.metadata->'continuum_legacy_tags'
-           WHEN jsonb_typeof(memory.metadata) = 'object'
-             AND memory.metadata ? 'continuum_legacy_tags'
-             AND jsonb_typeof(memory.metadata->'continuum_legacy_tags') <> 'null'
-             THEN jsonb_build_array(memory.metadata->'continuum_legacy_tags')
-           ELSE '[]'::jsonb
-         END || to_jsonb(classified.legacy_tags),
-         true
-       ),
-       tags = COALESCE(classified.active_tags, '{}')
-  FROM classified
- WHERE classified.id = memory.id
-   AND classified.legacy_tags IS NOT NULL;
-
--- Memories containing only shipped tags still need normalization and
--- de-duplication but do not need a legacy metadata field.
-WITH shipped AS (
-  SELECT memory.id,
-         lower(btrim(existing.value)) AS tag,
-         min(existing.position) AS first_position
-    FROM memories AS memory
-    JOIN scopes AS scope ON scope.id = memory.scope_id
-   CROSS JOIN LATERAL unnest(memory.tags) WITH ORDINALITY AS existing(value, position)
-   WHERE EXISTS (
-     SELECT 1
-       FROM tag_vocabularies AS vocabulary
-      WHERE vocabulary.scope_kind = scope.kind
-        AND vocabulary.tag = lower(btrim(existing.value))
-   )
-   GROUP BY memory.id, lower(btrim(existing.value))
-)
-UPDATE memories AS memory
-   SET tags = classified.tags
-  FROM (
-    SELECT id, array_agg(tag ORDER BY first_position) AS tags
-      FROM shipped
-     GROUP BY id
-  ) AS classified
- WHERE memory.id = classified.id
-   AND memory.tags IS DISTINCT FROM classified.tags;
+   SET tags = rewritten.active_tags,
+       metadata = rewritten.metadata
+  FROM rewritten
+ WHERE rewritten.id = memory.id;
 
 -- Install the database boundary in the same transaction as the rewrite. This
 -- makes a migration-first rolling deploy fail closed for old writers: values
