@@ -43,7 +43,7 @@ describe('tag vocabulary schema', () => {
     ]);
   });
 
-  it('adopts valid historical tags without blocking migration deployment', async () => {
+  it('keeps only shipped historical tags active and preserves private values in metadata', async () => {
     const suffix = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
     const schema = `tag_migration_${suffix}`;
     const first = await mkdtemp(join(tmpdir(), 'continuum-tags-before-'));
@@ -77,22 +77,50 @@ describe('tag vocabulary schema', () => {
           '20000000-0000-4000-8000-000000000001',
           'fact', 'Legacy', 'Keep its taxonomy',
           '10000000-0000-4000-8000-000000000001', 'manual',
-          ARRAY[' Customer-Impact ', 'customer-impact', 'legacy label']
+          ARRAY['decision', ' Customer-Impact ', 'customer-impact', 'legacy label']
+        ), (
+          '30000000-0000-4000-8000-000000000002',
+          '20000000-0000-4000-8000-000000000001',
+          'fact', 'Plugin legacy', 'Keep plugin dimensions privately',
+          '10000000-0000-4000-8000-000000000001', 'ado-workitem',
+          ARRAY['ado', 'private-project', 'System.AreaPath=Secret Team']
         )
       `);
 
       await expect(runMigrations(historical, second)).resolves.toHaveLength(1);
-      const memory = await historical.query(
-        `SELECT tags, metadata FROM memories
-          WHERE id = '30000000-0000-4000-8000-000000000001'`,
+      const memories = await historical.query(
+        `SELECT id, tags, metadata FROM memories
+          WHERE id IN (
+            '30000000-0000-4000-8000-000000000001',
+            '30000000-0000-4000-8000-000000000002'
+          )
+          ORDER BY id`,
       );
-      expect(memory.rows[0].tags).toEqual(['customer-impact']);
-      expect(memory.rows[0].metadata).toEqual({ continuum_legacy_tags: ['legacy label'] });
+      expect(memories.rows).toEqual([
+        {
+          id: '30000000-0000-4000-8000-000000000001',
+          tags: ['decision'],
+          metadata: {
+            continuum_legacy_tags: [
+              ' Customer-Impact ', 'customer-impact', 'legacy label',
+            ],
+          },
+        },
+        {
+          id: '30000000-0000-4000-8000-000000000002',
+          tags: ['ado'],
+          metadata: {
+            continuum_legacy_tags: ['private-project', 'System.AreaPath=Secret Team'],
+          },
+        },
+      ]);
       const vocabulary = await historical.query(
-        `SELECT is_system, created_by FROM tag_vocabularies
-          WHERE scope_kind = 'project' AND tag = 'customer-impact'`,
+        `SELECT tag FROM tag_vocabularies
+          WHERE scope_kind = 'project'
+            AND tag IN ('customer-impact', 'private-project')
+          ORDER BY tag`,
       );
-      expect(vocabulary.rows).toEqual([{ is_system: true, created_by: null }]);
+      expect(vocabulary.rows).toEqual([]);
     } finally {
       await historical.end();
       await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
