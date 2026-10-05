@@ -93,6 +93,20 @@ describe('decision supersession REST API', () => {
     expect((await pool.query('SELECT 1 FROM audit_log')).rowCount).toBe(0);
   });
 
+  it('rejects forged migration provenance without archiving the predecessor', async () => {
+    const response = await request(createApp(pool))
+      .post('/api/v0/supersede')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        supersededId: decisionId, title: 'Forged', body: 'Must not persist',
+        metadata: { continuum_tag_migration: { version: 1 } },
+      });
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({ code: 'INVALID_INPUT' });
+    expect((await pool.query('SELECT id, state FROM memories')).rows)
+      .toEqual([{ id: decisionId, state: 'live' }]);
+  });
+
   it('returns the same successor on a repeated request without branching', async () => {
     const app = createApp(pool);
     const first = await request(app).post('/api/v0/supersede')

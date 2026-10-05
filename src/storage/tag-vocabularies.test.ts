@@ -112,7 +112,7 @@ describe('tag vocabulary schema', () => {
           'fact', 'Plugin legacy', 'Keep plugin dimensions privately',
           '10000000-0000-4000-8000-000000000001', 'ado-workitem',
           ARRAY['ado', 'private-project', 'System.AreaPath=Secret Team'],
-          '{"continuum_legacy_tags":"pre-existing","keep":"yes"}'::jsonb
+          '{"continuum_legacy_tags":"pre-existing","continuum_legacy_metadata":{"forged":true},"continuum_tag_migration":{"version":999},"continuum_migration_conflicts":"forged","keep":"yes"}'::jsonb
         ), (
           '30000000-0000-4000-8000-000000000003',
           '20000000-0000-4000-8000-000000000001',
@@ -165,8 +165,16 @@ describe('tag vocabulary schema', () => {
           id: '30000000-0000-4000-8000-000000000002',
           tags: ['ado'],
           metadata: {
-            continuum_legacy_tags: [
-              'pre-existing', 'private-project', 'System.AreaPath=Secret Team',
+            continuum_legacy_tags: ['private-project', 'System.AreaPath=Secret Team'],
+            continuum_tag_migration: {
+              version: 1,
+              original_tags: ['ado', 'private-project', 'System.AreaPath=Secret Team'],
+            },
+            continuum_migration_conflicts: [
+              { key: 'continuum_legacy_tags', value: 'pre-existing' },
+              { key: 'continuum_legacy_metadata', value: { forged: true } },
+              { key: 'continuum_tag_migration', value: { version: 999 } },
+              { key: 'continuum_migration_conflicts', value: 'forged' },
             ],
             keep: 'yes',
           },
@@ -177,6 +185,10 @@ describe('tag vocabulary schema', () => {
           metadata: {
             continuum_legacy_metadata: [1, 2],
             continuum_legacy_tags: ['private-array'],
+            continuum_tag_migration: {
+              version: 1,
+              original_tags: ['private-array'],
+            },
           },
         },
         {
@@ -184,6 +196,10 @@ describe('tag vocabulary schema', () => {
           tags: ['pr'],
           metadata: {
             continuum_legacy_tags: [null, 'x'],
+            continuum_tag_migration: {
+              version: 1,
+              original_tags: ['PR', 'pr', null, 'x'],
+            },
             keep: 'yes',
           },
         },
@@ -345,8 +361,16 @@ describe('tag vocabulary schema', () => {
     const timeout = sql.indexOf("SET LOCAL lock_timeout = '5s';");
     const lock = sql.indexOf('LOCK TABLE memories IN EXCLUSIVE MODE;');
     expect(timeout).toBeGreaterThan(-1);
+    expect(sql.slice(0, timeout).replace(/--[^\n]*(?:\n|$)/g, '').trim()).toBe('');
     expect(lock).toBeGreaterThan(timeout);
     expect(sql).not.toContain('LOCK TABLE memories IN SHARE ROW EXCLUSIVE MODE;');
+  });
+
+  it('uses one materialized grouped pass for the historical rewrite', async () => {
+    const sql = await readFile(join(MIGRATIONS, '0010_tag_vocabularies.sql'), 'utf8');
+    expect(sql.match(/UPDATE memories AS memory/g)).toHaveLength(1);
+    expect(sql).toMatch(/WITH expanded AS MATERIALIZED/i);
+    expect(sql).toMatch(/row_number\(\) OVER/i);
   });
 
   it('rolls back cleanly when the bounded table-lock wait expires', async () => {

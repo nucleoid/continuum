@@ -62,6 +62,26 @@ describe('POST /api/v0/capture', () => {
     });
   });
 
+  it.each([
+    'continuum_legacy_tags',
+    'continuum_legacy_metadata',
+    'continuum_tag_migration',
+    'continuum_migration_conflicts',
+  ])('rejects forged migration metadata namespace %s', async (key) => {
+    await seedActor();
+    const res = await request(createApp(pool))
+      .post('/api/v0/capture')
+      .set('Authorization', 'Bearer entra:user:capture')
+      .send({
+        scope: { kind: 'team', name: 'payments' },
+        type: 'fact', title: 'Forged provenance', body: 'Must not persist', source: 'manual',
+        metadata: { [key]: 'forged' },
+      });
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ code: 'INVALID_INPUT' });
+    expect((await pool.query('SELECT id FROM memories')).rows).toEqual([]);
+  });
+
   it.each(captureSources)('accepts registered capture source %s', async (source) => {
     await seedActor();
     const res = await request(app)

@@ -31,7 +31,7 @@ describe('controlled-tag mixed-version operations', () => {
     expect(documentation).toMatch(/replay(?:ed|ing)?[\s\S]+idempotent/i);
   });
 
-  it('ships an exact pre-rollback trigger procedure for legacy ADO and deploy writers', async () => {
+  it('ships an exact pre-rollback trigger procedure for every legacy writer', async () => {
     const procedure = await readFile(
       join(process.cwd(), 'scripts/enable-tag-legacy-writer-compat.sql'),
       'utf8',
@@ -42,14 +42,14 @@ describe('controlled-tag mixed-version operations', () => {
     );
 
     expect(procedure).toContain('CREATE OR REPLACE FUNCTION enforce_memory_tag_vocabulary()');
-    expect(procedure).toMatch(/NEW\.source\s+IN\s+\('ado-workitem',\s*'deploy-event'\)/i);
+    expect(procedure).not.toMatch(/NEW\.source\s+IN/i);
     expect(procedure).toContain('continuum_legacy_tags');
     expect(procedure).toContain('FOR KEY SHARE');
     expect(documentation).toContain('scripts/enable-tag-legacy-writer-compat.sql');
     expect(documentation).toMatch(/pause webhook intake[\s\S]+drain in-flight[\s\S]+application rollback/i);
   });
 
-  it('quarantines only legacy plugin dynamics and keeps unrelated writers strict', async () => {
+  it('quarantines unknown tags from every legacy writer without losing originals', async () => {
     const schema = `tag_rollback_${Date.now()}_${Math.random().toString(16).slice(2)}`;
     const admin = new pg.Pool({ connectionString: DATABASE_URL });
     const pool = new pg.Pool({
@@ -92,16 +92,35 @@ describe('controlled-tag mixed-version operations', () => {
         },
       }]);
 
-      await expect(pool.query(`
+      await pool.query(`
         INSERT INTO memories (
-          id, scope_id, type, title, body, author_id, source, tags
+          id, scope_id, type, title, body, author_id, source, tags, metadata
         ) VALUES (
           '30000000-0000-4000-8000-000000000031',
           '20000000-0000-4000-8000-000000000030',
-          'fact', 'Manual', 'Manual writers remain strict',
-          '10000000-0000-4000-8000-000000000030', 'manual', ARRAY['active']
+          'fact', 'Manual', 'Manual writers are safely normalized',
+          '10000000-0000-4000-8000-000000000030', 'manual',
+          ARRAY['Deploy', 'active', 'deploy'],
+          '{"continuum_tag_migration":"forged"}'::jsonb
         )
-      `)).rejects.toMatchObject({ code: '23514' });
+      `);
+      const manual = await pool.query(
+        `SELECT tags, metadata FROM memories
+          WHERE id = '30000000-0000-4000-8000-000000000031'`,
+      );
+      expect(manual.rows).toEqual([{
+        tags: ['deploy'],
+        metadata: {
+          continuum_legacy_tags: ['active'],
+          continuum_tag_migration: {
+            version: 1,
+            original_tags: ['Deploy', 'active', 'deploy'],
+          },
+          continuum_migration_conflicts: [
+            { key: 'continuum_tag_migration', value: 'forged' },
+          ],
+        },
+      }]);
     } finally {
       await pool.end();
       await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
