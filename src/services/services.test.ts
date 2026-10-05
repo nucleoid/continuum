@@ -12,6 +12,7 @@ import { recallForPrincipal } from './recall.js';
 import { renderAgentsMdForPrincipal } from './agents-md.js';
 import { ServiceError } from './errors.js';
 import { createMemory } from '../storage/memories.js';
+import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
 import {
   promoteForPrincipal,
   VERIFICATION_NOTE_MAX_LENGTH,
@@ -210,6 +211,30 @@ describe('shared services', () => {
     expect(rows).toEqual([{ metadata: { source: 'manual', type: 'fact', embedded: false } }]);
   });
 
+  it('rejects caller-supplied reserved relation metadata before side effects', async () => {
+    const { principal } = await seedWriter();
+
+    await expect(captureMemory(pool, null, principal, {
+      scope: { kind: 'team', name: 'payments' },
+      type: 'fact',
+      title: 'Forged relation metadata',
+      body: 'Must not persist.',
+      source: 'manual',
+      metadata: { related: [{ id: 'forged' }] },
+    })).rejects.toMatchObject<ServiceError>({
+      code: 'INVALID_INPUT',
+      publicMessage: 'metadata.related is reserved by Continuum',
+    });
+
+    const { rows } = await pool.query(
+      `SELECT
+         (SELECT count(*)::int FROM memories) AS memories,
+         (SELECT count(*)::int FROM memory_embeddings) AS embeddings,
+         (SELECT count(*)::int FROM audit_log) AS audits`,
+    );
+    expect(rows[0]).toEqual({ memories: 0, embeddings: 0, audits: 0 });
+  });
+
   it('sanitizes embedding failures in results and audit metadata', async () => {
     const { principal } = await seedWriter();
     const provider: EmbeddingProvider = {
@@ -235,6 +260,169 @@ describe('shared services', () => {
     );
     expect(rows[0].metadata).toContain('EMBEDDING_FAILED');
     expect(rows[0].metadata).not.toContain('api-key-123');
+  });
+
+  it('computes once and persists an exact normalized duplicate candidate', async () => {
+    const { principal } = await seedWriter();
+    const embed = vi.fn(async () => [unitVector(1)]);
+    const provider: EmbeddingProvider = { id: 'test:relations', dim: 768, embed };
+
+    const first = await captureMemory(pool, provider, principal, {
+      scope: { kind: 'team', name: 'payments' }, type: 'fact',
+      title: ' Deploy policy ', body: 'No Fridays.\r\n', source: 'manual',
+    });
+    const second = await captureMemory(pool, provider, principal, {
+      scope: { kind: 'team', name: 'payments' }, type: 'fact',
+      title: 'deploy POLICY', body: ' No   Fridays. ', source: 'manual',
+    });
+
+    expect(embed).toHaveBeenCalledTimes(2);
+    expect(first.related).toEqual([]);
+    expect(second.related).toEqual([expect.objectContaining({
+      id: first.memory.id, similarity: expect.closeTo(1, 8),
+      relation: 'possible-duplicate', provider: provider.id, threshold: 0.92,
+      detectedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+    })]);
+    const stored = await pool.query('SELECT metadata FROM memories WHERE id = $1', [second.memory.id]);
+    expect(stored.rows[0].metadata.related).toEqual(second.related);
+  });
+
+  it('returns the five highest same-family readable candidates and filters unsafe rows', async () => {
+    const { principal, team } = await seedWriter();
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    const other = await createScope(pool, { kind: 'team', name: 'private' });
+    const author = await createOtherAuthor('relation-filter');
+    const provider: EmbeddingProvider = {
+      id: 'test:relation-filter', dim: 768, async embed() { return [unitVector(1)]; },
+    };
+    const valid: Array<{ id: string; similarity: number }> = [];
+    for (const [index, similarity] of [0.99, 0.98, 0.97, 0.96, 0.95, 0.94].entries()) {
+      const scope = index % 2 === 0 ? team : org;
+      const memory = await createMemory(pool, {
+        scopeId: scope.id, scopeKind: scope.kind, type: 'fact',
+        title: `Visible ${index}`, body: `Candidate ${index}`,
+        authorId: author.id, source: 'manual',
+      });
+      await storeMemoryEmbeddingVector(pool, memory.id, unitVector(similarity), provider);
+      valid.push({ id: memory.id, similarity });
+    }
+    const unsafe = [] as Array<Awaited<ReturnType<typeof createMemory>>>;
+    for (const [scope, title] of [
+      [other, 'private-title-marker'],
+      [team, 'stale-title-marker'],
+      [team, 'expired-title-marker'],
+      [team, 'wrong-provider-title-marker'],
+      [team, 'wrong-dimension-title-marker'],
+    ] as const) {
+      const memory = await createMemory(pool, {
+        scopeId: scope.id, scopeKind: scope.kind, type: 'fact', title,
+        body: `${title}-body`, authorId: author.id, source: 'manual',
+      });
+      await storeMemoryEmbeddingVector(pool, memory.id, unitVector(0.999), provider);
+      unsafe.push(memory);
+    }
+    await pool.query("UPDATE memories SET state = 'stale' WHERE id = $1", [unsafe[1].id]);
+    await pool.query("UPDATE memories SET expires_at = now() - interval '1 second' WHERE id = $1", [unsafe[2].id]);
+    await pool.query("UPDATE memory_embeddings SET provider = 'other:provider' WHERE memory_id = $1", [unsafe[3].id]);
+    await pool.query('UPDATE memory_embeddings SET dim = 767 WHERE memory_id = $1', [unsafe[4].id]);
+
+    const result = await captureMemory(pool, provider, principal, {
+      scope: { kind: 'team', name: 'payments' }, type: 'fact',
+      title: 'Incoming policy', body: 'Incoming candidate body', source: 'manual',
+    });
+
+    expect(result.related.map((item) => item.id)).toEqual(valid.slice(0, 5).map((item) => item.id));
+    expect(result.related.map((item) => item.similarity)).toEqual(
+      valid.slice(0, 5).map((item) => expect.closeTo(item.similarity, 6)),
+    );
+    expect(result.related.every((item) => item.relation === 'possible-conflict')).toBe(true);
+    const serialized = JSON.stringify(result);
+    for (const marker of ['private-title-marker', 'stale-title-marker', 'expired-title-marker',
+      'wrong-provider-title-marker', 'wrong-dimension-title-marker']) {
+      expect(serialized).not.toContain(marker);
+    }
+  });
+
+  it('honours an explicit threshold and does not return an unrelated candidate', async () => {
+    const { principal, team } = await seedWriter();
+    const author = await createOtherAuthor('threshold');
+    const provider: EmbeddingProvider = {
+      id: 'test:threshold', dim: 768, async embed() { return [unitVector(1)]; },
+    };
+    const candidate = await createMemory(pool, {
+      scopeId: team.id, scopeKind: team.kind, type: 'context', title: 'Nearby',
+      body: 'Below the default.', authorId: author.id, source: 'manual',
+    });
+    await storeMemoryEmbeddingVector(pool, candidate.id, unitVector(0.91), provider);
+
+    const defaultResult = await captureMemory(pool, provider, principal, {
+      scope: { kind: 'team', name: 'payments' }, type: 'context',
+      title: 'Default', body: 'No candidate.', source: 'manual',
+    });
+    const loweredResult = await captureMemory(pool, provider, principal, {
+      scope: { kind: 'team', name: 'payments' }, type: 'context',
+      title: 'Lowered', body: 'Candidate.', source: 'manual',
+    }, {}, { relationThreshold: 0.9 });
+
+    expect(defaultResult.related).toEqual([]);
+    expect(loweredResult.related.map((item) => item.id)).toEqual([
+      defaultResult.memory.id,
+      candidate.id,
+    ]);
+    expect(loweredResult.related).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: candidate.id, relation: 'possible-duplicate', threshold: 0.9,
+      }),
+    ]));
+  });
+
+  it('commits the provider embedding with empty relations and sanitized audit when probing fails', async () => {
+    const { principal } = await seedWriter();
+    const provider: EmbeddingProvider = {
+      id: 'test:probe-failure', dim: 768, async embed() { return [unitVector(1)]; },
+    };
+
+    const result = await captureMemory(
+      poolRejecting(pool, 'SELECT m.id, m.type, m.title'), provider, principal,
+      {
+        scope: { kind: 'team', name: 'payments' }, type: 'fact',
+        title: 'Probe fallback', body: 'private-probe-body', source: 'manual',
+      },
+    );
+
+    expect(result).toMatchObject({
+      embedded: true, related: [], relationErrorCode: 'RELATION_DETECTION_FAILED',
+    });
+    const { rows } = await pool.query(
+      `SELECT a.metadata::text AS metadata,
+              EXISTS (SELECT 1 FROM memory_embeddings e WHERE e.memory_id = a.memory_id)
+                AS embedded
+         FROM audit_log a WHERE memory_id = $1`,
+      [result.memory.id],
+    );
+    expect(rows[0].embedded).toBe(true);
+    expect(rows[0].metadata).toContain('RELATION_DETECTION_FAILED');
+    expect(rows[0].metadata).not.toContain('database detail');
+    expect(rows[0].metadata).not.toContain('private-probe-body');
+  });
+
+  it('documents the v0 race by allowing concurrent duplicates to miss each other', async () => {
+    const { principal } = await seedWriter();
+    const provider: EmbeddingProvider = {
+      id: 'test:concurrency', dim: 768, async embed() { return [unitVector(1)]; },
+    };
+    const synchronizedPool = poolSynchronizingRelationProbes(pool, 2);
+
+    const results = await Promise.all(['one', 'two'].map((suffix) => captureMemory(
+      synchronizedPool, provider, principal, {
+        scope: { kind: 'team', name: 'payments' }, type: 'fact',
+        title: 'Concurrent duplicate', body: 'Same content.',
+        source: 'manual', sourceRef: suffix,
+      },
+    )));
+
+    expect(results.map((result) => result.related)).toEqual([[], []]);
+    expect(results.every((result) => result.embedded)).toBe(true);
   });
 
   it('recovers from an embedding storage failure and still commits memory plus audit', async () => {
@@ -265,6 +453,56 @@ describe('shared services', () => {
     );
     expect(rows).toHaveLength(1);
     expect(rows[0].metadata.embedding_error_code).toBe('EMBEDDING_FAILED');
+  });
+
+  it('recovers when related metadata persistence fails after embedding storage', async () => {
+    const { principal } = await seedWriter();
+    const provider: EmbeddingProvider = {
+      id: 'test:metadata-failure', dim: 768, async embed() { return [unitVector(1)]; },
+    };
+
+    const result = await captureMemory(
+      poolRejecting(pool, 'UPDATE memories'), provider, principal,
+      {
+        scope: { kind: 'team', name: 'payments' }, type: 'fact',
+        title: 'Metadata fallback', body: 'Capture still commits.', source: 'manual',
+      },
+    );
+
+    expect(result).toMatchObject({
+      embedded: true, related: [], relationErrorCode: 'RELATION_DETECTION_FAILED',
+    });
+    const { rows } = await pool.query(
+      `SELECT m.metadata,
+              EXISTS (SELECT 1 FROM memory_embeddings e WHERE e.memory_id = m.id) AS embedded,
+              a.metadata AS audit_metadata
+         FROM memories m
+         JOIN audit_log a ON a.memory_id = m.id
+        WHERE m.id = $1`,
+      [result.memory.id],
+    );
+    expect(rows).toEqual([{
+      metadata: { related: [] },
+      embedded: true,
+      audit_metadata: {
+        source: 'manual', type: 'fact', embedded: true,
+        relation_error_code: 'RELATION_DETECTION_FAILED',
+      },
+    }]);
+  });
+
+  it('maps invalid programmatic relation configuration to a safe internal error', async () => {
+    const { principal } = await seedWriter();
+
+    await expect(captureMemory(pool, null, principal, {
+      scope: { kind: 'team', name: 'payments' }, type: 'fact',
+      title: 'Invalid threshold', body: 'Must not persist.', source: 'manual',
+    }, {}, { relationThreshold: Number.NaN })).rejects.toMatchObject<ServiceError>({
+      code: 'INTERNAL', publicMessage: 'An internal error occurred',
+    });
+
+    const { rows } = await pool.query('SELECT count(*)::int AS count FROM memories');
+    expect(rows[0].count).toBe(0);
   });
 
   it('calls the embedding provider before opening the capture transaction', async () => {
@@ -802,6 +1040,26 @@ describe('shared services', () => {
     )).resolves.toMatchObject({ destination: { scopeId: org.id } });
   });
 
+  it('strips scope-bound relation candidates when promoting metadata', async () => {
+    const { principal, team } = await seedWriter();
+    const project = await createScope(pool, { kind: 'project', name: 'promotion-metadata' });
+    await addMembership(pool, principal.id, project.id, 'writer');
+    const source = await createMemory(pool, {
+      scopeId: team.id, scopeKind: team.kind, type: 'decision', title: 'Promote safely',
+      body: 'Candidate ids are scoped to the source visibility set.',
+      authorId: principal.id, source: 'manual',
+      metadata: { owner: 'payments', related: [{ id: 'narrow-scope-memory' }] },
+    });
+
+    const result = await promoteForPrincipal(
+      pool, principal, source.id, { kind: 'project', name: 'promotion-metadata' },
+    );
+
+    expect(result.destination.metadata).toEqual({
+      owner: 'payments', promoted_from: source.id,
+    });
+  });
+
   it('denies an author whose source membership is revoked before authorization', async () => {
     const { principal, team } = await seedWriter();
     const source = await createMemory(pool, {
@@ -1204,6 +1462,30 @@ function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
   const promise = new Promise<T>((res) => { resolve = res; });
   return { promise, resolve };
+}
+
+function unitVector(similarity: number): number[] {
+  const vector = Array(768).fill(0) as number[];
+  vector[0] = similarity;
+  vector[1] = Math.sqrt(1 - similarity * similarity);
+  return vector;
+}
+
+function poolSynchronizingRelationProbes(pool: pg.Pool, expected: number): pg.Pool {
+  let reached = 0;
+  const allReached = deferred<void>();
+  return {
+    connect: pool.connect.bind(pool),
+    query: (async (...args: unknown[]) => {
+      const sql = typeof args[0] === 'string' ? args[0] : '';
+      if (sql.includes('SELECT m.id, m.type, m.title')) {
+        reached += 1;
+        if (reached === expected) allReached.resolve();
+        await allReached.promise;
+      }
+      return (pool.query as (...queryArgs: unknown[]) => unknown)(...args);
+    }) as pg.Pool['query'],
+  } as unknown as pg.Pool;
 }
 
 function poolWithClientCount(pool: pg.Pool, onCount: (count: number) => void): pg.Pool {

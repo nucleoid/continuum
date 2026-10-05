@@ -76,3 +76,48 @@ export async function vectorSearchMemoryIds(
   );
   return rows.map((r) => ({ id: r.id as string, distance: Number(r.distance) }));
 }
+
+export interface RelatedMemorySearchHit {
+  id: string;
+  type: MemoryType;
+  title: string;
+  body: string;
+  distance: number;
+}
+
+export async function vectorSearchRelatedMemories(
+  pool: Queryable,
+  queryVector: number[],
+  scopeIds: string[],
+  provider: Pick<EmbeddingProvider, 'id' | 'dim'>,
+  options: { threshold: number; excludeMemoryId: string; limit: number },
+): Promise<RelatedMemorySearchHit[]> {
+  if (scopeIds.length === 0) return [];
+  assertEmbeddingVectorDimension(queryVector, provider);
+  const { rows } = await pool.query(
+    `SELECT m.id, m.type, m.title, m.body,
+            e.embedding <=> $1::vector AS distance
+       FROM memory_embeddings e
+       JOIN memories m ON m.id = e.memory_id
+      WHERE m.scope_id = ANY($2::uuid[])
+        AND m.state = 'live'
+        AND (m.expires_at IS NULL OR m.expires_at > now())
+        AND e.provider = $3
+        AND e.dim = $4
+        AND m.id <> $5::uuid
+        AND 1 - (e.embedding <=> $1::vector) >= $6
+      ORDER BY distance ASC, m.id ASC
+      LIMIT $7`,
+    [
+      toPgVector(queryVector), scopeIds, provider.id, provider.dim,
+      options.excludeMemoryId, options.threshold, options.limit,
+    ],
+  );
+  return rows.map((row) => ({
+    id: row.id as string,
+    type: row.type as MemoryType,
+    title: row.title as string,
+    body: row.body as string,
+    distance: Number(row.distance),
+  }));
+}

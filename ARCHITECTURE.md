@@ -142,7 +142,13 @@ Content-Type: application/json
 
 Response:
 ```
-{ "id": "01HXY...", "scope_id": "...", "expires_at": "2026-06-16T02:44:05Z" }
+{
+  "id": "01HXY...",
+  "scope_id": "...",
+  "expires_at": "2026-06-16T02:44:05Z",
+  "embedded": true,
+  "related": []
+}
 ```
 
 Validation rules:
@@ -150,6 +156,39 @@ Validation rules:
 - `type` must be valid; `expires_at` is computed from type + scope kind.
 - `tags` validated against the controlled vocabulary for the scope kind (org-admins manage vocabularies).
 - `source` must be a registered capture plugin id or `"manual"`.
+
+When embedding is configured, capture computes the new vector once and probes
+at most five live, unexpired memories from the target scope plus org using the
+same provider and dimension. The default cosine-similarity threshold is 0.92
+and can be changed with `CONTINUUM_RELATION_THRESHOLD` (0 through 1). Exact
+normalized title and body matches are `possible-duplicate`. Nonidentical
+fact/fact and decision/decision matches are `possible-conflict`; all other
+matches are `possible-duplicate`. These are similarity candidates, not claims
+that content contradicts, and capture never mutates or supersedes an existing
+memory.
+
+`metadata.related` is reserved for Continuum-owned relation data. REST, MCP,
+and service callers that supply that key receive `INVALID_INPUT`; callers
+cannot forge candidate metadata. Promotion removes stored `related` metadata
+because candidate IDs were authorized and ranked for the source scope, not the
+destination scope.
+
+REST and MCP capture responses include the same safe `related` array. Each
+stored candidate contains only `id`, `similarity`, `relation`, `provider`,
+`threshold`, and `detectedAt`. Provider or embedding-storage failure is
+nonblocking: the memory and write audit still commit, `embedded` is false, and
+the audit contains only `EMBEDDING_FAILED`. Candidate probe or metadata
+persistence failure is also nonblocking: the valid provider embedding remains
+stored, `embedded` is true, `related` is empty, and the audit contains only
+`RELATION_DETECTION_FAILED`. With no serializing lock, two concurrent duplicate
+captures may both miss each other in v0; a later reconciliation sweep can
+address that limitation.
+
+Relation candidates are not surfaced in the review queue in issue #15. Any
+future issue #12 decision workflow must reauthorize candidate IDs for its
+caller and revalidate scope, lifecycle state, expiry, provider, dimension, and
+relation before acting. Stored advisory metadata is not durable authorization
+and never triggers automatic supersede, reject, or state mutation.
 
 ## Retrieval API (v0)
 
@@ -253,13 +292,13 @@ a high-entropy identity and requires trusted-network REST restriction.
 
 REST, MCP, and the AGENTS.md generator share canonical scope and access resolution under `src/services/`. Transport adapters parse protocol-specific input and serialize their existing wire formats. Services own scope validation, ACL decisions, persistence orchestration, and audit policy.
 
-The org scope is implicitly readable by every authenticated principal across recall and AGENTS.md generation. Other scopes require membership for every read path. Every source mutation requires an explicit `writer` or `admin` membership on that source scope: this includes verification updates (`state`, `last_verified`, and `expires_at`) and promotion (`state` and `promoted_to_id`). Authorship, implicit org access, and explicit `reader` membership are read-only. Promotion additionally requires `admin` on an org destination or `writer`/`admin` on any other destination. Lifecycle authorization is checked inside the mutation transaction with membership rows locked so concurrent revocation has deterministic ordering. Verification and promotion lock the memory row before locking source membership, so they serialize with one another and concurrent membership changes without reversing lock order. Verification checks source membership before reporting a terminal-state conflict, preventing unauthorized callers from learning whether a memory is promoted or archived. It rejects terminal states so it cannot overwrite a concurrent promotion or archive. For a live or stale memory, `still_true=true` moves the memory to `live` and renews its expiry from the verification instant; this is the recovery path for a stale memory that its owner re-confirms. `still_true=false` moves it to `stale` without renewing expiry. Capture commits the memory mutation and required write audit in one transaction. The embedding provider network call happens before `BEGIN`; only the vector insert runs under the transaction savepoint. A provider or embedding-storage failure is reduced to the safe `EMBEDDING_FAILED` code, while the memory and its audit may still commit together. Recall auditing is required; results are not returned when its audit entry cannot be persisted. Service errors retain internal causes for server-side diagnostics but transports serialize only stable codes and safe public messages.
+The org scope is implicitly readable by every authenticated principal across recall and AGENTS.md generation. Other scopes require membership for every read path. Every source mutation requires an explicit `writer` or `admin` membership on that source scope: this includes verification updates (`state`, `last_verified`, and `expires_at`) and promotion (`state` and `promoted_to_id`). Authorship, implicit org access, and explicit `reader` membership are read-only. Promotion additionally requires `admin` on an org destination or `writer`/`admin` on any other destination. Lifecycle authorization is checked inside the mutation transaction with membership rows locked so concurrent revocation has deterministic ordering. Verification and promotion lock the memory row before locking source membership, so they serialize with one another and concurrent membership changes without reversing lock order. Verification checks source membership before reporting a terminal-state conflict, preventing unauthorized callers from learning whether a memory is promoted or archived. It rejects terminal states so it cannot overwrite a concurrent promotion or archive. For a live or stale memory, `still_true=true` moves the memory to `live` and renews its expiry from the verification instant; this is the recovery path for a stale memory that its owner re-confirms. `still_true=false` moves it to `stale` without renewing expiry. Capture commits the memory mutation and required write audit in one transaction. The embedding provider network call happens before `BEGIN`; the vector insert and advisory relation metadata update use separate transaction savepoints so candidate failures cannot roll back a valid embedding. A provider or embedding-storage failure is reduced to the safe `EMBEDDING_FAILED` code. A candidate probe or metadata-storage failure is reduced to `RELATION_DETECTION_FAILED`. In either case the memory and its audit may still commit together. Recall auditing is required; results are not returned when its audit entry cannot be persisted. Service errors retain internal causes for server-side diagnostics but transports serialize only stable codes and safe public messages.
 
 ### Transport error and audit contracts
 
 REST errors use `{ "code": "...", "error": "..." }` with the HTTP status derived from the stable service code. Request-schema failures use `INVALID_INPUT`; malformed JSON uses `INVALID_INPUT`; bodies above the 1 MB parser limit use `PAYLOAD_TOO_LARGE`. No raw database or provider message is included. MCP tool failures set `isError: true` and return `{ "error": { "code": "...", "message": "..." } }` as JSON text. The MCP envelope is intentionally different because MCP tool results are content blocks rather than HTTP responses. Successful REST and MCP response shapes remain transport-specific and unchanged.
 
-Capture write-audit metadata is `{ source, type, embedded }`. When embedding fails, it additionally contains `embedding_error_code: "EMBEDDING_FAILED"`; raw provider messages and captured memory text are never copied into audit metadata. Promotion audit metadata contains `destination_id`. Verification audit metadata contains `still_true` and nullable `note`; it is committed atomically with the verification update and is absent when verification fails. Recall audit metadata contains scope count, effective scope IDs, hit count, and whether vector recall was requested. Effective scope IDs let derived knowledge-gap resolution report exact scope fidelity for new requests; historical rows without them remain `unknown`. Knowledge-gap reports write one query-free `read` audit with `metadata.view: "insights-gaps"`; their internal resolution checks do not emit recursive read audits.
+Capture write-audit metadata is `{ source, type, embedded }`. When embedding fails, it additionally contains `embedding_error_code: "EMBEDDING_FAILED"`; when advisory relation work fails, it contains `relation_error_code: "RELATION_DETECTION_FAILED"`. Raw provider messages, database details, and captured memory text are never copied into audit metadata. Promotion audit metadata contains `destination_id`. Verification audit metadata contains `still_true` and nullable `note`; it is committed atomically with the verification update and is absent when verification fails. Recall audit metadata contains scope count, effective scope IDs, hit count, and whether vector recall was requested. Effective scope IDs let derived knowledge-gap resolution report exact scope fidelity for new requests; historical rows without them remain `unknown`. Knowledge-gap reports write one query-free `read` audit with `metadata.view: "insights-gaps"`; their internal resolution checks do not emit recursive read audits.
 
 ## Extension points
 

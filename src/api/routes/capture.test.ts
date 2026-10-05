@@ -141,6 +141,7 @@ describe('POST /api/v0/capture', () => {
       scopeId: expect.any(String),
       expiresAt: expect.any(String),
       embedded: false,
+      related: [],
     });
     expect(JSON.stringify(res.body)).not.toContain(privateMessage);
     const { rows } = await pool.query(
@@ -199,6 +200,7 @@ describe('POST /api/v0/capture', () => {
     expect(res.body.id).toMatch(/^[0-9a-f-]{36}$/);
     expect(res.body.scopeId).toBe(scope.id);
     expect(res.body.expiresAt).toBeNull();
+    expect(res.body.related).toEqual([]);
 
     const audit = await pool.query(
       'SELECT action, memory_id, scope_id FROM audit_log WHERE principal_id = $1',

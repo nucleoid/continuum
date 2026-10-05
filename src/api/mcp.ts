@@ -33,6 +33,11 @@ import {
 import { isLifecyclePrincipal } from '../lifecycle/principal.js';
 import { gapConfigFromEnv, renderGapMarkdown, type GapConfig } from '../insights/gaps.js';
 import { getKnowledgeGaps } from '../services/gaps.js';
+import {
+  DEFAULT_RELATION_THRESHOLD,
+  relationThresholdFromEnv,
+  validateRelationThreshold,
+} from '../services/relations.js';
 
 const SCOPE_KINDS = ['org', 'team', 'project', 'user', 'role'] as const;
 const MEMORY_TYPES = ['fact', 'decision', 'context', 'playbook', 'relationship'] as const;
@@ -45,6 +50,7 @@ export interface McpDeps {
   reviewHorizonDays?: number;
   gapConfig?: GapConfig;
   now?: () => Date;
+  relationThreshold?: number;
 }
 
 function textResult(text: string): {
@@ -70,6 +76,9 @@ function serviceErrorResult(error: unknown, logger: ServiceLogger): {
 
 export function buildMcpServer(deps: McpDeps): McpServer {
   const { pool, embeddingProvider, principal } = deps;
+  const relationThreshold = validateRelationThreshold(
+    deps.relationThreshold ?? DEFAULT_RELATION_THRESHOLD,
+  );
   if (isLifecyclePrincipal(principal)) {
     throw new Error('The internal lifecycle principal cannot start an MCP session');
   }
@@ -139,12 +148,14 @@ export function buildMcpServer(deps: McpDeps): McpServer {
             metadata: args.metadata,
           },
           { transport: 'mcp' },
+          { relationThreshold },
         );
         return jsonResult({
           id: result.memory.id,
           scope: ref.kind === 'org' ? 'org' : `${ref.kind}:${ref.name}`,
           expires_at: result.memory.expiresAt,
           embedded: result.embedded,
+          related: result.related,
         });
       } catch (error) {
         return errorResult(error);
@@ -434,6 +445,7 @@ async function main(): Promise<void> {
     embeddingProvider,
     principal,
     reviewHorizonDays: configuredReviewHorizonDays(),
+    relationThreshold: relationThresholdFromEnv(),
   });
   const transport = new StdioServerTransport();
   await server.connect(transport);

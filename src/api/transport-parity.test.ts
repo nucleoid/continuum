@@ -10,6 +10,7 @@ import { createPrincipal } from '../storage/principals.js';
 import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import { createMemory } from '../storage/memories.js';
+import type { EmbeddingProvider } from '../embeddings/provider.js';
 
 interface ToolResult {
   content: Array<{ type: string; text?: string }>;
@@ -95,12 +96,14 @@ describe('REST/MCP semantic parity matrix', () => {
       scopeId: expect.any(String),
       expiresAt: expect.any(String),
       embedded: false,
+      related: [],
     });
     expect(toolJson(mcp)).toEqual({
       id: expect.any(String),
       scope: 'team:payments',
       expires_at: expect.any(String),
       embedded: false,
+      related: [],
     });
     const { rows } = await pool.query(
       `SELECT m.title, m.source_ref, m.tags, m.metadata, a.metadata AS audit_metadata
@@ -114,7 +117,7 @@ describe('REST/MCP semantic parity matrix', () => {
         title: 'MCP',
         source_ref: 'mcp-ref',
         tags: ['shared'],
-        metadata: { transport: 'mcp-value' },
+        metadata: { transport: 'mcp-value', related: [] },
         audit_metadata: {
           source: 'manual', type: 'fact', embedded: false, transport: 'mcp',
         },
@@ -123,10 +126,96 @@ describe('REST/MCP semantic parity matrix', () => {
         title: 'REST',
         source_ref: 'rest-ref',
         tags: ['shared'],
-        metadata: { transport: 'rest-value' },
+        metadata: { transport: 'rest-value', related: [] },
         audit_metadata: { source: 'manual', type: 'fact', embedded: false },
       },
     ]);
+  });
+
+  it('rejects reserved relation metadata consistently without persistence', async () => {
+    const metadata = { related: [{ id: 'forged-candidate' }] };
+    const rest = await request(createApp(pool))
+      .post('/api/v0/capture')
+      .set('Authorization', 'Bearer entra:user:parity')
+      .send({
+        scope: { kind: 'team', name: 'payments' }, type: 'fact',
+        title: 'REST reserved key', body: 'Must fail.', source: 'manual', metadata,
+      });
+    const mcp = (await client.callTool({
+      name: 'continuum.capture',
+      arguments: {
+        scope_kind: 'team', scope_name: 'payments', type: 'fact',
+        title: 'MCP reserved key', body: 'Must fail.', source: 'manual', metadata,
+      },
+    })) as ToolResult;
+
+    expect(rest.status).toBe(400);
+    expect(rest.body).toMatchObject({
+      code: 'INVALID_INPUT', error: 'metadata.related is reserved by Continuum',
+    });
+    expect(mcp.isError).toBe(true);
+    expect(toolJson(mcp)).toEqual({
+      error: { code: 'INVALID_INPUT', message: 'metadata.related is reserved by Continuum' },
+    });
+    const { rows } = await pool.query(
+      `SELECT count(*)::int AS memories FROM memories
+        WHERE title IN ('REST reserved key', 'MCP reserved key')`,
+    );
+    expect(rows[0].memories).toBe(0);
+  });
+
+  it('returns the same safe relation fields from REST and MCP capture', async () => {
+    const vector = Array(768).fill(0) as number[];
+    vector[0] = 1;
+    const provider: EmbeddingProvider = {
+      id: 'test:transport-relations', dim: 768, async embed() { return [vector]; },
+    };
+    const relationServer = buildMcpServer({ pool, embeddingProvider: provider, principal });
+    const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
+    const relationClient = new Client({ name: 'relation-parity', version: '0.0.1' });
+    await Promise.all([
+      relationServer.connect(serverTransport), relationClient.connect(clientTransport),
+    ]);
+
+    const first = await request(createApp(pool, { embeddingProvider: provider }))
+      .post('/api/v0/capture')
+      .set('Authorization', 'Bearer entra:user:parity')
+      .send({
+        scope: { kind: 'team', name: 'payments' }, type: 'fact',
+        title: 'Parity policy', body: 'Deploy on Fridays.', source: 'manual',
+      });
+    const mcp = toolJson((await relationClient.callTool({
+      name: 'continuum.capture',
+      arguments: {
+        scope_kind: 'team', scope_name: 'payments', type: 'fact',
+        title: 'Parity policy changed', body: 'Never deploy on Fridays.', source: 'manual',
+      },
+    })) as ToolResult);
+    const rest = await request(createApp(pool, { embeddingProvider: provider }))
+      .post('/api/v0/capture')
+      .set('Authorization', 'Bearer entra:user:parity')
+      .send({
+        scope: { kind: 'team', name: 'payments' }, type: 'fact',
+        title: 'Another parity policy', body: 'Ask before Friday deploys.', source: 'manual',
+      });
+
+    expect(first.body.related).toEqual([]);
+    expect(mcp.related[0]).toMatchObject({
+      id: first.body.id, relation: 'possible-conflict',
+      similarity: expect.any(Number), provider: provider.id, threshold: 0.92,
+      detectedAt: expect.any(String),
+    });
+    expect(rest.body.related[0]).toMatchObject({
+      id: expect.any(String),
+      relation: mcp.related[0].relation,
+      similarity: mcp.related[0].similarity,
+      provider: mcp.related[0].provider,
+      threshold: mcp.related[0].threshold,
+      detectedAt: expect.any(String),
+    });
+    expect(Object.keys(rest.body.related[0]).sort()).toEqual(
+      ['detectedAt', 'id', 'provider', 'relation', 'similarity', 'threshold'].sort(),
+    );
   });
 
   it('returns equivalent actionable review queues over REST and MCP', async () => {

@@ -100,4 +100,5 @@ describe('vector search filters', () => {
       7,
     ]);
   });
+
 });

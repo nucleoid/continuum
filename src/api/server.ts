@@ -18,6 +18,11 @@ import { startRuntime } from './runtime.js';
 import { createReadinessState, type ReadinessState } from './readiness.js';
 import { reviewQueueRouter } from './routes/review-queue.js';
 import { configuredReviewHorizonDays } from '../services/review-queue.js';
+import {
+  DEFAULT_RELATION_THRESHOLD,
+  relationThresholdFromEnv,
+  validateRelationThreshold,
+} from '../services/relations.js';
 
 export { createReadinessState } from './readiness.js';
 
@@ -51,6 +56,7 @@ export interface AppOptions {
   readinessTimeoutMs?: number;
   reviewHorizonDays?: number;
   gapConfig?: GapConfig;
+  relationThreshold?: number;
 }
 
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
@@ -216,6 +222,9 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   const readiness = opts.readiness ?? createReadinessState();
   const readinessTimeoutMs = opts.readinessTimeoutMs ?? 1_000;
   const gapConfig = opts.gapConfig ?? gapConfigFromEnv();
+  const relationThreshold = validateRelationThreshold(
+    opts.relationThreshold ?? DEFAULT_RELATION_THRESHOLD,
+  );
   if (!Number.isFinite(readinessTimeoutMs) || readinessTimeoutMs <= 0) {
     throw new Error('readinessTimeoutMs must be positive');
   }
@@ -252,7 +261,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
 
   const v0 = express.Router();
   v0.use(bearerAuth(pool));
-  v0.use(captureRouter(pool, provider));
+  v0.use(captureRouter(pool, provider, relationThreshold));
   v0.use(recallRouter(pool, provider));
   v0.use(agentsMdRouter(pool));
   v0.use(auditRouter(pool));
@@ -305,6 +314,7 @@ async function main(): Promise<void> {
     readiness,
     readinessTimeoutMs,
     reviewHorizonDays: configuredReviewHorizonDays(),
+    relationThreshold: relationThresholdFromEnv(),
   });
   await startRuntime(app, { port, readiness, closePool, shutdownTimeoutMs });
   console.log(`Continuum API listening on :${port}`);
