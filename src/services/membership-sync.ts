@@ -72,6 +72,22 @@ export async function provisionEntraGroupBinding(
       `SELECT scope_id, role, active FROM entra_groups WHERE external_id = $1 FOR UPDATE`,
       [input.externalId],
     );
+    const alreadyApproved = await client.query(
+      `SELECT 1 FROM entra_groups
+        WHERE external_id = $1 AND approved_by IS NOT NULL AND approval_revoked_at IS NULL`,
+      [input.externalId],
+    );
+    if (!alreadyApproved.rowCount) {
+      const approved = await client.query(
+        `SELECT count(*)::int AS count FROM entra_groups
+          WHERE approved_by IS NOT NULL AND approval_revoked_at IS NULL`,
+      );
+      if ((approved.rows[0]?.count ?? 0) >= MAX_SYNC_GROUPS) {
+        throw new ServiceError(
+          'CONFLICT', `cannot approve more than ${MAX_SYNC_GROUPS} Entra group bindings`,
+        );
+      }
+    }
     const created = !prior.rows[0];
     const reactivated = prior.rows[0]?.active === false;
     const changedTarget = prior.rows[0]

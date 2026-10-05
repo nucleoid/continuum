@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { fetchMembershipSnapshot } from './graph-membership.js';
+import { fetchMembershipSnapshot, GraphSnapshotUnavailableError } from './graph-membership.js';
 
 describe('Microsoft Graph membership snapshot', () => {
   const groupId = '22222222-2222-4222-8222-222222222222';
@@ -38,5 +38,20 @@ describe('Microsoft Graph membership snapshot', () => {
     expect(await fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher)).toEqual([
       { id: groupId, status: 'invalid', errorCode: 'GRAPH_FAILURE' },
     ]);
+  });
+
+  it.each([401, 403, 429, 500, 503])(
+    'aborts the whole snapshot on operational Graph status %s',
+    async (status) => {
+      const fetcher = vi.fn().mockResolvedValue(new Response('', { status }));
+      await expect(fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher))
+        .rejects.toBeInstanceOf(GraphSnapshotUnavailableError);
+    },
+  );
+
+  it('aborts the whole snapshot on a transport failure', async () => {
+    const fetcher = vi.fn().mockRejectedValue(new Error('socket reset'));
+    await expect(fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher))
+      .rejects.toBeInstanceOf(GraphSnapshotUnavailableError);
   });
 });

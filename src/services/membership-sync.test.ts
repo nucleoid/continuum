@@ -88,6 +88,39 @@ describe('Entra membership sync', () => {
     }
   });
 
+  it('locks the approved binding while an active Entra membership is written', async () => {
+    const alpha = await createScope(pool, { kind: 'team', name: 'locking' });
+    const user = await createPrincipal(pool, {
+      externalId: '11111111-1111-4111-8111-111111111111', kind: 'user', displayName: 'User',
+    });
+    const groupId = '22222222-2222-4222-8222-222222222222';
+    await provisionEntraGroupBinding(pool, admin, {
+      externalId: groupId, scopeId: alpha.id, role: 'reader',
+    });
+    const membershipClient = await pool.connect();
+    const bindingClient = await pool.connect();
+    try {
+      await membershipClient.query('BEGIN');
+      await membershipClient.query(
+        `INSERT INTO scope_memberships
+           (principal_id, scope_id, role, source_kind, source_id, active)
+         VALUES ($1, $2, 'reader', 'entra', $3, TRUE)`,
+        [user.id, alpha.id, groupId],
+      );
+      await bindingClient.query('BEGIN');
+      await bindingClient.query("SET LOCAL lock_timeout = '100ms'");
+      await expect(bindingClient.query(
+        'UPDATE entra_groups SET active = FALSE WHERE external_id = $1', [groupId],
+      )).rejects.toMatchObject({ code: '55P03' });
+    } finally {
+      await Promise.allSettled([
+        membershipClient.query('ROLLBACK'), bindingClient.query('ROLLBACK'),
+      ]);
+      membershipClient.release();
+      bindingClient.release();
+    }
+  });
+
   it('uses an audited explicit binding, treats rename as metadata, and safely reactivates', async () => {
     const alpha = await createScope(pool, { kind: 'team', name: 'alpha' });
     const beta = await createScope(pool, { kind: 'team', name: 'beta' });
@@ -133,6 +166,28 @@ describe('Entra membership sync', () => {
       'entra_group_binding_provisioned', 'entra_group_binding_reactivated',
       'entra_group_binding_updated',
     ]);
+  });
+
+  it('rejects a 501st approved and unrevoked binding', async () => {
+    const alpha = await createScope(pool, { kind: 'team', name: 'cardinality' });
+    await pool.query(
+      `INSERT INTO entra_groups
+         (external_id, display_name, scope_id, role, active, approved_by, approved_at)
+       SELECT lpad(n::text, 8, '0') || '-0000-4000-8000-' || lpad(n::text, 12, '0'),
+              'approved-' || n, $1, 'reader', TRUE, $2, now()
+         FROM generate_series(1, $3) n`,
+      [alpha.id, admin.id, MAX_SYNC_GROUPS],
+    );
+
+    await expect(provisionEntraGroupBinding(pool, admin, {
+      externalId: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+      scopeId: alpha.id,
+      role: 'reader',
+    })).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect((await pool.query(
+      `SELECT count(*)::int AS count FROM entra_groups
+        WHERE approved_by IS NOT NULL AND approval_revoked_at IS NULL`,
+    )).rows[0].count).toBe(MAX_SYNC_GROUPS);
   });
 
   it('fails closed for malformed and failed bound groups while valid groups remain authoritative', async () => {

@@ -66,7 +66,7 @@ describe('authentication configuration and Entra claims', () => {
     }, contract)).toBeNull();
   });
 
-  it('upserts immutable oid identity and rejects a kind change', async () => {
+  it('upserts immutable oid identity and maps a kind conflict to invalid credentials', async () => {
     const oid = '11111111-1111-4111-8111-111111111111';
     const userClaims = { oid, tid: contract.tenant, ver: '2.0', idtyp: 'user',
       azp: contract.allowedClientIds[0], scp: contract.userScope };
@@ -77,7 +77,7 @@ describe('authentication configuration and Entra claims', () => {
       oid, name: 'App', tid: contract.tenant, ver: '2.0', idtyp: 'app',
       azp: '44444444-4444-4444-8444-444444444444', roles: [contract.serviceAppRole],
     }, contract))
-      .rejects.toThrow(/kind conflicts/);
+      .resolves.toBeNull();
   });
 
   it('bounds discovery fetches, evicts rejected metadata, and maps all credential failures to 401', async () => {

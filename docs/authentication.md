@@ -68,7 +68,8 @@ memberships sourced by that group, excludes it from future Graph fetches, and
 cannot be undone by sync. `bind-group` is the only way to explicitly approve it
 again. A tenant user cannot create a privileged group with a matching name and
 self-escalate. Renames only update display metadata and never alter the approved
-scope or role.
+scope or role. At most 500 bindings may be approved and unrevoked at once;
+provisioning the 501st is rejected without changing an existing binding.
 
 ## Membership sync
 
@@ -82,14 +83,14 @@ Run `npm run sync:memberships` from a nightly scheduler. It requires:
 Before enabling the scheduler, retain an independently managed manual org
 administrator as a break-glass identity. Invalid-input quarantine is
 intentionally fail-closed and takes precedence over availability: if the only
-org-admin access is sourced by a malformed, failed, duplicate, or oversized
+org-admin access is sourced by a malformed, duplicate, or oversized
 Entra result, that access is removed and direct database recovery is required.
 
 The job reads all approved bindings, including currently missing groups, then fetches each directly by
 immutable ID. It does not perform name-based group discovery. A Graph 404 is a
 definitive disappearance. If that immutable ID returns, its still-approved
 binding is safely reactivated. Renames outside any naming convention remain active
-and update metadata. Malformed, failed, duplicate, and oversized results are
+and update metadata. Malformed, duplicate, and oversized results are
 counted in a durable screening audit and soft-deactivate access sourced by the
 affected approved binding. That quarantine commits before valid results are
 applied, so a later global threshold or administrator guard cannot restore
@@ -97,6 +98,13 @@ stale invalid access. Unbound and revoked IDs cannot confer access. Valid bound
 groups remain authoritative, so removed memberships from those groups are
 deactivated. A snapshot exceeding the whole-run bound quarantines all active
 Entra-sourced access before the run reports failure.
+
+Graph authentication, authorization, rate-limit, service, timeout, and
+transport failures abort snapshot collection before synchronization starts.
+They do not convert every approved group into malformed input or quarantine
+the last successfully synchronized access set. The job reports failure so the
+scheduler can retry. Invalid Graph payloads and untrusted pagination links are
+still contained to the affected binding and quarantined fail-closed.
 
 Empty snapshots fail closed. By default, a run that would deactivate more than
 25 percent of active bindings rolls back. After investigation, an operator may

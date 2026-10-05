@@ -9,6 +9,13 @@ export interface NewPrincipal {
   displayName: string;
 }
 
+export class PrincipalKindConflictError extends Error {
+  constructor() {
+    super('principal kind conflicts with established identity');
+    this.name = 'PrincipalKindConflictError';
+  }
+}
+
 function rowToPrincipal(row: Record<string, unknown>): Principal {
   return {
     id: row.id as string,
@@ -71,6 +78,6 @@ export async function upsertPrincipalByExternalId(
      RETURNING id, external_id, kind, display_name, created_at`,
     [id, input.externalId, input.kind, input.displayName],
   );
-  if (!rows[0]) throw new Error('principal kind conflicts with established identity');
+  if (!rows[0]) throw new PrincipalKindConflictError();
   return rowToPrincipal(rows[0]);
 }

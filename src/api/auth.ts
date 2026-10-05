@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto';
 import type pg from 'pg';
 import type express from 'express';
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
-import { getPrincipalByExternalId, upsertPrincipalByExternalId } from '../storage/principals.js';
+import {
+  getPrincipalByExternalId, PrincipalKindConflictError, upsertPrincipalByExternalId,
+} from '../storage/principals.js';
 import type { AuthenticatedPrincipal, Principal, PrincipalKind } from '../types.js';
 import { isLifecyclePrincipal } from '../lifecycle/principal.js';
 
@@ -186,9 +188,15 @@ export async function principalFromClaims(
       || !UUID.test(clientId)) return null;
     kind = 'service';
   } else return null;
-  const principal = await upsertPrincipalByExternalId(pool, {
-    externalId: oid, kind, displayName: name || oid,
-  });
+  let principal: Principal;
+  try {
+    principal = await upsertPrincipalByExternalId(pool, {
+      externalId: oid, kind, displayName: name || oid,
+    });
+  } catch (error) {
+    if (error instanceof PrincipalKindConflictError) return null;
+    throw error;
+  }
   return {
     principal,
     credential: 'entra',
