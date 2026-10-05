@@ -4,6 +4,7 @@ import { record as recordAudit } from '../audit/log.js';
 import { canMutateScope } from '../scopes/access.js';
 import { createMemory } from './memories.js';
 import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
+import type { Queryable } from './queryable.js';
 import { getScope } from './scopes.js';
 
 export class SupersedeStorageError extends Error {
@@ -78,17 +79,28 @@ async function supersedeInTransaction(client: pg.PoolClient, input: SupersedeWri
   return { predecessor: rowToMemory(archived.rows[0]), successor };
 }
 
-export async function getDecisionHistory(pool: pg.Pool, decisionId: string): Promise<{ memories: Memory[]; cycle: boolean } | null> {
-  const anchor = await pool.query('SELECT id FROM memories WHERE id = $1', [decisionId]);
-  if (!anchor.rows[0]) return null;
-  const { rows } = await pool.query(
-    `WITH RECURSIVE backward AS (
-       SELECT m.*, 0 AS depth, ARRAY[m.id] AS path, false AS cycle FROM memories m WHERE m.id = $1
+export async function getDecisionHistory(
+  queryable: Queryable,
+  principalId: string,
+  decisionId: string,
+): Promise<{ memories: Memory[]; cycle: boolean } | null> {
+  const { rows } = await queryable.query(
+    `WITH RECURSIVE anchor AS (
+       SELECT m.*
+         FROM memories m
+         JOIN scopes s ON s.id = m.scope_id
+        WHERE m.id = $1
+          AND (s.kind = 'org' OR EXISTS (
+            SELECT 1 FROM scope_memberships sm
+             WHERE sm.principal_id = $2 AND sm.scope_id = m.scope_id
+          ))
+     ), backward AS (
+       SELECT a.*, 0 AS depth, ARRAY[a.id] AS path, false AS cycle FROM anchor a
        UNION ALL
        SELECT p.*, b.depth + 1, b.path || p.id, p.id = ANY(b.path)
          FROM backward b JOIN memories p ON p.id = b.supersedes_id WHERE NOT b.cycle
      ), forward AS (
-       SELECT m.*, 0 AS depth, ARRAY[m.id] AS path, false AS cycle FROM memories m WHERE m.id = $1
+       SELECT a.*, 0 AS depth, ARRAY[a.id] AS path, false AS cycle FROM anchor a
        UNION ALL
        SELECT s.*, f.depth + 1, f.path || s.id, s.id = ANY(f.path)
          FROM forward f JOIN memories s ON s.supersedes_id = f.id WHERE NOT f.cycle
@@ -96,7 +108,8 @@ export async function getDecisionHistory(pool: pg.Pool, decisionId: string): Pro
      SELECT chain.* FROM (
        SELECT b.*, -b.depth AS position FROM backward b
        UNION ALL SELECT f.*, f.depth AS position FROM forward f WHERE f.depth > 0
-     ) chain ORDER BY position`, [decisionId],
+     ) chain ORDER BY position`, [decisionId, principalId],
   );
+  if (!rows[0]) return null;
   return { memories: rows.filter((row) => !row.cycle).map(rowToMemory), cycle: rows.some((row) => row.cycle === true) };
 }

@@ -1,7 +1,6 @@
 import type pg from 'pg';
 import { asEmbeddingRouter, type EmbeddingRouting } from '../embeddings/router.js';
 import type { Memory, Principal } from '../types.js';
-import { canReadScope } from './access.js';
 import { validateCaptureContent } from './capture.js';
 import { asServiceError, ServiceError } from './errors.js';
 import { getScope } from '../storage/scopes.js';
@@ -66,20 +65,20 @@ export async function decisionHistoryForPrincipal(
   pool: pg.Pool, principal: Principal, decisionId: string,
   auditMetadata: Record<string, unknown> = {},
 ): Promise<{ decisions: Memory[]; currentId: string }> {
+  let client: pg.PoolClient | undefined;
+  let destroyClient = false;
   try {
-    const history = await getDecisionHistory(pool, decisionId);
+    client = await pool.connect();
+    await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
+    const history = await getDecisionHistory(client, principal.id, decisionId);
     if (!history) throw new ServiceError('MEMORY_NOT_FOUND', 'Memory not found');
     const anchor = history.memories.find((memory) => memory.id === decisionId)!;
-    const scope = await getScope(pool, anchor.scopeId);
-    if (!scope || !(await canReadScope(pool, principal.id, scope))) {
-      throw new ServiceError('FORBIDDEN', 'Principal cannot read this decision');
-    }
     if (anchor.type !== 'decision') throw new ServiceError('INVALID_INPUT', 'Memory is not a decision');
     if (history.cycle || history.memories.some((memory) => memory.type !== 'decision' || memory.scopeId !== anchor.scopeId)) {
       throw new ServiceError('INTERNAL', 'An internal error occurred');
     }
     const currentId = history.memories.at(-1)!.id;
-    await recordReadAudit(pool, {
+    await recordReadAudit(client, {
       principalId: principal.id,
       metadata: {
         view: 'decision-history', anchor_id: decisionId, current_id: currentId,
@@ -89,6 +88,14 @@ export async function decisionHistoryForPrincipal(
         memoryId: memory.id, scopeId: memory.scopeId, metadata: { rank: index + 1 },
       })),
     });
+    await client.query('COMMIT');
     return { decisions: history.memories, currentId };
-  } catch (error) { throw asServiceError(error); }
+  } catch (error) {
+    if (client) {
+      try { await client.query('ROLLBACK'); } catch { destroyClient = true; }
+    }
+    throw asServiceError(error);
+  } finally {
+    client?.release(destroyClient);
+  }
 }

@@ -344,6 +344,46 @@ describe('REST/MCP semantic parity matrix', () => {
     expect(mcpList).toMatchObject({ limit: 50, offset: 0 });
   });
 
+  it('returns authorized decision chains and masks inaccessible MCP anchors as missing', async () => {
+    const readable = await createScope(pool, { kind: 'project', name: 'history-parity' });
+    const hidden = await createScope(pool, { kind: 'project', name: 'hidden-history-parity' });
+    await addMembership(pool, principal.id, readable.id, 'reader');
+    const first = await createMemory(pool, {
+      scopeId: readable.id, scopeKind: readable.kind, type: 'decision', title: 'First',
+      body: 'First body', authorId: principal.id, source: 'manual',
+    });
+    await pool.query(`UPDATE memories SET state = 'archived' WHERE id = $1`, [first.id]);
+    const second = await createMemory(pool, {
+      scopeId: readable.id, scopeKind: readable.kind, type: 'decision', title: 'Second',
+      body: 'Second body', authorId: principal.id, source: 'manual', supersedesId: first.id,
+    });
+    const privateDecision = await createMemory(pool, {
+      scopeId: hidden.id, scopeKind: hidden.kind, type: 'decision', title: 'Private',
+      body: 'Private body', authorId: principal.id, source: 'manual',
+    });
+
+    const authorized = toolJson((await client.callTool({
+      name: 'continuum.decision_history', arguments: { decision_id: first.id },
+    })) as ToolResult);
+    const inaccessible = (await client.callTool({
+      name: 'continuum.decision_history', arguments: { decision_id: privateDecision.id },
+    })) as ToolResult;
+    const missing = (await client.callTool({
+      name: 'continuum.decision_history',
+      arguments: { decision_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' },
+    })) as ToolResult;
+
+    expect(authorized.current_id).toBe(second.id);
+    expect(authorized.decisions.map((decision: { id: string }) => decision.id))
+      .toEqual([first.id, second.id]);
+    expect(inaccessible.isError).toBe(true);
+    expect(missing.isError).toBe(true);
+    expect(toolJson(inaccessible)).toEqual(toolJson(missing));
+    expect(toolJson(inaccessible)).toEqual({
+      error: { code: 'MEMORY_NOT_FOUND', message: 'Memory not found' },
+    });
+  });
+
   it('excludes expired full bodies before REST/MCP pagination and audits each delivered identity', async () => {
     const scope = await createScope(pool, { kind: 'project', name: 'expiry-parity' });
     await addMembership(pool, principal.id, scope.id, 'reader');

@@ -13,6 +13,7 @@ import { storeMemoryEmbedding } from '../../storage/embeddings.js';
 describe('decision supersession REST API', () => {
   let pool: pg.Pool;
   let token: string;
+  let principalId: string;
   let scopeId: string;
   let decisionId: string;
 
@@ -23,6 +24,7 @@ describe('decision supersession REST API', () => {
     const principal = await createPrincipal(pool, {
       externalId: token, kind: 'user', displayName: 'Decision Owner',
     });
+    principalId = principal.id;
     const scope = await createScope(pool, { kind: 'project', name: 'continuum' });
     scopeId = scope.id;
     await addMembership(pool, principal.id, scope.id, 'writer');
@@ -138,6 +140,30 @@ describe('decision supersession REST API', () => {
       .set('Authorization', 'Bearer entra:user:reader');
     expect(history.status).toBe(200);
     expect(history.body.currentId).toBe(decisionId);
+  });
+
+  it('masks inaccessible and missing history anchors with identical REST errors', async () => {
+    const hidden = await createScope(pool, { kind: 'project', name: 'hidden-decisions' });
+    const privateDecision = await createMemory(pool, {
+      scopeId: hidden.id, scopeKind: hidden.kind, type: 'decision', title: 'Private',
+      body: 'Private decision body', authorId: principalId, source: 'manual',
+    });
+    const app = createApp(pool);
+    const inaccessible = await request(app)
+      .get(`/api/v0/decisions/${privateDecision.id}/history`)
+      .set('Authorization', `Bearer ${token}`);
+    const missing = await request(app)
+      .get('/api/v0/decisions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/history')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(inaccessible.status).toBe(404);
+    expect(missing.status).toBe(404);
+    expect(inaccessible.body).toMatchObject({
+      code: 'MEMORY_NOT_FOUND', error: 'Memory not found',
+    });
+    expect(missing.body).toMatchObject({
+      code: inaccessible.body.code, error: inaccessible.body.error,
+    });
   });
 
   it('keeps archived content out of recall and AGENTS.md while showing head provenance', async () => {
