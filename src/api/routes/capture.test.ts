@@ -135,32 +135,31 @@ describe('POST /api/v0/capture', () => {
       .toBe(0);
   });
 
-  it('adds activity provenance only after self-attribution authorization', async () => {
+  it('rejects all activity and provenance fields on raw user capture', async () => {
     const { principal } = await seedActor();
-    const response = await request(app)
-      .post('/api/v0/capture')
-      .set('Authorization', 'Bearer entra:user:capture')
-      .send({
-        scope: { kind: 'team', name: 'payments' }, type: 'context',
-        title: 'Authorized activity', body: 'Trusted after authorization.', source: 'manual',
-        metadata: {
-          actor_principal_id: principal.id, actor: 'self', thread_key: 'manual:self',
-        },
-      });
-    expect(response.status).toBe(201);
-    const stored = await pool.query('SELECT metadata FROM memories WHERE id = $1', [response.body.id]);
-    expect(stored.rows[0].metadata._continuum_activity_provenance).toBe('capture-v1');
-
-    const forgedMarker = await request(app)
-      .post('/api/v0/capture')
-      .set('Authorization', 'Bearer entra:user:capture')
-      .send({
-        scope: { kind: 'team', name: 'payments' }, type: 'context',
-        title: 'Caller marker', body: 'Must be rejected.', source: 'manual',
-        metadata: { _continuum_activity_provenance: 'capture-v1' },
-      });
-    expect(forgedMarker.status).toBe(400);
-    expect(forgedMarker.body.code).toBe('INVALID_INPUT');
+    const cases = [
+      { metadata: { actor: 'self' }, status: 403 },
+      { metadata: { thread_key: 'manual:self' }, status: 403 },
+      { metadata: { closes_thread_keys: ['manual:other'] }, status: 403 },
+      { metadata: {
+        actor_principal_id: principal.id, actor: 'self', thread_key: 'manual:self',
+      }, status: 403 },
+      { metadata: { _continuum_activity_provenance: 'capture-v1' }, status: 400 },
+      { metadata: { _continuum_activity_epoch_ms: 1_700_000_000_000 }, status: 400 },
+    ];
+    for (const [index, item] of cases.entries()) {
+      const response = await request(app)
+        .post('/api/v0/capture')
+        .set('Authorization', 'Bearer entra:user:capture')
+        .send({
+          scope: { kind: 'team', name: 'payments' }, type: 'context',
+          title: `Forged raw activity ${index}`, body: 'Must not persist.', source: 'manual',
+          metadata: item.metadata,
+        });
+      expect(response.status).toBe(item.status);
+    }
+    expect((await pool.query("SELECT 1 FROM memories WHERE title LIKE 'Forged raw activity %'")).rowCount)
+      .toBe(0);
   });
 
   it.each([

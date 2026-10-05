@@ -37,6 +37,8 @@ function githubIdentity(user: { id: number }): { authority: string; externalId: 
 
 export const githubPrPlugin: CapturePlugin<GitHubPrEvent> = {
   id: 'github-pr',
+  trustedActivityMetadata: true,
+  activityIdentityAuthority: 'github',
 
   actorIdentity(event) {
     return githubIdentity(event.pull_request.user);
@@ -51,7 +53,8 @@ export const githubPrPlugin: CapturePlugin<GitHubPrEvent> = {
     const actorPrincipalId = identity
       ? ctx.resolveActorPrincipalId?.(identity) ?? null
       : null;
-    const threadKey = `github-pr:${event.repository.full_name}#${pr.number}`;
+    const threadPrefix = ctx.activityNamespace ?? 'github';
+    const threadKey = `${threadPrefix}:pr:${event.repository.full_name}#${pr.number}`;
 
     const lines: string[] = [];
     if (pr.body && pr.body.trim()) lines.push(pr.body.trim());
@@ -84,7 +87,7 @@ export const githubPrPlugin: CapturePlugin<GitHubPrEvent> = {
           thread_key: threadKey,
           closes_thread_keys: [
             threadKey,
-            `github-branch:${event.repository.full_name}:${pr.head.ref}`,
+            `${threadPrefix}:branch:${event.repository.full_name}:${pr.head.ref}`,
           ],
           baseRef: pr.base.ref,
           headRef: pr.head.ref,

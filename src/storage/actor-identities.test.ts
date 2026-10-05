@@ -4,7 +4,12 @@ import { makeTestPool, resetData } from './test-helpers.js';
 import { createPrincipal } from './principals.js';
 import { createScope, getScopeByRef } from './scopes.js';
 import { addMembership } from './memberships.js';
-import { mapActorIdentity, resolveActorPrincipalId } from './actor-identities.js';
+import {
+  mapActorIdentity,
+  replaceActorIdentity,
+  resolveActorPrincipalId,
+  revokeActorIdentity,
+} from './actor-identities.js';
 
 describe('actor identity mappings', () => {
   let pool: pg.Pool;
@@ -68,7 +73,66 @@ describe('actor identity mappings', () => {
     )).rejects.toThrow(/immutable/);
     await expect(pool.query(
       "DELETE FROM actor_principal_mappings WHERE authority = 'github' AND external_actor_id = 'opaque-1'",
-    )).rejects.toThrow(/immutable/);
+    )).rejects.toThrow(/cannot be deleted/);
+  });
+
+  it('revokes and replaces mappings with immutable history and explicit audits', async () => {
+    const first = await createPrincipal(pool, {
+      externalId: 'entra:first-target', kind: 'user', displayName: 'First target',
+    });
+    const second = await createPrincipal(pool, {
+      externalId: 'entra:second-target', kind: 'user', displayName: 'Second target',
+    });
+    const admin = await createPrincipal(pool, {
+      externalId: 'entra:mapping-admin', kind: 'user', displayName: 'Mapping admin',
+    });
+    const nonAdmin = await createPrincipal(pool, {
+      externalId: 'entra:mapping-non-admin', kind: 'user', displayName: 'Non admin',
+    });
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    await addMembership(pool, admin.id, org!.id, 'admin');
+    await mapActorIdentity(pool, {
+      authority: 'github.producer-a', externalActorId: '42', principalId: first.id,
+      mappedByPrincipalId: admin.id,
+    });
+
+    await expect(revokeActorIdentity(pool, {
+      authority: 'github.producer-a', externalActorId: '42',
+      revokedByPrincipalId: nonAdmin.id,
+    })).rejects.toThrow(/org admin/);
+    expect(await resolveActorPrincipalId(pool, {
+      authority: 'github.producer-a', externalId: '42',
+    })).toBe(first.id);
+
+    await replaceActorIdentity(pool, {
+      authority: 'github.producer-a', externalActorId: '42', principalId: second.id,
+      mappedByPrincipalId: admin.id,
+    });
+    expect(await resolveActorPrincipalId(pool, {
+      authority: 'github.producer-a', externalId: '42',
+    })).toBe(second.id);
+
+    const history = await pool.query(
+      `SELECT principal_id, revoked_at IS NOT NULL AS revoked
+         FROM actor_principal_mappings
+        WHERE authority = 'github.producer-a' AND external_actor_id = '42'
+        ORDER BY revoked_at NULLS LAST`,
+    );
+    expect(history.rows).toEqual([
+      { principal_id: first.id, revoked: true },
+      { principal_id: second.id, revoked: false },
+    ]);
+    const audits = await pool.query(
+      `SELECT metadata->>'operation' AS operation
+         FROM audit_log
+        WHERE metadata->>'authority' = 'github.producer-a'
+        ORDER BY id`,
+    );
+    expect(audits.rows.map((row) => row.operation)).toEqual([
+      'set_actor_principal_mapping',
+      'revoke_actor_principal_mapping',
+      'set_actor_principal_mapping',
+    ]);
   });
 
   it('does not infer a mapping from scope ownership or display names', async () => {

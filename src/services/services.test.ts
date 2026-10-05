@@ -19,6 +19,7 @@ import {
   verifyForPrincipal,
 } from './lifecycle.js';
 import { ensureScopeForPrincipal } from './scopes.js';
+import { standupForPrincipal } from './standup.js';
 
 describe('shared services', () => {
   let pool: pg.Pool;
@@ -1061,7 +1062,7 @@ describe('shared services', () => {
     });
   });
 
-  it('does not re-date trusted or forged standup activity during promotion', async () => {
+  it('preserves trusted standup activity at its original time and strips forged legacy metadata', async () => {
     const { principal, team } = await seedWriter();
     const project = await createScope(pool, { kind: 'project', name: 'promotion-activity' });
     await addMembership(pool, principal.id, project.id, 'writer');
@@ -1076,13 +1077,46 @@ describe('shared services', () => {
         _continuum_activity_provenance: 'capture-v1',
       },
     });
+    const activityAt = new Date('2026-10-05T08:00:00.000Z');
+    await pool.query(
+      'UPDATE memories SET created_at = $2, updated_at = $2 WHERE id = $1',
+      [source.id, activityAt],
+    );
 
     const result = await promoteForPrincipal(
       pool, principal, source.id, { kind: 'project', name: 'promotion-activity' },
     );
 
-    expect(result.destination.metadata).toEqual({
+    expect(result.destination.metadata).toMatchObject({
       owner: 'payments', promoted_from: source.id,
+      actor: 'actor-label', actor_principal_id: principal.id,
+      thread_owner_principal_id: principal.id, thread_key: 'terminal:old',
+      closes_thread_keys: ['terminal:older'],
+      _continuum_activity_provenance: 'capture-v1',
+      _continuum_activity_epoch_ms: activityAt.getTime(),
+    });
+    const standup = await standupForPrincipal(pool, principal, { sinceHours: 24 }, {
+      now: new Date('2026-10-05T12:00:00.000Z'),
+    });
+    expect(standup.activity).toEqual([
+      expect.objectContaining({ id: result.destination.id, createdAt: activityAt }),
+    ]);
+
+    const legacy = await createMemory(pool, {
+      scopeId: team.id, scopeKind: team.kind, type: 'context', title: 'Forged legacy activity',
+      body: 'Legacy caller-owned fields have no internal provenance.',
+      authorId: principal.id, source: 'manual',
+      metadata: {
+        owner: 'payments', actor: 'forged', actor_principal_id: principal.id,
+        thread_owner_principal_id: principal.id, thread_key: 'legacy:forged',
+        closes_thread_keys: ['victim:thread'],
+      },
+    });
+    const legacyResult = await promoteForPrincipal(
+      pool, principal, legacy.id, { kind: 'project', name: 'promotion-activity' },
+    );
+    expect(legacyResult.destination.metadata).toEqual({
+      owner: 'payments', promoted_from: legacy.id,
     });
   });
 

@@ -20,7 +20,8 @@ export interface TerminalSummaryPayload {
 
 export const terminalSummaryPlugin: CapturePlugin<TerminalSummaryPayload> = {
   id: 'terminal-summary',
-  authenticatedActorNamespace: true,
+  trustedActivityMetadata: true,
+  activityIdentityAuthority: 'terminal-summary',
 
   actorIdentity(event) {
     return event.actorExternalId

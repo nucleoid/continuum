@@ -21,6 +21,8 @@ function githubIdentity(user: { id: number }): { authority: string; externalId: 
 
 export const githubBranchPlugin: CapturePlugin<GitHubBranchEvent> = {
   id: 'github-branch',
+  trustedActivityMetadata: true,
+  activityIdentityAuthority: 'github',
 
   actorIdentity(event) {
     return githubIdentity(event.sender);
@@ -58,7 +60,7 @@ export const githubBranchPlugin: CapturePlugin<GitHubBranchEvent> = {
           actor,
           ...(actorPrincipalId ? { actor_principal_id: actorPrincipalId } : {}),
           ...(actorPrincipalId ? { thread_owner_principal_id: actorPrincipalId } : {}),
-          thread_key: `github-branch:${event.repository.full_name}:${event.ref}`,
+          thread_key: `${ctx.activityNamespace ?? 'github'}:branch:${event.repository.full_name}:${event.ref}`,
           closes_thread_keys: [],
         },
       },

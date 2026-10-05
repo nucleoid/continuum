@@ -15,7 +15,8 @@ export interface ExternalActorIdentity {
 
 export interface CapturePlugin<TEvent = unknown> {
   readonly id: string;
-  readonly authenticatedActorNamespace?: boolean;
+  readonly trustedActivityMetadata?: boolean;
+  readonly activityIdentityAuthority?: string;
   actorIdentity?(event: TEvent): ExternalActorIdentity | null;
   transform(event: TEvent, ctx?: CaptureContext): CaptureInput[];
 }

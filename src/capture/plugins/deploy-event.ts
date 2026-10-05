@@ -35,7 +35,8 @@ function deployActorIdentity(event: DeployEventPayload) {
 
 export const deployEventPlugin: CapturePlugin<DeployEventPayload> = {
   id: 'deploy-event',
-  authenticatedActorNamespace: true,
+  trustedActivityMetadata: true,
+  activityIdentityAuthority: 'deploy-event',
 
   actorIdentity: deployActorIdentity,
 

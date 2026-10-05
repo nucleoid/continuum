@@ -38,7 +38,7 @@ describe('github-branch plugin', () => {
       ref: 'feature/checkout-v2',
       base: 'main',
       actor: 'cass-exampleorg',
-      thread_key: 'github-branch:exampleorg/booking-engine:feature/checkout-v2',
+      thread_key: 'github:branch:exampleorg/booking-engine:feature/checkout-v2',
       closes_thread_keys: [],
     });
   });

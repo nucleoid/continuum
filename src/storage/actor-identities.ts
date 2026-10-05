@@ -9,6 +9,12 @@ export interface ActorIdentityMappingInput {
   mappedByPrincipalId: string;
 }
 
+export interface ActorIdentityRevocationInput {
+  authority: string;
+  externalActorId: string;
+  revokedByPrincipalId: string;
+}
+
 export async function mapActorIdentity(
   db: Queryable,
   input: ActorIdentityMappingInput,
@@ -19,6 +25,42 @@ export async function mapActorIdentity(
      VALUES ($1, $2, $3, $4)`,
     [input.authority, input.externalActorId, input.principalId, input.mappedByPrincipalId],
   );
+}
+
+export async function revokeActorIdentity(
+  db: Queryable,
+  input: ActorIdentityRevocationInput,
+): Promise<boolean> {
+  const result = await db.query(
+    `UPDATE actor_principal_mappings
+        SET revoked_by_principal_id = $3
+      WHERE authority = $1 AND external_actor_id = $2 AND revoked_at IS NULL`,
+    [input.authority, input.externalActorId, input.revokedByPrincipalId],
+  );
+  return result.rowCount === 1;
+}
+
+export async function replaceActorIdentity(
+  pool: pg.Pool,
+  input: ActorIdentityMappingInput,
+): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const revoked = await revokeActorIdentity(client, {
+      authority: input.authority,
+      externalActorId: input.externalActorId,
+      revokedByPrincipalId: input.mappedByPrincipalId,
+    });
+    if (!revoked) throw new Error('active actor identity mapping not found');
+    await mapActorIdentity(client, input);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function resolveActorPrincipalId(
@@ -32,6 +74,7 @@ export async function resolveActorPrincipalId(
        JOIN principals principal ON principal.id = mapping.principal_id
       WHERE mapping.authority = $1
         AND mapping.external_actor_id = $2
+        AND mapping.revoked_at IS NULL
         AND principal.kind = 'user'
       ${options.lock ? 'FOR KEY SHARE OF mapping, principal' : ''}`,
     [identity.authority, identity.externalId],

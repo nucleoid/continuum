@@ -45,10 +45,10 @@ describe('github-pr plugin', () => {
       number: 4421,
       actor: 'cass-exampleorg',
       merged_by: 'scott-exampleorg',
-      thread_key: 'github-pr:exampleorg/booking-engine#4421',
+      thread_key: 'github:pr:exampleorg/booking-engine#4421',
       closes_thread_keys: [
-        'github-pr:exampleorg/booking-engine#4421',
-        'github-branch:exampleorg/booking-engine:feature/checkout-v2',
+        'github:pr:exampleorg/booking-engine#4421',
+        'github:branch:exampleorg/booking-engine:feature/checkout-v2',
       ],
       baseRef: 'main',
       headRef: 'feature/checkout-v2',

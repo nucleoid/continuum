@@ -53,6 +53,15 @@ const AUTHORIZED_ACTIVITY = `
     ))
   )`;
 
+function activityAt(alias: string): string {
+  return `CASE
+    WHEN jsonb_typeof(${alias}.metadata->'_continuum_activity_epoch_ms') = 'number'
+     AND ${alias}.metadata->>'_continuum_activity_epoch_ms' ~ '^[0-9]{1,13}$'
+    THEN to_timestamp((${alias}.metadata->>'_continuum_activity_epoch_ms')::double precision / 1000)
+    ELSE ${alias}.created_at
+  END`;
+}
+
 export async function listStandupActivity(
   pool: pg.Pool,
   principalId: string,
@@ -68,7 +77,7 @@ export async function listStandupActivity(
             left(m.source_ref, 2000) AS source_ref,
             left(m.metadata->>'thread_key', 500) AS thread_key,
             left(m.metadata->>'actor', 200) AS actor,
-            m.created_at
+            ${activityAt('m')} AS created_at
        FROM memories m
        JOIN scopes s ON s.id = m.scope_id
       WHERE ${AUTHORIZED_ACTIVITY}
@@ -76,8 +85,8 @@ export async function listStandupActivity(
         AND m.metadata ? 'actor'
         AND m.state IN ('live', 'stale')
         AND (m.expires_at IS NULL OR m.expires_at > now())
-        AND m.created_at >= $2 AND m.created_at < $3
-      ORDER BY m.created_at ASC, m.id ASC
+        AND ${activityAt('m')} >= $2 AND ${activityAt('m')} < $3
+      ORDER BY ${activityAt('m')} ASC, m.id ASC
       LIMIT $4 OFFSET $5`,
     [principalId, start, end, limit, offset],
   );
@@ -99,7 +108,7 @@ export async function listOpenStandupThreads(
             left(m.source_ref, 2000) AS source_ref,
             left(m.metadata->>'thread_key', 500) AS thread_key,
             left(m.metadata->>'actor', 200) AS actor,
-            m.created_at
+            ${activityAt('m')} AS created_at
        FROM memories m
        JOIN scopes s ON s.id = m.scope_id
       WHERE COALESCE(
@@ -117,7 +126,7 @@ export async function listOpenStandupThreads(
         AND m.type = 'context' AND m.state = 'live'
         AND (m.expires_at IS NULL OR m.expires_at > now())
         AND m.metadata ? 'thread_key' AND m.metadata ? 'actor'
-        AND m.created_at < $2 AND m.created_at >= $3
+        AND ${activityAt('m')} < $2 AND ${activityAt('m')} >= $3
         AND NOT EXISTS (
           SELECT 1
             FROM memories closing
@@ -129,8 +138,8 @@ export async function listOpenStandupThreads(
                    m.metadata->>'thread_owner_principal_id',
                    m.metadata->>'actor_principal_id'
                  )
-             AND closing.created_at >= m.created_at
-             AND closing.created_at < $4
+             AND ${activityAt('closing')} >= ${activityAt('m')}
+             AND ${activityAt('closing')} < $4
              AND closing.metadata->>'_continuum_activity_provenance' = 'capture-v1'
              AND (
                (closing_scope.kind = 'user' AND closing_scope.owner_principal_id = $1::uuid)
@@ -143,7 +152,7 @@ export async function listOpenStandupThreads(
              AND COALESCE(closing.metadata->'closes_thread_keys', '[]'::jsonb)
                    @> to_jsonb(ARRAY[m.metadata->>'thread_key'])
         )
-      ORDER BY m.created_at ASC, m.id ASC
+      ORDER BY ${activityAt('m')} ASC, m.id ASC
       LIMIT $5`,
     [principalId, before, notBefore, asOf, limit],
   );

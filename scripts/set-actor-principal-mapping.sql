@@ -26,7 +26,7 @@ WITH inserted AS (
     :'authority', :'external_actor_id', :'principal_id'::uuid,
     :'admin_principal_id'::uuid
   )
-  ON CONFLICT (authority, external_actor_id) DO NOTHING
+  ON CONFLICT (authority, external_actor_id) WHERE revoked_at IS NULL DO NOTHING
   RETURNING authority, external_actor_id, principal_id
 )
 SELECT count(*) = 1 AS mapping_set FROM inserted

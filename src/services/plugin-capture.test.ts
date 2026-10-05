@@ -46,7 +46,7 @@ describe('plugin capture to standup attribution', () => {
     await addMembership(pool, service.id, project.id, 'writer');
     await addMembership(pool, actor.id, project.id, 'reader');
     await mapActorIdentity(pool, {
-      authority: 'github', externalActorId: '10123', principalId: actor.id,
+      authority: `github.${service.id}`, externalActorId: '10123', principalId: actor.id,
       mappedByPrincipalId: mapper.id,
     });
 
@@ -54,9 +54,20 @@ describe('plugin capture to standup attribution', () => {
       pool, null, service, 'github-pr', mergedPr(68, 10123, 'octocat-renamed'),
     );
     expect(captured.memory.metadata).toMatchObject({
-      actor: 'octocat-renamed', actor_principal_id: actor.id,
+      actor: 'Renamable Display Name', actor_principal_id: actor.id,
       thread_owner_principal_id: actor.id,
+      thread_key: `github.${service.id}:pr:org/continuum#68`,
     });
+    const otherProducer = await createPrincipal(pool, {
+      externalId: 'svc:github-enterprise-webhook', kind: 'service',
+      displayName: 'GitHub Enterprise webhook',
+    });
+    await addMembership(pool, otherProducer.id, project.id, 'writer');
+    const [isolated] = await capturePluginEvent(
+      pool, null, otherProducer, 'github-pr', mergedPr(69, 10123, 'same-numeric-id'),
+    );
+    expect(isolated.memory.metadata).not.toHaveProperty('actor_principal_id');
+    expect(isolated.memory.metadata).not.toHaveProperty('thread_key');
     const standup = await standupForPrincipal(pool, actor, { sinceHours: 24 }, {
       now: new Date(Date.now() + 1_000),
     });
@@ -121,7 +132,7 @@ describe('plugin capture to standup attribution', () => {
       actor: 'Deploy User', actorAuthority: 'forged-authority', actorExternalId: 'aad-42',
     });
     expect(mapped.memory.metadata).toMatchObject({
-      actor_principal_id: actor.id, thread_owner_principal_id: actor.id,
+      actor: 'Deployer', actor_principal_id: actor.id, thread_owner_principal_id: actor.id,
       thread_key: `deploy-event.${service.id}:deploy:continuum:prod:v1`,
       closes_thread_keys: [],
     });
@@ -182,13 +193,13 @@ describe('plugin capture to standup attribution', () => {
     });
 
     const [captured] = await capturePluginEvent(pool, null, service, 'terminal-summary', {
-      actor: 'renamable-terminal-label', actorAuthority: 'terminal', actorExternalId: 'subject-42',
+      actor: 'forged-terminal-label', actorAuthority: 'terminal', actorExternalId: 'subject-42',
       sessionId: '7ccfbaa8-c912-4f3a-91b0-664d77a8c1bb', summary: 'Mapped session summary.',
       threadKey: 'github-pr:other/repo#1', closesThreadKeys: ['github-pr:other/repo#2'],
     }, { resolveUserScope: () => 'mapped-terminal' });
 
     expect(captured.memory.metadata).toMatchObject({
-      actor: 'renamable-terminal-label', actor_principal_id: actor.id,
+      actor: 'Terminal actor', actor_principal_id: actor.id,
       thread_owner_principal_id: actor.id,
       thread_key: `terminal-summary.${service.id}:terminal-session:7ccfbaa8-c912-4f3a-91b0-664d77a8c1bb`,
       closes_thread_keys: [
@@ -197,7 +208,7 @@ describe('plugin capture to standup attribution', () => {
     });
   });
 
-  it('overwrites principal UUIDs emitted by a plugin with the mapped actual actor', async () => {
+  it('strips activity metadata from plugins not explicitly trusted for activity', async () => {
     const service = await createPrincipal(pool, {
       externalId: 'svc:custom-plugin', kind: 'service', displayName: 'Custom plugin',
     });
@@ -236,10 +247,10 @@ describe('plugin capture to standup attribution', () => {
     const [captured] = await capturePluginEvent(
       pool, null, service, 'forging-plugin', {}, { registry },
     );
-    expect(captured.memory.metadata).toMatchObject({
-      actor_principal_id: actor.id, thread_owner_principal_id: actor.id,
-      closes_thread_keys: ['victim:thread'],
-    });
-    expect(captured.memory.metadata.actor_principal_id).not.toBe(victim.id);
+    expect(captured.memory.metadata).not.toHaveProperty('actor');
+    expect(captured.memory.metadata).not.toHaveProperty('actor_principal_id');
+    expect(captured.memory.metadata).not.toHaveProperty('thread_owner_principal_id');
+    expect(captured.memory.metadata).not.toHaveProperty('thread_key');
+    expect(captured.memory.metadata).not.toHaveProperty('closes_thread_keys');
   });
 });

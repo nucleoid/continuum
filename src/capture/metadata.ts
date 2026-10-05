@@ -6,6 +6,7 @@ const MAX_THREAD_KEY_LENGTH = 500;
 const MAX_ACTOR_LENGTH = 200;
 export const ACTIVITY_PROVENANCE_KEY = '_continuum_activity_provenance';
 export const ACTIVITY_PROVENANCE_VALUE = 'capture-v1';
+export const ACTIVITY_EPOCH_MS_KEY = '_continuum_activity_epoch_ms';
 export const TRUSTED_ACTIVITY_METADATA_KEYS = [
   'actor',
   'actor_principal_id',
@@ -13,6 +14,7 @@ export const TRUSTED_ACTIVITY_METADATA_KEYS = [
   'thread_key',
   'closes_thread_keys',
   ACTIVITY_PROVENANCE_KEY,
+  ACTIVITY_EPOCH_MS_KEY,
 ] as const;
 
 function boundedString(value: unknown, name: string, max: number): asserts value is string {
@@ -22,10 +24,11 @@ function boundedString(value: unknown, name: string, max: number): asserts value
 }
 
 export function validateCaptureMetadata(metadata: Record<string, unknown> = {}): void {
-  if (Object.hasOwn(metadata, ACTIVITY_PROVENANCE_KEY)) {
+  if (Object.hasOwn(metadata, ACTIVITY_PROVENANCE_KEY)
+      || Object.hasOwn(metadata, ACTIVITY_EPOCH_MS_KEY)) {
     throw new ServiceError(
       'INVALID_INPUT',
-      `metadata.${ACTIVITY_PROVENANCE_KEY} is reserved by Continuum`,
+      'Continuum activity provenance metadata is reserved',
     );
   }
   if (Object.hasOwn(metadata, 'actor_principal_id')) {
@@ -108,5 +111,28 @@ export function stripTrustedActivityMetadata(
 ): Record<string, unknown> {
   const sanitized = { ...metadata };
   for (const key of TRUSTED_ACTIVITY_METADATA_KEYS) delete sanitized[key];
+  return sanitized;
+}
+
+export function hasTrustedActivityMetadata(metadata: Record<string, unknown> = {}): boolean {
+  return TRUSTED_ACTIVITY_METADATA_KEYS.some((key) => Object.hasOwn(metadata, key));
+}
+
+export function activityMetadataForPromotion(
+  metadata: Record<string, unknown>,
+  createdAt: Date,
+): Record<string, unknown> {
+  const sanitized = stripTrustedActivityMetadata(metadata);
+  if (metadata[ACTIVITY_PROVENANCE_KEY] !== ACTIVITY_PROVENANCE_VALUE) return sanitized;
+  for (const key of TRUSTED_ACTIVITY_METADATA_KEYS) {
+    if (key !== ACTIVITY_EPOCH_MS_KEY && Object.hasOwn(metadata, key)) {
+      sanitized[key] = metadata[key];
+    }
+  }
+  const inheritedEpoch = metadata[ACTIVITY_EPOCH_MS_KEY];
+  sanitized[ACTIVITY_EPOCH_MS_KEY] = typeof inheritedEpoch === 'number'
+      && Number.isSafeInteger(inheritedEpoch) && inheritedEpoch >= 0
+    ? inheritedEpoch
+    : createdAt.getTime();
   return sanitized;
 }

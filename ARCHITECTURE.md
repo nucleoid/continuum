@@ -325,14 +325,18 @@ unowned user scopes fail closed until an administrator reviews and audits a
 one-to-one backfill. Standup activity similarly requires explicit
 `metadata.actor_principal_id`, `actor`, a stable `thread_key`, and an internal
 post-authorization provenance marker; pre-migration metadata is not backfilled.
-Closure uses only trusted `closes_thread_keys`. Raw service capture cannot set
-attribution or closure fields; mapped plugin capture resolves immutable external
-IDs through append-only, database-audited org-admin mappings. GitHub uses numeric
-webhook user IDs, never mutable logins. Deploy and terminal identities and thread
-keys are namespaced to the authenticated ingestion principal. PR authors and
-deploy actors are the activity actors, while mergers and reviewers remain
-separate metadata. Promotion strips all activity/thread trust metadata so moving
-knowledge cannot manufacture freshly dated standup activity.
+Closure uses only trusted `closes_thread_keys`. Raw REST/MCP capture and plugins
+not explicitly trusted for activity cannot set actor, thread, closure,
+provenance, or activity-time fields. Mapped plugin capture resolves immutable
+external IDs through historical, database-audited org-admin mappings.
+Revocation retains the immutable old row; replacement atomically revokes it and
+inserts a new active row. GitHub uses numeric webhook user IDs, never mutable
+logins, under a namespace containing the authenticated ingestion principal.
+Deploy and terminal identities and thread keys use the same producer namespace
+rule. PR authors and deploy actors are the activity actors, while mergers and
+reviewers remain separate metadata. Promotion preserves internally trusted
+activity at its original time while stripping all activity trust fields from
+untrusted legacy rows.
 
 ## Shared service layer
 

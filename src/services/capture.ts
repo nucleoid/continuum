@@ -19,6 +19,7 @@ import {
 } from './relations.js';
 import type { Queryable } from '../storage/queryable.js';
 import {
+  hasTrustedActivityMetadata,
   markTrustedActivityMetadata,
   validateCaptureMetadata,
 } from '../capture/metadata.js';
@@ -281,6 +282,12 @@ async function captureMemoryInternal(
     const relationThreshold = validateRelationThreshold(
       options.relationThreshold ?? DEFAULT_RELATION_THRESHOLD,
     );
+    if (!mappedAttribution && hasTrustedActivityMetadata(input.metadata)) {
+      throw new ServiceError(
+        'FORBIDDEN',
+        'Activity attribution, threads, closure, and provenance require trusted mapped plugin capture',
+      );
+    }
     validateScopeRef(input.scope);
     const scope = await getScopeByRef(pool, input.scope);
     if (!scope) throw new ServiceError('SCOPE_NOT_FOUND', 'Scope not found');
@@ -289,16 +296,6 @@ async function captureMemoryInternal(
     }
     const actorPrincipalId = input.metadata?.actor_principal_id;
     const threadOwnerPrincipalId = input.metadata?.thread_owner_principal_id;
-    const hasThreadClosures = Object.hasOwn(input.metadata ?? {}, 'closes_thread_keys');
-    if (principal.kind === 'service' && !mappedAttribution
-        && (actorPrincipalId !== undefined
-          || threadOwnerPrincipalId !== undefined
-          || hasThreadClosures)) {
-      throw new ServiceError(
-        'FORBIDDEN',
-        'Service activity attribution and thread closure require an admin-controlled actor mapping',
-      );
-    }
     if (mappedAttribution) {
       if (actorPrincipalId !== mappedAttribution.principalId
           || threadOwnerPrincipalId !== mappedAttribution.principalId) {
@@ -331,7 +328,7 @@ async function captureMemoryInternal(
         );
       }
     }
-    const persistedMetadata = markTrustedActivityMetadata(input.metadata);
+    let persistedMetadata = markTrustedActivityMetadata(input.metadata);
 
     const memoryId = randomUUID();
     const route = asEmbeddingRouter(embeddingRouting).resolve({
@@ -391,11 +388,17 @@ async function captureMemoryInternal(
       }
       if (typeof actorPrincipalId === 'string') {
         const actor = await client.query(
-          'SELECT kind FROM principals WHERE id = $1 FOR KEY SHARE',
+          'SELECT kind, display_name FROM principals WHERE id = $1 FOR KEY SHARE',
           [actorPrincipalId],
         );
         if (actor.rows[0]?.kind !== 'user') {
           throw new ServiceError('INVALID_INPUT', 'Activity actor must be an existing user principal');
+        }
+        if (mappedAttribution) {
+          persistedMetadata = {
+            ...persistedMetadata,
+            actor: actor.rows[0].display_name as string,
+          };
         }
       }
       if (typeof threadOwnerPrincipalId === 'string') {

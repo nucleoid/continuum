@@ -5,6 +5,7 @@ import type { CaptureContext, ExternalActorIdentity } from '../capture/plugin.js
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import { resolveActorPrincipalId } from '../storage/actor-identities.js';
 import type { Principal } from '../types.js';
+import { stripTrustedActivityMetadata } from '../capture/metadata.js';
 import {
   captureMappedPluginMemory,
   captureMemory,
@@ -43,8 +44,11 @@ export async function capturePluginEvent(
   if (!plugin) throw new UnknownPluginError(pluginId);
 
   const claimedIdentity = plugin.actorIdentity?.(event) ?? null;
-  const activityNamespace = plugin.authenticatedActorNamespace
-    ? authenticatedActorAuthority(pluginId, ingestionPrincipal.id)
+  const activityNamespace = plugin.trustedActivityMetadata
+    ? authenticatedActorAuthority(
+        plugin.activityIdentityAuthority ?? pluginId,
+        ingestionPrincipal.id,
+      )
     : undefined;
   const identity = claimedIdentity && activityNamespace
     ? { authority: activityNamespace, externalId: claimedIdentity.externalId }
@@ -69,19 +73,19 @@ export async function capturePluginEvent(
 
   const results: CaptureResult[] = [];
   for (const transformedInput of inputs) {
-    const metadata = { ...transformedInput.metadata };
-    delete metadata.actor_principal_id;
-    delete metadata.thread_owner_principal_id;
-    if (actorPrincipalId) {
+    const metadata = plugin.trustedActivityMetadata && actorPrincipalId
+      ? { ...transformedInput.metadata }
+      : stripTrustedActivityMetadata(transformedInput.metadata ?? {});
+    if (plugin.trustedActivityMetadata && actorPrincipalId) {
+      delete metadata.actor_principal_id;
+      delete metadata.thread_owner_principal_id;
       metadata.actor_principal_id = actorPrincipalId;
       metadata.thread_owner_principal_id = actorPrincipalId;
-    } else {
-      delete metadata.closes_thread_keys;
     }
     const input = { ...transformedInput, metadata };
     const auditMetadata = { plugin: pluginId, ...options.auditMetadata };
     const captureOptions = { relationThreshold: options.relationThreshold };
-    results.push(identity && actorPrincipalId
+    results.push(plugin.trustedActivityMetadata && identity && actorPrincipalId
       ? await captureMappedPluginMemory(
           pool,
           embeddingProvider,
