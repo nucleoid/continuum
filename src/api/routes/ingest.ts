@@ -33,7 +33,7 @@ const timestamp = z.string().max(100).datetime({ offset: true })
   .transform((value) => new Date(value).toISOString());
 const optionalTimestamp = timestamp.optional();
 const actor = z.object({
-  id: z.number().int().nonnegative().safe(),
+  id: z.number().int().positive().safe(),
   login: text(200),
 });
 

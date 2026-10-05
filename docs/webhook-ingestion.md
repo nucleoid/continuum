@@ -23,15 +23,15 @@ must resolve to that exact principal. Provider credentials never select the
 principal. Every transformed target scope must already exist and the service
 principal must have an explicit `writer` or `admin` membership.
 
-GitHub branch actors and terminal actors are resolved through
-`principal_aliases`. GitHub uses the immutable numeric user ID as the external
-actor for provider `github`; the mutable login is retained only as display
-metadata. Terminal summaries use provider `terminal`, including summaries with
-an explicit scope override. The alias must point to a user principal, and that
-principal's `external_id` is the default user scope name. Missing aliases and
-scopes are rejected. Every selected scope, including an override, still
-requires writer or admin access by the configured service principal. Ingestion
-never creates scopes.
+Standup attribution resolves actors through `actor_principal_mappings` under a
+producer-specific authority such as `github.<service-principal-uuid>`. GitHub
+uses the immutable numeric webhook user ID as the external actor. A mutable
+login is display-only and is never an identity or user-scope fallback. Deploy
+and terminal producers likewise require an explicit opaque actor ID. Missing
+mappings store ordinary non-standup memories after reserved activity metadata
+is removed. Every selected scope, including an override, still requires writer
+or admin access by the configured service principal. Ingestion never creates
+scopes.
 
 ## Responses and replay
 

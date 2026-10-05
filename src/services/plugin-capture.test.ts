@@ -119,6 +119,16 @@ describe('plugin capture to standup attribution', () => {
       mappedByPrincipalId: admin.id,
     });
     expect((await standup()).activity).toEqual([]);
+
+    const [replacementCapture] = await capturePluginEvent(
+      pool, null, service, 'github-pr', mergedPr(71, 4242, 'renamed-again'),
+    );
+    await pool.query(
+      `UPDATE memories SET created_at = $2, updated_at = $2 WHERE id = $1`,
+      [replacementCapture.memory.id, '2026-10-05T11:00:00.000Z'],
+    );
+    expect((await standup()).activity.map((memory) => memory.id))
+      .toEqual([replacementCapture.memory.id]);
   });
 
   it('stores an unmapped GitHub PR safely but fails closed for standup eligibility', async () => {

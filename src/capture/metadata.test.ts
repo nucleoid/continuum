@@ -39,6 +39,11 @@ describe('capture activity metadata', () => {
     { _continuum_activity_provenance: 'capture-v1' },
     { actor_principal_id: 'display-name' },
     { actor_principal_id: '11111111-1111-4111-8111-111111111111' },
+    {
+      actor_principal_id: '11111111-1111-4111-8111-111111111111',
+      thread_owner_principal_id: '22222222-2222-4222-8222-222222222222',
+      thread_key: 'mismatched-owner',
+    },
     { _continuum_actor_mapping_id: '11111111-1111-4111-8111-111111111111' },
     { thread_owner_principal_id: '11111111-1111-4111-8111-111111111111' },
     { actor: '' },

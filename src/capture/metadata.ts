@@ -38,11 +38,11 @@ export function validateCaptureMetadata(metadata: Record<string, unknown> = {}):
     );
   }
   if (Object.hasOwn(metadata, 'actor_principal_id')) {
-    for (const required of ['thread_key']) {
+    for (const required of ['thread_key', 'thread_owner_principal_id']) {
       if (!Object.hasOwn(metadata, required)) {
         throw new ServiceError(
           'INVALID_INPUT',
-          'Activity metadata requires actor_principal_id and thread_key',
+          'Activity metadata requires actor_principal_id, thread_owner_principal_id, and thread_key',
         );
       }
     }
@@ -69,6 +69,11 @@ export function validateCaptureMetadata(metadata: Record<string, unknown> = {}):
     if (!Object.hasOwn(metadata, 'thread_key')) {
       throw new ServiceError(
         'INVALID_INPUT', 'metadata.thread_owner_principal_id requires thread_key',
+      );
+    }
+    if (metadata.actor_principal_id !== metadata.thread_owner_principal_id) {
+      throw new ServiceError(
+        'INVALID_INPUT', 'metadata.thread_owner_principal_id must equal metadata.actor_principal_id',
       );
     }
   }
@@ -134,7 +139,8 @@ export function activityMetadataForPromotion(
 ): Record<string, unknown> {
   const sanitized = stripTrustedActivityMetadata(metadata);
   if (!mappingAuthorized
-      || metadata[ACTIVITY_PROVENANCE_KEY] !== ACTIVITY_PROVENANCE_VALUE) return sanitized;
+      || metadata[ACTIVITY_PROVENANCE_KEY] !== ACTIVITY_PROVENANCE_VALUE
+      || metadata.thread_owner_principal_id !== metadata.actor_principal_id) return sanitized;
   for (const key of TRUSTED_ACTIVITY_METADATA_KEYS) {
     if (key !== ACTIVITY_EPOCH_MS_KEY && Object.hasOwn(metadata, key)) {
       sanitized[key] = metadata[key];

@@ -68,6 +68,15 @@ describe('standup mapping enforcement storage', () => {
         _continuum_actor_mapping_authority: 'terminal-summary.storage-test',
       },
     });
+    const mismatchedOwner = await createMemory(pool, {
+      scopeId: project.id, scopeKind: project.kind, type: 'context', title: 'Mismatched owner',
+      body: 'mismatched body', authorId: principal.id, source: 'terminal-summary',
+      metadata: {
+        ...base, thread_owner_principal_id: '22222222-2222-4222-8222-222222222222',
+        thread_key: 'thread:mismatched', _continuum_actor_mapping_id: mappingId,
+        _continuum_actor_mapping_authority: 'terminal-summary.storage-test',
+      },
+    });
 
     const migration = await readFile(
       new URL('../../migrations/0010_standup_mapping_enforcement.sql', import.meta.url),
@@ -77,14 +86,14 @@ describe('standup mapping enforcement storage', () => {
 
     const result = await pool.query<{ id: string; body: string; metadata: Record<string, unknown> }>(
       'SELECT id, body, metadata FROM memories WHERE id = ANY($1::uuid[]) ORDER BY title',
-      [[trusted.id, provenanceOnly.id, forged.id]],
+      [[trusted.id, provenanceOnly.id, forged.id, mismatchedOwner.id]],
     );
     const byId = new Map(result.rows.map((row) => [row.id, row]));
     expect(byId.get(trusted.id)!.metadata).toMatchObject({
       ordinary: 'retained', thread_key: 'thread:trusted',
       _continuum_actor_mapping_id: mappingId,
     });
-    for (const id of [provenanceOnly.id, forged.id]) {
+    for (const id of [provenanceOnly.id, forged.id, mismatchedOwner.id]) {
       expect(byId.get(id)!.metadata).toEqual({ ordinary: 'retained' });
       expect(byId.get(id)!.body).toMatch(/body$/);
     }

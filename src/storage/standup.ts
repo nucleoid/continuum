@@ -61,6 +61,7 @@ function mappingStillAuthorizes(alias: string): string {
 const AUTHORIZED_ACTIVITY = `
   m.metadata->>'_continuum_activity_provenance' = 'capture-v1'
   AND m.metadata->>'actor_principal_id' = $1::text
+  AND m.metadata->>'thread_owner_principal_id' = m.metadata->>'actor_principal_id'
   AND ${mappingStillAuthorizes('m')}
   AND (
     (s.kind = 'user' AND s.owner_principal_id = $1::uuid)
@@ -128,10 +129,8 @@ export async function listOpenStandupThreads(
             ${activityAt('m')} AS created_at
        FROM memories m
        JOIN scopes s ON s.id = m.scope_id
-      WHERE COALESCE(
-              m.metadata->>'thread_owner_principal_id',
-              m.metadata->>'actor_principal_id'
-            ) = $1::text
+      WHERE m.metadata->>'actor_principal_id' = $1::text
+        AND m.metadata->>'thread_owner_principal_id' = m.metadata->>'actor_principal_id'
         AND m.metadata->>'_continuum_activity_provenance' = 'capture-v1'
         AND (
           (s.kind = 'user' AND s.owner_principal_id = $1::uuid)
@@ -149,13 +148,9 @@ export async function listOpenStandupThreads(
           SELECT 1
             FROM memories closing
             JOIN scopes closing_scope ON closing_scope.id = closing.scope_id
-           WHERE COALESCE(
-                   closing.metadata->>'thread_owner_principal_id',
-                   closing.metadata->>'actor_principal_id'
-                 ) = COALESCE(
-                   m.metadata->>'thread_owner_principal_id',
-                   m.metadata->>'actor_principal_id'
-                 )
+           WHERE closing.metadata->>'actor_principal_id' = $1::text
+             AND closing.metadata->>'thread_owner_principal_id'
+                   = closing.metadata->>'actor_principal_id'
              AND ${activityAt('closing')} >= ${activityAt('m')}
              AND ${activityAt('closing')} < $4
              AND closing.metadata->>'_continuum_activity_provenance' = 'capture-v1'

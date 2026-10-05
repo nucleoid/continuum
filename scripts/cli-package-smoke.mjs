@@ -70,6 +70,7 @@ try {
     'scripts/retire-scope-operator.sql',
     'docs/audit-retention.md',
     'docs/memory-api.md',
+    'docs/standup-digest.md',
   ]) {
     if (!existsSync(join(installedRoot, required))) {
       throw new Error(`Packed package is missing required runtime artifact: ${required}`);

@@ -84,6 +84,11 @@ describe('ensure-scope operator client', () => {
       .catch((error: unknown) => error as { code: number });
     expect(invalid.code).toBe(2);
 
+    const missingUserOwner = await execFileAsync(process.execPath, [script, 'user', 'opaque-user'])
+      .catch((error: unknown) => error as { code: number; stderr: string });
+    expect(missingUserOwner.code).toBe(2);
+    expect(missingUserOwner.stderr).toContain('User scopes require the owner UUID');
+
     const unknownCredential = 'c'.repeat(64);
     const startupFailure = await execFileAsync(process.execPath, [
       script, 'project', 'client-smoke',

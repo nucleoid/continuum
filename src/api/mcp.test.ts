@@ -199,6 +199,7 @@ describe('MCP server', () => {
       authorId: me.id, source: 'terminal-summary', sourceRef: 'session://source-1',
       metadata: {
         actor_principal_id: me.id, actor: 'mcp-user',
+        thread_owner_principal_id: me.id,
         thread_key: 'terminal-session:source-1', closes_thread_keys: [],
         _continuum_activity_provenance: 'capture-v1',
         _continuum_actor_mapping_id: mapping.rows[0]!.mapping_id,
@@ -789,6 +790,26 @@ describe('MCP server', () => {
         },
       ]),
     );
+  });
+
+  it('ensure_scope requires an explicit owner for user scopes without creating or auditing', async () => {
+    const { client, me, org } = await connectClient();
+    await addMembership(pool, me.id, org.id, 'admin');
+
+    const result = (await client.callTool({
+      name: 'continuum.ensure_scope',
+      arguments: { kind: 'user', name: 'owner-required' },
+    })) as CallToolResult & { isError?: boolean };
+
+    expect(result.isError).toBe(true);
+    expect(parseJsonResult(result)).toEqual({
+      error: { code: 'INVALID_INPUT', message: 'User scope owner_principal_id is required' },
+    });
+    expect((await pool.query(
+      `SELECT
+         (SELECT count(*)::int FROM scopes WHERE kind = 'user' AND name = 'owner-required') AS scopes,
+         (SELECT count(*)::int FROM audit_log) AS audits`,
+    )).rows[0]).toEqual({ scopes: 0, audits: 0 });
   });
 
   it.each(['writer', 'reader'] as const)(

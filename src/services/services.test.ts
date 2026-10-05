@@ -1137,6 +1137,29 @@ describe('shared services', () => {
       owner: 'payments', promoted_from: legacy.id,
     });
 
+    const expired = await createMemory(pool, {
+      scopeId: team.id, scopeKind: team.kind, type: 'context', title: 'Expired activity',
+      body: 'Expired activity must not regain standup eligibility through promotion.',
+      authorId: principal.id, source: 'terminal-summary',
+      metadata: {
+        owner: 'payments', actor: 'actor-label', actor_principal_id: principal.id,
+        thread_owner_principal_id: principal.id, thread_key: 'terminal:expired',
+        closes_thread_keys: [], _continuum_activity_provenance: 'capture-v1',
+        _continuum_actor_mapping_id: mappingId,
+        _continuum_actor_mapping_authority: 'terminal-summary.producer',
+      },
+    });
+    await pool.query(
+      `UPDATE memories SET expires_at = now() - interval '1 second' WHERE id = $1`,
+      [expired.id],
+    );
+    const expiredResult = await promoteForPrincipal(
+      pool, principal, expired.id, { kind: 'project', name: 'promotion-activity' },
+    );
+    expect(expiredResult.destination.metadata).toEqual({
+      owner: 'payments', promoted_from: expired.id,
+    });
+
     await revokeActorIdentity(pool, {
       authority: 'terminal-summary.producer', externalActorId: 'promotion-actor',
       revokedByPrincipalId: principal.id,

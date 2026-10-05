@@ -33,10 +33,9 @@ export const githubBranchPlugin: CapturePlugin<GitHubBranchEvent> = {
 
     const actor = event.sender.login;
     const identity = githubIdentity(event.sender);
-    const userScopeName = (identity ? ctx.resolveUserScope?.(identity) : null) ?? actor;
-    const actorPrincipalId = identity
-      ? ctx.resolveActorPrincipalId?.(identity) ?? null
-      : null;
+    if (!identity) return [];
+    const userScopeName = ctx.resolveUserScope?.(identity) ?? identity.externalId;
+    const actorPrincipalId = ctx.resolveActorPrincipalId?.(identity) ?? null;
 
     const lines = [
       `Branch ${event.ref} created in ${event.repository.full_name}.`,

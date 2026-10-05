@@ -59,6 +59,7 @@ describe('GET /api/v0/standup', () => {
       }
       return {
         ...metadata,
+        thread_owner_principal_id: metadata.thread_owner_principal_id ?? actorId,
         _continuum_activity_provenance: 'capture-v1',
         _continuum_actor_mapping_id: mapping.id,
         _continuum_actor_mapping_authority: mapping.authority,
@@ -229,7 +230,7 @@ describe('GET /api/v0/standup', () => {
     expect(response.body.openThreads.map((item: { id: string }) => item.id)).not.toContain(open.id);
   });
 
-  it('allows a different actual actor to close a thread only with explicit matching ownership', async () => {
+  it('does not let a different actor claim or close another actor thread', async () => {
     const { me, trustedMetadata } = await seed();
     const other = await createPrincipal(pool, {
       externalId: 'entra:thread-closer', kind: 'user', displayName: 'Thread Closer',
@@ -262,7 +263,7 @@ describe('GET /api/v0/standup', () => {
       .get('/api/v0/standup').query({ since: '24h', openThreadDays: 2 })
       .set('Authorization', 'Bearer entra:standup-me');
     expect(response.status).toBe(200);
-    expect(response.body.openThreads.map((item: { id: string }) => item.id)).not.toContain(opened.id);
+    expect(response.body.openThreads.map((item: { id: string }) => item.id)).toContain(opened.id);
   });
 
   it.each(['archived', 'expired'])('keeps a thread closed after its closure is %s', async (

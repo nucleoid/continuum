@@ -91,7 +91,9 @@ async function promoteOperation(
     throw new PromoteError(`principal lacks ${roleName} role on target scope`, 403);
   }
 
-  const mappingAuthorized = await activityMappingIsAuthorized(client, source.metadata);
+  const mappingAuthorized = await activityMappingIsAuthorized(
+    client, source.metadata, source.expiresAt,
+  );
   const destinationMetadata = activityMetadataForPromotion(
     source.metadata, source.createdAt, mappingAuthorized,
   );
@@ -198,6 +200,7 @@ async function verifyOperation(
 async function activityMappingIsAuthorized(
   client: pg.PoolClient,
   metadata: Record<string, unknown>,
+  expiresAt: Date | null,
 ): Promise<boolean> {
   const mappingId = metadata._continuum_actor_mapping_id;
   const authority = metadata._continuum_actor_mapping_authority;
@@ -213,8 +216,9 @@ async function activityMappingIsAuthorized(
         AND mapping.authority = $2
         AND mapping.principal_id::text = $3
         AND mapping.revoked_at IS NULL
+        AND ($4::timestamptz IS NULL OR $4::timestamptz > now())
       FOR SHARE OF mapping`,
-    [mappingId, authority, principalId],
+    [mappingId, authority, principalId, expiresAt],
   );
   return rows.length === 1;
 }

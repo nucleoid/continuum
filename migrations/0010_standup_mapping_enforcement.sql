@@ -35,6 +35,24 @@ UPDATE memories memory
             AND mapping.revoked_at IS NULL
        );
 
+-- Thread ownership is part of actor attribution, not a delegation mechanism.
+-- Retire historical rows that omit it or assign the thread to another actor.
+UPDATE memories memory
+   SET metadata = memory.metadata
+       - 'actor'
+       - 'actor_principal_id'
+       - 'thread_owner_principal_id'
+       - 'thread_key'
+       - 'closes_thread_keys'
+       - '_continuum_activity_provenance'
+       - '_continuum_activity_epoch_ms'
+       - '_continuum_actor_mapping_id'
+       - '_continuum_actor_mapping_authority',
+       updated_at = statement_timestamp()
+ WHERE memory.metadata ? 'actor_principal_id'
+   AND memory.metadata->>'thread_owner_principal_id'
+         IS DISTINCT FROM memory.metadata->>'actor_principal_id';
+
 DROP INDEX memories_standup_closures_gin;
 CREATE INDEX memories_standup_closures_gin
   ON memories USING gin ((metadata->'closes_thread_keys') jsonb_path_ops)

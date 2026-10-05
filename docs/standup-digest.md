@@ -17,7 +17,7 @@ Standup-eligible captures use these reserved metadata fields:
 - `actor_principal_id`: UUID of the actual person who performed the activity.
 - `actor`: bounded mapped-principal display label loaded inside the write transaction.
 - `thread_key`: stable, source-qualified thread identity.
-- `thread_owner_principal_id`: optional explicit user UUID that owns the thread.
+- `thread_owner_principal_id`: required actor UUID, equal to `actor_principal_id`.
 - `closes_thread_keys`: explicit list of stable thread keys closed by this capture.
 - `_continuum_activity_provenance`: internal trust marker written only after
   attribution authorization; capture callers cannot supply it.
@@ -68,10 +68,11 @@ Oversized terminal session IDs use a deterministic SHA-256 thread-key suffix;
 caller-supplied closure keys are ignored. A supplied principal UUID, authority,
 or actor label is never accepted as identity or as the displayed actor.
 
-Open threads use `thread_owner_principal_id`, falling back to the actor ID only
-for historical records. A capture by another actor may close a thread only
-when it explicitly carries the same thread owner. Closures after a requested
-historical window do not rewrite that historical view. Terminal summaries
+Thread ownership is not delegation. Standup rows require
+`thread_owner_principal_id` to equal `actor_principal_id`; missing or mismatched
+historical metadata is ineligible. Only that actor's later trusted captures can
+close the thread. Closures after a requested historical window do not rewrite
+that historical view. Terminal summaries
 close their session thread by default; producers must set `keepThreadOpen`
 when the summarized session intentionally remains actionable.
 Archived or expired closure memories remain historical closure evidence and
@@ -106,6 +107,12 @@ Mapping and capture audits reference the internal mapping UUID and authority;
 they do not duplicate the provider's opaque actor ID. Capture holds a shared
 mapping lock through persistence, while revocation/replacement takes an update
 lock, so a capture cannot commit against a concurrently revoked mapping.
+
+Revocation retires all standup activity and closure semantics authorized by
+that exact historical mapping UUID. Replacing a mapping does not reactivate old
+rows, even when the replacement points to the same principal. Only captures
+written after replacement carry the new mapping UUID and become eligible.
+Memory bodies and ordinary metadata remain available through their normal ACLs.
 
 For deploy and terminal mappings, use the generated authority shown above,
 for example `terminal-summary.<authenticated-service-principal-uuid>`. This
@@ -142,16 +149,18 @@ Promoted copies preserve activity metadata only when the source has Continuum's
 internal provenance marker and its exact mapping UUID, authority, and principal
 still identify an active mapping. Promotion holds a shared lock on that mapping
 through the destination write and carries the original activity time so the
-digest does not re-date the work. Legacy, forged, or revoked-mapping rows lose
-actor, thread, closure, provenance, mapping, and activity-time fields during
-promotion. Expired promoted activity remains excluded.
+digest does not re-date the work. Legacy, forged, revoked-mapping, or already
+expired rows lose actor, thread, closure, provenance, mapping, and activity-time
+fields during promotion. A destination scope's fresh lifecycle cannot revive
+expired activity.
 
 ## Mapping-enforcement rollout
 
 Migration `0010_standup_mapping_enforcement.sql` strips all reserved activity,
 thread, closure, provenance, and mapping keys from rows that do not match one
-active mapping UUID, authority, and actor principal. It retains the memory body
-and all ordinary metadata. This cleanup is intentionally fail-closed: legacy
+active mapping UUID, authority, and actor principal, or whose explicit thread
+owner is missing or differs from the actor. It retains the memory body and all
+ordinary metadata. This cleanup is intentionally fail-closed: legacy
 reserved fields are not copied into a quarantine metadata object where an old
 reader or later promotion could treat them as active semantics.
 
