@@ -47,6 +47,7 @@ describe('runMigrations', () => {
     expect(migrations).toContain('0008_decision_supersession_validation.sql');
     expect(migrations).toContain('0009_decision_supersession_unique_index.sql');
     expect(migrations.filter((file) => file.startsWith('0005_'))).toEqual([
+      '0005_entra_auth.sql',
       '0005_webhook_ingestion.sql',
     ]);
 
@@ -253,6 +254,78 @@ describe('runMigrations', () => {
          VALUES ($1, 'upper', $2, 'reader', TRUE, $3, now())`,
         ['CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCCC', scope, approver],
       )).rejects.toThrow();
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  });
+
+  it('canonicalizes UUID-shaped principal identities and enforces the invariant', async () => {
+    const schema = `migrator_principal_case_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const migration = await readFile(
+      join(process.cwd(), 'migrations/0013_canonicalize_principal_external_ids.sql'),
+      'utf8',
+    );
+    const directory = await migrationDirectory(migration);
+    const lower = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    try {
+      await pool.query(
+        `CREATE TABLE principals (
+           id UUID PRIMARY KEY, external_id TEXT UNIQUE, kind TEXT, display_name TEXT
+         )`,
+      );
+      await pool.query(
+        `INSERT INTO principals (id, external_id, kind, display_name) VALUES
+         (gen_random_uuid(), $1, 'user', 'UUID'),
+         (gen_random_uuid(), 'Service:Opaque', 'service', 'Opaque')`,
+        [lower.toUpperCase()],
+      );
+
+      await runMigrations(pool, directory);
+
+      expect((await pool.query('SELECT external_id FROM principals ORDER BY external_id')).rows)
+        .toEqual([{ external_id: lower }, { external_id: 'Service:Opaque' }]);
+      await expect(pool.query(
+        `INSERT INTO principals (id, external_id, kind, display_name)
+         VALUES (gen_random_uuid(), 'BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB', 'user', 'Invalid')`,
+      )).rejects.toThrow();
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  });
+
+  it('preflights principal UUID case collisions without changing rows', async () => {
+    const schema = `migrator_principal_collision_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const migration = await readFile(
+      join(process.cwd(), 'migrations/0013_canonicalize_principal_external_ids.sql'),
+      'utf8',
+    );
+    const directory = await migrationDirectory(migration);
+    const lower = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    try {
+      await pool.query(
+        `CREATE TABLE principals (
+           id UUID PRIMARY KEY, external_id TEXT UNIQUE, kind TEXT, display_name TEXT
+         )`,
+      );
+      await pool.query(
+        `INSERT INTO principals (id, external_id, kind, display_name) VALUES
+         (gen_random_uuid(), $1, 'user', 'Lower'),
+         (gen_random_uuid(), $2, 'user', 'Upper')`,
+        [lower, lower.toUpperCase()],
+      );
+
+      await expect(runMigrations(pool, directory))
+        .rejects.toThrow(/collide after lowercase canonicalization/);
+      expect((await pool.query('SELECT external_id FROM principals ORDER BY external_id')).rows)
+        .toEqual([{ external_id: lower }, { external_id: lower.toUpperCase() }]);
     } finally {
       await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
     }

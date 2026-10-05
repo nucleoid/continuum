@@ -38,10 +38,12 @@ authentication immediately; long-lived MCP sessions revalidate on their normal
 30-second interval. This database check is defense in depth and does not replace
 the required enterprise-application assignment.
 
-The immutable `oid` claim owns principal identity. A changed `name` only
-updates display metadata, and a principal cannot change kind. Stdio MCP
-sessions revalidate credentials every 30 seconds and terminate at token or API
-key expiry, rotation, or revocation.
+The immutable `oid` claim owns principal identity. UUID-shaped principal
+external IDs are stored in lowercase, and actor and ingest principal
+configuration accepts either UUID case. A changed `name` updates display
+metadata only when the value actually changes, and a principal cannot change
+kind. Stdio MCP sessions revalidate credentials every 30 seconds and terminate
+at token or API key expiry, rotation, or revocation.
 
 Tenant and client UUID configuration is canonicalized to lowercase at startup.
 This is a representation rule only; Entra UUID comparisons remain
@@ -103,18 +105,22 @@ reprovisioning.
 
 ## Membership sync
 
-Run `npm run sync:memberships` from a nightly scheduler. It requires:
+Run `npm run sync:memberships` from a nightly scheduler. Operators may run the
+same command on demand after a Graph outage, binding change, or approved
+mass-deactivation investigation. It requires:
 
 - `CONTINUUM_ENTRA_MEMBERSHIP_SYNC=true`
 - `CONTINUUM_GRAPH_ACCESS_TOKEN`
 - `CONTINUUM_MEMBERSHIP_SYNC_ACTOR`, the external ID of an org admin
 - the normal database configuration
 
-Before enabling the scheduler, retain an independently managed manual org
-administrator as a break-glass identity. Invalid-input quarantine is
-intentionally fail-closed and takes precedence over availability: if the only
-org-admin access is sourced by a malformed, duplicate, or per-group oversized
-Entra result, that access is removed and direct database recovery is required.
+Before enabling the scheduler, retain an independently managed, active manual
+org administrator as a break-glass identity. Every run verifies this database
+state before screening or quarantine and fails with `CONFLICT` without changing
+access if it is absent. Invalid-input quarantine is
+intentionally fail-closed and takes precedence over Entra-sourced availability:
+admin access sourced by a malformed, duplicate, or per-group oversized Entra
+result is removed while the required manual break-glass administrator remains.
 
 Quarantine is durable state, distinct from an ordinary 404 disappearance. A
 later valid Graph response cannot silently reactivate a quarantined binding;
@@ -142,15 +148,17 @@ result accounting counts every unusable result while deactivating each affected
 binding only once.
 
 Graph authentication, authorization, rate-limit, service, timeout, transport,
-response-body timeout/drop/truncation, and non-JSON body failures abort snapshot
+response-body timeout/drop/truncation, non-JSON body, malformed pagination,
+untrusted next-link, cycle, and page-cap exhaustion failures abort snapshot
 collection before synchronization starts.
 They do not convert every approved group into malformed input or quarantine
-the last successfully synchronized access set. The job reports failure so the
-scheduler can retry. Invalid Graph payloads and untrusted pagination links are
-still contained to the affected binding and quarantined fail-closed.
-Member pagination is restricted to trusted Microsoft Graph v1.0 URLs, rejects
-cycles, and permits at most 11 pages per group (enough for the 10,000-member
-per-group bound at the requested 999-member page size).
+the last successfully synchronized access set. The job reports the safe
+`DEPENDENCY_UNAVAILABLE` code so a scheduler or on-demand operator can retry.
+Deterministically invalid group identity or membership data remains contained
+to the affected binding and quarantined fail-closed. Member pagination is
+restricted to trusted Microsoft Graph v1.0 URLs, rejects cycles, stops at the
+10,000-member bound, and has a separate generous 10,001-page safety cap so
+short Graph pages are not mistaken for durable tenant corruption.
 
 Empty snapshots fail closed. By default, a run that would deactivate more than
 25 percent of active bindings rolls back. After investigation, an operator may
@@ -168,9 +176,10 @@ normally from successful first sign-in, before group membership becomes active.
 
 This release does not support a mixed-version rolling deployment. Stop every
 API, MCP, admin, and membership-sync process built from the old version, then
-apply all migrations through `0012_entra_quarantine_state.sql`, review its
-conservatively quarantined legacy inactive bindings, then start only the new
-binaries. The database trigger
+apply all migrations through `0013_canonicalize_principal_external_ids.sql`,
+review the inactive bindings conservatively quarantined by
+`0012_entra_quarantine_state.sql`, then start only the new binaries. The
+database trigger
 enforces the approved binding's immutable UUID, target scope, role, lifecycle,
 and 500-binding cardinality on membership and binding writes. Binding changes
 that would orphan active sourced memberships are rejected; the audited
@@ -180,7 +189,10 @@ more than 500 approved bindings, it leaves the old schema and access unchanged.
 Use `revoke-group` (while the old processes remain stopped) to resolve excess
 valid bindings, or repair the named malformed rows under database-owner change
 control, then rerun migration. Old binaries do not understand the complete
-ID-authoritative sync and provenance contract. Pause external schedulers for
+ID-authoritative sync and provenance contract. Migration 0013 lowercases
+UUID-shaped principal external IDs and aborts before mutation if legacy rows
+would collide after canonicalization; opaque identities remain unchanged.
+Pause external schedulers for
 the entire stop/migrate/start window. Treat the schema as forward-only: do not
 restart old binaries after migration and do not roll back by dropping audit,
 credential, binding, or provenance data.

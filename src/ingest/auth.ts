@@ -2,7 +2,9 @@ import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import type { Request } from 'express';
 import type pg from 'pg';
 import type { Principal } from '../types.js';
-import { getPrincipalByExternalId } from '../storage/principals.js';
+import {
+  canonicalPrincipalExternalId, getPrincipalByExternalId,
+} from '../storage/principals.js';
 import { ServiceError } from '../services/errors.js';
 import type { IngestPluginConfig } from './config.js';
 import { isLifecyclePrincipal } from '../lifecycle/principal.js';
@@ -71,7 +73,8 @@ export async function authenticateIngest(
     const authenticated = await authenticator.authenticate(match[1], match[2]);
     if (!authenticated || authenticated.principal.kind !== 'service'
       || isLifecyclePrincipal(authenticated.principal)) unauthorized();
-    if (authenticated.principal.externalId !== config.principalExternalId) {
+    if (authenticated.principal.externalId
+      !== canonicalPrincipalExternalId(config.principalExternalId)) {
       throw new ServiceError('FORBIDDEN', 'Principal is not authorized for this plugin');
     }
     if (authenticated.allowedSource !== undefined && authenticated.allowedSource !== pluginId) {
@@ -81,7 +84,7 @@ export async function authenticateIngest(
   }
   const principal = await getPrincipalByExternalId(pool, match[2].trim());
   if (!principal || principal.kind !== 'service' || isLifecyclePrincipal(principal)) unauthorized();
-  if (principal.externalId !== config.principalExternalId) {
+  if (principal.externalId !== canonicalPrincipalExternalId(config.principalExternalId)) {
     throw new ServiceError('FORBIDDEN', 'Principal is not authorized for this plugin');
   }
   return principal;

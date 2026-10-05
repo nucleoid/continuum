@@ -16,6 +16,13 @@ export class PrincipalKindConflictError extends Error {
   }
 }
 
+const UUID_EXTERNAL_ID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+
+export function canonicalPrincipalExternalId(externalId: string): string {
+  const trimmed = externalId.trim();
+  return UUID_EXTERNAL_ID.test(trimmed) ? trimmed.toLowerCase() : trimmed;
+}
+
 function rowToPrincipal(row: Record<string, unknown>): Principal {
   return {
     id: row.id as string,
@@ -31,11 +38,12 @@ export async function createPrincipal(
   input: NewPrincipal,
 ): Promise<Principal> {
   const id = randomUUID();
+  const externalId = canonicalPrincipalExternalId(input.externalId);
   const { rows } = await pool.query(
     `INSERT INTO principals (id, external_id, kind, display_name)
      VALUES ($1, $2, $3, $4)
      RETURNING id, external_id, kind, display_name, created_at`,
-    [id, input.externalId, input.kind, input.displayName],
+    [id, externalId, input.kind, input.displayName],
   );
   return rowToPrincipal(rows[0]);
 }
@@ -56,6 +64,7 @@ export async function getPrincipalByExternalId(
   pool: Queryable,
   externalId: string,
 ): Promise<Principal | null> {
+  externalId = canonicalPrincipalExternalId(externalId);
   const { rows } = await pool.query(
     `SELECT id, external_id, kind, display_name, created_at
        FROM principals WHERE external_id = $1`,
@@ -69,15 +78,30 @@ export async function upsertPrincipalByExternalId(
   input: NewPrincipal,
 ): Promise<Principal> {
   const id = randomUUID();
-  const { rows } = await pool.query(
+  const externalId = canonicalPrincipalExternalId(input.externalId);
+  const inserted = await pool.query(
     `INSERT INTO principals (id, external_id, kind, display_name)
      VALUES ($1, $2, $3, $4)
-     ON CONFLICT (external_id) DO UPDATE
-       SET display_name = EXCLUDED.display_name
-       WHERE principals.kind = EXCLUDED.kind
+     ON CONFLICT (external_id) DO NOTHING
      RETURNING id, external_id, kind, display_name, created_at`,
-    [id, input.externalId, input.kind, input.displayName],
+    [id, externalId, input.kind, input.displayName],
   );
-  if (!rows[0]) throw new PrincipalKindConflictError();
+  if (inserted.rows[0]) return rowToPrincipal(inserted.rows[0]);
+
+  const existing = await getPrincipalByExternalId(pool, externalId);
+  if (!existing || existing.kind !== input.kind) throw new PrincipalKindConflictError();
+  if (existing.displayName === input.displayName) return existing;
+
+  const { rows } = await pool.query(
+    `UPDATE principals SET display_name = $2
+      WHERE id = $1 AND kind = $3 AND display_name IS DISTINCT FROM $2
+      RETURNING id, external_id, kind, display_name, created_at`,
+    [existing.id, input.displayName, input.kind],
+  );
+  if (!rows[0]) {
+    const current = await getPrincipal(pool, existing.id);
+    if (!current || current.kind !== input.kind) throw new PrincipalKindConflictError();
+    return current;
+  }
   return rowToPrincipal(rows[0]);
 }

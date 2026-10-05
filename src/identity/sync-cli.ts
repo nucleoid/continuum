@@ -4,6 +4,7 @@ import { fetchMembershipSnapshot } from './graph-membership.js';
 import {
   listBoundEntraGroupIds, MAX_SYNC_GROUPS, syncEntraMemberships,
 } from '../services/membership-sync.js';
+import { cliFailure } from './cli-errors.js';
 
 async function main(): Promise<void> {
   if (process.env.CONTINUUM_ENTRA_MEMBERSHIP_SYNC !== 'true') {
@@ -29,7 +30,7 @@ async function main(): Promise<void> {
   }
 }
 
-void main().catch(() => {
-  process.stderr.write(`${JSON.stringify({ event: 'entra_membership_sync_failed', message: 'sync failed' })}\n`);
+void main().catch((error) => {
+  process.stderr.write(`${cliFailure('entra_membership_sync_failed', error)}\n`);
   process.exitCode = 1;
 });

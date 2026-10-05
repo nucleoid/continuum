@@ -1,28 +1,39 @@
 import type { EntraGroupSnapshot } from '../services/membership-sync.js';
 import { MAX_GROUP_MEMBERS, MAX_SYNC_GROUPS, MAX_SYNC_MEMBERSHIPS } from '../services/membership-sync.js';
+import { ServiceError } from '../services/errors.js';
 
 interface GraphPage { value?: unknown; '@odata.nextLink'?: unknown }
 type Fetch = typeof globalThis.fetch;
 const DEFAULT_TIMEOUT_MS = 10_000;
 const GRAPH_PAGE_SIZE = 999;
-const MAX_MEMBER_PAGES = Math.ceil(MAX_GROUP_MEMBERS / GRAPH_PAGE_SIZE);
+// Graph can return fewer rows than requested. Permit the one-member-per-page
+// worst case plus a terminating empty page, while retaining a hard request cap.
+const MAX_MEMBER_PAGES = MAX_GROUP_MEMBERS + 1;
 
 class MembershipSnapshotTooLargeError extends Error {}
 
-export class GraphSnapshotUnavailableError extends Error {
+export class GraphSnapshotUnavailableError extends ServiceError {
   constructor(message: string, options?: ErrorOptions) {
-    super(message, options);
+    super('DEPENDENCY_UNAVAILABLE', 'Microsoft Graph membership snapshot is unavailable', {
+      cause: options?.cause ?? new Error(message),
+    });
     this.name = 'GraphSnapshotUnavailableError';
   }
 }
 
 function safeGraphUrl(value: string): URL {
-  const url = new URL(value);
-  if (url.protocol !== 'https:' || url.hostname !== 'graph.microsoft.com'
-    || !url.pathname.startsWith('/v1.0/')) {
-    throw new Error('Graph pagination returned an untrusted URL');
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:' || url.hostname !== 'graph.microsoft.com'
+      || !url.pathname.startsWith('/v1.0/')) {
+      throw new Error('Graph pagination returned an untrusted URL');
+    }
+    return url;
+  } catch (error) {
+    throw new GraphSnapshotUnavailableError('Microsoft Graph pagination URL was invalid', {
+      cause: error,
+    });
   }
-  return url;
 }
 
 async function request(
@@ -71,8 +82,19 @@ async function page(
   const response = await request(fetcher, url, token, timeoutMs);
   requireSuccessfulResponse(response);
   const body = await readJson(response) as GraphPage;
-  if (!Array.isArray(body.value)) throw new Error('Microsoft Graph returned an invalid page');
+  if (body === null || typeof body !== 'object' || !Array.isArray(body.value)) {
+    throw new GraphSnapshotUnavailableError('Microsoft Graph returned an invalid page');
+  }
   return body;
+}
+
+function nextPage(current: GraphPage): URL | undefined {
+  if (!Object.hasOwn(current, '@odata.nextLink')) return undefined;
+  const value = current['@odata.nextLink'];
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new GraphSnapshotUnavailableError('Microsoft Graph returned an invalid next link');
+  }
+  return safeGraphUrl(value);
 }
 
 /** Fetches only administrator-approved immutable group IDs. */
@@ -115,8 +137,12 @@ export async function fetchMembershipSnapshot(
       const visited = new Set<string>();
       let pages = 0;
       while (next) {
-        if (visited.has(next.href)) throw new Error('PAGINATION_CYCLE');
-        if (++pages > MAX_MEMBER_PAGES) throw new Error('PAGINATION_LIMIT');
+        if (visited.has(next.href)) {
+          throw new GraphSnapshotUnavailableError('Microsoft Graph pagination cycle detected');
+        }
+        if (++pages > MAX_MEMBER_PAGES) {
+          throw new GraphSnapshotUnavailableError('Microsoft Graph pagination limit exceeded');
+        }
         visited.add(next.href);
         const current = await page(fetcher, next, token, timeoutMs);
         for (const raw of current.value as unknown[]) {
@@ -128,8 +154,7 @@ export async function fetchMembershipSnapshot(
             throw new MembershipSnapshotTooLargeError('membership snapshot exceeds sync limit');
           }
         }
-        next = typeof current['@odata.nextLink'] === 'string'
-          ? safeGraphUrl(current['@odata.nextLink']) : undefined;
+        next = nextPage(current);
       }
       snapshots.push({ id, status: 'present', displayName: group.displayName, memberObjectIds: members });
       total += members.length;

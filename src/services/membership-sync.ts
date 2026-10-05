@@ -56,6 +56,24 @@ function role(value: string): asserts value is MembershipRole {
   }
 }
 
+async function requireManualOrgAdministrator(client: pg.PoolClient): Promise<void> {
+  const manualAdmin = await client.query(
+    `SELECT m.principal_id
+       FROM scope_memberships m
+       JOIN scopes s ON s.id = m.scope_id
+      WHERE s.kind = 'org' AND s.name = ''
+        AND m.source_kind = 'manual' AND m.active AND m.role = 'admin'
+      LIMIT 1
+      FOR SHARE OF m`,
+  );
+  if (!manualAdmin.rowCount) {
+    throw new ServiceError(
+      'CONFLICT',
+      'membership sync requires an active manually managed org administrator',
+    );
+  }
+}
+
 /** Explicitly creates, updates, or reactivates an immutable group-ID binding. */
 export async function provisionEntraGroupBinding(
   pool: pg.Pool,
@@ -268,6 +286,7 @@ async function rejectOversizedSnapshot(
   await client.query('BEGIN');
   try {
     await requireOrgAdmin(client, actor.id);
+    await requireManualOrgAdministrator(client);
     await client.query(
       `INSERT INTO audit_log (principal_id, action, metadata)
        VALUES ($1, 'write', $2::jsonb)`,
@@ -382,6 +401,7 @@ export async function syncEntraMemberships(
     await client.query('BEGIN');
     transactionOpen = true;
     await requireOrgAdmin(client, actor.id);
+    await requireManualOrgAdministrator(client);
     const bindings = await client.query<BindingRow>(
       `SELECT external_id, scope_id, role, active, approval_revoked_at, quarantined_at FROM entra_groups
         WHERE approved_by IS NOT NULL ORDER BY external_id FOR UPDATE`,
@@ -462,6 +482,7 @@ export async function syncEntraMemberships(
     await client.query('BEGIN');
     transactionOpen = true;
     await requireOrgAdmin(client, actor.id);
+    await requireManualOrgAdministrator(client);
     const currentBindings = await client.query<BindingRow>(
       `SELECT external_id, scope_id, role, active, approval_revoked_at, quarantined_at FROM entra_groups
         WHERE approved_by IS NOT NULL ORDER BY external_id FOR UPDATE`,

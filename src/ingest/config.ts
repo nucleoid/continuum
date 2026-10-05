@@ -1,3 +1,5 @@
+import { canonicalPrincipalExternalId } from '../storage/principals.js';
+
 export type IngestPluginId =
   | 'github-pr'
   | 'github-branch'
@@ -47,7 +49,9 @@ export function ingestConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Inges
     if (rawEnabled.toLowerCase() !== 'true') {
       throw new Error(`${spec.prefix}_ENABLED must be true or false`);
     }
-    const principalExternalId = required(env, `${spec.prefix}_PRINCIPAL`);
+    const principalExternalId = canonicalPrincipalExternalId(
+      required(env, `${spec.prefix}_PRINCIPAL`),
+    );
     let auth: IngestAuth;
     if (spec.auth === 'github-hmac') {
       auth = {

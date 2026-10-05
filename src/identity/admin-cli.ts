@@ -3,6 +3,7 @@ import { getPrincipalByExternalId } from '../storage/principals.js';
 import { issueApiKey, revokeApiKey, rotateApiKey } from '../services/api-keys.js';
 import { provisionEntraGroupBinding, revokeEntraGroupBinding } from '../services/membership-sync.js';
 import type { MembershipRole } from '../types.js';
+import { cliFailure } from './cli-errors.js';
 
 async function main(): Promise<void> {
   const [operation, ...args] = process.argv.slice(2);
@@ -43,7 +44,7 @@ async function main(): Promise<void> {
   } finally { await pool.end(); }
 }
 
-void main().catch(() => {
-  process.stderr.write(`${JSON.stringify({ event: 'continuum_admin_failed', message: 'operation failed' })}\n`);
+void main().catch((error) => {
+  process.stderr.write(`${cliFailure('continuum_admin_failed', error)}\n`);
   process.exitCode = 1;
 });

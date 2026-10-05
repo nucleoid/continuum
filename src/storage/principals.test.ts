@@ -42,18 +42,38 @@ describe('principals repository', () => {
     expect(fetched?.displayName).toBe('Cass');
   });
 
+  it('canonicalizes UUID-shaped identities on writes and lookups', async () => {
+    const lower = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const principal = await createPrincipal(pool, {
+      externalId: lower.toUpperCase(), kind: 'user', displayName: 'Canonical',
+    });
+    expect(principal.externalId).toBe(lower);
+    expect((await getPrincipalByExternalId(pool, lower.toUpperCase()))?.id).toBe(principal.id);
+    await expect(pool.query(
+      `INSERT INTO principals (id, external_id, kind, display_name)
+       VALUES (gen_random_uuid(), $1, 'user', 'Invalid')`,
+      ['BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB'],
+    )).rejects.toThrow();
+  });
+
   it('upsert returns existing principal unchanged when display name matches', async () => {
     const a = await upsertPrincipalByExternalId(pool, {
       externalId: 'svc:github-pr',
       kind: 'service',
       displayName: 'github-pr capture',
     });
+    const before = (await pool.query(
+      'SELECT xmin::text AS xmin FROM principals WHERE id = $1', [a.id],
+    )).rows[0].xmin;
     const b = await upsertPrincipalByExternalId(pool, {
       externalId: 'svc:github-pr',
       kind: 'service',
       displayName: 'github-pr capture',
     });
     expect(b.id).toBe(a.id);
+    expect((await pool.query(
+      'SELECT xmin::text AS xmin FROM principals WHERE id = $1', [a.id],
+    )).rows[0].xmin).toBe(before);
   });
 
   it('upsert updates display name', async () => {

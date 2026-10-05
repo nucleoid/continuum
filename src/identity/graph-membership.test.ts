@@ -29,15 +29,14 @@ describe('Microsoft Graph membership snapshot', () => {
     ]);
   });
 
-  it('rejects pagination links outside Microsoft Graph for only that group', async () => {
+  it('treats untrusted pagination links as a snapshot outage', async () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ id: groupId, displayName: 'renamed' }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({
         value: [], '@odata.nextLink': 'https://evil.example/steal',
       }), { status: 200 }));
-    expect(await fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher)).toEqual([
-      { id: groupId, status: 'invalid', errorCode: 'GRAPH_FAILURE' },
-    ]);
+    await expect(fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher))
+      .rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE' });
   });
 
   it.each([401, 403, 429, 500, 503])(
@@ -79,15 +78,76 @@ describe('Microsoft Graph membership snapshot', () => {
       .rejects.toBeInstanceOf(GraphSnapshotUnavailableError);
   });
 
-  it('bounds member pagination and rejects a repeating next link', async () => {
+  it('accepts short Graph pages beyond the requested-page estimate', async () => {
+    const fetcher = vi.fn(async (url: URL) => {
+      if (!String(url).includes('/members/')) {
+        return new Response(JSON.stringify({ id: groupId, displayName: 'group' }));
+      }
+      const pageNumber = fetcher.mock.calls.length - 1;
+      return new Response(JSON.stringify({
+        value: [{ id: `${String(pageNumber).padStart(8, '0')}-0000-4000-8000-000000000000` }],
+        ...(pageNumber < 12 ? {
+          '@odata.nextLink': `https://graph.microsoft.com/v1.0/groups/${groupId}/members/microsoft.graph.user?$skiptoken=${pageNumber + 1}`,
+        } : {}),
+      }));
+    });
+
+    const snapshot = await fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher);
+
+    expect(snapshot[0]).toMatchObject({ status: 'present' });
+    expect(snapshot[0]?.memberObjectIds).toHaveLength(12);
+    expect(fetcher).toHaveBeenCalledTimes(13);
+  });
+
+  it('treats repeating next links as a snapshot outage', async () => {
     const next = `https://graph.microsoft.com/v1.0/groups/${groupId}/members/microsoft.graph.user?$skiptoken=repeat`;
     const fetcher = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ id: groupId, displayName: 'group' })))
       .mockImplementation(async () => new Response(JSON.stringify({ value: [], '@odata.nextLink': next })));
 
-    expect(await fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher)).toEqual([{
-      id: groupId, status: 'invalid', errorCode: 'PAGINATION_CYCLE',
-    }]);
+    await expect(fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher))
+      .rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE' });
     expect(fetcher).toHaveBeenCalledTimes(3);
   });
+
+  it('treats malformed next-link metadata as a snapshot outage', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: groupId, displayName: 'group' })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ value: [], '@odata.nextLink': 42 })));
+
+    await expect(fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher))
+      .rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE' });
+  });
+
+  it('treats malformed member-page values as a snapshot outage', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: groupId, displayName: 'group' })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ value: null })));
+
+    await expect(fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher))
+      .rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE' });
+  });
+
+  it('treats short-page safety-cap exhaustion as a snapshot outage', async () => {
+    let memberPage = 0;
+    const fetcher = vi.fn(async () => {
+      if (memberPage === 0) {
+        memberPage += 1;
+        return new Response(JSON.stringify({ id: groupId, displayName: 'group' }));
+      }
+      const next = memberPage++;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          value: [],
+          '@odata.nextLink': `https://graph.microsoft.com/v1.0/groups/${groupId}/members/microsoft.graph.user?$skiptoken=${next}`,
+        }),
+      } as unknown as Response;
+    });
+
+    await expect(fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher))
+      .rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE' });
+    expect(fetcher).toHaveBeenCalledTimes(10_002);
+  }, 10_000);
 });
