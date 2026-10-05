@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
-import type { CaptureInput, Memory, Principal } from '../types.js';
+import type { CaptureInput, Memory, Principal, Scope } from '../types.js';
 import { asEmbeddingRouter, type EmbeddingRouting } from '../embeddings/router.js';
 import { createMemory, updateMemoryMetadata } from '../storage/memories.js';
 import { getScope, getScopeByRef } from '../storage/scopes.js';
@@ -37,6 +37,14 @@ export function validateCaptureContent(input: Pick<CaptureInput,
   if (input.title.length === 0 || input.title.length > 500 || input.body.length === 0) {
     throw new ServiceError('INVALID_INPUT', 'Invalid memory content');
   }
+  for (const key of ['related', 'continuum_legacy_tags']) {
+    if (input.metadata && Object.hasOwn(input.metadata, key)) {
+      throw new ServiceError(
+        'INVALID_INPUT',
+        `metadata.${key} is reserved by Continuum`,
+      );
+    }
+  }
   if (!isCaptureSource(input.source)) {
     throw new ServiceError('INVALID_INPUT', 'Unknown capture source');
   }
@@ -46,9 +54,27 @@ export function validateCaptureContent(input: Pick<CaptureInput,
   if (input.metadata && (Array.isArray(input.metadata) || input.metadata === null)) {
     throw new ServiceError('INVALID_INPUT', 'Invalid memory metadata');
   }
-  if (input.metadata && Object.hasOwn(input.metadata, 'related')) {
-    throw new ServiceError('INVALID_INPUT', 'metadata.related is reserved by Continuum');
+}
+
+function normalizeCapture(input: CaptureInput): string[] {
+  validateCaptureContent(input);
+  validateScopeRef(input.scope);
+  return normalizeTags(input.tags);
+}
+
+async function prepareCaptureWrite(
+  client: Queryable,
+  principal: Principal,
+  input: CaptureInput,
+): Promise<{ scope: Scope; tags: string[] }> {
+  const tags = normalizeCapture(input);
+  const scope = await getScopeByRef(client, input.scope);
+  if (!scope) throw new ServiceError('SCOPE_NOT_FOUND', 'Scope not found');
+  if (!(await canWriteScopeForMutation(client, principal.id, scope.id))) {
+    throw new ServiceError('FORBIDDEN', 'Principal lacks writer role on scope');
   }
+  await validateTagsForScopeKind(client, scope.kind, tags, true);
+  return { scope, tags };
 }
 
 /** Insert one capture into a caller-owned transaction. */
@@ -59,13 +85,7 @@ export async function captureOne(
   input: CaptureInput,
   auditMetadata: Record<string, unknown> = {},
 ): Promise<CaptureResult> {
-  validateCaptureContent(input);
-  validateScopeRef(input.scope);
-  const scope = await getScopeByRef(client, input.scope);
-  if (!scope) throw new ServiceError('SCOPE_NOT_FOUND', 'Scope not found');
-  if (!(await canWriteScopeForMutation(client, principal.id, scope.id))) {
-    throw new ServiceError('FORBIDDEN', 'Principal lacks writer role on scope');
-  }
+  const { scope, tags } = await prepareCaptureWrite(client, principal, input);
 
   const route = asEmbeddingRouter(embeddingRouting).resolve(input.scope);
   const memory = await createMemory(client, {
@@ -77,7 +97,7 @@ export async function captureOne(
     authorId: principal.id,
     source: input.source,
     sourceRef: input.sourceRef ?? null,
-    tags: input.tags,
+    tags,
     metadata: { ...input.metadata, related: [] },
   });
 
@@ -238,12 +258,10 @@ export async function captureMemory(
   options: CaptureOptions = {},
 ): Promise<CaptureResult> {
   try {
-    validateCaptureContent(input);
     const relationThreshold = validateRelationThreshold(
       options.relationThreshold ?? DEFAULT_RELATION_THRESHOLD,
     );
-    const tags = normalizeTags(input.tags);
-    validateScopeRef(input.scope);
+    const tags = normalizeCapture(input);
     const scope = await getScopeByRef(pool, input.scope);
     if (!scope) throw new ServiceError('SCOPE_NOT_FOUND', 'Scope not found');
     if (!(await canWriteScope(pool, principal.id, scope.id))) {
@@ -302,12 +320,8 @@ export async function captureMemory(
     let destroyClient = false;
     try {
       await client.query('BEGIN');
-      const authorizedScope = await getScopeByRef(client, input.scope);
-      if (!authorizedScope) throw new ServiceError('SCOPE_NOT_FOUND', 'Scope not found');
-      if (!(await canWriteScopeForMutation(client, principal.id, authorizedScope.id))) {
-        throw new ServiceError('FORBIDDEN', 'Principal lacks writer role on scope');
-      }
-      await validateTagsForScopeKind(client, authorizedScope.kind, tags, true);
+      const prepared = await prepareCaptureWrite(client, principal, input);
+      const authorizedScope = prepared.scope;
 
       let memory = await createMemory(client, {
         id: memoryId,
@@ -319,7 +333,7 @@ export async function captureMemory(
         authorId: principal.id,
         source: input.source,
         sourceRef: input.sourceRef ?? null,
-        tags,
+        tags: prepared.tags,
         metadata: { ...input.metadata, related: [] },
       });
 

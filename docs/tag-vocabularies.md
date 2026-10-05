@@ -16,7 +16,7 @@ remain available in capture metadata but are not taxonomy tags.
 
 ## Upgrade behavior
 
-Migration `0005_tag_vocabularies.sql` is a one-way rewrite of historical
+Migration `0007_tag_vocabularies.sql` is a one-way rewrite of historical
 memory tags. Only the ten built-in tags listed above remain active. Every other
 original value is removed from `tags` and retained, unchanged and in order, in
 `metadata.continuum_legacy_tags`; this includes well-formed private tags,
@@ -33,6 +33,9 @@ Legacy values remain private to each memory instead of entering the shared
 scope-kind vocabulary. Promotion deliberately copies source metadata,
 including `continuum_legacy_tags`, to the destination memory because promotion
 is an explicit copy by a caller authorized for both scopes.
+
+`metadata.continuum_legacy_tags` is reserved for migration-owned provenance.
+Capture requests and ingestion plugins cannot set it directly.
 
 ## REST management
 

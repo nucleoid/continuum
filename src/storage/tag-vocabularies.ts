@@ -120,7 +120,7 @@ export async function tagIsInUse(
     `SELECT 1
        FROM memories AS memory
        JOIN scopes AS scope ON scope.id = memory.scope_id
-      WHERE scope.kind = $1 AND $2 = ANY(memory.tags)
+      WHERE scope.kind = $1 AND memory.tags @> ARRAY[$2]::text[]
       LIMIT 1`,
     [scopeKind, tag],
   );

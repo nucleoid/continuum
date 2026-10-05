@@ -211,19 +211,25 @@ describe('shared services', () => {
     expect(rows).toEqual([{ metadata: { source: 'manual', type: 'fact', embedded: false } }]);
   });
 
-  it('rejects caller-supplied reserved relation metadata before side effects', async () => {
+  it.each([
+    ['related', [{ id: 'forged' }]],
+    ['continuum_legacy_tags', ['spoofed-private-tag']],
+  ] as const)('rejects caller-supplied reserved metadata.%s before side effects', async (
+    key,
+    value,
+  ) => {
     const { principal } = await seedWriter();
 
     await expect(captureMemory(pool, null, principal, {
       scope: { kind: 'team', name: 'payments' },
       type: 'fact',
-      title: 'Forged relation metadata',
+      title: 'Forged reserved metadata',
       body: 'Must not persist.',
       source: 'manual',
-      metadata: { related: [{ id: 'forged' }] },
+      metadata: { [key]: value },
     })).rejects.toMatchObject<ServiceError>({
       code: 'INVALID_INPUT',
-      publicMessage: 'metadata.related is reserved by Continuum',
+      publicMessage: `metadata.${key} is reserved by Continuum`,
     });
 
     const { rows } = await pool.query(

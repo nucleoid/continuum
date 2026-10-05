@@ -62,8 +62,8 @@ describe('tag vocabulary schema', () => {
         await writeFile(join(first, name), await readFile(join(MIGRATIONS, name), 'utf8'));
       }
       await writeFile(
-        join(second, '0005_tag_vocabularies.sql'),
-        await readFile(join(MIGRATIONS, '0005_tag_vocabularies.sql'), 'utf8'),
+        join(second, '0007_tag_vocabularies.sql'),
+        await readFile(join(MIGRATIONS, '0007_tag_vocabularies.sql'), 'utf8'),
       );
       await runMigrations(historical, first);
       await historical.query(`
