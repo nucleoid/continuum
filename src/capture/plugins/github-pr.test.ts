@@ -18,7 +18,7 @@ function mergedEvent(overrides: Partial<GitHubPrEvent['pull_request']> = {}): Gi
       head: { ref: 'feature/checkout-v2' },
       ...overrides,
     },
-    repository: { full_name: 'exampleorg/booking-engine', name: 'booking-engine' },
+    repository: { id: 987654321, full_name: 'exampleorg/booking-engine', name: 'booking-engine' },
   };
 }
 
@@ -59,10 +59,10 @@ describe('github-pr plugin', () => {
       number: 4421,
       actor: 'cass-exampleorg',
       merged_by: 'scott-exampleorg',
-      thread_key: 'github:pr:exampleorg/booking-engine#4421',
+      thread_key: 'github:repo:987654321:pr:4421',
       closes_thread_keys: [
-        'github:pr:exampleorg/booking-engine#4421',
-        'github:branch:exampleorg/booking-engine:feature/checkout-v2',
+        'github:repo:987654321:pr:4421',
+        'github:repo:987654321:branch:feature/checkout-v2',
       ],
       baseRef: 'main',
       headRef: 'feature/checkout-v2',

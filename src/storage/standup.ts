@@ -42,27 +42,10 @@ function mapRow(row: StandupRow): StandupMemory {
   };
 }
 
-function mappingStillAuthorizes(alias: string): string {
-  return `EXISTS (
-    SELECT 1
-      FROM actor_principal_mappings mapping
-     WHERE mapping.mapping_id = CASE
-             WHEN ${alias}.metadata->>'_continuum_actor_mapping_id'
-                    ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
-             THEN (${alias}.metadata->>'_continuum_actor_mapping_id')::uuid
-             ELSE NULL
-           END
-       AND mapping.authority = ${alias}.metadata->>'_continuum_actor_mapping_authority'
-       AND mapping.principal_id::text = ${alias}.metadata->>'actor_principal_id'
-       AND mapping.revoked_at IS NULL
-  )`;
-}
-
 const AUTHORIZED_ACTIVITY = `
-  m.metadata->>'_continuum_activity_provenance' = 'capture-v1'
-  AND m.metadata->>'actor_principal_id' = $1::text
-  AND m.metadata->>'thread_owner_principal_id' = m.metadata->>'actor_principal_id'
-  AND ${mappingStillAuthorizes('m')}
+  attribution.actor_principal_id = $1::uuid
+  AND attribution.thread_owner_principal_id = attribution.actor_principal_id
+  AND mapping.revoked_at IS NULL
   AND (
     (s.kind = 'user' AND s.owner_principal_id = $1::uuid)
     OR (s.kind = 'project' AND EXISTS (
@@ -70,15 +53,6 @@ const AUTHORIZED_ACTIVITY = `
        WHERE sm.scope_id = s.id AND sm.principal_id = $1::uuid
     ))
   )`;
-
-function activityAt(alias: string): string {
-  return `CASE
-    WHEN jsonb_typeof(${alias}.metadata->'_continuum_activity_epoch_ms') = 'number'
-     AND ${alias}.metadata->>'_continuum_activity_epoch_ms' ~ '^[0-9]{1,13}$'
-    THEN to_timestamp((${alias}.metadata->>'_continuum_activity_epoch_ms')::double precision / 1000)
-    ELSE ${alias}.created_at
-  END`;
-}
 
 export async function listStandupActivity(
   pool: pg.Pool,
@@ -93,18 +67,21 @@ export async function listStandupActivity(
             left(CASE WHEN s.kind = 'org' THEN 'org' ELSE s.kind || ':' || s.name END, 500) AS scope_label,
             m.type, left(m.title, 500) AS title, left(m.source, 100) AS source,
             left(m.source_ref, 2000) AS source_ref,
-            left(m.metadata->>'thread_key', 500) AS thread_key,
-            left(m.metadata->>'actor', 200) AS actor,
-            ${activityAt('m')} AS created_at
+            attribution.thread_key,
+            attribution.actor_label AS actor,
+            attribution.activity_at AS created_at
        FROM memories m
+       JOIN memory_activity_attributions attribution ON attribution.memory_id = m.id
+       JOIN actor_principal_mappings mapping
+         ON mapping.mapping_id = attribution.mapping_id
+        AND mapping.authority = attribution.mapping_authority
+        AND mapping.principal_id = attribution.actor_principal_id
        JOIN scopes s ON s.id = m.scope_id
       WHERE ${AUTHORIZED_ACTIVITY}
-        AND m.metadata ? 'thread_key'
-        AND m.metadata ? 'actor'
         AND m.state IN ('live', 'stale')
         AND (m.expires_at IS NULL OR m.expires_at > now())
-        AND ${activityAt('m')} >= $2 AND ${activityAt('m')} < $3
-      ORDER BY ${activityAt('m')} ASC, m.id ASC
+        AND attribution.activity_at >= $2 AND attribution.activity_at < $3
+      ORDER BY attribution.activity_at ASC, m.id ASC
       LIMIT $4 OFFSET $5`,
     [principalId, start, end, limit, offset],
   );
@@ -124,14 +101,19 @@ export async function listOpenStandupThreads(
             left(CASE WHEN s.kind = 'org' THEN 'org' ELSE s.kind || ':' || s.name END, 500) AS scope_label,
             m.type, left(m.title, 500) AS title, left(m.source, 100) AS source,
             left(m.source_ref, 2000) AS source_ref,
-            left(m.metadata->>'thread_key', 500) AS thread_key,
-            left(m.metadata->>'actor', 200) AS actor,
-            ${activityAt('m')} AS created_at
+            attribution.thread_key,
+            attribution.actor_label AS actor,
+            attribution.activity_at AS created_at
        FROM memories m
+       JOIN memory_activity_attributions attribution ON attribution.memory_id = m.id
+       JOIN actor_principal_mappings mapping
+         ON mapping.mapping_id = attribution.mapping_id
+        AND mapping.authority = attribution.mapping_authority
+        AND mapping.principal_id = attribution.actor_principal_id
        JOIN scopes s ON s.id = m.scope_id
-      WHERE m.metadata->>'actor_principal_id' = $1::text
-        AND m.metadata->>'thread_owner_principal_id' = m.metadata->>'actor_principal_id'
-        AND m.metadata->>'_continuum_activity_provenance' = 'capture-v1'
+      WHERE attribution.actor_principal_id = $1::uuid
+        AND attribution.thread_owner_principal_id = attribution.actor_principal_id
+        AND mapping.revoked_at IS NULL
         AND (
           (s.kind = 'user' AND s.owner_principal_id = $1::uuid)
           OR (s.kind = 'project' AND EXISTS (
@@ -141,33 +123,15 @@ export async function listOpenStandupThreads(
         )
         AND m.type = 'context' AND m.state = 'live'
         AND (m.expires_at IS NULL OR m.expires_at > now())
-        AND m.metadata ? 'thread_key' AND m.metadata ? 'actor'
-        AND ${mappingStillAuthorizes('m')}
-        AND ${activityAt('m')} < $2 AND ${activityAt('m')} >= $3
+        AND attribution.activity_at < $2 AND attribution.activity_at >= $3
         AND NOT EXISTS (
           SELECT 1
-            FROM memories closing
-            JOIN scopes closing_scope ON closing_scope.id = closing.scope_id
-           WHERE closing.metadata->>'actor_principal_id' = $1::text
-             AND closing.metadata->>'thread_owner_principal_id'
-                   = closing.metadata->>'actor_principal_id'
-             AND ${activityAt('closing')} >= ${activityAt('m')}
-             AND ${activityAt('closing')} < $4
-             AND closing.metadata->>'_continuum_activity_provenance' = 'capture-v1'
-             AND ${mappingStillAuthorizes('closing')}
-             AND (
-               (closing_scope.kind = 'user' AND closing_scope.owner_principal_id = $1::uuid)
-               OR (closing_scope.kind = 'project' AND EXISTS (
-                 SELECT 1 FROM scope_memberships closing_sm
-                  WHERE closing_sm.scope_id = closing_scope.id
-                    AND closing_sm.principal_id = $1::uuid
-               ))
-             )
-             AND closing.metadata ? 'closes_thread_keys'
-             AND closing.metadata->'closes_thread_keys'
-                   @> jsonb_build_array(m.metadata->>'thread_key')
+            FROM standup_thread_closures closure
+           WHERE closure.actor_principal_id = $1::uuid
+             AND closure.thread_key = attribution.thread_key
+             AND closure.closed_at < $4
         )
-      ORDER BY ${activityAt('m')} ASC, m.id ASC
+      ORDER BY attribution.activity_at ASC, m.id ASC
       LIMIT $5`,
     [principalId, before, notBefore, asOf, limit],
   );

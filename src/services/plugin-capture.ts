@@ -28,22 +28,6 @@ function sameIdentity(
   return left.authority === right.authority && left.externalId === right.externalId;
 }
 
-export function authenticatedActorAuthority(pluginId: string, principalId: string): string {
-  return `${pluginId}.${principalId}`;
-}
-
-async function resolveCurrentOrLegacyMapping(
-  pool: pg.Pool,
-  authority: string,
-  legacyAuthority: string,
-  externalId: string,
-) {
-  return await resolveActorIdentityMapping(pool, { authority, externalId })
-    ?? (legacyAuthority === authority
-      ? null
-      : await resolveActorIdentityMapping(pool, { authority: legacyAuthority, externalId }));
-}
-
 export async function capturePluginEvent(
   pool: pg.Pool,
   embeddingProvider: EmbeddingProvider | null,
@@ -61,10 +45,9 @@ export async function capturePluginEvent(
   const activityNamespace = plugin.trustedActivityMetadata
     ? options.activityNamespace ?? baseAuthority
     : undefined;
-  const legacyAuthority = authenticatedActorAuthority(baseAuthority, ingestionPrincipal.id);
   const actorMapping = claimedIdentity && activityNamespace
-    ? await resolveCurrentOrLegacyMapping(
-        pool, activityNamespace, legacyAuthority, claimedIdentity.externalId,
+    ? await resolveActorIdentityMapping(
+        pool, { authority: activityNamespace, externalId: claimedIdentity.externalId },
       )
     : null;
   const identity = actorMapping && claimedIdentity

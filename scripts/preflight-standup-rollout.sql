@@ -30,12 +30,7 @@ SELECT count(*) AS cleanup_candidates
          'closes_thread_keys', '_continuum_activity_provenance',
          '_continuum_activity_epoch_ms', '_continuum_actor_mapping_id',
          '_continuum_actor_mapping_authority'
-       ]
-   AND NOT EXISTS (
-         SELECT 1
-           FROM actor_principal_mappings mapping
-          WHERE mapping.mapping_id::text = memory.metadata->>'_continuum_actor_mapping_id'
-            AND mapping.authority = memory.metadata->>'_continuum_actor_mapping_authority'
-            AND mapping.principal_id::text = memory.metadata->>'actor_principal_id'
-            AND mapping.revoked_at IS NULL
-       );
+       ];
+
+SELECT count(*) AS trusted_attributions FROM memory_activity_attributions;
+SELECT count(*) AS closure_tombstones FROM standup_thread_closures;

@@ -19,6 +19,7 @@ export interface GitHubPrEvent {
     head: { ref: string };
   };
   repository: {
+    id: number;
     full_name: string;
     name: string;
   };
@@ -54,7 +55,8 @@ export const githubPrPlugin: CapturePlugin<GitHubPrEvent> = {
       ? ctx.resolveActorPrincipalId?.(identity) ?? null
       : null;
     const threadPrefix = ctx.activityNamespace ?? 'github';
-    const threadKey = `${threadPrefix}:pr:${event.repository.full_name}#${pr.number}`;
+    const repoKey = `${threadPrefix}:repo:${event.repository.id}`;
+    const threadKey = `${repoKey}:pr:${pr.number}`;
 
     const lines: string[] = [];
     if (pr.body && pr.body.trim()) lines.push(pr.body.trim());
@@ -87,7 +89,7 @@ export const githubPrPlugin: CapturePlugin<GitHubPrEvent> = {
           thread_key: threadKey,
           closes_thread_keys: [
             threadKey,
-            `${threadPrefix}:branch:${event.repository.full_name}:${pr.head.ref}`,
+            `${repoKey}:branch:${pr.head.ref}`,
           ],
           baseRef: pr.base.ref,
           headRef: pr.head.ref,

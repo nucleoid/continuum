@@ -15,6 +15,7 @@ export interface IngestPluginConfig {
   principalExternalId: string;
   auth: IngestAuth;
   activityNamespace?: string;
+  actorExternalId?: string;
 }
 
 export interface IngestConfig {
@@ -54,6 +55,9 @@ export function validateIngestConfig(config: IngestConfig): void {
     if (!ACTIVITY_NAMESPACE.test(namespace)) {
       throw new Error(`${id} activity namespace must match ${ACTIVITY_NAMESPACE}`);
     }
+    if (namespace === 'github' && id !== 'github-pr' && id !== 'github-branch') {
+      throw new Error('github namespace is reserved for GitHub-signed producers');
+    }
   }
   const githubPr = config.plugins['github-pr'];
   const githubBranch = config.plugins['github-branch'];
@@ -92,11 +96,15 @@ export function ingestConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Inges
       auth = { kind: 'bearer' };
     }
     const activityNamespace = env[`${spec.prefix}_ACTIVITY_NAMESPACE`]?.trim() || undefined;
+    const actorExternalId = spec.auth === 'bearer'
+      ? required(env, `${spec.prefix}_ACTOR_EXTERNAL_ID`)
+      : undefined;
     plugins[spec.id] = {
       enabled: true,
       principalExternalId,
       auth,
       ...(activityNamespace ? { activityNamespace } : {}),
+      ...(actorExternalId ? { actorExternalId } : {}),
     };
   }
   const config = { plugins };

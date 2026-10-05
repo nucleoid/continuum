@@ -55,6 +55,7 @@ import type { MemoryState, MemoryType } from '../types.js';
 import { decisionHistoryForPrincipal, supersedeForPrincipal } from '../services/supersede.js';
 import { standupForPrincipal } from '../services/standup.js';
 import { renderStandupMarkdown } from '../standup/render.js';
+import { standupReaderEnabledFromEnv } from '../standup/config.js';
 
 const SCOPE_KINDS = ['org', 'team', 'project', 'user', 'role'] as const;
 const MEMORY_TYPES = ['fact', 'decision', 'context', 'playbook', 'relationship'] as const;
@@ -68,6 +69,7 @@ export interface McpDeps {
   gapConfig?: GapConfig;
   now?: () => Date;
   relationThreshold?: number;
+  standupReaderEnabled?: boolean;
 }
 
 function textResult(text: string): {
@@ -554,6 +556,12 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     },
     async (args) => {
       try {
+        if (deps.standupReaderEnabled === false) {
+          throw new ServiceError(
+            'DEPENDENCY_UNAVAILABLE',
+            'Standup reads are disabled until trusted activity writers are active',
+          );
+        }
         const result = await standupForPrincipal(pool, principal, {
           sinceHours: args.since === undefined ? undefined : Number(args.since.slice(0, -1)),
           date: args.date,
@@ -677,6 +685,7 @@ async function main(): Promise<void> {
     principal,
     reviewHorizonDays: configuredReviewHorizonDays(),
     relationThreshold: relationThresholdFromEnv(),
+    standupReaderEnabled: standupReaderEnabledFromEnv(),
   });
   const transport = new StdioServerTransport();
   await server.connect(transport);

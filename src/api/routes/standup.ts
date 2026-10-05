@@ -16,12 +16,22 @@ const querySchema = z.object({
   openThreadLimit: z.coerce.number().int().optional(),
 }).strict();
 
-export function standupRouter(pool: pg.Pool, now: () => Date = () => new Date()): Router {
+export function standupRouter(
+  pool: pg.Pool,
+  now: () => Date = () => new Date(),
+  enabled = true,
+): Router {
   const router = Router();
   router.get('/standup', async (req, res, next) => {
     res.setHeader('Cache-Control', 'private, no-store');
     res.setHeader('Pragma', 'no-cache');
     try {
+      if (!enabled) {
+        throw new ServiceError(
+          'DEPENDENCY_UNAVAILABLE',
+          'Standup reads are disabled until trusted activity writers are active',
+        );
+      }
       const parsed = querySchema.safeParse(req.query);
       if (!parsed.success) throw new ServiceError('INVALID_INPUT', 'Invalid standup query');
       const result = await standupForPrincipal(pool, req.principal!, {

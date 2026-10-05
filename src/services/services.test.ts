@@ -21,6 +21,7 @@ import {
 import { ensureScopeForPrincipal } from './scopes.js';
 import { standupForPrincipal } from './standup.js';
 import { mapActorIdentity, revokeActorIdentity } from '../storage/actor-identities.js';
+import { createActivityAttribution } from '../storage/activity-attributions.js';
 
 describe('shared services', () => {
   let pool: pg.Pool;
@@ -1088,9 +1089,6 @@ describe('shared services', () => {
         owner: 'payments', actor: 'actor-label', actor_principal_id: principal.id,
         thread_owner_principal_id: principal.id, thread_key: 'terminal:old',
         closes_thread_keys: ['terminal:older'],
-        _continuum_activity_provenance: 'capture-v1',
-        _continuum_actor_mapping_id: mappingId,
-        _continuum_actor_mapping_authority: 'terminal-summary.producer',
       },
     });
     const activityAt = new Date('2026-10-05T08:00:00.000Z');
@@ -1099,6 +1097,11 @@ describe('shared services', () => {
       'UPDATE memories SET created_at = $2, updated_at = $2, expires_at = $3 WHERE id = $1',
       [source.id, activityAt, sourceExpiry],
     );
+    await createActivityAttribution(pool, {
+      memoryId: source.id, actorPrincipalId: principal.id, mappingId,
+      mappingAuthority: 'terminal-summary.producer', actorLabel: 'actor-label',
+      threadKey: 'terminal:old', closesThreadKeys: ['terminal:older'], activityAt,
+    });
 
     const result = await promoteForPrincipal(
       pool, principal, source.id, { kind: 'project', name: 'promotion-activity' },
@@ -1109,12 +1112,12 @@ describe('shared services', () => {
       actor: 'actor-label', actor_principal_id: principal.id,
       thread_owner_principal_id: principal.id, thread_key: 'terminal:old',
       closes_thread_keys: ['terminal:older'],
-      _continuum_activity_provenance: 'capture-v1',
-      _continuum_activity_epoch_ms: activityAt.getTime(),
-      _continuum_actor_mapping_id: mappingId,
-      _continuum_actor_mapping_authority: 'terminal-summary.producer',
     });
     expect(result.destination.expiresAt).toEqual(sourceExpiry);
+    const verifiedDestination = await verifyForPrincipal(
+      pool, principal, result.destination.id, true,
+    );
+    expect(verifiedDestination.expiresAt).toEqual(sourceExpiry);
     const standup = await standupForPrincipal(pool, principal, { sinceHours: 24 }, {
       now: new Date('2026-10-05T12:00:00.000Z'),
     });
@@ -1130,15 +1133,13 @@ describe('shared services', () => {
         owner: 'payments', actor: 'forged', actor_principal_id: principal.id,
         thread_owner_principal_id: principal.id, thread_key: 'legacy:forged',
         closes_thread_keys: ['victim:thread'],
-        _continuum_actor_mapping_id: '22222222-2222-4222-8222-222222222222',
-        _continuum_actor_mapping_authority: 'forged.authority',
       },
     });
     const legacyResult = await promoteForPrincipal(
       pool, principal, legacy.id, { kind: 'project', name: 'promotion-activity' },
     );
-    expect(legacyResult.destination.metadata).toEqual({
-      owner: 'payments', promoted_from: legacy.id,
+    expect(legacyResult.destination.metadata).toMatchObject({
+      owner: 'payments', actor: 'forged', promoted_from: legacy.id,
     });
 
     const expired = await createMemory(pool, {
@@ -1148,9 +1149,7 @@ describe('shared services', () => {
       metadata: {
         owner: 'payments', actor: 'actor-label', actor_principal_id: principal.id,
         thread_owner_principal_id: principal.id, thread_key: 'terminal:expired',
-        closes_thread_keys: [], _continuum_activity_provenance: 'capture-v1',
-        _continuum_actor_mapping_id: mappingId,
-        _continuum_actor_mapping_authority: 'terminal-summary.producer',
+        closes_thread_keys: [],
       },
     });
     await pool.query(
@@ -1160,8 +1159,8 @@ describe('shared services', () => {
     const expiredResult = await promoteForPrincipal(
       pool, principal, expired.id, { kind: 'project', name: 'promotion-activity' },
     );
-    expect(expiredResult.destination.metadata).toEqual({
-      owner: 'payments', promoted_from: expired.id,
+    expect(expiredResult.destination.metadata).toMatchObject({
+      owner: 'payments', actor: 'actor-label', promoted_from: expired.id,
     });
 
     await revokeActorIdentity(pool, {
@@ -1175,20 +1174,17 @@ describe('shared services', () => {
       metadata: {
         owner: 'payments', actor: 'actor-label', actor_principal_id: principal.id,
         thread_owner_principal_id: principal.id, thread_key: 'terminal:revoked',
-        _continuum_activity_provenance: 'capture-v1',
-        _continuum_actor_mapping_id: mappingId,
-        _continuum_actor_mapping_authority: 'terminal-summary.producer',
       },
     });
     const revokedResult = await promoteForPrincipal(
       pool, principal, revoked.id, { kind: 'project', name: 'promotion-activity' },
     );
-    expect(revokedResult.destination.metadata).toEqual({
-      owner: 'payments', promoted_from: revoked.id,
+    expect(revokedResult.destination.metadata).toMatchObject({
+      owner: 'payments', actor: 'actor-label', promoted_from: revoked.id,
     });
   });
 
-  it('strips provenance-only standup metadata during promotion', async () => {
+  it('preserves untrusted activity-shaped metadata without granting standup trust', async () => {
     const { principal, team } = await seedWriter();
     const project = await createScope(pool, { kind: 'project', name: 'promotion-unmapped' });
     await addMembership(pool, principal.id, project.id, 'writer');
@@ -1200,7 +1196,6 @@ describe('shared services', () => {
         owner: 'payments', actor: 'forged', actor_principal_id: principal.id,
         thread_owner_principal_id: principal.id, thread_key: 'legacy:unmapped',
         closes_thread_keys: ['victim:thread'],
-        _continuum_activity_provenance: 'capture-v1',
       },
     });
 
@@ -1208,8 +1203,8 @@ describe('shared services', () => {
       pool, principal, source.id, { kind: 'project', name: 'promotion-unmapped' },
     );
 
-    expect(result.destination.metadata).toEqual({
-      owner: 'payments', promoted_from: source.id,
+    expect(result.destination.metadata).toMatchObject({
+      owner: 'payments', actor: 'forged', promoted_from: source.id,
     });
   });
 
@@ -1231,15 +1226,12 @@ describe('shared services', () => {
     const common = {
       actor: 'actual-user', actor_principal_id: principal.id,
       thread_owner_principal_id: principal.id,
-      _continuum_activity_provenance: 'capture-v1',
     };
     const open = await createMemory(pool, {
       scopeId: project.id, scopeKind: project.kind, type: 'context', title: 'Mapped open thread',
       body: 'This thread remains open.', authorId: principal.id, source: 'terminal-summary',
       metadata: {
         ...common, thread_key: 'thread:mapped-open',
-        _continuum_actor_mapping_id: mapping.rows[0]!.mapping_id,
-        _continuum_actor_mapping_authority: 'terminal-summary.producer',
       },
     });
     const provenanceOnly = await createMemory(pool, {
@@ -1253,8 +1245,6 @@ describe('shared services', () => {
       source: 'terminal-summary', metadata: {
         ...common, thread_key: 'thread:forged-closure',
         closes_thread_keys: ['thread:mapped-open'],
-        _continuum_actor_mapping_id: mapping.rows[0]!.mapping_id,
-        _continuum_actor_mapping_authority: 'forged.authority',
       },
     });
     await pool.query(
@@ -1266,6 +1256,13 @@ describe('shared services', () => {
         WHERE id IN ($1, $2) OR title = 'Forged closure'`,
       [open.id, provenanceOnly.id],
     );
+    await createActivityAttribution(pool, {
+      memoryId: open.id, actorPrincipalId: principal.id,
+      mappingId: mapping.rows[0]!.mapping_id,
+      mappingAuthority: 'terminal-summary.producer', actorLabel: 'actual-user',
+      threadKey: 'thread:mapped-open', closesThreadKeys: [],
+      activityAt: new Date('2026-09-30T08:00:00Z'),
+    });
 
     const digest = await standupForPrincipal(pool, principal, {
       sinceHours: 24, openThreadDays: 2,

@@ -14,13 +14,14 @@ export async function resolvePrincipalAlias(
   db: Queryable,
   provider: string,
   externalActor: string,
+  aliasKind: 'id' | 'login' | 'subject' | 'legacy' = 'legacy',
 ): Promise<Principal | null> {
   const { rows } = await db.query(
     `SELECT p.id, p.external_id, p.kind, p.display_name, p.created_at
        FROM principal_aliases a
        JOIN principals p ON p.id = a.principal_id
-      WHERE a.provider = $1 AND a.external_actor = $2`,
-    [provider, externalActor],
+      WHERE a.provider = $1 AND a.alias_kind = $2 AND a.external_actor = $3`,
+    [provider, aliasKind, externalActor],
   );
   const row = rows[0];
   if (!row) return null;

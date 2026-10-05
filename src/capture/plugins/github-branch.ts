@@ -6,6 +6,7 @@ export interface GitHubBranchEvent {
   ref_type: 'branch' | 'tag';
   master_branch?: string;
   repository: {
+    id: number;
     full_name: string;
     name: string;
     html_url: string;
@@ -59,7 +60,7 @@ export const githubBranchPlugin: CapturePlugin<GitHubBranchEvent> = {
           actor,
           ...(actorPrincipalId ? { actor_principal_id: actorPrincipalId } : {}),
           ...(actorPrincipalId ? { thread_owner_principal_id: actorPrincipalId } : {}),
-          thread_key: `${ctx.activityNamespace ?? 'github'}:branch:${event.repository.full_name}:${event.ref}`,
+          thread_key: `${ctx.activityNamespace ?? 'github'}:repo:${event.repository.id}:branch:${event.ref}`,
           closes_thread_keys: [],
         },
       },

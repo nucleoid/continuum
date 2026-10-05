@@ -7,6 +7,7 @@ function event(overrides: Partial<GitHubBranchEvent> = {}): GitHubBranchEvent {
     ref_type: 'branch',
     master_branch: 'main',
     repository: {
+      id: 987654321,
       full_name: 'exampleorg/booking-engine',
       name: 'booking-engine',
       html_url: 'https://github.com/exampleorg/booking-engine',
@@ -38,7 +39,7 @@ describe('github-branch plugin', () => {
       ref: 'feature/checkout-v2',
       base: 'main',
       actor: 'cass-exampleorg',
-      thread_key: 'github:branch:exampleorg/booking-engine:feature/checkout-v2',
+      thread_key: 'github:repo:987654321:branch:feature/checkout-v2',
       closes_thread_keys: [],
     });
   });

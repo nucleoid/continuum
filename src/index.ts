@@ -32,6 +32,5 @@ export * from './standup/render.js';
 export * from './lifecycle/sweep.js';
 export { promoteMemory, verifyMemory, PromoteError } from './storage/promote.js';
 export * from './capture/index.js';
-export * from './services/plugin-capture.js';
 export * from './audit/log.js';
 export * from './audit/query.js';

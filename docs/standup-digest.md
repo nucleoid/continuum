@@ -12,20 +12,21 @@ an unowned scope is never considered personal activity. Ownership is unique,
 so one principal cannot own two user scopes. Non-user scopes cannot have an
 owner.
 
-Standup-eligible captures use these reserved metadata fields:
+Activity-shaped labels may remain in memory metadata for history and display,
+but standup trust never comes from that caller-mutable JSON. Trusted captures
+atomically create an immutable `memory_activity_attributions` row containing
+the actor, thread, source event time, and exact mapping UUID/authority.
+Content-free closure tombstones live in `standup_thread_closures`.
+Once a trusted thread key is closed, that tombstone remains effective even if
+the closing scope later becomes unreadable or the opening event arrives late.
+
+Activity metadata includes:
 
 - `actor_principal_id`: UUID of the actual person who performed the activity.
 - `actor`: bounded mapped-principal display label loaded inside the write transaction.
 - `thread_key`: stable, source-qualified thread identity.
 - `thread_owner_principal_id`: required actor UUID, equal to `actor_principal_id`.
 - `closes_thread_keys`: explicit list of stable thread keys closed by this capture.
-- `_continuum_activity_provenance`: internal trust marker written only after
-  attribution authorization; capture callers cannot supply it.
-- `_continuum_activity_epoch_ms`: internal original activity time carried only
-  when trusted activity is promoted; capture callers cannot supply it.
-- `_continuum_actor_mapping_id`: UUID of the exact mapping that authorized capture.
-- `_continuum_actor_mapping_authority`: authenticated producer namespace on
-  that exact mapping.
 - `merged_by` and `reviewers`: optional PR participants, distinct from `actor`.
 
 The GitHub PR plugin uses the PR author as `actor`; a merger remains
@@ -48,14 +49,11 @@ payload `actorAuthority`, `threadKey`, and `closesThreadKeys` fields are ignored
 the server uses the immutable `actorExternalId` and creates canonical thread
 keys inside that authenticated source namespace.
 
-During rollout, actor mapping lookup first checks the stable namespace and then
-the legacy `<plugin-id>.<service-principal-uuid>` authority. New thread keys
-always use the stable namespace, so accepting a legacy mapping does not fragment
-threads. For GitHub branch scope routing, Continuum first checks the numeric
-`sender.id` alias and temporarily falls back to an existing login alias. That
-fallback preserves capture availability but never grants standup attribution;
-new aliases and actor mappings must use the immutable numeric ID. Run
-`scripts/preflight-standup-rollout.sql` before removing legacy entries.
+Actor mapping lookup uses only the configured stable namespace. There is no
+principal-scoped or mutable-login fallback. GitHub scope routing requires an
+explicit `alias_kind='id'` numeric `sender.id` alias; login aliases cannot
+collide with numeric IDs. GitHub thread keys use the immutable numeric
+repository ID, so repository renames do not fork history.
 
 The authenticated ingestion service principal remains the capture author and
 must have writer access to the destination scope. It is not the activity actor
@@ -161,25 +159,23 @@ scopes are searched. Every returned record must have
 `actor_principal_id` equal to the caller. Team, role, org, unowned user, and
 other actors' records are excluded.
 
-Promotion moves knowledge between scopes but is not a new activity event.
-Promoted copies preserve activity metadata only when the source has Continuum's
-internal provenance marker and its exact mapping UUID, authority, and principal
-still identify an active mapping. Promotion holds a shared lock on that mapping
-through the destination write and carries the original activity time so the
-digest does not re-date the work. Legacy, forged, revoked-mapping, or already
-expired rows lose actor, thread, closure, provenance, mapping, and activity-time
-fields during promotion. A trusted promoted copy also caps its expiry at the
-source expiry, even when the destination scope normally lives longer. A
-destination scope's fresh lifecycle cannot extend or revive source activity.
+Promotion moves knowledge between scopes but is not a new activity event. A
+promoted copy gets a trusted attribution only when the source has an immutable
+attribution whose exact mapping is still active. Promotion holds a shared lock
+on that mapping, preserves source event time, and records the source expiry as
+an absolute trust ceiling. Later verification cannot extend that ceiling.
+Untrusted activity-shaped metadata remains truthful ordinary history but is
+never consulted by standup readers.
 
 ## Mapping-enforcement rollout
 
-Ordinary startup applies schema migrations `0010` through `0012`. Migration
-`0013_standup_indexes.sql` builds the four potentially large memory indexes
-with `CREATE INDEX CONCURRENTLY` outside a transaction. None of these startup
-migrations rewrites existing memory rows. Strict readers and promotion already
-fail closed for legacy or forged metadata, so destructive cleanup is not a
-correctness prerequisite.
+Ordinary startup applies schema migrations through `0015`. Migration `0013`
+removes the prerelease metadata indexes, `0014` creates empty attribution and
+tombstone relations, and `0015` builds the indexes used by shipped queries.
+Every concurrent build drops a same-named interrupted attempt first and refuses
+to ledger unless `pg_index.indisvalid` is true. `0014` also blocks new reserved
+provenance in memory metadata and never backfills unverifiable rows.
+Keep `CONTINUUM_STANDUP_READER_ENABLED=false` during rollout.
 
 Before rollout, run the read-only inventory and retain its output in change
 control:
@@ -188,19 +184,20 @@ control:
 psql "$CONTINUUM_DATABASE_URL" -f scripts/preflight-standup-rollout.sql
 ```
 
-The `0010`-`0012` mapping-table sequence is applied under the migrator lock and
-must complete before any mapping-aware writer starts; it performs no historical
-`audit_log` rewrite. First deploy mapping-aware writers everywhere, verify
-stable namespace and numeric alias coverage, and drain old writers. Deploy
-strict readers only after that writer gate is complete. If policy requires
-removing dormant reserved metadata from a prerelease deployment, schedule a
-maintenance window and run
-`scripts/run-standup-mapping-enforcement.sql`. It strips reserved fields only,
-uses a five-second lock timeout, and processes at most 10,000 invalid rows per
-statement. Rerun the preflight and cleanup until `cleanup_candidates` reaches
-zero. Do not run the cleanup from application startup, and do not overlap it
-with older promotion workers. Already stripped rows remain ordinary memories;
-valid rows keep the exact active mapping UUID, authority, actor, and owner.
+Apply migrations, deploy attribution-aware writers everywhere, verify a
+production POST creates one memory plus one attribution, and drain old writers.
+If rolling back to an old binary, keep all standup REST/MCP traffic disabled:
+that binary does not understand the attribution relation. Its reserved-metadata
+writes fail at the database boundary, so rollback is fail-closed for writes but
+is not an authorized standup-reader rollback. Enable readers only after the new
+writer gate is verified.
+
+Cleanup is optional operator maintenance, never startup work. The cleanup
+script backs up exact metadata, loops 10,000-row batches to completion using
+the same reserved-key predicate as preflight, and removes only obsolete
+`_continuum_*` keys. It preserves content, labels, thread history, and revoked
+history. Restore with `scripts/restore-standup-mapping-enforcement.sql` after
+draining writers.
 
 ## Existing user-scope backfill
 

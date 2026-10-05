@@ -27,18 +27,20 @@ Standup attribution resolves actors through `actor_principal_mappings` under a
 stable configured activity namespace (`github`, `deploy-event`, or
 `terminal-summary` by default). GitHub PR and branch ingestion fail startup if
 configured with different namespaces, so separate service principals cannot
-silently fragment one thread. GitHub uses the immutable numeric webhook user ID
-as the external actor. During numeric-alias rollout, a login alias may still
-route branch capture to the existing user scope, but it cannot authorize
-standup activity; all new aliases and mappings use numeric `sender.id`. Deploy
-and terminal producers likewise require an explicit opaque actor ID. Missing
+silently fragment one thread. GitHub uses immutable numeric webhook user and
+repository IDs. Branch scope routing requires an explicit `alias_kind='id'`
+numeric alias and never falls back to a mutable login. Deploy and terminal
+credentials bind one configured `*_ACTOR_EXTERNAL_ID`; a request body cannot
+select another mapped actor, and the `github` namespace is reserved for
+GitHub-signed producers. Missing
 mappings store ordinary non-standup memories after reserved activity metadata
 is removed. Every selected scope, including an override, still requires writer
 or admin access by the configured service principal. Ingestion never creates
 scopes.
 
-`deploy-event.actorExternalId` and `terminal-summary.actorExternalId` are
-non-empty strings capped at 500 characters. `terminal-summary.keepThreadOpen`
+The configured deploy/terminal actor IDs are non-empty strings capped at 500
+characters. A body actor ID, when present for compatibility, must exactly match
+the credential-bound value. `terminal-summary.keepThreadOpen`
 is an optional boolean. Terminal summaries self-close unless that flag is true;
 deploy facts always self-close their canonical thread.
 

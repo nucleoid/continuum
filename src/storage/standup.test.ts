@@ -1,136 +1,101 @@
-import { readFile } from 'node:fs/promises';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import type pg from 'pg';
 import { addMembership } from './memberships.js';
 import { mapActorIdentity } from './actor-identities.js';
+import { createActivityAttribution } from './activity-attributions.js';
 import { createMemory } from './memories.js';
 import { createPrincipal } from './principals.js';
 import { createScope, getScopeByRef } from './scopes.js';
+import { listOpenStandupThreads } from './standup.js';
 import { makeTestPool, resetData } from './test-helpers.js';
 
-describe('standup mapping enforcement storage', () => {
+describe('standup trusted activity storage', () => {
   let pool: pg.Pool;
 
   beforeEach(async () => {
     pool ??= await makeTestPool();
     await resetData(pool);
   });
-
   afterAll(async () => pool?.end());
 
-  async function seedMapping() {
-    const principal = await createPrincipal(pool, {
+  async function seed() {
+    const actor = await createPrincipal(pool, {
       externalId: 'entra:standup-storage', kind: 'user', displayName: 'Standup Storage',
     });
+    const service = await createPrincipal(pool, {
+      externalId: 'service:standup-storage', kind: 'service', displayName: 'Capture service',
+    });
     const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
-    const project = await createScope(pool, { kind: 'project', name: 'standup-storage' });
-    await addMembership(pool, principal.id, org.id, 'admin');
-    await addMembership(pool, principal.id, project.id, 'writer');
+    const openerScope = await createScope(pool, { kind: 'project', name: 'opener' });
+    const closerScope = await createScope(pool, { kind: 'project', name: 'closer' });
+    await addMembership(pool, actor.id, org.id, 'admin');
+    await addMembership(pool, actor.id, openerScope.id, 'reader');
+    await addMembership(pool, actor.id, closerScope.id, 'reader');
     await mapActorIdentity(pool, {
-      authority: 'terminal-summary.storage-test', externalActorId: principal.id,
-      principalId: principal.id, mappedByPrincipalId: principal.id,
+      authority: 'terminal-summary', externalActorId: 'actor-1',
+      principalId: actor.id, mappedByPrincipalId: actor.id,
     });
     const mapping = await pool.query<{ mapping_id: string }>(
       `SELECT mapping_id FROM actor_principal_mappings
-        WHERE authority = 'terminal-summary.storage-test' AND external_actor_id = $1`,
-      [principal.id],
+        WHERE authority = 'terminal-summary' AND external_actor_id = 'actor-1'`,
     );
-    return { principal, project, mappingId: mapping.rows[0]!.mapping_id };
+    return { actor, service, openerScope, closerScope, mappingId: mapping.rows[0]!.mapping_id };
   }
 
-  it('strips reserved activity and closure keys from rows without an active exact mapping', async () => {
-    const { principal, project, mappingId } = await seedMapping();
-    const base = {
-      ordinary: 'retained', actor: 'actor', actor_principal_id: principal.id,
-      thread_owner_principal_id: principal.id, closes_thread_keys: ['thread:victim'],
-      _continuum_activity_provenance: 'capture-v1',
-    };
-    const trusted = await createMemory(pool, {
-      scopeId: project.id, scopeKind: project.kind, type: 'context', title: 'Trusted',
-      body: 'trusted body', authorId: principal.id, source: 'terminal-summary',
-      metadata: {
-        ...base, thread_key: 'thread:trusted',
-        _continuum_actor_mapping_id: mappingId,
-        _continuum_actor_mapping_authority: 'terminal-summary.storage-test',
-      },
+  it('keeps a source-time closure after closer access is revoked and late opener delivery', async () => {
+    const { actor, service, openerScope, closerScope, mappingId } = await seed();
+    const closure = await createMemory(pool, {
+      scopeId: closerScope.id, scopeKind: closerScope.kind, type: 'context',
+      title: 'Merged', body: 'content', authorId: service.id, source: 'github-pr', metadata: {},
     });
-    const provenanceOnly = await createMemory(pool, {
-      scopeId: project.id, scopeKind: project.kind, type: 'context', title: 'Legacy',
-      body: 'legacy body', authorId: principal.id, source: 'terminal-summary',
-      metadata: { ...base, thread_key: 'thread:legacy' },
+    await createActivityAttribution(pool, {
+      memoryId: closure.id, actorPrincipalId: actor.id, mappingId,
+      mappingAuthority: 'terminal-summary', actorLabel: actor.displayName,
+      threadKey: 'pr:1', closesThreadKeys: ['branch:late'],
+      activityAt: new Date('2026-10-04T12:00:00Z'),
     });
-    const forged = await createMemory(pool, {
-      scopeId: project.id, scopeKind: project.kind, type: 'context', title: 'Forged',
-      body: 'forged body', authorId: principal.id, source: 'terminal-summary',
-      metadata: {
-        ...base, thread_key: 'thread:forged',
-        _continuum_actor_mapping_id: '22222222-2222-4222-8222-222222222222',
-        _continuum_actor_mapping_authority: 'terminal-summary.storage-test',
-      },
+    await pool.query(
+      'DELETE FROM scope_memberships WHERE principal_id = $1 AND scope_id = $2',
+      [actor.id, closerScope.id],
+    );
+    const opener = await createMemory(pool, {
+      scopeId: openerScope.id, scopeKind: openerScope.kind, type: 'context',
+      title: 'Started branch', body: 'content', authorId: service.id,
+      source: 'github-branch', metadata: {},
     });
-    const mismatchedOwner = await createMemory(pool, {
-      scopeId: project.id, scopeKind: project.kind, type: 'context', title: 'Mismatched owner',
-      body: 'mismatched body', authorId: principal.id, source: 'terminal-summary',
-      metadata: {
-        ...base, thread_owner_principal_id: '22222222-2222-4222-8222-222222222222',
-        thread_key: 'thread:mismatched', _continuum_actor_mapping_id: mappingId,
-        _continuum_actor_mapping_authority: 'terminal-summary.storage-test',
-      },
+    await createActivityAttribution(pool, {
+      memoryId: opener.id, actorPrincipalId: actor.id, mappingId,
+      mappingAuthority: 'terminal-summary', actorLabel: actor.displayName,
+      threadKey: 'branch:late', closesThreadKeys: [],
+      activityAt: new Date('2026-10-03T12:00:00Z'),
     });
 
-    const migration = await readFile(
-      new URL('../../scripts/run-standup-mapping-enforcement.sql', import.meta.url),
-      'utf8',
+    const open = await listOpenStandupThreads(
+      pool, actor.id, new Date('2026-10-05T00:00:00Z'),
+      new Date('2026-09-01T00:00:00Z'), new Date('2026-10-05T12:00:00Z'), 20,
     );
-    await pool.query(migration);
-
-    const result = await pool.query<{ id: string; body: string; metadata: Record<string, unknown> }>(
-      'SELECT id, body, metadata FROM memories WHERE id = ANY($1::uuid[]) ORDER BY title',
-      [[trusted.id, provenanceOnly.id, forged.id, mismatchedOwner.id]],
-    );
-    const byId = new Map(result.rows.map((row) => [row.id, row]));
-    expect(byId.get(trusted.id)!.metadata).toMatchObject({
-      ordinary: 'retained', thread_key: 'thread:trusted',
-      _continuum_actor_mapping_id: mappingId,
-    });
-    for (const id of [provenanceOnly.id, forged.id, mismatchedOwner.id]) {
-      expect(byId.get(id)!.metadata).toEqual({ ordinary: 'retained' });
-      expect(byId.get(id)!.body).toMatch(/body$/);
-    }
+    expect(open).toEqual([]);
   });
 
-  it('uses the closure containment index for a selective realistic lookup', async () => {
-    const { principal, project, mappingId } = await seedMapping();
-    await pool.query(
-      `INSERT INTO memories
-         (id, scope_id, type, title, body, metadata, author_id, source, state)
-       SELECT gen_random_uuid(), $1, 'context', 'Closure ' || n, 'body',
-              jsonb_build_object(
-                'actor_principal_id', $2::text,
-                'thread_key', 'thread:closure:' || n,
-                'closes_thread_keys', jsonb_build_array(
-                  CASE WHEN n <= 10 THEN 'thread:target' ELSE 'thread:other:' || n END
-                ),
-                '_continuum_activity_provenance', 'capture-v1',
-                '_continuum_actor_mapping_id', $3::text,
-                '_continuum_actor_mapping_authority', 'terminal-summary.storage-test'
-              ),
-              $2::uuid, 'terminal-summary', 'live'
-         FROM generate_series(1, 2500) AS n`,
-      [project.id, principal.id, mappingId],
-    );
-    await pool.query('ANALYZE memories');
-
-    const plan = await pool.query<{ 'QUERY PLAN': unknown }>(
+  it('has usable indexes for the shipped actor/time and closure predicates', async () => {
+    await pool.query('SET enable_seqscan = off');
+    const actorPlan = await pool.query<{ 'QUERY PLAN': unknown }>(
       `EXPLAIN (FORMAT JSON)
-       SELECT id
-         FROM memories
-        WHERE metadata->>'_continuum_activity_provenance' = 'capture-v1'
-          AND metadata ? 'closes_thread_keys'
-          AND metadata->'closes_thread_keys' @> '["thread:target"]'::jsonb`,
+       SELECT memory_id FROM memory_activity_attributions
+        WHERE actor_principal_id = '11111111-1111-4111-8111-111111111111'::uuid
+          AND activity_at >= '2026-10-01Z'::timestamptz
+          AND activity_at < '2026-10-06Z'::timestamptz`,
     );
-
-    expect(JSON.stringify(plan.rows[0]!['QUERY PLAN']))
-      .toContain('memories_standup_closures_gin');
+    const closurePlan = await pool.query<{ 'QUERY PLAN': unknown }>(
+      `EXPLAIN (FORMAT JSON)
+       SELECT source_memory_id FROM standup_thread_closures
+        WHERE actor_principal_id = '11111111-1111-4111-8111-111111111111'::uuid
+          AND thread_key = 'branch:1'
+          AND closed_at >= '2026-10-01Z'::timestamptz`,
+    );
+    await pool.query('RESET enable_seqscan');
+    const rendered = JSON.stringify([actorPlan.rows, closurePlan.rows]);
+    expect(rendered).toContain('memory_activity_actor_time_idx');
+    expect(rendered).toContain('standup_thread_closures_lookup_idx');
   });
 });

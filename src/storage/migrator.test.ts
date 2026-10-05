@@ -79,11 +79,13 @@ describe('runMigrations', () => {
     expect(uniqueIndex).toMatch(/CREATE UNIQUE INDEX CONCURRENTLY memories_supersedes_unique_idx/i);
 
     const standupIndexes = await readFile(
-      join(process.cwd(), 'migrations/0013_standup_indexes.sql'),
+      join(process.cwd(), 'migrations/0015_standup_query_indexes.sql'),
       'utf8',
     );
     expect(standupIndexes.trimStart()).toMatch(/^-- continuum:no-transaction/);
-    expect(standupIndexes.match(/CREATE INDEX CONCURRENTLY/g)).toHaveLength(4);
+    expect(standupIndexes.match(/DROP INDEX CONCURRENTLY/g)).toHaveLength(3);
+    expect(standupIndexes.match(/CREATE INDEX CONCURRENTLY/g)).toHaveLength(3);
+    expect(standupIndexes).toMatch(/indisvalid/);
   });
 
   it('runs marked concurrent-index migrations outside a transaction', async () => {

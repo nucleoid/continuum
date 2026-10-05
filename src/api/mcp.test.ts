@@ -16,6 +16,7 @@ import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
 import { LIFECYCLE_PRINCIPAL_ID } from '../lifecycle/principal.js';
 import { recordRead } from '../audit/log.js';
 import { mapActorIdentity } from '../storage/actor-identities.js';
+import { createActivityAttribution } from '../storage/activity-attributions.js';
 
 interface CallToolResult {
   content: Array<{ type: string; text?: string }>;
@@ -201,15 +202,19 @@ describe('MCP server', () => {
         actor_principal_id: me.id, actor: 'mcp-user',
         thread_owner_principal_id: me.id,
         thread_key: 'terminal-session:source-1', closes_thread_keys: [],
-        _continuum_activity_provenance: 'capture-v1',
-        _continuum_actor_mapping_id: mapping.rows[0]!.mapping_id,
-        _continuum_actor_mapping_authority: 'terminal-summary.mcp-test',
       },
     });
     await pool.query(
       `UPDATE memories SET created_at = '2026-10-05T10:00:00Z' WHERE id = $1`,
       [memory.id],
     );
+    await createActivityAttribution(pool, {
+      memoryId: memory.id, actorPrincipalId: me.id,
+      mappingId: mapping.rows[0]!.mapping_id,
+      mappingAuthority: 'terminal-summary.mcp-test', actorLabel: 'mcp-user',
+      threadKey: 'terminal-session:source-1', closesThreadKeys: [],
+      activityAt: new Date('2026-10-05T10:00:00Z'),
+    });
 
     const result = (await client.callTool({
       name: 'continuum.standup', arguments: { since: '24h' },

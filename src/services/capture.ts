@@ -18,14 +18,10 @@ import {
   validateRelationThreshold,
 } from './relations.js';
 import type { Queryable } from '../storage/queryable.js';
-import {
-  ACTOR_MAPPING_AUTHORITY_KEY,
-  ACTOR_MAPPING_ID_KEY,
-  markTrustedActivityMetadata,
-  validateCaptureMetadata,
-} from '../capture/metadata.js';
+import { validateCaptureMetadata } from '../capture/metadata.js';
 import type { ExternalActorIdentity } from '../capture/plugin.js';
 import { resolveActorIdentityMapping } from '../storage/actor-identities.js';
+import { createActivityAttribution } from '../storage/activity-attributions.js';
 
 export interface CaptureResult {
   memory: Memory;
@@ -244,6 +240,42 @@ export interface MappedActorAttribution {
   principalId: string;
 }
 
+function activityAt(metadata: Record<string, unknown>, fallback: Date): Date {
+  for (const key of ['mergedAt', 'finishedAt', 'startedAt']) {
+    const value = metadata[key];
+    if (typeof value !== 'string') continue;
+    const parsed = new Date(value);
+    if (Number.isFinite(parsed.getTime())) return parsed;
+  }
+  return fallback;
+}
+
+async function persistActivityAttribution(
+  client: Queryable,
+  memory: Memory,
+  metadata: Record<string, unknown>,
+  attribution: MappedActorAttribution,
+  actorLabel: string,
+  trustExpiresAt: Date | null = null,
+): Promise<void> {
+  if (typeof metadata.thread_key !== 'string') {
+    throw new ServiceError('INVALID_INPUT', 'Mapped activity requires a thread key');
+  }
+  await createActivityAttribution(client, {
+    memoryId: memory.id,
+    actorPrincipalId: attribution.principalId,
+    mappingId: attribution.mappingId,
+    mappingAuthority: attribution.authority,
+    actorLabel,
+    threadKey: metadata.thread_key,
+    closesThreadKeys: Array.isArray(metadata.closes_thread_keys)
+      ? metadata.closes_thread_keys as string[]
+      : [],
+    activityAt: activityAt(metadata, memory.createdAt),
+    trustExpiresAt,
+  });
+}
+
 /** Insert one trusted mapped plugin capture into a caller-owned transaction. */
 export async function captureMappedPluginOne(
   client: Queryable,
@@ -276,12 +308,10 @@ export async function captureMappedPluginOne(
   if (actor.rows[0]?.kind !== 'user') {
     throw new ServiceError('INVALID_INPUT', 'Activity actor must be an existing user principal');
   }
-  const metadata = markTrustedActivityMetadata({
+  const metadata = {
     ...input.metadata,
     actor: actor.rows[0].display_name as string,
-    [ACTOR_MAPPING_ID_KEY]: attribution.mappingId,
-    [ACTOR_MAPPING_AUTHORITY_KEY]: attribution.authority,
-  });
+  };
   const route = asEmbeddingRouter(embeddingRouting).resolve(input.scope);
   const memory = await createMemory(client, {
     scopeId: scope.id,
@@ -295,6 +325,9 @@ export async function captureMappedPluginOne(
     tags: input.tags,
     metadata: { ...metadata, related: [] },
   });
+  await persistActivityAttribution(
+    client, memory, metadata, attribution, actor.rows[0].display_name as string,
+  );
   await recordAudit(client, {
     principalId: principal.id,
     action: 'write',
@@ -416,7 +449,7 @@ async function captureMemoryInternal(
         );
       }
     }
-    let persistedMetadata = markTrustedActivityMetadata(input.metadata);
+    let persistedMetadata = { ...input.metadata };
 
     const memoryId = randomUUID();
     const route = asEmbeddingRouter(embeddingRouting).resolve({
@@ -486,8 +519,6 @@ async function captureMemoryInternal(
           persistedMetadata = {
             ...persistedMetadata,
             actor: actor.rows[0].display_name as string,
-            [ACTOR_MAPPING_ID_KEY]: mappedAttribution.mappingId,
-            [ACTOR_MAPPING_AUTHORITY_KEY]: mappedAttribution.authority,
           };
         }
       }
@@ -525,6 +556,15 @@ async function captureMemoryInternal(
         tags: input.tags,
         metadata: { ...persistedMetadata, related: [] },
       });
+      if (mappedAttribution) {
+        await persistActivityAttribution(
+          client,
+          memory,
+          persistedMetadata,
+          mappedAttribution,
+          persistedMetadata.actor as string,
+        );
+      }
 
       let embedded = false;
       if (embeddingProvider && embeddingVector) {

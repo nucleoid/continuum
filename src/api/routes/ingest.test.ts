@@ -55,7 +55,7 @@ describe('webhook ingestion transport', () => {
         merged_at: '2026-10-04T00:00:00Z', merged_by: { id: 1002, login: 'maintainer' },
         user: { id: 1001, login: 'author' }, base: { ref: 'master' }, head: { ref: 'feature/ingest' },
       },
-      repository: { full_name: 'nucleoid/booking-engine', name: 'booking-engine' },
+      repository: { id: 13579, full_name: 'nucleoid/booking-engine', name: 'booking-engine' },
     };
   }
 
@@ -220,7 +220,8 @@ describe('webhook ingestion transport', () => {
     const userScope = await createScope(pool, { kind: 'user', name: user.externalId });
     await addMembership(pool, principal.id, userScope.id, 'writer');
     await pool.query(
-      `INSERT INTO principal_aliases (provider, external_actor, principal_id) VALUES ('terminal', 'cass-exampleorg', $1)`,
+      `INSERT INTO principal_aliases (provider, alias_kind, external_actor, principal_id)
+       VALUES ('terminal', 'subject', 'cass-exampleorg', $1)`,
       [user.id],
     );
     const target = app({ plugins: { 'terminal-summary': {
@@ -260,8 +261,8 @@ describe('webhook ingestion transport', () => {
     await addMembership(pool, terminalService.id, userScope.id, 'writer');
     await addMembership(pool, deployService.id, project.id, 'writer');
     await pool.query(
-      `INSERT INTO principal_aliases (provider, external_actor, principal_id)
-       VALUES ('terminal', 'terminal-subject-77', $1)`,
+      `INSERT INTO principal_aliases (provider, alias_kind, external_actor, principal_id)
+       VALUES ('terminal', 'subject', 'terminal-subject-77', $1)`,
       [actor.id],
     );
     await mapActorIdentity(pool, {
@@ -276,10 +277,12 @@ describe('webhook ingestion transport', () => {
       'terminal-summary': {
         enabled: true, auth: { kind: 'bearer' },
         principalExternalId: terminalService.externalId,
+        actorExternalId: 'terminal-subject-77',
       },
       'deploy-event': {
         enabled: true, auth: { kind: 'bearer' },
         principalExternalId: deployService.externalId,
+        actorExternalId: 'deploy-subject-77',
       },
     } });
 
@@ -309,6 +312,13 @@ describe('webhook ingestion transport', () => {
     // Current-window activity is not backlog, and the deploy's self-closing fact
     // must never appear as a permanent open thread.
     expect(digest.body.openThreads).toEqual([]);
+    const persistedTrust = await pool.query(
+      `SELECT attribution.memory_id, attribution.activity_at
+         FROM memory_activity_attributions attribution
+         JOIN memories memory ON memory.id = attribution.memory_id
+        WHERE memory.source IN ('terminal-summary', 'deploy-event')`,
+    );
+    expect(persistedTrust.rows).toHaveLength(2);
     const { rows } = await pool.query(
       `SELECT source, metadata->'closes_thread_keys' AS closes
          FROM memories ORDER BY source`,
@@ -341,8 +351,8 @@ describe('webhook ingestion transport', () => {
     await send('unmapped-actor', { kind: 'team', name: 'payments' }, 'override-unmapped')
       .expect(400);
     await pool.query(
-      `INSERT INTO principal_aliases (provider, external_actor, principal_id)
-       VALUES ('terminal', 'cass-exampleorg', $1)`,
+      `INSERT INTO principal_aliases (provider, alias_kind, external_actor, principal_id)
+       VALUES ('terminal', 'subject', 'cass-exampleorg', $1)`,
       [user.id],
     );
     await send('cass-exampleorg', { kind: 'team', name: 'security' }, 'override-forbidden')
@@ -372,7 +382,7 @@ describe('webhook ingestion transport', () => {
     });
     const raw = JSON.stringify({
       ref: 'feature/secure', ref_type: 'branch', master_branch: 'master',
-      repository: { full_name: 'nucleoid/continuum', name: 'continuum',
+      repository: { id: 24680, full_name: 'nucleoid/continuum', name: 'continuum',
         html_url: 'https://github.com/nucleoid/continuum' },
       sender: { id: 40404, login: 'unmapped-user' },
     });
@@ -388,7 +398,7 @@ describe('webhook ingestion transport', () => {
     expect((await pool.query('SELECT id FROM memories')).rows).toEqual([]);
   });
 
-  it('accepts a legacy GitHub login alias while rolling out numeric identity', async () => {
+  it('rejects legacy GitHub login aliases and accepts explicit numeric-id aliases', async () => {
     const service = await createPrincipal(pool, {
       externalId: 'service:branch-rollout', kind: 'service', displayName: 'Branch hook',
     });
@@ -403,8 +413,8 @@ describe('webhook ingestion transport', () => {
     await addMembership(pool, admin.id, org!.id, 'admin');
     await addMembership(pool, service.id, userScope.id, 'writer');
     await pool.query(
-      `INSERT INTO principal_aliases (provider, external_actor, principal_id)
-       VALUES ('github', 'legacy-login', $1)`,
+      `INSERT INTO principal_aliases (provider, alias_kind, external_actor, principal_id)
+       VALUES ('github', 'login', 'legacy-login', $1)`,
       [user.id],
     );
     const target = app({ plugins: { 'github-branch': {
@@ -414,7 +424,7 @@ describe('webhook ingestion transport', () => {
     const send = async (ref: string) => {
       const raw = JSON.stringify({
         ref, ref_type: 'branch', master_branch: 'master',
-        repository: { full_name: 'nucleoid/continuum', name: 'continuum',
+        repository: { id: 24680, full_name: 'nucleoid/continuum', name: 'continuum',
           html_url: 'https://github.com/nucleoid/continuum' },
         sender: { id: 7654321, login: 'legacy-login' },
       });
@@ -423,12 +433,12 @@ describe('webhook ingestion transport', () => {
         .set('X-GitHub-Event', 'create').set('X-GitHub-Delivery', ref).send(raw);
     };
 
-    await send('legacy-alias-capture').then((response) => expect(response.status).toBe(202));
+    await send('legacy-alias-capture').then((response) => expect(response.status).toBe(400));
     let rows = (await pool.query('SELECT metadata FROM memories')).rows;
-    expect(rows[0].metadata).not.toHaveProperty('actor_principal_id');
+    expect(rows).toEqual([]);
     await pool.query(
-      `INSERT INTO principal_aliases (provider, external_actor, principal_id)
-       VALUES ('github', '7654321', $1)`,
+      `INSERT INTO principal_aliases (provider, alias_kind, external_actor, principal_id)
+       VALUES ('github', 'id', '7654321', $1)`,
       [user.id],
     );
     await mapActorIdentity(pool, {
@@ -437,11 +447,10 @@ describe('webhook ingestion transport', () => {
     });
     await send('numeric-alias-capture').then((response) => expect(response.status).toBe(202));
     rows = (await pool.query('SELECT metadata FROM memories ORDER BY created_at, id')).rows;
-    expect(rows).toHaveLength(2);
-    expect(rows[1].metadata).toMatchObject({
+    expect(rows).toHaveLength(1);
+    expect(rows[0].metadata).toMatchObject({
       actor: 'Branch User', actor_principal_id: user.id,
-      thread_key: 'github:branch:nucleoid/continuum:numeric-alias-capture',
-      _continuum_actor_mapping_authority: 'github',
+      thread_key: 'github:repo:24680:branch:numeric-alias-capture',
     });
   });
 
@@ -457,12 +466,12 @@ describe('webhook ingestion transport', () => {
     await addMembership(pool, user.id, org!.id, 'admin');
     await addMembership(pool, principal.id, userScope.id, 'writer');
     await pool.query(
-      `INSERT INTO principal_aliases (provider, external_actor, principal_id)
-       VALUES ('github', '12345', $1)`,
+      `INSERT INTO principal_aliases (provider, alias_kind, external_actor, principal_id)
+       VALUES ('github', 'id', '12345', $1)`,
       [user.id],
     );
     await mapActorIdentity(pool, {
-      authority: `github.${principal.id}`, externalActorId: '12345',
+      authority: 'github', externalActorId: '12345',
       principalId: user.id, mappedByPrincipalId: user.id,
     });
     const target = app({ plugins: { 'github-branch': {
@@ -472,7 +481,7 @@ describe('webhook ingestion transport', () => {
     const send = async (login: string) => {
       const raw = JSON.stringify({
         ref: `feature/${login}`, ref_type: 'branch', master_branch: 'master',
-        repository: { full_name: 'nucleoid/continuum', name: 'continuum',
+        repository: { id: 24680, full_name: 'nucleoid/continuum', name: 'continuum',
           html_url: 'https://github.com/nucleoid/continuum' },
         sender: { id: 12345, login },
       });
@@ -487,11 +496,9 @@ describe('webhook ingestion transport', () => {
     expect(rows).toHaveLength(2);
     expect(rows.map((row) => row.metadata.actor)).toEqual(['Cass', 'Cass']);
     expect(rows.map((row) => row.metadata.actor_principal_id)).toEqual([user.id, user.id]);
-    expect(rows.map((row) => row.metadata._continuum_actor_mapping_authority))
-      .toEqual([`github.${principal.id}`, `github.${principal.id}`]);
     expect(rows.map((row) => row.metadata.thread_key).sort()).toEqual([
-      'github:branch:nucleoid/continuum:feature/old-login',
-      'github:branch:nucleoid/continuum:feature/renamed-login',
+      'github:repo:24680:branch:feature/old-login',
+      'github:repo:24680:branch:feature/renamed-login',
     ].sort());
   });
 

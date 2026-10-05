@@ -57,10 +57,26 @@ describe('standup remediation database boundary', () => {
 
   it('repairs interrupted concurrent indexes and checks validity', async () => {
     const sql = await readFile(
-      new URL('../../migrations/0013_standup_indexes.sql', import.meta.url),
+      new URL('../../migrations/0015_standup_query_indexes.sql', import.meta.url),
       'utf8',
     );
     expect(sql).toMatch(/DROP INDEX CONCURRENTLY IF EXISTS/);
     expect(sql).toMatch(/indisvalid/);
+  });
+
+  it('backs up and loops cleanup without deleting truthful labels or history', async () => {
+    const cleanup = await readFile(
+      new URL('../../scripts/run-standup-mapping-enforcement.sql', import.meta.url),
+      'utf8',
+    );
+    const restore = await readFile(
+      new URL('../../scripts/restore-standup-mapping-enforcement.sql', import.meta.url),
+      'utf8',
+    );
+    expect(cleanup).toContain('standup_metadata_cleanup_backup');
+    expect(cleanup).toMatch(/LOOP[\s\S]+EXIT WHEN changed = 0/);
+    expect(cleanup).not.toMatch(/- 'actor'\s/);
+    expect(cleanup).not.toMatch(/- 'thread_key'\s/);
+    expect(restore).toContain('backup.metadata');
   });
 });

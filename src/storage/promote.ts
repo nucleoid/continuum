@@ -9,9 +9,10 @@ import {
 } from '../scopes/access.js';
 import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
 import { computeExpiry } from './expiry.js';
-import { activityMetadataForPromotion } from '../capture/metadata.js';
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+import {
+  createActivityAttribution,
+  getActivityAttributionForUpdate,
+} from './activity-attributions.js';
 
 export interface PromoteResult {
   source: Memory;
@@ -91,12 +92,8 @@ async function promoteOperation(
     throw new PromoteError(`principal lacks ${roleName} role on target scope`, 403);
   }
 
-  const mappingAuthorized = await activityMappingIsAuthorized(
-    client, source.metadata, source.expiresAt,
-  );
-  const destinationMetadata = activityMetadataForPromotion(
-    source.metadata, source.createdAt, mappingAuthorized,
-  );
+  const sourceAttribution = await getActivityAttributionForUpdate(client, source.id);
+  const destinationMetadata = { ...source.metadata };
   delete destinationMetadata.related;
   const destination = await createMemory(client, {
     scopeId: destinationScope.id,
@@ -109,8 +106,21 @@ async function promoteOperation(
     sourceRef: source.sourceRef ?? null,
     tags: source.tags,
     metadata: { ...destinationMetadata, promoted_from: source.id },
-    expiresAtCeiling: mappingAuthorized ? source.expiresAt : null,
+    expiresAtCeiling: sourceAttribution ? source.expiresAt : null,
   });
+  if (sourceAttribution) {
+    await createActivityAttribution(client, {
+      memoryId: destination.id,
+      actorPrincipalId: sourceAttribution.actorPrincipalId,
+      mappingId: sourceAttribution.mappingId,
+      mappingAuthority: sourceAttribution.mappingAuthority,
+      actorLabel: sourceAttribution.actorLabel,
+      threadKey: sourceAttribution.threadKey,
+      closesThreadKeys: [],
+      activityAt: sourceAttribution.activityAt,
+      trustExpiresAt: source.expiresAt,
+    });
+  }
   const { rows } = await client.query(
     `UPDATE memories
         SET state = 'promoted', promoted_to_id = $2, updated_at = now()
@@ -183,9 +193,20 @@ async function verifyOperation(
     'SELECT statement_timestamp() AS verified_at',
   );
   const verifiedAt = clockRows[0].verified_at as Date;
-  const expiresAt = stillTrue
+  let expiresAt = stillTrue
     ? computeExpiry(memory.type, memoryScope.kind, verifiedAt)
     : memory.expiresAt;
+  if (stillTrue) {
+    const trust = await client.query<{ trust_expires_at: Date | null }>(
+      `SELECT trust_expires_at
+         FROM memory_activity_attributions
+        WHERE memory_id = $1
+        FOR SHARE`,
+      [memory.id],
+    );
+    const ceiling = trust.rows[0]?.trust_expires_at;
+    if (ceiling && (!expiresAt || ceiling < expiresAt)) expiresAt = ceiling;
+  }
   const nextState = stillTrue ? 'live' : 'stale';
   const { rows } = await client.query(
     `UPDATE memories
@@ -196,32 +217,6 @@ async function verifyOperation(
   );
   if (!rows[0]) throw new PromoteError('memory is in a terminal state', 409);
   return rowToMemory(rows[0]);
-}
-
-async function activityMappingIsAuthorized(
-  client: pg.PoolClient,
-  metadata: Record<string, unknown>,
-  expiresAt: Date | null,
-): Promise<boolean> {
-  const mappingId = metadata._continuum_actor_mapping_id;
-  const authority = metadata._continuum_actor_mapping_authority;
-  const principalId = metadata.actor_principal_id;
-  if (typeof mappingId !== 'string'
-      || typeof authority !== 'string'
-      || typeof principalId !== 'string'
-      || !UUID.test(mappingId)) return false;
-  const { rows } = await client.query(
-    `SELECT 1
-       FROM actor_principal_mappings mapping
-      WHERE mapping.mapping_id = $1::uuid
-        AND mapping.authority = $2
-        AND mapping.principal_id::text = $3
-        AND mapping.revoked_at IS NULL
-        AND ($4::timestamptz IS NULL OR $4::timestamptz > now())
-      FOR SHARE OF mapping`,
-    [mappingId, authority, principalId, expiresAt],
-  );
-  return rows.length === 1;
 }
 
 async function getMemoryForUpdate(

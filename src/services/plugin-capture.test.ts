@@ -23,10 +23,11 @@ describe('plugin capture to standup attribution', () => {
       action: 'closed',
       pull_request: {
         number, title: `Ship ${number}`, html_url: `https://github.test/org/continuum/pull/${number}`,
-        state: 'closed', merged: true, user: { id, login }, base: { ref: 'master' },
+        state: 'closed', merged: true, merged_at: '2026-10-05T10:00:00.000Z',
+        user: { id, login }, base: { ref: 'master' },
         head: { ref: `feature/${number}` }, merged_by: { login: 'release-bot' },
       },
-      repository: { full_name: 'org/continuum', name: 'continuum' },
+      repository: { id: 24680, full_name: 'org/continuum', name: 'continuum' },
     };
   }
 
@@ -46,7 +47,7 @@ describe('plugin capture to standup attribution', () => {
     await addMembership(pool, service.id, project.id, 'writer');
     await addMembership(pool, actor.id, project.id, 'reader');
     await mapActorIdentity(pool, {
-      authority: `github.${service.id}`, externalActorId: '10123', principalId: actor.id,
+      authority: 'github', externalActorId: '10123', principalId: actor.id,
       mappedByPrincipalId: mapper.id,
     });
 
@@ -56,7 +57,7 @@ describe('plugin capture to standup attribution', () => {
     expect(captured.memory.metadata).toMatchObject({
       actor: 'Renamable Display Name', actor_principal_id: actor.id,
       thread_owner_principal_id: actor.id,
-      thread_key: 'github:pr:org/continuum#68',
+      thread_key: 'github:repo:24680:pr:68',
     });
     const otherProducer = await createPrincipal(pool, {
       externalId: 'svc:github-enterprise-webhook', kind: 'service',
@@ -66,13 +67,16 @@ describe('plugin capture to standup attribution', () => {
     const [isolated] = await capturePluginEvent(
       pool, null, otherProducer, 'github-pr', mergedPr(69, 10123, 'same-numeric-id'),
     );
-    expect(isolated.memory.metadata).not.toHaveProperty('actor_principal_id');
-    expect(isolated.memory.metadata).not.toHaveProperty('thread_key');
-    expect(isolated.memory.metadata).toMatchObject({ source_actor_label: 'same-numeric-id' });
+    expect(isolated.memory.metadata).toMatchObject({
+      actor_principal_id: actor.id,
+      thread_key: 'github:repo:24680:pr:69',
+    });
     const standup = await standupForPrincipal(pool, actor, { sinceHours: 24 }, {
       now: new Date(Date.now() + 1_000),
     });
-    expect(standup.activity.map((memory) => memory.id)).toEqual([captured.memory.id]);
+    expect(new Set(standup.activity.map((memory) => memory.id))).toEqual(
+      new Set([captured.memory.id, isolated.memory.id]),
+    );
   });
 
   it('keeps GitHub branch and PR threads stable across separate service principals', async () => {
@@ -102,7 +106,7 @@ describe('plugin capture to standup attribution', () => {
 
     const [branch] = await capturePluginEvent(pool, null, branchService, 'github-branch', {
       ref: 'feature/stable', ref_type: 'branch', master_branch: 'master',
-      repository: { full_name: 'org/continuum', name: 'continuum',
+      repository: { id: 24680, full_name: 'org/continuum', name: 'continuum',
         html_url: 'https://github.test/org/continuum' },
       sender: { id: 5150, login: 'rename-safe' },
     }, { resolveUserScope: () => 'github-actor' });
@@ -110,12 +114,16 @@ describe('plugin capture to standup attribution', () => {
     event.pull_request.head.ref = 'feature/stable';
     const [pr] = await capturePluginEvent(pool, null, prService, 'github-pr', event);
 
-    const branchKey = 'github:branch:org/continuum:feature/stable';
+    const branchKey = 'github:repo:24680:branch:feature/stable';
     expect(branch.memory.metadata.thread_key).toBe(branchKey);
-    expect(pr.memory.metadata.thread_key).toBe('github:pr:org/continuum#72');
+    expect(pr.memory.metadata.thread_key).toBe('github:repo:24680:pr:72');
     expect(pr.memory.metadata.closes_thread_keys).toContain(branchKey);
-    expect(branch.memory.metadata._continuum_actor_mapping_authority).toBe('github');
-    expect(pr.memory.metadata._continuum_actor_mapping_authority).toBe('github');
+    const storedMappings = await pool.query<{ mapping_authority: string }>(
+      `SELECT mapping_authority FROM memory_activity_attributions
+        WHERE memory_id = ANY($1::uuid[]) ORDER BY memory_id`,
+      [[branch.memory.id, pr.memory.id]],
+    );
+    expect(storedMappings.rows.map((row) => row.mapping_authority)).toEqual(['github', 'github']);
   });
 
   it('excludes historical activity after its exact actor mapping is revoked or replaced', async () => {
@@ -133,7 +141,7 @@ describe('plugin capture to standup attribution', () => {
     await addMembership(pool, admin.id, org!.id, 'admin');
     await addMembership(pool, service.id, project.id, 'writer');
     await addMembership(pool, actor.id, project.id, 'reader');
-    const authority = `github.${service.id}`;
+    const authority = 'github';
     await mapActorIdentity(pool, {
       authority, externalActorId: '4242', principalId: actor.id,
       mappedByPrincipalId: admin.id,
@@ -212,7 +220,7 @@ describe('plugin capture to standup attribution', () => {
     await addMembership(pool, service.id, project.id, 'writer');
     await addMembership(pool, actor.id, project.id, 'reader');
     await mapActorIdentity(pool, {
-      authority: `deploy-event.${service.id}`, externalActorId: 'aad-42', principalId: actor.id,
+      authority: 'deploy-event', externalActorId: 'aad-42', principalId: actor.id,
       mappedByPrincipalId: mapper.id,
     });
 
@@ -236,13 +244,12 @@ describe('plugin capture to standup attribution', () => {
       actor: 'Deployer', actor_principal_id: actor.id, thread_owner_principal_id: actor.id,
       thread_key: 'deploy-event:deploy:continuum:prod:v1',
       closes_thread_keys: ['deploy-event:deploy:continuum:prod:v1'],
-      _continuum_actor_mapping_id: expect.any(String),
-      _continuum_actor_mapping_authority: `deploy-event.${service.id}`,
     });
     expect(withoutActor.memory.metadata).not.toHaveProperty('actor');
     expect(withoutActor.memory.metadata).not.toHaveProperty('actor_principal_id');
-    expect(otherProducer.memory.metadata).not.toHaveProperty('actor_principal_id');
-    expect(otherProducer.memory.metadata).toMatchObject({ source_actor_label: 'Deploy User' });
+    expect(otherProducer.memory.metadata).toMatchObject({
+      actor: 'Deployer', actor_principal_id: actor.id,
+    });
 
     const captureAudit = await pool.query(
       `SELECT metadata FROM audit_log
@@ -251,8 +258,8 @@ describe('plugin capture to standup attribution', () => {
     );
     expect(captureAudit.rows[0].metadata).toMatchObject({
       actor_mapping: {
-        mapping_id: mapped.memory.metadata._continuum_actor_mapping_id,
-        authority: `deploy-event.${service.id}`,
+        mapping_id: expect.any(String),
+        authority: 'deploy-event',
       },
     });
     expect(JSON.stringify(captureAudit.rows[0].metadata)).not.toContain('aad-42');
@@ -260,7 +267,9 @@ describe('plugin capture to standup attribution', () => {
     const standup = await standupForPrincipal(pool, actor, { sinceHours: 24 }, {
       now: new Date(Date.now() + 1_000),
     });
-    expect(standup.activity.map((memory) => memory.id)).toEqual([mapped.memory.id]);
+    expect(new Set(standup.activity.map((memory) => memory.id))).toEqual(
+      new Set([mapped.memory.id, otherProducer.memory.id]),
+    );
   });
 
   it('does not let terminal payloads bypass mapping with a principal UUID', async () => {
@@ -305,7 +314,7 @@ describe('plugin capture to standup attribution', () => {
     await addMembership(pool, service.id, scope.id, 'writer');
     await addMembership(pool, actor.id, scope.id, 'reader');
     await mapActorIdentity(pool, {
-      authority: `terminal-summary.${service.id}`, externalActorId: 'subject-42', principalId: actor.id,
+      authority: 'terminal-summary', externalActorId: 'subject-42', principalId: actor.id,
       mappedByPrincipalId: admin.id,
     });
 
