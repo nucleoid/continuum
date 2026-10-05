@@ -274,6 +274,10 @@ describe('POST /api/v0/recall', () => {
     );
     expect(rows).toHaveLength(1);
     expect(rows[0].metadata).toContain('test:failing');
+    expect(JSON.parse(rows[0].metadata)).toMatchObject({
+      embedded: false,
+      embedding_groups: [{ provider: 'test:failing', dim: 768, scopes: expect.any(Number), status: 'failed' }],
+    });
     expect(rows[0].metadata).not.toContain(privateMessage);
   });
 });

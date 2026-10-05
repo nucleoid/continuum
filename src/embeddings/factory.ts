@@ -10,6 +10,11 @@ import {
 } from './router.js';
 import { STORAGE_EMBEDDING_DIM } from '../storage/schema.js';
 import type { ScopeKind } from '../types.js';
+import {
+  DEFAULT_EMBEDDING_TIMEOUT_MS,
+  MAX_EMBEDDING_TIMEOUT_MS,
+  validateEmbeddingTimeout,
+} from './timeout.js';
 
 function embeddingDimension(env: NodeJS.ProcessEnv): number {
   const configured = env.CONTINUUM_EMBEDDING_DIM ?? String(STORAGE_EMBEDDING_DIM);
@@ -22,14 +27,32 @@ function embeddingDimension(env: NodeJS.ProcessEnv): number {
   return dim;
 }
 
+function embeddingTimeout(env: NodeJS.ProcessEnv): number {
+  const configured = env.CONTINUUM_EMBEDDING_TIMEOUT_MS;
+  if (configured === undefined) return DEFAULT_EMBEDDING_TIMEOUT_MS;
+  return validateEmbeddingTimeout(Number(configured));
+}
+
 export function makeEmbeddingProviderFromEnv(env: NodeJS.ProcessEnv = process.env): EmbeddingProvider | null {
   const kind = env.CONTINUUM_EMBEDDING_PROVIDER?.toLowerCase();
   if (!kind || kind === 'none' || kind === 'noop') return null;
   if (kind === 'ollama') {
     const baseUrl = env.CONTINUUM_OLLAMA_URL ?? 'http://localhost:11434';
     const model = env.CONTINUUM_EMBEDDING_MODEL ?? 'nomic-embed-text';
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(model)) {
+      throw new Error('CONTINUUM_EMBEDDING_MODEL is invalid');
+    }
+    try {
+      const endpoint = new URL(baseUrl);
+      if (!['http:', 'https:'].includes(endpoint.protocol)
+        || endpoint.username || endpoint.password) throw new Error('unsafe endpoint');
+    } catch {
+      throw new Error('CONTINUUM_OLLAMA_URL must be an HTTP URL without credentials');
+    }
     const dim = embeddingDimension(env);
-    return new OllamaEmbeddingProvider({ baseUrl, model, dim });
+    return new OllamaEmbeddingProvider({
+      baseUrl, model, dim, timeoutMs: embeddingTimeout(env),
+    });
   }
   throw new Error(`Unknown CONTINUUM_EMBEDDING_PROVIDER: ${kind}`);
 }
@@ -63,6 +86,9 @@ function providerDefinition(value: unknown): ProviderDefinition {
   if (typeof raw.alias !== 'string' || typeof raw.model !== 'string' || !raw.model) {
     throw new Error('Embedding provider alias and model are required');
   }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(raw.model)) {
+    throw new Error('Embedding provider model is invalid');
+  }
   if (!['ollama', 'openai', 'voyage'].includes(String(raw.kind))) {
     throw new Error('Embedding provider kind must be ollama, openai, or voyage');
   }
@@ -88,13 +114,31 @@ function providerDefinition(value: unknown): ProviderDefinition {
     }
   }
   if (raw.timeout_ms !== undefined
-    && (!Number.isSafeInteger(raw.timeout_ms) || (raw.timeout_ms as number) <= 0)) {
-    throw new Error('Embedding provider timeout_ms must be a positive integer');
+    && (!Number.isSafeInteger(raw.timeout_ms)
+      || (raw.timeout_ms as number) < 1
+      || (raw.timeout_ms as number) > MAX_EMBEDDING_TIMEOUT_MS)) {
+    throw new Error(`Embedding provider timeout_ms must be between 1 and ${MAX_EMBEDDING_TIMEOUT_MS}`);
   }
-  if (raw.kind === 'ollama' && raw.timeout_ms !== undefined) {
-    throw new Error('Ollama timeout configuration is not supported by scope routing');
+  const definition = raw as ProviderDefinition;
+  validateProviderCompatibility(definition);
+  return definition;
+}
+
+function validateProviderCompatibility(definition: ProviderDefinition): void {
+  if (definition.kind === 'voyage') {
+    throw new Error(
+      `Voyage model ${definition.model} dimension ${definition.dim} is unsupported: `
+      + 'Voyage supports 256, 512, 1024, or 2048 dimensions, while v0 storage requires 768',
+    );
   }
-  return raw as ProviderDefinition;
+  if (definition.kind === 'openai') {
+    if (definition.model === 'text-embedding-ada-002') {
+      throw new Error('OpenAI text-embedding-ada-002 requires dimension 1536; v0 storage requires 768');
+    }
+    if (!['text-embedding-3-small', 'text-embedding-3-large'].includes(definition.model)) {
+      throw new Error(`Unsupported OpenAI embedding model: ${definition.model}`);
+    }
+  }
 }
 
 const SCOPE_KINDS = new Set<ScopeKind>(['org', 'team', 'project', 'user', 'role']);
@@ -153,6 +197,7 @@ function instantiateProvider(
     }
     const provider = new OllamaEmbeddingProvider({
       baseUrl: endpoint, model: definition.model, dim: definition.dim,
+      timeoutMs: definition.timeout_ms ?? DEFAULT_EMBEDDING_TIMEOUT_MS,
     });
     Object.defineProperty(provider, 'local', { value: definition.local });
     return provider;

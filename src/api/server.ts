@@ -271,8 +271,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   v0.use(agentsMdRouter(pool));
   v0.use(auditRouter(pool));
   v0.use(reviewQueueRouter(pool, opts.reviewHorizonDays));
-  const orgProvider = asEmbeddingRouter(provider).resolve({ kind: 'org', name: '' }).provider;
-  v0.use(insightsRouter(pool, orgProvider, gapConfig, () => new Date((opts.clock ?? Date.now)())));
+  v0.use(insightsRouter(pool, provider, gapConfig, () => new Date((opts.clock ?? Date.now)())));
   app.use('/api/v0', v0);
 
   app.use('/api', (_req, res) => {

@@ -407,7 +407,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         }
         const report = await getKnowledgeGaps(
           pool,
-          asEmbeddingRouter(embeddingProvider).resolve({ kind: 'org', name: '' }).provider,
+          embeddingProvider,
           principal,
           {
             sinceDays,

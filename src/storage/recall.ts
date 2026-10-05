@@ -13,6 +13,11 @@ export interface RecallOptions {
   limit: number;
   embeddingProvider?: EmbeddingProvider | null;
   embeddingGroups?: Array<{ scopeIds: string[]; provider: EmbeddingProvider }>;
+  onEmbeddingGroupResult?: (result: {
+    provider: EmbeddingProvider;
+    scopeIds: string[];
+    status: 'succeeded' | 'failed';
+  }) => void;
 }
 
 export class EmbeddingProviderUnavailableError extends Error {
@@ -143,6 +148,9 @@ export async function recall(
       assertEmbeddingVectorDimension(queryVec, group.provider);
     } catch {
       // An outage degrades only this provider group to full-text search.
+      opts.onEmbeddingGroupResult?.({
+        provider: group.provider, scopeIds: group.scopeIds, status: 'failed',
+      });
       vectorLists.push([]);
       continue;
     }
@@ -152,6 +160,9 @@ export async function recall(
     vectorLists.push(hits.map((hit, index) => ({
       id: hit.id, rank: index + 1, distance: hit.distance,
     })));
+    opts.onEmbeddingGroupResult?.({
+      provider: group.provider, scopeIds: group.scopeIds, status: 'succeeded',
+    });
   }
 
   const fused = fuse(fts, ...vectorLists);

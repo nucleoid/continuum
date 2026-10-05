@@ -67,8 +67,10 @@ describe('GET /api/v0/insights/gaps', () => {
 
   it('does not leak query or provider text into operational logs during safe fallback', async () => {
     const admin = await seed('admin');
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
     await recordRead(pool, {
-      principalId: admin.id, query: 'secret-token-gap', metadata: { hits: 0 }, memories: [],
+      principalId: admin.id, query: 'secret-token-gap',
+      metadata: { hits: 0, scope_ids: [org.id] }, memories: [],
     });
     const privateError = 'provider failed while embedding secret-token-gap';
     const provider: EmbeddingProvider = {
@@ -84,6 +86,7 @@ describe('GET /api/v0/insights/gaps', () => {
       .set('Authorization', 'Bearer entra:admin');
     expect(res.status).toBe(200);
     expect(res.body.semanticClustering).toBe(false);
+    expect(res.body.embedding).toMatchObject({ status: 'degraded', failedGroups: 1 });
     expect(JSON.stringify(events)).not.toContain('secret-token-gap');
     expect(JSON.stringify(events)).not.toContain(privateError);
   });

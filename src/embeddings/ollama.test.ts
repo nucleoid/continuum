@@ -95,4 +95,15 @@ describe('OllamaEmbeddingProvider', () => {
       .rejects.toThrow('deadline');
     expect(fetchImpl).not.toHaveBeenCalled();
   });
+
+  it('enforces its deadline even when an injected fetch ignores abort', async () => {
+    const fetchImpl = vi.fn(async () => new Promise<Response>(() => undefined));
+    const provider = new OllamaEmbeddingProvider({
+      baseUrl: 'http://localhost:11434', model: 'nomic-embed-text', dim: 768,
+      timeoutMs: 5, fetchImpl,
+    });
+
+    await expect(provider.embed(['private local text'])).rejects.toThrow(/timed out/i);
+    expect(fetchImpl.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
+  });
 });

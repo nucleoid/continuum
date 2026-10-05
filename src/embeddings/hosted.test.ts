@@ -41,4 +41,17 @@ describe('hosted embedding providers', () => {
 
     await expect(provider.embed(['one'])).rejects.toThrow(/timed out/i);
   });
+
+  it('does not start a request when the caller signal is already aborted', async () => {
+    const fetchImpl = vi.fn(async () => new Promise<Response>(() => undefined));
+    const provider = new OpenAIEmbeddingProvider({
+      apiKey: '***', model: 'm', dim: 2, timeoutMs: 5_000, fetchImpl,
+    });
+    const controller = new AbortController();
+    controller.abort(new Error('caller cancelled'));
+
+    await expect(provider.embed(['one'], { signal: controller.signal }))
+      .rejects.toThrow('caller cancelled');
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
 });

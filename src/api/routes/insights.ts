@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import type pg from 'pg';
 import { z } from 'zod';
-import type { EmbeddingProvider } from '../../embeddings/provider.js';
+import type { EmbeddingRouting } from '../../embeddings/router.js';
 import type { GapConfig } from '../../insights/gaps.js';
 import { getKnowledgeGaps } from '../../services/gaps.js';
 import { ServiceError } from '../../services/errors.js';
@@ -11,7 +11,7 @@ const unitDecimalPattern = /^(?:0(?:\.\d+)?|1(?:\.0+)?)$/;
 
 export function insightsRouter(
   pool: pg.Pool,
-  provider: EmbeddingProvider | null,
+  embeddingRouting: EmbeddingRouting,
   config: GapConfig,
   now: () => Date = () => new Date(),
 ): Router {
@@ -33,7 +33,7 @@ export function insightsRouter(
     try {
       const parsed = schema.safeParse(req.query);
       if (!parsed.success) throw new ServiceError('INVALID_INPUT', 'Invalid gap insight query');
-      const report = await getKnowledgeGaps(pool, provider, req.principal!, {
+      const report = await getKnowledgeGaps(pool, embeddingRouting, req.principal!, {
         sinceDays: parsed.data.since,
         limit: parsed.data.limit,
         minFrequency: parsed.data.minFrequency,

@@ -1,4 +1,9 @@
 import type { EmbeddingProvider } from './provider.js';
+import {
+  DEFAULT_EMBEDDING_TIMEOUT_MS,
+  validateEmbeddingTimeout,
+  withEmbeddingTimeout,
+} from './timeout.js';
 
 interface HostedOptions {
   apiKey: string;
@@ -26,29 +31,6 @@ function validateVectors(items: EmbeddingItem[], count: number, dim: number): nu
   });
 }
 
-async function withTimeout<T>(
-  timeoutMs: number,
-  signal: AbortSignal | undefined,
-  operation: (signal: AbortSignal) => Promise<T>,
-): Promise<T> {
-  const controller = new AbortController();
-  const forward = () => controller.abort(signal?.reason);
-  signal?.addEventListener('abort', forward, { once: true });
-  if (signal?.aborted) forward();
-  let timeout: NodeJS.Timeout | undefined;
-  const deadline = new Promise<never>((_resolve, reject) => {
-    timeout = setTimeout(() => {
-      const error = new Error('Embedding request timed out');
-      controller.abort(error);
-      reject(error);
-    }, timeoutMs);
-  });
-  try { return await Promise.race([operation(controller.signal), deadline]); } finally {
-    clearTimeout(timeout);
-    signal?.removeEventListener('abort', forward);
-  }
-}
-
 abstract class HostedEmbeddingProvider implements EmbeddingProvider {
   abstract readonly id: string;
   abstract embed(texts: string[], options?: { signal?: AbortSignal }): Promise<number[][]>;
@@ -65,7 +47,7 @@ abstract class HostedEmbeddingProvider implements EmbeddingProvider {
     this.model = options.model;
     this.dim = options.dim;
     this.endpoint = options.endpoint ?? defaultEndpoint;
-    this.timeoutMs = options.timeoutMs ?? 10_000;
+    this.timeoutMs = validateEmbeddingTimeout(options.timeoutMs ?? DEFAULT_EMBEDDING_TIMEOUT_MS);
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
@@ -74,7 +56,7 @@ abstract class HostedEmbeddingProvider implements EmbeddingProvider {
     signal?: AbortSignal,
   ): Promise<number[][]> {
     if (texts.length === 0) return [];
-    return withTimeout(this.timeoutMs, signal, async (requestSignal) => {
+    return withEmbeddingTimeout(this.timeoutMs, signal, async (requestSignal) => {
       const response = await this.fetchImpl(this.endpoint, {
         method: 'POST', headers: { 'content-type': 'application/json', ...headers },
         body: JSON.stringify(body), signal: requestSignal,

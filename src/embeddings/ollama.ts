@@ -1,9 +1,15 @@
 import type { EmbeddingProvider } from './provider.js';
+import {
+  DEFAULT_EMBEDDING_TIMEOUT_MS,
+  validateEmbeddingTimeout,
+  withEmbeddingTimeout,
+} from './timeout.js';
 
 export interface OllamaProviderOptions {
   baseUrl: string;
   model: string;
   dim: number;
+  timeoutMs?: number;
   fetchImpl?: typeof fetch;
 }
 
@@ -19,6 +25,7 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
   private readonly baseUrl: string;
   private readonly model: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly timeoutMs: number;
 
   constructor(opts: OllamaProviderOptions) {
     this.id = `ollama:${opts.model}`;
@@ -26,18 +33,20 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
     this.baseUrl = opts.baseUrl.replace(/\/$/, '');
     this.model = opts.model;
     this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.timeoutMs = validateEmbeddingTimeout(opts.timeoutMs ?? DEFAULT_EMBEDDING_TIMEOUT_MS);
   }
 
   async embed(texts: string[], options: { signal?: AbortSignal } = {}): Promise<number[][]> {
     const out: number[][] = [];
     for (const text of texts) {
       options.signal?.throwIfAborted();
-      const res = await this.fetchImpl(`${this.baseUrl}/api/embeddings`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ model: this.model, prompt: text }),
-        signal: options.signal,
-      });
+      const res = await withEmbeddingTimeout(this.timeoutMs, options.signal, (signal) =>
+        this.fetchImpl(`${this.baseUrl}/api/embeddings`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ model: this.model, prompt: text }),
+          signal,
+        }));
       if (!res.ok) {
         throw new Error(
           `Ollama embed failed: ${res.status} ${res.statusText}`,

@@ -46,13 +46,28 @@ export async function recallForPrincipal(
       grouped.set(key, group);
     }
     const embeddingGroups = [...grouped.values()];
+    const embeddingGroupResults = new Map<string, 'succeeded' | 'failed'>();
     const results = await recall(pool, {
       query: input.query,
       scopeIds,
       types: input.types,
       limit: input.limit ?? 10,
       embeddingGroups,
+      onEmbeddingGroupResult: ({ provider, status }) => {
+        embeddingGroupResults.set(`${provider.id}\u0000${provider.dim}`, status);
+      },
     });
+    const embeddingAuditGroups = embeddingGroups.map((group) => ({
+      provider: group.provider.id,
+      dim: group.provider.dim,
+      scopes: group.scopeIds.length,
+      status: embeddingGroupResults.get(`${group.provider.id}\u0000${group.provider.dim}`)
+        ?? 'failed' as const,
+    }));
+    const succeededEmbeddingGroups = embeddingAuditGroups
+      .filter((group) => group.status === 'succeeded').length;
+    const failedEmbeddingGroups = embeddingAuditGroups
+      .filter((group) => group.status === 'failed').length;
 
     // Recall auditing is required. Results are not returned if this write fails.
     await recordReadAudit(pool, {
@@ -62,12 +77,11 @@ export async function recallForPrincipal(
         scopes: scopeIds.length,
         scope_ids: scopeIds,
         hits: results.length,
-        embedded: embeddingGroups.length > 0,
-        embedding_groups: embeddingGroups.map((group) => ({
-          provider: group.provider.id,
-          dim: group.provider.dim,
-          scopes: group.scopeIds.length,
-        })),
+        embedded: succeededEmbeddingGroups > 0,
+        embedding_status: failedEmbeddingGroups > 0
+          ? 'degraded'
+          : succeededEmbeddingGroups > 0 ? 'succeeded' : 'not-requested',
+        embedding_groups: embeddingAuditGroups,
         ...(localOnlyUnavailable > 0
           ? { local_only_unavailable_scopes: localOnlyUnavailable }
           : {}),

@@ -82,6 +82,12 @@ provider. Provider outages affect only their routed vector group. Full-text
 recall remains available and vector searches retain exact provider and
 dimension filters.
 
+Every provider HTTP call has a validated deadline (`timeout_ms` per provider,
+or `CONTINUUM_EMBEDDING_TIMEOUT_MS` for the legacy Ollama configuration). The
+default is 10000 ms and the maximum is 300000 ms. Cancellation is forwarded to
+`fetch`; a provider implementation that ignores cancellation is still bounded
+by the local deadline.
+
 OpenAI and Voyage credentials are read only from `OPENAI_API_KEY` and
 `VOYAGE_API_KEY`. Inline credentials are rejected. Ollama definitions must
 explicitly declare locality; a non-loopback endpoint marked local emits a
@@ -90,6 +96,21 @@ The legacy `CONTINUUM_EMBEDDING_PROVIDER` variables remain supported as a
 single-provider policy. Existing vectors are never automatically sent to a new
 provider. Re-embedding, especially to a hosted provider, must be an explicit
 operator action.
+
+The v0 `vector(768)` schema supports OpenAI `text-embedding-3-small` and
+`text-embedding-3-large` with an explicit 768-dimensional output. Current
+Voyage text models document only 256, 512, 1024, or 2048 dimensions, so Voyage
+configuration is rejected at startup instead of accepting a configuration that
+will fail on its first response. Voyage becomes configurable when storage gains
+a supported dimension; the client remains available for that migration.
+
+Knowledge-gap semantic clustering applies the same routing policy to the exact
+scope IDs recorded by each zero-hit recall. A candidate is sent only when every
+scope still exists and all scopes resolve to the same provider. Mixed-provider,
+empty, malformed, unknown, or legacy scope fidelity remains exact-text-only;
+in particular, a query involving any local-only scope cannot fall through to a
+hosted provider. Provider outages degrade to exact/FTS behavior with explicit,
+content-free status and counts in the report audit.
 
 ## License
 
