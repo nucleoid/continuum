@@ -238,11 +238,92 @@ export async function embedCapturedMemory(
   }
 }
 
-interface MappedActorAttribution {
+export interface MappedActorAttribution {
   identity: ExternalActorIdentity;
   mappingId: string;
   authority: string;
   principalId: string;
+}
+
+/** Insert one trusted mapped plugin capture into a caller-owned transaction. */
+export async function captureMappedPluginOne(
+  client: Queryable,
+  embeddingRouting: EmbeddingRouting,
+  principal: Principal,
+  input: CaptureInput,
+  attribution: MappedActorAttribution,
+  auditMetadata: Record<string, unknown> = {},
+): Promise<CaptureResult> {
+  validateCapture(input);
+  const scope = await getScopeByRef(client, input.scope);
+  if (!scope) throw new ServiceError('SCOPE_NOT_FOUND', 'Scope not found');
+  if (!(await canWriteScopeForMutation(client, principal.id, scope.id))) {
+    throw new ServiceError('FORBIDDEN', 'Principal lacks writer role on scope');
+  }
+  if (input.metadata?.actor_principal_id !== attribution.principalId
+      || input.metadata?.thread_owner_principal_id !== attribution.principalId) {
+    throw new ServiceError('FORBIDDEN', 'Mapped plugin attribution does not match the event actor');
+  }
+  const mapping = await resolveActorIdentityMapping(client, attribution.identity, { lock: true });
+  if (mapping?.mappingId !== attribution.mappingId
+      || mapping.principalId !== attribution.principalId) {
+    throw new ServiceError('FORBIDDEN', 'Actor mapping is missing or changed');
+  }
+  const actor = await client.query(
+    'SELECT kind, display_name FROM principals WHERE id = $1 FOR KEY SHARE',
+    [attribution.principalId],
+  );
+  if (actor.rows[0]?.kind !== 'user') {
+    throw new ServiceError('INVALID_INPUT', 'Activity actor must be an existing user principal');
+  }
+  const metadata = markTrustedActivityMetadata({
+    ...input.metadata,
+    actor: actor.rows[0].display_name as string,
+    [ACTOR_MAPPING_ID_KEY]: attribution.mappingId,
+    [ACTOR_MAPPING_AUTHORITY_KEY]: attribution.authority,
+  });
+  const route = asEmbeddingRouter(embeddingRouting).resolve(input.scope);
+  const memory = await createMemory(client, {
+    scopeId: scope.id,
+    scopeKind: scope.kind,
+    type: input.type,
+    title: input.title,
+    body: input.body,
+    authorId: principal.id,
+    source: input.source,
+    sourceRef: input.sourceRef ?? null,
+    tags: input.tags,
+    metadata: { ...metadata, related: [] },
+  });
+  await recordAudit(client, {
+    principalId: principal.id,
+    action: 'write',
+    memoryId: memory.id,
+    scopeId: scope.id,
+    metadata: {
+      source: input.source,
+      type: input.type,
+      embedded: false,
+      actor_mapping: {
+        mapping_id: attribution.mappingId,
+        authority: attribution.authority,
+      },
+      ...(route.provider ? {
+        embedding: { provider: route.provider.id, dim: route.provider.dim, status: 'failed' },
+        embedding_error_code: 'EMBEDDING_FAILED',
+      } : {}),
+      ...(route.policy === 'local-only-unavailable'
+        ? { embedding_policy: 'local-only-unavailable' }
+        : {}),
+      ...auditMetadata,
+    },
+  });
+  return {
+    memory,
+    embedded: false,
+    related: [],
+    ...(route.provider ? { embedErrorCode: 'EMBEDDING_FAILED' as const } : {}),
+  };
 }
 
 export async function captureMemory(

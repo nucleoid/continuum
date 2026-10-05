@@ -4,12 +4,23 @@ import type pg from 'pg';
 import { z } from 'zod';
 import type { EmbeddingRouting } from '../../embeddings/router.js';
 import { defaultCaptureRegistry } from '../../capture/index.js';
-import type { CaptureContext, CaptureRegistry } from '../../capture/plugin.js';
+import type {
+  CaptureContext,
+  CaptureRegistry,
+  ExternalActorIdentity,
+} from '../../capture/plugin.js';
 import type { CaptureInput } from '../../types.js';
 import { authenticateIngest } from '../../ingest/auth.js';
 import type { IngestConfig, IngestPluginId } from '../../ingest/config.js';
 import { ServiceError } from '../../services/errors.js';
-import { captureOne, embedCapturedMemory } from '../../services/capture.js';
+import {
+  captureMappedPluginOne,
+  captureOne,
+  embedCapturedMemory,
+} from '../../services/capture.js';
+import { authenticatedActorAuthority } from '../../services/plugin-capture.js';
+import { stripTrustedActivityMetadata } from '../../capture/metadata.js';
+import { resolveActorIdentityMapping } from '../../storage/actor-identities.js';
 import { DEFAULT_RELATION_THRESHOLD } from '../../services/relations.js';
 import {
   processIngestDelivery,
@@ -109,6 +120,10 @@ const schemas: Record<IngestPluginId, z.ZodTypeAny> = {
 
 const deliveryPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 
+function sameIdentity(left: ExternalActorIdentity, right: ExternalActorIdentity): boolean {
+  return left.authority === right.authority && left.externalId === right.externalId;
+}
+
 function payloadHash(rawBody: Buffer | undefined): string {
   if (!rawBody) throw new ServiceError('INVALID_INPUT', 'A request payload is required');
   return createHash('sha256').update(rawBody).digest('hex');
@@ -189,20 +204,63 @@ export function ingestRouter(
     const event = adoResource
       ? ('revision' in adoResource ? adoResource.revision : adoResource)
       : parsed.data;
-    const context = await captureContext(pool, pluginId, event);
+    const scopeContext = await captureContext(pool, pluginId, event);
+    const plugin = registry.get(pluginId);
+    if (!plugin) throw new ServiceError('INVALID_INPUT', 'Invalid webhook payload');
+    const claimedIdentity = plugin.actorIdentity?.(event) ?? null;
+    const activityNamespace = plugin.trustedActivityMetadata
+      ? authenticatedActorAuthority(plugin.activityIdentityAuthority ?? pluginId, principal.id)
+      : undefined;
+    const identity = claimedIdentity && activityNamespace
+      ? { authority: activityNamespace, externalId: claimedIdentity.externalId }
+      : claimedIdentity;
+    const actorMapping = identity
+      ? await resolveActorIdentityMapping(pool, identity)
+      : null;
+    const context: CaptureContext = {
+      ...scopeContext,
+      activityNamespace,
+      resolveActorPrincipalId: (candidate) => (
+        claimedIdentity && actorMapping && sameIdentity(claimedIdentity, candidate)
+          ? actorMapping.principalId
+          : null
+      ),
+    };
     let inputs: CaptureInput[];
     try {
-      inputs = registry.run(pluginId, event, context).map((input) => ({ ...input, source: pluginId }));
+      inputs = registry.run(pluginId, event, context).map((transformed) => {
+        const sourceActorLabel = transformed.metadata?.actor;
+        const metadata = plugin.trustedActivityMetadata && actorMapping
+          ? { ...transformed.metadata }
+          : stripTrustedActivityMetadata(transformed.metadata ?? {});
+        if (!actorMapping && typeof sourceActorLabel === 'string' && sourceActorLabel.length > 0) {
+          metadata.source_actor_label = sourceActorLabel;
+        }
+        if (plugin.trustedActivityMetadata && actorMapping) {
+          metadata.actor_principal_id = actorMapping.principalId;
+          metadata.thread_owner_principal_id = actorMapping.principalId;
+        }
+        return { ...transformed, source: pluginId, metadata };
+      });
     } catch {
       throw new ServiceError('INVALID_INPUT', 'Invalid webhook payload');
     }
     const result = await processIngestDelivery(pool, pluginId, id, hash, async (client) => {
       const captures = [];
       for (let index = 0; index < inputs.length; index += 1) {
-        captures.push(await captureOne(
-          client, embeddingRouting, principal, inputs[index],
-          { transport: 'ingest' },
-        ));
+        captures.push(plugin.trustedActivityMetadata && identity && actorMapping
+          ? await captureMappedPluginOne(
+              client, embeddingRouting, principal, inputs[index], {
+                identity,
+                mappingId: actorMapping.mappingId,
+                authority: actorMapping.authority,
+                principalId: actorMapping.principalId,
+              }, { transport: 'ingest', plugin: pluginId },
+            )
+          : await captureOne(
+              client, embeddingRouting, principal, inputs[index],
+              { transport: 'ingest', plugin: pluginId },
+            ));
       }
       return captures;
     });

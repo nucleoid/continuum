@@ -5,8 +5,9 @@ import request from 'supertest';
 import { createApp } from '../server.js';
 import { makeTestPool, resetData } from '../../storage/test-helpers.js';
 import { createPrincipal } from '../../storage/principals.js';
-import { createScope } from '../../storage/scopes.js';
+import { createScope, getScopeByRef } from '../../storage/scopes.js';
 import { addMembership } from '../../storage/memberships.js';
+import { mapActorIdentity } from '../../storage/actor-identities.js';
 import { EmbeddingRegistry, ScopeEmbeddingRouter } from '../../embeddings/router.js';
 
 const requestId = 'ingest-request-id';
@@ -279,7 +280,7 @@ describe('webhook ingestion transport', () => {
     expect((await pool.query('SELECT id FROM memories')).rows).toEqual([]);
   });
 
-  it('attributes GitHub actors by immutable numeric ID while retaining login as display metadata', async () => {
+  it('attributes GitHub actors through the producer namespace and immutable numeric ID', async () => {
     const principal = await createPrincipal(pool, {
       externalId: 'service:branch-id', kind: 'service', displayName: 'Branch hook',
     });
@@ -287,12 +288,18 @@ describe('webhook ingestion transport', () => {
       externalId: 'entra:user:cass', kind: 'user', displayName: 'Cass',
     });
     const userScope = await createScope(pool, { kind: 'user', name: user.externalId });
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    await addMembership(pool, user.id, org!.id, 'admin');
     await addMembership(pool, principal.id, userScope.id, 'writer');
     await pool.query(
       `INSERT INTO principal_aliases (provider, external_actor, principal_id)
        VALUES ('github', '12345', $1)`,
       [user.id],
     );
+    await mapActorIdentity(pool, {
+      authority: `github.${principal.id}`, externalActorId: '12345',
+      principalId: user.id, mappedByPrincipalId: user.id,
+    });
     const target = app({ plugins: { 'github-branch': {
       enabled: true, auth: { kind: 'github-hmac', secret: githubSecret, event: 'create' },
       principalExternalId: principal.externalId,
@@ -313,9 +320,14 @@ describe('webhook ingestion transport', () => {
     await send('renamed-login').then((response) => expect(response.status).toBe(202));
     const { rows } = await pool.query('SELECT metadata FROM memories ORDER BY created_at, id');
     expect(rows).toHaveLength(2);
-    expect(rows.map((row) => row.metadata.actor)).toEqual(['12345', '12345']);
-    expect(rows.map((row) => row.metadata.actorLogin).sort())
-      .toEqual(['old-login', 'renamed-login']);
+    expect(rows.map((row) => row.metadata.actor)).toEqual(['Cass', 'Cass']);
+    expect(rows.map((row) => row.metadata.actor_principal_id)).toEqual([user.id, user.id]);
+    expect(rows.map((row) => row.metadata._continuum_actor_mapping_authority))
+      .toEqual([`github.${principal.id}`, `github.${principal.id}`]);
+    expect(rows.map((row) => row.metadata.thread_key).sort()).toEqual([
+      `github.${principal.id}:branch:nucleoid/continuum:feature/old-login`,
+      `github.${principal.id}:branch:nucleoid/continuum:feature/renamed-login`,
+    ].sort());
   });
 
   it('keeps capture and audit when post-commit embedding fails', async () => {

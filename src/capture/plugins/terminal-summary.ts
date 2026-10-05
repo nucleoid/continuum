@@ -34,10 +34,12 @@ export const terminalSummaryPlugin: CapturePlugin<TerminalSummaryPayload> = {
     const explicitIdentity = event.actorExternalId
       ? { authority: 'terminal-summary', externalId: event.actorExternalId }
       : null;
+    const scopeIdentity = explicitIdentity
+      ?? { authority: 'terminal', externalId: event.actor };
     const baseScope: ScopeRef =
       event.scopeOverride ?? {
         kind: 'user',
-        name: (explicitIdentity ? ctx.resolveUserScope?.(explicitIdentity) : null) ?? event.actor,
+        name: ctx.resolveUserScope?.(scopeIdentity) ?? event.actor,
       };
 
     const actorPrincipalId = explicitIdentity
