@@ -25,12 +25,15 @@ import {
   validateRelationThreshold,
 } from '../services/relations.js';
 import { memoriesRouter } from './routes/memories.js';
+import { ingestRouter } from './routes/ingest.js';
+import { ingestConfigFromEnv, type IngestConfig } from '../ingest/config.js';
 
 export { createReadinessState } from './readiness.js';
 
 declare module 'express-serve-static-core' {
   interface Request {
     requestId: string;
+    rawBody?: Buffer;
   }
 }
 
@@ -59,6 +62,7 @@ export interface AppOptions {
   reviewHorizonDays?: number;
   gapConfig?: GapConfig;
   relationThreshold?: number;
+  ingestConfig?: IngestConfig;
 }
 
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
@@ -70,6 +74,7 @@ const KNOWN_LOG_PATHS = new Set([
   '/api/v0/review-queue',
   '/api/v0/memories', '/api/v0/memories/:id',
   '/api/v0/insights/gaps',
+  '/api/v0/ingest/:pluginId',
 ]);
 
 const defaultLogger: OperationalLogger = {
@@ -84,6 +89,7 @@ const defaultLogger: OperationalLogger = {
 function safeLogPath(req: express.Request): string {
   const pathname = req.originalUrl.split('?', 1)[0];
   if (KNOWN_LOG_PATHS.has(pathname)) return pathname;
+  if (pathname.startsWith('/api/v0/ingest/')) return '/api/v0/ingest/:pluginId';
   const routePath = req.route?.path;
   if (typeof routePath === 'string') return routePath.slice(0, 128);
   if (pathname.startsWith('/api/v0/')) return '/api/v0/:unmatched';
@@ -231,6 +237,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   const relationThreshold = validateRelationThreshold(
     opts.relationThreshold ?? DEFAULT_RELATION_THRESHOLD,
   );
+  const ingestConfig = opts.ingestConfig ?? ingestConfigFromEnv();
   if (!Number.isFinite(readinessTimeoutMs) || readinessTimeoutMs <= 0) {
     throw new Error('readinessTimeoutMs must be positive');
   }
@@ -243,7 +250,12 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
     opts.requestIdFactory ?? randomUUID,
     opts.clock ?? Date.now,
   ));
-  app.use(express.json({ limit: '1mb' }));
+  app.use(express.json({
+    limit: '1mb',
+    verify(req, _res, buffer) {
+      (req as express.Request).rawBody = Buffer.from(buffer);
+    },
+  }));
 
   const liveness: express.RequestHandler = (_req, res) => { res.json({ ok: true }); };
   app.get('/health', liveness);
@@ -268,6 +280,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   });
 
   const v0 = express.Router();
+  v0.use(ingestRouter(pool, provider, ingestConfig, undefined, relationThreshold));
   v0.use(bearerAuth(pool));
   v0.use(captureRouter(pool, provider, relationThreshold));
   v0.use(recallRouter(pool, provider));

@@ -10,7 +10,7 @@ export interface GitHubBranchEvent {
     name: string;
     html_url: string;
   };
-  sender: { login: string };
+  sender: { id: number; login: string };
 }
 
 export const githubBranchPlugin: CapturePlugin<GitHubBranchEvent> = {
@@ -19,13 +19,14 @@ export const githubBranchPlugin: CapturePlugin<GitHubBranchEvent> = {
   transform(event, ctx: CaptureContext = {}): CaptureInput[] {
     if (event.ref_type !== 'branch') return [];
 
-    const actor = event.sender.login;
+    const actor = String(event.sender.id);
+    const actorLogin = event.sender.login;
     const userScopeName = ctx.resolveUserScope?.(actor) ?? actor;
 
     const lines = [
       `Branch ${event.ref} created in ${event.repository.full_name}.`,
       `Base: ${event.master_branch ?? 'unknown'}`,
-      `Author: ${actor}`,
+      `Author: ${actorLogin}`,
     ];
 
     return [
@@ -42,6 +43,7 @@ export const githubBranchPlugin: CapturePlugin<GitHubBranchEvent> = {
           ref: event.ref,
           base: event.master_branch ?? null,
           actor,
+          actorLogin,
         },
       },
     ];

@@ -24,6 +24,7 @@ v0 design in progress. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the schema, 
 
 ## API contracts
 
+- [Webhook ingestion](./docs/webhook-ingestion.md)
 - [Audit query API](./docs/audit-api.md)
 - [Knowledge-gap insights](./docs/knowledge-gap-insights.md)
 - [API operations, health checks, and shutdown](./docs/api-operations.md)

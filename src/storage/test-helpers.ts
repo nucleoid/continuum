@@ -13,6 +13,8 @@ export async function makeTestPool(): Promise<pg.Pool> {
 export async function resetData(pool: pg.Pool): Promise<void> {
   await pool.query(`
     TRUNCATE TABLE
+      ingest_deliveries,
+      principal_aliases,
       audit_log,
       memory_embeddings,
       memories,

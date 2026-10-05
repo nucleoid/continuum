@@ -11,8 +11,8 @@ export interface GitHubPrEvent {
     state: string;
     merged: boolean;
     merged_at?: string | null;
-    merged_by?: { login: string } | null;
-    user: { login: string };
+    merged_by?: { id: number; login: string } | null;
+    user: { id: number; login: string };
     base: { ref: string };
     head: { ref: string };
   };
@@ -56,8 +56,10 @@ export const githubPrPlugin: CapturePlugin<GitHubPrEvent> = {
         metadata: {
           repo: event.repository.full_name,
           number: pr.number,
-          author: pr.user.login,
-          mergedBy: pr.merged_by?.login ?? null,
+          author: String(pr.user.id),
+          authorLogin: pr.user.login,
+          mergedBy: pr.merged_by ? String(pr.merged_by.id) : null,
+          mergedByLogin: pr.merged_by?.login ?? null,
           baseRef: pr.base.ref,
           headRef: pr.head.ref,
           mergedAt: pr.merged_at ?? null,

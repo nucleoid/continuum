@@ -3,7 +3,7 @@ import type pg from 'pg';
 import type { CaptureInput, Memory, Principal } from '../types.js';
 import { asEmbeddingRouter, type EmbeddingRouting } from '../embeddings/router.js';
 import { createMemory, updateMemoryMetadata } from '../storage/memories.js';
-import { getScopeByRef } from '../storage/scopes.js';
+import { getScope, getScopeByRef } from '../storage/scopes.js';
 import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
 import { assertEmbeddingVectorDimension } from '../storage/schema.js';
 import { record as recordAudit } from '../audit/log.js';
@@ -17,6 +17,7 @@ import {
   type RelatedMemory,
   validateRelationThreshold,
 } from './relations.js';
+import type { Queryable } from '../storage/queryable.js';
 
 export interface CaptureResult {
   memory: Memory;
@@ -28,6 +29,193 @@ export interface CaptureResult {
 
 export interface CaptureOptions {
   relationThreshold?: number;
+}
+
+function validateCapture(input: CaptureInput): void {
+  if (input.metadata && Object.hasOwn(input.metadata, 'related')) {
+    throw new ServiceError('INVALID_INPUT', 'metadata.related is reserved by Continuum');
+  }
+  if (!isCaptureSource(input.source)) {
+    throw new ServiceError('INVALID_INPUT', 'Unknown capture source');
+  }
+  validateScopeRef(input.scope);
+}
+
+/** Insert one capture into a caller-owned transaction. */
+export async function captureOne(
+  client: Queryable,
+  embeddingRouting: EmbeddingRouting,
+  principal: Principal,
+  input: CaptureInput,
+  auditMetadata: Record<string, unknown> = {},
+): Promise<CaptureResult> {
+  validateCapture(input);
+  const scope = await getScopeByRef(client, input.scope);
+  if (!scope) throw new ServiceError('SCOPE_NOT_FOUND', 'Scope not found');
+  if (!(await canWriteScopeForMutation(client, principal.id, scope.id))) {
+    throw new ServiceError('FORBIDDEN', 'Principal lacks writer role on scope');
+  }
+
+  const route = asEmbeddingRouter(embeddingRouting).resolve(input.scope);
+  const memory = await createMemory(client, {
+    scopeId: scope.id,
+    scopeKind: scope.kind,
+    type: input.type,
+    title: input.title,
+    body: input.body,
+    authorId: principal.id,
+    source: input.source,
+    sourceRef: input.sourceRef ?? null,
+    tags: input.tags,
+    metadata: { ...input.metadata, related: [] },
+  });
+
+  await recordAudit(client, {
+    principalId: principal.id,
+    action: 'write',
+    memoryId: memory.id,
+    scopeId: scope.id,
+    metadata: {
+      source: input.source,
+      type: input.type,
+      embedded: false,
+      ...(route.provider ? {
+        embedding: {
+          provider: route.provider.id,
+          dim: route.provider.dim,
+          status: 'failed',
+        },
+        embedding_error_code: 'EMBEDDING_FAILED',
+      } : {}),
+      ...(route.policy === 'local-only-unavailable'
+        ? { embedding_policy: 'local-only-unavailable' }
+        : {}),
+      ...auditMetadata,
+    },
+  });
+  return {
+    memory,
+    embedded: false,
+    related: [],
+    ...(route.provider ? { embedErrorCode: 'EMBEDDING_FAILED' as const } : {}),
+  };
+}
+
+/** Finish provider work only after the atomic webhook delivery commits. */
+export async function embedCapturedMemory(
+  pool: pg.Pool,
+  embeddingRouting: EmbeddingRouting,
+  result: CaptureResult,
+  options: CaptureOptions = {},
+): Promise<CaptureResult> {
+  const relationThreshold = validateRelationThreshold(
+    options.relationThreshold ?? DEFAULT_RELATION_THRESHOLD,
+  );
+  const scope = await getScope(pool, result.memory.scopeId);
+  if (!scope) return result;
+  const route = asEmbeddingRouter(embeddingRouting).resolve({ kind: scope.kind, name: scope.name });
+  const provider = route.provider;
+  if (!provider) return result;
+  let vector: number[];
+  try {
+    [vector] = await provider.embed([
+      `${result.memory.title}\n\n${result.memory.body}`,
+    ]);
+    assertEmbeddingVectorDimension(vector, provider);
+  } catch {
+    return result;
+  }
+
+  let related: RelatedMemory[] = [];
+  let relationErrorCode: 'RELATION_DETECTION_FAILED' | undefined;
+  try {
+    const org = scope.kind === 'org'
+      ? scope
+      : await getScopeByRef(pool, { kind: 'org', name: '' });
+    const familyScopeIds = org && org.id !== scope.id
+      ? [scope.id, org.id]
+      : [scope.id];
+    related = await detectRelatedMemories(
+      pool,
+      vector,
+      familyScopeIds,
+      provider,
+      result.memory,
+      result.memory.id,
+      relationThreshold,
+    );
+  } catch {
+    relationErrorCode = 'RELATION_DETECTION_FAILED';
+  }
+
+  let client: pg.PoolClient;
+  try {
+    client = await pool.connect();
+  } catch {
+    return result;
+  }
+  let destroyClient = false;
+  try {
+    await client.query('BEGIN');
+    await client.query('SAVEPOINT ingest_embedding');
+    try {
+      await storeMemoryEmbeddingVector(client, result.memory.id, vector, provider);
+      await client.query('RELEASE SAVEPOINT ingest_embedding');
+    } catch {
+      await client.query('ROLLBACK TO SAVEPOINT ingest_embedding');
+      await client.query('RELEASE SAVEPOINT ingest_embedding');
+      await client.query('COMMIT');
+      return result;
+    }
+
+    let memory = result.memory;
+    if (!relationErrorCode) {
+      await client.query('SAVEPOINT ingest_relations');
+      try {
+        memory = await updateMemoryMetadata(client, memory.id, {
+          ...memory.metadata,
+          related,
+        });
+        await client.query('RELEASE SAVEPOINT ingest_relations');
+      } catch {
+        await client.query('ROLLBACK TO SAVEPOINT ingest_relations');
+        await client.query('RELEASE SAVEPOINT ingest_relations');
+        related = [];
+        relationErrorCode = 'RELATION_DETECTION_FAILED';
+      }
+    }
+
+    await recordAudit(client, {
+      principalId: memory.authorId,
+      action: 'write',
+      memoryId: memory.id,
+      scopeId: memory.scopeId,
+      metadata: {
+        record_kind: 'embedding',
+        source: memory.source,
+        type: memory.type,
+        embedded: true,
+        embedding: { provider: provider.id, dim: provider.dim, status: 'succeeded' },
+        ...(relationErrorCode ? { relation_error_code: relationErrorCode } : {}),
+      },
+    });
+    await client.query('COMMIT');
+    return {
+      memory,
+      embedded: true,
+      related: relationErrorCode ? [] : related,
+      ...(relationErrorCode ? { relationErrorCode } : {}),
+    };
+  } catch {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      destroyClient = true;
+    }
+    return result;
+  } finally {
+    client.release(destroyClient);
+  }
 }
 
 export async function captureMemory(
@@ -97,7 +285,6 @@ export async function captureMemory(
         relationErrorCode = 'RELATION_DETECTION_FAILED';
       }
     }
-
     let client: pg.PoolClient;
     try {
       client = await pool.connect();

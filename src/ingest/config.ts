@@ -1,0 +1,70 @@
+export type IngestPluginId =
+  | 'github-pr'
+  | 'github-branch'
+  | 'ado-workitem'
+  | 'deploy-event'
+  | 'terminal-summary';
+
+export type IngestAuth =
+  | { kind: 'github-hmac'; secret: string; event: 'pull_request' | 'create' }
+  | { kind: 'ado-basic'; username: string; password: string }
+  | { kind: 'bearer' };
+
+export interface IngestPluginConfig {
+  enabled: true;
+  principalExternalId: string;
+  auth: IngestAuth;
+}
+
+export interface IngestConfig {
+  plugins: Partial<Record<IngestPluginId, IngestPluginConfig>>;
+}
+
+const SPECS: Array<{
+  id: IngestPluginId;
+  prefix: string;
+  auth: IngestAuth['kind'];
+  event?: 'pull_request' | 'create';
+}> = [
+  { id: 'github-pr', prefix: 'CONTINUUM_INGEST_GITHUB_PR', auth: 'github-hmac', event: 'pull_request' },
+  { id: 'github-branch', prefix: 'CONTINUUM_INGEST_GITHUB_BRANCH', auth: 'github-hmac', event: 'create' },
+  { id: 'ado-workitem', prefix: 'CONTINUUM_INGEST_ADO_WORKITEM', auth: 'ado-basic' },
+  { id: 'deploy-event', prefix: 'CONTINUUM_INGEST_DEPLOY_EVENT', auth: 'bearer' },
+  { id: 'terminal-summary', prefix: 'CONTINUUM_INGEST_TERMINAL_SUMMARY', auth: 'bearer' },
+];
+
+function required(env: NodeJS.ProcessEnv, name: string): string {
+  const value = env[name]?.trim();
+  if (!value) throw new Error(`${name} is required when ingestion is enabled`);
+  return value;
+}
+
+export function ingestConfigFromEnv(env: NodeJS.ProcessEnv = process.env): IngestConfig {
+  const plugins: IngestConfig['plugins'] = {};
+  for (const spec of SPECS) {
+    const rawEnabled = env[`${spec.prefix}_ENABLED`];
+    if (rawEnabled === undefined || rawEnabled === '' || rawEnabled.toLowerCase() === 'false') continue;
+    if (rawEnabled.toLowerCase() !== 'true') {
+      throw new Error(`${spec.prefix}_ENABLED must be true or false`);
+    }
+    const principalExternalId = required(env, `${spec.prefix}_PRINCIPAL`);
+    let auth: IngestAuth;
+    if (spec.auth === 'github-hmac') {
+      auth = {
+        kind: 'github-hmac',
+        secret: required(env, `${spec.prefix}_SECRET`),
+        event: spec.event!,
+      };
+    } else if (spec.auth === 'ado-basic') {
+      auth = {
+        kind: 'ado-basic',
+        username: required(env, `${spec.prefix}_USERNAME`),
+        password: required(env, `${spec.prefix}_PASSWORD`),
+      };
+    } else {
+      auth = { kind: 'bearer' };
+    }
+    plugins[spec.id] = { enabled: true, principalExternalId, auth };
+  }
+  return { plugins };
+}

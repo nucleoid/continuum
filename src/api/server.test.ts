@@ -203,6 +203,7 @@ describe('REST error middleware', () => {
     const cases = [
       ['INVALID_INPUT', 400], ['INVALID_SCOPE', 400], ['FORBIDDEN', 403],
       ['SCOPE_NOT_FOUND', 404], ['MEMORY_NOT_FOUND', 404], ['CONFLICT', 409],
+      ['NOT_FOUND', 404],
       ['PAYLOAD_TOO_LARGE', 413], ['DEPENDENCY_UNAVAILABLE', 503], ['INTERNAL', 500],
     ] as const;
 

@@ -121,7 +121,7 @@ CREATE INDEX audit_log_memory_idx    ON audit_log (memory_id);
 
 ## Capture API (v0)
 
-Single ingestion endpoint. Capture plugins call this; manual CLI calls this; terminal hooks call this.
+The authenticated manual capture endpoint is shared by REST and MCP callers.
 
 ```
 POST /api/v0/capture
@@ -189,6 +189,19 @@ future issue #12 decision workflow must reauthorize candidate IDs for its
 caller and revalidate scope, lifecycle state, expiry, provider, dimension, and
 relation before acting. Stored advisory metadata is not durable authorization
 and never triggers automatic supersede, reject, or state mutation.
+
+Provider webhooks enter through `POST /api/v0/ingest/:pluginId`, which verifies
+provider credentials before dispatching to the built-in capture registry. The
+route binds source to the selected plugin, resolves its configured service
+principal, requires explicit writer or admin membership on every target scope,
+and reuses the shared capture service. Delivery identities are durable: a new
+capture returns `202`, a valid ignored event returns `204`, and a completed
+replay returns `200` with the original memory IDs. Reusing an idempotency key
+with different request bytes fails closed. GitHub delivery identity is derived
+from the signed request bytes instead of its unsigned delivery header. Derived
+embedding provenance is appended as a new audit row; committed audit rows are
+not updated. See
+[`docs/webhook-ingestion.md`](./docs/webhook-ingestion.md).
 
 ## Retrieval API (v0)
 

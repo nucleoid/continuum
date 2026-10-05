@@ -12,8 +12,8 @@ function mergedEvent(overrides: Partial<GitHubPrEvent['pull_request']> = {}): Gi
       state: 'closed',
       merged: true,
       merged_at: '2026-06-03T01:11:00Z',
-      merged_by: { login: 'scott-exampleorg' },
-      user: { login: 'cass-exampleorg' },
+      merged_by: { id: 1002, login: 'scott-exampleorg' },
+      user: { id: 1001, login: 'cass-exampleorg' },
       base: { ref: 'main' },
       head: { ref: 'feature/checkout-v2' },
       ...overrides,
@@ -43,8 +43,10 @@ describe('github-pr plugin', () => {
     expect(out[0].metadata).toMatchObject({
       repo: 'exampleorg/booking-engine',
       number: 4421,
-      author: 'cass-exampleorg',
-      mergedBy: 'scott-exampleorg',
+      author: '1001',
+      authorLogin: 'cass-exampleorg',
+      mergedBy: '1002',
+      mergedByLogin: 'scott-exampleorg',
       baseRef: 'main',
       headRef: 'feature/checkout-v2',
     });
