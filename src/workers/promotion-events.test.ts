@@ -308,9 +308,11 @@ describe('PromotionEventWorker', () => {
       const store = mockStore({
         claim: vi.fn().mockReturnValueOnce(never).mockResolvedValueOnce([]),
       });
+      const registry = new PromotionWebhookRegistry();
+      registry.register({ id: 'hook', onPromoted: async () => undefined });
       const instance = new PromotionEventWorker(
         pool,
-        new PromotionWebhookRegistry(),
+        registry,
         { ...workerOptions(), databaseTimeoutMs: 20 },
         store,
       );
@@ -383,9 +385,11 @@ describe('PromotionEventWorker', () => {
   it('abandons a claimed delivery when its webhook is unavailable', async () => {
     const missing = { ...claimedDelivery, webhookId: 'missing' };
     const store = mockStore({ claim: vi.fn().mockResolvedValue([missing]) });
+    const registry = new PromotionWebhookRegistry();
+    registry.register({ id: 'hook', onPromoted: async () => undefined });
     const instance = new PromotionEventWorker(
       pool,
-      new PromotionWebhookRegistry(),
+      registry,
       workerOptions(),
       store,
     );
@@ -411,7 +415,10 @@ describe('PromotionEventWorker', () => {
           });
         },
       });
-      const store = mockStore({ claim: vi.fn().mockResolvedValue([claimedDelivery]) });
+      const store = mockStore({
+        claim: vi.fn().mockResolvedValue([claimedDelivery]),
+        renew: vi.fn().mockResolvedValue(1),
+      });
       const instance = new PromotionEventWorker(
         pool,
         registry,
@@ -747,6 +754,52 @@ describe('PromotionEventWorker', () => {
     }
   });
 
+  it('continues delivering a healthy webhook while another webhook callback remains hung', async () => {
+    vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
+    const releaseHung = deferred();
+    try {
+      await seed(['hung']);
+      await seed(['healthy']);
+      const hungEntered = deferred();
+      const healthy = vi.fn();
+      const registry = new PromotionWebhookRegistry();
+      registry.register({
+        id: 'hung',
+        onPromoted: async () => {
+          hungEntered.resolve();
+          await releaseHung.promise;
+        },
+      });
+      registry.register({ id: 'healthy', onPromoted: healthy });
+      const instance = worker(registry, {
+        claimBatch: 1,
+        leaseMs: 90,
+        callbackTimeoutMs: 20,
+      });
+
+      const first = instance.drainOnce();
+      await hungEntered.promise;
+      await vi.advanceTimersByTimeAsync(20);
+      await expect(first).resolves.toBe(1);
+
+      await expect(instance.drainOnce()).resolves.toBe(1);
+      expect(healthy).toHaveBeenCalledOnce();
+      const { rows } = await pool.query(
+        `SELECT webhook_id, state
+           FROM promotion_event_deliveries
+          ORDER BY webhook_id`,
+      );
+      expect(rows).toEqual([
+        { webhook_id: 'healthy', state: 'delivered' },
+        { webhook_id: 'hung', state: 'pending' },
+      ]);
+    } finally {
+      releaseHung.resolve();
+      await vi.runAllTimersAsync();
+      vi.useRealTimers();
+    }
+  });
+
   it('does not abort a healthy callback when another delivery completes during renewal', async () => {
     vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
     const finishFirst = deferred();
@@ -852,6 +905,49 @@ describe('PromotionEventWorker', () => {
       expect(store.claim).toHaveBeenCalledTimes(2);
     } finally {
       releaseCallback.resolve();
+      await vi.runAllTimersAsync();
+      vi.useRealTimers();
+    }
+  });
+
+  it('charges a callback rejection caused by ownership-loss abort instead of abandoning it', async () => {
+    vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
+    try {
+      const entered = deferred();
+      const registry = new PromotionWebhookRegistry();
+      registry.register({
+        id: 'hook',
+        onPromoted: async (_event, { signal }) => {
+          entered.resolve();
+          await new Promise<void>((_resolve, reject) => {
+            signal.addEventListener('abort', () => reject(new Error('ownership lost')), {
+              once: true,
+            });
+          });
+        },
+      });
+      const store = mockStore({
+        claim: vi.fn().mockResolvedValue([claimedDelivery]),
+        renew: vi.fn().mockResolvedValue({
+          renewed: [], terminalOwned: [], lost: [claimedDelivery],
+        }),
+      });
+      const instance = new PromotionEventWorker(
+        pool,
+        registry,
+        workerOptions({ leaseMs: 90, callbackTimeoutMs: 80 }),
+        store,
+      );
+
+      const draining = instance.drainOnce();
+      await entered.promise;
+      await vi.advanceTimersByTimeAsync(30);
+      await expect(draining).resolves.toBe(1);
+      await vi.runAllTicks();
+
+      expect(store.fail).toHaveBeenCalledOnce();
+      expect(store.abandon).not.toHaveBeenCalled();
+    } finally {
       await vi.runAllTimersAsync();
       vi.useRealTimers();
     }

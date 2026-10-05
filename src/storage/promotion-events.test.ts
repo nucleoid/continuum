@@ -39,7 +39,7 @@ describe('promotion outbox', () => {
       scopeId: sourceScope.id, scopeKind: sourceScope.kind, type: 'decision',
       title: 'Promote', body: 'Transactional.', authorId: principal.id, source: 'manual',
     });
-    return { principal, source, destinationScope };
+    return { principal, source, sourceScope, destinationScope };
   }
 
   it('atomically creates one stable event and one delivery per sorted webhook', async () => {
@@ -122,6 +122,28 @@ describe('promotion outbox', () => {
     expect(reclaimed[0].leaseGeneration).toBe(2);
     expect(reclaimed[0].leaseRecovered).toBe(true);
     expect(consumerSeen.has(reclaimed[0].event.eventId)).toBe(true);
+  });
+
+  it('enforces the per-webhook claim limit in SQL', async () => {
+    const { principal, source, sourceScope } = await seed();
+    const secondSource = await createMemory(pool, {
+      scopeId: sourceScope.id, scopeKind: sourceScope.kind, type: 'decision',
+      title: 'Promote again', body: 'Also transactional.', authorId: principal.id, source: 'manual',
+    });
+    for (const memory of [source, secondSource]) {
+      await promoteMemoryWithAudit(
+        pool, principal.id, memory.id, { kind: 'project', name: 'destination' }, {},
+        ['healthy', 'hung'],
+      );
+    }
+
+    const claimed = await claimPromotionDeliveries(pool, {
+      owner: 'worker', webhookIds: ['healthy', 'hung'], limit: 4,
+      perWebhookLimit: 1, leaseMs: 1000,
+    });
+
+    expect(claimed).toHaveLength(2);
+    expect(claimed.map(({ webhookId }) => webhookId).sort()).toEqual(['healthy', 'hung']);
   });
 
   it('abandons unusable claims without consuming an attempt and honors in-flight exclusions', async () => {
@@ -256,6 +278,36 @@ describe('promotion outbox', () => {
       lease_retained: true,
       retry_after_lease: true,
       last_error: 'callback timed out',
+    }]);
+  });
+
+  it('preserves timeout backoff when shutdown releases the owned lease', async () => {
+    const { principal, source } = await seed();
+    await promoteMemoryWithAudit(
+      pool, principal.id, source.id, { kind: 'project', name: 'destination' }, {}, ['hook'],
+    );
+    const [delivery] = await claimPromotionDeliveries(pool, {
+      owner: 'worker', webhookIds: ['hook'], limit: 1, leaseMs: 1000,
+    });
+    await expect(timeoutPromotionDelivery(
+      pool,
+      delivery.event.eventId,
+      delivery.webhookId,
+      'worker',
+      {
+        maxAttempts: 3, retryDelayMs: 10_000,
+        attemptCount: delivery.attemptCount, leaseGeneration: delivery.leaseGeneration,
+      },
+    )).resolves.toBe('pending');
+
+    await expect(releasePromotionDeliveries(pool, 'worker')).resolves.toBe(1);
+    const { rows } = await pool.query(
+      `SELECT lease_owner, lease_expires_at,
+              available_at > now() + interval '5 seconds' AS backoff_preserved
+         FROM promotion_event_deliveries`,
+    );
+    expect(rows).toEqual([{
+      lease_owner: null, lease_expires_at: null, backoff_preserved: true,
     }]);
   });
 

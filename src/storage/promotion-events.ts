@@ -96,6 +96,7 @@ export async function claimPromotionDeliveries(
     limit: number;
     leaseMs: number;
     maxAttempts?: number;
+    perWebhookLimit?: number;
     excluded?: readonly Pick<ClaimedPromotionDelivery, 'webhookId' | 'event'>[];
   },
 ): Promise<ClaimedPromotionDelivery[]> {
@@ -109,6 +110,10 @@ export async function claimPromotionDeliveries(
   const maxAttempts = input.maxAttempts ?? 10;
   if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) {
     throw new Error('maxAttempts must be positive');
+  }
+  const perWebhookLimit = input.perWebhookLimit ?? input.limit;
+  if (!Number.isSafeInteger(perWebhookLimit) || perWebhookLimit < 1 || perWebhookLimit > 100) {
+    throw new Error('perWebhookLimit must be between 1 and 100');
   }
   if (input.webhookIds.length === 0) return [];
   const excludedEventIds = (input.excluded ?? []).map((delivery) => delivery.event.eventId);
@@ -142,9 +147,12 @@ export async function claimPromotionDeliveries(
       lease_generation: string;
       lease_recovered: boolean;
     }>(
-      `WITH candidates AS (
+      `WITH ranked AS MATERIALIZED (
          SELECT d.event_id, d.webhook_id,
-                (d.lease_expires_at IS NOT NULL) AS lease_recovered
+                row_number() OVER (
+                  PARTITION BY d.webhook_id
+                  ORDER BY d.available_at, d.event_id
+                ) AS webhook_rank
            FROM promotion_event_deliveries d
           WHERE d.state = 'pending'
             AND d.available_at <= now()
@@ -154,8 +162,14 @@ export async function claimPromotionDeliveries(
             AND (d.event_id, d.webhook_id) NOT IN (
               SELECT * FROM unnest($6::uuid[], $7::text[])
             )
+       ), candidates AS (
+         SELECT d.event_id, d.webhook_id,
+                (d.lease_expires_at IS NOT NULL) AS lease_recovered
+           FROM promotion_event_deliveries d
+           JOIN ranked r USING (event_id, webhook_id)
+          WHERE r.webhook_rank <= $8
           ORDER BY d.available_at, d.event_id, d.webhook_id
-          FOR UPDATE SKIP LOCKED
+          FOR UPDATE OF d SKIP LOCKED
           LIMIT $3
        ), claimed AS (
          UPDATE promotion_event_deliveries d
@@ -180,6 +194,7 @@ export async function claimPromotionDeliveries(
         maxAttempts,
         excludedEventIds,
         excludedWebhookIds,
+        perWebhookLimit,
       ],
     );
     await client.query('COMMIT');
@@ -314,7 +329,8 @@ export async function releasePromotionDeliveries(
   const retainedLeaseGenerations = retained.map((delivery) => delivery.leaseGeneration);
   const result = await queryable.query(
     `UPDATE promotion_event_deliveries
-        SET lease_owner = NULL, lease_expires_at = NULL, available_at = now()
+        SET lease_owner = NULL, lease_expires_at = NULL,
+            available_at = GREATEST(available_at, now())
       WHERE state = 'pending' AND lease_owner = $1
         AND NOT EXISTS (
           SELECT 1

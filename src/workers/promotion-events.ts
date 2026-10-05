@@ -82,6 +82,7 @@ export interface PromotionWorkerStore {
       limit: number;
       leaseMs: number;
       maxAttempts: number;
+      perWebhookLimit: number;
       excluded: readonly ClaimedPromotionDelivery[];
     },
   ): Promise<ClaimedPromotionDelivery[]>;
@@ -154,7 +155,8 @@ function deliveryKey(delivery: Pick<ClaimedPromotionDelivery, 'webhookId' | 'eve
 // callback fence process-wide so a lease expiry cannot start a second local callback while the
 // first callback is still ignoring its AbortSignal.
 const inFlightCallbacks = new Map<string, ClaimedPromotionDelivery>();
-let callbackReservations = 0;
+const callbackReservations = new Map<string, number>();
+const GLOBAL_CALLBACK_LIMIT = 100;
 
 type CallbackOutcome = 'success' | 'failure' | 'not_started';
 
@@ -235,24 +237,65 @@ export class PromotionEventWorker implements RuntimeWorker {
   }
 
   private async drainCycle(): Promise<number> {
-    const available = Math.max(
+    const webhookIds = this.registry.ids();
+    const inFlightByWebhook = new Map<string, number>();
+    for (const delivery of inFlightCallbacks.values()) {
+      inFlightByWebhook.set(
+        delivery.webhookId,
+        (inFlightByWebhook.get(delivery.webhookId) ?? 0) + 1,
+      );
+    }
+    const reserved = [...callbackReservations.values()].reduce((sum, count) => sum + count, 0);
+    const globalAvailable = Math.max(
       0,
-      this.options.claimBatch - inFlightCallbacks.size - callbackReservations,
+      GLOBAL_CALLBACK_LIMIT - inFlightCallbacks.size - reserved,
     );
-    if (available === 0) return 0;
-    callbackReservations += available;
+    if (globalAvailable === 0) return 0;
+    const eligible = webhookIds
+      .map((webhookId) => ({
+        webhookId,
+        available: Math.max(
+          0,
+          this.options.claimBatch
+            - (inFlightByWebhook.get(webhookId) ?? 0)
+            - (callbackReservations.get(webhookId) ?? 0),
+        ),
+      }))
+      .filter(({ available }) => available > 0)
+      .slice(0, globalAvailable);
+    if (eligible.length === 0) return 0;
+    const perWebhookLimit = Math.min(
+      ...eligible.map(({ available }) => available),
+      Math.max(1, Math.floor(globalAvailable / eligible.length)),
+    );
+    const available = Math.min(
+      this.options.claimBatch,
+      globalAvailable,
+      perWebhookLimit * eligible.length,
+    );
+    for (const { webhookId } of eligible) {
+      callbackReservations.set(
+        webhookId,
+        (callbackReservations.get(webhookId) ?? 0) + perWebhookLimit,
+      );
+    }
     let deliveries: ClaimedPromotionDelivery[];
     try {
       deliveries = await this.databaseOperation(this.store.claim(this.pool, {
         owner: this.options.owner,
-        webhookIds: this.registry.ids(),
+        webhookIds: eligible.map(({ webhookId }) => webhookId),
         limit: available,
         leaseMs: this.options.leaseMs,
         maxAttempts: this.options.maxAttempts,
+        perWebhookLimit,
         excluded: [...inFlightCallbacks.values()],
       }));
     } finally {
-      callbackReservations -= available;
+      for (const { webhookId } of eligible) {
+        const remaining = (callbackReservations.get(webhookId) ?? 0) - perWebhookLimit;
+        if (remaining > 0) callbackReservations.set(webhookId, remaining);
+        else callbackReservations.delete(webhookId);
+      }
     }
     if (this.stopped) {
       await this.abandonDeliveries(deliveries, 'promotion_worker_stopped_claim_abandoned');
@@ -432,9 +475,10 @@ export class PromotionEventWorker implements RuntimeWorker {
         return;
       }
       if (outcome === 'shutdown') {
-        if (!this.ownershipLost.has(controller)) this.retainLease(delivery);
+        const abortReason = this.ownershipLost.has(controller) ? 'ownership_loss' : 'shutdown';
+        if (abortReason === 'shutdown') this.retainLease(delivery);
         lateFollower = true;
-        this.followLateCallback(delivery, controller, callback, 'shutdown');
+        this.followLateCallback(delivery, controller, callback, abortReason);
         return;
       }
       if (outcome === 'not_started') return;
@@ -535,7 +579,7 @@ export class PromotionEventWorker implements RuntimeWorker {
     delivery: ClaimedPromotionDelivery,
     controller: AbortController,
     callback: Promise<CallbackOutcome>,
-    abortReason: 'timeout' | 'shutdown',
+    abortReason: 'timeout' | 'shutdown' | 'ownership_loss',
   ): void {
     void callback.then(async (outcome) => {
       if (outcome === 'success') {
@@ -548,6 +592,8 @@ export class PromotionEventWorker implements RuntimeWorker {
           [delivery],
           'promotion_delivery_shutdown_abort_abandoned',
         );
+      } else if (outcome === 'failure' && abortReason === 'ownership_loss') {
+        await this.persistCallbackOutcome(delivery, outcome);
       }
     }).catch(() => {
       this.logger.error({ event: 'promotion_delivery_late_settlement_failed' });
