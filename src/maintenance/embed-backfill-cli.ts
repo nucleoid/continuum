@@ -16,6 +16,7 @@ export interface EmbedBackfillCliOptions extends EmbeddingBackfillOptions {
   batchSize: number;
   maxRows: number;
   maxErrors: number;
+  retryFailures: boolean;
 }
 
 function bounded(raw: string | undefined, name: string, minimum: number, maximum: number): number {
@@ -38,12 +39,13 @@ function valueAfter(args: string[], index: number): string {
 export function parseEmbedBackfillCliOptions(args: string[]): EmbedBackfillCliOptions {
   const options: EmbedBackfillCliOptions = {
     dryRun: false, countOnly: false, batchSize: 32, maxRows: 1_000,
-    maxErrors: 25,
+    maxErrors: 25, retryFailures: false,
   };
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
     if (arg === '--dry-run') options.dryRun = true;
     else if (arg === '--count') options.countOnly = true;
+    else if (arg === '--retry-failures') options.retryFailures = true;
     else if (arg === '--batch-size') options.batchSize = bounded(valueAfter(args, index++), arg, 1, 1_000);
     else if (arg === '--max-rows') options.maxRows = bounded(valueAfter(args, index++), arg, 1, 1_000_000);
     else if (arg === '--max-errors') options.maxErrors = bounded(valueAfter(args, index++), arg, 1, 10_000);
@@ -61,6 +63,10 @@ export function parseEmbedBackfillCliOptions(args: string[]): EmbedBackfillCliOp
   }
   if (options.dryRun && options.countOnly) throw new Error('--dry-run and --count are mutually exclusive');
   if (options.cursor && !options.providerId) throw new Error('--cursor requires --provider');
+  if (options.retryFailures && !options.providerId) throw new Error('--retry-failures requires --provider');
+  if (options.retryFailures && (options.dryRun || options.countOnly)) {
+    throw new Error('--retry-failures cannot be used with --dry-run or --count');
+  }
   return options;
 }
 

@@ -12,8 +12,9 @@ import { StubEmbeddingProvider } from '../embeddings/stub.js';
 import { createMemory } from '../storage/memories.js';
 import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
 import { createPrincipal } from '../storage/principals.js';
-import { createScope } from '../storage/scopes.js';
+import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
+import { runAuditRetention } from './audit-retention.js';
 import { runEmbeddingBackfill } from './embed-backfill.js';
 
 describe('embedding backfill', () => {
@@ -179,6 +180,74 @@ describe('embedding backfill', () => {
     expect(audit.rows[0].metadata).not.toContain('private provider detail');
   });
 
+  it('keeps poison-row suppression after audit retention deletes its audit', async () => {
+    await seed('project', 'retained-poison-state', ['poison item']);
+    const embed = vi.fn(async () => {
+      throw new EmbeddingItemError('private provider detail');
+    });
+    const provider: EmbeddingProvider = {
+      id: 'ollama:retained-poison-state', dim: 768, local: true, embed,
+    };
+    const first = await runEmbeddingBackfill(pool, provider, { maxRows: 10 });
+    expect(first).toMatchObject({ failed: 1, completed: true });
+
+    const admin = await createPrincipal(pool, {
+      externalId: 'svc:retention-for-backfill', kind: 'service', displayName: 'retention',
+    });
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    if (!org) throw new Error('org scope missing');
+    await pool.query(
+      `INSERT INTO scope_memberships (principal_id, scope_id, role)
+       VALUES ($1, $2, 'admin')`,
+      [admin.id, org.id],
+    );
+    await pool.query(
+      `UPDATE audit_log SET at = '2020-01-01T00:00:00Z'
+        WHERE metadata->>'operation' = 'embedding_backfill'`,
+    );
+    await runAuditRetention(pool, {
+      retentionDays: 1,
+      principalExternalId: admin.externalId!,
+      runId: '11111111-1111-4111-8111-111111111111',
+    });
+    expect((await pool.query(
+      `SELECT count(*)::int AS count FROM audit_log
+        WHERE metadata->>'operation' = 'embedding_backfill'`,
+    )).rows[0].count).toBe(0);
+
+    const resumed = await runEmbeddingBackfill(pool, provider, { maxRows: 10 });
+
+    expect(resumed).toMatchObject({ embedded: 0, failed: 0, completed: true });
+    expect(embed).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries durable poison rows only through the explicit provider control', async () => {
+    await seed('project', 'controlled-poison-retry', ['poison item']);
+    let reject = true;
+    const embed = vi.fn(async (texts: string[]) => {
+      if (reject) throw new EmbeddingItemError('deterministic input rejection');
+      return vectors.embed(texts);
+    });
+    const provider: EmbeddingProvider = {
+      id: 'ollama:controlled-poison-retry', dim: 768, local: true, embed,
+    };
+    await runEmbeddingBackfill(pool, provider, { maxRows: 10 });
+    reject = false;
+
+    const suppressed = await runEmbeddingBackfill(pool, provider, { maxRows: 10 });
+    expect(suppressed).toMatchObject({ embedded: 0, failuresCleared: 0 });
+    expect(embed).toHaveBeenCalledTimes(1);
+
+    const retried = await runEmbeddingBackfill(pool, provider, {
+      providerId: provider.id, retryFailures: true, maxRows: 10,
+    });
+    expect(retried).toMatchObject({ embedded: 1, failed: 0, failuresCleared: 1, completed: true });
+    expect(embed).toHaveBeenCalledTimes(2);
+    expect((await pool.query(
+      'SELECT count(*)::int AS count FROM embedding_backfill_failures',
+    )).rows[0].count).toBe(0);
+  });
+
   it('bisects a realistic Voyage aggregate token-limit rejection and checkpoints progress', async () => {
     const { memories } = await seed('project', 'voyage-request-limit', [
       'healthy one', 'healthy two', 'healthy three', 'healthy four',
@@ -281,6 +350,34 @@ describe('embedding backfill', () => {
     expect((await pool.query(
       'SELECT memory_id FROM memory_embeddings ORDER BY memory_id',
     )).rows.map((row) => row.memory_id)).toEqual([lower!.id, upper!.id].sort());
+  });
+
+  it('wraps an explicit cursor before reporting completion or clearing saved progress', async () => {
+    const { memories } = await seed('project', 'explicit-cursor-wrap', ['lower UUID', 'upper UUID']);
+    const [lower, upper] = [...memories].sort((left, right) => left.id.localeCompare(right.id));
+    const provider: EmbeddingProvider = {
+      id: 'ollama:explicit-cursor-wrap', dim: 768, local: true,
+      embed: (texts) => vectors.embed(texts),
+    };
+    await pool.query(
+      `INSERT INTO embedding_backfill_checkpoints (provider, dim, scope_filter, cursor)
+       VALUES ($1, $2, '', $3)`,
+      [provider.id, provider.dim, upper!.id],
+    );
+
+    const report = await runEmbeddingBackfill(pool, provider, {
+      providerId: provider.id, cursor: upper!.id, batchSize: 2, maxRows: 10,
+    });
+
+    expect(report).toMatchObject({ embedded: 2, failed: 0, completed: true, cursor: null });
+    expect((await pool.query(
+      'SELECT memory_id FROM memory_embeddings ORDER BY memory_id',
+    )).rows.map((row) => row.memory_id)).toEqual([lower!.id, upper!.id].sort());
+    expect((await pool.query(
+      `SELECT cursor FROM embedding_backfill_checkpoints
+        WHERE provider = $1 AND dim = $2 AND scope_filter = ''`,
+      [provider.id, provider.dim],
+    )).rows[0].cursor).toBeNull();
   });
 
   it('destroys the pooled client when advisory unlock cannot be confirmed', async () => {

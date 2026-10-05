@@ -28,10 +28,15 @@ raw exception messages.
 
 Useful controls are `--provider`, `--batch-size`, `--max-rows`, `--scope`, and
 `--max-errors`. Deterministic input rejections are bisected to a single memory,
-audited once, and never retried. The last completed or audited memory is
+recorded in durable backfill state, audited once, and never retried even after
+audit retention removes the audit event. To retry known failures after fixing
+the underlying data or provider, use `--retry-failures` with an explicit
+`--provider`; an optional `--scope` limits which durable failure rows are
+cleared. Retry clearing is unavailable in count or dry-run modes. The last completed or audited memory is
 checkpointed before an exhausted error budget stops the command. Provider-wide authentication,
 rate-limit, 5xx, network, timeout, and invalid-response failures stop immediately.
-`--cursor UUID`
-requires `--provider`. A nonzero exit indicates invalid configuration, lock
+`--cursor UUID` requires `--provider`. Saved and explicit cursors wrap once at
+the end of the UUID range, and completion is reported only after the lower
+range has also been scanned. A nonzero exit indicates invalid configuration, lock
 contention, database failure, or an exhausted error budget. The command never
 falls back from a local-only route to a hosted provider.

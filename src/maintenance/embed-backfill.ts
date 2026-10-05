@@ -34,6 +34,7 @@ export interface EmbeddingBackfillOptions {
   dryRun?: boolean;
   countOnly?: boolean;
   maxErrors?: number;
+  retryFailures?: boolean;
 }
 
 export interface EmbeddingBackfillReport {
@@ -41,6 +42,7 @@ export interface EmbeddingBackfillReport {
   eligible: number;
   embedded: number;
   failed: number;
+  failuresCleared: number;
   providers: number;
   completed: boolean;
   cursor: string | null;
@@ -113,27 +115,40 @@ async function storeBatch(
   }
 }
 
-async function auditFailure(
+async function recordFailure(
   client: pg.PoolClient,
   provider: EmbeddingProvider,
   item: Candidate,
 ): Promise<void> {
-  await client.query(
-    `INSERT INTO audit_log (principal_id, action, memory_id, scope_id, metadata)
-     SELECT $1, 'write', m.id, m.scope_id, $3::jsonb
-       FROM memories m WHERE m.id = $2`,
-    [
-      LIFECYCLE_PRINCIPAL_ID,
-      item.id,
-      JSON.stringify({
-        operation: 'embedding_backfill',
-        embedded: false,
-        embedding_error_code: 'EMBEDDING_FAILED',
-        provider: provider.id,
-        dim: provider.dim,
-      }),
-    ],
-  );
+  await client.query('BEGIN');
+  try {
+    await client.query(
+      `INSERT INTO embedding_backfill_failures (memory_id, provider, dim)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (memory_id, provider, dim) DO NOTHING`,
+      [item.id, provider.id, provider.dim],
+    );
+    await client.query(
+      `INSERT INTO audit_log (principal_id, action, memory_id, scope_id, metadata)
+       SELECT $1, 'write', m.id, m.scope_id, $3::jsonb
+         FROM memories m WHERE m.id = $2`,
+      [
+        LIFECYCLE_PRINCIPAL_ID,
+        item.id,
+        JSON.stringify({
+          operation: 'embedding_backfill',
+          embedded: false,
+          embedding_error_code: 'EMBEDDING_FAILED',
+          provider: provider.id,
+          dim: provider.dim,
+        }),
+      ],
+    );
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  }
 }
 
 async function runProvider(
@@ -142,7 +157,7 @@ async function runProvider(
   provider: EmbeddingProvider,
   options: Required<Pick<EmbeddingBackfillOptions,
     'batchSize' | 'maxRows' | 'dryRun' | 'countOnly' | 'maxErrors'>>
-    & Pick<EmbeddingBackfillOptions, 'cursor' | 'scope'>,
+    & Pick<EmbeddingBackfillOptions, 'cursor' | 'scope' | 'retryFailures'>,
 ): Promise<Omit<EmbeddingBackfillReport, 'providers' | 'dryRun' | 'countOnly'>> {
   const router = asEmbeddingRouter(routing);
   const client = await pool.connect();
@@ -152,12 +167,14 @@ async function runProvider(
   let locked = false;
   let destroyClient = false;
   let cursor: string | null = options.cursor ?? null;
-  let wrapSavedCursor = false;
+  let wrapCursor = cursor !== null;
+  const wrapBoundary = cursor;
   let wrapped = false;
   let scanned = 0;
   let eligible = 0;
   let embedded = 0;
   let failed = 0;
+  let failuresCleared = 0;
   let completed = false;
 
   try {
@@ -168,6 +185,19 @@ async function runProvider(
       );
       if (lock.rows[0]?.locked !== true) throw new Error('Embedding backfill is already running for this provider');
       locked = true;
+      if (options.retryFailures) {
+        const cleared = await client.query(
+          `DELETE FROM embedding_backfill_failures f
+            USING memories m, scopes s
+           WHERE f.memory_id = m.id
+             AND s.id = m.scope_id
+             AND f.provider = $1
+             AND f.dim = $2
+             AND ($3 = '' OR concat(s.kind, CASE WHEN s.kind = 'org' THEN '' ELSE ':' || s.name END) = $3)`,
+          [provider.id, provider.dim, filter],
+        );
+        failuresCleared = cleared.rowCount ?? 0;
+      }
       if (!options.cursor) {
         const saved = await client.query<{ cursor: string | null }>(
           `SELECT cursor FROM embedding_backfill_checkpoints
@@ -175,7 +205,7 @@ async function runProvider(
           [provider.id, provider.dim, filter],
         );
         cursor = saved.rows[0]?.cursor ?? null;
-        wrapSavedCursor = cursor !== null;
+        wrapCursor = cursor !== null;
       }
     }
 
@@ -194,7 +224,7 @@ async function runProvider(
       completed = true;
       cursor = null;
       if (!options.dryRun && !options.countOnly) await checkpoint(client, provider, filter, null);
-      return { scanned, eligible, embedded, failed, completed, cursor };
+      return { scanned, eligible, embedded, failed, failuresCleared, completed, cursor };
     }
 
     const processItems = async (items: Candidate[]): Promise<boolean> => {
@@ -218,7 +248,7 @@ async function runProvider(
           return processItems(items.slice(middle));
         }
         failed += 1;
-        await auditFailure(client, provider, items[0]!);
+        await recordFailure(client, provider, items[0]!);
         cursor = items[0]!.id;
         return failed < options.maxErrors;
       }
@@ -230,7 +260,13 @@ async function runProvider(
     };
 
     while (eligible < options.maxRows || options.countOnly) {
-      const params: unknown[] = [cursor, provider.id, provider.dim, routedScopeIds];
+      const params: unknown[] = [
+        cursor,
+        provider.id,
+        provider.dim,
+        routedScopeIds,
+        wrapped ? wrapBoundary : null,
+      ];
       params.push(Math.max(100, options.batchSize * 4));
       const limitIndex = params.length;
       const rows = await client.query<{
@@ -240,6 +276,7 @@ async function runProvider(
            FROM memories m
            JOIN scopes s ON s.id = m.scope_id
           WHERE ($1::uuid IS NULL OR m.id > $1::uuid)
+            AND ($5::uuid IS NULL OR m.id <= $5::uuid)
             AND m.state = 'live'
             AND (m.expires_at IS NULL OR m.expires_at > now())
             AND m.scope_id = ANY($4::uuid[])
@@ -248,24 +285,19 @@ async function runProvider(
                WHERE e.memory_id = m.id AND e.provider = $2 AND e.dim = $3
             )
             AND NOT EXISTS (
-              SELECT 1 FROM audit_log a
-               WHERE a.memory_id = m.id
-                 AND a.action = 'write'
-                 AND a.metadata->>'operation' = 'embedding_backfill'
-                 AND a.metadata->>'provider' = $2
-                 AND a.metadata->>'dim' = $3::text
+              SELECT 1 FROM embedding_backfill_failures f
+               WHERE f.memory_id = m.id
+                 AND f.provider = $2
+                 AND f.dim = $3
             )
           ORDER BY m.id
           LIMIT $${limitIndex}`,
         params,
       );
       if (rows.rows.length === 0) {
-        if (wrapSavedCursor && !wrapped) {
+        if (wrapCursor && !wrapped) {
           cursor = null;
           wrapped = true;
-          if (!options.dryRun && !options.countOnly) {
-            await checkpoint(client, provider, filter, null);
-          }
           continue;
         }
         completed = true;
@@ -305,7 +337,7 @@ async function runProvider(
       if (!options.countOnly && eligible >= options.maxRows) break;
     }
 
-    return { scanned, eligible, embedded, failed, completed, cursor };
+    return { scanned, eligible, embedded, failed, failuresCleared, completed, cursor };
   } finally {
     if (locked) {
       try {
@@ -332,6 +364,10 @@ export async function runEmbeddingBackfill(
   const maxErrors = integer(options.maxErrors ?? DEFAULT_MAX_ERRORS, 'maxErrors', 1, 10_000);
   if (options.dryRun && options.countOnly) throw new Error('dryRun and countOnly are mutually exclusive');
   if (options.cursor && !options.providerId) throw new Error('cursor requires providerId');
+  if (options.retryFailures && !options.providerId) throw new Error('retryFailures requires providerId');
+  if (options.retryFailures && (options.dryRun || options.countOnly)) {
+    throw new Error('retryFailures cannot be used with dryRun or countOnly');
+  }
   const router = asEmbeddingRouter(routing);
   const providers = router.providers().filter((provider) =>
     options.providerId === undefined || provider.id === options.providerId);
@@ -342,7 +378,7 @@ export async function runEmbeddingBackfill(
     throw new Error('Requested embedding provider is not configured');
   }
   const report: EmbeddingBackfillReport = {
-    scanned: 0, eligible: 0, embedded: 0, failed: 0,
+    scanned: 0, eligible: 0, embedded: 0, failed: 0, failuresCleared: 0,
     providers: providers.length, completed: true, cursor: null,
     dryRun: options.dryRun ?? false, countOnly: options.countOnly ?? false,
   };
@@ -360,11 +396,13 @@ export async function runEmbeddingBackfill(
       maxErrors,
       cursor: options.cursor,
       scope: options.scope,
+      retryFailures: options.retryFailures,
     });
     report.scanned += result.scanned;
     report.eligible += result.eligible;
     report.embedded += result.embedded;
     report.failed += result.failed;
+    report.failuresCleared += result.failuresCleared;
     report.completed &&= result.completed;
     report.cursor = result.cursor;
     remaining -= result.eligible;

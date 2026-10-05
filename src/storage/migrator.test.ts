@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+=======
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+>>>>>>> 01b36f6 (fix: persist embedding backfill failure state)
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pg from 'pg';
@@ -250,6 +254,62 @@ describe('runMigrations', () => {
         `SELECT name FROM ${schema}._continuum_migrations`,
       );
       expect(ledger.rows).toEqual([{ name: '001_test.sql' }]);
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  });
+
+  it('migrates valid historical poison audits into durable backfill state', async () => {
+    const schema = `migrator_backfill_failures_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const migrationSql = await readFile(
+      new URL('../../migrations/0007_embedding_backfill_failures.sql', import.meta.url),
+      'utf8',
+    );
+    const directory = await migrationDirectory(migrationSql);
+    const memoryId = '11111111-1111-4111-8111-111111111111';
+
+    try {
+      await pool.query(`
+        CREATE TABLE memories (id UUID PRIMARY KEY);
+        CREATE TABLE audit_log (
+          at TIMESTAMPTZ NOT NULL,
+          action TEXT NOT NULL,
+          memory_id UUID,
+          metadata JSONB
+        );
+        INSERT INTO memories (id) VALUES ('${memoryId}');
+        INSERT INTO audit_log (at, action, memory_id, metadata) VALUES
+          ('2026-01-02T00:00:00Z', 'write', '${memoryId}',
+           '{"operation":"embedding_backfill","provider":"ollama:model","dim":768}'),
+          ('2026-01-01T00:00:00Z', 'write', '${memoryId}',
+           '{"operation":"embedding_backfill","provider":"ollama:model","dim":768}'),
+          ('2026-01-01T00:00:00Z', 'write', '${memoryId}',
+           '{"operation":"embedding_backfill","provider":"ollama:model","dim":"invalid"}'),
+          ('2026-01-01T00:00:00Z', 'read', '${memoryId}',
+           '{"operation":"embedding_backfill","provider":"ignored","dim":768}');
+      `);
+
+      await expect(runMigrations(pool, directory)).resolves.toHaveLength(1);
+      await expect(runMigrations(pool, directory)).resolves.toHaveLength(0);
+      const failures = await pool.query(
+        `SELECT memory_id, provider, dim, failed_at
+           FROM embedding_backfill_failures`,
+      );
+      expect(failures.rows).toEqual([{
+        memory_id: memoryId,
+        provider: 'ollama:model',
+        dim: 768,
+        failed_at: new Date('2026-01-01T00:00:00Z'),
+      }]);
+
+      await pool.query('DELETE FROM memories WHERE id = $1', [memoryId]);
+      expect((await pool.query(
+        'SELECT count(*)::int AS count FROM embedding_backfill_failures',
+      )).rows[0].count).toBe(0);
     } finally {
       await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
     }

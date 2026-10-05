@@ -105,6 +105,17 @@ CREATE TABLE memory_embeddings (
 
 CREATE INDEX memory_embeddings_ivf ON memory_embeddings USING ivfflat (embedding vector_cosine_ops);
 
+-- Deterministic provider input failures are durable operational state. Audit
+-- retention may remove their corresponding event rows, so backfill resume
+-- must not use audit_log as its retry-suppression store.
+CREATE TABLE embedding_backfill_failures (
+  memory_id      UUID NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  provider       TEXT NOT NULL,
+  dim            INT NOT NULL CHECK (dim > 0),
+  failed_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (memory_id, provider, dim)
+);
+
 CREATE TABLE audit_log (
   id              BIGSERIAL PRIMARY KEY,
   at              TIMESTAMPTZ NOT NULL DEFAULT now(),

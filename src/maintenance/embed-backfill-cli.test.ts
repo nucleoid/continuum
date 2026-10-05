@@ -10,8 +10,11 @@ describe('parseEmbedBackfillCliOptions', () => {
     ])).toEqual({
       dryRun: true, countOnly: false, batchSize: 8, maxRows: 50,
       providerId: 'ollama:model', cursor: '00000000-0000-4000-8000-000000000012',
-      scope: { kind: 'team', name: 'security' }, maxErrors: 4,
+      scope: { kind: 'team', name: 'security' }, maxErrors: 4, retryFailures: false,
     });
+    expect(parseEmbedBackfillCliOptions([
+      '--provider', 'ollama:model', '--retry-failures',
+    ])).toMatchObject({ providerId: 'ollama:model', retryFailures: true });
   });
 
   it('rejects conflicting preview modes, malformed values, and ambiguous cursors', () => {
@@ -21,5 +24,9 @@ describe('parseEmbedBackfillCliOptions', () => {
     expect(() => parseEmbedBackfillCliOptions([
       '--cursor', '00000000-0000-4000-8000-000000000012',
     ])).toThrow(/provider/i);
+    expect(() => parseEmbedBackfillCliOptions(['--retry-failures'])).toThrow(/provider/i);
+    expect(() => parseEmbedBackfillCliOptions([
+      '--provider', 'ollama:model', '--retry-failures', '--dry-run',
+    ])).toThrow(/cannot be used/i);
   });
 });
