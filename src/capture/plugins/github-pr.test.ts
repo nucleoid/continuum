@@ -43,11 +43,7 @@ describe('github-pr plugin', () => {
     expect(out[0].metadata).toMatchObject({
       repo: 'exampleorg/booking-engine',
       number: 4421,
-      author: '1001',
-      authorLogin: 'cass-exampleorg',
-      mergedBy: '1002',
-      mergedByLogin: 'scott-exampleorg',
-      actor: '1001',
+      actor: 'cass-exampleorg',
       merged_by: 'scott-exampleorg',
       thread_key: 'github-pr:exampleorg/booking-engine#4421',
       closes_thread_keys: [
@@ -70,12 +66,33 @@ describe('github-pr plugin', () => {
         : null,
     });
     expect(out[0].metadata).toMatchObject({
-      actor: '1001',
+      actor: 'cass-exampleorg',
       actor_principal_id: '11111111-1111-4111-8111-111111111111',
       thread_owner_principal_id: '11111111-1111-4111-8111-111111111111',
       merged_by: 'scott-exampleorg',
       reviewers: ['actual-reviewer-exampleorg'],
       requested_reviewers: ['reviewer-exampleorg'],
+    });
+  });
+
+  it('uses the immutable GitHub user id when a login is renamed', () => {
+    const renamed = mergedEvent({ user: { id: 1001, login: 'cass-renamed' } });
+    const identities: Array<{ authority: string; externalId: string }> = [];
+    const out = githubPrPlugin.transform(renamed, {
+      resolveActorPrincipalId: (identity) => {
+        identities.push(identity);
+        return identity.externalId === '1001'
+          ? '11111111-1111-4111-8111-111111111111'
+          : null;
+      },
+    });
+    expect(githubPrPlugin.actorIdentity?.(renamed)).toEqual({
+      authority: 'github', externalId: '1001',
+    });
+    expect(identities).toEqual([{ authority: 'github', externalId: '1001' }]);
+    expect(out[0].metadata).toMatchObject({
+      actor: 'cass-renamed',
+      actor_principal_id: '11111111-1111-4111-8111-111111111111',
     });
   });
 

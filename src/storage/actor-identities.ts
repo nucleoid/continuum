@@ -24,6 +24,7 @@ export async function mapActorIdentity(
 export async function resolveActorPrincipalId(
   db: pg.Pool | Queryable,
   identity: ExternalActorIdentity,
+  options: { lock?: boolean } = {},
 ): Promise<string | null> {
   const { rows } = await db.query(
     `SELECT mapping.principal_id
@@ -31,7 +32,8 @@ export async function resolveActorPrincipalId(
        JOIN principals principal ON principal.id = mapping.principal_id
       WHERE mapping.authority = $1
         AND mapping.external_actor_id = $2
-        AND principal.kind = 'user'`,
+        AND principal.kind = 'user'
+      ${options.lock ? 'FOR KEY SHARE OF mapping, principal' : ''}`,
     [identity.authority, identity.externalId],
   );
   return (rows[0]?.principal_id as string | undefined) ?? null;

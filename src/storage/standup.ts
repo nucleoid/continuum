@@ -129,8 +129,6 @@ export async function listOpenStandupThreads(
                  )
              AND closing.created_at >= m.created_at
              AND closing.created_at < $4
-             AND closing.state IN ('live', 'stale', 'promoted')
-             AND (closing.expires_at IS NULL OR closing.expires_at > now())
              AND (
                (closing_scope.kind = 'user' AND closing_scope.owner_principal_id = $1::uuid)
                OR (closing_scope.kind = 'project' AND EXISTS (

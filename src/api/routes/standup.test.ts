@@ -172,6 +172,22 @@ describe('GET /api/v0/standup', () => {
     expect(response.body.openThreads.map((item: { id: string }) => item.id)).toContain(open.id);
   });
 
+  it('excludes expired memories from both activity and open threads', async () => {
+    const { open } = await seed();
+    await pool.query(
+      `UPDATE memories SET expires_at = now() - interval '1 second'
+        WHERE id = $1 OR title = 'Worked on digest'`,
+      [open.id],
+    );
+    const response = await request(createApp(pool, { clock: () => now.getTime() }))
+      .get('/api/v0/standup').query({ since: '24h', openThreadDays: 2 })
+      .set('Authorization', 'Bearer entra:standup-me');
+    expect(response.status).toBe(200);
+    expect(response.body.activity.map((item: { title: string }) => item.title))
+      .not.toContain('Worked on digest');
+    expect(response.body.openThreads.map((item: { id: string }) => item.id)).not.toContain(open.id);
+  });
+
   it('allows a different actual actor to close a thread only with explicit matching ownership', async () => {
     const { me } = await seed();
     const other = await createPrincipal(pool, {
@@ -206,6 +222,34 @@ describe('GET /api/v0/standup', () => {
       .set('Authorization', 'Bearer entra:standup-me');
     expect(response.status).toBe(200);
     expect(response.body.openThreads.map((item: { id: string }) => item.id)).not.toContain(opened.id);
+  });
+
+  it.each(['archived', 'expired'])('keeps a thread closed after its closure is %s', async (
+    closureState,
+  ) => {
+    const { me, open } = await seed();
+    const closure = await createMemory(pool, {
+      scopeId: open.scopeId, scopeKind: 'user', type: 'context', title: 'Durable closure',
+      body: 'closed', authorId: me.id, source: 'terminal-summary', metadata: {
+        actor_principal_id: me.id, actor: 'actual-user', thread_owner_principal_id: me.id,
+        thread_key: 'closure:durable', closes_thread_keys: ['thread:open'],
+      },
+    });
+    await pool.query(
+      `UPDATE memories
+          SET created_at = '2026-10-04T09:00:00Z',
+              state = CASE WHEN $2 = 'archived' THEN 'archived' ELSE state END,
+              expires_at = CASE WHEN $2 = 'expired' THEN now() - interval '1 second'
+                                ELSE expires_at END
+        WHERE id = $1`,
+      [closure.id, closureState],
+    );
+
+    const response = await request(createApp(pool, { clock: () => now.getTime() }))
+      .get('/api/v0/standup').query({ since: '24h', openThreadDays: 2 })
+      .set('Authorization', 'Bearer entra:standup-me');
+    expect(response.status).toBe(200);
+    expect(response.body.openThreads.map((item: { id: string }) => item.id)).not.toContain(open.id);
   });
 
   it('returns no digest when required read auditing fails', async () => {

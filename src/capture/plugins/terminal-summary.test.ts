@@ -72,8 +72,10 @@ describe('terminal-summary plugin', () => {
   });
 
   it('resolves user scope via context when no override is given', () => {
-    const out = terminalSummaryPlugin.transform(summary({ actor: 'github-cass' }), {
-      resolveUserScope: (a) => (a === 'github-cass' ? 'entra-cass' : null),
+    const out = terminalSummaryPlugin.transform(summary({
+      actor: 'github-cass', actorAuthority: 'github', actorExternalId: '1001',
+    }), {
+      resolveUserScope: (identity) => identity.externalId === '1001' ? 'entra-cass' : null,
     });
     expect(out[0].scope).toEqual({ kind: 'user', name: 'entra-cass' });
   });
@@ -83,5 +85,25 @@ describe('terminal-summary plugin', () => {
       resolveUserScope: () => null,
     });
     expect(out[0].scope).toEqual({ kind: 'user', name: 'cass-exampleorg' });
+  });
+
+  it('ignores a supplied principal UUID and resolves only an external identity', () => {
+    const event = {
+      ...summary(),
+      actorPrincipalId: '22222222-2222-4222-8222-222222222222',
+      actorAuthority: 'terminal', actorExternalId: 'immutable-terminal-user-7',
+    } as TerminalSummaryPayload & { actorPrincipalId: string };
+    const out = terminalSummaryPlugin.transform(event, {
+      resolveActorPrincipalId: (identity) => identity.externalId === 'immutable-terminal-user-7'
+        ? '11111111-1111-4111-8111-111111111111'
+        : null,
+    });
+    expect(terminalSummaryPlugin.actorIdentity?.(event)).toEqual({
+      authority: 'terminal', externalId: 'immutable-terminal-user-7',
+    });
+    expect(out[0].metadata).toMatchObject({
+      actor_principal_id: '11111111-1111-4111-8111-111111111111',
+      thread_owner_principal_id: '11111111-1111-4111-8111-111111111111',
+    });
   });
 });

@@ -5,7 +5,12 @@ import type { CaptureContext, ExternalActorIdentity } from '../capture/plugin.js
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import { resolveActorPrincipalId } from '../storage/actor-identities.js';
 import type { Principal } from '../types.js';
-import { captureMemory, type CaptureOptions, type CaptureResult } from './capture.js';
+import {
+  captureMappedPluginMemory,
+  captureMemory,
+  type CaptureOptions,
+  type CaptureResult,
+} from './capture.js';
 
 export interface PluginCaptureOptions extends CaptureOptions {
   registry?: CaptureRegistry;
@@ -48,15 +53,37 @@ export async function capturePluginEvent(
   });
 
   const results: CaptureResult[] = [];
-  for (const input of inputs) {
-    results.push(await captureMemory(
-      pool,
-      embeddingProvider,
-      ingestionPrincipal,
-      input,
-      { plugin: pluginId, ...options.auditMetadata },
-      { relationThreshold: options.relationThreshold },
-    ));
+  for (const transformedInput of inputs) {
+    const metadata = { ...transformedInput.metadata };
+    delete metadata.actor_principal_id;
+    delete metadata.thread_owner_principal_id;
+    if (actorPrincipalId) {
+      metadata.actor_principal_id = actorPrincipalId;
+      metadata.thread_owner_principal_id = actorPrincipalId;
+    } else {
+      delete metadata.closes_thread_keys;
+    }
+    const input = { ...transformedInput, metadata };
+    const auditMetadata = { plugin: pluginId, ...options.auditMetadata };
+    const captureOptions = { relationThreshold: options.relationThreshold };
+    results.push(identity && actorPrincipalId
+      ? await captureMappedPluginMemory(
+          pool,
+          embeddingProvider,
+          ingestionPrincipal,
+          input,
+          { identity, principalId: actorPrincipalId },
+          auditMetadata,
+          captureOptions,
+        )
+      : await captureMemory(
+          pool,
+          embeddingProvider,
+          ingestionPrincipal,
+          input,
+          auditMetadata,
+          captureOptions,
+        ));
   }
   return results;
 }

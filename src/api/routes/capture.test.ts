@@ -135,6 +135,41 @@ describe('POST /api/v0/capture', () => {
       .toBe(0);
   });
 
+  it.each([
+    ['actor attribution', (userId: string) => ({
+      actor_principal_id: userId, actor: 'forged-user', thread_key: 'manual:actor',
+    })],
+    ['thread closure', (userId: string) => ({
+      actor_principal_id: userId, actor: 'forged-user',
+      thread_owner_principal_id: userId, thread_key: 'manual:closure',
+      closes_thread_keys: ['terminal-session:victim'],
+    })],
+  ])('prevents a service from forging user %s through raw capture', async (_label, metadata) => {
+    const service = await createPrincipal(pool, {
+      externalId: 'svc:raw-capture', kind: 'service', displayName: 'Raw capture service',
+    });
+    const user = await createPrincipal(pool, {
+      externalId: 'entra:user:victim', kind: 'user', displayName: 'Victim user',
+    });
+    const scope = await createScope(pool, { kind: 'project', name: 'raw-capture-project' });
+    await addMembership(pool, service.id, scope.id, 'writer');
+
+    const response = await request(createApp(pool))
+      .post('/api/v0/capture')
+      .set('Authorization', 'Bearer svc:raw-capture')
+      .send({
+        scope: { kind: 'project', name: 'raw-capture-project' }, type: 'context',
+        title: 'Forged service activity', body: 'Must not persist.', source: 'manual',
+        metadata: metadata(user.id),
+      });
+
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe('FORBIDDEN');
+    expect((await pool.query(
+      "SELECT 1 FROM memories WHERE title = 'Forged service activity'",
+    )).rowCount).toBe(0);
+  });
+
   it('commits memory and sanitized audit when the embedding provider fails', async () => {
     const privateMessage = 'provider token private-provider-value';
     const provider: EmbeddingProvider = {

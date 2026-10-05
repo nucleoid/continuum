@@ -19,6 +19,8 @@ import {
 } from './relations.js';
 import type { Queryable } from '../storage/queryable.js';
 import { validateCaptureMetadata } from '../capture/metadata.js';
+import type { ExternalActorIdentity } from '../capture/plugin.js';
+import { resolveActorPrincipalId } from '../storage/actor-identities.js';
 
 export interface CaptureResult {
   memory: Memory;
@@ -230,6 +232,11 @@ export async function embedCapturedMemory(
   }
 }
 
+interface MappedActorAttribution {
+  identity: ExternalActorIdentity;
+  principalId: string;
+}
+
 export async function captureMemory(
   pool: pg.Pool,
   embeddingRouting: EmbeddingRouting,
@@ -237,6 +244,34 @@ export async function captureMemory(
   input: CaptureInput,
   auditMetadata: Record<string, unknown> = {},
   options: CaptureOptions = {},
+): Promise<CaptureResult> {
+  return captureMemoryInternal(
+    pool, embeddingRouting, principal, input, auditMetadata, options,
+  );
+}
+
+export async function captureMappedPluginMemory(
+  pool: pg.Pool,
+  embeddingRouting: EmbeddingRouting,
+  principal: Principal,
+  input: CaptureInput,
+  attribution: MappedActorAttribution,
+  auditMetadata: Record<string, unknown> = {},
+  options: CaptureOptions = {},
+): Promise<CaptureResult> {
+  return captureMemoryInternal(
+    pool, embeddingRouting, principal, input, auditMetadata, options, attribution,
+  );
+}
+
+async function captureMemoryInternal(
+  pool: pg.Pool,
+  embeddingRouting: EmbeddingRouting,
+  principal: Principal,
+  input: CaptureInput,
+  auditMetadata: Record<string, unknown>,
+  options: CaptureOptions,
+  mappedAttribution?: MappedActorAttribution,
 ): Promise<CaptureResult> {
   try {
     validateCaptureContent(input);
@@ -251,6 +286,26 @@ export async function captureMemory(
     }
     const actorPrincipalId = input.metadata?.actor_principal_id;
     const threadOwnerPrincipalId = input.metadata?.thread_owner_principal_id;
+    const hasThreadClosures = Object.hasOwn(input.metadata ?? {}, 'closes_thread_keys');
+    if (principal.kind === 'service' && !mappedAttribution
+        && (actorPrincipalId !== undefined
+          || threadOwnerPrincipalId !== undefined
+          || hasThreadClosures)) {
+      throw new ServiceError(
+        'FORBIDDEN',
+        'Service activity attribution and thread closure require an admin-controlled actor mapping',
+      );
+    }
+    if (mappedAttribution) {
+      if (actorPrincipalId !== mappedAttribution.principalId
+          || threadOwnerPrincipalId !== mappedAttribution.principalId) {
+        throw new ServiceError('FORBIDDEN', 'Mapped plugin attribution does not match the event actor');
+      }
+      const mappedPrincipalId = await resolveActorPrincipalId(pool, mappedAttribution.identity);
+      if (mappedPrincipalId !== mappedAttribution.principalId) {
+        throw new ServiceError('FORBIDDEN', 'Actor mapping is missing or changed');
+      }
+    }
     if (typeof actorPrincipalId === 'string') {
       if (principal.kind === 'user' && actorPrincipalId !== principal.id) {
         throw new ServiceError('FORBIDDEN', 'A user can attribute activity only to itself');
@@ -348,6 +403,14 @@ export async function captureMemory(
           throw new ServiceError(
             'INVALID_INPUT', 'Activity thread owner must be an existing user principal',
           );
+        }
+      }
+      if (mappedAttribution) {
+        const mappedPrincipalId = await resolveActorPrincipalId(
+          client, mappedAttribution.identity, { lock: true },
+        );
+        if (mappedPrincipalId !== mappedAttribution.principalId) {
+          throw new ServiceError('FORBIDDEN', 'Actor mapping is missing or changed');
         }
       }
 

@@ -324,7 +324,10 @@ never inferred from a scope name, display name, author, or membership. Existing
 unowned user scopes fail closed until an administrator reviews and audits a
 one-to-one backfill. Standup activity similarly requires explicit
 `metadata.actor_principal_id`, `actor`, and stable `thread_key`; closure uses
-only explicit `closes_thread_keys`. PR authors and deploy actors are the
+only explicit `closes_thread_keys`. Raw service capture cannot set attribution
+or closure fields; mapped plugin capture resolves immutable external IDs through
+org-admin-controlled mappings. GitHub uses numeric webhook user IDs, never
+mutable logins. PR authors and deploy actors are the
 activity actors, while mergers and reviewers remain separate metadata.
 
 ## Shared service layer

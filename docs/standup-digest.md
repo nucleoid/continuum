@@ -25,8 +25,9 @@ The GitHub PR plugin uses the PR author as `actor`; a merger remains
 `merged_by`. Deploy activity uses the deploy actor. The production
 `capturePluginEvent` path resolves only `(authority, external_actor_id)` pairs
 that an org administrator explicitly provisioned in
-`actor_principal_mappings`. GitHub logins are looked up under the `github`
-authority. Deploy producers must provide both `actorAuthority` and
+`actor_principal_mappings`. GitHub webhook `user.id` values are looked up under
+the `github` authority; mutable logins are display labels only. Deploy producers
+must provide both `actorAuthority` and
 `actorExternalId`; the human-readable `actor` is never used for lookup.
 
 The authenticated ingestion service principal remains the capture author and
@@ -37,12 +38,24 @@ record without `actor_principal_id`. Missing ownership, actor ID, actor label,
 or thread key makes a record ineligible rather than triggering a display-name
 guess.
 
+Raw REST and MCP capture reject service-supplied `actor_principal_id`,
+`thread_owner_principal_id`, and `closes_thread_keys`. Service ingestion must
+use `capturePluginEvent`, which removes plugin-supplied principal UUIDs,
+resolves the event's immutable external identity through the admin-controlled
+mapping, and verifies that mapping again in the write transaction. Unmapped
+events cannot close threads. Terminal summaries follow the same rule: callers
+provide `actorAuthority` and immutable `actorExternalId`; a supplied principal
+UUID is never accepted as identity.
+
 Open threads use `thread_owner_principal_id`, falling back to the actor ID only
 for historical records. A capture by another actor may close a thread only
 when it explicitly carries the same thread owner. Closures after a requested
 historical window do not rewrite that historical view. Terminal summaries
 close their session thread by default; producers must set `keepThreadOpen`
 when the summarized session intentionally remains actionable.
+Archived or expired closure memories remain historical closure evidence and
+do not reopen a thread. Expired activity and expired open-thread candidates
+are excluded from standups using the database clock.
 
 ## Actor identity mapping
 

@@ -11,7 +11,6 @@ export interface TerminalSummaryPayload {
   finishedAt?: string;
   transcriptHash?: string;
   scopeOverride?: ScopeRef;
-  actorPrincipalId?: string;
   actorAuthority?: string;
   actorExternalId?: string;
   threadKey?: string;
@@ -22,19 +21,25 @@ export interface TerminalSummaryPayload {
 export const terminalSummaryPlugin: CapturePlugin<TerminalSummaryPayload> = {
   id: 'terminal-summary',
 
-  transform(event, ctx: CaptureContext = {}): CaptureInput[] {
-    const baseScope: ScopeRef =
-      event.scopeOverride ?? {
-        kind: 'user',
-        name: ctx.resolveUserScope?.(event.actor) ?? event.actor,
-      };
+  actorIdentity(event) {
+    return event.actorAuthority && event.actorExternalId
+      ? { authority: event.actorAuthority, externalId: event.actorExternalId }
+      : null;
+  },
 
+  transform(event, ctx: CaptureContext = {}): CaptureInput[] {
     const explicitIdentity = event.actorAuthority && event.actorExternalId
       ? { authority: event.actorAuthority, externalId: event.actorExternalId }
       : null;
-    const actorPrincipalId = event.actorPrincipalId
-      ?? (explicitIdentity ? ctx.resolveActorPrincipalId?.(explicitIdentity) : null)
-      ?? null;
+    const baseScope: ScopeRef =
+      event.scopeOverride ?? {
+        kind: 'user',
+        name: (explicitIdentity ? ctx.resolveUserScope?.(explicitIdentity) : null) ?? event.actor,
+      };
+
+    const actorPrincipalId = explicitIdentity
+      ? ctx.resolveActorPrincipalId?.(explicitIdentity) ?? null
+      : null;
     const threadKey = event.threadKey ?? `terminal-session:${event.sessionId}`;
     const metadata = {
       actor: event.actor,

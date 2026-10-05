@@ -12,7 +12,7 @@ export interface GitHubPrEvent {
     state: string;
     merged: boolean;
     merged_at?: string | null;
-    merged_by?: { id: number; login: string } | null;
+    merged_by?: { id?: number; login: string } | null;
     user: { id: number; login: string };
     requested_reviewers?: Array<{ login: string }>;
     base: { ref: string };
@@ -29,11 +29,17 @@ function projectName(repoFullName: string): string {
   return slash === -1 ? repoFullName : repoFullName.slice(slash + 1);
 }
 
+function githubIdentity(user: { id: number }): { authority: string; externalId: string } | null {
+  return Number.isSafeInteger(user.id) && user.id > 0
+    ? { authority: 'github', externalId: String(user.id) }
+    : null;
+}
+
 export const githubPrPlugin: CapturePlugin<GitHubPrEvent> = {
   id: 'github-pr',
 
   actorIdentity(event) {
-    return { authority: 'github', externalId: String(event.pull_request.user.id) };
+    return githubIdentity(event.pull_request.user);
   },
 
   transform(event, ctx: CaptureContext = {}): CaptureInput[] {
@@ -41,10 +47,10 @@ export const githubPrPlugin: CapturePlugin<GitHubPrEvent> = {
 
     const pr = event.pull_request;
     const project = ctx.defaultProjectName ?? projectName(event.repository.full_name);
-    const actor = String(pr.user.id);
-    const actorPrincipalId = ctx.resolveActorPrincipalId?.({
-      authority: 'github', externalId: actor,
-    }) ?? null;
+    const identity = githubIdentity(pr.user);
+    const actorPrincipalId = identity
+      ? ctx.resolveActorPrincipalId?.(identity) ?? null
+      : null;
     const threadKey = `github-pr:${event.repository.full_name}#${pr.number}`;
 
     const lines: string[] = [];
@@ -67,11 +73,7 @@ export const githubPrPlugin: CapturePlugin<GitHubPrEvent> = {
         metadata: {
           repo: event.repository.full_name,
           number: pr.number,
-          author: String(pr.user.id),
-          authorLogin: pr.user.login,
-          mergedBy: pr.merged_by ? String(pr.merged_by.id) : null,
-          mergedByLogin: pr.merged_by?.login ?? null,
-          actor,
+          actor: pr.user.login,
           ...(actorPrincipalId ? { actor_principal_id: actorPrincipalId } : {}),
           ...(actorPrincipalId ? { thread_owner_principal_id: actorPrincipalId } : {}),
           merged_by: pr.merged_by?.login ?? null,
