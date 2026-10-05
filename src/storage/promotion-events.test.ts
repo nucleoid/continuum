@@ -131,6 +131,7 @@ describe('promotion outbox', () => {
       owner: 'stopping', webhookIds: ['hook'], limit: 1, leaseMs: 1000, maxAttempts: 1,
     });
     expect(claimed.attemptCount).toBe(1);
+    expect(await releasePromotionDeliveries(pool, 'stopping')).toBe(1);
     expect(await abandonPromotionDeliveries(pool, 'stopping', [claimed])).toBe(1);
 
     const [reclaimed] = await claimPromotionDeliveries(pool, {
