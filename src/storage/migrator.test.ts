@@ -189,6 +189,65 @@ describe('runMigrations', () => {
     expect(ledger).toBeGreaterThan(index);
   });
 
+  it('repairs the provider scan index when the original 0010 was already recorded', async () => {
+    const schema = `migrator_embedding_scan_repair_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-migrator-upgrade-'));
+    directories.push(directory);
+    const originalMigration = '0010_provider_embeddings_backfill.sql';
+    const repairMigration = '0013_embedding_provider_scan_index.sql';
+    const repairSql = await readFile(
+      new URL(`../../migrations/${repairMigration}`, import.meta.url),
+      'utf8',
+    );
+    await writeFile(join(directory, originalMigration), 'SELECT 1;');
+    await writeFile(join(directory, repairMigration), repairSql);
+
+    try {
+      await pool.query(`
+        CREATE TABLE memory_embeddings (
+          memory_id UUID NOT NULL,
+          provider TEXT NOT NULL,
+          dim INT NOT NULL,
+          PRIMARY KEY (memory_id, provider, dim)
+        );
+        CREATE TABLE _continuum_migrations (
+          name TEXT PRIMARY KEY,
+          applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        INSERT INTO _continuum_migrations (name) VALUES ('${originalMigration}');
+      `);
+
+      const applied = await runMigrations(pool, directory);
+      expect(applied.map(({ name }) => name)).toEqual([repairMigration]);
+      const indexes = await pool.query<{ indexname: string; indexdef: string }>(`
+        SELECT indexname, indexdef
+          FROM pg_indexes
+         WHERE schemaname = current_schema()
+           AND tablename = 'memory_embeddings'
+           AND indexname = 'memory_embeddings_provider_dim_memory_idx'
+      `);
+      expect(indexes.rows).toHaveLength(1);
+      expect(indexes.rows[0].indexdef).toMatch(/\(provider, dim, memory_id\)$/i);
+      await expect(runMigrations(pool, directory)).resolves.toHaveLength(0);
+
+      // Simulate a crash after the retry-safe DDL but before its ledger write.
+      await pool.query('DELETE FROM _continuum_migrations WHERE name = $1', [repairMigration]);
+      await expect(runMigrations(pool, directory)).resolves.toHaveLength(1);
+      expect((await pool.query(`
+        SELECT count(*)::int AS count
+          FROM pg_indexes
+         WHERE schemaname = current_schema()
+           AND indexname = 'memory_embeddings_provider_dim_memory_idx'
+      `)).rows[0].count).toBe(1);
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  });
+
   it('uses one dedicated client and locks before inspecting the ledger', async () => {
     const queries: string[] = [];
     const release = vi.fn();
