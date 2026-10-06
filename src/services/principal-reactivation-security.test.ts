@@ -752,7 +752,10 @@ describe('principal reactivation database trust boundary', () => {
       await expect(syncEntraMemberships(rolePool, admin, [{
         id: groupId, status: 'present', displayName: 'Runtime Group',
         memberObjectIds: ['aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'],
-      }], { allowMassDeactivation: true })).rejects.toThrow();
+      }], { allowMassDeactivation: true })).resolves.toMatchObject({
+        groupsSeen: 0, groupsSkipped: 1, membershipsActive: 0,
+        skipCodes: { UNBOUND_GROUP: 1 },
+      });
     } finally {
       await rolePool?.end();
       await pool.query(`DROP OWNED BY ${quotedRole}`);

@@ -137,12 +137,15 @@ UUID, initiator UUID, exact approval ID, and acknowledgement hash is appended to
 `principal_offboarding_run_events`. Finalization appends a `completed` row that
 preserves the initiator and records
 `completion_basis: database_verified_erasure`. The function constructs this
-evidence itself, requires the same currently effective org administrator that
-initiated the run, and labels cumulative counters under
+evidence itself and labels cumulative counters under
 `telemetry.trust: application_reported`; caller JSON cannot become immutable
 completion evidence. The ledger rejects update,
 delete, and truncate; mutable cursor progress is never the sole authorization
-record. Direct deletion of run progress is rejected, `completed_at` cannot be
+record. Any current effective org administrator may resume an incomplete run;
+the first cross-admin takeover by a current effective org administrator and the
+eventual finalizer are appended to the
+immutable run/takeover ledgers while preserving the original initiator. Direct
+deletion of run progress is rejected, `completed_at` cannot be
 set without the matching append-only completion row, and fences/cursors cannot
 move backwards within a run. Reactivation reads the immutable completed event,
 not mutable `completed_at`, and appends a `reactivated` event with the presented
@@ -282,6 +285,10 @@ application-reported counter labels. Migration
 `0045_offboarding_trust_boundary.sql` enforces owner-controlled audit retention,
 trusted approval and Entra administrator paths, server-generated correlation,
 upgrade-safe function ACLs, per-takeover evidence, and one bounded restart proof.
+Migration `0046_offboarding_authority_remediation.sql` binds approvals and sync
+to separately provisioned database roles, restores manual-admin DML protection,
+removes legacy request-ID authority, aligns retention cutoff evidence, and
+restores early immutable-start validation.
 
 The final database verification is exact and executes once: the completion
 event trigger checks every memory and every audit row linked to the run's
@@ -307,13 +314,13 @@ must roll back and retry the entire transaction after the lifecycle operation
 commits; do not retry only the rejected statement inside an aborted
 transaction.
 
-Production must use separate migration-owner and application roles. Drain old
-offboarding-capable API, MCP, admin, and membership-sync processes; run
-`continuum-migrate` through `0045_offboarding_trust_boundary.sql` with
-`CONTINUUM_DATABASE_URL` set to the
-migration owner; apply the exact grant script below; and only then start the new
-binaries with the same variable set to a non-owner application role. Do not mix pre-`0045` and `0045`
-application or grant versions.
+Production must use separate migration-owner, shared application, dedicated
+operator, and dedicated sync login roles. The operator and sync roles must not
+be granted to the shared application role. Rollout is an explicit maintenance
+window: **stop** every API, MCP, admin, retention, and membership-sync process;
+**migrate** through `0046_offboarding_authority_remediation.sql` as the owner;
+**regrant** the shared app, operator, and sync profiles; then **start** only the
+`0046`-aware binaries. Mixed pre-`0046`/`0046` binaries or grants are unsupported.
 The application role must not own the event ledger, completion-capability
 table, or security-definer functions, and receives no direct privilege on the
 capability table. Direct `completed` inserts then fail at the trigger.
@@ -325,12 +332,28 @@ psql "$CONTINUUM_MIGRATION_OWNER_URL" \
   --set=continuum_schema=public \
   --set=continuum_app_role=continuum_app \
   --file=scripts/grant-application-role.sql
+
+psql "$CONTINUUM_MIGRATION_OWNER_URL" \
+  --set=continuum_schema=public \
+  --set=continuum_operator_role=continuum_operator \
+  --set=continuum_principal_id='<manual-admin-uuid>' \
+  --file=scripts/grant-operator-role.sql
+
+psql "$CONTINUUM_MIGRATION_OWNER_URL" \
+  --set=continuum_schema=public \
+  --set=continuum_sync_role=continuum_sync \
+  --set=continuum_principal_id='<manual-admin-uuid>' \
+  --file=scripts/grant-sync-role.sql
 ```
 
-The script enumerates the tables and sequences needed by capture, embedding,
-membership administration and sync, identity provisioning, service-key
-rotation, webhook delivery, lifecycle, and offboarding traffic, plus the
-completion and reactivation entry points. It explicitly revokes both
+The shared-role script enumerates ordinary capture, embedding, identity,
+service-key, webhook, lifecycle, retention, and offboarding traffic. Approval,
+binding provisioning, manual-admin changes, and Entra activation are excluded.
+Run `grant-application-role.sql` for the dedicated operator role before adding
+its DB-bound approval grants. The dedicated sync role receives only the reads,
+writes, and activation function needed by authoritative sync. The scripts revoke
+the identity registry and registration function from every non-owner role. The
+application script also explicitly revokes both
 backend-local capability tables and the selector-backfill function from the
 application role. Do not
 replace it with ownership, schema `CREATE`, broad `ALL TABLES`, or `PUBLIC`
@@ -348,20 +371,14 @@ requires the exact index to exist and be valid before the migration ledger can
 record success. A timeout or failed build leaves the file unapplied and safely
 retryable.
 
-Apply migrations through `0045_offboarding_trust_boundary.sql` before starting the new application version. Old
-instances can continue ordinary traffic after `0023`, but they do not know the
-offboarding workflow and an old authenticated request may already be in flight.
-Do not invoke offboarding until `0045_offboarding_trust_boundary.sql` is recorded on every shared
-database and all old application instances have drained. Use application-first rollback:
-stop invoking offboarding, drain the new instances, and
-deploy the old application only after `list-incomplete-offboarding` reports
-zero incomplete runs. An old application must never resume against an
-unfinished erasure. Do not drop the new columns, tables, functions, or
-triggers during that rollback; the old application tolerates them, while
-dropping the guards would reopen late-write races. Schema removal requires a
-separate reviewed migration only after no offboarded principals or owned-scope
-mappings remain. Offboarding erasure itself is irreversible and is not undone
-by an application rollback.
+Rollback is supported only to an 0046-aware binary and its matching grant
+profile. Stop all processes and confirm there are zero incomplete runs with
+`list-incomplete-offboarding`; then deploy the selected `0046`-aware binary, reapply all three
+grant profiles, and restart. Pre-`0046` binaries are incompatible with the new
+approval and sync boundary and are not a supported application-first rollback.
+Database rollback requires a separate forward migration; do not drop guards or
+regrant the shared role ad hoc. Completed offboarding erasure is irreversible
+and is never undone by binary or schema rollback.
 
 This is an application-data boundary. Operators must separately apply their
 documented retention policy to encrypted database backups, database/WAL logs,

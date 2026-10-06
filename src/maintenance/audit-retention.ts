@@ -342,6 +342,15 @@ export async function runAuditRetention(
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
     try {
       await authorizedPrincipalId(client, options.principalExternalId);
+      const policy = await client.query<{ minimum_days: number }>(
+        `SELECT continuum_audit_retention_minimum_days()::int AS minimum_days`,
+      );
+      const minimumDays = Number(policy.rows[0]?.minimum_days);
+      if (!Number.isSafeInteger(minimumDays) || retentionDays < minimumDays) {
+        throw new RangeError(
+          `retentionDays must satisfy the database minimum of ${minimumDays} days`,
+        );
+      }
       const lock = await client.query<{ acquired: boolean }>(
         'SELECT pg_try_advisory_lock($1::bigint) AS acquired',
         [AUDIT_RETENTION_LOCK_KEY],

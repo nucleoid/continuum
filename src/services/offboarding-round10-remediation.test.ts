@@ -42,7 +42,8 @@ async function syncRolePool(
     .join('\n')
     .replaceAll(':"continuum_schema"', '"public"')
     .replaceAll(':"continuum_sync_role"', `"${role}"`)
-    .replaceAll("'\"continuum_principal_id\"'", `'${principalId}'`);
+    .replaceAll(":'continuum_principal_id'", `'${principalId}'`)
+    .replaceAll(":'continuum_sync_role'", `'${role}'`);
   await pool.query(sql);
   return new pg.Pool({
     ...(pool as unknown as { options: PoolConfig }).options,

@@ -11,7 +11,9 @@ of your choice. Do not run it as an API or MCP process timer.
 
 ## Configuration
 
-Set `CONTINUUM_AUDIT_RETENTION_DAYS` to a positive integer to enable retention.
+Set `CONTINUUM_AUDIT_RETENTION_DAYS` to an integer at or above the database
+minimum (30 days by default) to enable retention. Values below the current
+owner-controlled policy fail before dry-run selection, export, or deletion.
 Unset or empty keeps retention disabled. Disabled mode ignores retention tuning
 and export settings because none of them can affect a disabled run. The runner
 derives one cutoff from PostgreSQL's transaction clock in a repeatable-read
@@ -115,7 +117,8 @@ Only one runner can hold the dedicated advisory lock. Successful batches delete
 exactly their selected IDs and verify the deleted values still byte-match the
 selected export candidate. A concurrent row change rolls the delete back. The
 runner then writes one sanitized `action='archive'` summary in the same
-transaction. The immutable summary includes the cutoff, ID and time range, row
+transaction. The immutable summary includes the exact selected/applied cutoff
+reported by the runner, ID and time range, row
 count, run and batch identifiers, export mode, and digest. It never includes raw
 queries, metadata, payloads, credentials, or a host path.
 
