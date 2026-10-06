@@ -441,14 +441,23 @@ describe('offboarding and erasure', () => {
     )).rows[0].count).toBe(0);
   });
 
-  it('redacts exact JSON scope-name values without wildcard collateral damage', async () => {
+  it.each([
+    { scopeName: '%', collateral: 'collateral-percent-match' },
+    { scopeName: '_', collateral: 'x' },
+    { scopeName: 'a_b', collateral: 'axb' },
+  ])('redacts exact JSON scope-name value "$scopeName" without wildcard collateral damage', async ({
+    scopeName, collateral,
+  }) => {
     const value = await fixture();
-    await pool.query('UPDATE scopes SET name = $2 WHERE id = $1', [value.personal.id, 'a_b%']);
+    await pool.query('UPDATE scopes SET name = $2 WHERE id = $1', [value.personal.id, scopeName]);
+    expect((await pool.query(
+      'SELECT $2::text LIKE $1::text AS would_match', [scopeName, collateral],
+    )).rows[0].would_match).toBe(true);
     await pool.query(
       `INSERT INTO audit_log (principal_id, action, metadata) VALUES
        ($1, 'read', $2::jsonb), ($1, 'read', $3::jsonb)`,
-      [value.admin.id, JSON.stringify({ nested: { scope: 'a_b%' } }),
-        JSON.stringify({ nested: { scope: 'axbZZ' }, marker: 'unrelated' })],
+      [value.admin.id, JSON.stringify({ nested: { scope: scopeName } }),
+        JSON.stringify({ nested: { scope: collateral }, marker: 'unrelated' })],
     );
     await offboardPrincipal(pool, value.admin, value.target.id);
     const rows = (await pool.query(
@@ -456,7 +465,7 @@ describe('offboarding and erasure', () => {
         WHERE principal_id = $1 AND action = 'read' ORDER BY id`, [value.admin.id],
     )).rows;
     expect(rows[0].metadata).toEqual({ redacted: 'principal_offboarding' });
-    expect(rows[1].metadata).toEqual({ nested: { scope: 'axbZZ' }, marker: 'unrelated' });
+    expect(rows[1].metadata).toEqual({ nested: { scope: collateral }, marker: 'unrelated' });
   });
 
   it('binds shared-scope acknowledgement to the reviewed principal evidence set', async () => {
