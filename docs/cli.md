@@ -6,6 +6,9 @@ Org-admin identity, group-binding, and offboarding commands are exposed through
 `--dry-run` count and bounded UUID evidence before execution. Execution requires
 `--confirm-scope <user-scope-id>` matching the locked mapping and accepts
 `--batch-size <1-5000>` for the resumable fenced procedure.
+The admin command loops until `complete: true` by default. Use `--once` for an
+external one-batch orchestrator, and `list-incomplete-offboarding` to enumerate
+durable unfinished runs before or after maintenance.
 Mapping a legitimately shared personal scope requires the explicit
 `map-user-scope ... --allow-other-active-members` acknowledgement.
 

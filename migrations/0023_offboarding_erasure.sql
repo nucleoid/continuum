@@ -36,6 +36,10 @@ CREATE TRIGGER preserve_user_scope_approval
 BEFORE UPDATE OR DELETE ON principal_user_scope_approvals
 FOR EACH ROW EXECUTE FUNCTION continuum_preserve_user_scope_approval();
 
+CREATE TRIGGER preserve_user_scope_approval_truncate
+BEFORE TRUNCATE ON principal_user_scope_approvals
+FOR EACH STATEMENT EXECUTE FUNCTION continuum_preserve_user_scope_approval();
+
 CREATE TABLE principal_offboarding_runs (
   principal_id UUID PRIMARY KEY REFERENCES principals(id) ON DELETE RESTRICT,
   scope_id UUID NOT NULL REFERENCES scopes(id) ON DELETE RESTRICT,
@@ -49,9 +53,16 @@ CREATE TABLE principal_offboarding_runs (
   initial_entra_bindings INTEGER NOT NULL CHECK (initial_entra_bindings >= 0),
   initial_audit_rows INTEGER NOT NULL CHECK (initial_audit_rows >= 0),
   initial_audit_queries INTEGER NOT NULL CHECK (initial_audit_queries >= 0),
+  initial_audit_selection JSONB NOT NULL DEFAULT '{}'::jsonb,
   memories_processed INTEGER NOT NULL DEFAULT 0 CHECK (memories_processed >= 0),
   audit_rows_processed INTEGER NOT NULL DEFAULT 0 CHECK (audit_rows_processed >= 0),
   batches INTEGER NOT NULL DEFAULT 0 CHECK (batches >= 0),
+  memory_cursor UUID,
+  audit_principal_cursor BIGINT NOT NULL DEFAULT 0,
+  audit_scope_cursor BIGINT NOT NULL DEFAULT 0,
+  audit_memory_cursor BIGINT NOT NULL DEFAULT 0,
+  audit_scope_ids_cursor BIGINT NOT NULL DEFAULT 0,
+  audit_linked_cursor BIGINT NOT NULL DEFAULT 0,
   completed_at TIMESTAMPTZ
 );
 
@@ -84,6 +95,20 @@ CREATE TABLE principal_offboarding_events (
 
 CREATE INDEX principal_offboarding_events_principal_idx
   ON principal_offboarding_events (principal_id, id);
+
+CREATE FUNCTION continuum_preserve_offboarding_event() RETURNS trigger AS $$
+BEGIN
+  RAISE EXCEPTION 'principal offboarding event evidence is immutable';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER preserve_offboarding_event
+BEFORE UPDATE OR DELETE ON principal_offboarding_events
+FOR EACH ROW EXECUTE FUNCTION continuum_preserve_offboarding_event();
+
+CREATE TRIGGER preserve_offboarding_event_truncate
+BEFORE TRUNCATE ON principal_offboarding_events
+FOR EACH STATEMENT EXECUTE FUNCTION continuum_preserve_offboarding_event();
 
 CREATE FUNCTION continuum_validate_principal_user_scope() RETURNS trigger AS $$
 BEGIN

@@ -10,11 +10,32 @@ import { createPrincipal, upsertPrincipalByExternalId } from '../storage/princip
 import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import {
-  mapOwnedUserScope, MAX_OFFBOARD_AFFECTED_ROWS, MAX_OFFBOARD_MEMORIES, offboardPrincipal,
+  listIncompleteOffboardingRuns, mapOwnedUserScope, MAX_OFFBOARD_AFFECTED_ROWS, MAX_OFFBOARD_MEMORIES,
+  offboardPrincipal as serviceOffboardPrincipal, type OffboardingOptions,
 } from './offboarding.js';
 import { provisionEntraGroupBinding } from './membership-sync.js';
 import { disablePrincipal, reactivatePrincipal } from './principal-admin.js';
 import { recallForPrincipal } from './recall.js';
+
+async function offboardPrincipal(
+  pool: pg.Pool, actor: Parameters<typeof serviceOffboardPrincipal>[1], principalId: string,
+  options: boolean | OffboardingOptions = false,
+) {
+  if (options === true || (typeof options === 'object' && options.dryRun)) {
+    return serviceOffboardPrincipal(pool, actor, principalId, options);
+  }
+  if (typeof options === 'object' && options.confirmationScopeId) {
+    return serviceOffboardPrincipal(pool, actor, principalId, options);
+  }
+  const mapping = await pool.query(
+    'SELECT scope_id::text AS scope_id FROM principal_user_scopes WHERE principal_id = $1',
+    [principalId],
+  );
+  return serviceOffboardPrincipal(pool, actor, principalId, {
+    ...(typeof options === 'object' ? options : {}),
+    confirmationScopeId: mapping.rows[0]?.scope_id,
+  });
+}
 
 describe('offboarding and erasure', () => {
   let pool: pg.Pool;
@@ -57,8 +78,8 @@ describe('offboarding and erasure', () => {
       memories: 1, embeddings: 1, memberships: 1, liveMemories: 1,
       auditQueries: 0, dryRun: true,
       evidence: {
-        memberPrincipalIds: [value.target.id],
-        authorPrincipalIds: [value.target.id],
+        memberPrincipalIds: [],
+        authorPrincipalIds: [],
         memberPrincipalIdsTruncated: false,
         authorPrincipalIdsTruncated: false,
       },
@@ -476,7 +497,7 @@ describe('offboarding and erasure', () => {
       [value.target.id],
     )).rows[0];
     expect(durable).toMatchObject({ memories: 1, embeddings: 1, memberships: 1 });
-    expect(durable.evidence).toMatchObject({ memberPrincipalIds: [value.target.id] });
+    expect(durable.evidence).toMatchObject({ memberPrincipalIds: [] });
     await pool.query('DELETE FROM audit_log');
     const retry = await offboardPrincipal(pool, value.admin, value.target.id);
     expect(retry.alreadyOffboarded).toBe(true);
@@ -714,10 +735,9 @@ describe('offboarding and erasure', () => {
     expect(preview.memories).toBe(MAX_OFFBOARD_MEMORIES + 1);
     expect(preview.auditRows).toBe(MAX_OFFBOARD_AFFECTED_ROWS + 1);
     const first = await offboardPrincipal(pool, value.admin, value.target.id, { batchSize: 10 });
-    expect(first).toMatchObject({
-      complete: false,
-      progress: { memoriesProcessed: 10, auditRowsProcessed: 10 },
-    });
+    expect(first).toMatchObject({ complete: false, progress: { memoriesProcessed: 10 } });
+    expect(first.progress.auditRowsProcessed).toBeGreaterThan(0);
+    expect(first.progress.auditRowsProcessed).toBeLessThanOrEqual(10);
     expect((await pool.query(
       `SELECT disabled_at IS NOT NULL AS disabled, offboarded_at IS NOT NULL AS fenced
          FROM principals WHERE id = $1`, [value.target.id],
@@ -768,7 +788,7 @@ describe('offboarding and erasure', () => {
 
   it('requires exact service-layer confirmation for every non-dry-run batch', async () => {
     const value = await fixture();
-    await expect(offboardPrincipal(pool, value.admin, value.target.id))
+    await expect(serviceOffboardPrincipal(pool, value.admin, value.target.id))
       .rejects.toThrow(/confirmation scope id is required/i);
     await expect(offboardPrincipal(pool, value.admin, value.target.id, {
       confirmationScopeId: value.shared.id,
@@ -792,6 +812,11 @@ describe('offboarding and erasure', () => {
       confirmationScopeId: value.personal.id, batchSize: 1,
     });
     expect(first.complete).toBe(false);
+    await expect(listIncompleteOffboardingRuns(pool, value.admin)).resolves.toEqual([
+      expect.objectContaining({
+        principalId: value.target.id, scopeId: value.personal.id, batches: 1,
+      }),
+    ]);
     expect((await pool.query(
       `SELECT request_id FROM principal_offboarding_audit_requests WHERE principal_id = $1`,
       [value.target.id],
@@ -820,7 +845,8 @@ describe('offboarding and erasure', () => {
       `DELETE FROM principal_offboarding_events WHERE principal_id = $1`, [value.target.id],
     )).rejects.toThrow(/immutable/i);
     await expect(pool.query('TRUNCATE principal_offboarding_events')).rejects.toThrow(/immutable/i);
-    await expect(pool.query('TRUNCATE principal_user_scope_approvals')).rejects.toThrow(/immutable/i);
+    await expect(pool.query('TRUNCATE principal_user_scope_approvals CASCADE'))
+      .rejects.toThrow(/immutable/i);
   });
 
   it('accepts exactly the bounded maximum of other-principal evidence', async () => {
@@ -858,7 +884,7 @@ describe('offboarding and erasure', () => {
     let priorMemories = 0;
     let priorAudits = 0;
     let result;
-    for (let attempt = 0; attempt < 20; attempt += 1) {
+    for (let attempt = 0; attempt < 40; attempt += 1) {
       result = await offboardPrincipal(pool, value.admin, value.target.id, {
         confirmationScopeId: value.personal.id, batchSize: 5_000,
       });

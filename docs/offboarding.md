@@ -12,6 +12,7 @@ immutable principal UUID to exactly one existing `user` scope UUID:
 npm run admin -- map-user-scope <principal-id> <user-scope-id>
 npm run admin -- offboard-principal <principal-id> --dry-run
 npm run admin -- offboard-principal <principal-id> --confirm-scope <user-scope-id> --batch-size 1000
+npm run admin -- list-incomplete-offboarding
 ```
 
 The REST equivalents are `PUT
@@ -50,10 +51,14 @@ deactivates owned-scope access, quarantines its Entra bindings, and deletes
 aliases in the first transaction. Those database fences remain closed while
 memories and audit rows are processed in retry-safe batches. `batchSize`
 defaults to 1,000 and accepts 1 through 5,000 through REST or CLI
-`--batch-size`; each response reports cumulative processed counts, remaining
-counts, batch number, and `complete`. Principals with more than 10,000 memories
+`--batch-size`; each response reports cumulative processed counts, bounded
+remaining-work indicators, batch number, and `complete`. Durable UUID and audit
+ID keyset cursors ensure every resumed batch scans bounded windows; bounded
+`EXISTS` probes, rather than full recounts, decide completion. Principals with more than 10,000 memories
 or 50,000 audit rows use the same path and are not rejected. Reissue the exact
-confirmed operation until `complete: true`. Every membership on the owned scope
+confirmed REST operation until `complete: true`. The admin CLI does this loop by
+default; `--once` performs one batch for external orchestration, and
+`list-incomplete-offboarding` lists durable unfinished runs. Every membership on the owned scope
 is deactivated, including delegate and ingest identities. Database triggers
 reject later active memberships or bindings while its owner remains offboarded.
 Safe retries return
@@ -86,11 +91,23 @@ knowledge-gap output. Audit inserts lock the principal row and are rejected
 after offboarding; an in-flight recall that loses this race fails closed instead
 of returning results with an unsanitized late audit row.
 
-Each changed ownership acknowledgement is written to the immutable
+Offboarding is not globally atomic across all batches. Until `complete: true`,
+audit rows beyond the current keyset cursors can still contain raw query text and
+remain visible to authorized audit and knowledge-gap readers. The principal and
+owned scope are fenced immediately, but operators must treat an incomplete run
+as active privacy work and resume it promptly. A query already copied into a
+preserved shared org knowledge-gap memory is shared provenance, not an owned
+scope row; offboarding does not rewrite that shared record.
+
+When the departing principal acted as an administrator, UUID-only API-key,
+principal-admin, Entra-binding, and membership-sync metadata is retained for
+audit integrity; `query` and free-text/name fields are removed. Each changed
+ownership acknowledgement is written to the immutable
 `principal_user_scope_approvals` ledger with approver UUID, timestamp, reviewed
 UUIDs, and evidence hash. UUID-only mapping and erasure receipt audit operations
 are excluded from redaction. The original count and bounded-ID receipt is also written to
-`principal_offboarding_events`. That compact privacy-safe ledger is outside
+`principal_offboarding_events`. Both evidence ledgers reject update, delete,
+and truncate operations. The compact privacy-safe event ledger is outside
 ordinary `audit_log` retention and is the authoritative retry evidence after
 audit rows have been pruned. It contains UUIDs, counts, timestamps, and
 truncation flags only, never memory text, names, queries, or verification notes.
@@ -105,7 +122,8 @@ identity rows retain the immutable Entra object ID solely as the minimal
 pseudonymous deny-list key needed to prevent silent re-provisioning. This
 documented exception can still be personal data and must not be used for display
 or new authorization; aliases and display names are removed or pseudonymized.
-Only the audited `reactivate-principal` operator action can enable the identity.
+Only the audited `reactivate-principal` operator action can enable the identity,
+and it is refused while a durable offboarding run is incomplete.
 It clears the offboarded lifecycle marker and records
 `previously_offboarded: true`, but does not itself restore memberships, keys,
 names, or erased content. A later authoritative membership sync can restore
@@ -130,16 +148,12 @@ timeouts. Migration `0023_offboarding_erasure.sql` installs the ledgers and
 database guards after that lock is released. Migration
 `0024_offboarding_embedding_cleanup.sql` removes old archived embeddings in its
 own transaction. Migration `0025_offboarding_audit_indexes.sql` is marked
-no-transaction and creates the three audit indexes with `CREATE INDEX
-CONCURRENTLY IF NOT EXISTS`. The migrator serializes every file with its
-advisory lock; a crash before a no-transaction ledger write safely retries the
-idempotent index statements. A failed concurrent build can leave an `INVALID`
-index that still satisfies `IF NOT EXISTS`. Before retrying a file that failed
-during index construction, inspect `pg_index.indisvalid` in the target schema
-and use `DROP INDEX CONCURRENTLY <exact-invalid-index>` only for an invalid
-remnant. Do not use an unqualified drop on a multi-schema search path. Old
-application versions do not depend on these new indexes. A timeout or failed
-build leaves the file unapplied so the operator can remove the blocker and retry.
+no-transaction and creates the three audit indexes concurrently. Before each
+create, the migrator resolves the named index in `current_schema()`, drops that
+exact schema-qualified object concurrently only when `pg_index.indisvalid` is
+false, and then creates it. A post-create directive requires the exact index to
+exist and be valid before the migration ledger can record success. A timeout or
+failed build leaves the file unapplied and safely retryable.
 
 Apply all four migrations before starting the new application version. Old
 instances can continue ordinary traffic after `0023`, but they do not know the

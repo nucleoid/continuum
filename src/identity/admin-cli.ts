@@ -7,7 +7,9 @@ import {
 } from '../services/principal-admin.js';
 import type { MembershipRole } from '../types.js';
 import { cliFailure } from './cli-errors.js';
-import { mapOwnedUserScope, offboardPrincipal } from '../services/offboarding.js';
+import {
+  listIncompleteOffboardingRuns, mapOwnedUserScope, offboardPrincipal,
+} from '../services/offboarding.js';
 
 async function main(): Promise<void> {
   const [operation, ...args] = process.argv.slice(2);
@@ -75,6 +77,7 @@ async function main(): Promise<void> {
       })}\n`);
     } else if (operation === 'offboard-principal') {
       const dryRun = args.includes('--dry-run');
+      const once = args.includes('--once');
       const confirmIndex = args.indexOf('--confirm-scope');
       const confirmationScopeId = confirmIndex >= 0 ? args[confirmIndex + 1] : undefined;
       const batchIndex = args.indexOf('--batch-size');
@@ -82,6 +85,7 @@ async function main(): Promise<void> {
       const batchSize = batchText === undefined ? undefined : Number(batchText);
       const consumed = new Set<number>();
       if (dryRun) consumed.add(args.indexOf('--dry-run'));
+      if (once) consumed.add(args.indexOf('--once'));
       if (confirmIndex >= 0) { consumed.add(confirmIndex); consumed.add(confirmIndex + 1); }
       if (batchIndex >= 0) { consumed.add(batchIndex); consumed.add(batchIndex + 1); }
       const positional = args.filter((_value, index) => !consumed.has(index));
@@ -91,13 +95,24 @@ async function main(): Promise<void> {
         || (batchIndex >= 0 && (!Number.isInteger(batchSize)
           || (batchSize ?? 0) < 1 || (batchSize ?? 0) > 5_000))
         || args.some((value, index) => value.startsWith('--') && !consumed.has(index))) {
-        throw new Error('usage: offboard-principal <principal-id> (--dry-run | --confirm-scope <user-scope-id>) [--batch-size <1-5000>]');
+        throw new Error('usage: offboard-principal <principal-id> (--dry-run | --confirm-scope <user-scope-id>) [--batch-size <1-5000>] [--once]');
+      }
+      let result = await offboardPrincipal(pool, actor, positional[0], {
+        dryRun, confirmationScopeId, batchSize,
+      });
+      while (!dryRun && !once && !result.complete) {
+        result = await offboardPrincipal(pool, actor, positional[0], {
+          dryRun: false, confirmationScopeId, batchSize,
+        });
       }
       process.stdout.write(`${JSON.stringify({
         operation,
-        ...await offboardPrincipal(pool, actor, positional[0], {
-          dryRun, confirmationScopeId, batchSize,
-        }),
+        ...result,
+      })}\n`);
+    } else if (operation === 'list-incomplete-offboarding') {
+      if (args.length) throw new Error('usage: list-incomplete-offboarding');
+      process.stdout.write(`${JSON.stringify({
+        operation, runs: await listIncompleteOffboardingRuns(pool, actor),
       })}\n`);
     } else throw new Error('unknown admin operation');
   } finally { await pool.end(); }

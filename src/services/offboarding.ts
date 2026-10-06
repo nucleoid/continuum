@@ -70,6 +70,45 @@ export interface OffboardingOptions {
   batchSize?: number;
 }
 
+export interface IncompleteOffboardingRun {
+  principalId: string;
+  scopeId: string;
+  startedAt: Date;
+  batches: number;
+  memoriesProcessed: number;
+  auditRowsProcessed: number;
+}
+
+export async function listIncompleteOffboardingRuns(
+  pool: pg.Pool, actor: Principal,
+): Promise<IncompleteOffboardingRun[]> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await requireOrgAdmin(client, actor.id);
+    const result = await client.query(
+      `SELECT principal_id::text, scope_id::text, started_at, batches,
+              memories_processed, audit_rows_processed
+         FROM principal_offboarding_runs
+        WHERE completed_at IS NULL ORDER BY started_at, principal_id`,
+    );
+    await client.query('COMMIT');
+    return result.rows.map((row) => ({
+      principalId: row.principal_id as string,
+      scopeId: row.scope_id as string,
+      startedAt: row.started_at as Date,
+      batches: Number(row.batches),
+      memoriesProcessed: Number(row.memories_processed),
+      auditRowsProcessed: Number(row.audit_rows_processed),
+    }));
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 function id(value: string, field: string): string {
   if (!UUID.test(value)) throw new ServiceError('INVALID_INPUT', `${field} must be a UUID`);
   return value.toLowerCase();
@@ -262,10 +301,173 @@ const PRESERVED_AUDIT_OPERATIONS = [
   'principal_offboarding_repaired',
 ] as const;
 
+const UUID_ONLY_ADMIN_AUDIT_OPERATIONS = [
+  'api_key_issued',
+  'api_key_rotated',
+  'api_key_revoked',
+  'principal_disabled',
+  'principal_reactivated',
+  'service_principal_provisioned',
+  'entra_group_binding_provisioned',
+  'entra_group_binding_revoked',
+  'entra_membership_sync_rejected',
+  'entra_membership_sync_screened',
+  'entra_membership_sync',
+] as const;
+
+const ADMIN_OPERATION_SQL = `ARRAY[${UUID_ONLY_ADMIN_AUDIT_OPERATIONS
+  .map((operation) => `'${operation}'`).join(',')}]::text[]`;
+const AUDIT_SAFE_METADATA = `(SELECT COALESCE(jsonb_object_agg(entry.key, entry.value), '{}'::jsonb)
+  FROM jsonb_each(a.metadata) entry
+ WHERE entry.key = 'operation'
+    OR jsonb_typeof(entry.value) IN ('number', 'boolean')
+    OR (jsonb_typeof(entry.value) = 'string'
+        AND trim(both '"' from entry.value::text)
+          ~* '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$')
+    OR (jsonb_typeof(entry.value) = 'array'
+        AND NOT EXISTS (
+          SELECT 1 FROM jsonb_array_elements_text(entry.value) item(value)
+           WHERE item.value !~* '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+        )))`;
+const AUDIT_REDACTED_METADATA = `'${JSON.stringify({ redacted: 'principal_offboarding' })}'::jsonb`;
+const AUDIT_EXPECTED_METADATA = `(CASE
+  WHEN a.metadata->>'operation' = ANY(${ADMIN_OPERATION_SQL}) THEN ${AUDIT_SAFE_METADATA}
+  ELSE ${AUDIT_REDACTED_METADATA} END)`;
+
 const AUDIT_DIRTY = `(a.query IS NOT NULL
-  OR a.metadata IS DISTINCT FROM '{"redacted":"principal_offboarding"}'::jsonb)`;
+  OR a.metadata IS DISTINCT FROM ${AUDIT_EXPECTED_METADATA})`;
 const AUDIT_NOT_PRESERVED = `COALESCE(a.metadata->>'operation', '')
   <> ALL($3::text[])`;
+
+type AuditCursorColumn = 'audit_principal_cursor' | 'audit_scope_cursor'
+  | 'audit_memory_cursor' | 'audit_scope_ids_cursor' | 'audit_linked_cursor';
+
+async function selectAuditBranch(
+  client: pg.PoolClient,
+  args: {
+    principalId: string; scopeId: string; cursor: string; cursorColumn: AuditCursorColumn;
+    reason: 'principal' | 'scope' | 'memory' | 'scope_ids' | 'linked_request';
+    from: string; where: string; remaining: number;
+  },
+): Promise<number> {
+  if (args.remaining <= 0) return 0;
+  const selected = await client.query(
+    `WITH candidates AS MATERIALIZED (
+       SELECT a.*
+         ${args.from}
+        WHERE a.id > $4 AND $1::uuid IS NOT NULL AND $2::uuid IS NOT NULL AND ${args.where}
+        ORDER BY a.id LIMIT $5
+     ), selected AS (
+       SELECT a.id, a.metadata->>'request_id' AS request_id
+         FROM candidates a
+        WHERE ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED}
+     ), inserted AS (
+       INSERT INTO offboarding_audit_targets (id, request_id, reason)
+       SELECT id, request_id, $6 FROM selected
+       ON CONFLICT (id) DO NOTHING RETURNING id
+     )
+     SELECT COALESCE((SELECT max(id) FROM candidates), $4::bigint)::text AS cursor,
+            (SELECT count(*)::int FROM inserted) AS inserted`,
+    [args.scopeId, args.principalId, [...PRESERVED_AUDIT_OPERATIONS], args.cursor,
+      args.remaining, args.reason],
+  );
+  const cursor = selected.rows[0].cursor as string;
+  if (BigInt(cursor) > BigInt(args.cursor)) {
+    await client.query(
+      `UPDATE principal_offboarding_runs SET ${args.cursorColumn} = $2 WHERE principal_id = $1`,
+      [args.principalId, cursor],
+    );
+  }
+  return Number(selected.rows[0].inserted);
+}
+
+async function auditWorkRemains(
+  client: pg.PoolClient, scopeId: string, principalId: string,
+): Promise<boolean> {
+  const result = await client.query(
+    `SELECT EXISTS (
+       SELECT 1 FROM audit_log a
+        WHERE a.principal_id = $2 AND ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED} LIMIT 1
+     ) OR EXISTS (
+       SELECT 1 FROM audit_log a
+        WHERE a.scope_id = $1 AND ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED} LIMIT 1
+     ) OR EXISTS (
+       SELECT 1 FROM memories m JOIN audit_log a ON a.memory_id = m.id
+        WHERE m.scope_id = $1 AND ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED} LIMIT 1
+     ) OR EXISTS (
+       SELECT 1 FROM audit_log a
+        WHERE a.metadata ? 'scope_ids'
+          AND a.metadata->'scope_ids' @> jsonb_build_array($1::text)
+          AND ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED} LIMIT 1
+     ) OR EXISTS (
+       SELECT 1 FROM principal_offboarding_audit_requests r
+       JOIN audit_log a ON a.metadata ? 'request_id'
+        AND a.metadata->>'request_id' = r.request_id
+        WHERE r.principal_id = $2 AND ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED} LIMIT 1
+     ) AS remains`,
+    [scopeId, principalId, [...PRESERVED_AUDIT_OPERATIONS]],
+  );
+  return result.rows[0].remains as boolean;
+}
+
+async function auditCursorWorkRemains(
+  client: pg.PoolClient, scopeId: string, principalId: string,
+  cursors: Record<AuditCursorColumn, string>,
+): Promise<boolean> {
+  const result = await client.query(
+    `SELECT EXISTS (
+       SELECT 1 FROM audit_log a WHERE a.principal_id = $2 AND a.id > $3 LIMIT 1
+     ) OR EXISTS (
+       SELECT 1 FROM audit_log a WHERE a.scope_id = $1 AND a.id > $4 LIMIT 1
+     ) OR EXISTS (
+       SELECT 1 FROM memories m JOIN audit_log a ON a.memory_id = m.id
+        WHERE m.scope_id = $1 AND a.id > $5 LIMIT 1
+     ) OR EXISTS (
+       SELECT 1 FROM audit_log a
+        WHERE a.metadata ? 'scope_ids'
+          AND a.metadata->'scope_ids' @> jsonb_build_array($1::text)
+          AND a.id > $6 LIMIT 1
+     ) OR EXISTS (
+       SELECT 1 FROM principal_offboarding_audit_requests r
+       JOIN audit_log a ON a.metadata ? 'request_id'
+        AND a.metadata->>'request_id' = r.request_id
+        WHERE r.principal_id = $2 AND a.id > $7 LIMIT 1
+     ) AS remains`,
+    [scopeId, principalId, cursors.audit_principal_cursor,
+      cursors.audit_scope_cursor, cursors.audit_memory_cursor,
+      cursors.audit_scope_ids_cursor, cursors.audit_linked_cursor],
+  );
+  return result.rows[0].remains as boolean;
+}
+
+async function stateWorkRemains(
+  client: pg.PoolClient, scopeId: string, principalId: string, memoryCursor?: string | null,
+): Promise<{ memories: boolean; embeddings: boolean; memberships: boolean;
+  aliases: boolean; entraBindings: boolean }> {
+  const result = await client.query(
+    `SELECT
+       EXISTS (SELECT 1 FROM memories WHERE scope_id = $1 AND (
+         ($3::uuid IS NOT NULL AND id > $3)
+         OR ($3::uuid IS NULL AND (
+           type <> 'context' OR title <> '[erased]' OR body <> '[erased]'
+           OR metadata <> '{}'::jsonb OR tags <> '{}'::text[] OR source <> 'erased'
+           OR source_ref IS NOT NULL OR state <> 'archived' OR supersedes_id IS NOT NULL
+           OR promoted_to_id IS NOT NULL OR expires_at IS NOT NULL OR last_verified IS NOT NULL
+         ))
+       ) LIMIT 1) AS memories,
+       EXISTS (SELECT 1 FROM memory_embeddings e JOIN memories m ON m.id = e.memory_id
+         WHERE m.scope_id = $1 LIMIT 1) AS embeddings,
+       EXISTS (SELECT 1 FROM scope_memberships WHERE scope_id = $1 AND active LIMIT 1) AS memberships,
+       EXISTS (SELECT 1 FROM principal_aliases WHERE principal_id = $2 LIMIT 1) AS aliases,
+       EXISTS (SELECT 1 FROM entra_groups WHERE scope_id = $1
+         AND (active OR approval_revoked_at IS NULL) LIMIT 1) AS entra_bindings`,
+    [scopeId, principalId, memoryCursor ?? null],
+  );
+  return result.rows[0] as {
+    memories: boolean; embeddings: boolean; memberships: boolean;
+    aliases: boolean; entraBindings: boolean;
+  };
+}
 
 async function auditSelectionCounts(
   client: pg.PoolClient,
@@ -383,7 +585,10 @@ export async function offboardPrincipal(
     }
     const scopeId = mapping.rows[0].scope_id as string;
     const approvalId = mapping.rows[0].approval_id as string;
-    if (!dryRun && confirmationScopeId !== undefined && confirmationScopeId !== scopeId) {
+    if (!dryRun && confirmationScopeId === undefined) {
+      throw new ServiceError('INVALID_INPUT', 'confirmation scope id is required for erasure');
+    }
+    if (!dryRun && confirmationScopeId !== scopeId) {
       throw new ServiceError('CONFLICT', 'confirmation scope id does not match the owned user scope');
     }
     const scopeState = await client.query('SELECT name FROM scopes WHERE id = $1', [scopeId]);
@@ -419,24 +624,17 @@ export async function offboardPrincipal(
     const evidence: OffboardingEvidence = {
       ...ownership, acknowledgedPrincipalIds, acknowledgedEvidenceHash,
     };
-    const members = await client.query(
-      `SELECT DISTINCT principal_id::text AS id FROM scope_memberships
-        WHERE scope_id = $1 ORDER BY id LIMIT $2`,
-      [scopeId, MAX_OFFBOARD_EVIDENCE_IDS + 1],
+    let run = await client.query(
+      'SELECT * FROM principal_offboarding_runs WHERE principal_id = $1 FOR UPDATE', [principalId],
     );
-    const authors = await client.query(
-      `SELECT DISTINCT author_id::text AS id FROM memories
-        WHERE scope_id = $1 ORDER BY id LIMIT $2`,
-      [scopeId, MAX_OFFBOARD_EVIDENCE_IDS + 1],
-    );
-    evidence.memberPrincipalIds = members.rows.slice(0, MAX_OFFBOARD_EVIDENCE_IDS)
-      .map((member) => member.id as string);
-    evidence.authorPrincipalIds = authors.rows.slice(0, MAX_OFFBOARD_EVIDENCE_IDS)
-      .map((author) => author.id as string);
-    evidence.memberPrincipalIdsTruncated = members.rows.length > MAX_OFFBOARD_EVIDENCE_IDS;
-    evidence.authorPrincipalIdsTruncated = authors.rows.length > MAX_OFFBOARD_EVIDENCE_IDS;
-    requireCompleteEvidence(evidence);
-    const state = await client.query(
+    const resumedRun = run.rows[0]?.completed_at === null;
+    const resumedState = resumedRun
+      ? await stateWorkRemains(client, scopeId, principalId, run.rows[0].memory_cursor) : null;
+    const resumedAuditRemains = resumedRun
+      ? await auditCursorWorkRemains(
+        client, scopeId, principalId, run.rows[0] as Record<AuditCursorColumn, string>,
+      ) : false;
+    const state = resumedRun ? null : await client.query(
       `SELECT
          (SELECT count(*)::int FROM memories WHERE scope_id = $1) AS memories,
          (SELECT count(*)::int FROM memories WHERE scope_id = $1 AND state = 'live') AS live_memories,
@@ -454,8 +652,19 @@ export async function offboardPrincipal(
            AND (active OR approval_revoked_at IS NULL)) AS entra_bindings`,
       [scopeId, principalId],
     );
-    const audit = await auditSelectionCounts(client, scopeId, principalId);
-    const row = state.rows[0];
+    const audit = resumedRun ? {
+      selection: run.rows[0].initial_audit_selection as AuditSelectionCounts,
+      queries: Number(run.rows[0].initial_audit_queries),
+    } : await auditSelectionCounts(client, scopeId, principalId);
+    const row = resumedRun ? {
+      memories: run.rows[0].initial_memories,
+      live_memories: run.rows[0].initial_memories,
+      dirty_memories: resumedState!.memories ? 1 : 0,
+      embeddings: run.rows[0].initial_embeddings,
+      memberships: run.rows[0].initial_memberships,
+      aliases: run.rows[0].initial_aliases,
+      entra_bindings: run.rows[0].initial_entra_bindings,
+    } : state!.rows[0];
     const memories = Number(row.memories);
     const liveMemories = Number(row.live_memories);
     const dirtyMemories = Number(row.dirty_memories);
@@ -465,7 +674,7 @@ export async function offboardPrincipal(
     const entraBindings = Number(row.entra_bindings);
     const auditRows = audit.selection.total;
     const auditQueries = audit.queries;
-    const dirtyAuditRows = auditRows;
+    const dirtyAuditRows = resumedRun ? (resumedAuditRemains ? 1 : 0) : auditRows;
     const affectedRows = (dirtyMemories * 2) + embeddings + memberships + aliases
       + entraBindings + auditRows + 4;
     const original = await client.query(
@@ -486,8 +695,11 @@ export async function offboardPrincipal(
     } : null;
     const pseudonym = erasedPrincipalPseudonym(principalId);
     const scopePseudonym = erasedScopePseudonym(scopeId);
-    const clean = dirtyMemories === 0 && embeddings === 0 && memberships === 0
-      && aliases === 0 && entraBindings === 0 && auditRows === 0;
+    const clean = resumedRun
+      ? !resumedState!.memories && !resumedState!.embeddings && !resumedState!.memberships
+        && !resumedState!.aliases && !resumedState!.entraBindings && !resumedAuditRemains
+      : dirtyMemories === 0 && embeddings === 0 && memberships === 0
+        && aliases === 0 && entraBindings === 0 && auditRows === 0;
     const wasOffboarded = target.rows[0].offboarded_at !== null;
     const alreadyOffboarded = wasOffboarded
       && target.rows[0].disabled_at !== null
@@ -496,7 +708,7 @@ export async function offboardPrincipal(
       && scopeName === scopePseudonym && clean;
     const previewProgress: OffboardingProgress = {
       batch: 0, batchSize, memoriesProcessed: 0, auditRowsProcessed: 0,
-      memoriesRemaining: dirtyMemories, auditRowsRemaining: auditRows,
+      memoriesRemaining: dirtyMemories, auditRowsRemaining: dirtyAuditRows,
     };
     const baseResult = {
       principalId, scopeId, memories, liveMemories, embeddings, memberships, aliases,
@@ -507,15 +719,6 @@ export async function offboardPrincipal(
     if (dryRun) { await client.query('ROLLBACK'); return baseResult; }
     if (alreadyOffboarded) { await client.query('COMMIT'); return baseResult; }
 
-    if (target.rows[0].reactivated_at !== null) {
-      await client.query(
-        'DELETE FROM principal_offboarding_audit_requests WHERE principal_id = $1', [principalId],
-      );
-      await client.query('DELETE FROM principal_offboarding_runs WHERE principal_id = $1', [principalId]);
-    }
-    let run = await client.query(
-      'SELECT * FROM principal_offboarding_runs WHERE principal_id = $1 FOR UPDATE', [principalId],
-    );
     if (run.rows[0]?.completed_at !== null && run.rows[0]?.completed_at !== undefined) {
       await client.query(
         `UPDATE principal_offboarding_runs
@@ -523,11 +726,14 @@ export async function offboardPrincipal(
                 initial_memories = $4, initial_embeddings = $5, initial_memberships = $6,
                 initial_aliases = $7, initial_entra_bindings = $8,
                 initial_audit_rows = $9, initial_audit_queries = $10,
+                initial_audit_selection = $11::jsonb,
                 memories_processed = 0, audit_rows_processed = 0, batches = 0,
+                memory_cursor = NULL, audit_principal_cursor = 0, audit_scope_cursor = 0,
+                audit_memory_cursor = 0, audit_scope_ids_cursor = 0, audit_linked_cursor = 0,
                 completed_at = NULL
           WHERE principal_id = $1`,
         [principalId, actor.id, approvalId, memories, embeddings, memberships, aliases,
-          entraBindings, auditRows, auditQueries],
+          entraBindings, auditRows, auditQueries, JSON.stringify(audit.selection)],
       );
       run = await client.query(
         'SELECT * FROM principal_offboarding_runs WHERE principal_id = $1 FOR UPDATE', [principalId],
@@ -537,10 +743,11 @@ export async function offboardPrincipal(
         `INSERT INTO principal_offboarding_runs
            (principal_id, scope_id, initiated_by, approval_id, initial_memories,
             initial_embeddings, initial_memberships, initial_aliases,
-            initial_entra_bindings, initial_audit_rows, initial_audit_queries)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+            initial_entra_bindings, initial_audit_rows, initial_audit_queries,
+            initial_audit_selection)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb) RETURNING *`,
         [principalId, scopeId, actor.id, approvalId, memories, embeddings, memberships,
-          aliases, entraBindings, auditRows, auditQueries],
+          aliases, entraBindings, auditRows, auditQueries, JSON.stringify(audit.selection)],
       );
     }
 
@@ -567,14 +774,33 @@ export async function offboardPrincipal(
     );
 
     await client.query(
+      `CREATE TEMP TABLE offboarding_memory_candidates ON COMMIT DROP AS
+       SELECT id FROM memories
+        WHERE scope_id = $1 AND ($3::uuid IS NULL OR id > $3)
+        ORDER BY id LIMIT $2`,
+      [scopeId, batchSize, run.rows[0].memory_cursor],
+    );
+    const memoryCandidates = Number((await client.query(
+      'SELECT count(*)::int AS count FROM offboarding_memory_candidates',
+    )).rows[0].count);
+    if (memoryCandidates > 0) {
+      await client.query(
+        `UPDATE principal_offboarding_runs
+            SET memory_cursor = (
+              SELECT id FROM offboarding_memory_candidates ORDER BY id DESC LIMIT 1
+            )
+          WHERE principal_id = $1`, [principalId],
+      );
+    }
+    await client.query(
       `CREATE TEMP TABLE offboarding_memory_targets ON COMMIT DROP AS
-       SELECT id FROM memories WHERE scope_id = $1 AND (
-         type <> 'context' OR title <> '[erased]' OR body <> '[erased]'
-         OR metadata <> '{}'::jsonb OR tags <> '{}'::text[] OR source <> 'erased'
-         OR source_ref IS NOT NULL OR state <> 'archived' OR supersedes_id IS NOT NULL
-         OR promoted_to_id IS NOT NULL OR expires_at IS NOT NULL OR last_verified IS NOT NULL
-       ) ORDER BY id FOR UPDATE LIMIT $2`,
-      [scopeId, batchSize],
+       SELECT m.id FROM memories m
+       JOIN offboarding_memory_candidates candidate ON candidate.id = m.id
+       WHERE m.type <> 'context' OR m.title <> '[erased]' OR m.body <> '[erased]'
+          OR m.metadata <> '{}'::jsonb OR m.tags <> '{}'::text[] OR m.source <> 'erased'
+          OR m.source_ref IS NOT NULL OR m.state <> 'archived' OR m.supersedes_id IS NOT NULL
+          OR m.promoted_to_id IS NOT NULL OR m.expires_at IS NOT NULL OR m.last_verified IS NOT NULL
+       FOR UPDATE OF m`,
     );
     const memoryBatch = Number((await client.query(
       'SELECT count(*)::int AS count FROM offboarding_memory_targets',
@@ -608,81 +834,90 @@ export async function offboardPrincipal(
     );
 
     await client.query(
-      `CREATE TEMP TABLE offboarding_audit_targets ON COMMIT DROP AS
-       WITH candidates AS (
-         SELECT a.id, a.metadata->>'request_id' AS request_id, 'principal'::text AS reason, 1 AS priority
-           FROM audit_log a WHERE a.principal_id = $2 AND ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED}
-         UNION ALL
-         SELECT a.id, a.metadata->>'request_id', 'scope', 2
-           FROM audit_log a WHERE a.scope_id = $1 AND ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED}
-         UNION ALL
-         SELECT a.id, a.metadata->>'request_id', 'memory', 3
-           FROM memories m JOIN audit_log a ON a.memory_id = m.id
-          WHERE m.scope_id = $1 AND ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED}
-         UNION ALL
-         SELECT a.id, a.metadata->>'request_id', 'scope_ids', 4
-           FROM audit_log a
-          WHERE a.metadata ? 'scope_ids'
-            AND a.metadata->'scope_ids' @> jsonb_build_array($1::text)
-            AND ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED}
-       )
-       SELECT DISTINCT ON (id) id, request_id, reason FROM candidates
-        ORDER BY id, priority LIMIT $4`,
-      [scopeId, principalId, [...PRESERVED_AUDIT_OPERATIONS], batchSize],
+      `CREATE TEMP TABLE offboarding_audit_targets (
+         id BIGINT PRIMARY KEY, request_id TEXT, reason TEXT NOT NULL
+       ) ON COMMIT DROP`,
     );
-    await client.query('ALTER TABLE offboarding_audit_targets ADD PRIMARY KEY (id)');
-    await client.query(
+    let auditBatch = 0;
+    const branch = async (
+      cursorColumn: AuditCursorColumn, reason: Parameters<typeof selectAuditBranch>[1]['reason'],
+      from: string, where: string,
+    ) => {
+      const inserted = await selectAuditBranch(client, {
+        principalId, scopeId, cursorColumn, reason, from, where,
+        cursor: String(run.rows[0][cursorColumn]), remaining: batchSize - auditBatch,
+      });
+      auditBatch += inserted;
+    };
+    await branch('audit_principal_cursor', 'principal', 'FROM audit_log a', 'a.principal_id = $2');
+    await branch('audit_scope_cursor', 'scope', 'FROM audit_log a', 'a.scope_id = $1');
+    await branch(
+      'audit_memory_cursor', 'memory',
+      'FROM memories m JOIN audit_log a ON a.memory_id = m.id', 'm.scope_id = $1',
+    );
+    await branch(
+      'audit_scope_ids_cursor', 'scope_ids', 'FROM audit_log a',
+      `a.metadata ? 'scope_ids' AND a.metadata->'scope_ids' @> jsonb_build_array($1::text)`,
+    );
+    const addedRequests = await client.query(
       `INSERT INTO principal_offboarding_audit_requests (principal_id, request_id)
        SELECT $1, request_id FROM offboarding_audit_targets WHERE request_id IS NOT NULL
-       ON CONFLICT DO NOTHING`, [principalId],
+       ON CONFLICT DO NOTHING RETURNING request_id`, [principalId],
     );
-    const directBatch = Number((await client.query(
-      'SELECT count(*)::int AS count FROM offboarding_audit_targets',
-    )).rows[0].count);
-    await client.query(
-      `INSERT INTO offboarding_audit_targets (id, request_id, reason)
-       SELECT a.id, a.metadata->>'request_id', 'linked_request'
-         FROM principal_offboarding_audit_requests r
-         JOIN audit_log a ON a.metadata ? 'request_id'
-          AND a.metadata->>'request_id' = r.request_id
-        WHERE r.principal_id = $2 AND $1::uuid IS NOT NULL
-          AND ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED}
-       ORDER BY a.id
-       LIMIT $4
-       ON CONFLICT (id) DO NOTHING`,
-      [scopeId, principalId, [...PRESERVED_AUDIT_OPERATIONS],
-        Math.max(0, batchSize - directBatch)],
+    if (addedRequests.rowCount) {
+      run.rows[0].audit_linked_cursor = '0';
+      await client.query(
+        `UPDATE principal_offboarding_runs SET audit_linked_cursor = 0 WHERE principal_id = $1`,
+        [principalId],
+      );
+    }
+    await branch(
+      'audit_linked_cursor', 'linked_request',
+      `FROM principal_offboarding_audit_requests r
+       JOIN audit_log a ON a.metadata ? 'request_id'
+        AND a.metadata->>'request_id' = r.request_id`,
+      'r.principal_id = $2',
     );
-    const auditBatch = Number((await client.query(
+    const auditedRows = Number((await client.query(
       'SELECT count(*)::int AS count FROM offboarding_audit_targets',
     )).rows[0].count);
     await client.query(
       `UPDATE audit_log a SET query = NULL,
-              metadata = '{"redacted":"principal_offboarding"}'::jsonb
+              metadata = ${AUDIT_EXPECTED_METADATA}
          FROM offboarding_audit_targets t WHERE t.id = a.id`,
     );
 
-    const remainingState = await client.query(
-      `SELECT
-         (SELECT count(*)::int FROM memories WHERE scope_id = $1 AND (
-           type <> 'context' OR title <> '[erased]' OR body <> '[erased]'
-           OR metadata <> '{}'::jsonb OR tags <> '{}'::text[] OR source <> 'erased'
-           OR source_ref IS NOT NULL OR state <> 'archived' OR supersedes_id IS NOT NULL
-           OR promoted_to_id IS NOT NULL OR expires_at IS NOT NULL OR last_verified IS NOT NULL
-         )) AS memories,
-         (SELECT count(*)::int FROM memory_embeddings e JOIN memories m ON m.id = e.memory_id
-           WHERE m.scope_id = $1) AS embeddings,
-         (SELECT count(*)::int FROM scope_memberships WHERE scope_id = $1 AND active) AS memberships,
-         (SELECT count(*)::int FROM principal_aliases WHERE principal_id = $2) AS aliases,
-         (SELECT count(*)::int FROM entra_groups WHERE scope_id = $1
-           AND (active OR approval_revoked_at IS NULL)) AS entra_bindings`,
-      [scopeId, principalId],
+    await client.query(
+      `DELETE FROM principal_offboarding_audit_requests r
+        WHERE (r.principal_id, r.request_id) IN (
+          SELECT candidate.principal_id, candidate.request_id
+            FROM principal_offboarding_audit_requests candidate
+           WHERE candidate.principal_id = $1
+             AND NOT EXISTS (
+               SELECT 1 FROM audit_log a
+                WHERE a.metadata ? 'request_id'
+                  AND a.metadata->>'request_id' = candidate.request_id
+                  AND ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED}
+             )
+           ORDER BY candidate.request_id LIMIT $2
+        )`, [principalId, batchSize, [...PRESERVED_AUDIT_OPERATIONS]],
     );
-    const remainingAudit = await auditSelectionCounts(client, scopeId, principalId);
-    const remaining = remainingState.rows[0];
-    const complete = Number(remaining.memories) === 0 && Number(remaining.embeddings) === 0
-      && Number(remaining.memberships) === 0 && Number(remaining.aliases) === 0
-      && Number(remaining.entra_bindings) === 0 && remainingAudit.selection.total === 0;
+
+    const currentRun = await client.query(
+      `SELECT memory_cursor, audit_principal_cursor, audit_scope_cursor,
+              audit_memory_cursor, audit_scope_ids_cursor, audit_linked_cursor
+         FROM principal_offboarding_runs WHERE principal_id = $1`, [principalId],
+    );
+    const remaining = await stateWorkRemains(
+      client, scopeId, principalId, currentRun.rows[0].memory_cursor,
+    );
+    const remainingAudit = await auditCursorWorkRemains(
+      client, scopeId, principalId,
+      currentRun.rows[0] as Record<AuditCursorColumn, string>,
+    );
+    const complete = !remaining.memories && !remaining.embeddings
+      && !remaining.memberships && !remaining.aliases
+      && !remaining.entraBindings && !remainingAudit;
     const progressUpdate = await client.query(
       `UPDATE principal_offboarding_runs
           SET memories_processed = memories_processed + $2,
@@ -690,7 +925,7 @@ export async function offboardPrincipal(
               batches = batches + 1,
               completed_at = CASE WHEN $4 THEN now() ELSE NULL END
         WHERE principal_id = $1 RETURNING *`,
-      [principalId, memoryBatch, auditBatch, complete],
+      [principalId, memoryBatch, auditedRows, complete],
     );
     const progressRow = progressUpdate.rows[0];
     if (complete) {
@@ -728,8 +963,8 @@ export async function offboardPrincipal(
       batch: Number(progressRow.batches), batchSize,
       memoriesProcessed: Number(progressRow.memories_processed),
       auditRowsProcessed: Number(progressRow.audit_rows_processed),
-      memoriesRemaining: Number(remaining.memories),
-      auditRowsRemaining: remainingAudit.selection.total,
+      memoriesRemaining: remaining.memories ? 1 : 0,
+      auditRowsRemaining: remainingAudit ? 1 : 0,
     };
     return {
       ...baseResult,

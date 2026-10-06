@@ -10,6 +10,8 @@ const DEFAULT_MIGRATIONS_DIR = resolve(here, '../../migrations');
 // Changing it would break coordination with replicas running an older version.
 const CONTINUUM_MIGRATION_LOCK_ID = '7215328273579717613';
 const NO_TRANSACTION_MARKER = '-- continuum:no-transaction';
+const REPAIR_INVALID_INDEX = '-- continuum:repair-invalid-index ';
+const REQUIRE_VALID_INDEX = '-- continuum:require-valid-index ';
 const REVIEW_ENTRA_MIGRATION_RENAMES = [
   ['0005_entra_auth.sql', '0010_entra_auth.sql'],
   ['0006_entra_binding_approval.sql', '0011_entra_binding_approval.sql'],
@@ -34,6 +36,58 @@ function nonTransactionalStatements(sql: string): string[] {
     throw new Error('no-transaction migration must contain at least one statement');
   }
   return statements;
+}
+
+function directiveIndexName(statement: string, directive: string): string | null {
+  const line = statement.split(/\r?\n/).find((candidate) => candidate.trim().startsWith(directive));
+  if (!line) return null;
+  const name = line.trim().slice(directive.length).trim();
+  if (!/^[a-z][a-z0-9_]*$/.test(name)) {
+    throw new Error(`invalid no-transaction index directive: ${statement}`);
+  }
+  return name;
+}
+
+function quoteIdentifier(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`;
+}
+
+async function indexState(
+  client: pg.PoolClient, indexName: string,
+): Promise<{ schema: string; valid: boolean } | null> {
+  const result = await client.query(
+    `SELECT n.nspname AS schema, i.indisvalid AS valid
+       FROM pg_class c
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       JOIN pg_index i ON i.indexrelid = c.oid
+      WHERE c.oid = to_regclass(format('%I.%I', current_schema(), $1::text))`,
+    [indexName],
+  );
+  return result.rows[0] ?? null;
+}
+
+async function runNonTransactionalStatement(
+  client: pg.PoolClient, statement: string,
+): Promise<void> {
+  const repairName = directiveIndexName(statement, REPAIR_INVALID_INDEX);
+  if (repairName) {
+    const state = await indexState(client, repairName);
+    if (state && !state.valid) {
+      await client.query(
+        `DROP INDEX CONCURRENTLY ${quoteIdentifier(state.schema)}.${quoteIdentifier(repairName)}`,
+      );
+    }
+    return;
+  }
+  const requiredName = directiveIndexName(statement, REQUIRE_VALID_INDEX);
+  if (requiredName) {
+    const state = await indexState(client, requiredName);
+    if (!state?.valid) {
+      throw new Error(`required index ${requiredName} is missing or invalid in current schema`);
+    }
+    return;
+  }
+  await client.query(statement);
 }
 
 export interface AppliedMigration {
@@ -92,7 +146,7 @@ export async function runMigrations(
           // migrations use retry-safe statements so a crash before the ledger
           // write can rerun the file.
           for (const statement of nonTransactionalStatements(sql)) {
-            await client.query(statement);
+            await runNonTransactionalStatement(client, statement);
           }
           await client.query(
             'INSERT INTO _continuum_migrations (name) VALUES ($1)',

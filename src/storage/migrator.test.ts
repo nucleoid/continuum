@@ -51,10 +51,9 @@ describe('runMigrations', () => {
     expect(principal).not.toMatch(/CREATE TABLE|CREATE INDEX|CREATE FUNCTION/i);
     expect(erasure).not.toMatch(/CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?!principal_offboarding_events)/i);
     expect(indexes.trimStart()).toMatch(/^-- continuum:no-transaction/);
-    expect(indexes.match(/DROP INDEX CONCURRENTLY/gi)).toHaveLength(3);
+    expect(indexes.match(/continuum:repair-invalid-index/gi)).toHaveLength(3);
     expect(indexes.match(/CREATE INDEX CONCURRENTLY/gi)).toHaveLength(3);
-    expect(indexes).toMatch(/pg_index[\s\S]*indisvalid/i);
-    expect(indexes).toMatch(/RAISE EXCEPTION[\s\S]*invalid/i);
+    expect(indexes.match(/continuum:require-valid-index/gi)).toHaveLength(3);
   });
   it('removes pre-existing embeddings for archived memories during the offboarding migration', async () => {
     const schema = `migrator_offboarding_${Date.now()}_${Math.random().toString(16).slice(2)}`;
@@ -563,6 +562,71 @@ describe('runMigrations', () => {
     expect(drop).toBeGreaterThan(-1);
     expect(index).toBeGreaterThan(drop);
     expect(ledger).toBeGreaterThan(index);
+  });
+
+  it('drops only an invalid exact-schema index and verifies the replacement before ledgering', async () => {
+    const queries: string[] = [];
+    let stateChecks = 0;
+    const client = {
+      query: vi.fn(async (query: string) => {
+        queries.push(query.trim());
+        if (query.includes('SELECT 1 FROM _continuum_migrations')) return { rowCount: 0, rows: [] };
+        if (query.includes('JOIN pg_index')) {
+          stateChecks += 1;
+          return { rowCount: 1, rows: [{ schema: 'tenant_exact', valid: stateChecks > 1 }] };
+        }
+        if (query.includes('pg_advisory_unlock')) {
+          return { rowCount: 1, rows: [{ unlocked: true }] };
+        }
+        return { rowCount: 1, rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    const directory = await migrationDirectory(
+      `-- continuum:no-transaction
+-- continuum:repair-invalid-index exact_idx;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS exact_idx ON exact_table (id);
+-- continuum:require-valid-index exact_idx;`,
+    );
+
+    await runMigrations({ connect: vi.fn(async () => client) } as unknown as pg.Pool, directory);
+
+    expect(queries).toContain('DROP INDEX CONCURRENTLY "tenant_exact"."exact_idx"');
+    const drop = queries.findIndex((query) => query.startsWith('DROP INDEX CONCURRENTLY'));
+    const create = queries.findIndex((query) => query.startsWith('CREATE INDEX CONCURRENTLY'));
+    const ledger = queries.findIndex((query) => query.includes('INSERT INTO _continuum_migrations'));
+    expect(drop).toBeLessThan(create);
+    expect(create).toBeLessThan(ledger);
+    expect(stateChecks).toBe(2);
+  });
+
+  it('refuses to ledger a no-transaction migration when a required index remains invalid', async () => {
+    const queries: string[] = [];
+    const client = {
+      query: vi.fn(async (query: string) => {
+        queries.push(query.trim());
+        if (query.includes('SELECT 1 FROM _continuum_migrations')) return { rowCount: 0, rows: [] };
+        if (query.includes('JOIN pg_index')) {
+          return { rowCount: 1, rows: [{ schema: 'tenant_exact', valid: false }] };
+        }
+        if (query.includes('pg_advisory_unlock')) {
+          return { rowCount: 1, rows: [{ unlocked: true }] };
+        }
+        return { rowCount: 1, rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    const directory = await migrationDirectory(
+      `-- continuum:no-transaction
+-- continuum:require-valid-index exact_idx;`,
+    );
+
+    await expect(runMigrations(
+      { connect: vi.fn(async () => client) } as unknown as pg.Pool, directory,
+    )).rejects.toThrow(/required index exact_idx is missing or invalid/);
+    expect(queries.some((query) => query.includes(
+      'INSERT INTO _continuum_migrations (name) VALUES',
+    ))).toBe(false);
   });
 
   it('uses one dedicated client and locks before inspecting the ledger', async () => {

@@ -109,6 +109,13 @@ export async function reactivatePrincipal(
     if (!disabled.rowCount) {
       throw new ServiceError('INVALID_INPUT', 'disabled principal not found');
     }
+    const incomplete = await client.query(
+      `SELECT 1 FROM principal_offboarding_runs
+        WHERE principal_id = $1 AND completed_at IS NULL LIMIT 1`, [principalId],
+    );
+    if (incomplete.rowCount) {
+      throw new ServiceError('CONFLICT', 'principal offboarding is incomplete; complete erasure before reactivation');
+    }
     const previouslyOffboarded = disabled.rows[0].offboarded_at !== null;
     const reactivated = await client.query(
       `UPDATE principals
