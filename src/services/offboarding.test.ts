@@ -1024,6 +1024,97 @@ describe('offboarding and erasure', () => {
     await expect(reactivatePrincipal(pool, value.admin, value.target.id)).resolves.toBeUndefined();
   });
 
+  it('rejects the two-step lifecycle-marker bypass while erasure is incomplete', async () => {
+    const value = await fixture();
+    await pool.query(
+      `INSERT INTO audit_log (principal_id, action, scope_id, query, metadata)
+       SELECT $1, 'read', $2, 'private ' || n, '{}'::jsonb
+         FROM generate_series(1, 4) n`,
+      [value.admin.id, value.personal.id],
+    );
+    const first = await offboardPrincipal(pool, value.admin, value.target.id, { batchSize: 1 });
+    expect(first.complete).toBe(false);
+
+    await expect(pool.query(
+      'UPDATE principals SET offboarded_at = NULL WHERE id = $1', [value.target.id],
+    )).rejects.toThrow(/guarded database function|offboarding is incomplete/i);
+    await expect(pool.query(
+      'UPDATE principals SET disabled_at = NULL WHERE id = $1', [value.target.id],
+    )).rejects.toThrow(/guarded database function|offboarding is incomplete/i);
+  });
+
+  it('protects incomplete run completion/deletion and monotonic fences and cursors', async () => {
+    const value = await fixture();
+    await pool.query(
+      `INSERT INTO audit_log (principal_id, action, scope_id, query, metadata)
+       SELECT $1, 'read', $2, 'private ' || n, '{}'::jsonb
+         FROM generate_series(1, 4) n`,
+      [value.admin.id, value.personal.id],
+    );
+    const first = await offboardPrincipal(pool, value.admin, value.target.id, { batchSize: 1 });
+    expect(first.complete).toBe(false);
+    const run = (await pool.query(
+      `SELECT run_id, audit_fence_id, audit_principal_cursor
+         FROM principal_offboarding_runs WHERE principal_id = $1`, [value.target.id],
+    )).rows[0];
+
+    await expect(pool.query(
+      'UPDATE principal_offboarding_runs SET completed_at = now() WHERE principal_id = $1',
+      [value.target.id],
+    )).rejects.toThrow(/completion evidence/i);
+    await expect(pool.query(
+      'DELETE FROM principal_offboarding_runs WHERE principal_id = $1', [value.target.id],
+    )).rejects.toThrow(/incomplete offboarding run/i);
+    await expect(pool.query(
+      `UPDATE principal_offboarding_runs
+          SET audit_fence_id = $2::bigint - 1,
+              audit_principal_cursor = GREATEST($3::bigint - 1, 0)
+        WHERE principal_id = $1`,
+      [value.target.id, run.audit_fence_id, run.audit_principal_cursor],
+    )).rejects.toThrow(/cannot regress/i);
+    expect((await pool.query(
+      `SELECT count(*)::int AS count FROM principal_offboarding_run_events
+        WHERE run_id = $1 AND phase = 'completed'`, [run.run_id],
+    )).rows[0].count).toBe(0);
+  });
+
+  it('rejects memory-only audit writes after the owned scope is fenced', async () => {
+    const value = await fixture();
+    let result = await offboardPrincipal(pool, value.admin, value.target.id);
+    while (!result.complete) result = await offboardPrincipal(pool, value.admin, value.target.id);
+
+    await expect(pool.query(
+      `INSERT INTO audit_log (principal_id, action, memory_id, query, metadata)
+       VALUES ($1, 'read', $2, 'late memory-only secret', '{}'::jsonb)`,
+      [value.admin.id, value.personalMemory.id],
+    )).rejects.toThrow(/offboarded owned scope/i);
+  });
+
+  it('records durable append-only reactivation evidence in the lifecycle ledger', async () => {
+    const value = await fixture();
+    let result = await offboardPrincipal(pool, value.admin, value.target.id);
+    while (!result.complete) result = await offboardPrincipal(pool, value.admin, value.target.id);
+    await reactivatePrincipal(pool, value.admin, value.target.id);
+
+    const evidence = (await pool.query(
+      `SELECT phase, finalized_by, evidence
+         FROM principal_offboarding_run_events
+        WHERE principal_id = $1 ORDER BY id DESC LIMIT 1`, [value.target.id],
+    )).rows[0];
+    expect(evidence).toMatchObject({
+      phase: 'reactivated',
+      finalized_by: value.admin.id,
+      evidence: {
+        authorization_principal_id: value.admin.id,
+        previously_offboarded: true,
+      },
+    });
+    await expect(pool.query(
+      `DELETE FROM principal_offboarding_run_events
+        WHERE principal_id = $1 AND phase = 'reactivated'`, [value.target.id],
+    )).rejects.toThrow(/immutable/i);
+  });
+
   it('makes approval evidence and completed erasure receipts immutable to all writes', async () => {
     const value = await fixture();
     let result = await offboardPrincipal(pool, value.admin, value.target.id, {

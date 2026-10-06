@@ -113,4 +113,24 @@ describe('recordRead', () => {
     const { rows } = await pool.query('SELECT count(*)::int AS count FROM audit_log');
     expect(rows[0].count).toBe(0);
   });
+
+  it('does not let caller metadata impersonate a preserved audit operation', async () => {
+    await recordRead(pool, {
+      principalId,
+      query: 'private query that must remain scrub-eligible',
+      metadata: {
+        operation: 'principal_offboarded',
+        source: 'audit-retention',
+        hits: 0,
+      },
+      memories: [],
+    });
+
+    const { rows } = await pool.query('SELECT metadata FROM audit_log');
+    expect(rows[0].metadata).toEqual({
+      hits: 0,
+      record_kind: 'summary',
+      request_id: expect.any(String),
+    });
+  });
 });
