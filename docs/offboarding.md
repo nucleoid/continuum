@@ -177,19 +177,38 @@ processed-count accumulators, and a SECURITY DEFINER reactivation capability
 that cannot be spoofed with a caller-set custom GUC. Migration
 `0028_offboarding_reactivation_authorization.sql` requires an effective org
 administrator and appends the reactivation audit inside that same database
-transaction. Direct ordinary application SQL can neither clear the lifecycle
-columns nor invoke the capability for a non-admin actor. Database-owner access
-remains a trusted administrative boundary. Before each concurrent
-create, the migrator resolves the named index in `current_schema()`, drops that
-exact schema-qualified object concurrently only when `pg_index.indisvalid` is
-false, and then creates it. A post-create directive requires the exact index to
-exist and be valid before the migration ledger can record success. A timeout or
-failed build leaves the file unapplied and safely retryable.
+transaction. Migration
+`0029_offboarding_reactivation_trust_boundary.sql` revokes the capability's
+default `PUBLIC` execute grant and separates its mandatory database guard audit
+from authenticated application actor attribution. The database row uses the
+noninteractive lifecycle principal and records the presented effective-admin
+UUID as `authorization_principal_id`. It does not claim that UUID is the SQL
+caller. The application writes the authenticated actor's
+`principal_reactivated` audit in the same transaction, so failure of either
+audit rolls back the lifecycle update.
 
-Apply all seven offboarding migrations before starting the new application version. Old
+Continuum uses one shared `CONTINUUM_DATABASE_URL` role for migrations and
+application queries. PostgreSQL therefore cannot bind a per-request caller to
+the administrator UUID supplied to the security-definer function. Arbitrary
+SQL running as the shared function-owning role can present any current
+effective administrator UUID. That role, database-owner access, and later
+privileged audit mutation are trusted administrative capabilities, not
+end-user authentication boundaries. Within the supported function call, an
+effective administrator is still required, incomplete offboarding is refused,
+ordinary updates and old custom-GUC spoofing remain blocked, and the lifecycle
+change cannot commit without its lifecycle-attributed guard audit.
+
+Before each concurrent create, the migrator resolves the named index in
+`current_schema()`, drops that exact schema-qualified object concurrently only
+when `pg_index.indisvalid` is false, and then creates it. A post-create directive
+requires the exact index to exist and be valid before the migration ledger can
+record success. A timeout or failed build leaves the file unapplied and safely
+retryable.
+
+Apply all eight offboarding migrations before starting the new application version. Old
 instances can continue ordinary traffic after `0023`, but they do not know the
 offboarding workflow and an old authenticated request may already be in flight.
-Do not invoke offboarding until all seven migrations are recorded on every shared
+Do not invoke offboarding until all eight migrations are recorded on every shared
 database and all old application instances have drained. Rollback is
 application-first: stop invoking offboarding, drain the new instances, and
 deploy the old application only after `list-incomplete-offboarding` reports

@@ -380,6 +380,16 @@ current service keys at the database boundary. Explicit audited reactivation
 does not restore either. Database triggers also prevent deletion, demotion, or
 disablement of the final effective manually managed org administrator.
 
+Reactivation has two audit records with distinct trust semantics. Its database
+capability validates that a presented UUID is an effective org administrator,
+then attributes mandatory guard evidence to the noninteractive lifecycle
+principal. The application service separately attributes the operator event to
+its authenticated actor in the same transaction. Continuum uses one shared
+database role and has no per-request database identity, so the presented UUID
+is authorization evidence, not proof of the SQL caller. Execute permission is
+revoked from `PUBLIC`, but the shared function-owning role and database-owner
+access remain trusted administrative capabilities.
+
 Offboarding uses an explicit `principal_user_scopes` UUID mapping; mutable names
 never establish ownership. Mapping requires target membership history and
 rejects other active members unless an operator records the explicit shared

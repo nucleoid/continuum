@@ -139,6 +139,44 @@ describe('principal reactivation database trust boundary', () => {
     ]);
   });
 
+  it('rolls back service reactivation when authenticated actor auditing fails', async () => {
+    const { admin, target } = await fixture(pool);
+    await pool.query(`
+      CREATE FUNCTION issue4_reject_reactivation_actor_audit() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.metadata->>'operation' = 'principal_reactivated' THEN
+          RAISE EXCEPTION 'forced reactivation actor audit failure';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+      CREATE TRIGGER issue4_reject_reactivation_actor_audit
+      BEFORE INSERT ON audit_log FOR EACH ROW
+      EXECUTE FUNCTION issue4_reject_reactivation_actor_audit();
+    `);
+    try {
+      await expect(reactivatePrincipal(pool, admin, target.id))
+        .rejects.toThrow(/forced reactivation actor audit failure/i);
+    } finally {
+      await pool.query(`
+        DROP TRIGGER issue4_reject_reactivation_actor_audit ON audit_log;
+        DROP FUNCTION issue4_reject_reactivation_actor_audit();
+      `);
+    }
+
+    expect((await pool.query(
+      `SELECT disabled_at IS NOT NULL AS disabled,
+              offboarded_at IS NOT NULL AS offboarded, reactivated_at
+         FROM principals WHERE id = $1`,
+      [target.id],
+    )).rows[0]).toEqual({ disabled: true, offboarded: true, reactivated_at: null });
+    expect((await pool.query(
+      `SELECT count(*)::int AS count FROM audit_log
+        WHERE metadata->>'operation' IN
+          ('principal_reactivation_guarded', 'principal_reactivated')`,
+    )).rows[0].count).toBe(0);
+  });
+
   it('keeps direct updates and non-admin capability calls prohibited', async () => {
     const { target } = await fixture(pool);
     const outsider = await createPrincipal(pool, {

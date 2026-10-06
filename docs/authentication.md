@@ -99,6 +99,15 @@ npm run admin -- disable-principal <principal-id>
 npm run admin -- reactivate-principal <principal-id>
 ```
 
+The application checks the authenticated operator and records that actor in
+the same transaction as reactivation. The database also records a mandatory
+guard event under `system:lifecycle`. Its
+`authorization_principal_id` is the effective administrator UUID presented to
+the database function, not a database-authenticated caller identity. All
+application connections share one database role, so direct SQL access to that
+role is a trusted administrative capability and must not be interpreted as an
+end-user authentication boundary.
+
 After reactivation, review required access and issue a new service key. A later
 authoritative membership sync can restore eligible Entra-sourced memberships;
 manual memberships require explicit restoration. Old keys never become valid

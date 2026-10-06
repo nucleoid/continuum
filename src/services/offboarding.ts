@@ -331,6 +331,7 @@ const AUDIT_OPERATION_POLICIES = [
   { operation: 'list_memories', safeFields: ['request_id', 'record_kind', 'state', 'scope_filtered', 'type_filter', 'limit', 'offset', 'count'] },
   { operation: 'principal_disabled', safeFields: ['principal_id'] },
   { operation: 'principal_memory_erased', safeFields: ['principal_id'] },
+  { operation: 'principal_reactivation_guarded', safeFields: ['principal_id', 'authorization_principal_id', 'previously_offboarded'] },
   { operation: 'principal_reactivated', safeFields: ['principal_id', 'previously_offboarded'] },
   { operation: 'service_principal_provisioned', safeFields: ['service_principal_id', 'external_id'] },
 ] as const;

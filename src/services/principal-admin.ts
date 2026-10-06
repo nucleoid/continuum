@@ -109,6 +109,15 @@ export async function reactivatePrincipal(
     if (reactivated.rows[0]?.previously_offboarded === null) {
       throw new ServiceError('INVALID_INPUT', 'disabled principal not found');
     }
+    await client.query(
+      `INSERT INTO audit_log (principal_id, action, metadata)
+       VALUES ($1, 'write', $2::jsonb)`,
+      [actor.id, JSON.stringify({
+        operation: 'principal_reactivated',
+        principal_id: principalId,
+        previously_offboarded: reactivated.rows[0].previously_offboarded,
+      })],
+    );
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK');
