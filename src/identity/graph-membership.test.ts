@@ -48,7 +48,7 @@ describe('Microsoft Graph membership snapshot', () => {
     },
   );
 
-  it.each([429, 503])('retries Graph status %s using Retry-After before succeeding', async (status) => {
+  it.each([429, 500, 503])('retries Graph status %s using Retry-After before succeeding', async (status) => {
     const sleep = vi.fn(async () => undefined);
     const fetcher = vi.fn()
       .mockResolvedValueOnce(new Response('', { status, headers: { 'Retry-After': '2' } }))

@@ -32,11 +32,13 @@ authorization grant. Continuum admits both member tokens (`acct=0`) and guest
 tokens (`acct=1`) under the same rule: the immutable `oid` must already have at
 least one active Continuum scope membership. Missing `acct` is accepted because
 it is an optional Entra claim, but any other value is rejected. A first valid
-sign-in registers the immutable principal but returns 401 until membership sync
-activates an approved group binding. Deactivation makes later REST requests fail
-authentication immediately; long-lived MCP sessions revalidate on their normal
-30-second interval. This database check is defense in depth and does not replace
-the required enterprise-application assignment.
+user sign-in remains rejected until membership sync provisions the immutable
+principal and activates an approved group binding. Service tokens never
+provision their principal; an administrator must use `provision-service`
+first. Deactivation makes later REST requests fail authentication immediately;
+long-lived MCP sessions revalidate on their normal 30-second interval. This
+database check is defense in depth and does not replace the required
+enterprise-application assignment.
 
 The immutable `oid` claim owns principal identity. UUID-shaped principal
 external IDs are stored in lowercase, and actor and ingest principal
@@ -78,6 +80,27 @@ npm run admin -- issue-key <service-external-id> [allowed-source]
 npm run admin -- rotate-key <key-id>
 npm run admin -- revoke-key <key-id>
 ```
+
+Provision an Entra service principal before accepting its app token:
+
+```text
+npm run admin -- provision-service <entra-object-id> <display-name>
+```
+
+Disabling any principal is an audited, fail-closed operator action. It
+deactivates every membership and permanently revokes every current service key.
+Database triggers enforce those effects even for direct database changes and
+prevent deletion, demotion, or disabling of the final effective manual
+break-glass org administrator. Reactivation is also explicit and audited, but
+does not restore memberships or keys:
+
+```text
+npm run admin -- disable-principal <principal-id>
+npm run admin -- reactivate-principal <principal-id>
+```
+
+After reactivation, explicitly restore required access and issue a new service
+key. Old keys never become valid again.
 
 ## Approved group bindings
 
@@ -132,7 +155,7 @@ result is removed while the required manual break-glass administrator remains.
 Quarantine is durable state, distinct from an ordinary 404 disappearance. A
 later valid Graph response cannot silently reactivate a quarantined binding;
 an org administrator must inspect the failure and run `bind-group` explicitly.
-Migration `0012_entra_quarantine_state.sql` conservatively marks every inactive,
+Migration `0017_entra_quarantine_state.sql` conservatively marks every inactive,
 approved, unrevoked pre-upgrade binding as `LEGACY_INACTIVE_REVIEW`, because old
 rows did not record whether inactivity came from a 404 or invalid input. Review
 and explicitly reprovision those bindings after the upgrade.
@@ -203,9 +226,13 @@ memberships. Sign-in never provisions an unknown user.
 
 This release does not support a mixed-version rolling deployment. Stop every
 API, MCP, admin, and membership-sync process built from the old version, then
-apply all migrations through `0015_entra_review_hardening.sql`,
+apply all migrations through `0021_principal_deactivation.sql`,
 review the inactive bindings conservatively quarantined by
-`0012_entra_quarantine_state.sql`, then start only the new binaries. The
+`0017_entra_quarantine_state.sql`, then start only the new binaries. The
+migrator recognizes the exact pre-renumber Entra filenames used by review
+builds and records their public sequence aliases under the same advisory lock,
+so it does not replay an already applied identity migration. Unrelated or
+partial filenames are never treated as aliases. The
 database trigger
 enforces the approved binding's immutable UUID, target scope, role, lifecycle,
 and 500-binding cardinality on membership and binding writes. Binding changes
@@ -215,12 +242,12 @@ recovery or reprovisioning. If migration reports malformed binding state or
 more than 500 approved bindings, it leaves the old schema and access unchanged.
 Use `revoke-group` (while the old processes remain stopped) to resolve excess
 valid bindings, or repair the named malformed rows under database-owner change
-control, then rerun migration. Migration 0014 derives freshness only from a
+control, then rerun migration. Migration 0019 derives freshness only from a
 durable prior successful-sync audit, defaulting to the fail-closed Unix epoch
-when none exists. Migration 0015 applies the same correction to review-era
+when none exists. Migration 0020 applies the same correction to review-era
 deployments that had already installed the earlier migration-time seed. Old
 binaries do not understand the complete
-ID-authoritative sync and provenance contract. Migration 0013 lowercases
+ID-authoritative sync and provenance contract. Migration 0018 lowercases
 UUID-shaped principal external IDs and aborts before mutation if legacy rows
 would collide after canonicalization; opaque identities remain unchanged.
 Pause external schedulers for

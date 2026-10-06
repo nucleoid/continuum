@@ -54,7 +54,7 @@ export async function getPrincipal(
 ): Promise<Principal | null> {
   const { rows } = await pool.query(
     `SELECT id, external_id, kind, display_name, created_at
-       FROM principals WHERE id = $1`,
+       FROM principals WHERE id = $1 AND disabled_at IS NULL`,
     [id],
   );
   return rows[0] ? rowToPrincipal(rows[0]) : null;
@@ -67,7 +67,7 @@ export async function getPrincipalByExternalId(
   externalId = canonicalPrincipalExternalId(externalId);
   const { rows } = await pool.query(
     `SELECT id, external_id, kind, display_name, created_at
-       FROM principals WHERE external_id = $1`,
+       FROM principals WHERE external_id = $1 AND disabled_at IS NULL`,
     [externalId],
   );
   return rows[0] ? rowToPrincipal(rows[0]) : null;
@@ -94,7 +94,8 @@ export async function upsertPrincipalByExternalId(
 
   const { rows } = await pool.query(
     `UPDATE principals SET display_name = $2
-      WHERE id = $1 AND kind = $3 AND display_name IS DISTINCT FROM $2
+      WHERE id = $1 AND kind = $3 AND disabled_at IS NULL
+        AND display_name IS DISTINCT FROM $2
       RETURNING id, external_id, kind, display_name, created_at`,
     [existing.id, input.displayName, input.kind],
   );

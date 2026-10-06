@@ -510,6 +510,40 @@ describe('REST/MCP semantic parity matrix', () => {
     expect(mcpList.items).toEqual([]);
   });
 
+  it('fails closed for a disabled principal across REST and an existing MCP session', async () => {
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    const memory = await createMemory(pool, {
+      scopeId: org!.id, scopeKind: 'org', type: 'fact', title: 'Org secret',
+      body: 'disabled principals must not retain implicit org reads',
+      authorId: principal.id, source: 'manual',
+    });
+    await pool.query('UPDATE principals SET disabled_at = now() WHERE id = $1', [principal.id]);
+
+    const rest = await request(createApp(pool))
+      .get(`/api/v0/memories/${memory.id}`)
+      .set('Authorization', 'Bearer entra:user:parity');
+    const mcpFetch = await client.callTool({
+      name: 'continuum.get_memory', arguments: { memory_id: memory.id },
+    }) as ToolResult;
+    const mcpList = await client.callTool({
+      name: 'continuum.list_memories', arguments: { scope: 'org' },
+    }) as ToolResult;
+    const mcpCapture = await client.callTool({
+      name: 'continuum.capture',
+      arguments: {
+        scope_kind: 'team', scope_name: 'payments', type: 'fact',
+        title: 'Denied', body: 'Denied', source: 'manual',
+      },
+    }) as ToolResult;
+
+    expect(rest.status).toBe(401);
+    expect(mcpFetch.isError).toBe(true);
+    expect(toolJson(mcpFetch).error.code).toBe('MEMORY_NOT_FOUND');
+    expect(toolJson(mcpList).items).toEqual([]);
+    expect(mcpCapture.isError).toBe(true);
+    expect(toolJson(mcpCapture).error.code).toBe('FORBIDDEN');
+  });
+
   it('excludes expired full bodies before REST/MCP pagination and audits each delivered identity', async () => {
     const scope = await createScope(pool, { kind: 'project', name: 'expiry-parity' });
     await addMembership(pool, principal.id, scope.id, 'reader');

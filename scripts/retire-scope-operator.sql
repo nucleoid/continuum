@@ -20,6 +20,7 @@ WITH target AS (
    WHERE external_id = :'external_id'
      AND kind = 'service'
      AND display_name = 'Scope Provisioning Operator'
+     AND disabled_at IS NULL
    FOR UPDATE
 ), removed AS (
   DELETE FROM scope_memberships sm

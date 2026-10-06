@@ -27,7 +27,14 @@ describe('service API keys', () => {
     expect(await auth.authenticate('ApiKey', issued.key)).toMatchObject({
       principal: { id: service.id }, allowedSource: 'github-pr', credential: 'api-key',
     });
-    const rotated = await rotateApiKey(pool, admin, issued.id);
+    await pool.query('UPDATE principals SET disabled_at = now() WHERE id = $1', [service.id]);
+    expect(await auth.authenticate('ApiKey', issued.key)).toBeNull();
+    await expect(rotateApiKey(pool, admin, issued.id)).rejects.toThrow('API key not found');
+    await pool.query('UPDATE principals SET disabled_at = NULL WHERE id = $1', [service.id]);
+    expect(await auth.authenticate('ApiKey', issued.key)).toBeNull();
+    const replacement = await issueApiKey(pool, admin, service.id, 'github-pr');
+    expect((await auth.authenticate('ApiKey', replacement.key))?.principal.id).toBe(service.id);
+    const rotated = await rotateApiKey(pool, admin, replacement.id);
     expect(await auth.authenticate('ApiKey', issued.key)).toBeNull();
     expect((await auth.authenticate('ApiKey', rotated.key))?.principal.id).toBe(service.id);
     await revokeApiKey(pool, admin, rotated.id);

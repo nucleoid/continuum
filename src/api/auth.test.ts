@@ -93,11 +93,19 @@ describe('authentication configuration and Entra claims', () => {
     )).rows[0].count).toBe(1);
   });
 
-  it('accepts only service access tokens assigned the configured app role', async () => {
+  it('accepts only explicitly provisioned active services with the configured app role', async () => {
     const oid = '11111111-1111-4111-8111-111111111111';
     const valid = { oid, tid: contract.tenant, ver: '2.0', idtyp: 'app',
       azp: '44444444-4444-4444-8444-444444444444', roles: [contract.serviceAppRole] };
-    expect((await principalFromClaims(pool, valid, contract))?.principal.kind).toBe('service');
+    expect(await principalFromClaims(pool, valid, contract)).toBeNull();
+    const service = (await pool.query(
+      `INSERT INTO principals (id, external_id, kind, display_name)
+       VALUES (gen_random_uuid(), $1, 'service', 'Provisioned service') RETURNING id`, [oid],
+    )).rows[0];
+    expect((await principalFromClaims(pool, valid, contract))?.principal.id).toBe(service.id);
+    await pool.query('UPDATE principals SET disabled_at = now() WHERE id = $1', [service.id]);
+    expect(await principalFromClaims(pool, { ...valid, name: 'Must not reactivate' }, contract))
+      .toBeNull();
     expect(await principalFromClaims(pool, { ...valid, roles: ['Other.Role'] }, contract)).toBeNull();
     expect(await principalFromClaims(pool, { ...valid, azp: 'unauthorized' }, contract)).toBeNull();
     expect(await principalFromClaims(pool, {

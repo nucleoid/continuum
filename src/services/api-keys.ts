@@ -42,7 +42,8 @@ export async function issueApiKey(
     await client.query('BEGIN');
     await requireOrgAdmin(client, actor.id);
     const principal = await client.query(
-      `SELECT 1 FROM principals WHERE id = $1 AND kind = 'service' FOR UPDATE`,
+      `SELECT 1 FROM principals
+        WHERE id = $1 AND kind = 'service' AND disabled_at IS NULL FOR UPDATE`,
       [servicePrincipalId],
     );
     if (!principal.rowCount) throw new ServiceError('INVALID_INPUT', 'service principal not found');
@@ -76,10 +77,12 @@ export async function rotateApiKey(
     await client.query('BEGIN');
     await requireOrgAdmin(client, actor.id);
     const { rows } = await client.query(
-      `UPDATE service_api_keys SET key_hash = $2, prefix = $3, last_four = $4,
-              rotated_at = now()
-        WHERE id = $1 AND revoked_at IS NULL
-      RETURNING allowed_source, principal_id, rotated_at`,
+      `UPDATE service_api_keys k
+          SET key_hash = $2, prefix = $3, last_four = $4, rotated_at = now()
+         FROM principals p
+        WHERE k.id = $1 AND k.revoked_at IS NULL
+          AND p.id = k.principal_id AND p.disabled_at IS NULL
+      RETURNING k.allowed_source, k.principal_id, k.rotated_at`,
       [keyId, generated.hash, generated.prefix, generated.lastFour],
     );
     if (!rows[0]) throw new ServiceError('INVALID_INPUT', 'API key not found');

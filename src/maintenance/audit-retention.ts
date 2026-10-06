@@ -239,6 +239,7 @@ async function authorizedPrincipalId(client: pg.PoolClient, externalId: string):
         AND continuum_membership_is_effective(sm.active, sm.source_kind)
        JOIN scopes s ON s.id = sm.scope_id AND s.kind = 'org' AND s.name = ''
       WHERE p.external_id = $1
+        AND p.disabled_at IS NULL
       FOR KEY SHARE OF p, s
       FOR SHARE OF sm`,
     [externalId],

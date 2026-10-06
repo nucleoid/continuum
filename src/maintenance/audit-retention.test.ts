@@ -598,6 +598,7 @@ describe('audit retention', () => {
   it('does not authorize retention through an inactive admin membership', async () => {
     const admin = await seedPrincipal('svc:retention', 'admin');
     await insertAudit(admin.id, new Date('2026-01-01T00:00:00Z'));
+    await seedPrincipal('break-glass', 'admin');
     await pool.query(
       `UPDATE scope_memberships SET active = FALSE, deactivated_at = now()
         WHERE principal_id = $1`,

@@ -60,12 +60,13 @@ export async function getMembership(
   scopeId: string,
 ): Promise<ScopeMembership | null> {
   const { rows } = await pool.query(
-    `SELECT principal_id, scope_id, role, added_at, source_kind, source_id, active
-       FROM scope_memberships
-      WHERE principal_id = $1 AND scope_id = $2 AND active
-        AND continuum_membership_is_effective(active, source_kind)
-      ORDER BY CASE role WHEN 'admin' THEN 3 WHEN 'writer' THEN 2 ELSE 1 END DESC,
-               source_kind, source_id
+    `SELECT m.principal_id, m.scope_id, m.role, m.added_at, m.source_kind, m.source_id, m.active
+       FROM scope_memberships m JOIN principals p ON p.id = m.principal_id
+      WHERE m.principal_id = $1 AND m.scope_id = $2 AND m.active
+        AND p.disabled_at IS NULL
+        AND continuum_membership_is_effective(m.active, m.source_kind)
+      ORDER BY CASE m.role WHEN 'admin' THEN 3 WHEN 'writer' THEN 2 ELSE 1 END DESC,
+               m.source_kind, m.source_id
       LIMIT 1`,
     [principalId, scopeId],
   );
@@ -82,6 +83,7 @@ export async function getScopesForPrincipal(
               WHEN 3 THEN 'admin' WHEN 2 THEN 'writer' ELSE 'reader' END AS role
        FROM scope_memberships m
        JOIN scopes s ON s.id = m.scope_id
+       JOIN principals p ON p.id = m.principal_id AND p.disabled_at IS NULL
       WHERE m.principal_id = $1 AND m.active
         AND continuum_membership_is_effective(m.active, m.source_kind)
       GROUP BY s.id, s.kind, s.name, s.created_at`,
@@ -107,6 +109,7 @@ export async function getPrincipalsForScope(
        FROM scope_memberships m
        JOIN principals p ON p.id = m.principal_id
       WHERE m.scope_id = $1 AND m.active
+        AND p.disabled_at IS NULL
         AND continuum_membership_is_effective(m.active, m.source_kind)
       GROUP BY p.id, p.external_id, p.kind, p.display_name, p.created_at`,
     [scopeId],

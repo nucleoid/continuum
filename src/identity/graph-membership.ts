@@ -68,7 +68,8 @@ async function request(
         cause: error,
       });
     }
-    if (![429, 503].includes(response.status) || attempt >= options.maxRetries) return response;
+    const retryable = response.status === 429 || (response.status >= 500 && response.status <= 599);
+    if (!retryable || attempt >= options.maxRetries) return response;
     const retryAfter = response.headers.get('retry-after');
     let delayMs = 250 * (2 ** attempt);
     if (retryAfter !== null) {

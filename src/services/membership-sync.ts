@@ -67,6 +67,7 @@ async function requireManualSyncActor(
     `SELECT m.principal_id
        FROM scope_memberships m
        JOIN scopes s ON s.id = m.scope_id
+       JOIN principals p ON p.id = m.principal_id AND p.disabled_at IS NULL
       WHERE s.kind = 'org' AND s.name = ''
         AND m.principal_id = $1
         AND m.source_kind = 'manual' AND m.active AND m.role = 'admin'
@@ -596,7 +597,7 @@ export async function syncEntraMemberships(
         );
       }
       const principals = externalIds.length === 0 ? [] : (await client.query(
-        `SELECT id, external_id, kind FROM principals
+        `SELECT id, external_id, kind, disabled_at FROM principals
           WHERE external_id = ANY($1::text[])`,
         [externalIds],
       )).rows;
@@ -604,7 +605,14 @@ export async function syncEntraMemberships(
         || principals.some((principal) => principal.kind !== 'user')) {
         throw new ServiceError('CONFLICT', 'Entra member identity conflicts with an existing principal');
       }
-      const principalIds = principals.map((row) => row.id as string);
+      const disabledCount = principals.filter((row) => row.disabled_at !== null).length;
+      if (disabledCount > 0) {
+        result.skipCodes.DISABLED_PRINCIPAL =
+          (result.skipCodes.DISABLED_PRINCIPAL ?? 0) + disabledCount;
+      }
+      const principalIds = principals
+        .filter((row) => row.disabled_at === null)
+        .map((row) => row.id as string);
       if (principalIds.length > 0) {
         const activated = await client.query(
           `INSERT INTO scope_memberships
@@ -670,7 +678,9 @@ export async function syncEntraMemberships(
     await requireManualSyncActor(client, actor.id);
     const admins = await client.query(
       `SELECT count(DISTINCT m.principal_id)::int AS count
-         FROM scope_memberships m JOIN scopes s ON s.id = m.scope_id
+         FROM scope_memberships m
+         JOIN scopes s ON s.id = m.scope_id
+         JOIN principals p ON p.id = m.principal_id AND p.disabled_at IS NULL
         WHERE s.kind = 'org' AND s.name = '' AND m.active AND m.role = 'admin'`,
     );
     if ((admins.rows[0]?.count ?? 0) < 1) {

@@ -21,6 +21,7 @@ WITH matches AS (
     JOIN scopes s ON s.id = sm.scope_id
    WHERE p.kind = 'service'
      AND p.display_name = 'Scope Provisioning Operator'
+     AND p.disabled_at IS NULL
      AND p.id = :'principal_id'
      AND s.kind = 'org' AND s.name = ''
      AND sm.role = 'admin'
@@ -35,6 +36,7 @@ SELECT count(*) = 1 AS verify_succeeded FROM matches \gset
     JOIN scopes s ON s.id = sm.scope_id
    WHERE p.kind = 'service'
      AND p.display_name = 'Scope Provisioning Operator'
+     AND p.disabled_at IS NULL
      AND p.id = :'principal_id'
      AND s.kind = 'org' AND s.name = ''
      AND sm.role = 'admin'

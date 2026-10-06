@@ -79,6 +79,7 @@ async function authenticateApiKey(
        , COALESCE(k.rotated_at, k.created_at) + interval '90 days' AS expires_at
        FROM service_api_keys k JOIN principals p ON p.id = k.principal_id
       WHERE k.key_hash = $1 AND k.revoked_at IS NULL
+        AND p.disabled_at IS NULL
         AND COALESCE(k.rotated_at, k.created_at) > now() - interval '90 days'`,
     [hash],
   );
@@ -194,6 +195,7 @@ export async function principalFromClaims(
   } else return null;
   const existing = await getPrincipalByExternalId(pool, oid);
   if (existing && existing.kind !== kind) return null;
+  if (!existing) return null;
   let principal: Principal;
   if (kind === 'user') {
     if (!existing) return null;
@@ -206,16 +208,7 @@ export async function principalFromClaims(
     );
     if (!membership.rowCount) return null;
     principal = existing;
-  } else {
-    try {
-      principal = await upsertPrincipalByExternalId(pool, {
-        externalId: oid, kind, displayName: name || oid,
-      });
-    } catch (error) {
-      if (error instanceof PrincipalKindConflictError) return null;
-      throw error;
-    }
-  }
+  } else principal = existing;
   if (principal.displayName !== (name || oid)) {
     try {
       principal = await upsertPrincipalByExternalId(pool, {

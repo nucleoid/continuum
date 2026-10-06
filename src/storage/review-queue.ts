@@ -81,7 +81,10 @@ export async function listReviewQueue(
             ORDER BY CASE sm.role WHEN 'admin' THEN 3 WHEN 'writer' THEN 2 ELSE 1 END DESC
             LIMIT 1
          ) membership ON TRUE
-        WHERE (s.kind = 'org' OR membership.role IS NOT NULL)
+        WHERE EXISTS (
+            SELECT 1 FROM principals caller WHERE caller.id = $1 AND caller.disabled_at IS NULL
+          )
+          AND (s.kind = 'org' OR membership.role IS NOT NULL)
           AND (m.author_id = $1 OR membership.role IN ('writer', 'admin'))
           AND (
             (m.state = 'stale' AND m.type IN ('fact', 'relationship'))

@@ -32,3 +32,4 @@ export { promoteMemory, verifyMemory, PromoteError } from './storage/promote.js'
 export * from './capture/index.js';
 export * from './audit/log.js';
 export * from './audit/query.js';
+export * from './services/principal-admin.js';

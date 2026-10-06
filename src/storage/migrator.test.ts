@@ -39,6 +39,40 @@ afterEach(async () => {
 });
 
 describe('runMigrations', () => {
+  it('aliases exact review-era Entra ledger names without replaying renamed migrations', async () => {
+    const schema = `migrator_entra_rename_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-entra-rename-'));
+    directories.push(directory);
+    await writeFile(
+      join(directory, '0010_entra_auth.sql'),
+      "DO $$ BEGIN RAISE EXCEPTION 'renamed migration replayed'; END $$;",
+    );
+    try {
+      await pool.query(
+        `CREATE TABLE _continuum_migrations (
+           name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+         );
+         INSERT INTO _continuum_migrations (name) VALUES ('0005_entra_auth.sql')`,
+      );
+
+      await expect(runMigrations(pool, directory)).resolves.toEqual([]);
+      expect((await pool.query(
+        `SELECT name FROM _continuum_migrations
+          WHERE name IN ('0005_entra_auth.sql', '0010_entra_auth.sql')
+          ORDER BY name`,
+      )).rows).toEqual([
+        { name: '0005_entra_auth.sql' },
+        { name: '0010_entra_auth.sql' },
+      ]);
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  });
+
   it('seeds Entra freshness from durable successful-sync evidence, never migration time', async () => {
     const schema = `migrator_entra_freshness_${Date.now()}_${Math.random().toString(16).slice(2)}`;
     const admin = new pg.Pool({ connectionString: DATABASE_URL });
@@ -46,7 +80,7 @@ describe('runMigrations', () => {
     await admin.query(`CREATE SCHEMA ${schema}`);
     const pool = schemaPool(schema);
     const migration = await readFile(
-      join(process.cwd(), 'migrations/0014_entra_sync_freshness.sql'),
+      join(process.cwd(), 'migrations/0019_entra_sync_freshness.sql'),
       'utf8',
     );
     const directory = await migrationDirectory(migration);
@@ -86,7 +120,7 @@ describe('runMigrations', () => {
     await admin.query(`CREATE SCHEMA ${schema}`);
     const pool = schemaPool(schema);
     const migration = await readFile(
-      join(process.cwd(), 'migrations/0015_entra_review_hardening.sql'),
+      join(process.cwd(), 'migrations/0020_entra_review_hardening.sql'),
       'utf8',
     );
     const directory = await migrationDirectory(migration);
@@ -135,10 +169,9 @@ describe('runMigrations', () => {
     expect(migrations).toContain('0007_decision_supersession_constraints.sql');
     expect(migrations).toContain('0008_decision_supersession_validation.sql');
     expect(migrations).toContain('0009_decision_supersession_unique_index.sql');
-    expect(migrations.filter((file) => file.startsWith('0005_'))).toEqual([
-      '0005_entra_auth.sql',
-      '0005_webhook_ingestion.sql',
-    ]);
+    const sequenceNumbers = migrations.map((file) => file.slice(0, 4));
+    expect(new Set(sequenceNumbers).size).toBe(sequenceNumbers.length);
+    expect(migrations).toContain('0010_entra_auth.sql');
 
     const constraints = await readFile(
       join(process.cwd(), 'migrations/0007_decision_supersession_constraints.sql'),
@@ -174,7 +207,7 @@ describe('runMigrations', () => {
     directories.push(directory);
     const source = new URL('../../migrations/', import.meta.url);
     const files = (await readdir(source)).filter((file) => file.endsWith('.sql')).sort();
-    for (const file of files.filter((name) => name <= '0005_entra_auth.sql')) {
+    for (const file of files.filter((name) => name <= '0010_entra_auth.sql')) {
       await copyFile(new URL(file, source), join(directory, file));
     }
 
@@ -193,7 +226,7 @@ describe('runMigrations', () => {
         "INSERT INTO scope_memberships (principal_id, scope_id, role, source_kind, source_id) VALUES ($1, $2, 'admin', 'entra', $3)",
         [principal, scope, groupId],
       );
-      for (const file of files.filter((name) => name > '0005_entra_auth.sql')) {
+      for (const file of files.filter((name) => name > '0010_entra_auth.sql')) {
         await copyFile(new URL(file, source), join(directory, file));
       }
       await runMigrations(pool, directory);
@@ -215,7 +248,7 @@ describe('runMigrations', () => {
     directories.push(directory);
     const source = new URL('../../migrations/', import.meta.url);
     const files = (await readdir(source)).filter((file) => file.endsWith('.sql')).sort();
-    for (const file of files.filter((name) => name <= '0009_lock_entra_binding_invariant.sql')) {
+    for (const file of files.filter((name) => name <= '0014_lock_entra_binding_invariant.sql')) {
       await copyFile(new URL(file, source), join(directory, file));
     }
 
@@ -248,7 +281,7 @@ describe('runMigrations', () => {
         [groupId],
       );
 
-      for (const file of files.filter((name) => name > '0009_lock_entra_binding_invariant.sql')) {
+      for (const file of files.filter((name) => name > '0014_lock_entra_binding_invariant.sql')) {
         await copyFile(new URL(file, source), join(directory, file));
       }
       await runMigrations(pool, directory);
@@ -287,7 +320,7 @@ describe('runMigrations', () => {
     directories.push(directory);
     const source = new URL('../../migrations/', import.meta.url);
     const files = (await readdir(source)).filter((file) => file.endsWith('.sql')).sort();
-    for (const file of files.filter((name) => name <= '0010_harden_entra_binding_invariants.sql')) {
+    for (const file of files.filter((name) => name <= '0015_harden_entra_binding_invariants.sql')) {
       await copyFile(new URL(file, source), join(directory, file));
     }
 
@@ -319,7 +352,7 @@ describe('runMigrations', () => {
         );
       }
 
-      for (const file of files.filter((name) => name > '0010_harden_entra_binding_invariants.sql')) {
+      for (const file of files.filter((name) => name > '0015_harden_entra_binding_invariants.sql')) {
         await copyFile(new URL(file, source), join(directory, file));
       }
       await runMigrations(pool, directory);
@@ -355,7 +388,7 @@ describe('runMigrations', () => {
     await admin.query(`CREATE SCHEMA ${schema}`);
     const pool = schemaPool(schema);
     const migration = await readFile(
-      join(process.cwd(), 'migrations/0013_canonicalize_principal_external_ids.sql'),
+      join(process.cwd(), 'migrations/0018_canonicalize_principal_external_ids.sql'),
       'utf8',
     );
     const directory = await migrationDirectory(migration);
@@ -393,7 +426,7 @@ describe('runMigrations', () => {
     await admin.query(`CREATE SCHEMA ${schema}`);
     const pool = schemaPool(schema);
     const migration = await readFile(
-      join(process.cwd(), 'migrations/0013_canonicalize_principal_external_ids.sql'),
+      join(process.cwd(), 'migrations/0018_canonicalize_principal_external_ids.sql'),
       'utf8',
     );
     const directory = await migrationDirectory(migration);

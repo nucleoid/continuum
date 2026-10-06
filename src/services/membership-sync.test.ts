@@ -10,6 +10,7 @@ import {
   rejectEntraMembershipSync, revokeEntraGroupBinding, syncEntraMemberships,
 } from './membership-sync.js';
 import { ServiceError } from './errors.js';
+import { disablePrincipal } from './principal-admin.js';
 
 describe('Entra membership sync', () => {
   let pool: pg.Pool;
@@ -20,6 +21,13 @@ describe('Entra membership sync', () => {
     const org = await getScopeByRef(pool, { kind: 'org', name: '' });
     await addMembership(pool, admin.id, org!.id, 'admin');
   });
+  async function retainBreakGlassAdmin(orgId: string): Promise<void> {
+    const breakGlass = await createPrincipal(pool, {
+      externalId: 'break-glass', kind: 'user', displayName: 'Break glass',
+    });
+    await addMembership(pool, breakGlass.id, orgId, 'admin');
+  }
+
   afterAll(async () => { await pool?.end(); });
 
   it('never binds by name and skips arbitrary tenant groups with an audit summary', async () => {
@@ -34,6 +42,33 @@ describe('Entra membership sync', () => {
     expect(await hasRole(pool, user.id, alpha.id, 'reader')).toBe(false);
     expect((await pool.query('SELECT count(*)::int AS count FROM entra_groups')).rows[0].count).toBe(0);
     expect(result).toMatchObject({ groupsSeen: 0, groupsSkipped: 1, skipCodes: { UNBOUND_GROUP: 1 } });
+  });
+
+  it('never reactivates a disabled principal that remains in Graph', async () => {
+    const alpha = await createScope(pool, { kind: 'team', name: 'alpha' });
+    const user = await createPrincipal(pool, {
+      externalId: '11111111-1111-4111-8111-111111111111',
+      kind: 'user', displayName: 'User',
+    });
+    const groupId = '22222222-2222-4222-8222-222222222222';
+    await provisionEntraGroupBinding(pool, admin, {
+      externalId: groupId, scopeId: alpha.id, role: 'reader',
+    });
+    const snapshot = [{
+      id: groupId, status: 'present' as const, displayName: 'alpha',
+      memberObjectIds: [user.externalId],
+    }];
+    await syncEntraMemberships(pool, admin, snapshot);
+    expect(await hasRole(pool, user.id, alpha.id, 'reader')).toBe(true);
+
+    await disablePrincipal(pool, admin, user.id);
+    const result = await syncEntraMemberships(pool, admin, snapshot);
+
+    expect(await hasRole(pool, user.id, alpha.id, 'reader')).toBe(false);
+    expect((await pool.query(
+      'SELECT active FROM scope_memberships WHERE principal_id = $1', [user.id],
+    )).rows).toEqual([{ active: false }]);
+    expect(result.skipCodes).toMatchObject({ DISABLED_PRINCIPAL: 1 });
   });
 
   it('database-enforces approval against a pre-remediation name-based writer', async () => {
@@ -229,6 +264,7 @@ describe('Entra membership sync', () => {
     await syncEntraMemberships(pool, admin, [{
       id: groupId, status: 'present', displayName: 'admins', memberObjectIds: [admin.externalId],
     }]);
+    await retainBreakGlassAdmin(org!.id);
     await removeMembership(pool, admin.id, org!.id);
 
     await expect(provisionEntraGroupBinding(pool, admin, {
@@ -443,6 +479,7 @@ describe('Entra membership sync', () => {
     await syncEntraMemberships(pool, admin, [{
       id: groupId, status: 'present', displayName: 'admins', memberObjectIds: [admin.externalId],
     }]);
+    await retainBreakGlassAdmin(org!.id);
     await removeMembership(pool, admin.id, org!.id);
 
     await expect(revokeEntraGroupBinding(pool, admin, groupId)).rejects
@@ -730,6 +767,7 @@ describe('Entra membership sync', () => {
     await syncEntraMemberships(pool, admin, [{
       id: groupId, status: 'present', displayName: 'org-admin', memberObjectIds: [admin.externalId],
     }]);
+    await retainBreakGlassAdmin(org!.id);
     await removeMembership(pool, admin.id, org!.id);
     await expect(syncEntraMemberships(pool, admin, [{
       id: groupId, status: 'present', displayName: 'org-admin', memberObjectIds: [],
@@ -762,6 +800,7 @@ describe('Entra membership sync', () => {
     await syncEntraMemberships(pool, admin, [{
       id: groupId, status: 'present', displayName: 'admins', memberObjectIds: [admin.externalId],
     }]);
+    await retainBreakGlassAdmin(org!.id);
     await removeMembership(pool, admin.id, org!.id);
 
     await expect(syncEntraMemberships(pool, admin, [{

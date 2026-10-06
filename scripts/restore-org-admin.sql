@@ -21,6 +21,7 @@ WITH target AS (
     FROM principals p
     JOIN scopes s ON s.kind = 'org' AND s.name = ''
    WHERE p.id = :'principal_id'
+     AND p.disabled_at IS NULL
 ), restored AS (
   INSERT INTO scope_memberships
     (principal_id, scope_id, role, source_kind, source_id, active, deactivated_at)

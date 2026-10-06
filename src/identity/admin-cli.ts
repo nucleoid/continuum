@@ -2,6 +2,9 @@ import { getPool } from '../storage/pool.js';
 import { getPrincipalByExternalId } from '../storage/principals.js';
 import { issueApiKey, revokeApiKey, rotateApiKey } from '../services/api-keys.js';
 import { provisionEntraGroupBinding, revokeEntraGroupBinding } from '../services/membership-sync.js';
+import {
+  disablePrincipal, provisionServicePrincipal, reactivatePrincipal,
+} from '../services/principal-admin.js';
 import type { MembershipRole } from '../types.js';
 import { cliFailure } from './cli-errors.js';
 
@@ -40,7 +43,23 @@ async function main(): Promise<void> {
       if (!args[0]) throw new Error('usage: revoke-key <key-id>');
       await revokeApiKey(pool, actor, args[0]);
       process.stdout.write(`${JSON.stringify({ operation, keyId: args[0], revoked: true })}\n`);
-    } else throw new Error('operation must be bind-group, revoke-group, issue-key, rotate-key, or revoke-key');
+    } else if (operation === 'provision-service') {
+      const [externalId, ...displayNameParts] = args;
+      const displayName = displayNameParts.join(' ');
+      if (!externalId || !displayName) {
+        throw new Error('usage: provision-service <entra-object-id> <display-name>');
+      }
+      const principal = await provisionServicePrincipal(pool, actor, externalId, displayName);
+      process.stdout.write(`${JSON.stringify({ operation, principal })}\n`);
+    } else if (operation === 'disable-principal') {
+      if (!args[0]) throw new Error('usage: disable-principal <principal-id>');
+      await disablePrincipal(pool, actor, args[0]);
+      process.stdout.write(`${JSON.stringify({ operation, principalId: args[0] })}\n`);
+    } else if (operation === 'reactivate-principal') {
+      if (!args[0]) throw new Error('usage: reactivate-principal <principal-id>');
+      await reactivatePrincipal(pool, actor, args[0]);
+      process.stdout.write(`${JSON.stringify({ operation, principalId: args[0] })}\n`);
+    } else throw new Error('unknown admin operation');
   } finally { await pool.end(); }
 }
 

@@ -12,6 +12,7 @@ WITH target AS (
     FROM principals p
     JOIN scopes s ON s.kind = 'org' AND s.name = ''
    WHERE p.external_id = :'external_id'
+     AND p.disabled_at IS NULL
      AND p.kind = 'service'
      AND p.display_name = 'Scope Provisioning Operator'
 ), granted AS (
