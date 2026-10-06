@@ -208,8 +208,8 @@ describe('REST error middleware', () => {
   it('maps every stable ServiceError code and sanitizes unknown failures', async () => {
     const cases = [
       ['INVALID_INPUT', 400], ['INVALID_SCOPE', 400], ['FORBIDDEN', 403],
-      ['SCOPE_NOT_FOUND', 404], ['MEMORY_NOT_FOUND', 404], ['CONFLICT', 409],
-      ['NOT_FOUND', 404],
+      ['SCOPE_NOT_FOUND', 404], ['MEMORY_NOT_FOUND', 404], ['TAG_NOT_FOUND', 404],
+      ['NOT_FOUND', 404], ['UNKNOWN_TAGS', 422], ['CONFLICT', 409],
       ['PAYLOAD_TOO_LARGE', 413], ['DEPENDENCY_UNAVAILABLE', 503], ['INTERNAL', 500],
     ] as const;
 

@@ -5,6 +5,16 @@ export type PrincipalKind = 'user' | 'service';
 export type MembershipRole = 'reader' | 'writer' | 'admin';
 export type AuditAction = 'read' | 'write' | 'promote' | 'archive' | 'verify';
 
+export interface TagVocabulary {
+  scopeKind: ScopeKind;
+  tag: string;
+  description: string;
+  createdBy: string | null;
+  isSystem: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 export interface ScopeRef {
   kind: ScopeKind;
   name: string;

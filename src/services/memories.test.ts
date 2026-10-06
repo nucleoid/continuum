@@ -29,7 +29,7 @@ describe('memory read service', () => {
     const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
     const memory = await createMemory(pool, {
       scopeId: org.id, scopeKind: 'org', type: 'decision', title: 'Complete',
-      body: 'full private body', metadata: { key: 'value' }, tags: ['policy'],
+      body: 'full private body', metadata: { key: 'value' }, tags: ['decision'],
       authorId: author.id, source: 'manual', sourceRef: 'private-source-ref',
     });
     await pool.query(
@@ -42,7 +42,7 @@ describe('memory read service', () => {
       scope: 'org', authorDisplayName: 'Renamed Author',
       memory: {
         id: memory.id, body: 'full private body', metadata: { key: 'value' },
-        tags: ['policy'], authorId: author.id, sourceRef: 'private-source-ref',
+        tags: ['decision'], authorId: author.id, sourceRef: 'private-source-ref',
       },
     });
     const { rows } = await pool.query(

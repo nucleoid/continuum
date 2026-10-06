@@ -8,6 +8,8 @@ import { createPrincipal } from '../../storage/principals.js';
 import { createScope } from '../../storage/scopes.js';
 import { addMembership } from '../../storage/memberships.js';
 import { EmbeddingRegistry, ScopeEmbeddingRouter } from '../../embeddings/router.js';
+import { CaptureRegistry } from '../../capture/plugin.js';
+import type { CaptureInput } from '../../types.js';
 
 const requestId = 'ingest-request-id';
 const githubSecret = 'github-test-secret';
@@ -29,12 +31,29 @@ describe('webhook ingestion transport', () => {
     return { principal, project };
   }
 
-  function app(config: Record<string, unknown>) {
+  function app(config: Record<string, unknown>, captureRegistry?: CaptureRegistry) {
     return createApp(pool, {
       requestIdFactory: () => requestId,
       logger: { info() {}, error() {} },
       ingestConfig: config,
+      captureRegistry,
     });
+  }
+
+  function registryWithCapture(overrides: Partial<CaptureInput>): CaptureRegistry {
+    const registry = new CaptureRegistry();
+    registry.register({
+      id: 'github-pr',
+      transform: () => [{
+        scope: { kind: 'project', name: 'booking-engine' },
+        type: 'fact',
+        title: 'Plugin-provided capture',
+        body: 'Capture emitted by an ingestion plugin.',
+        source: 'github-pr',
+        ...overrides,
+      }],
+    });
+    return registry;
   }
 
   function githubConfig(principalExternalId = 'service:github-pr') {
@@ -95,6 +114,53 @@ describe('webhook ingestion transport', () => {
       source: 'github-pr',
       metadata: expect.objectContaining({ source: 'github-pr', transport: 'ingest' }),
     })]);
+  });
+
+  it('normalizes controlled tags emitted by an ingestion plugin', async () => {
+    await seedService();
+    const raw = JSON.stringify(mergedPr());
+    const response = await request(app(
+      githubConfig(),
+      registryWithCapture({ tags: [' ADO '] }),
+    )).post('/api/v0/ingest/github-pr')
+      .set('Content-Type', 'application/json')
+      .set('X-Hub-Signature-256', sign(raw))
+      .set('X-GitHub-Event', 'pull_request')
+      .set('X-GitHub-Delivery', 'plugin-normalized-tags')
+      .send(raw);
+
+    expect(response.status).toBe(202);
+    expect((await pool.query('SELECT tags FROM memories')).rows)
+      .toEqual([{ tags: ['ado'] }]);
+  });
+
+  it.each([
+    ['unknown tags', { tags: ['not-in-vocabulary'] }, 422, 'UNKNOWN_TAGS'],
+    ['reserved legacy-tag metadata', {
+      metadata: { continuum_legacy_tags: ['spoofed-private-tag'] },
+    }, 400, 'INVALID_INPUT'],
+  ] as const)('rejects plugin captures with %s atomically', async (
+    _case,
+    overrides,
+    status,
+    code,
+  ) => {
+    await seedService();
+    const raw = JSON.stringify(mergedPr());
+    const response = await request(app(
+      githubConfig(),
+      registryWithCapture(overrides),
+    )).post('/api/v0/ingest/github-pr')
+      .set('Content-Type', 'application/json')
+      .set('X-Hub-Signature-256', sign(raw))
+      .set('X-GitHub-Event', 'pull_request')
+      .set('X-GitHub-Delivery', `plugin-rejected-${code}`)
+      .send(raw);
+
+    expect(response.status).toBe(status);
+    expect(response.body).toMatchObject({ code, requestId });
+    expect((await pool.query('SELECT id FROM memories')).rows).toEqual([]);
+    expect((await pool.query('SELECT plugin_id FROM ingest_deliveries')).rows).toEqual([]);
   });
 
   it('fails closed for missing, malformed, wrong GitHub signatures and event headers', async () => {

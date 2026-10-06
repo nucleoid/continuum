@@ -67,7 +67,7 @@ export const adoWorkItemPlugin: CapturePlugin<AdoWorkItemEvent> = {
         type,
         title: `${f['System.WorkItemType']} ${event.id}: ${f['System.Title']}`,
         body: lines.join('\n').trim(),
-        tags: ['ado', f['System.State'].toLowerCase(), ...adoTags.map((t) => t.toLowerCase())],
+        tags: isDecision ? ['ado', 'decision'] : ['ado'],
         source: 'ado-workitem',
         sourceRef: event._links?.html?.href ?? undefined,
         metadata: {

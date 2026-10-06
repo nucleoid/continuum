@@ -79,14 +79,14 @@ describe('REST/MCP semantic parity matrix', () => {
       .send({
         scope: { kind: 'team', name: 'payments' },
         type: 'fact', title: 'REST', body: 'body', source: 'manual',
-        sourceRef: 'rest-ref', tags: ['shared'], metadata: { transport: 'rest-value' },
+        sourceRef: 'rest-ref', tags: ['session'], metadata: { transport: 'rest-value' },
       });
     const mcp = (await client.callTool({
       name: 'continuum.capture',
       arguments: {
         scope_kind: 'team', scope_name: 'payments', type: 'fact',
         title: 'MCP', body: 'body', source: 'manual', source_ref: 'mcp-ref',
-        tags: ['shared'], metadata: { transport: 'mcp-value' },
+        tags: ['session'], metadata: { transport: 'mcp-value' },
       },
     })) as ToolResult;
 
@@ -116,7 +116,7 @@ describe('REST/MCP semantic parity matrix', () => {
       {
         title: 'MCP',
         source_ref: 'mcp-ref',
-        tags: ['shared'],
+        tags: ['session'],
         metadata: { transport: 'mcp-value', related: [] },
         audit_metadata: {
           source: 'manual', type: 'fact', embedded: false, transport: 'mcp',
@@ -125,7 +125,7 @@ describe('REST/MCP semantic parity matrix', () => {
       {
         title: 'REST',
         source_ref: 'rest-ref',
-        tags: ['shared'],
+        tags: ['session'],
         metadata: { transport: 'rest-value', related: [] },
         audit_metadata: { source: 'manual', type: 'fact', embedded: false },
       },
@@ -310,7 +310,7 @@ describe('REST/MCP semantic parity matrix', () => {
     await addMembership(pool, principal.id, scope.id, 'reader');
     const memory = await createMemory(pool, {
       scopeId: scope.id, scopeKind: 'project', type: 'decision', title: 'Parity record',
-      body: 'The complete parity body.', metadata: { channel: 'both' }, tags: ['parity'],
+      body: 'The complete parity body.', metadata: { channel: 'both' }, tags: ['decision'],
       authorId: principal.id, source: 'manual', sourceRef: 'parity-ref',
     });
 

@@ -6,11 +6,13 @@ import { createMemory } from './memories.js';
 import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
 import type { Queryable } from './queryable.js';
 import { getScope } from './scopes.js';
+import { listTagVocabulary, lockRequestedTags } from './tag-vocabularies.js';
 
 export class SupersedeStorageError extends Error {
   constructor(
-    readonly kind: 'not_found' | 'forbidden' | 'not_decision' | 'not_live' | 'successor_exists' | 'dependency_unavailable',
+    readonly kind: 'not_found' | 'forbidden' | 'not_decision' | 'not_live' | 'successor_exists' | 'unknown_tags' | 'dependency_unavailable',
     readonly successorId?: string,
+    readonly details?: Record<string, unknown>,
   ) { super(kind); this.name = 'SupersedeStorageError'; }
 }
 
@@ -75,10 +77,24 @@ async function supersedeInTransaction(client: pg.PoolClient, input: SupersedeWri
   if (existing.rows[0]) throw new SupersedeStorageError('successor_exists', existing.rows[0].id);
   if (predecessor.state !== 'live') throw new SupersedeStorageError('not_live');
 
+  const tags = input.tags ?? [];
+  const matchedTags = await lockRequestedTags(client, scope.kind, tags);
+  const matchedSet = new Set(matchedTags);
+  const unknownTags = [...new Set(tags.filter((tag) => !matchedSet.has(tag)))].sort();
+  if (unknownTags.length > 0) {
+    const allowedTags = (await listTagVocabulary(client, scope.kind))
+      .map((entry) => entry.tag);
+    throw new SupersedeStorageError('unknown_tags', undefined, {
+      scopeKind: scope.kind,
+      unknownTags,
+      allowedTags: allowedTags.slice(0, 100),
+    });
+  }
+
   const successor = await createMemory(client, {
     scopeId: scope.id, scopeKind: scope.kind, type: 'decision', title: input.title,
     body: input.body, authorId: input.principalId, source: input.source,
-    sourceRef: input.sourceRef, tags: input.tags,
+    sourceRef: input.sourceRef, tags,
     metadata: { ...input.metadata, related: [] },
     supersedesId: predecessor.id,
   });

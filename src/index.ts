@@ -24,6 +24,7 @@ export * from './services/recall.js';
 export * from './services/lifecycle.js';
 export * from './services/review-queue.js';
 export * from './services/agents-md.js';
+export * from './services/tag-vocabularies.js';
 export * from './lifecycle/sweep.js';
 export { promoteMemory, verifyMemory, PromoteError } from './storage/promote.js';
 export * from './capture/index.js';

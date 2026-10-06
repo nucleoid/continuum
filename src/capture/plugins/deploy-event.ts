@@ -46,7 +46,7 @@ export const deployEventPlugin: CapturePlugin<DeployEventPayload> = {
         type: 'fact',
         title: `${event.version} ${verb} on ${event.environment}`,
         body: lines.join('\n'),
-        tags: ['deploy', event.environment, event.status],
+        tags: ['deploy'],
         source: 'deploy-event',
         sourceRef: event.url ?? undefined,
         metadata: {

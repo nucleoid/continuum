@@ -193,14 +193,14 @@ describe('shared services', () => {
       body: 'Three attempts.',
       source: 'manual',
       sourceRef: 'https://example.test/source/1',
-      tags: ['checkout'],
+      tags: ['decision'],
       metadata: { branch: 'main' },
     });
 
     expect(result.embedded).toBe(false);
     expect(result.memory).toMatchObject({
       scopeId: team.id,
-      tags: ['checkout'],
+      tags: ['decision'],
       sourceRef: 'https://example.test/source/1',
       metadata: { branch: 'main' },
     });
@@ -211,19 +211,25 @@ describe('shared services', () => {
     expect(rows).toEqual([{ metadata: { source: 'manual', type: 'fact', embedded: false } }]);
   });
 
-  it('rejects caller-supplied reserved relation metadata before side effects', async () => {
+  it.each([
+    ['related', [{ id: 'forged' }]],
+    ['continuum_legacy_tags', ['spoofed-private-tag']],
+  ] as const)('rejects caller-supplied reserved metadata.%s before side effects', async (
+    key,
+    value,
+  ) => {
     const { principal } = await seedWriter();
 
     await expect(captureMemory(pool, null, principal, {
       scope: { kind: 'team', name: 'payments' },
       type: 'fact',
-      title: 'Forged relation metadata',
+      title: 'Forged reserved metadata',
       body: 'Must not persist.',
       source: 'manual',
-      metadata: { related: [{ id: 'forged' }] },
+      metadata: { [key]: value },
     })).rejects.toMatchObject<ServiceError>({
       code: 'INVALID_INPUT',
-      publicMessage: 'metadata.related is reserved by Continuum',
+      publicMessage: `metadata.${key} is reserved by Continuum`,
     });
 
     const { rows } = await pool.query(
@@ -1210,6 +1216,39 @@ describe('shared services', () => {
       [source.id],
     );
     expect(rows[0].count).toBe(1);
+  });
+
+  it('rejects promotion when source tags are not allowed by the destination scope kind', async () => {
+    const { principal, team } = await seedWriter();
+    const project = await createScope(pool, { kind: 'project', name: 'tag-boundary' });
+    await addMembership(pool, principal.id, project.id, 'writer');
+    await pool.query(
+      `INSERT INTO tag_vocabularies (scope_kind, tag, description, created_by)
+       VALUES ('team', 'team-only', 'Only valid for teams', $1)`,
+      [principal.id],
+    );
+    const source = await createMemory(pool, {
+      scopeId: team.id, scopeKind: team.kind, type: 'decision', title: 'Scoped taxonomy',
+      body: 'Do not leak tags across vocabularies.', authorId: principal.id,
+      source: 'manual', tags: ['team-only'],
+    });
+
+    await expect(promoteForPrincipal(
+      pool, principal, source.id, { kind: 'project', name: 'tag-boundary' },
+    )).rejects.toMatchObject<ServiceError>({
+      code: 'UNKNOWN_TAGS',
+      status: 422,
+      details: {
+        scopeKind: 'project', unknownTags: ['team-only'],
+      },
+    });
+    const persisted = await pool.query(
+      `SELECT state, promoted_to_id,
+              (SELECT count(*)::int FROM memories WHERE metadata->>'promoted_from' = $2) AS copies
+         FROM memories WHERE id = $1`,
+      [source.id, source.id],
+    );
+    expect(persisted.rows[0]).toEqual({ state: 'live', promoted_to_id: null, copies: 0 });
   });
 
   it('cannot restore live state when verify(true) races promotion', async () => {

@@ -398,6 +398,38 @@ describe('MCP server', () => {
     expect(stored.rows).toEqual([{ source }]);
   });
 
+  it('returns the shared unknown-tag domain error before embedding or persistence', async () => {
+    const embed = vi.fn(async () => [[0.1, 0.2, 0.3]]);
+    const { client } = await connectClient({ id: 'test:tags', dim: 768, embed });
+    const result = (await client.callTool({
+      name: 'continuum.capture',
+      arguments: {
+        scope_kind: 'team', scope_name: 'payments', type: 'fact',
+        title: 'Unknown tag', body: 'Must not persist.', source: 'manual',
+        tags: ['unknown-tag'],
+      },
+    })) as CallToolResult & { isError?: boolean };
+
+    expect(result.isError).toBe(true);
+    expect(parseJsonResult(result)).toEqual({
+      error: {
+        code: 'UNKNOWN_TAGS',
+        message: 'One or more tags are not in the vocabulary for this scope kind',
+        details: {
+          scopeKind: 'team',
+          unknownTags: ['unknown-tag'],
+          allowedTags: [
+            'ado', 'branch', 'decision', 'deploy', 'github', 'knowledge-gap', 'merged', 'pr',
+            'session', 'terminal',
+          ],
+        },
+      },
+    });
+    expect(embed).not.toHaveBeenCalled();
+    expect((await pool.query('SELECT 1 FROM memories')).rowCount).toBe(0);
+    expect((await pool.query('SELECT 1 FROM audit_log')).rowCount).toBe(0);
+  });
+
   it('rejects an unknown source before embedding or persistence', async () => {
     const embed = vi.fn(async () => [[0.1, 0.2, 0.3]]);
     const { client } = await connectClient({
@@ -509,6 +541,47 @@ describe('MCP server', () => {
     expect(result.isError).toBe(true);
     expect(parseJsonResult(result)).toEqual({
       error: { code: 'FORBIDDEN', message: 'principal lacks admin role on target scope' },
+    });
+  });
+
+  it('returns destination vocabulary failures in the stable MCP error envelope', async () => {
+    const { client, me, teamPayments } = await connectClient();
+    const project = await createScope(pool, { kind: 'project', name: 'tag-boundary' });
+    await addMembership(pool, me.id, project.id, 'writer');
+    await pool.query(
+      `INSERT INTO tag_vocabularies (scope_kind, tag, description, created_by)
+       VALUES ('team', 'team-only', 'Only valid for teams', $1)`,
+      [me.id],
+    );
+    const source = await createMemory(pool, {
+      scopeId: teamPayments.id, scopeKind: 'team', type: 'decision',
+      title: 'Team taxonomy', body: 'Keep destination tags controlled.',
+      authorId: me.id, source: 'manual', tags: ['team-only'],
+    });
+
+    const result = (await client.callTool({
+      name: 'continuum.promote',
+      arguments: {
+        memory_id: source.id,
+        target_scope_kind: 'project',
+        target_scope_name: 'tag-boundary',
+      },
+    })) as CallToolResult & { isError?: boolean };
+
+    expect(result.isError).toBe(true);
+    expect(parseJsonResult(result)).toEqual({
+      error: {
+        code: 'UNKNOWN_TAGS',
+        message: 'One or more tags are not in the vocabulary for this scope kind',
+        details: {
+          scopeKind: 'project',
+          unknownTags: ['team-only'],
+          allowedTags: [
+            'ado', 'branch', 'decision', 'deploy', 'github', 'knowledge-gap', 'merged', 'pr',
+            'session', 'terminal',
+          ],
+        },
+      },
     });
   });
 

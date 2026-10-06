@@ -12,6 +12,7 @@ import {
   type SupersedeWriteResult,
 } from '../storage/supersede.js';
 import { record as recordAudit, recordRead as recordReadAudit } from '../audit/log.js';
+import { normalizeTags } from './tag-vocabularies.js';
 
 export interface SupersedeInput {
   supersededId: string; title: string; body: string; tags?: string[]; source?: string;
@@ -30,6 +31,11 @@ function mapStorageError(error: SupersedeStorageError): ServiceError {
     case 'successor_exists': return new ServiceError('CONFLICT', 'Decision has already been superseded', {
       details: error.successorId ? { successorId: error.successorId } : undefined,
     });
+    case 'unknown_tags': return new ServiceError(
+      'UNKNOWN_TAGS',
+      'One or more tags are not in the vocabulary for this scope kind',
+      { details: error.details },
+    );
     case 'dependency_unavailable': return dependencyUnavailable(error);
   }
 }
@@ -154,9 +160,12 @@ export async function supersedeForPrincipal(
   try {
     const source = input.source ?? 'manual';
     validateCaptureContent({ ...input, source });
+    const tags = normalizeTags(input.tags);
     let result;
     try {
-      result = await supersedeDecision(pool, { ...input, source, principalId: principal.id, auditMetadata });
+      result = await supersedeDecision(pool, {
+        ...input, tags, source, principalId: principal.id, auditMetadata,
+      });
     } catch (error) {
       if (error instanceof SupersedeStorageError) throw mapStorageError(error);
       throw error;

@@ -49,6 +49,9 @@ describe('runMigrations', () => {
     expect(migrations.filter((file) => file.startsWith('0005_'))).toEqual([
       '0005_webhook_ingestion.sql',
     ]);
+    const numericPrefixes = migrations.map((file) => file.split('_', 1)[0]);
+    expect(new Set(numericPrefixes).size).toBe(numericPrefixes.length);
+    expect(migrations).toContain('0010_tag_vocabularies.sql');
 
     const constraints = await readFile(
       join(process.cwd(), 'migrations/0007_decision_supersession_constraints.sql'),
