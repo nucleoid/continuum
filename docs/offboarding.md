@@ -39,8 +39,10 @@ Truncated evidence can never be acknowledged. Mapping audit contains only UUID
 lists, the evidence hash, and explicit truncation flags. Names alone are never
 ownership evidence.
 
-Dry-run reports personal-memory, live-memory, embedding, active scope-membership,
-and raw audit-query counts without writing an audit or changing state. It also
+Dry-run reports bounded lower-bound previews for personal memories, live
+memories, embeddings, active scope memberships, and raw audit queries without
+writing an audit or changing state. `countEvidence` identifies the preview
+limit and every truncated field; an unlisted field is exact. It also
 returns bounded, sorted member and author principal UUID evidence, explicit
 truncation flags, and audit selection counts by principal, scope, memory,
 `scope_ids`, and linked request. This lets the operator detect a mistaken
@@ -53,8 +55,12 @@ memories and audit rows are processed in retry-safe batches. `batchSize`
 defaults to 1,000 and accepts 1 through 5,000 through REST or CLI
 `--batch-size`; each response reports cumulative processed counts, bounded
 remaining-work indicators, batch number, and `complete`. Durable UUID and audit
-ID keyset cursors ensure every resumed batch scans bounded windows; bounded
-`EXISTS` probes, rather than full recounts, decide completion. Principals with more than 10,000 memories
+ID keyset cursors ensure every resumed batch scans bounded windows. After the
+principal and owned-scope write fence is closed, the run records one immutable
+audit high-water ID. Every selector exhausts only its window through that fence;
+the linked-request selector starts after request-ID discovery is complete.
+Cursor exhaustion, rather than repeated dirty-history scans or full recounts,
+decides audit completion. Principals with more than 10,000 memories
 or 50,000 audit rows use the same path and are not rejected. Reissue the exact
 confirmed REST operation until `complete: true`. The admin CLI does this loop by
 default; `--once` performs one batch for external orchestration, and
@@ -66,8 +72,9 @@ Safe retries return
 principal and scope pseudonyms, zero embeddings, aliases, active memberships,
 and zero unrevoked Entra bindings,
 and no dirty audit query or metadata rows. Dry-run and retry output includes
-dirty-memory and dirty-audit counts. Retry output also includes the first durable
-evidence ID, timestamp, original query count, and original row counts. A dirty
+dirty-memory and dirty-audit indicators. Retry output also includes the first durable
+evidence ID, timestamp, and exact cumulative processed counts from the completed
+run. A dirty
 retry resumes or repairs bounded work and records a repair event rather than
 silently reporting success.
 
@@ -108,7 +115,8 @@ and audit-retention counts, hashes, and run IDs. Each changed
 ownership acknowledgement is written to the immutable
 `principal_user_scope_approvals` ledger with approver UUID, timestamp, reviewed
 UUIDs, and evidence hash. UUID-only mapping and erasure receipt audit operations
-are excluded from redaction. The original count and bounded-ID receipt is also written to
+are excluded from redaction. The exact cumulative processed-count and bounded-ID
+receipt is also written to
 `principal_offboarding_events`. Both evidence ledgers reject update, delete,
 and truncate operations. The compact privacy-safe event ledger is outside
 ordinary `audit_log` retention and is the authoritative retry evidence after
@@ -117,7 +125,8 @@ truncation flags only, never memory text, names, queries, or verification notes.
 Before the first irreversible batch write, a `started` row containing the run
 UUID, initiator UUID, exact approval ID, and acknowledgement hash is appended to
 `principal_offboarding_run_events`. Finalization appends a `completed` row that
-preserves the initiator and identifies the finalizer. The ledger rejects update,
+preserves the initiator, identifies the finalizer, and records exact cumulative
+processed counts. The ledger rejects update,
 delete, and truncate; mutable cursor progress is never the sole authorization
 record.
 
@@ -162,17 +171,25 @@ with a batch size from 1 through 5,000 until it returns zero. Migration
 `0025_offboarding_audit_indexes.sql` is marked no-transaction and creates the
 selector-plus-ID cursor indexes and metadata indexes concurrently. Migration
 `0026_offboarding_round6_hardening.sql` installs append-only run evidence and
-the database reactivation guard. Before each concurrent
+the first database reactivation guard. Migration
+`0027_offboarding_bounded_completion.sql` adds the durable audit fence, exact
+processed-count accumulators, and a SECURITY DEFINER reactivation capability
+that cannot be spoofed with a caller-set custom GUC. Migration
+`0028_offboarding_reactivation_authorization.sql` requires an effective org
+administrator and appends the reactivation audit inside that same database
+transaction. Direct ordinary application SQL can neither clear the lifecycle
+columns nor invoke the capability for a non-admin actor. Database-owner access
+remains a trusted administrative boundary. Before each concurrent
 create, the migrator resolves the named index in `current_schema()`, drops that
 exact schema-qualified object concurrently only when `pg_index.indisvalid` is
 false, and then creates it. A post-create directive requires the exact index to
 exist and be valid before the migration ledger can record success. A timeout or
 failed build leaves the file unapplied and safely retryable.
 
-Apply all five migrations before starting the new application version. Old
+Apply all seven offboarding migrations before starting the new application version. Old
 instances can continue ordinary traffic after `0023`, but they do not know the
 offboarding workflow and an old authenticated request may already be in flight.
-Do not invoke offboarding until all five migrations are recorded on every shared
+Do not invoke offboarding until all seven migrations are recorded on every shared
 database and all old application instances have drained. Rollback is
 application-first: stop invoking offboarding, drain the new instances, and
 deploy the old application only after `list-incomplete-offboarding` reports

@@ -12,6 +12,7 @@ import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import {
   DEFAULT_OFFBOARD_BATCH_SIZE, listIncompleteOffboardingRuns, mapOwnedUserScope,
   MAX_OFFBOARD_AFFECTED_ROWS, MAX_OFFBOARD_MEMORIES,
+  offboardingAuditBranchSql,
   offboardPrincipal as serviceOffboardPrincipal, type OffboardingOptions,
 } from './offboarding.js';
 import { provisionEntraGroupBinding } from './membership-sync.js';
@@ -248,7 +249,13 @@ describe('offboarding and erasure', () => {
     );
     const client = await pool.connect();
     try {
+      await client.query('BEGIN');
       await client.query('SET enable_seqscan = off');
+      await client.query(
+        `CREATE TEMP TABLE offboarding_audit_targets (
+           id BIGINT PRIMARY KEY, request_id TEXT, reason TEXT NOT NULL
+         ) ON COMMIT DROP`,
+      );
       const explain = async (sql: string, parameters: unknown[]) => JSON.stringify(
         (await client.query(`EXPLAIN (FORMAT JSON) ${sql}`, parameters)).rows[0],
       );
@@ -263,30 +270,32 @@ describe('offboarding and erasure', () => {
         [value.personal.id, 0, 100],
       )).toContain('audit_log_scope_cursor_idx');
       expect(await explain(
-        `WITH scan AS MATERIALIZED (
-           SELECT a.* FROM audit_log a
-            WHERE a.id > $2 AND a.id <= $3 ORDER BY a.id LIMIT $4
-         )
-         SELECT a.id FROM scan a JOIN memories m ON m.id = a.memory_id
-          WHERE m.scope_id = $1`,
-        [value.personal.id, 0, 9_223_372_036_854_775_807n, 100],
+        offboardingAuditBranchSql(
+          'memory', 'FROM memories m JOIN audit_log a ON a.memory_id = m.id',
+          'm.scope_id = $1',
+        ),
+        [value.personal.id, value.target.id, [], 0, 100, 'memory',
+          9_223_372_036_854_775_807n],
       )).toMatch(/audit_log_pkey[\s\S]*CTE Scan|CTE Scan[\s\S]*audit_log_pkey/);
       expect(await explain(
-        `WITH scan AS MATERIALIZED (
-           SELECT a.* FROM audit_log a
-            WHERE a.id > $2 AND a.id <= $3 ORDER BY a.id LIMIT $4
-         )
-         SELECT a.id FROM scan a WHERE a.metadata ? 'scope_ids'
-          AND a.metadata->'scope_ids' @> jsonb_build_array($1::text)`,
-        [value.personal.id, 0, 9_223_372_036_854_775_807n, 100],
+        offboardingAuditBranchSql(
+          'scope_ids', 'FROM audit_log a',
+          `a.metadata ? 'scope_ids'
+            AND a.metadata->'scope_ids' @> jsonb_build_array($1::text)`,
+        ),
+        [value.personal.id, value.target.id, [], 0, 100, 'scope_ids',
+          9_223_372_036_854_775_807n],
       )).toMatch(/audit_log_pkey[\s\S]*CTE Scan|CTE Scan[\s\S]*audit_log_pkey/);
       expect(await explain(
-        `SELECT a.id FROM principal_offboarding_audit_requests r
+        offboardingAuditBranchSql(
+          'linked_request',
+          `FROM principal_offboarding_audit_requests r
            JOIN audit_log a ON a.metadata ? 'request_id'
-            AND a.metadata->>'request_id' = r.request_id
-          WHERE r.principal_id = $1 AND a.id > $2 AND a.id <= $3
-          ORDER BY a.id LIMIT $4`,
-        [value.target.id, 0, 9_223_372_036_854_775_807n, 100],
+            AND a.metadata->>'request_id' = r.request_id`,
+          'r.principal_id = $2',
+        ),
+        [value.personal.id, value.target.id, [], 0, 100, 'linked_request',
+          9_223_372_036_854_775_807n],
       )).toContain('audit_log_request_cursor_idx');
       expect(await explain(
         `SELECT id FROM audit_log WHERE id > $1 ORDER BY id LIMIT $2`,
@@ -299,6 +308,7 @@ describe('offboarding and erasure', () => {
         [JSON.stringify([value.personal.id])],
       )).toContain('principal_user_scopes_scope_id_key');
     } finally {
+      await client.query('ROLLBACK');
       client.release();
     }
   });
@@ -308,7 +318,7 @@ describe('offboarding and erasure', () => {
     await pool.query(
       `INSERT INTO audit_log (principal_id, action, query, metadata)
        SELECT $1, 'read', NULL, '{"source":"manual"}'::jsonb
-         FROM generate_series(1, 40)`,
+         FROM generate_series(1, 8)`,
       [value.admin.id],
     );
     await pool.query(
@@ -331,7 +341,7 @@ describe('offboarding and erasure', () => {
     expect(Object.entries(firstRun).filter(([key]) => key !== 'audit_fence_id')
       .every(([, cursor]) => BigInt(cursor as string) <= BigInt(firstRun.audit_fence_id))).toBe(true);
 
-    for (let attempt = 0; attempt < 100 && !result.complete; attempt += 1) {
+    for (let attempt = 0; attempt < 50 && !result.complete; attempt += 1) {
       result = await offboardPrincipal(pool, value.admin, value.target.id, { batchSize: 1 });
     }
     expect(result.complete).toBe(true);
@@ -377,7 +387,9 @@ describe('offboarding and erasure', () => {
       result = await offboardPrincipal(pool, value.admin, value.target.id, { batchSize: 1 });
     }
     expect(result.complete).toBe(true);
-    expect((result as any).countEvidence).toEqual({ exact: true, limit: null, truncated: [] });
+    expect((result as any).countEvidence).toEqual({
+      exact: false, limit: 1, truncated: ['liveMemories'],
+    });
     expect(result).toMatchObject({ memories: 4, auditRows: 3, auditQueries: 3 });
     expect((await pool.query(
       `SELECT memories, audit_rows, audit_queries FROM principal_offboarding_events
@@ -751,6 +763,34 @@ describe('offboarding and erasure', () => {
     )).rejects.toThrow(/offboarded owned scope/i);
   });
 
+  it('discovers linked request IDs from clean direct carrier rows', async () => {
+    const value = await fixture();
+    const delegate = await createPrincipal(pool, {
+      externalId: 'clean-request-carrier', kind: 'user', displayName: 'Delegate',
+    });
+    const requestId = 'clean-carrier-request';
+    await pool.query(
+      `INSERT INTO audit_log (principal_id, action, scope_id, query, metadata) VALUES
+       ($1, 'read', $2, NULL, $3::jsonb),
+       ($1, 'read', NULL, 'linked private query', $4::jsonb)`,
+      [delegate.id, value.personal.id,
+        JSON.stringify({ operation: 'get_memory', request_id: requestId, record_kind: 'memory' }),
+        JSON.stringify({ request_id: requestId })],
+    );
+
+    let result = await offboardPrincipal(pool, value.admin, value.target.id, { batchSize: 1 });
+    for (let attempt = 0; attempt < 50 && !result.complete; attempt += 1) {
+      result = await offboardPrincipal(pool, value.admin, value.target.id, { batchSize: 1 });
+    }
+    expect(result.complete).toBe(true);
+    expect((await pool.query(
+      `SELECT query, metadata FROM audit_log
+        WHERE principal_id = $1 ORDER BY id DESC LIMIT 1`, [delegate.id],
+    )).rows[0]).toEqual({
+      query: null, metadata: { redacted: 'principal_offboarding' },
+    });
+  });
+
   it('fails a concurrent delegate audit closed when the owner transition wins', async () => {
     const value = await fixture();
     const delegate = await createPrincipal(pool, {
@@ -848,8 +888,13 @@ describe('offboarding and erasure', () => {
       [value.admin.id, value.personal.id, MAX_OFFBOARD_AFFECTED_ROWS + 1],
     );
     const preview = await offboardPrincipal(pool, value.admin, value.target.id, true);
-    expect(preview.memories).toBe(DEFAULT_OFFBOARD_BATCH_SIZE + 1);
+    expect(preview.memories).toBe(DEFAULT_OFFBOARD_BATCH_SIZE);
     expect(preview.auditRows).toBe(DEFAULT_OFFBOARD_BATCH_SIZE);
+    expect(preview.countEvidence).toMatchObject({
+      exact: false,
+      limit: DEFAULT_OFFBOARD_BATCH_SIZE,
+      truncated: expect.arrayContaining(['memories', 'auditRows']),
+    });
     const first = await offboardPrincipal(pool, value.admin, value.target.id, { batchSize: 10 });
     expect(first).toMatchObject({ complete: false, progress: { memoriesProcessed: 10 } });
     expect(first.progress.auditRowsProcessed).toBeGreaterThan(0);
@@ -969,6 +1014,13 @@ describe('offboarding and erasure', () => {
       await attacker.query('ROLLBACK');
       attacker.release();
     }
+    const outsider = await createPrincipal(pool, {
+      externalId: 'reactivation-outsider', kind: 'user', displayName: 'Outsider',
+    });
+    await expect(pool.query(
+      `SELECT continuum_reactivate_principal($1::uuid, $2::uuid)`,
+      [value.target.id, outsider.id],
+    )).rejects.toThrow(/effective org administrator/i);
     await expect(reactivatePrincipal(pool, value.admin, value.target.id)).resolves.toBeUndefined();
   });
 

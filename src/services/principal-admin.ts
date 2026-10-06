@@ -103,20 +103,12 @@ export async function reactivatePrincipal(
     await client.query('BEGIN');
     await requireOrgAdmin(client, actor.id);
     const reactivated = await client.query(
-      `SELECT continuum_reactivate_principal($1::uuid) AS previously_offboarded`, [principalId],
+      `SELECT continuum_reactivate_principal($1::uuid, $2::uuid) AS previously_offboarded`,
+      [principalId, actor.id],
     );
     if (reactivated.rows[0]?.previously_offboarded === null) {
       throw new ServiceError('INVALID_INPUT', 'disabled principal not found');
     }
-    const previouslyOffboarded = reactivated.rows[0].previously_offboarded as boolean;
-    await client.query(
-      `INSERT INTO audit_log (principal_id, action, metadata)
-       VALUES ($1, 'write', $2::jsonb)`,
-      [actor.id, JSON.stringify({
-        operation: 'principal_reactivated', principal_id: principalId,
-        previously_offboarded: previouslyOffboarded,
-      })],
-    );
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK');

@@ -62,6 +62,12 @@ describe('runMigrations', () => {
     expect(hardening).toMatch(/ADD COLUMN audit_fence_id BIGINT/i);
     expect(hardening).toMatch(/SECURITY DEFINER/i);
     expect(hardening).not.toMatch(/current_setting|set_config/i);
+    const authorization = await readFile(
+      join(process.cwd(), 'migrations/0028_offboarding_reactivation_authorization.sql'), 'utf8',
+    );
+    expect(authorization).toMatch(/continuum_membership_is_effective/i);
+    expect(authorization).toMatch(/principal_reactivated/i);
+    expect(authorization).toMatch(/SECURITY DEFINER/i);
   });
   it('removes pre-existing embeddings for archived memories during the offboarding migration', async () => {
     const schema = `migrator_offboarding_${Date.now()}_${Math.random().toString(16).slice(2)}`;

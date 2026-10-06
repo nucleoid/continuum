@@ -391,7 +391,8 @@ scope and redacts linked audit rows in bounded transactions. It deletes
 embeddings and aliases, revokes and quarantines scope-targeting Entra bindings,
 deactivates every membership on that scope, and writes per-memory plus
 operation-summary audit records. Immutable approval and completion ledgers bind
-the approver, reviewed UUIDs, evidence hash, original counts, and batch progress.
+the approver, reviewed UUIDs, evidence hash, bounded preview semantics, exact
+cumulative completion counts, and batch progress.
 Database guards close an
 offboarded owned scope to non-tombstone writes, active memberships, and active
 Entra bindings; retries verify that no dirty memories, embeddings, aliases,
