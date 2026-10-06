@@ -1,5 +1,7 @@
 # Embedding resilience and backfill
 
+## Implemented runtime behavior
+
 Continuum sends every provider bounded arrays (`/api/embed` for Ollama and the
 native embeddings endpoint for hosted providers). Routed-provider `batch_size`
 is the maximum number of texts in each HTTP request, not the backfill scan size;
@@ -17,7 +19,7 @@ same object in result `_meta.diagnostics`. Audit summaries record
 `embedding_recall_fallback` counts without queries, memory text, vectors, or
 raw exception messages.
 
-## Backfill procedure
+## Operator backfill procedure
 
 1. Apply migrations and configure the same scope routing used by the API.
 2. Run `npm run embed-backfill -- --count`.
@@ -41,13 +43,17 @@ bounded diagnostic bisection. An isolated ambiguous row is recorded as a retryab
 `suspect`, not durable poison; it is retried on the next run and removed after a
 successful write. If every diagnostic leaf fails, the result remains a provider
 outage and no row is suppressed. Diagnostic probing is capped at 64 sub-batch
-requests per failed batch. A one-item provider batch cannot distinguish an
+requests per failed batch and stops after more than eight ambiguous probe
+failures, limiting additional pressure during a provider brownout. A one-item provider batch cannot distinguish an
 isolated input from an outage, so an ambiguous provider failure stops that
 provider immediately without advancing its cursor or recording a suspect.
 
 The JSON report includes `providerReports`, preserving each provider's counters,
-cursor, completion state, sanitized `errorCode`, and `unresolvedIds`. The top-level
-`unresolvedIds` aggregates retryable suspects across providers. Provider-local
+cursor, completion state, sanitized `errorCode`, `unresolvedCount`,
+`unresolvedTruncated`, and `unresolvedIds`. Each `unresolvedIds` list is a sample
+capped at 25 entries; `unresolvedCount` retains the full count and
+`unresolvedTruncated` reports whether the sample was shortened. The top-level
+fields aggregate retryable suspects across providers. Provider-local
 database and advisory-lock failures do not prevent later routed providers from
 running. Any incomplete provider or provider error makes the CLI exit nonzero
 after printing the report.
@@ -63,7 +69,7 @@ cannot be combined with preview, retry, or cursor controls. Do not use it during
 a provider-wide outage. The command never falls back from a local-only route to
 a hosted provider.
 
-## Migration 0010 rollout and rollback
+## Operator migration 0010 rollout and rollback
 
 Migration `0010_provider_embeddings_backfill.sql` builds the new unique index
 concurrently, then attaches it as the primary key in a short transaction with a

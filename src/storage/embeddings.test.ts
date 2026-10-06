@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   storeMemoryEmbeddingVector,
   vectorSearchMemoryIds,
+  vectorSearchRelatedMemories,
 } from './embeddings.js';
 import type { Queryable } from './queryable.js';
 
@@ -109,6 +110,30 @@ describe('vector search filters', () => {
     const [sql] = vi.mocked(db.query).mock.calls[0] as [string, unknown[]];
     expect(sql).toMatch(/WITH provider_embeddings AS MATERIALIZED/i);
     expect(sql.indexOf('e.provider = $3')).toBeLessThan(sql.indexOf('ORDER BY'));
+    const materializedEnd = sql.indexOf('\n     )');
+    expect(sql.indexOf('JOIN memories m')).toBeLessThan(materializedEnd);
+    expect(sql.indexOf('m.scope_id = ANY')).toBeLessThan(materializedEnd);
+    expect(sql.indexOf("m.state = 'live'")).toBeLessThan(materializedEnd);
+    expect(sql.indexOf('m.expires_at IS NULL')).toBeLessThan(materializedEnd);
+  });
+
+  it('scope-filters related-memory candidates inside the materialized exact scan', async () => {
+    const db = queryable();
+    vi.mocked(db.query).mockResolvedValue({ rows: [] } as never);
+
+    await vectorSearchRelatedMemories(db, vector, scopeIds, provider, {
+      threshold: 0.75,
+      excludeMemoryId: '00000000-0000-0000-0000-000000000002',
+      limit: 5,
+    });
+
+    const [sql] = vi.mocked(db.query).mock.calls[0] as [string, unknown[]];
+    const materializedEnd = sql.indexOf('\n     )');
+    expect(sql).toMatch(/WITH provider_embeddings AS MATERIALIZED/i);
+    expect(sql.indexOf('JOIN memories m')).toBeLessThan(materializedEnd);
+    expect(sql.indexOf('m.scope_id = ANY')).toBeLessThan(materializedEnd);
+    expect(sql.indexOf("m.state = 'live'")).toBeLessThan(materializedEnd);
+    expect(sql.indexOf('m.expires_at IS NULL')).toBeLessThan(materializedEnd);
   });
 
   it('combines multiple requested types with provider and dimension filters', async () => {

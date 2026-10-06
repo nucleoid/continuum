@@ -630,7 +630,7 @@ describe('embedding backfill', () => {
     connect.mockRestore();
   });
 
-  it('does not wrap database storage failures as provider failures', async () => {
+  it('reports database storage failures with accumulated provider progress', async () => {
     await seed('project', 'storage-failure', ['one']);
     const provider: EmbeddingProvider = {
       id: 'ollama:storage-failure', dim: 768, local: true,
@@ -651,13 +651,26 @@ describe('embedding backfill', () => {
       return client;
     });
 
-    const error = await runEmbeddingBackfill(pool, provider, { maxRows: 10 })
-      .catch((cause: unknown) => cause as Error);
-
-    restoreQuery();
-    connect.mockRestore();
-    expect(error).toMatchObject({ message: 'synthetic database write failure' });
-    expect(error).not.toBeInstanceOf(EmbeddingProviderError);
+    let report;
+    try {
+      report = await runEmbeddingBackfill(pool, provider, { maxRows: 10 });
+    } finally {
+      restoreQuery();
+      connect.mockRestore();
+    }
+    expect(report).toMatchObject({
+      scanned: 1,
+      eligible: 1,
+      embedded: 0,
+      completed: false,
+      errorCodes: ['BACKFILL_STORE'],
+      providerReports: [expect.objectContaining({
+        provider: provider.id,
+        scanned: 1,
+        eligible: 1,
+        errorCode: 'BACKFILL_STORE',
+      })],
+    });
   });
 
   it.each([
@@ -932,5 +945,117 @@ describe('embedding backfill', () => {
     expect(dryRun).toMatchObject({ eligible: 1, embedded: 0 });
     expect(embed).not.toHaveBeenCalled();
     expect((await pool.query('SELECT count(*)::int AS count FROM embedding_backfill_checkpoints')).rows[0].count).toBe(0);
+  });
+
+  it('bounds diagnostic probes during a provider-wide brownout', async () => {
+    await seed('project', 'bounded-brownout', Array.from({ length: 32 }, (_, index) => `row ${index}`));
+    const embed = vi.fn(async () => {
+      throw new EmbeddingProviderError('EMBEDDING_SERVER', 'provider unavailable', { diagnostic: true });
+    });
+    const provider: EmbeddingProvider = {
+      id: 'hosted:bounded-brownout', dim: 768, local: false, embed,
+    };
+
+    const report = await runEmbeddingBackfill(pool, provider, { batchSize: 32, maxRows: 32 });
+
+    expect(report).toMatchObject({ completed: false, errorCodes: ['EMBEDDING_SERVER'] });
+    expect(embed.mock.calls.length).toBeLessThanOrEqual(10);
+  });
+
+  it('stops diagnostic recursion at the error budget without advancing past unaudited rows', async () => {
+    const { memories } = await seed('project', 'diagnostic-budget', [
+      'healthy before', 'poison first', 'poison unaudited', 'healthy unaudited',
+    ]);
+    const embed = vi.fn(async (texts: string[]) => {
+      if (texts.some((text) => text.includes('poison'))) {
+        if (texts.length === 1) throw new EmbeddingItemError('deterministic poison');
+        throw new EmbeddingProviderError('EMBEDDING_SERVER', 'ambiguous batch', { diagnostic: true });
+      }
+      return vectors.embed(texts);
+    });
+    const provider: EmbeddingProvider = {
+      id: 'hosted:diagnostic-budget', dim: 768, local: false, embed,
+    };
+    const ordered = [...memories].sort((left, right) => left.id.localeCompare(right.id));
+    const firstPoison = ordered.find((memory) => memory.title.includes('poison'))!;
+    const embeddedBeforeBudget = ordered
+      .filter((memory) => memory.id < firstPoison.id && !memory.title.includes('poison'))
+      .map((memory) => ({ memory_id: memory.id }));
+
+    const report = await runEmbeddingBackfill(pool, provider, {
+      batchSize: 4, maxRows: 10, maxErrors: 1,
+    });
+
+    expect(report).toMatchObject({
+      failed: 1,
+      completed: false,
+      errorCodes: ['BACKFILL_ERROR_BUDGET'],
+      cursor: firstPoison.id,
+    });
+    expect((await pool.query(
+      `SELECT memory_id FROM embedding_backfill_failures
+        WHERE provider = $1 ORDER BY memory_id`,
+      [provider.id],
+    )).rows).toEqual([{ memory_id: firstPoison.id }]);
+    expect((await pool.query(
+      'SELECT memory_id FROM memory_embeddings ORDER BY memory_id',
+    )).rows).toEqual(embeddedBeforeBudget);
+  });
+
+  it('contains partial-invalid vectors discovered during diagnostic bisection', async () => {
+    await seed('project', 'diagnostic-partial-invalid', ['one', 'invalid', 'three', 'four']);
+    let first = true;
+    const embed = vi.fn(async (texts: string[]) => {
+      if (first) {
+        first = false;
+        throw new EmbeddingProviderError('EMBEDDING_SERVER', 'ambiguous batch', { diagnostic: true });
+      }
+      const result = await vectors.embed(texts);
+      if (texts.length > 1) {
+        const invalid = texts.findIndex((text) => text.includes('invalid'));
+        if (invalid >= 0) result[invalid] = [0];
+      }
+      return result;
+    });
+    const provider: EmbeddingProvider = {
+      id: 'hosted:diagnostic-partial-invalid', dim: 768, local: false, embed,
+    };
+
+    const report = await runEmbeddingBackfill(pool, provider, { batchSize: 4, maxRows: 10 });
+
+    expect(report).toMatchObject({ embedded: 4, failed: 0, completed: true });
+    expect(report.errorCodes).toEqual([]);
+  });
+
+  it('caps unresolved ID samples while retaining the total suspect count', async () => {
+    const titles = Array.from({ length: 52 }, (_, index) =>
+      index % 2 === 0 ? `healthy ${index}` : `transient ${index}`);
+    await seed('project', 'bounded-unresolved-report', titles);
+    let singletonProbe = 0;
+    const unitVector = Array<number>(768).fill(0);
+    unitVector[0] = 1;
+    const embed = vi.fn(async (texts: string[]) => {
+      if (texts.length > 1) {
+        throw new EmbeddingProviderError('EMBEDDING_SERVER', 'temporary upstream failure', { diagnostic: true });
+      }
+      singletonProbe += 1;
+      if (singletonProbe % 2 === 0) {
+        throw new EmbeddingProviderError('EMBEDDING_SERVER', 'temporary upstream failure', { diagnostic: true });
+      }
+      return texts.map(() => unitVector);
+    });
+    const provider: EmbeddingProvider = {
+      id: 'hosted:bounded-unresolved-report', dim: 768, local: false, embed,
+    };
+
+    const report = await runEmbeddingBackfill(pool, provider, { batchSize: 2, maxRows: 52 });
+
+    expect(report).toMatchObject({
+      completed: false,
+      unresolvedCount: 26,
+      unresolvedTruncated: true,
+    });
+    expect(report.unresolvedIds).toHaveLength(25);
+    expect(embed).toHaveBeenCalledTimes(78);
   });
 });

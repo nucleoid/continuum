@@ -383,7 +383,7 @@ describe('shared services', () => {
     };
 
     const result = await captureMemory(
-      poolRejecting(pool, 'SELECT m.id, m.type, m.title'), provider, principal,
+      poolRejecting(pool, 'SELECT ranked.memory_id AS id, m.type, m.title'), provider, principal,
       {
         scope: { kind: 'team', name: 'payments' }, type: 'fact',
         title: 'Probe fallback', body: 'private-probe-body', source: 'manual',

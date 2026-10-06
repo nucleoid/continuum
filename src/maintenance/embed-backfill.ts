@@ -18,6 +18,8 @@ const DEFAULT_MAX_ROWS = 1_000;
 const DEFAULT_MAX_ERRORS = 25;
 const MAX_BATCH_SIZE = 1_000;
 const MAX_DIAGNOSTIC_PROBES = 64;
+const MAX_AMBIGUOUS_DIAGNOSTIC_FAILURES = 8;
+const MAX_REPORTED_UNRESOLVED_IDS = 25;
 
 interface Candidate {
   id: string;
@@ -51,6 +53,8 @@ export interface EmbeddingBackfillProviderReport {
   completed: boolean;
   cursor: string | null;
   unresolvedIds: string[];
+  unresolvedCount: number;
+  unresolvedTruncated: boolean;
   errorCode?: string;
 }
 
@@ -68,14 +72,16 @@ export interface EmbeddingBackfillReport {
   providerReports: EmbeddingBackfillProviderReport[];
   errorCodes: string[];
   unresolvedIds: string[];
+  unresolvedCount: number;
+  unresolvedTruncated: boolean;
 }
 
 type ProviderRunResult = Pick<EmbeddingBackfillReport,
   'scanned' | 'eligible' | 'embedded' | 'failed' | 'failuresCleared'
-  | 'completed' | 'cursor' | 'unresolvedIds'>;
+  | 'completed' | 'cursor' | 'unresolvedIds' | 'unresolvedCount' | 'unresolvedTruncated'>;
 
 class PartialInvalidVectorsError extends Error {
-  constructor(readonly items: Candidate[]) {
+  constructor(readonly items: Candidate[], readonly validCount: number) {
     super('Embedding provider returned some invalid vectors');
     this.name = 'PartialInvalidVectorsError';
   }
@@ -265,6 +271,11 @@ async function runProvider(
   let failuresCleared = 0;
   let completed = false;
   const unresolvedIds = new Set<string>();
+  let unresolvedCount = 0;
+  const addUnresolved = (id: string): void => {
+    unresolvedCount += 1;
+    if (unresolvedIds.size < MAX_REPORTED_UNRESOLVED_IDS) unresolvedIds.add(id);
+  };
 
   try {
     if (!options.dryRun && !options.countOnly) {
@@ -316,7 +327,7 @@ async function runProvider(
       if (!options.dryRun && !options.countOnly) await checkpoint(client, provider, filter, null);
       return {
         scanned, eligible, embedded, failed, failuresCleared, completed, cursor,
-        unresolvedIds: [],
+        unresolvedIds: [], unresolvedCount: 0, unresolvedTruncated: false,
       };
     }
 
@@ -358,6 +369,7 @@ async function runProvider(
       return {
         scanned: 1, eligible: 1, embedded, failed, failuresCleared,
         completed: true, cursor, unresolvedIds: [],
+        unresolvedCount: 0, unresolvedTruncated: false,
       };
     }
 
@@ -365,14 +377,14 @@ async function runProvider(
       if (items.length === 0) return true;
       const attempt = async (part: Candidate[]): Promise<void> => {
         let vectors: number[][];
+        let validItems: Candidate[] = [];
+        let validVectors: number[][] = [];
+        let invalidItems: Candidate[] = [];
         try {
           vectors = await provider.embed(part.map(memoryEmbeddingText));
           if (!Array.isArray(vectors) || vectors.length !== part.length) {
             validateVectors(vectors, part.length, provider);
           }
-          const validItems: Candidate[] = [];
-          const validVectors: number[][] = [];
-          const invalidItems: Candidate[] = [];
           for (let index = 0; index < part.length; index += 1) {
             const vector = vectors[index];
             if (validVector(vector, provider)) {
@@ -382,11 +394,9 @@ async function runProvider(
               invalidItems.push(part[index]!);
             }
           }
-          if (invalidItems.length > 0 && validItems.length > 0) {
-            embedded += await storeBatch(client, provider, validItems, validVectors);
-            throw new PartialInvalidVectorsError(invalidItems);
+          if (invalidItems.length === 0 || validItems.length === 0) {
+            validateVectors(vectors, part.length, provider);
           }
-          validateVectors(vectors, part.length, provider);
         } catch (error) {
           if (error instanceof EmbeddingProviderError || isEmbeddingItemError(error)
             || error instanceof PartialInvalidVectorsError) throw error;
@@ -395,13 +405,18 @@ async function runProvider(
             { cause: error, diagnostic: true },
           );
         }
+        if (invalidItems.length > 0) {
+          embedded += await storeBatch(client, provider, validItems, validVectors);
+          throw new PartialInvalidVectorsError(invalidItems, validItems.length);
+        }
         // Keep database failures distinct from provider failures. A concurrent archive
         // is a safe no-op and must not recreate derived vectors for tombstoned memory.
         embedded += await storeBatch(client, provider, part, vectors);
       };
       const mark = async (item: Candidate): Promise<boolean> => {
-        failed += 1;
         await recordFailure(client, provider, item);
+        failed += 1;
+        cursor = item.id;
         return failed < options.maxErrors;
       };
       try {
@@ -411,7 +426,7 @@ async function runProvider(
       } catch (initialError) {
         if (initialError instanceof PartialInvalidVectorsError) {
           const canContinue = await processItems(initialError.items);
-          cursor = items.at(-1)!.id;
+          if (canContinue) cursor = items.at(-1)!.id;
           return canContinue;
         }
         if (isEmbeddingItemError(initialError)) {
@@ -436,21 +451,30 @@ async function runProvider(
         let successes = 0;
         let canContinue = true;
         let diagnosticProbes = 0;
+        let ambiguousFailures = 0;
         const diagnose = async (part: Candidate[]): Promise<void> => {
+          if (!canContinue) return;
           diagnosticProbes += 1;
           if (diagnosticProbes > MAX_DIAGNOSTIC_PROBES) throw initialError;
           try {
             await attempt(part);
             successes += part.length;
+            cursor = part.at(-1)!.id;
             return;
           } catch (error) {
+            if (error instanceof PartialInvalidVectorsError) {
+              successes += error.validCount;
+              await diagnose(error.items);
+              return;
+            }
             if (isEmbeddingItemError(error)) {
               if (part.length === 1) {
-                canContinue &&= await mark(part[0]!);
+                canContinue = await mark(part[0]!);
                 return;
               }
               const middle = Math.floor(part.length / 2);
               await diagnose(part.slice(0, middle));
+              if (!canContinue) return;
               await diagnose(part.slice(middle));
               return;
             }
@@ -458,12 +482,15 @@ async function runProvider(
               && ['EMBEDDING_SERVER', 'EMBEDDING_INVALID_RESPONSE', 'EMBEDDING_FAILED']
                 .includes(error.code)
               && error.diagnostic !== false) {
+              ambiguousFailures += 1;
+              if (ambiguousFailures > MAX_AMBIGUOUS_DIAGNOSTIC_FAILURES) throw initialError;
               if (part.length === 1) {
                 ambiguous.push(part[0]!);
                 return;
               }
               const middle = Math.floor(part.length / 2);
               await diagnose(part.slice(0, middle));
+              if (!canContinue) return;
               await diagnose(part.slice(middle));
               return;
             }
@@ -472,11 +499,14 @@ async function runProvider(
         };
         const middle = Math.floor(items.length / 2);
         await diagnose(items.slice(0, middle));
+        if (!canContinue) return false;
         await diagnose(items.slice(middle));
+        if (!canContinue) return false;
         if (successes === 0 && ambiguous.length > 0) throw initialError;
         for (const item of ambiguous) {
           await recordSuspect(client, provider, item, initialError.code);
-          unresolvedIds.add(item.id);
+          addUnresolved(item.id);
+          cursor = item.id;
         }
         cursor = items.at(-1)!.id;
         return canContinue;
@@ -564,15 +594,22 @@ async function runProvider(
 
     return {
       scanned, eligible, embedded, failed, failuresCleared,
-      completed: completed && unresolvedIds.size === 0,
+      completed: completed && unresolvedCount === 0,
       cursor,
       unresolvedIds: [...unresolvedIds],
+      unresolvedCount,
+      unresolvedTruncated: unresolvedCount > unresolvedIds.size,
     };
   } catch (error) {
-    if (error instanceof EmbeddingProviderError || error instanceof BackfillControlError) {
-      throw new ProviderRunError(error.code, {
+    if (error instanceof EmbeddingProviderError || error instanceof BackfillControlError
+      || (!(error instanceof Error) || !/already running/i.test(error.message))) {
+      const code = error instanceof EmbeddingProviderError || error instanceof BackfillControlError
+        ? error.code
+        : 'BACKFILL_STORE';
+      throw new ProviderRunError(code, {
         scanned, eligible, embedded, failed, failuresCleared,
         completed: false, cursor, unresolvedIds: [...unresolvedIds],
+        unresolvedCount, unresolvedTruncated: unresolvedCount > unresolvedIds.size,
       }, error);
     }
     throw error;
@@ -626,6 +663,7 @@ export async function runEmbeddingBackfill(
     providers: providers.length, completed: true, cursor: null,
     dryRun: options.dryRun ?? false, countOnly: options.countOnly ?? false,
     providerReports: [], errorCodes: [], unresolvedIds: [],
+    unresolvedCount: 0, unresolvedTruncated: false,
   };
   for (const provider of providers) {
     let result;
@@ -655,6 +693,7 @@ export async function runEmbeddingBackfill(
         result = {
           scanned: 0, eligible: 0, embedded: 0, failed: 0, failuresCleared: 0,
           completed: false, cursor: null, unresolvedIds: [],
+          unresolvedCount: 0, unresolvedTruncated: false,
         };
       }
       report.errorCodes.push(errorCode);
@@ -665,7 +704,12 @@ export async function runEmbeddingBackfill(
     report.failed += result.failed;
     report.failuresCleared += result.failuresCleared;
     report.completed &&= result.completed;
-    report.unresolvedIds.push(...result.unresolvedIds);
+    report.unresolvedCount += result.unresolvedCount;
+    for (const id of result.unresolvedIds) {
+      if (report.unresolvedIds.length < MAX_REPORTED_UNRESOLVED_IDS) report.unresolvedIds.push(id);
+      else report.unresolvedTruncated = true;
+    }
+    report.unresolvedTruncated ||= result.unresolvedTruncated;
     report.cursor = providers.length === 1 ? result.cursor : null;
     report.providerReports.push({
       provider: provider.id, dim: provider.dim, ...result,
