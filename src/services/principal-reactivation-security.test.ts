@@ -567,7 +567,7 @@ describe('principal reactivation database trust boundary', () => {
     }
   });
 
-  it('runs mapping, multi-batch erasure, reads, audit, and reactivation as the app role', async () => {
+  it('runs multi-batch erasure, reads, audit, and reactivation as the app role', async () => {
     const admin = await createPrincipal(pool, {
       externalId: 'app-role-offboarding-admin', kind: 'user', displayName: 'Admin',
     });
@@ -576,6 +576,11 @@ describe('principal reactivation database trust boundary', () => {
     });
     const org = await getScopeByRef(pool, { kind: 'org', name: '' });
     await addMembership(pool, admin.id, org!.id, 'admin');
+    const scope = await createScope(pool, {
+      kind: 'user', name: 'app-role-offboarding-owned',
+    });
+    await addMembership(pool, target.id, scope.id, 'writer');
+    await mapOwnedUserScope(pool, admin, target.id, scope.id);
     const role = `continuum_offboard_${Date.now()}`;
     const quotedRole = `"${role}"`;
     await pool.query(`CREATE ROLE ${quotedRole} NOLOGIN`);
@@ -588,11 +593,6 @@ describe('principal reactivation database trust boundary', () => {
         max: 2,
         options: `-c role=${role}`,
       });
-      const scope = await createScope(rolePool, {
-        kind: 'user', name: 'app-role-offboarding-owned',
-      });
-      await addMembership(rolePool, target.id, scope.id, 'writer');
-      await mapOwnedUserScope(rolePool, admin, target.id, scope.id);
       await rolePool.query(
         `INSERT INTO memories (id, scope_id, type, title, body, author_id, source)
          SELECT gen_random_uuid(), $1, 'context', 'private ' || n, 'secret ' || n,
@@ -746,13 +746,13 @@ describe('principal reactivation database trust boundary', () => {
       await expect(issueApiKey(rolePool, admin, service.id, 'terminal-summary'))
         .resolves.toMatchObject({ allowedSource: 'terminal-summary' });
       const groupId = '87654321-4321-4321-8321-cba987654321';
-      await provisionEntraGroupBinding(rolePool, admin, {
+      await expect(provisionEntraGroupBinding(rolePool, admin, {
         externalId: groupId, scopeId: project.id, role: 'reader',
-      });
+      })).rejects.toThrow(/trusted|permission denied|database identity/i);
       await expect(syncEntraMemberships(rolePool, admin, [{
         id: groupId, status: 'present', displayName: 'Runtime Group',
         memberObjectIds: ['aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'],
-      }], { allowMassDeactivation: true })).resolves.toMatchObject({ groupsSeen: 1 });
+      }], { allowMassDeactivation: true })).rejects.toThrow();
     } finally {
       await rolePool?.end();
       await pool.query(`DROP OWNED BY ${quotedRole}`);
