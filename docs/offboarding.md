@@ -237,6 +237,18 @@ selector backfill before recording itself. Migrations `0036` and `0037` safely
 translate an installation that had already applied the rejected round-seven
 0033/0035 pair: the old blocking copy is recognized as caught up, incomplete
 run cursors are rewound, and the same bounded finisher is invoked.
+Migration `0038_offboarding_search_path_hardening.sql` pins `pg_catalog`, the
+owning application schema, and finally `pg_temp` for every Continuum
+security-definer and trigger function. This prevents an application session
+from substituting temporary relations during completion, reactivation,
+offboarded-audit, embedding, membership, or other database guard checks.
+
+Linked-request erasure selects a bounded ordered request-ID window from
+`principal_offboarding_audit_requests`, then performs one indexed
+`audit_log_request_cursor_idx` seek per request through a lateral join. A batch
+never walks the global request-history index to discover another principal's
+request IDs. The durable request-ID and audit-ID cursor pair advances across
+full and final partial batches without rescanning unrelated users.
 
 Production must use separate migration-owner and application roles. Run
 `continuum-migrate` with `CONTINUUM_DATABASE_URL` set to the migration owner,
@@ -254,9 +266,12 @@ psql "$CONTINUUM_MIGRATION_OWNER_URL" \
   --file=scripts/grant-application-role.sql
 ```
 
-The script enumerates the required tables, sequences, and the completion and
-reactivation entry points. It explicitly revokes both backend-local capability
-tables and the selector-backfill function from the application role. Do not
+The script enumerates the tables and sequences needed by capture, embedding,
+membership administration and sync, identity provisioning, service-key
+rotation, webhook delivery, lifecycle, and offboarding traffic, plus the
+completion and reactivation entry points. It explicitly revokes both
+backend-local capability tables and the selector-backfill function from the
+application role. Do not
 replace it with ownership, schema `CREATE`, broad `ALL TABLES`, or `PUBLIC`
 function execution.
 PostgreSQL still cannot bind a per-request caller to
@@ -276,7 +291,7 @@ requires the exact index to exist and be valid before the migration ledger can
 record success. A timeout or failed build leaves the file unapplied and safely
 retryable.
 
-Apply all sixteen offboarding migrations before starting the new application version. Old
+Apply all seventeen offboarding migrations before starting the new application version. Old
 instances can continue ordinary traffic after `0023`, but they do not know the
 offboarding workflow and an old authenticated request may already be in flight.
 Do not invoke offboarding until all sixteen migrations are recorded on every shared

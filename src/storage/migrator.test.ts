@@ -104,7 +104,7 @@ describe('runMigrations', () => {
     const pool = schemaPool(schema);
     try {
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-8).map((migration) => migration.name)).toEqual([
+      expect(applied.slice(-9).map((migration) => migration.name)).toEqual([
         '0030_offboarding_round7_integrity.sql',
         '0031_offboarding_round7_indexes.sql',
         '0032_offboarding_round7_compatibility.sql',
@@ -113,6 +113,7 @@ describe('runMigrations', () => {
         '0035_offboarding_selector_cursor_indexes.sql',
         '0036_offboarding_round8_upgrade.sql',
         '0037_offboarding_round8_online_finish.sql',
+        '0038_offboarding_search_path_hardening.sql',
       ]);
       expect((await pool.query(
         `SELECT indisvalid AS valid FROM pg_index
@@ -151,12 +152,19 @@ describe('runMigrations', () => {
           WHERE pronamespace = current_schema()::regnamespace
             AND proname IN (
               'continuum_complete_offboarding_run',
+              'continuum_guard_offboarding_run_progress',
               'continuum_guard_principal_reactivation',
+              'continuum_reject_offboarded_principal_audit',
+              'continuum_require_embeddable_memory',
               'continuum_reactivate_principal'
             ) ORDER BY proname`,
       )).rows).toEqual([
         expect.objectContaining({
           proname: 'continuum_complete_offboarding_run',
+          proconfig: [`search_path=pg_catalog, ${schema}, pg_temp`],
+        }),
+        expect.objectContaining({
+          proname: 'continuum_guard_offboarding_run_progress',
           proconfig: [`search_path=pg_catalog, ${schema}, pg_temp`],
         }),
         expect.objectContaining({
@@ -167,8 +175,65 @@ describe('runMigrations', () => {
           proname: 'continuum_reactivate_principal',
           proconfig: [`search_path=pg_catalog, ${schema}, pg_temp`],
         }),
+        expect.objectContaining({
+          proname: 'continuum_reject_offboarded_principal_audit',
+          proconfig: [`search_path=pg_catalog, ${schema}, pg_temp`],
+        }),
+        expect.objectContaining({
+          proname: 'continuum_require_embeddable_memory',
+          proconfig: [`search_path=pg_catalog, ${schema}, pg_temp`],
+        }),
       ]);
+      expect((await pool.query(
+        `SELECT proname
+           FROM pg_proc
+          WHERE pronamespace = current_schema()::regnamespace
+            AND (prosecdef OR prorettype = 'pg_catalog.trigger'::pg_catalog.regtype
+                 OR proname LIKE 'continuum\\_%' ESCAPE '\\')
+            AND NOT (proconfig @> ARRAY[
+              format('search_path=pg_catalog, %s, pg_temp', current_schema())
+            ])
+          ORDER BY proname`,
+      )).rows).toEqual([]);
       expect(await runMigrations(pool, join(process.cwd(), 'migrations'))).toEqual([]);
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  });
+  it('upgrades the 5e0ab45 intermediate state where 0035 lacks its backfill function', async () => {
+    const schema = `migrator_missing_backfill_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = new pg.Pool({
+      connectionString: DATABASE_URL,
+      max: 1,
+      options: `-c search_path=${schema}`,
+    });
+    pools.push(pool);
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-missing-backfill-'));
+    directories.push(directory);
+    await writeFile(join(directory, '0034_setup.sql'), `
+      CREATE TABLE audit_log_offboarding_scopes (
+        selector_kind TEXT NOT NULL,
+        scope_id UUID NOT NULL,
+        audit_id BIGINT NOT NULL,
+        PRIMARY KEY (selector_kind, scope_id, audit_id)
+      );
+    `);
+    await copyFile(
+      new URL('../../migrations/0035_offboarding_selector_cursor_indexes.sql', import.meta.url),
+      join(directory, '0035_offboarding_selector_cursor_indexes.sql'),
+    );
+    try {
+      await expect(runMigrations(pool, directory)).resolves.toEqual([
+        expect.objectContaining({ name: '0034_setup.sql' }),
+        expect.objectContaining({ name: '0035_offboarding_selector_cursor_indexes.sql' }),
+      ]);
+      expect((await pool.query(
+        `SELECT indisvalid FROM pg_index
+          WHERE indexrelid = 'audit_log_offboarding_memory_cursor_idx'::regclass`,
+      )).rows).toEqual([{ indisvalid: true }]);
     } finally {
       await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
     }
@@ -802,6 +867,9 @@ describe('runMigrations', () => {
       query: vi.fn(async (query: string) => {
         if (query.includes('SELECT 1 FROM _continuum_migrations')) {
           return { rowCount: 0, rows: [] };
+        }
+        if (query.includes('to_regprocedure')) {
+          return { rowCount: 1, rows: [{ available: true }] };
         }
         if (query.includes('continuum_backfill_audit_offboarding_scopes')) {
           batches += 1;

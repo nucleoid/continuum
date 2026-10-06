@@ -12,12 +12,22 @@
 -- not granted CREATE on the schema or any privilege on capability tables.
 GRANT USAGE ON SCHEMA :"continuum_schema" TO :"continuum_app_role";
 
-GRANT SELECT, UPDATE ON TABLE
+GRANT SELECT, INSERT, UPDATE ON TABLE
   :"continuum_schema".principals,
   :"continuum_schema".scopes,
-  :"continuum_schema".scope_memberships,
   :"continuum_schema".entra_groups,
   :"continuum_schema".memories
+TO :"continuum_app_role";
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
+  :"continuum_schema".scope_memberships,
+  :"continuum_schema".memory_embeddings
+TO :"continuum_app_role";
+
+GRANT SELECT, INSERT, UPDATE ON TABLE
+  :"continuum_schema".service_api_keys,
+  :"continuum_schema".ingest_deliveries,
+  :"continuum_schema".entra_sync_state
 TO :"continuum_app_role";
 
 GRANT SELECT, INSERT, UPDATE ON TABLE
@@ -26,8 +36,6 @@ GRANT SELECT, INSERT, UPDATE ON TABLE
 TO :"continuum_app_role";
 
 GRANT SELECT, INSERT, UPDATE ON TABLE :"continuum_schema".audit_log
-TO :"continuum_app_role";
-GRANT SELECT, DELETE ON TABLE :"continuum_schema".memory_embeddings
 TO :"continuum_app_role";
 GRANT SELECT, DELETE ON TABLE :"continuum_schema".principal_aliases
 TO :"continuum_app_role";

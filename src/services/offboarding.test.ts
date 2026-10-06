@@ -366,6 +366,9 @@ describe('offboarding and erasure', () => {
         `selector.selector_kind = 'scope_ids' AND selector.scope_id = $1`,
       )).toMatch(/ORDER BY selector\.audit_id LIMIT/);
       expect(offboardingLinkedAuditSql()).toMatch(
+        /CROSS JOIN LATERAL[\s\S]*candidate\.metadata->>'request_id' = request\.request_id[\s\S]*candidate\.id > CASE/i,
+      );
+      expect(offboardingLinkedAuditSql()).not.toMatch(
         /\(a\.metadata->>'request_id', a\.id\)[\s\S]*> \(COALESCE\(\$2, ''\), \$3::bigint\)/,
       );
       expect(await explain(

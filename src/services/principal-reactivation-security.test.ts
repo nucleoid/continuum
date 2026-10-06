@@ -1,16 +1,33 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import type pg from 'pg';
+import pg, { type PoolConfig } from 'pg';
 import { LIFECYCLE_PRINCIPAL_ID } from '../lifecycle/principal.js';
+import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
+import { processIngestDelivery } from '../storage/ingest-deliveries.js';
 import { addMembership } from '../storage/memberships.js';
 import { createPrincipal } from '../storage/principals.js';
 import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
-import { reactivatePrincipal } from './principal-admin.js';
+import { issueApiKey } from './api-keys.js';
+import { captureOne } from './capture.js';
+import { provisionEntraGroupBinding, syncEntraMemberships } from './membership-sync.js';
+import { provisionServicePrincipal, reactivatePrincipal } from './principal-admin.js';
 import { mapOwnedUserScope, offboardPrincipal } from './offboarding.js';
 
-async function fixture(pool: pg.Pool) {
+async function applyApplicationRoleGrants(pool: pg.Pool, role: string): Promise<void> {
+  const source = await readFile(
+    join(process.cwd(), 'scripts/grant-application-role.sql'), 'utf8',
+  );
+  const sql = source.split(/\r?\n/)
+    .filter((line) => !line.trimStart().startsWith('\\'))
+    .join('\n')
+    .replaceAll(':"continuum_schema"', '"public"')
+    .replaceAll(':"continuum_app_role"', `"${role}"`);
+  await pool.query(sql);
+}
+
+async function fixture(pool: pg.Pool, complete = true) {
   const admin = await createPrincipal(pool, {
     externalId: 'reactivation-security-admin', kind: 'user', displayName: 'Admin',
   });
@@ -22,13 +39,27 @@ async function fixture(pool: pg.Pool) {
   const scope = await createScope(pool, { kind: 'user', name: 'reactivation-security-owned' });
   await addMembership(pool, target.id, scope.id, 'writer');
   await mapOwnedUserScope(pool, admin, target.id, scope.id);
+  if (!complete) {
+    await pool.query(
+      `INSERT INTO memories (id, scope_id, type, title, body, author_id, source)
+       VALUES (gen_random_uuid(), $1, 'context', 'private', 'private', $2, 'manual')`,
+      [scope.id, target.id],
+    );
+    await pool.query(
+      `INSERT INTO audit_log (principal_id, action, scope_id, query, metadata)
+       SELECT $1, 'read', $2, 'private ' || n, '{}'::jsonb FROM generate_series(1, 5) n`,
+      [admin.id, scope.id],
+    );
+  }
   let offboarded = await offboardPrincipal(pool, admin, target.id, {
-    confirmationScopeId: scope.id,
+    confirmationScopeId: scope.id, batchSize: complete ? undefined : 1,
   });
-  while (!offboarded.complete) offboarded = await offboardPrincipal(pool, admin, target.id, {
-    confirmationScopeId: scope.id,
-  });
-  return { admin, target };
+  while (complete && !offboarded.complete) {
+    offboarded = await offboardPrincipal(pool, admin, target.id, {
+      confirmationScopeId: scope.id,
+    });
+  }
+  return { admin, target, scope, offboarded };
 }
 
 describe('principal reactivation database trust boundary', () => {
@@ -80,6 +111,17 @@ describe('principal reactivation database trust boundary', () => {
     expect(grants).toMatch(
       /GRANT SELECT, INSERT ON TABLE[\s\S]*principal_offboarding_run_events/i,
     );
+    for (const table of [
+      'service_api_keys', 'ingest_deliveries', 'entra_sync_state',
+    ]) {
+      expect(grants).toMatch(new RegExp(`GRANT[\\s\\S]*${table}`, 'i'));
+    }
+    expect(grants).toMatch(
+      /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE[\s\S]*scope_memberships/i,
+    );
+    expect(grants).toMatch(
+      /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE[\s\S]*memory_embeddings/i,
+    );
   });
 
   it('supports lifecycle functions as a separately granted non-owner role', async () => {
@@ -89,13 +131,7 @@ describe('principal reactivation database trust boundary', () => {
     await pool.query(`CREATE ROLE ${quotedRole} NOLOGIN`);
     try {
       await pool.query(`GRANT ${quotedRole} TO CURRENT_USER`);
-      await pool.query(`GRANT USAGE ON SCHEMA public TO ${quotedRole}`);
-      await pool.query(`GRANT EXECUTE ON FUNCTION
-        continuum_complete_offboarding_run(UUID, UUID, JSONB),
-        continuum_reactivate_principal(UUID, UUID) TO ${quotedRole}`);
-      await pool.query(`REVOKE ALL ON TABLE
-        continuum_offboarding_completion_requests,
-        continuum_principal_reactivation_requests FROM ${quotedRole}`);
+      await applyApplicationRoleGrants(pool, role);
 
       const client = await pool.connect();
       try {
@@ -137,6 +173,121 @@ describe('principal reactivation database trust boundary', () => {
           [target.id, admin.id],
         )).resolves.toBeDefined();
         await client.query('ROLLBACK');
+      } finally {
+        client.release();
+      }
+    } finally {
+      await pool.query(`DROP OWNED BY ${quotedRole}`);
+      await pool.query(`REVOKE ${quotedRole} FROM CURRENT_USER`);
+      await pool.query(`DROP ROLE ${quotedRole}`);
+    }
+  });
+
+  it('supports representative runtime traffic through the documented non-owner grants', async () => {
+    const admin = await createPrincipal(pool, {
+      externalId: 'runtime-role-admin', kind: 'user', displayName: 'Runtime Admin',
+    });
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    await addMembership(pool, admin.id, org!.id, 'admin');
+    const role = `continuum_runtime_${Date.now()}`;
+    const quotedRole = `"${role}"`;
+    await pool.query(`CREATE ROLE ${quotedRole} NOLOGIN`);
+    let rolePool: pg.Pool | undefined;
+    try {
+      await pool.query(`GRANT ${quotedRole} TO CURRENT_USER`);
+      await applyApplicationRoleGrants(pool, role);
+      rolePool = new pg.Pool({
+        ...(pool as unknown as { options: PoolConfig }).options,
+        max: 2,
+        options: `-c role=${role}`,
+      });
+      const project = await createScope(rolePool, { kind: 'project', name: 'runtime-role' });
+      const service = await provisionServicePrincipal(
+        rolePool, admin, '12345678-1234-4234-8234-123456789abc', 'Runtime Service',
+      );
+      await addMembership(rolePool, service.id, project.id, 'writer');
+      const delivery = await processIngestDelivery(
+        rolePool, 'terminal-summary', 'runtime-role-delivery', 'a'.repeat(64),
+        async (client) => [await captureOne(client, null, service, {
+          scope: { kind: 'project', name: 'runtime-role' }, type: 'context',
+          title: 'Runtime capture', body: 'Representative application traffic.',
+          source: 'terminal-summary',
+        })],
+      );
+      await storeMemoryEmbeddingVector(
+        rolePool, delivery.memoryIds[0], Array(768).fill(0), { id: 'test', dim: 768 },
+      );
+      await expect(issueApiKey(rolePool, admin, service.id, 'terminal-summary'))
+        .resolves.toMatchObject({ allowedSource: 'terminal-summary' });
+      const groupId = '87654321-4321-4321-8321-cba987654321';
+      await provisionEntraGroupBinding(rolePool, admin, {
+        externalId: groupId, scopeId: project.id, role: 'reader',
+      });
+      await expect(syncEntraMemberships(rolePool, admin, [{
+        id: groupId, status: 'present', displayName: 'Runtime Group',
+        memberObjectIds: ['aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'],
+      }], { allowMassDeactivation: true })).resolves.toMatchObject({ groupsSeen: 1 });
+    } finally {
+      await rolePool?.end();
+      await pool.query(`DROP OWNED BY ${quotedRole}`);
+      await pool.query(`REVOKE ${quotedRole} FROM CURRENT_USER`);
+      await pool.query(`DROP ROLE ${quotedRole}`);
+    }
+  });
+
+  it('rejects pg_temp shadow attempts from a non-owner application role', async () => {
+    const { admin, target, scope } = await fixture(pool, false);
+    const memoryId = (await pool.query(
+      'SELECT id FROM memories WHERE scope_id = $1 ORDER BY id LIMIT 1', [scope.id],
+    )).rows[0].id as string;
+    const runId = (await pool.query(
+      'SELECT run_id FROM principal_offboarding_runs WHERE principal_id = $1', [target.id],
+    )).rows[0].run_id as string;
+    const role = `continuum_shadow_${Date.now()}`;
+    const quotedRole = `"${role}"`;
+    await pool.query(`CREATE ROLE ${quotedRole} NOLOGIN`);
+    try {
+      await pool.query(`GRANT ${quotedRole} TO CURRENT_USER`);
+      await applyApplicationRoleGrants(pool, role);
+      const client = await pool.connect();
+      try {
+        const attack = async (setup: string, sql: string, parameters: unknown[]) => {
+          await client.query('BEGIN');
+          await client.query(`SET LOCAL ROLE ${quotedRole}`);
+          await client.query('SET LOCAL search_path = pg_temp, public');
+          await client.query(setup);
+          await expect(client.query(sql, parameters)).rejects.toThrow();
+          await client.query('ROLLBACK');
+        };
+        await attack(
+          `CREATE TEMP TABLE principal_offboarding_run_events (run_id UUID, phase TEXT);
+           INSERT INTO principal_offboarding_run_events VALUES ('${runId}', 'completed')`,
+          'UPDATE principal_offboarding_runs SET completed_at = now() WHERE run_id = $1',
+          [runId],
+        );
+        await attack(
+          `CREATE TEMP TABLE continuum_principal_reactivation_requests
+             (principal_id UUID, backend_pid INTEGER, transaction_id BIGINT);
+           INSERT INTO continuum_principal_reactivation_requests
+             VALUES ('${target.id}', pg_backend_pid(), txid_current())`,
+          `UPDATE principals SET disabled_at = NULL, offboarded_at = NULL,
+             reactivated_at = now() WHERE id = $1`,
+          [target.id],
+        );
+        await attack(
+          `CREATE TEMP TABLE principals (id UUID, offboarded_at TIMESTAMPTZ);
+           CREATE TEMP TABLE principal_user_scopes (principal_id UUID, scope_id UUID)`,
+          `INSERT INTO audit_log (principal_id, action, scope_id, query, metadata)
+           VALUES ($1, 'read', $2, 'late secret', '{}'::jsonb)`,
+          [admin.id, scope.id],
+        );
+        await attack(
+          `CREATE TEMP TABLE memories (id UUID, state TEXT);
+           INSERT INTO memories VALUES ('${memoryId}', 'live')`,
+          `INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
+           VALUES ($1, 'forged', 768, $2::vector)`,
+          [memoryId, `[${Array(768).fill(0).join(',')}]`],
+        );
       } finally {
         client.release();
       }

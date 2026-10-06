@@ -56,3 +56,8 @@ and plugin schemas also bound strings and arrays.
 
 All errors use the normal REST envelope and include `requestId`. Raw request
 bodies, credentials, and webhook secrets are never logged.
+
+The non-owner runtime role needs the checked `ingest_deliveries`, capture,
+embedding, and audit privileges in `scripts/grant-application-role.sql`.
+Applying only an offboarding-specific subset is insufficient for webhook
+traffic; do not compensate with table ownership or broad schema privileges.

@@ -24,6 +24,15 @@ and tokens from unlisted or role-unassigned applications are rejected.
 All credential, JOSE, JWKS, key, and claim failures return an authentication
 failure without exposing provider details.
 
+Run the service with a non-owner database role after the migration owner has
+applied `scripts/grant-application-role.sql`. Those checked grants cover normal
+principal provisioning, scope and membership traffic, Entra binding and sync
+state, service-key issue and rotation, capture, embeddings, audit writes,
+ingest deliveries, and lifecycle operations. They do not grant schema
+creation, selector backfill execution, or access to lifecycle capability
+tables. Reapply the script after migrations that change this documented
+runtime surface.
+
 Set **Assignment required?** to **Yes** on Continuum's Entra enterprise
 application, then assign only approved users and groups. The API client used to
 obtain delegated tokens must also be present in

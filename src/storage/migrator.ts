@@ -73,6 +73,16 @@ async function runNonTransactionalStatement(
   if (statement.split(/\r?\n/).some(
     (line) => line.trim() === BACKFILL_OFFBOARDING_SELECTORS,
   )) {
+    const available = await client.query<{ available: boolean }>(
+      `SELECT to_regprocedure(format(
+         '%I.continuum_backfill_audit_offboarding_scopes(integer)', current_schema()
+       )) IS NOT NULL AS available`,
+    );
+    // Review-era 0033 installations did not create the bounded backfill
+    // function. 0036 installs it and 0037 invokes this same directive, so 0035
+    // must finish its retry-safe indexes without resolving another schema's
+    // function or failing before the compatibility migration can run.
+    if (available.rows[0]?.available !== true) return;
     for (;;) {
       const result = await client.query<{ completed: boolean }>(
         `SELECT continuum_backfill_audit_offboarding_scopes(1000) AS completed`,

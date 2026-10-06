@@ -481,17 +481,25 @@ export function offboardingMemoryAuditSql(): string {
 }
 
 export function offboardingLinkedAuditSql(): string {
-  return `WITH candidates AS MATERIALIZED (
+  return `WITH requests AS MATERIALIZED (
+       SELECT request_id
+         FROM principal_offboarding_audit_requests
+        WHERE principal_id = $1
+          AND request_id >= COALESCE($2, '')
+        ORDER BY request_id LIMIT ($5 + 1)
+     ), candidates AS MATERIALIZED (
        SELECT a.*, request.request_id
-         FROM audit_log a
-         JOIN principal_offboarding_audit_requests request
-           ON request.principal_id = $1
-          AND request.request_id = a.metadata->>'request_id'
-        WHERE a.metadata ? 'request_id'
-          AND (a.metadata->>'request_id', a.id)
-              > (COALESCE($2, ''), $3::bigint)
-          AND a.id <= $6
-        ORDER BY a.metadata->>'request_id', a.id LIMIT $5
+         FROM requests request
+         CROSS JOIN LATERAL (
+           SELECT candidate.* FROM audit_log candidate
+            WHERE candidate.metadata ? 'request_id'
+              AND candidate.metadata->>'request_id' = request.request_id
+              AND candidate.id > CASE WHEN request.request_id = $2
+                                      THEN $3::bigint ELSE 0 END
+              AND candidate.id <= $6
+            ORDER BY candidate.id LIMIT $5
+         ) a
+        ORDER BY request.request_id, a.id LIMIT $5
      ), selected AS (
        SELECT a.id, a.request_id FROM candidates a
         WHERE ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED.replace('$3', '$4')}
@@ -505,6 +513,9 @@ export function offboardingLinkedAuditSql(): string {
               AS request_cursor,
             (SELECT id::text FROM candidates ORDER BY request_id DESC, id DESC LIMIT 1)
               AS item_cursor,
+            (SELECT request_id FROM requests ORDER BY request_id DESC LIMIT 1)
+              AS request_window_cursor,
+            ((SELECT count(*) FROM requests) = ($5 + 1)) AS request_window_full,
             (SELECT count(*)::int FROM inserted) AS inserted`;
 }
 
@@ -549,7 +560,8 @@ async function selectLinkedAuditBranch(
       args.remaining, run.audit_fence_id],
   );
   const row = selected.rows[0];
-  if (Number(row.examined) < args.remaining) {
+  const examined = Number(row.examined);
+  if (examined < args.remaining && row.request_window_full !== true) {
     await client.query(
       `UPDATE principal_offboarding_runs
           SET audit_linked_request_cursor = COALESCE($2, audit_linked_request_cursor),
@@ -567,15 +579,18 @@ async function selectLinkedAuditBranch(
     run.audit_linked_request_exhausted = true;
     run.audit_linked_complete = true;
   } else {
+    const requestCursor = examined < args.remaining
+      ? row.request_window_cursor : row.request_cursor;
+    const itemCursor = examined < args.remaining ? '0' : row.item_cursor;
     await client.query(
       `UPDATE principal_offboarding_runs
           SET audit_linked_request_cursor = $2,
               audit_linked_request_item_cursor = $3,
               audit_linked_request_exhausted = FALSE
-        WHERE principal_id = $1`, [args.principalId, row.request_cursor, row.item_cursor],
+        WHERE principal_id = $1`, [args.principalId, requestCursor, itemCursor],
     );
-    run.audit_linked_request_cursor = row.request_cursor as string;
-    run.audit_linked_request_item_cursor = row.item_cursor as string;
+    run.audit_linked_request_cursor = requestCursor as string;
+    run.audit_linked_request_item_cursor = itemCursor as string;
     run.audit_linked_request_exhausted = false;
   }
   return Number(row.inserted);
