@@ -96,7 +96,13 @@ export async function startRuntime(
   });
   try {
     await waitForListening(server);
-    await Promise.all(workers.map(async (worker) => worker.start?.()));
+    const startResults = await Promise.allSettled(
+      workers.map(async (worker) => worker.start?.()),
+    );
+    const startFailure = startResults.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    if (startFailure) throw startFailure.reason;
   } catch (error) {
     readiness.markUnready();
     await Promise.allSettled(workers.map(async (worker) => worker.stop('startup_failed')));

@@ -68,4 +68,5 @@ export interface RecallResult {
   score: number;
   excerpt: string;
   bodyTruncated: boolean;
+  enrichments?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
 }

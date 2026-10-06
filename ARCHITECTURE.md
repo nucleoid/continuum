@@ -359,8 +359,37 @@ Capture write-audit metadata is `{ source, type, embedded }`. When embedding fai
 Five interfaces. Engram and any future system integrate through these. Continuum core has zero knowledge of Engram.
 
 1. **CapturePlugin**: implements `capture(event) -> CaptureRecord[]`. Registered at startup. Engram could write a plugin that turns its code-archaeology findings into `decision` memories.
-2. **RetrievalEnricher**: receives a `RecallResult` and may attach additional context. Engram could attach work-item linkages to results without Continuum knowing what a work item is.
-3. **PromotionWebhook**: fires on every promotion. Engram could subscribe and re-index the AGENTS.md output for affected repos.
+2. **RetrievalEnricher**: receives an immutable clone of already-authorized,
+   ranked recall results. Plain JSON output is attached only below the
+   enricher's validated ID in `result.enrichments`. Enrichers run concurrently
+   under one bounded deadline and combined size budget. Timeout, exception, or
+   invalid output fails open with sanitized operational logging. Empty
+   registries preserve the original REST and MCP response shapes.
+3. **PromotionWebhook**: receives an immutable promotion event with a stable
+   event ID after a worker claims its delivery. The event and one delivery per
+   registered webhook are inserted in the same transaction as destination
+   creation, source mutation, and promotion audit. Workers claim with leases,
+   renew them while callbacks drain, invoke callbacks outside database
+   transactions, retry with bounded backoff, reclaim expired leases, and
+   dead-letter after a bounded attempt count. Worker database waits and
+   callback admission are bounded. Every delivery mutation is fenced by the
+   exact durable owner, attempt, and monotonic lease generation, and successful
+   callbacks retain that ownership until acknowledgement settles. Shutdown stops new work, renews
+   exact active leases through a bounded grace period, and acknowledges
+   callbacks that succeed during that grace. The grace must remain shorter
+   than the lease duration. At the deadline it aborts and detaches
+   non-cooperative callbacks without releasing their leases. A
+   process-wide in-flight fence prevents replacement workers in that process
+   from invoking the same callback concurrently, and a late success is
+   acknowledged while its durable owner fence remains intact. Shutdown applies
+   one wall-clock deadline to callback drain and database cleanup, and does not
+   rearm renewal afterward. Claims that cannot start after stop, registry
+   mismatches, and shutdown-abort rejections are abandoned without consuming an
+   attempt. Process exit is the bounded cross-process fence for callbacks that
+   ignore abort. Crashed attempts are dead-lettered at the configured bound
+   after lease recovery. Delivery is at least once, so consumers deduplicate by
+   event ID. Manual retry preserves that ID. Unknown webhook IDs remain pending
+   and observable.
 4. **EmbeddingProvider**: implements `embed(texts) -> vectors`. Default impls: `ollama`, `voyage`, `openai`. Sensitive scopes pin to local-only providers.
 5. **Transport**: today MCP + REST + AGENTS.md. New transports (Teams bot, Slack command) implement this and reuse all ACL/audit machinery.
 

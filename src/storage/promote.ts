@@ -9,10 +9,13 @@ import {
 } from '../scopes/access.js';
 import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
 import { computeExpiry } from './expiry.js';
+import { enqueuePromotionEvent } from './promotion-events.js';
+import type { PromotionEvent } from '../extensions/promotion.js';
 
 export interface PromoteResult {
   source: Memory;
   destination: Memory;
+  promotionEvent: PromotionEvent;
 }
 
 export class PromoteError extends Error {
@@ -34,9 +37,10 @@ export async function promoteMemory(
   principalId: string,
   memoryId: string,
   targetScope: ScopeRef,
+  webhookIds: readonly string[] = [],
 ): Promise<PromoteResult> {
   return inTransaction(pool, (client) =>
-    promoteOperation(client, principalId, memoryId, targetScope, false),
+    promoteOperation(client, principalId, memoryId, targetScope, false, {}, webhookIds),
   );
 }
 
@@ -46,9 +50,10 @@ export async function promoteMemoryWithAudit(
   memoryId: string,
   targetScope: ScopeRef,
   auditMetadata: Record<string, unknown> = {},
+  webhookIds: readonly string[] = [],
 ): Promise<PromoteResult> {
   return inTransaction(pool, (client) =>
-    promoteOperation(client, principalId, memoryId, targetScope, true, auditMetadata),
+    promoteOperation(client, principalId, memoryId, targetScope, true, auditMetadata, webhookIds),
   );
 }
 
@@ -59,6 +64,7 @@ async function promoteOperation(
   targetScope: ScopeRef,
   audit: boolean,
   auditMetadata: Record<string, unknown> = {},
+  webhookIds: readonly string[] = [],
 ): Promise<PromoteResult> {
   const source = await getMemoryForUpdate(client, memoryId);
   if (!source) throw new PromoteError('memory not found', 404);
@@ -119,7 +125,15 @@ async function promoteOperation(
       metadata: { destination_id: destination.id, ...auditMetadata },
     });
   }
-  return { source: updatedSource, destination };
+  const promotionEvent = await enqueuePromotionEvent(client, {
+    sourceId: source.id,
+    destinationId: destination.id,
+    destinationScopeId: destinationScope.id,
+    destinationScope: { kind: destinationScope.kind, name: destinationScope.name },
+    principalId,
+    webhookIds,
+  });
+  return { source: updatedSource, destination, promotionEvent };
 }
 
 export async function verifyMemory(

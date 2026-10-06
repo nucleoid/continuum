@@ -11,6 +11,8 @@ import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import { createMemory } from '../storage/memories.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
+import { RetrievalEnricherRegistry } from '../extensions/retrieval.js';
+import { PromotionWebhookRegistry } from '../extensions/promotion.js';
 
 interface ToolResult {
   content: Array<{ type: string; text?: string }>;
@@ -216,6 +218,71 @@ describe('REST/MCP semantic parity matrix', () => {
     expect(Object.keys(rest.body.related[0]).sort()).toEqual(
       ['detectedAt', 'id', 'provider', 'relation', 'similarity', 'threshold'].sort(),
     );
+  });
+
+  it('creates the same registered webhook delivery rows for REST and MCP promotion', async () => {
+    const registry = new PromotionWebhookRegistry();
+    registry.register({ id: 'audit-hook', onPromoted: async () => undefined });
+    registry.register({ id: 'search-hook', onPromoted: async () => undefined });
+    const sourceScope = await createScope(pool, { kind: 'team', name: 'promotion-source' });
+    const destinationScope = await createScope(pool, {
+      kind: 'project', name: 'promotion-destination',
+    });
+    await addMembership(pool, principal.id, sourceScope.id, 'writer');
+    await addMembership(pool, principal.id, destinationScope.id, 'writer');
+    const restSource = await createMemory(pool, {
+      scopeId: sourceScope.id, scopeKind: sourceScope.kind, type: 'fact',
+      title: 'REST promotion', body: 'Promote through REST.', authorId: principal.id,
+      source: 'manual',
+    });
+    const mcpSource = await createMemory(pool, {
+      scopeId: sourceScope.id, scopeKind: sourceScope.kind, type: 'fact',
+      title: 'MCP promotion', body: 'Promote through MCP.', authorId: principal.id,
+      source: 'manual',
+    });
+    const parityServer = buildMcpServer({
+      pool, embeddingProvider: null, principal, promotionWebhooks: registry,
+    });
+    const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
+    const parityClient = new Client({ name: 'promotion-parity', version: '0.0.1' });
+    await Promise.all([
+      parityServer.connect(serverTransport), parityClient.connect(clientTransport),
+    ]);
+    const appOptions = { clock: Date.now, promotionWebhooks: registry };
+
+    const rest = await request(createApp(pool, appOptions))
+      .post(`/api/v0/memories/${restSource.id}/promote`)
+      .set('Authorization', 'Bearer entra:user:parity')
+      .send({ targetScope: { kind: 'project', name: destinationScope.name } });
+    const mcp = toolJson((await parityClient.callTool({
+      name: 'continuum.promote',
+      arguments: {
+        memory_id: mcpSource.id,
+        target_scope_kind: 'project',
+        target_scope_name: destinationScope.name,
+      },
+    })) as ToolResult);
+
+    expect(rest.status).toBe(201);
+    expect(mcp.destination_id).toMatch(/^[0-9a-f-]{36}$/);
+    const { rows } = await pool.query(
+      `SELECT e.source_memory_id, d.webhook_id
+         FROM promotion_events e
+         JOIN promotion_event_deliveries d ON d.event_id = e.id
+        WHERE e.source_memory_id = ANY($1::uuid[])
+        ORDER BY e.source_memory_id, d.webhook_id`,
+      [[restSource.id, mcpSource.id]],
+    );
+    expect(rows.filter((row) => row.source_memory_id === restSource.id))
+      .toEqual([
+        { source_memory_id: restSource.id, webhook_id: 'audit-hook' },
+        { source_memory_id: restSource.id, webhook_id: 'search-hook' },
+      ]);
+    expect(rows.filter((row) => row.source_memory_id === mcpSource.id))
+      .toEqual([
+        { source_memory_id: mcpSource.id, webhook_id: 'audit-hook' },
+        { source_memory_id: mcpSource.id, webhook_id: 'search-hook' },
+      ]);
   });
 
   it('returns equivalent actionable review queues over REST and MCP', async () => {
@@ -539,6 +606,51 @@ describe('REST/MCP semantic parity matrix', () => {
     expect(restAtMax.status).toBe(200);
     expect(restAtMax.body.limit).toBe(100);
     expect(mcpAtMax.limit).toBe(100);
+  });
+
+  it('returns identical namespaced enrichments through REST and MCP', async () => {
+    const scope = await createScope(pool, { kind: 'project', name: 'enriched' });
+    await addMembership(pool, principal.id, scope.id, 'writer');
+    await createMemory(pool, {
+      scopeId: scope.id, scopeKind: scope.kind, type: 'fact', title: 'Enriched marker',
+      body: 'Enriched marker content.', authorId: principal.id, source: 'manual',
+    });
+    const enrichers = new RetrievalEnricherRegistry();
+    enrichers.register({
+      id: 'links',
+      enrich: async (results, context) => results.map(() => ({
+        principal: context.principalId,
+        workItems: ['WI-26'],
+      })),
+    });
+    const enrichedServer = buildMcpServer({
+      pool, embeddingProvider: null, principal, retrievalEnrichers: enrichers,
+      enrichment: { timeoutMs: 100, maxBytes: 1024 },
+    });
+    const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
+    const enrichedClient = new Client({ name: 'enriched-parity', version: '0.0.1' });
+    await Promise.all([
+      enrichedServer.connect(serverTransport),
+      enrichedClient.connect(clientTransport),
+    ]);
+
+    const rest = await request(createApp(pool, {
+      retrievalEnrichers: enrichers,
+      enrichment: { timeoutMs: 100, maxBytes: 1024 },
+    }))
+      .post('/api/v0/recall')
+      .set('Authorization', 'Bearer entra:user:parity')
+      .send({ query: 'enriched marker', scopes: ['project:enriched'] });
+    const mcp = toolJson((await enrichedClient.callTool({
+      name: 'continuum.recall',
+      arguments: { query: 'enriched marker', scopes: ['project:enriched'] },
+    })) as ToolResult);
+
+    expect(rest.status).toBe(200);
+    expect(rest.body.results[0].enrichments).toEqual({
+      links: { principal: principal.id, workItems: ['WI-26'] },
+    });
+    expect(mcp[0].enrichments).toEqual(rest.body.results[0].enrichments);
   });
 
   it('uses the same readable access set for list_scopes, recall, and AGENTS.md', async () => {

@@ -15,6 +15,7 @@ import { captureSources } from '../capture/source.js';
 import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
 import { LIFECYCLE_PRINCIPAL_ID } from '../lifecycle/principal.js';
 import { recordRead } from '../audit/log.js';
+import { PromotionWebhookRegistry } from '../extensions/promotion.js';
 
 interface CallToolResult {
   content: Array<{ type: string; text?: string }>;
@@ -46,6 +47,7 @@ describe('MCP server', () => {
     selectedProvider: EmbeddingProvider | null = provider,
     selectedPool: pg.Pool = pool,
     logger?: { error(message: string, error: unknown): void },
+    promotionWebhooks?: PromotionWebhookRegistry,
   ) {
     const me = await createPrincipal(pool, {
       externalId: 'entra:user:mcp',
@@ -61,6 +63,7 @@ describe('MCP server', () => {
       embeddingProvider: selectedProvider,
       principal: me,
       logger,
+      promotionWebhooks,
     });
     const [a, b] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: 'test-client', version: '0.0.1' });
@@ -482,6 +485,39 @@ describe('MCP server', () => {
     );
     expect(rows[0].state).toBe('promoted');
     expect(rows[0].promoted_to_id).toBe(result.destination_id);
+  });
+
+  it('materializes registered webhook deliveries without changing the MCP response', async () => {
+    const webhooks = new PromotionWebhookRegistry();
+    webhooks.register({ id: 'consumer', onPromoted: vi.fn() });
+    const { client, me, org } = await connectClient(provider, pool, undefined, webhooks);
+    await addMembership(pool, me.id, org.id, 'admin');
+    const capture = (await client.callTool({
+      name: 'continuum.capture',
+      arguments: {
+        scope_kind: 'team', scope_name: 'payments', type: 'decision',
+        title: 'Outbox MCP', body: 'Registered delivery.', source: 'manual',
+      },
+    })) as CallToolResult;
+    const sourceId = (parseJsonResult(capture) as { id: string }).id;
+
+    const promote = (await client.callTool({
+      name: 'continuum.promote',
+      arguments: { memory_id: sourceId, target_scope_kind: 'org', target_scope_name: '' },
+    })) as CallToolResult;
+    expect(parseJsonResult(promote)).toEqual({
+      source_id: sourceId,
+      destination_id: expect.any(String),
+      destination_scope_id: org.id,
+    });
+    const { rows } = await pool.query(
+      `SELECT d.webhook_id, d.state, e.source_memory_id
+         FROM promotion_event_deliveries d
+         JOIN promotion_events e ON e.id = d.event_id`,
+    );
+    expect(rows).toEqual([{
+      webhook_id: 'consumer', state: 'pending', source_memory_id: sourceId,
+    }]);
   });
 
   it('denies org promotion to a writer with the stable MCP error envelope', async () => {
