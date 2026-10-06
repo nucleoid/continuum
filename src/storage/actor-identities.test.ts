@@ -98,9 +98,18 @@ describe('actor identity mappings', () => {
       mappedByPrincipalId: admin.id,
     });
 
+    await expect(pool.query(
+      `UPDATE actor_principal_mappings
+          SET revoked_by_principal_id = $1
+        WHERE authority = 'github.producer-a' AND external_actor_id = '42'
+          AND revoked_at IS NULL`,
+      [admin.id],
+    )).rejects.toThrow(/explicit reason/i);
+
     await expect(revokeActorIdentity(pool, {
       authority: 'github.producer-a', externalActorId: '42',
       revokedByPrincipalId: nonAdmin.id,
+      reason: 'Unauthorized test revocation',
     })).rejects.toThrow(/org admin/);
     expect(await resolveActorPrincipalId(pool, {
       authority: 'github.producer-a', externalId: '42',
@@ -109,6 +118,7 @@ describe('actor identity mappings', () => {
     await replaceActorIdentity(pool, {
       authority: 'github.producer-a', externalActorId: '42', principalId: second.id,
       mappedByPrincipalId: admin.id,
+      reason: 'Rotate actor ownership',
     });
     expect(await resolveActorPrincipalId(pool, {
       authority: 'github.producer-a', externalId: '42',
@@ -167,6 +177,7 @@ describe('actor identity mappings', () => {
       await expect(revokeActorIdentity(revokeClient, {
         authority: 'github.producer-lock', externalActorId: '84',
         revokedByPrincipalId: admin.id,
+        reason: 'Concurrent test revocation',
       })).rejects.toThrow(/lock timeout|canceling statement/i);
       await revokeClient.query('ROLLBACK');
       await captureClient.query('COMMIT');
@@ -174,6 +185,7 @@ describe('actor identity mappings', () => {
       expect(await revokeActorIdentity(pool, {
         authority: 'github.producer-lock', externalActorId: '84',
         revokedByPrincipalId: admin.id,
+        reason: 'Complete credential rotation',
       })).toBe(true);
     } finally {
       await captureClient.query('ROLLBACK').catch(() => undefined);

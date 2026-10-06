@@ -1166,6 +1166,7 @@ describe('shared services', () => {
     await revokeActorIdentity(pool, {
       authority: 'terminal-summary.producer', externalActorId: 'promotion-actor',
       revokedByPrincipalId: principal.id,
+      reason: 'Retire stale activity mapping',
     });
     const revoked = await createMemory(pool, {
       scopeId: team.id, scopeKind: team.kind, type: 'context', title: 'Revoked activity',

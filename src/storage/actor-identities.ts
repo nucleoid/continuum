@@ -9,10 +9,15 @@ export interface ActorIdentityMappingInput {
   mappedByPrincipalId: string;
 }
 
+export interface ActorIdentityReplacementInput extends ActorIdentityMappingInput {
+  reason: string;
+}
+
 export interface ActorIdentityRevocationInput {
   authority: string;
   externalActorId: string;
   revokedByPrincipalId: string;
+  reason: string;
 }
 
 export interface ResolvedActorIdentityMapping {
@@ -45,17 +50,17 @@ export async function revokeActorIdentity(
         FOR UPDATE
      )
      UPDATE actor_principal_mappings mapping
-        SET revoked_by_principal_id = $3
+        SET revoked_by_principal_id = $3, revocation_reason = $4
        FROM active_mapping
       WHERE mapping.mapping_id = active_mapping.mapping_id`,
-    [input.authority, input.externalActorId, input.revokedByPrincipalId],
+    [input.authority, input.externalActorId, input.revokedByPrincipalId, input.reason],
   );
   return result.rowCount === 1;
 }
 
 export async function replaceActorIdentity(
   pool: pg.Pool,
-  input: ActorIdentityMappingInput,
+  input: ActorIdentityReplacementInput,
 ): Promise<void> {
   const client = await pool.connect();
   try {
@@ -64,6 +69,7 @@ export async function replaceActorIdentity(
       authority: input.authority,
       externalActorId: input.externalActorId,
       revokedByPrincipalId: input.mappedByPrincipalId,
+      reason: input.reason,
     });
     if (!revoked) throw new Error('active actor identity mapping not found');
     await mapActorIdentity(client, input);

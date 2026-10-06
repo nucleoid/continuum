@@ -15,7 +15,9 @@ owner.
 Activity-shaped labels may remain in memory metadata for history and display,
 but standup trust never comes from that caller-mutable JSON. Trusted captures
 atomically create an immutable `memory_activity_attributions` row containing
-the actor, thread, source event time, and exact mapping UUID/authority.
+the actor, thread, bounded source event time, trusted database receipt time,
+and exact mapping UUID/authority. Producer timestamps are clamped to the
+seven days before receipt and cannot be future-dated.
 Content-free closure tombstones live in `standup_thread_closures`.
 Once a trusted thread key is closed, that tombstone remains effective even if
 the closing scope later becomes unreadable or the opening event arrives late.
@@ -122,13 +124,16 @@ they do not duplicate the provider's opaque actor ID. Capture holds a shared
 mapping lock through persistence, while revocation/replacement takes an update
 lock, so a capture cannot commit against a concurrently revoked mapping.
 
-Revocation retires all standup activity and closure semantics authorized by
-that exact historical mapping UUID. Replacing a mapping does not reactivate old
-rows, even when the replacement points to the same principal. Only captures
-written after replacement carry the new mapping UUID and become eligible.
-Memory bodies and ordinary metadata remain available through their normal ACLs.
+Revocation and replacement require a non-empty operator reason, retained in
+the mapping history and audit. Activity received while the exact mapping was
+active remains legitimate history. Replacement starts a new mapping
+generation: closures from an older mapping UUID cannot close threads opened
+under the replacement, and a closure earlier than an opening event cannot
+close it. Memory bodies and ordinary metadata remain available through their
+normal ACLs.
 
-For deploy and terminal mappings, use the configured activity namespace,
+For deploy and terminal mappings, use distinct service principals and distinct
+configured activity namespaces,
 `deploy-event` and `terminal-summary` by default. When multiple independent
 identity domains feed one Continuum deployment, configure a distinct validated
 namespace for each domain before creating mappings.
@@ -161,17 +166,22 @@ other actors' records are excluded.
 
 Promotion moves knowledge between scopes but is not a new activity event. A
 promoted copy gets a trusted attribution only when the source has an immutable
-attribution whose exact mapping is still active. Promotion holds a shared lock
-on that mapping, preserves source event time, and records the source expiry as
-an absolute trust ceiling. Later verification cannot extend that ceiling.
+attribution received while its exact mapping was active. Promotion preserves
+source event time and records the earliest source expiry as an absolute trust
+ceiling. Later verification cannot extend that ceiling. The database also
+clamps direct expiry updates and rejects a legacy promotion that marks an
+attributed source promoted before a matching destination attribution exists.
 Untrusted activity-shaped metadata remains truthful ordinary history but is
 never consulted by standup readers.
 
 ## Mapping-enforcement rollout
 
-Ordinary startup applies schema migrations through `0015`. Migration `0013`
-removes the prerelease metadata indexes, `0014` creates empty attribution and
-tombstone relations, and `0015` builds the indexes used by shipped queries.
+Ordinary startup applies schema migrations through `0018`. Published migration
+`0013` remains immutable, `0014` creates empty attribution and tombstone
+relations, and `0015` builds the initial indexes used by shipped queries.
+`0016` retires obsolete metadata indexes, `0017` installs receipt-time,
+expiry, revocation, and mixed-version promotion invariants, and `0018` adds
+the mapping-generation closure index.
 Every concurrent build drops a same-named interrupted attempt first and refuses
 to ledger unless `pg_index.indisvalid` is true. `0014` also blocks new reserved
 provenance in memory metadata and never backfills unverifiable rows.
@@ -183,6 +193,13 @@ control:
 ```sh
 psql "$CONTINUUM_DATABASE_URL" -f scripts/preflight-standup-rollout.sql
 ```
+
+For every reported legacy numeric GitHub alias and terminal subject, review
+the immutable provider identifier and run
+`scripts/provision-standup-actor.sql`. The script copies the reviewed legacy
+alias into its typed `id` or `subject` key, provisions the exact activity
+namespace mapping to the same user, and audits both changes. Complete this
+step before enabling strict branch or terminal ingestion.
 
 Apply migrations, deploy attribution-aware writers everywhere, verify a
 production POST creates one memory plus one attribution, and drain old writers.
@@ -197,7 +214,8 @@ script backs up exact metadata, loops 10,000-row batches to completion using
 the same reserved-key predicate as preflight, and removes only obsolete
 `_continuum_*` keys. It preserves content, labels, thread history, and revoked
 history. Restore with `scripts/restore-standup-mapping-enforcement.sql` after
-draining writers.
+draining writers. Restore merges only the four reserved provenance keys from
+the backup, so metadata written after cleanup remains intact.
 
 ## Existing user-scope backfill
 

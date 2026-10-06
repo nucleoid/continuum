@@ -96,7 +96,7 @@ describe('standup remediation database boundary', () => {
     expect(cleanup).not.toMatch(/- 'actor'\s/);
     expect(cleanup).not.toMatch(/- 'thread_key'\s/);
     expect(restore).toContain('jsonb_strip_nulls(jsonb_build_object(');
-    expect(restore).toContain("memory.metadata - '_continuum_activity_provenance'");
+    expect(restore).toMatch(/memory\.metadata\s+- '_continuum_activity_provenance'/);
     expect(restore).not.toMatch(/SET metadata = backup\.metadata[,\s]/);
   });
 

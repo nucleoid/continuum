@@ -126,7 +126,7 @@ describe('plugin capture to standup attribution', () => {
     expect(storedMappings.rows.map((row) => row.mapping_authority)).toEqual(['github', 'github']);
   });
 
-  it('excludes historical activity after its exact actor mapping is revoked or replaced', async () => {
+  it('retains historical activity after its exact actor mapping is replaced', async () => {
     const service = await createPrincipal(pool, {
       externalId: 'svc:revoked-github-webhook', kind: 'service', displayName: 'GitHub webhook',
     });
@@ -162,14 +162,15 @@ describe('plugin capture to standup attribution', () => {
 
     await expect(revokeActorIdentity(pool, {
       authority, externalActorId: '4242', revokedByPrincipalId: admin.id,
+      reason: 'Rotate a compromised GitHub identity binding',
     })).resolves.toBe(true);
-    expect((await standup()).activity).toEqual([]);
+    expect((await standup()).activity.map((memory) => memory.id)).toEqual([captured.memory.id]);
 
     await mapActorIdentity(pool, {
       authority, externalActorId: '4242', principalId: actor.id,
       mappedByPrincipalId: admin.id,
     });
-    expect((await standup()).activity).toEqual([]);
+    expect((await standup()).activity.map((memory) => memory.id)).toEqual([captured.memory.id]);
 
     const [replacementCapture] = await capturePluginEvent(
       pool, null, service, 'github-pr', mergedPr(71, 4242, 'renamed-again'),
@@ -178,8 +179,8 @@ describe('plugin capture to standup attribution', () => {
       `UPDATE memories SET created_at = $2, updated_at = $2 WHERE id = $1`,
       [replacementCapture.memory.id, '2026-10-05T11:00:00.000Z'],
     );
-    expect((await standup()).activity.map((memory) => memory.id))
-      .toEqual([replacementCapture.memory.id]);
+    expect((await standup()).activity.map((memory) => memory.id).sort())
+      .toEqual([captured.memory.id, replacementCapture.memory.id].sort());
   });
 
   it('stores an unmapped GitHub PR safely but fails closed for standup eligibility', async () => {

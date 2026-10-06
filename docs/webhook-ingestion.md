@@ -30,7 +30,8 @@ configured with different namespaces, so separate service principals cannot
 silently fragment one thread. GitHub uses immutable numeric webhook user and
 repository IDs. Branch scope routing requires an explicit `alias_kind='id'`
 numeric alias and never falls back to a mutable login. Deploy and terminal
-credentials bind one configured `*_ACTOR_EXTERNAL_ID`; a request body cannot
+ingestion must use distinct service principals and distinct activity
+namespaces. Their credentials bind one configured `*_ACTOR_EXTERNAL_ID`; a request body cannot
 select another mapped actor, and the `github` namespace is reserved for
 GitHub-signed producers. Missing
 mappings store ordinary non-standup memories after reserved activity metadata

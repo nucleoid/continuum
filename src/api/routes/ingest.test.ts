@@ -160,13 +160,20 @@ describe('webhook ingestion transport', () => {
   });
 
   it('bounds production actor identities and requires boolean terminal closure policy', async () => {
-    const { principal } = await seedService('service:schema-bounds');
+    const { principal, project } = await seedService('service:schema-bounds-deploy');
+    const terminalPrincipal = await createPrincipal(pool, {
+      externalId: 'service:schema-bounds-terminal',
+      kind: 'service',
+      displayName: 'Terminal schema bounds',
+    });
+    await addMembership(pool, terminalPrincipal.id, project.id, 'writer');
     const target = app({ plugins: {
       'deploy-event': {
         enabled: true, auth: { kind: 'bearer' }, principalExternalId: principal.externalId,
       },
       'terminal-summary': {
-        enabled: true, auth: { kind: 'bearer' }, principalExternalId: principal.externalId,
+        enabled: true, auth: { kind: 'bearer' },
+        principalExternalId: terminalPrincipal.externalId,
       },
     } });
     await request(target).post('/api/v0/ingest/deploy-event')
@@ -177,7 +184,7 @@ describe('webhook ingestion transport', () => {
         actorExternalId: 'x'.repeat(501),
       }).expect(400);
     await request(target).post('/api/v0/ingest/terminal-summary')
-      .set('Authorization', `Bearer ${principal.externalId}`)
+      .set('Authorization', `Bearer ${terminalPrincipal.externalId}`)
       .set('Idempotency-Key', 'terminal-invalid-policy')
       .send({
         actor: 'actor', actorExternalId: 'subject', sessionId: 'session', summary: 'summary',

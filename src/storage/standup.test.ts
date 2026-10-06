@@ -6,7 +6,12 @@ import { createActivityAttribution } from './activity-attributions.js';
 import { createMemory } from './memories.js';
 import { createPrincipal } from './principals.js';
 import { createScope, getScopeByRef } from './scopes.js';
-import { listOpenStandupThreads, listStandupActivity } from './standup.js';
+import {
+  listOpenStandupThreads,
+  listStandupActivity,
+  OPEN_STANDUP_THREADS_SQL,
+  STANDUP_ACTIVITY_SQL,
+} from './standup.js';
 import { makeTestPool, resetData } from './test-helpers.js';
 
 describe('standup trusted activity storage', () => {
@@ -93,8 +98,25 @@ describe('standup trusted activity storage', () => {
           AND thread_key = 'branch:1'
           AND closed_at >= '2026-10-01Z'::timestamptz`,
     );
+    const productionActivityPlan = await pool.query<{ 'QUERY PLAN': unknown }>(
+      `EXPLAIN (FORMAT JSON) ${STANDUP_ACTIVITY_SQL}`,
+      [
+        '11111111-1111-4111-8111-111111111111',
+        new Date('2026-10-01T00:00:00Z'), new Date('2026-10-06T00:00:00Z'), 20, 0,
+      ],
+    );
+    const productionOpenPlan = await pool.query<{ 'QUERY PLAN': unknown }>(
+      `EXPLAIN (FORMAT JSON) ${OPEN_STANDUP_THREADS_SQL}`,
+      [
+        '11111111-1111-4111-8111-111111111111',
+        new Date('2026-10-05T00:00:00Z'), new Date('2026-09-01T00:00:00Z'),
+        new Date('2026-10-05T12:00:00Z'), 20,
+      ],
+    );
     await pool.query('RESET enable_seqscan');
-    const rendered = JSON.stringify([actorPlan.rows, closurePlan.rows]);
+    const rendered = JSON.stringify([
+      actorPlan.rows, closurePlan.rows, productionActivityPlan.rows, productionOpenPlan.rows,
+    ]);
     expect(rendered).toContain('memory_activity_actor_time_idx');
     expect(rendered).toContain('standup_thread_closures_lookup_idx');
   });

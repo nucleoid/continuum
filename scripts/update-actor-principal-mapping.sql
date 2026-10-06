@@ -16,6 +16,10 @@
 \else
   \prompt 'Reviewing org-admin principal UUID: ' admin_principal_id
 \endif
+\if :{?reason}
+\else
+  \prompt 'Reason for replacement (required, max 500 characters): ' reason
+\endif
 
 BEGIN;
 
@@ -28,7 +32,8 @@ WITH active_mapping AS MATERIALIZED (
    FOR UPDATE
 ), revoked AS (
   UPDATE actor_principal_mappings mapping
-     SET revoked_by_principal_id = :'admin_principal_id'::uuid
+     SET revoked_by_principal_id = :'admin_principal_id'::uuid,
+         revocation_reason = :'reason'
     FROM active_mapping
    WHERE mapping.mapping_id = active_mapping.mapping_id
   RETURNING mapping.mapping_id

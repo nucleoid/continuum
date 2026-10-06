@@ -68,6 +68,19 @@ export function validateIngestConfig(config: IngestConfig): void {
       throw new Error('GitHub PR and branch ingestion must use the same activity namespace');
     }
   }
+  const deploy = config.plugins['deploy-event'];
+  const terminal = config.plugins['terminal-summary'];
+  if (deploy && terminal) {
+    if (deploy.principalExternalId === terminal.principalExternalId) {
+      throw new Error('Deploy and terminal ingestion require distinct service principals');
+    }
+    const deployNamespace = deploy.activityNamespace ?? defaultActivityNamespace('deploy-event');
+    const terminalNamespace =
+      terminal.activityNamespace ?? defaultActivityNamespace('terminal-summary');
+    if (deployNamespace === terminalNamespace) {
+      throw new Error('Deploy and terminal ingestion require distinct activity namespaces');
+    }
+  }
 }
 
 export function ingestConfigFromEnv(env: NodeJS.ProcessEnv = process.env): IngestConfig {

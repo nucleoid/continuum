@@ -26,11 +26,12 @@ export async function createActivityAttribution(
   db: Queryable,
   input: ActivityAttributionInput,
 ): Promise<void> {
-  await db.query(
+  const attribution = await db.query<{ activity_at: Date }>(
     `INSERT INTO memory_activity_attributions
        (memory_id, actor_principal_id, thread_owner_principal_id, mapping_id,
         mapping_authority, actor_label, thread_key, activity_at, trust_expires_at)
-     VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $8)`,
+     VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING activity_at`,
     [
       input.memoryId,
       input.actorPrincipalId,
@@ -53,7 +54,7 @@ export async function createActivityAttribution(
         input.actorPrincipalId,
         input.mappingId,
         input.closesThreadKeys,
-        input.activityAt,
+        attribution.rows[0]!.activity_at,
       ],
     );
   }
@@ -73,7 +74,8 @@ export async function getActivityAttributionForUpdate(
          ON mapping.mapping_id = attribution.mapping_id
         AND mapping.authority = attribution.mapping_authority
         AND mapping.principal_id = attribution.actor_principal_id
-        AND mapping.revoked_at IS NULL
+        AND (mapping.revoked_at IS NULL
+             OR mapping.revoked_at >= attribution.received_at)
       WHERE attribution.memory_id = $1
       FOR SHARE OF attribution, mapping`,
     [memoryId],

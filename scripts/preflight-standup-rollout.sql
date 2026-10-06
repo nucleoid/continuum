@@ -14,6 +14,29 @@ SELECT count(*) AS stable_github_numeric_aliases
   FROM principal_aliases
  WHERE provider = 'github' AND external_actor ~ '^[1-9][0-9]*$';
 
+SELECT count(*) AS github_numeric_aliases_needing_conversion
+  FROM principal_aliases legacy
+ WHERE legacy.provider = 'github'
+   AND legacy.alias_kind = 'legacy'
+   AND legacy.external_actor ~ '^[1-9][0-9]*$'
+   AND NOT EXISTS (
+     SELECT 1 FROM principal_aliases typed
+      WHERE typed.provider = 'github'
+        AND typed.alias_kind = 'id'
+        AND typed.external_actor = legacy.external_actor
+   );
+
+SELECT count(*) AS terminal_subject_aliases_needing_conversion
+  FROM principal_aliases legacy
+ WHERE legacy.provider = 'terminal'
+   AND legacy.alias_kind = 'legacy'
+   AND NOT EXISTS (
+     SELECT 1 FROM principal_aliases typed
+      WHERE typed.provider = 'terminal'
+        AND typed.alias_kind = 'subject'
+        AND typed.external_actor = legacy.external_actor
+   );
+
 SELECT count(*) AS legacy_principal_scoped_github_mappings
   FROM actor_principal_mappings
  WHERE revoked_at IS NULL

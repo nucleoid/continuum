@@ -93,6 +93,9 @@ async function promoteOperation(
   }
 
   const sourceAttribution = await getActivityAttributionForUpdate(client, source.id);
+  const trustCeiling = sourceAttribution
+    ? earliestDate(source.expiresAt, sourceAttribution.trustExpiresAt)
+    : null;
   const destinationMetadata = { ...source.metadata };
   delete destinationMetadata.related;
   const destination = await createMemory(client, {
@@ -106,7 +109,7 @@ async function promoteOperation(
     sourceRef: source.sourceRef ?? null,
     tags: source.tags,
     metadata: { ...destinationMetadata, promoted_from: source.id },
-    expiresAtCeiling: sourceAttribution ? source.expiresAt : null,
+    expiresAtCeiling: trustCeiling,
   });
   if (sourceAttribution) {
     await createActivityAttribution(client, {
@@ -118,7 +121,7 @@ async function promoteOperation(
       threadKey: sourceAttribution.threadKey,
       closesThreadKeys: [],
       activityAt: sourceAttribution.activityAt,
-      trustExpiresAt: source.expiresAt,
+      trustExpiresAt: trustCeiling,
     });
   }
   const { rows } = await client.query(
@@ -139,6 +142,12 @@ async function promoteOperation(
     });
   }
   return { source: updatedSource, destination };
+}
+
+function earliestDate(left: Date | null, right: Date | null): Date | null {
+  if (!left) return right;
+  if (!right) return left;
+  return left < right ? left : right;
 }
 
 export async function verifyMemory(
