@@ -383,13 +383,17 @@ disablement of the final effective manually managed org administrator.
 Offboarding uses an explicit `principal_user_scopes` UUID mapping; mutable names
 never establish ownership. Mapping requires target membership history and
 rejects other active members unless an operator records the explicit shared
-scope override. An org-admin transaction locks against membership sync,
+scope override. The acknowledgement is bound to a bounded sorted UUID set and
+hash, so newly observed member or author evidence fails closed. An org-admin
+transaction locks against membership sync,
 tombstones and archives only the mapped user scope, deletes embeddings, nulls
-the target's raw audit queries, deactivates every membership on that scope,
+linked raw audit queries, deletes aliases, revokes and quarantines scope-targeting
+Entra bindings, deactivates every membership on that scope,
 disables access, applies a stable UUID-derived pseudonym, and writes atomic
 per-memory plus operation-summary audit records. Database guards close an
-offboarded owned scope to new live memories and retries verify that no live
-rows, embeddings, active memberships, or raw target queries remain.
+offboarded owned scope to non-tombstone writes, active memberships, and active
+Entra bindings; retries verify that no dirty memories, embeddings, aliases,
+active access, or linked raw audit rows remain.
 Shared scopes and stable UUID references remain intact. Database archive and
 embedding triggers enforce cleanup for lifecycle, supersession, offboarding,
 and direct state transitions. See `docs/offboarding.md` for limits, retry

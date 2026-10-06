@@ -9,7 +9,10 @@ import { selectGapCandidates } from '../storage/gaps.js';
 import { createPrincipal, upsertPrincipalByExternalId } from '../storage/principals.js';
 import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
-import { mapOwnedUserScope, offboardPrincipal } from './offboarding.js';
+import {
+  mapOwnedUserScope, MAX_OFFBOARD_AFFECTED_ROWS, offboardPrincipal,
+} from './offboarding.js';
+import { provisionEntraGroupBinding } from './membership-sync.js';
 import { disablePrincipal, reactivatePrincipal } from './principal-admin.js';
 import { recallForPrincipal } from './recall.js';
 
@@ -136,10 +139,7 @@ describe('offboarding and erasure', () => {
       externalId: 'delegate', kind: 'service', displayName: 'Delegate',
     });
     await addMembership(pool, delegate.id, value.personal.id, 'writer');
-    await pool.query(
-      'UPDATE principal_user_scopes SET allow_other_active_members = TRUE WHERE principal_id = $1',
-      [value.target.id],
-    );
+    await mapOwnedUserScope(pool, value.admin, value.target.id, value.personal.id, true);
     await offboardPrincipal(pool, value.admin, value.target.id);
     expect((await pool.query(
       'SELECT bool_and(NOT active) AS inactive FROM scope_memberships WHERE scope_id = $1',
@@ -148,10 +148,10 @@ describe('offboarding and erasure', () => {
     await expect(createMemory(pool, {
       scopeId: value.personal.id, scopeKind: 'user', type: 'context', title: 'Late', body: 'Late',
       authorId: delegate.id, source: 'terminal-summary',
-    })).rejects.toThrow(/offboarded principal/i);
+    })).rejects.toThrow(/offboarded (principal|owned scope)/i);
     await expect(pool.query(
       `UPDATE memories SET state = 'live' WHERE id = $1`, [value.personalMemory.id],
-    )).rejects.toThrow(/offboarded principal/i);
+    )).rejects.toThrow(/offboarded (principal|owned scope)/i);
 
     await pool.query('ALTER TABLE memories DISABLE TRIGGER require_open_owned_user_scope');
     const dirty = await createMemory(pool, {
@@ -439,5 +439,199 @@ describe('offboarding and erasure', () => {
       'SELECT count(*)::int AS count FROM memory_embeddings WHERE memory_id = $1',
       [value.personalMemory.id],
     )).rows[0].count).toBe(0);
+  });
+
+  it('redacts exact JSON scope-name values without wildcard collateral damage', async () => {
+    const value = await fixture();
+    await pool.query('UPDATE scopes SET name = $2 WHERE id = $1', [value.personal.id, 'a_b%']);
+    await pool.query(
+      `INSERT INTO audit_log (principal_id, action, metadata) VALUES
+       ($1, 'read', $2::jsonb), ($1, 'read', $3::jsonb)`,
+      [value.admin.id, JSON.stringify({ nested: { scope: 'a_b%' } }),
+        JSON.stringify({ nested: { scope: 'axbZZ' }, marker: 'unrelated' })],
+    );
+    await offboardPrincipal(pool, value.admin, value.target.id);
+    const rows = (await pool.query(
+      `SELECT metadata FROM audit_log
+        WHERE principal_id = $1 AND action = 'read' ORDER BY id`, [value.admin.id],
+    )).rows;
+    expect(rows[0].metadata).toEqual({ redacted: 'principal_offboarding' });
+    expect(rows[1].metadata).toEqual({ nested: { scope: 'axbZZ' }, marker: 'unrelated' });
+  });
+
+  it('binds shared-scope acknowledgement to the reviewed principal evidence set', async () => {
+    const value = await fixture();
+    const reviewed = await createPrincipal(pool, {
+      externalId: 'reviewed-delegate', kind: 'service', displayName: 'Reviewed',
+    });
+    await addMembership(pool, reviewed.id, value.personal.id, 'writer');
+    await mapOwnedUserScope(pool, value.admin, value.target.id, value.personal.id, true);
+    const unreviewed = await createPrincipal(pool, {
+      externalId: 'unreviewed-delegate', kind: 'service', displayName: 'Unreviewed',
+    });
+    await addMembership(pool, unreviewed.id, value.personal.id, 'reader');
+    await expect(offboardPrincipal(pool, value.admin, value.target.id))
+      .rejects.toThrow(/unacknowledged principal evidence/i);
+    await mapOwnedUserScope(pool, value.admin, value.target.id, value.personal.id, true);
+    await offboardPrincipal(pool, value.admin, value.target.id);
+    const event = (await pool.query(
+      `SELECT evidence FROM principal_offboarding_events WHERE principal_id = $1`,
+      [value.target.id],
+    )).rows[0].evidence;
+    expect(event.acknowledgedPrincipalIds).toEqual([reviewed.id, unreviewed.id].sort());
+    expect(event.acknowledgedEvidenceHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('quarantines owned-scope Entra bindings and database-rejects later active access', async () => {
+    const value = await fixture();
+    const groupId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+    const member = await createPrincipal(pool, {
+      externalId: 'entra-member', kind: 'user', displayName: 'Entra member',
+    });
+    await provisionEntraGroupBinding(pool, value.admin, {
+      externalId: groupId, scopeId: value.personal.id, role: 'reader',
+    });
+    await pool.query(
+      `INSERT INTO scope_memberships
+         (principal_id, scope_id, role, source_kind, source_id, active)
+       VALUES ($1, $2, 'reader', 'entra', $3, TRUE)`,
+      [member.id, value.personal.id, groupId],
+    );
+    await mapOwnedUserScope(pool, value.admin, value.target.id, value.personal.id, true);
+    const result = await offboardPrincipal(pool, value.admin, value.target.id);
+    expect(result.entraBindings).toBe(1);
+    expect((await pool.query(
+      `SELECT active, approval_revoked_at IS NOT NULL AS revoked, quarantine_reason
+         FROM entra_groups WHERE external_id = $1`, [groupId],
+    )).rows[0]).toEqual({
+      active: false, revoked: true, quarantine_reason: 'OWNED_SCOPE_OFFBOARDED',
+    });
+    await expect(pool.query(
+      `INSERT INTO scope_memberships
+         (principal_id, scope_id, role, source_kind, source_id, active)
+       VALUES ($1, $2, 'reader', 'manual', 'manual', TRUE)`,
+      [member.id, value.personal.id],
+    )).rejects.toThrow(/offboarded owned scope/i);
+  });
+
+  it('redacts delegate summaries through scope_ids and request_id linkage', async () => {
+    const value = await fixture();
+    const delegate = await createPrincipal(pool, {
+      externalId: 'audit-delegate', kind: 'user', displayName: 'Audit delegate',
+    });
+    const requestId = 'linked-request';
+    await pool.query(
+      `INSERT INTO audit_log (principal_id, action, query, metadata) VALUES
+       ($1, 'read', 'scope ids secret', $2::jsonb),
+       ($1, 'read', 'linked secret', $3::jsonb)`,
+      [delegate.id,
+        JSON.stringify({ request_id: requestId, scope_ids: [value.personal.id] }),
+        JSON.stringify({ request_id: requestId })],
+    );
+    await offboardPrincipal(pool, value.admin, value.target.id);
+    const rows = (await pool.query(
+      `SELECT query, metadata FROM audit_log
+        WHERE principal_id = $1 ORDER BY id`, [delegate.id],
+    )).rows;
+    expect(rows).toEqual([
+      { query: null, metadata: { redacted: 'principal_offboarding' } },
+      { query: null, metadata: { redacted: 'principal_offboarding' } },
+    ]);
+    await expect(pool.query(
+      `INSERT INTO audit_log (principal_id, action, query, metadata)
+       VALUES ($1, 'read', 'late secret', $2::jsonb)`,
+      [delegate.id, JSON.stringify({ scope_ids: [value.personal.id] })],
+    )).rejects.toThrow(/offboarded owned scope/i);
+  });
+
+  it('fails a concurrent delegate audit closed when the owner transition wins', async () => {
+    const value = await fixture();
+    const delegate = await createPrincipal(pool, {
+      externalId: 'concurrent-delegate', kind: 'user', displayName: 'Concurrent delegate',
+    });
+    const transition = await pool.connect();
+    await transition.query('BEGIN');
+    await transition.query('SELECT id FROM principals WHERE id = $1 FOR UPDATE', [value.target.id]);
+    let settled = false;
+    const lateAudit = pool.query(
+      `INSERT INTO audit_log (principal_id, action, query, metadata)
+       VALUES ($1, 'read', 'late delegate secret', $2::jsonb)`,
+      [delegate.id, JSON.stringify({ scope_ids: [value.personal.id] })],
+    ).finally(() => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(settled).toBe(false);
+    await transition.query(
+      'UPDATE principals SET offboarded_at = now() WHERE id = $1', [value.target.id],
+    );
+    await transition.query('COMMIT');
+    transition.release();
+    await expect(lateAudit).rejects.toThrow(/offboarded owned scope/i);
+    expect((await pool.query(
+      `SELECT count(*)::int AS count FROM audit_log
+        WHERE principal_id = $1 AND query = 'late delegate secret'`, [delegate.id],
+    )).rows[0].count).toBe(0);
+  });
+
+  it('fails a concurrent membership write closed when the owner transition wins', async () => {
+    const value = await fixture();
+    const member = await createPrincipal(pool, {
+      externalId: 'concurrent-member', kind: 'user', displayName: 'Concurrent member',
+    });
+    const transition = await pool.connect();
+    await transition.query('BEGIN');
+    await transition.query('SELECT id FROM principals WHERE id = $1 FOR UPDATE', [value.target.id]);
+    let settled = false;
+    const lateMembership = addMembership(
+      pool, member.id, value.personal.id, 'reader',
+    ).finally(() => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(settled).toBe(false);
+    await transition.query(
+      'UPDATE principals SET offboarded_at = now() WHERE id = $1', [value.target.id],
+    );
+    await transition.query('COMMIT');
+    transition.release();
+    await expect(lateMembership).rejects.toThrow(/offboarded owned scope/i);
+    expect((await pool.query(
+      `SELECT count(*)::int AS count FROM scope_memberships
+        WHERE principal_id = $1 AND scope_id = $2 AND active`,
+      [member.id, value.personal.id],
+    )).rows[0].count).toBe(0);
+  });
+
+  it('removes aliases and protects archived tombstones from later content edits', async () => {
+    const value = await fixture();
+    await pool.query(
+      `INSERT INTO principal_aliases (provider, external_actor, principal_id)
+       VALUES ('github', 'sensitive-login', $1)`, [value.target.id],
+    );
+    const preview = await offboardPrincipal(pool, value.admin, value.target.id, true);
+    expect(preview.aliases).toBe(1);
+    await offboardPrincipal(pool, value.admin, value.target.id);
+    expect((await pool.query(
+      'SELECT count(*)::int AS count FROM principal_aliases WHERE principal_id = $1',
+      [value.target.id],
+    )).rows[0].count).toBe(0);
+    await expect(pool.query(
+      `UPDATE memories SET body = 'restored' WHERE id = $1`, [value.personalMemory.id],
+    )).rejects.toThrow(/archived memory content is immutable/i);
+  });
+
+  it('fails closed before mutation when the affected-row cap is exceeded', async () => {
+    const value = await fixture();
+    await pool.query(
+      `INSERT INTO audit_log (principal_id, action, scope_id, query, metadata)
+       SELECT $1, 'read', $2, 'bounded secret', '{}'::jsonb
+         FROM generate_series(1, $3)`,
+      [value.admin.id, value.personal.id, MAX_OFFBOARD_AFFECTED_ROWS + 1],
+    );
+    await expect(offboardPrincipal(pool, value.admin, value.target.id))
+      .rejects.toThrow(/affected-row limit/i);
+    expect((await pool.query(
+      'SELECT disabled_at FROM principals WHERE id = $1', [value.target.id],
+    )).rows[0].disabled_at).toBeNull();
+    expect((await pool.query(
+      'SELECT title FROM memories WHERE id = $1', [value.personalMemory.id],
+    )).rows[0].title).toBe('Private title');
   });
 });

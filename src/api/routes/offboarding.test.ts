@@ -43,8 +43,23 @@ describe('offboarding REST administration', () => {
     expect(preview.status).toBe(200);
     expect(preview.body).toMatchObject({ principalId: target.id, dryRun: true, alreadyOffboarded: false });
 
-    const executed = await request(app).post(`${path}/offboard`)
+    const defaultPreview = await request(app).post(`${path}/offboard`)
       .set('Authorization', 'Bearer admin-rest').send({});
+    expect(defaultPreview.status).toBe(200);
+    expect(defaultPreview.body).toMatchObject({ dryRun: true, alreadyOffboarded: false });
+
+    const unconfirmed = await request(app).post(`${path}/offboard`)
+      .set('Authorization', 'Bearer admin-rest').send({ dryRun: false });
+    expect(unconfirmed.status).toBe(400);
+
+    const mismatched = await request(app).post(`${path}/offboard`)
+      .set('Authorization', 'Bearer admin-rest')
+      .send({ dryRun: false, confirmScopeId: org!.id });
+    expect(mismatched.status).toBe(409);
+
+    const executed = await request(app).post(`${path}/offboard`)
+      .set('Authorization', 'Bearer admin-rest')
+      .send({ dryRun: false, confirmScopeId: personal.id });
     expect(executed.status).toBe(200);
     expect(executed.body).toMatchObject({ principalId: target.id, dryRun: false, alreadyOffboarded: false });
   });
@@ -71,7 +86,8 @@ describe('offboarding REST administration', () => {
       [target.id, personal.id],
     );
     expect((await request(app).post(`${path}/offboard`)
-      .set('Authorization', 'Bearer audit-admin').send({})).status).toBe(200);
+      .set('Authorization', 'Bearer audit-admin')
+      .send({ dryRun: false, confirmScopeId: personal.id })).status).toBe(200);
     const response = await request(app).get('/api/v0/audit')
       .set('Authorization', 'Bearer audit-admin');
     expect(response.status).toBe(200);
@@ -93,10 +109,40 @@ describe('offboarding REST administration', () => {
     expect((await request(app).put(`${path}/owned-user-scope`)
       .set('Authorization', 'Bearer only-admin-rest').send({ scopeId: personal.id })).status).toBe(201);
     const response = await request(app).post(`${path}/offboard`)
-      .set('Authorization', 'Bearer only-admin-rest').send({});
+      .set('Authorization', 'Bearer only-admin-rest')
+      .send({ dryRun: false, confirmScopeId: personal.id });
     expect(response.status).toBe(409);
     expect(response.body).toMatchObject({
       code: 'CONFLICT', error: 'cannot remove the last effective manual org administrator',
+    });
+  });
+
+  it('rejects API-key credentials for offboarding administration', async () => {
+    const service = await createPrincipal(pool, {
+      externalId: 'api-key-admin', kind: 'service', displayName: 'API key admin',
+    });
+    const target = await createPrincipal(pool, {
+      externalId: 'api-key-target', kind: 'user', displayName: 'Target',
+    });
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    const personal = await createScope(pool, { kind: 'user', name: 'api-key-scope' });
+    await addMembership(pool, service.id, org!.id, 'admin');
+    await addMembership(pool, target.id, personal.id, 'writer');
+    const app = createApp(pool, {
+      logger: { info() {}, error() {} },
+      authenticator: {
+        mode: 'entra',
+        async authenticate() {
+          return { principal: service, credential: 'api-key' as const };
+        },
+      },
+    });
+    const response = await request(app)
+      .put(`/api/v0/admin/principals/${target.id}/owned-user-scope`)
+      .set('Authorization', 'ApiKey ctm_placeholder').send({ scopeId: personal.id });
+    expect(response.status).toBe(403);
+    expect(response.body).toMatchObject({
+      code: 'FORBIDDEN', error: 'API-key credentials cannot administer offboarding',
     });
   });
 });

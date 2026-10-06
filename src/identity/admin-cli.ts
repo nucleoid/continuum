@@ -74,11 +74,25 @@ async function main(): Promise<void> {
         ),
       })}\n`);
     } else if (operation === 'offboard-principal') {
-      const positional = args.filter((value) => value !== '--dry-run');
-      if (!positional[0] || positional.length !== 1 || args.some((value) => value.startsWith('--') && value !== '--dry-run')) {
-        throw new Error('usage: offboard-principal <principal-id> [--dry-run]');
+      const dryRun = args.includes('--dry-run');
+      const confirmIndex = args.indexOf('--confirm-scope');
+      const confirmationScopeId = confirmIndex >= 0 ? args[confirmIndex + 1] : undefined;
+      const consumed = new Set<number>();
+      if (dryRun) consumed.add(args.indexOf('--dry-run'));
+      if (confirmIndex >= 0) { consumed.add(confirmIndex); consumed.add(confirmIndex + 1); }
+      const positional = args.filter((_value, index) => !consumed.has(index));
+      if (!positional[0] || positional.length !== 1
+        || (!dryRun && !confirmationScopeId)
+        || (dryRun && confirmIndex >= 0)
+        || args.some((value, index) => value.startsWith('--') && !consumed.has(index))) {
+        throw new Error('usage: offboard-principal <principal-id> (--dry-run | --confirm-scope <user-scope-id>)');
       }
-      process.stdout.write(`${JSON.stringify({ operation, ...await offboardPrincipal(pool, actor, positional[0], args.includes('--dry-run')) })}\n`);
+      process.stdout.write(`${JSON.stringify({
+        operation,
+        ...await offboardPrincipal(pool, actor, positional[0], {
+          dryRun, confirmationScopeId,
+        }),
+      })}\n`);
     } else throw new Error('unknown admin operation');
   } finally { await pool.end(); }
 }

@@ -1,7 +1,9 @@
 -- Explicit user-scope ownership and fail-closed erasure lifecycle.
 
--- Fail quickly instead of queueing application traffic behind a long-held lock.
+-- Fail quickly instead of queueing application traffic or scanning without a
+-- bounded operator-visible failure.
 SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '30s';
 
 ALTER TABLE principals
   ADD COLUMN offboarded_at TIMESTAMPTZ,
@@ -12,7 +14,9 @@ CREATE TABLE principal_user_scopes (
   scope_id UUID NOT NULL UNIQUE REFERENCES scopes(id) ON DELETE RESTRICT,
   mapped_by UUID NOT NULL REFERENCES principals(id) ON DELETE RESTRICT,
   mapped_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  allow_other_active_members BOOLEAN NOT NULL DEFAULT FALSE
+  acknowledged_principal_ids UUID[] NOT NULL,
+  acknowledged_evidence_hash TEXT NOT NULL
+    CHECK (acknowledged_evidence_hash ~ '^[0-9a-f]{64}$')
 );
 
 -- This compact privacy-safe ledger is deliberately outside audit_log so the
@@ -27,12 +31,19 @@ CREATE TABLE principal_offboarding_events (
   memories INTEGER NOT NULL CHECK (memories >= 0),
   embeddings INTEGER NOT NULL CHECK (embeddings >= 0),
   memberships INTEGER NOT NULL CHECK (memberships >= 0),
+  aliases INTEGER NOT NULL CHECK (aliases >= 0),
+  entra_bindings INTEGER NOT NULL CHECK (entra_bindings >= 0),
   audit_rows INTEGER NOT NULL CHECK (audit_rows >= 0),
   evidence JSONB NOT NULL
 );
 
 CREATE INDEX principal_offboarding_events_principal_idx
   ON principal_offboarding_events (principal_id, id);
+CREATE INDEX audit_log_scope_idx ON audit_log (scope_id) WHERE scope_id IS NOT NULL;
+CREATE INDEX audit_log_request_id_idx ON audit_log ((metadata->>'request_id'))
+  WHERE metadata ? 'request_id';
+CREATE INDEX audit_log_scope_ids_gin_idx ON audit_log
+  USING gin ((metadata->'scope_ids')) WHERE metadata ? 'scope_ids';
 
 CREATE FUNCTION continuum_validate_principal_user_scope() RETURNS trigger AS $$
 BEGIN
@@ -51,28 +62,123 @@ BEFORE INSERT OR UPDATE ON principal_user_scopes
 FOR EACH ROW EXECUTE FUNCTION continuum_validate_principal_user_scope();
 
 -- Close an offboarded owned scope at the database boundary. Locking the owner
--- row orders capture against offboarding and reactivation.
+-- row orders capture against offboarding and reactivation. Only the canonical
+-- tombstone is accepted for repair of a dirty archived row.
 CREATE FUNCTION continuum_require_open_owned_user_scope() RETURNS trigger AS $$
 DECLARE
   owner_offboarded_at TIMESTAMPTZ;
 BEGIN
-  IF NEW.state = 'live' THEN
-    SELECT p.offboarded_at INTO owner_offboarded_at
-      FROM principal_user_scopes pus
-      JOIN principals p ON p.id = pus.principal_id
-     WHERE pus.scope_id = NEW.scope_id
-     FOR KEY SHARE OF p;
-    IF FOUND AND owner_offboarded_at IS NOT NULL THEN
-      RAISE EXCEPTION 'live memory is forbidden for a scope owned by an offboarded principal';
-    END IF;
+  SELECT p.offboarded_at INTO owner_offboarded_at
+    FROM principal_user_scopes pus
+    JOIN principals p ON p.id = pus.principal_id
+   WHERE pus.scope_id = NEW.scope_id
+   FOR KEY SHARE OF p;
+  IF FOUND AND owner_offboarded_at IS NOT NULL
+     AND (NEW.state <> 'archived' OR NEW.type <> 'context'
+          OR NEW.title <> '[erased]' OR NEW.body <> '[erased]'
+          OR NEW.metadata <> '{}'::jsonb OR NEW.tags <> '{}'::text[]
+          OR NEW.source <> 'erased' OR NEW.source_ref IS NOT NULL
+          OR NEW.supersedes_id IS NOT NULL OR NEW.promoted_to_id IS NOT NULL
+          OR NEW.expires_at IS NOT NULL OR NEW.last_verified IS NOT NULL) THEN
+    RAISE EXCEPTION 'live or non-tombstone memory is forbidden for an offboarded owned scope';
   END IF;
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER require_open_owned_user_scope
-BEFORE INSERT OR UPDATE OF scope_id, state ON memories
+BEFORE INSERT OR UPDATE OF scope_id, type, title, body, metadata, tags, source,
+  source_ref, state, supersedes_id, promoted_to_id, expires_at, last_verified ON memories
 FOR EACH ROW EXECUTE FUNCTION continuum_require_open_owned_user_scope();
+
+CREATE FUNCTION continuum_protect_offboarded_memory_tombstone() RETURNS trigger AS $$
+DECLARE
+  owner_offboarded_at TIMESTAMPTZ;
+BEGIN
+  SELECT p.offboarded_at INTO owner_offboarded_at
+    FROM principal_user_scopes pus JOIN principals p ON p.id = pus.principal_id
+   WHERE pus.scope_id = OLD.scope_id
+   FOR KEY SHARE OF p;
+  IF FOUND AND owner_offboarded_at IS NOT NULL
+     AND (NEW.scope_id IS DISTINCT FROM OLD.scope_id
+         OR NEW.author_id IS DISTINCT FROM OLD.author_id
+         OR NEW.type IS DISTINCT FROM OLD.type OR NEW.title IS DISTINCT FROM OLD.title
+         OR NEW.body IS DISTINCT FROM OLD.body OR NEW.metadata IS DISTINCT FROM OLD.metadata
+         OR NEW.tags IS DISTINCT FROM OLD.tags OR NEW.source IS DISTINCT FROM OLD.source
+         OR NEW.source_ref IS DISTINCT FROM OLD.source_ref OR NEW.state IS DISTINCT FROM OLD.state
+         OR NEW.supersedes_id IS DISTINCT FROM OLD.supersedes_id
+         OR NEW.promoted_to_id IS DISTINCT FROM OLD.promoted_to_id
+         OR NEW.expires_at IS DISTINCT FROM OLD.expires_at
+         OR NEW.last_verified IS DISTINCT FROM OLD.last_verified) THEN
+    IF NEW.scope_id IS DISTINCT FROM OLD.scope_id
+       OR NEW.author_id IS DISTINCT FROM OLD.author_id
+       OR NEW.state <> 'archived' OR NEW.type <> 'context'
+       OR NEW.title <> '[erased]' OR NEW.body <> '[erased]'
+       OR NEW.metadata <> '{}'::jsonb OR NEW.tags <> '{}'::text[]
+       OR NEW.source <> 'erased' OR NEW.source_ref IS NOT NULL
+       OR NEW.supersedes_id IS NOT NULL OR NEW.promoted_to_id IS NOT NULL
+       OR NEW.expires_at IS NOT NULL OR NEW.last_verified IS NOT NULL THEN
+      RAISE EXCEPTION 'archived memory content is immutable in an offboarded owned scope';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER protect_offboarded_memory_tombstone
+BEFORE UPDATE OF scope_id, type, title, body, metadata, tags, author_id, source,
+  source_ref, state, supersedes_id, promoted_to_id, expires_at, last_verified ON memories
+FOR EACH ROW EXECUTE FUNCTION continuum_protect_offboarded_memory_tombstone();
+
+-- No active direct or source-managed access can target a closed owned scope.
+CREATE OR REPLACE FUNCTION continuum_require_active_membership_principal()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  owner_offboarded_at TIMESTAMPTZ;
+BEGIN
+  IF NEW.active AND NOT EXISTS (
+    SELECT 1 FROM principals p WHERE p.id = NEW.principal_id AND p.disabled_at IS NULL
+  ) THEN
+    RAISE EXCEPTION 'active membership requires an active principal';
+  END IF;
+  IF NEW.active THEN
+    SELECT p.offboarded_at INTO owner_offboarded_at
+      FROM principal_user_scopes pus JOIN principals p ON p.id = pus.principal_id
+     WHERE pus.scope_id = NEW.scope_id
+     FOR KEY SHARE OF p;
+    IF FOUND AND owner_offboarded_at IS NOT NULL THEN
+      RAISE EXCEPTION 'active membership is forbidden for an offboarded owned scope';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER require_active_membership_principal ON scope_memberships;
+CREATE TRIGGER require_active_membership_principal
+BEFORE INSERT OR UPDATE OF principal_id, scope_id, active ON scope_memberships
+FOR EACH ROW EXECUTE FUNCTION continuum_require_active_membership_principal();
+
+CREATE FUNCTION continuum_require_open_entra_binding_scope() RETURNS trigger AS $$
+DECLARE
+  owner_offboarded_at TIMESTAMPTZ;
+BEGIN
+  IF NEW.active THEN
+    SELECT p.offboarded_at INTO owner_offboarded_at
+      FROM principal_user_scopes pus JOIN principals p ON p.id = pus.principal_id
+     WHERE pus.scope_id = NEW.scope_id
+     FOR KEY SHARE OF p;
+    IF FOUND AND owner_offboarded_at IS NOT NULL THEN
+      RAISE EXCEPTION 'active Entra binding is forbidden for an offboarded owned scope';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER require_open_entra_binding_scope
+BEFORE INSERT OR UPDATE OF scope_id, active ON entra_groups
+FOR EACH ROW EXECUTE FUNCTION continuum_require_open_entra_binding_scope();
 
 -- Parent locking orders embedding writes against every archive path.
 CREATE FUNCTION continuum_require_embeddable_memory() RETURNS trigger AS $$
@@ -105,8 +211,9 @@ CREATE TRIGGER remove_archived_memory_embedding
 AFTER UPDATE OF state ON memories
 FOR EACH ROW EXECUTE FUNCTION continuum_remove_archived_memory_embedding();
 
--- Order every audit write against offboarding through the principal row. An
--- in-flight request that loses the race fails before returning unaudited data.
+-- Order every audit write against offboarding through both the acting principal
+-- and every exact scope UUID carried by the row. A late delegate/admin summary
+-- therefore fails before unsanitized recall results can be returned.
 CREATE FUNCTION continuum_reject_offboarded_principal_audit() RETURNS trigger AS $$
 DECLARE
   principal_offboarded_at TIMESTAMPTZ;
@@ -118,6 +225,24 @@ BEGIN
   IF principal_offboarded_at IS NOT NULL THEN
     RAISE EXCEPTION 'audit insert forbidden for offboarded principal';
   END IF;
+  FOR principal_offboarded_at IN
+    SELECT p.offboarded_at
+      FROM principal_user_scopes pus
+      JOIN principals p ON p.id = pus.principal_id
+     WHERE pus.scope_id = NEW.scope_id OR EXISTS (
+       SELECT 1
+         FROM jsonb_array_elements_text(
+           CASE WHEN jsonb_typeof(NEW.metadata->'scope_ids') = 'array'
+                THEN NEW.metadata->'scope_ids' ELSE '[]'::jsonb END
+         ) AS scope_id(value)
+        WHERE scope_id.value = pus.scope_id::text
+     )
+     FOR KEY SHARE OF p
+  LOOP
+    IF principal_offboarded_at IS NOT NULL THEN
+      RAISE EXCEPTION 'audit insert forbidden for an offboarded owned scope';
+    END IF;
+  END LOOP;
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
