@@ -344,17 +344,19 @@ describe('PromotionEventWorker', () => {
         if (event.eventId === 'event-2') {
           siblingEntered.resolve();
           await releaseSibling.promise;
+        } else {
+          throw new Error('callback failed');
         }
       },
     });
     const store = mockStore({
       claim: vi.fn().mockResolvedValue([claimedDelivery, secondDelivery]),
-      complete: vi.fn(async (_pool, eventId) => {
+      fail: vi.fn(async (_pool, eventId) => {
         if (eventId === 'event-1') {
           firstPersistenceFailed.resolve();
-          throw new Error('complete write failed');
+          throw new Error('fail write failed');
         }
-        return true;
+        return 'pending';
       }),
     });
     const instance = new PromotionEventWorker(
@@ -376,7 +378,7 @@ describe('PromotionEventWorker', () => {
 
     expect(store.release).not.toHaveBeenCalled();
     releaseSibling.resolve();
-    await expect(draining).rejects.toThrow('complete write failed');
+    await expect(draining).rejects.toThrow('fail write failed');
     await expect(stopping).resolves.toBeUndefined();
     expect(store.complete).toHaveBeenCalledWith(pool, 'event-2', 'hook', 'worker-test', 1, 1);
     expect(store.complete).toHaveBeenCalledBefore(store.release as ReturnType<typeof vi.fn>);
@@ -780,9 +782,9 @@ describe('PromotionEventWorker', () => {
       const first = instance.drainOnce();
       await hungEntered.promise;
       await vi.advanceTimersByTimeAsync(20);
-      await expect(first).resolves.toBe(1);
+      await expect(first).resolves.toBe(2);
 
-      await expect(instance.drainOnce()).resolves.toBe(1);
+      await expect(instance.drainOnce()).resolves.toBe(0);
       expect(healthy).toHaveBeenCalledOnce();
       const { rows } = await pool.query(
         `SELECT webhook_id, state
@@ -1107,13 +1109,17 @@ describe('PromotionEventWorker', () => {
   it('retains a successful callback lease across acknowledgement error and stop', async () => {
     vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
     try {
+      const acknowledgementDelivery: ClaimedPromotionDelivery = {
+        ...claimedDelivery,
+        event: { ...claimedDelivery.event, eventId: 'ack-event' },
+      };
       const registry = new PromotionWebhookRegistry();
       registry.register({ id: 'hook', onPromoted: async () => undefined });
       const store = mockStore({
-        claim: vi.fn().mockResolvedValue([claimedDelivery]),
+        claim: vi.fn().mockResolvedValue([acknowledgementDelivery]),
         complete: vi.fn().mockRejectedValue(new Error('ack unavailable')),
         renew: vi.fn().mockResolvedValue({
-          renewed: [claimedDelivery], terminalOwned: [], lost: [],
+          renewed: [acknowledgementDelivery], terminalOwned: [], lost: [],
         }),
       });
       const instance = new PromotionEventWorker(
@@ -1130,7 +1136,11 @@ describe('PromotionEventWorker', () => {
       const stopping = instance.stop('SIGTERM');
       await vi.advanceTimersByTimeAsync(50);
       await stopping;
-      expect(store.release).toHaveBeenCalledWith(pool, 'worker-test', [claimedDelivery]);
+      expect(store.release).toHaveBeenCalledWith(
+        pool,
+        'worker-test',
+        [acknowledgementDelivery],
+      );
     } finally {
       await vi.runAllTimersAsync();
       vi.useRealTimers();
@@ -1358,7 +1368,7 @@ describe('PromotionEventWorker', () => {
       await expect(contender.drainOnce()).resolves.toBe(0);
       expect(contenderCallback).not.toHaveBeenCalled();
       expect((store.claim as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[1].excluded)
-        .toEqual([claimedDelivery]);
+        .toContainEqual(claimedDelivery);
 
       releaseCallback.resolve();
       await vi.runAllTicks();
@@ -1367,7 +1377,7 @@ describe('PromotionEventWorker', () => {
       await expect(contender.drainOnce()).resolves.toBe(0);
       expect(contenderCallback).not.toHaveBeenCalled();
       expect((store.claim as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[1].excluded)
-        .toEqual([]);
+        .not.toContainEqual(claimedDelivery);
       await contender.stop('test_complete');
 
       expect(store.renew).toHaveBeenCalledOnce();

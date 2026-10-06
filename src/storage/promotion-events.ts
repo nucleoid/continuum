@@ -168,7 +168,7 @@ export async function claimPromotionDeliveries(
            FROM promotion_event_deliveries d
            JOIN ranked r USING (event_id, webhook_id)
           WHERE r.webhook_rank <= $8
-          ORDER BY d.available_at, d.event_id, d.webhook_id
+          ORDER BY r.webhook_rank, d.available_at, d.event_id, d.webhook_id
           FOR UPDATE OF d SKIP LOCKED
           LIMIT $3
        ), claimed AS (
