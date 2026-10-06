@@ -192,24 +192,39 @@ export async function principalFromClaims(
       || !UUID.test(clientId)) return null;
     kind = 'service';
   } else return null;
+  const existing = await getPrincipalByExternalId(pool, oid);
+  if (existing && existing.kind !== kind) return null;
   let principal: Principal;
-  try {
-    principal = await upsertPrincipalByExternalId(pool, {
-      externalId: oid, kind, displayName: name || oid,
-    });
-  } catch (error) {
-    if (error instanceof PrincipalKindConflictError) return null;
-    throw error;
-  }
   if (kind === 'user') {
+    if (!existing) return null;
     const membership = await pool.query(
       `SELECT 1 FROM scope_memberships
         WHERE principal_id = $1 AND active
           AND continuum_membership_is_effective(active, source_kind)
         LIMIT 1`,
-      [principal.id],
+      [existing.id],
     );
     if (!membership.rowCount) return null;
+    principal = existing;
+  } else {
+    try {
+      principal = await upsertPrincipalByExternalId(pool, {
+        externalId: oid, kind, displayName: name || oid,
+      });
+    } catch (error) {
+      if (error instanceof PrincipalKindConflictError) return null;
+      throw error;
+    }
+  }
+  if (principal.displayName !== (name || oid)) {
+    try {
+      principal = await upsertPrincipalByExternalId(pool, {
+        externalId: oid, kind, displayName: name || oid,
+      });
+    } catch (error) {
+      if (error instanceof PrincipalKindConflictError) return null;
+      throw error;
+    }
   }
   return {
     principal,

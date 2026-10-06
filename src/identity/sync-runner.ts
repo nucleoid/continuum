@@ -2,7 +2,7 @@ import type pg from 'pg';
 import { getPrincipalByExternalId } from '../storage/principals.js';
 import {
   DEFAULT_MAX_STALENESS_HOURS, listBoundEntraGroupIds, MAX_STALENESS_HOURS,
-  MAX_SYNC_GROUPS, rejectEntraMembershipSync, syncEntraMemberships,
+  MAX_SYNC_GROUPS, rejectEntraMembershipSync, syncEntraMemberships, validateMembershipSyncActor,
   type EntraGroupSnapshot, type MembershipSyncResult,
 } from '../services/membership-sync.js';
 import {
@@ -34,6 +34,7 @@ export async function runMembershipSync(
   }
   const actor = await getPrincipalByExternalId(pool, actorExternalId);
   if (!actor) throw new Error('membership sync actor is unknown');
+  await validateMembershipSyncActor(pool, actor);
   try {
     const boundGroupIds = await listBoundEntraGroupIds(pool);
     const snapshots = boundGroupIds.length > MAX_SYNC_GROUPS

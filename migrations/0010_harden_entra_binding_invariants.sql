@@ -59,7 +59,8 @@ BEGIN
           OR OLD.approved_by IS NULL OR OLD.approval_revoked_at IS NOT NULL) THEN
     PERFORM pg_advisory_xact_lock(834641726154302119::bigint);
     IF (SELECT count(*) FROM entra_groups
-         WHERE approved_by IS NOT NULL AND approval_revoked_at IS NULL) >= 500 THEN
+         WHERE approved_by IS NOT NULL AND approval_revoked_at IS NULL
+           AND external_id <> NEW.external_id) >= 500 THEN
       RAISE EXCEPTION 'cannot approve more than 500 Entra group bindings';
     END IF;
   END IF;

@@ -111,15 +111,20 @@ mass-deactivation investigation. It requires:
 
 - `CONTINUUM_ENTRA_MEMBERSHIP_SYNC=true`
 - `CONTINUUM_GRAPH_ACCESS_TOKEN`
-- `CONTINUUM_MEMBERSHIP_SYNC_ACTOR`, the external ID of an org admin
+- `CONTINUUM_MEMBERSHIP_SYNC_ACTOR`, the external ID of an active, manually
+  sourced org admin
 - `CONTINUUM_ENTRA_MAX_STALENESS_HOURS`, an integer from 1 through 168
-  (default 24)
+  (default 48, allowing one delayed nightly run plus token refresh/recovery)
 - the normal database configuration
 
 Before enabling the scheduler, retain an independently managed, active manual
-org administrator as a break-glass identity. Every run verifies this database
-state before screening or quarantine and fails with `CONFLICT` without changing
-access if it is absent. Invalid-input quarantine is
+org administrator as a break-glass identity and configure that identity as the
+sync actor. Every run verifies the actor itself before any Graph request and
+before screening or quarantine. It fails with `FORBIDDEN` without changing
+access when the actor is not an active manual org admin. Because this authority
+is manually sourced, Entra staleness or self-quarantine cannot lock out sync;
+`bind-group` provides an audited recovery path for quarantined bindings.
+Invalid-input quarantine is
 intentionally fail-closed and takes precedence over Entra-sourced availability:
 admin access sourced by a malformed, duplicate, or per-group oversized Entra
 result is removed while the required manual break-glass administrator remains.
@@ -148,6 +153,12 @@ screening, without changing existing bindings or memberships. One unexpected
 extra result must not quarantine an otherwise valid tenant. Duplicate group
 result accounting counts every unusable result while deactivating each affected
 binding only once.
+
+Successful authoritative snapshots provision at most 50,000 user principals
+from immutable Graph member object IDs before granting their sourced
+memberships. Until that bounded provisioning occurs, a first user sign-in is
+rejected without creating a principal or storing mutable display-name PII.
+Authorized sign-in may then refresh the existing principal's display name.
 
 Graph authentication, authorization, rate-limit, service, timeout, transport,
 response-body timeout/drop/truncation, non-JSON body, malformed pagination,
@@ -186,13 +197,13 @@ not rolled back. Manual memberships and rows sourced by other groups are
 unchanged.
 
 Only direct user members are fetched through the typed Graph user-member
-endpoint. Nested groups are intentionally not expanded. Users are not
-provisioned by sync; an Entra user must already have a Continuum principal,
-normally from successful first sign-in, before group membership becomes active.
+endpoint. Nested groups are intentionally not expanded. A successful bounded
+snapshot provisions its immutable user object IDs before activating sourced
+memberships. Sign-in never provisions an unknown user.
 
 This release does not support a mixed-version rolling deployment. Stop every
 API, MCP, admin, and membership-sync process built from the old version, then
-apply all migrations through `0014_entra_sync_freshness.sql`,
+apply all migrations through `0015_entra_review_hardening.sql`,
 review the inactive bindings conservatively quarantined by
 `0012_entra_quarantine_state.sql`, then start only the new binaries. The
 database trigger
@@ -204,7 +215,11 @@ recovery or reprovisioning. If migration reports malformed binding state or
 more than 500 approved bindings, it leaves the old schema and access unchanged.
 Use `revoke-group` (while the old processes remain stopped) to resolve excess
 valid bindings, or repair the named malformed rows under database-owner change
-control, then rerun migration. Old binaries do not understand the complete
+control, then rerun migration. Migration 0014 derives freshness only from a
+durable prior successful-sync audit, defaulting to the fail-closed Unix epoch
+when none exists. Migration 0015 applies the same correction to review-era
+deployments that had already installed the earlier migration-time seed. Old
+binaries do not understand the complete
 ID-authoritative sync and provenance contract. Migration 0013 lowercases
 UUID-shaped principal external IDs and aborts before mutation if legacy rows
 would collide after canonicalization; opaque identities remain unchanged.

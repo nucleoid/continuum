@@ -378,7 +378,8 @@ Entra groups are bound by immutable object ID to a scope and role on first
 sync. Renames only update group display metadata. Missing groups and missing
 members soft-deactivate only their Entra-sourced membership rows, retaining
 history and preserving manual or differently sourced grants. A durable
-last-success deadline denies stale Entra-sourced rows after 24 hours by default;
+last-success deadline denies stale Entra-sourced rows after 48 hours by default,
+allowing a delayed nightly run and token refresh/recovery;
 failed attempts after the deadline soft-deactivate those rows and audit the
 count. Sync is bounded, org-admin controlled, serialized, and atomically audited. See
 `docs/authentication.md` for the operational contract.

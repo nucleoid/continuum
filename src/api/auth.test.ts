@@ -105,10 +105,16 @@ describe('authentication configuration and Entra claims', () => {
     }, contract)).toBeNull();
   });
 
-  it('upserts immutable oid identity and maps a kind conflict to invalid credentials', async () => {
+  it('refreshes a provisioned oid identity and maps a kind conflict to invalid credentials', async () => {
     const oid = '11111111-1111-4111-8111-111111111111';
     const userClaims = { oid, tid: contract.tenant, ver: '2.0', idtyp: 'user',
       azp: contract.allowedClientIds[0], scp: contract.userScope };
+    const principal = (await pool.query(
+      `INSERT INTO principals (id, external_id, kind, display_name)
+       VALUES (gen_random_uuid(), $1, 'user', $1) RETURNING id`, [oid],
+    )).rows[0];
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    await addMembership(pool, principal.id, org!.id, 'reader');
     const first = await principalFromClaims(pool, { ...userClaims, name: 'Old Name' }, contract);
     const renamed = await principalFromClaims(pool, { ...userClaims, name: 'New Name' }, contract);
     expect(renamed?.principal.id).toBe(first?.principal.id);

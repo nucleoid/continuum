@@ -79,6 +79,55 @@ describe('runMigrations', () => {
     }
   });
 
+  it('repairs review-era freshness state from durable sync evidence on upgrade', async () => {
+    const schema = `migrator_entra_upgrade_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const migration = await readFile(
+      join(process.cwd(), 'migrations/0015_entra_review_hardening.sql'),
+      'utf8',
+    );
+    const directory = await migrationDirectory(migration);
+    try {
+      await pool.query(
+        `CREATE TABLE audit_log (
+           at TIMESTAMPTZ NOT NULL, metadata JSONB
+         );
+         CREATE TABLE entra_sync_state (
+           singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+           last_success_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+           max_staleness INTERVAL NOT NULL DEFAULT interval '24 hours'
+         );
+         INSERT INTO audit_log (at, metadata)
+         VALUES (now() - interval '72 hours', '{"operation":"entra_membership_sync"}');
+         INSERT INTO entra_sync_state (singleton) VALUES (TRUE)`,
+      );
+
+      await runMigrations(pool, directory);
+
+      expect((await pool.query(
+        `SELECT last_success_at = (
+           SELECT max(at) FROM audit_log
+            WHERE metadata->>'operation' = 'entra_membership_sync'
+         ) AS derived,
+         now() >= last_success_at + max_staleness AS stale,
+         max_staleness = interval '48 hours' AS two_day_default
+         FROM entra_sync_state WHERE singleton`,
+      )).rows).toEqual([{ derived: true, stale: true, two_day_default: true }]);
+
+      await pool.query('DELETE FROM entra_sync_state');
+      expect((await pool.query(
+        `INSERT INTO entra_sync_state (singleton) VALUES (TRUE)
+         RETURNING last_success_at = TIMESTAMPTZ '1970-01-01 00:00:00+00' AS fail_closed,
+                   max_staleness = interval '48 hours' AS two_day_default`,
+      )).rows).toEqual([{ fail_closed: true, two_day_default: true }]);
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  });
+
   it('ships decision constraints after ingestion with nonblocking validation and indexing', async () => {
     const migrations = (await readdir(join(process.cwd(), 'migrations')))
       .filter((file) => file.endsWith('.sql'))

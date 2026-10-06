@@ -733,7 +733,10 @@ describe('Entra membership sync', () => {
     await removeMembership(pool, admin.id, org!.id);
     await expect(syncEntraMemberships(pool, admin, [{
       id: groupId, status: 'present', displayName: 'org-admin', memberObjectIds: [],
-    }])).rejects.toMatchObject({ code: 'CONFLICT' });
+    }])).rejects.toMatchObject({
+      code: 'FORBIDDEN',
+      publicMessage: 'membership sync actor must be an active manually managed org administrator',
+    });
     expect(await hasRole(pool, admin.id, org!.id, 'admin')).toBe(true);
   });
 
@@ -764,8 +767,8 @@ describe('Entra membership sync', () => {
     await expect(syncEntraMemberships(pool, admin, [{
       id: groupId, status: 'invalid', errorCode: 'MALFORMED_GROUP',
     }])).rejects.toMatchObject({
-      code: 'CONFLICT',
-      publicMessage: 'membership sync requires an active manually managed org administrator',
+      code: 'FORBIDDEN',
+      publicMessage: 'membership sync actor must be an active manually managed org administrator',
     });
     expect((await pool.query(
       'SELECT active, quarantined_at FROM entra_groups WHERE external_id = $1', [groupId],

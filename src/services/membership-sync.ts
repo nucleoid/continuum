@@ -8,7 +8,7 @@ export const MAX_GROUP_MEMBERS = 10_000;
 export const MAX_SYNC_MEMBERSHIPS = 50_000;
 export const DEFAULT_MAX_DEACTIVATION_PERCENT = 25;
 export const DEFAULT_MASS_MEMBERSHIP_DEACTIVATION_COUNT = 100;
-export const DEFAULT_MAX_STALENESS_HOURS = 24;
+export const DEFAULT_MAX_STALENESS_HOURS = 48;
 export const MAX_STALENESS_HOURS = 168;
 const SYNC_LOCK_ID = '834641726154302119';
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
@@ -59,22 +59,35 @@ function role(value: string): asserts value is MembershipRole {
   }
 }
 
-async function requireManualOrgAdministrator(client: pg.PoolClient): Promise<void> {
+async function requireManualSyncActor(
+  client: pg.PoolClient | pg.Pool,
+  actorId: string,
+): Promise<void> {
   const manualAdmin = await client.query(
     `SELECT m.principal_id
        FROM scope_memberships m
        JOIN scopes s ON s.id = m.scope_id
       WHERE s.kind = 'org' AND s.name = ''
+        AND m.principal_id = $1
         AND m.source_kind = 'manual' AND m.active AND m.role = 'admin'
       LIMIT 1
       FOR SHARE OF m`,
+    [actorId],
   );
   if (!manualAdmin.rowCount) {
     throw new ServiceError(
-      'CONFLICT',
-      'membership sync requires an active manually managed org administrator',
+      'FORBIDDEN',
+      'membership sync actor must be an active manually managed org administrator',
     );
   }
+}
+
+/** Performs the cheap local authorization gate required before Graph I/O. */
+export async function validateMembershipSyncActor(
+  pool: pg.Pool,
+  actor: Principal,
+): Promise<void> {
+  await requireManualSyncActor(pool, actor.id);
 }
 
 /** Explicitly creates, updates, or reactivates an immutable group-ID binding. */
@@ -335,8 +348,7 @@ async function recordRejectedAttempt(
   maxStalenessHours: number,
   quarantine: Pick<MembershipSyncResult, 'groupsDeactivated' | 'membershipsDeactivated' | 'skipCodes'>,
 ): Promise<void> {
-  await requireOrgAdmin(client, actor.id);
-  await requireManualOrgAdministrator(client);
+  await requireManualSyncActor(client, actor.id);
   const state = await client.query<{ last_success_at: Date; stale: boolean }>(
     `UPDATE entra_sync_state
         SET last_attempt_at = now(), last_failure_at = now(), last_failure_code = $1,
@@ -468,8 +480,7 @@ export async function syncEntraMemberships(
     // Later threshold/admin rejection must never restore stale invalid access.
     await client.query('BEGIN');
     transactionOpen = true;
-    await requireOrgAdmin(client, actor.id);
-    await requireManualOrgAdministrator(client);
+    await requireManualSyncActor(client, actor.id);
     const bindings = await client.query<BindingRow>(
       `SELECT external_id, scope_id, role, active, approval_revoked_at, quarantined_at FROM entra_groups
         WHERE approved_by IS NOT NULL ORDER BY external_id FOR UPDATE`,
@@ -549,8 +560,7 @@ export async function syncEntraMemberships(
     // when a global removal threshold or administrator guard rejects the run.
     await client.query('BEGIN');
     transactionOpen = true;
-    await requireOrgAdmin(client, actor.id);
-    await requireManualOrgAdministrator(client);
+    await requireManualSyncActor(client, actor.id);
     const currentBindings = await client.query<BindingRow>(
       `SELECT external_id, scope_id, role, active, approval_revoked_at, quarantined_at FROM entra_groups
         WHERE approved_by IS NOT NULL ORDER BY external_id FOR UPDATE`,
@@ -576,10 +586,24 @@ export async function syncEntraMemberships(
       if (!candidate.binding.active && reactivated.rowCount) result.groupsReactivated += 1;
       result.groupsSeen += 1;
       const externalIds = snapshot.memberObjectIds;
+      if (externalIds.length > 0) {
+        await client.query(
+          `INSERT INTO principals (id, external_id, kind, display_name)
+           SELECT gen_random_uuid(), external_id, 'user', external_id
+             FROM unnest($1::text[]) external_id
+           ON CONFLICT (external_id) DO NOTHING`,
+          [externalIds],
+        );
+      }
       const principals = externalIds.length === 0 ? [] : (await client.query(
-        `SELECT id FROM principals WHERE kind = 'user' AND external_id = ANY($1::text[])`,
+        `SELECT id, external_id, kind FROM principals
+          WHERE external_id = ANY($1::text[])`,
         [externalIds],
       )).rows;
+      if (principals.length !== externalIds.length
+        || principals.some((principal) => principal.kind !== 'user')) {
+        throw new ServiceError('CONFLICT', 'Entra member identity conflicts with an existing principal');
+      }
       const principalIds = principals.map((row) => row.id as string);
       if (principalIds.length > 0) {
         const activated = await client.query(
@@ -643,7 +667,7 @@ export async function syncEntraMemberships(
     }
 
     // The synchronizing administrator and the organization must retain authority.
-    await requireOrgAdmin(client, actor.id);
+    await requireManualSyncActor(client, actor.id);
     const admins = await client.query(
       `SELECT count(DISTINCT m.principal_id)::int AS count
          FROM scope_memberships m JOIN scopes s ON s.id = m.scope_id
