@@ -279,8 +279,19 @@ describe('offboarding and erasure', () => {
     await pool.query('ANALYZE audit_log');
     await pool.query(
       `INSERT INTO principal_offboarding_audit_requests (principal_id, request_id)
-       VALUES ($1, 'production-request')`, [value.target.id],
+       VALUES ($1, 'production-request'), ($1, 'production-request-z')`, [value.target.id],
     );
+    await pool.query(
+      `INSERT INTO audit_log (principal_id, action, query, metadata)
+       SELECT $1, 'read', 'second production linked ' || n,
+              jsonb_build_object('request_id', 'production-request-z')
+         FROM generate_series(1, 20) n`, [value.admin.id],
+    );
+    const scopeIdsMidCursor = (await pool.query(
+      `SELECT audit_id::text FROM audit_log_offboarding_scopes
+        WHERE selector_kind = 'scope_ids' AND scope_id = $1
+        ORDER BY audit_id OFFSET 5000 LIMIT 1`, [value.shared.id],
+    )).rows[0].audit_id as string;
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -318,16 +329,25 @@ describe('offboarding and erasure', () => {
             JOIN audit_log a ON a.id = selector.audit_id`,
           `selector.selector_kind = 'scope_ids' AND selector.scope_id = $1`,
         ),
-        [value.personal.id, value.target.id, [], 0, 100, 'scope_ids',
+        [value.shared.id, value.target.id, [], scopeIdsMidCursor, 100, 'scope_ids',
           9_223_372_036_854_775_807n],
       )).toContain('audit_log_offboarding_scope_ids_cursor_idx');
       const linkedPlan = await explainAnalyze(
         offboardingLinkedAuditSql(),
-        [value.target.id, null, 0, [], 100,
+        [value.target.id, 'production-request', 9_223_372_036_854_775_807n, [], 100,
           9_223_372_036_854_775_807n],
       );
       expect(linkedPlan).toContain('audit_log_request_cursor_idx');
       expect(linkedPlan).toContain('"Actual Rows":20');
+      expect(offboardingAuditBranchSql(
+        'scope_ids',
+        `FROM audit_log_offboarding_scopes selector
+          JOIN audit_log a ON a.id = selector.audit_id`,
+        `selector.selector_kind = 'scope_ids' AND selector.scope_id = $1`,
+      )).toMatch(/ORDER BY selector\.audit_id LIMIT/);
+      expect(offboardingLinkedAuditSql()).toMatch(
+        /JOIN LATERAL[\s\S]*a\.id > CASE[\s\S]*ORDER BY a\.id LIMIT/,
+      );
       expect(await explain(
         `SELECT request_id FROM principal_offboarding_audit_requests
           WHERE principal_id = $1 AND request_id > $2 ORDER BY request_id LIMIT 1`,

@@ -55,6 +55,25 @@ describe('runMigrations', () => {
     expect(indexes.match(/CREATE INDEX CONCURRENTLY/gi)).toHaveLength(5);
     expect(indexes.match(/continuum:require-valid-index/gi)).toHaveLength(5);
   });
+  it('keeps selector installation short and makes backfill and indexes retry-safe', async () => {
+    const migrations = join(process.cwd(), 'migrations');
+    const selectors = await readFile(
+      join(migrations, '0033_offboarding_bounded_selectors.sql'), 'utf8',
+    );
+    const selectorIndexes = await readFile(
+      join(migrations, '0035_offboarding_selector_cursor_indexes.sql'), 'utf8',
+    );
+
+    expect(selectors).toMatch(/audit_log_offboarding_backfill_state/i);
+    expect(selectors).toMatch(/continuum_backfill_audit_offboarding_scopes\s*\(/i);
+    expect(selectors).not.toMatch(
+      /INSERT INTO audit_log_offboarding_scopes[\s\S]*FROM audit_log audit[\s\S]*ON CONFLICT DO NOTHING/i,
+    );
+    expect(selectorIndexes.trimStart()).toMatch(/^-- continuum:no-transaction/);
+    expect(selectorIndexes).toMatch(/continuum:backfill-offboarding-selectors/i);
+    expect(selectorIndexes.match(/CREATE INDEX CONCURRENTLY/gi)).toHaveLength(2);
+    expect(selectorIndexes.match(/continuum:require-valid-index/gi)).toHaveLength(2);
+  });
   it('hardens round-six offboarding without a caller-spoofable reactivation GUC', async () => {
     const hardening = await readFile(
       join(process.cwd(), 'migrations/0027_offboarding_bounded_completion.sql'), 'utf8',

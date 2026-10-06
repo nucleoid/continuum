@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import type pg from 'pg';
 import { LIFECYCLE_PRINCIPAL_ID } from '../lifecycle/principal.js';
@@ -48,6 +50,24 @@ describe('principal reactivation database trust boundary', () => {
        ) AS public_execute`,
     );
     expect(result.rows[0].public_execute).toBe(false);
+  });
+
+  it('ships explicit non-owner grants without capability-table forgery privileges', async () => {
+    const grants = await readFile(
+      join(process.cwd(), 'scripts/grant-application-role.sql'), 'utf8',
+    );
+    expect(grants).toMatch(
+      /GRANT EXECUTE ON FUNCTION continuum_complete_offboarding_run\(UUID, UUID, JSONB\)/i,
+    );
+    expect(grants).toMatch(
+      /GRANT EXECUTE ON FUNCTION continuum_reactivate_principal\(UUID, UUID\)/i,
+    );
+    expect(grants).toMatch(
+      /REVOKE ALL ON TABLE continuum_offboarding_completion_requests/i,
+    );
+    expect(grants).toMatch(
+      /REVOKE ALL ON TABLE continuum_principal_reactivation_requests/i,
+    );
   });
 
   it('attributes direct capability use to the lifecycle guard, not the presented administrator', async () => {
