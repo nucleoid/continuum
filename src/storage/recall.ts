@@ -55,22 +55,85 @@ function connectable(pool: Queryable): pool is Queryable & Pick<pg.Pool, 'connec
   return typeof (pool as Partial<pg.Pool>).connect === 'function';
 }
 
+async function connectBeforeDeadline(
+  pool: Queryable & Pick<pg.Pool, 'connect'>,
+  deadlineAt: number,
+  signal: AbortSignal,
+): Promise<pg.PoolClient> {
+  const remainingMs = deadlineAt - Date.now();
+  if (remainingMs < 1 || signal.aborted) {
+    throw new VectorSearchTimeoutError('Vector search deadline exceeded');
+  }
+  return new Promise<pg.PoolClient>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+    };
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new VectorSearchTimeoutError('Vector search deadline exceeded'));
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new VectorSearchTimeoutError('Vector search deadline exceeded'));
+    }, remainingMs);
+    signal.addEventListener('abort', onAbort, { once: true });
+    void pool.connect().then(
+      (client) => {
+        if (settled || signal.aborted || Date.now() >= deadlineAt) {
+          client.release();
+          if (!settled) {
+            settled = true;
+            cleanup();
+            reject(new VectorSearchTimeoutError('Vector search deadline exceeded'));
+          }
+          return;
+        }
+        settled = true;
+        cleanup();
+        resolve(client);
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
 async function boundedVectorSearch(
   pool: Queryable,
-  remainingMs: number,
+  deadlineAt: number,
   queryVec: number[],
   scopeIds: string[],
   provider: EmbeddingProvider,
   limit: number,
   types: MemoryType[] | undefined,
+  signal: AbortSignal,
 ): Promise<Array<{ id: string; distance: number }>> {
-  if (remainingMs < 1) throw new VectorSearchTimeoutError('Vector search deadline exceeded');
+  let remainingMs = deadlineAt - Date.now();
+  if (remainingMs < 1 || signal.aborted) {
+    throw new VectorSearchTimeoutError('Vector search deadline exceeded');
+  }
   if (!connectable(pool)) {
     return vectorSearchMemoryIds(pool, queryVec, scopeIds, provider, limit, types);
   }
-  const client = await pool.connect();
+  const client = await connectBeforeDeadline(pool, deadlineAt, signal);
+  let transactionStarted = false;
   try {
+    remainingMs = deadlineAt - Date.now();
+    if (remainingMs < 1 || signal.aborted) {
+      throw new VectorSearchTimeoutError('Vector search deadline exceeded');
+    }
     await client.query('BEGIN');
+    transactionStarted = true;
     await client.query(`SET LOCAL statement_timeout = '${remainingMs}ms'`);
     const hits = await vectorSearchMemoryIds(
       client, queryVec, scopeIds, provider, limit, types,
@@ -78,7 +141,9 @@ async function boundedVectorSearch(
     await client.query('COMMIT');
     return hits;
   } catch (error) {
-    try { await client.query('ROLLBACK'); } catch { /* preserve the search failure */ }
+    if (transactionStarted) {
+      try { await client.query('ROLLBACK'); } catch { /* preserve the search failure */ }
+    }
     if ((error as { code?: unknown })?.code === '57014') {
       throw new VectorSearchTimeoutError('Vector search deadline exceeded');
     }
@@ -241,8 +306,8 @@ export async function recall(
       }
       try {
         const hits = await boundedVectorSearch(
-          pool, deadlineAt - Date.now(), queryVec, group.scopeIds,
-          group.provider, overFetch, opts.types,
+          pool, deadlineAt, queryVec, group.scopeIds,
+          group.provider, overFetch, opts.types, controller.signal,
         );
         return {
           list: hits.map((hit, index) => ({

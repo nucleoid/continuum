@@ -129,10 +129,14 @@ async function embedSuccessor(
   let destroyClient = false;
   try {
     await client.query('BEGIN');
-    await storeMemoryEmbeddingVector(client, result.successor.id, vector, provider);
-    await recordEmbeddingOutcome(client, result, provider, 'succeeded');
+    const stored = await storeMemoryEmbeddingVector(
+      client, result.successor.id, vector, provider,
+    );
+    await recordEmbeddingOutcome(client, result, provider, stored ? 'succeeded' : 'failed');
     await client.query('COMMIT');
-    return { embedded: true };
+    return stored
+      ? { embedded: true }
+      : { embedded: false, embedErrorCode: 'EMBEDDING_FAILED' };
   } catch {
     try {
       await client.query('ROLLBACK');

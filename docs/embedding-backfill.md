@@ -41,7 +41,9 @@ bounded diagnostic bisection. An isolated ambiguous row is recorded as a retryab
 `suspect`, not durable poison; it is retried on the next run and removed after a
 successful write. If every diagnostic leaf fails, the result remains a provider
 outage and no row is suppressed. Diagnostic probing is capped at 64 sub-batch
-requests per failed batch.
+requests per failed batch. A one-item provider batch cannot distinguish an
+isolated input from an outage, so an ambiguous provider failure stops that
+provider immediately without advancing its cursor or recording a suspect.
 
 The JSON report includes `providerReports`, preserving each provider's counters,
 cursor, completion state, sanitized `errorCode`, and `unresolvedIds`. The top-level
@@ -102,10 +104,17 @@ CREATE UNIQUE INDEX CONCURRENTLY memory_embeddings_memory_id_rollback_idx
   ON memory_embeddings (memory_id);
 
 BEGIN;
+SET LOCAL lock_timeout = '5s';
 ALTER TABLE memory_embeddings DROP CONSTRAINT memory_embeddings_pkey;
 ALTER TABLE memory_embeddings
   ADD CONSTRAINT memory_embeddings_pkey PRIMARY KEY
   USING INDEX memory_embeddings_memory_id_rollback_idx;
+DELETE FROM _continuum_migrations
+ WHERE name IN (
+   '0010_provider_embeddings_backfill.sql',
+   '0013_embedding_provider_scan_index.sql',
+   '0014_embedding_provider_scan_index_rebuild.sql'
+ );
 COMMIT;
 ```
 
@@ -119,4 +128,8 @@ HAVING count(*) > 1;
 ```
 
 An empty result is required. The checkpoint and durable-failure tables may remain
-in place during rollback; old binaries do not access them.
+in place during rollback; old binaries do not access them. The checked rollback
+script also removes the 0010, 0013, and 0014 migration ledger rows in the same
+bounded key-swap transaction. A later upgrade can therefore rebuild the
+provider-qualified key and scan index instead of skipping them against the
+rolled-back schema.

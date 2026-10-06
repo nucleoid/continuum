@@ -170,8 +170,14 @@ export async function embedCapturedMemory(
     await client.query('BEGIN');
     await client.query('SAVEPOINT ingest_embedding');
     try {
-      await storeMemoryEmbeddingVector(client, result.memory.id, vector, provider);
+      const stored = await storeMemoryEmbeddingVector(
+        client, result.memory.id, vector, provider,
+      );
       await client.query('RELEASE SAVEPOINT ingest_embedding');
+      if (!stored) {
+        await client.query('COMMIT');
+        return result;
+      }
     } catch {
       await client.query('ROLLBACK TO SAVEPOINT ingest_embedding');
       await client.query('RELEASE SAVEPOINT ingest_embedding');
@@ -322,14 +328,14 @@ export async function captureMemory(
       if (embeddingProvider && embeddingVector) {
         await client.query('SAVEPOINT capture_embedding');
         try {
-          await storeMemoryEmbeddingVector(
+          embedded = await storeMemoryEmbeddingVector(
             client,
             memory.id,
             embeddingVector,
             embeddingProvider,
           );
           await client.query('RELEASE SAVEPOINT capture_embedding');
-          embedded = true;
+          if (!embedded) embedErrorCode = 'EMBEDDING_FAILED';
         } catch {
           await client.query('ROLLBACK TO SAVEPOINT capture_embedding');
           await client.query('RELEASE SAVEPOINT capture_embedding');

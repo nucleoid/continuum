@@ -236,7 +236,13 @@ Search is hybrid: vector similarity on `memory_embeddings` plus full-text on `me
 Routed vector arms run concurrently under one shared overall deadline, while
 each provider also retains its local request timeout. A provider or vector
 query failure degrades only that arm to full-text search and is returned as
-sanitized retrieval diagnostics. AGENTS.md generation remains deterministic
+sanitized retrieval diagnostics. Provider qualification is materialized before
+distance ordering so rows from another provider cannot consume approximate-index
+candidates and underfill the requested route. This makes the provider arm an
+exact scan of that provider's rows rather than an ANN lookup; the shared
+statement deadline bounds recall degradation as the table grows. Deployments
+that outgrow exact provider scans need provider-specific vector partitions or
+indexes before removing that correctness fence. AGENTS.md generation remains deterministic
 scope-ordered retrieval and does not depend on embedding availability.
 Every serving query also excludes memories whose `expires_at` is at or before
 the database's current time. The full-text and vector candidate queries apply

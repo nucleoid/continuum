@@ -844,19 +844,26 @@ describe('embedding backfill', () => {
     )).rows[0].count).toBe(0);
   });
 
-  it('advances past one ambiguous row and reports its unresolved id without wrapping forever', async () => {
-    const { memories } = await seed('project', 'single-ambiguous', ['ambiguous item']);
+  it('stops a batch-size-one provider outage without suppressing every row', async () => {
+    await seed('project', 'single-ambiguous', ['ambiguous one', 'ambiguous two', 'ambiguous three']);
+    const embed = vi.fn(async () => {
+      throw new EmbeddingProviderError('EMBEDDING_SERVER', 'temporary upstream failure', { diagnostic: true });
+    });
     const provider: EmbeddingProvider = {
-      id: 'ollama:single-ambiguous', dim: 768, local: true,
-      async embed() {
-        throw new EmbeddingProviderError('EMBEDDING_SERVER', 'temporary upstream failure', { diagnostic: true });
-      },
+      id: 'ollama:single-ambiguous', dim: 768, local: true, embed,
     };
 
     const report = await runEmbeddingBackfill(pool, provider, { batchSize: 1, maxRows: 10 });
 
-    expect(report).toMatchObject({ embedded: 0, failed: 0, completed: false, cursor: null });
-    expect(report.unresolvedIds).toEqual([memories[0]!.id]);
+    expect(report).toMatchObject({ embedded: 0, failed: 0, completed: false });
+    expect(report.errorCodes).toEqual(['EMBEDDING_SERVER']);
+    expect(report.unresolvedIds).toEqual([]);
+    expect(embed).toHaveBeenCalledOnce();
+    expect((await pool.query(
+      `SELECT count(*)::int AS count FROM embedding_backfill_failures
+        WHERE provider = $1 AND dim = $2`,
+      [provider.id, provider.dim],
+    )).rows[0].count).toBe(0);
   });
 
   it('stores already-paid valid vectors and retries only invalid response items', async () => {

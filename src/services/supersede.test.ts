@@ -155,6 +155,56 @@ describe('decision history service', () => {
     }]);
   });
 
+  it('reports a failed embedding when the successor is archived before vector storage', async () => {
+    const scope = await createScope(pool, { kind: 'project', name: 'embedding-lifecycle-race' });
+    await addMembership(pool, author.id, scope.id, 'writer');
+    const predecessor = await createMemory(pool, {
+      scopeId: scope.id, scopeKind: scope.kind, type: 'decision', title: 'Original',
+      body: 'Original body', authorId: author.id, source: 'manual',
+    });
+    let signalStarted!: () => void;
+    const embedStarted = new Promise<void>((resolve) => {
+      signalStarted = resolve;
+    });
+    let continueEmbed!: () => void;
+    const embedMayFinish = new Promise<void>((resolve) => {
+      continueEmbed = resolve;
+    });
+    const provider = {
+      id: 'test:lifecycle-race', dim: 768,
+      async embed() {
+        signalStarted();
+        await embedMayFinish;
+        return [Array(768).fill(0) as number[]];
+      },
+    };
+    const pending = supersedeForPrincipal(pool, provider, author, {
+      supersededId: predecessor.id, title: 'Archived successor', body: 'No vector should survive',
+    });
+    await embedStarted;
+    const successor = await pool.query<{ id: string }>(
+      'SELECT id FROM memories WHERE supersedes_id = $1',
+      [predecessor.id],
+    );
+    await pool.query(`UPDATE memories SET state = 'archived' WHERE id = $1`, [successor.rows[0]!.id]);
+    continueEmbed();
+
+    const result = await pending;
+    expect(result).toMatchObject({ embedded: false, embedErrorCode: 'EMBEDDING_FAILED' });
+    expect((await pool.query(
+      'SELECT count(*)::int AS count FROM memory_embeddings WHERE memory_id = $1',
+      [result.successor.id],
+    )).rows[0].count).toBe(0);
+    expect((await pool.query(
+      `SELECT metadata FROM audit_log
+        WHERE memory_id = $1 AND metadata->>'record_kind' = 'embedding'`,
+      [result.successor.id],
+    )).rows[0].metadata).toMatchObject({
+      embedded: false,
+      embedding_error_code: 'EMBEDDING_FAILED',
+    });
+  });
+
   it('returns the committed supersession when post-commit pool connection fails', async () => {
     const scope = await createScope(pool, { kind: 'project', name: 'post-commit-connect' });
     await addMembership(pool, author.id, scope.id, 'writer');

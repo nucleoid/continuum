@@ -105,6 +105,7 @@ async function boundedErrorBody(response: Response): Promise<unknown> {
       chunks.push(next.value);
     }
   } catch {
+    await reader.cancel().catch(() => undefined);
     return null;
   }
   const bytes = new Uint8Array(length);
@@ -183,6 +184,8 @@ export async function embeddingProviderHttpError(
     if (isExplicitItemFailure(provider, body)) {
       return new EmbeddingItemError(`Embedding provider rejected input with status ${status}`);
     }
+  } else {
+    await response.body?.cancel().catch(() => undefined);
   }
   const code: EmbeddingProviderErrorCode = status === 401 || status === 403
     ? 'EMBEDDING_AUTH'

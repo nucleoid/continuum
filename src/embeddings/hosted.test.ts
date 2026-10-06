@@ -69,6 +69,25 @@ describe('hosted embedding providers', () => {
     });
   });
 
+  it('cancels an unread provider-error body so the connection can be reused', async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(1024));
+      },
+      cancel() { cancelled = true; },
+    });
+    const provider = new OpenAIEmbeddingProvider({
+      apiKey: '***', model: 'model', dim: 2,
+      fetchImpl: vi.fn(async () => new Response(body, { status: 500 })),
+    });
+
+    await expect(provider.embed(['one'])).rejects.toMatchObject({
+      code: 'EMBEDDING_SERVER',
+    });
+    expect(cancelled).toBe(true);
+  });
+
   it.each([
     ['OpenAI', OpenAIEmbeddingProvider, 400, { error: { code: 'context_length_exceeded' } }],
     ['OpenAI', OpenAIEmbeddingProvider, 413, { error: { param: 'input' } }],

@@ -97,13 +97,20 @@ export async function runMigrations(
       if (rowCount && rowCount > 0) continue;
 
       const sql = await readFile(join(migrationsDir, file), 'utf8');
+      const noTransaction = sql.trimStart().startsWith(NO_TRANSACTION_MARKER);
+      let embeddedTransactionOpen = false;
       try {
-        if (sql.trimStart().startsWith(NO_TRANSACTION_MARKER)) {
+        if (noTransaction) {
           // CREATE INDEX CONCURRENTLY cannot run in a transaction block. Such
           // migrations use retry-safe statements so a crash before the ledger
           // write can rerun the file.
           for (const statement of nonTransactionalStatements(sql)) {
             await client.query(statement);
+            if (/^(?:BEGIN|START\s+TRANSACTION)\b/i.test(statement)) {
+              embeddedTransactionOpen = true;
+            } else if (/^(?:COMMIT|ROLLBACK)\b/i.test(statement)) {
+              embeddedTransactionOpen = false;
+            }
           }
           await client.query(
             'INSERT INTO _continuum_migrations (name) VALUES ($1)',
@@ -126,7 +133,7 @@ export async function runMigrations(
           { cause: error },
         );
         try {
-          if (!sql.trimStart().startsWith(NO_TRANSACTION_MARKER)) {
+          if (!noTransaction || embeddedTransactionOpen) {
             await client.query('ROLLBACK');
           }
         } catch (rollbackError) {

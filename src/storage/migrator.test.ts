@@ -58,6 +58,15 @@ describe('runMigrations', () => {
     expect(failureSeed).toMatch(/CREATE INDEX CONCURRENTLY/i);
     expect(failureSeed).toMatch(/disposition/i);
     expect(failureSeed).toMatch(/reason/i);
+
+    const rollback = await readFile(
+      join(process.cwd(), 'scripts/rollback-embedding-provider-key.sql'),
+      'utf8',
+    );
+    expect(rollback).toMatch(/BEGIN;[\s\S]*SET LOCAL lock_timeout[\s\S]*DROP CONSTRAINT[\s\S]*ADD CONSTRAINT[\s\S]*DELETE FROM _continuum_migrations[\s\S]*COMMIT;/i);
+    expect(rollback).toMatch(/0010_provider_embeddings_backfill\.sql/);
+    expect(rollback).toMatch(/0013_embedding_provider_scan_index\.sql/);
+    expect(rollback).toMatch(/0014_embedding_provider_scan_index_rebuild\.sql/);
   });
 
   it('bounds advisory-lock acquisition', async () => {
@@ -246,6 +255,95 @@ describe('runMigrations', () => {
     } finally {
       await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
     }
+  });
+
+  it('rebuilds a same-named invalid provider scan index before recording the repair', async () => {
+    const schema = `migrator_embedding_invalid_repair_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-migrator-invalid-index-'));
+    directories.push(directory);
+    const repairMigration = '0014_embedding_provider_scan_index_rebuild.sql';
+    const repairSql = await readFile(
+      new URL(`../../migrations/${repairMigration}`, import.meta.url),
+      'utf8',
+    );
+    await writeFile(join(directory, repairMigration), repairSql);
+
+    try {
+      await pool.query(`
+        CREATE TABLE memory_embeddings (
+          memory_id UUID NOT NULL,
+          provider TEXT NOT NULL,
+          dim INT NOT NULL,
+          PRIMARY KEY (memory_id, provider, dim)
+        );
+        INSERT INTO memory_embeddings (memory_id, provider, dim) VALUES
+          ('00000000-0000-0000-0000-000000000001', 'provider:test', 768),
+          ('00000000-0000-0000-0000-000000000002', 'provider:test', 768);
+      `);
+      await expect(pool.query(`
+        CREATE UNIQUE INDEX CONCURRENTLY memory_embeddings_provider_dim_memory_idx
+          ON memory_embeddings (provider, dim)
+      `)).rejects.toThrow();
+      expect((await pool.query<{ indisvalid: boolean }>(`
+        SELECT indisvalid
+          FROM pg_index
+         WHERE indexrelid = 'memory_embeddings_provider_dim_memory_idx'::regclass
+      `)).rows).toEqual([{ indisvalid: false }]);
+
+      const applied = await runMigrations(pool, directory);
+      expect(applied.map(({ name }) => name)).toEqual([repairMigration]);
+      expect((await pool.query<{ indisvalid: boolean; indexdef: string }>(`
+        SELECT i.indisvalid, pg_get_indexdef(i.indexrelid) AS indexdef
+          FROM pg_index i
+         WHERE i.indexrelid = 'memory_embeddings_provider_dim_memory_idx'::regclass
+      `)).rows).toEqual([{
+        indisvalid: true,
+        indexdef: expect.stringMatching(/\(provider, dim, memory_id\)$/i),
+      }]);
+      await expect(runMigrations(pool, directory)).resolves.toHaveLength(0);
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  });
+
+  it('rolls back an embedded transaction before unlocking after no-transaction DDL fails', async () => {
+    const queries: string[] = [];
+    const release = vi.fn();
+    const client = {
+      query: vi.fn(async (query: string) => {
+        const normalized = query.trim();
+        queries.push(normalized);
+        if (normalized.includes('pg_try_advisory_lock')) {
+          return { rows: [{ locked: true }], rowCount: 1 };
+        }
+        if (normalized.includes('SELECT 1 FROM _continuum_migrations')) {
+          return { rows: [], rowCount: 0 };
+        }
+        if (normalized === 'SELECT broken') throw new Error('lock timeout');
+        if (normalized.includes('pg_advisory_unlock')) {
+          return { rows: [{ unlocked: true }], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 0 };
+      }),
+      release,
+    };
+    const directory = await migrationDirectory(
+      '-- continuum:no-transaction\nBEGIN;\nSELECT broken;',
+    );
+
+    await expect(runMigrations(
+      { connect: vi.fn(async () => client) } as unknown as pg.Pool,
+      directory,
+    )).rejects.toThrow(/lock timeout/i);
+    expect(queries).toContain('ROLLBACK');
+    expect(queries.indexOf('ROLLBACK')).toBeLessThan(
+      queries.findIndex((query) => query.includes('pg_advisory_unlock')),
+    );
+    expect(release).toHaveBeenCalledOnce();
   });
 
   it('uses one dedicated client and locks before inspecting the ledger', async () => {

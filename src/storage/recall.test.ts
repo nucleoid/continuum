@@ -197,6 +197,37 @@ describe('recall expiry enforcement', () => {
     }
   });
 
+  it('bounds pool connection waits and releases a connection that arrives after the deadline', async () => {
+    const { scope } = await seedMemory('bounded connection wait');
+    let resolveConnection!: (client: pg.PoolClient) => void;
+    const delayedConnection = new Promise<pg.PoolClient>((resolve) => {
+      resolveConnection = resolve;
+    });
+    const release = vi.fn();
+    const clientQuery = vi.fn();
+    const queryable = {
+      query: pool.query.bind(pool),
+      connect: vi.fn(() => delayedConnection),
+    } as unknown as Queryable & Pick<pg.Pool, 'connect'>;
+    const provider = {
+      id: 'provider:connection-timeout', dim: 768,
+      async embed() { return [Array(768).fill(0) as number[]]; },
+    };
+
+    const recalled = await recall(queryable, {
+      query: 'bounded connection wait', scopeIds: [scope.id], limit: 10,
+      embeddingDeadlineMs: 20,
+      embeddingGroups: [{ scopeIds: [scope.id], provider }],
+    });
+    expect(recalled.diagnostics.groups).toEqual([
+      { provider: provider.id, dim: 768, status: 'failed', errorCode: 'EMBEDDING_TIMEOUT' },
+    ]);
+
+    resolveConnection({ query: clientQuery, release } as unknown as pg.PoolClient);
+    await vi.waitFor(() => expect(release).toHaveBeenCalledOnce());
+    expect(clientQuery).not.toHaveBeenCalled();
+  });
+
   it.each([
     [199, false],
     [200, false],

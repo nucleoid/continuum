@@ -429,10 +429,7 @@ async function runProvider(
             .includes(initialError.code)
           || initialError.diagnostic === false) throw initialError;
         if (items.length === 1) {
-          await recordSuspect(client, provider, items[0]!, initialError.code);
-          unresolvedIds.add(items[0]!.id);
-          cursor = items[0]!.id;
-          return true;
+          throw initialError;
         }
 
         const ambiguous: Candidate[] = [];
