@@ -385,15 +385,19 @@ never establish ownership. Mapping requires target membership history and
 rejects other active members unless an operator records the explicit shared
 scope override. The acknowledgement is bound to a bounded sorted UUID set and
 hash, so newly observed member or author evidence fails closed. An org-admin
-transaction locks against membership sync,
-tombstones and archives only the mapped user scope, deletes embeddings, nulls
-linked raw audit queries, deletes aliases, revokes and quarantines scope-targeting
-Entra bindings, deactivates every membership on that scope,
-disables access, applies a stable UUID-derived pseudonym, and writes atomic
-per-memory plus operation-summary audit records. Database guards close an
+operation locks against membership sync, immediately closes access and applies
+stable UUID-derived pseudonyms, then resumably tombstones only the mapped user
+scope and redacts linked audit rows in bounded transactions. It deletes
+embeddings and aliases, revokes and quarantines scope-targeting Entra bindings,
+deactivates every membership on that scope, and writes per-memory plus
+operation-summary audit records. Immutable approval and completion ledgers bind
+the approver, reviewed UUIDs, evidence hash, original counts, and batch progress.
+Database guards close an
 offboarded owned scope to non-tombstone writes, active memberships, and active
 Entra bindings; retries verify that no dirty memories, embeddings, aliases,
-active access, or linked raw audit rows remain.
+active access, or linked raw audit rows remain. Audit selection uses indexed
+UUID and explicit metadata-key branches; mutable or recursive name matching is
+not an erasure criterion.
 Shared scopes and stable UUID references remain intact. Database archive and
 embedding triggers enforce cleanup for lifecycle, supersession, offboarding,
 and direct state transitions. See `docs/offboarding.md` for limits, retry

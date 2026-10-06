@@ -11,7 +11,7 @@ immutable principal UUID to exactly one existing `user` scope UUID:
 ```text
 npm run admin -- map-user-scope <principal-id> <user-scope-id>
 npm run admin -- offboard-principal <principal-id> --dry-run
-npm run admin -- offboard-principal <principal-id> --confirm-scope <user-scope-id>
+npm run admin -- offboard-principal <principal-id> --confirm-scope <user-scope-id> --batch-size 1000
 ```
 
 The REST equivalents are `PUT
@@ -40,27 +40,31 @@ ownership evidence.
 
 Dry-run reports personal-memory, live-memory, embedding, active scope-membership,
 and raw audit-query counts without writing an audit or changing state. It also
-returns bounded, sorted member and author principal UUID evidence, with explicit
-truncation flags, so the operator can detect a mistaken mapping without exposing
-names or memory content. Execution is limited to 10,000 memories and 50,000
-total affected rows (memories, embeddings, memberships, aliases, Entra
-bindings, selected audit rows, per-memory receipts, and fixed control rows) so
-the redaction, archive transition, embedding deletion, membership deactivation,
-principal disablement, principal and scope pseudonymization, and audit commit
-remain one bounded transaction. Every membership on the owned scope is
-deactivated, including delegate and ingest identities. Entra bindings targeting
-the scope are revoked and quarantined; database triggers reject later active
-memberships or bindings while its owner remains offboarded. Larger operations
-are rejected intact and require a reviewed retention plan; the service never
-partially erases one owned scope. Safe retries return
+returns bounded, sorted member and author principal UUID evidence, explicit
+truncation flags, and audit selection counts by principal, scope, memory,
+`scope_ids`, and linked request. This lets the operator detect a mistaken
+mapping without exposing names or memory content.
+
+Execution immediately disables and pseudonymizes the principal and scope,
+deactivates owned-scope access, quarantines its Entra bindings, and deletes
+aliases in the first transaction. Those database fences remain closed while
+memories and audit rows are processed in retry-safe batches. `batchSize`
+defaults to 1,000 and accepts 1 through 5,000 through REST or CLI
+`--batch-size`; each response reports cumulative processed counts, remaining
+counts, batch number, and `complete`. Principals with more than 10,000 memories
+or 50,000 audit rows use the same path and are not rejected. Reissue the exact
+confirmed operation until `complete: true`. Every membership on the owned scope
+is deactivated, including delegate and ingest identities. Database triggers
+reject later active memberships or bindings while its owner remains offboarded.
+Safe retries return
 `alreadyOffboarded: true` only after verifying the exact memory tombstone fields,
 principal and scope pseudonyms, zero embeddings, aliases, active memberships,
 and zero unrevoked Entra bindings,
 and no dirty audit query or metadata rows. Dry-run and retry output includes
 dirty-memory and dirty-audit counts. Retry output also includes the first durable
-evidence ID, timestamp, and original counts. A dirty retry
-runs the complete erasure again and records a repair event rather than silently
-reporting success.
+evidence ID, timestamp, original query count, and original row counts. A dirty
+retry resumes or repairs bounded work and records a repair event rather than
+silently reporting success.
 
 Every memory in the mapped user scope has its title and body replaced with the
 fixed `[erased]` tombstone, type normalized to `context`, metadata and tags
@@ -74,15 +78,18 @@ from the ordinary `principals` table. Audit metadata contains UUIDs, counts, and
 the pseudonym, never the removed display name or memory content. Raw recall text
 and free-text audit metadata (including verification notes) on rows tied to the
 principal, owned scope, or its memories are replaced by a fixed tombstone in the
-same transaction. Selection uses UUID columns, exact `metadata.scope_ids`
-membership, exact JSON string-value equality for the old scope name, and exact
-`request_id` linkage; SQL wildcard semantics are never used. This also reaches
+same batch transaction. Selection uses separately indexed `UNION` branches for
+UUID columns, exact `metadata.scope_ids` membership, and exact `request_id`
+linkage. Free-form or recursive scope-name matching is not used. This also reaches
 delegate/admin summaries whose `scope_id` is null, so they cannot remain visible through the audit API or
 knowledge-gap output. Audit inserts lock the principal row and are rejected
 after offboarding; an in-flight recall that loses this race fails closed instead
 of returning results with an unsanitized late audit row.
 
-The original count and bounded-ID receipt is also written to
+Each changed ownership acknowledgement is written to the immutable
+`principal_user_scope_approvals` ledger with approver UUID, timestamp, reviewed
+UUIDs, and evidence hash. UUID-only mapping and erasure receipt audit operations
+are excluded from redaction. The original count and bounded-ID receipt is also written to
 `principal_offboarding_events`. That compact privacy-safe ledger is outside
 ordinary `audit_log` retention and is the authoritative retry evidence after
 audit rows have been pruned. It contains UUIDs, counts, timestamps, and
@@ -117,21 +124,27 @@ rows remain the lifecycle sweeper's responsibility until its atomic transition.
 The database also rejects inserting a live memory, or changing a memory back to
 live, in a scope whose mapped owner is currently offboarded.
 
-Migration `0022_offboarding_erasure.sql` uses a five-second `lock_timeout`, a
-30-second `statement_timeout`, and targeted audit scope, request-ID, and
-`scope_ids` indexes. Application transactions apply the same timeouts and
-materialize bounded audit target IDs once rather than repeating selection
-scans. It also installs the columns, ledgers, and database guards. Migration
-`0023_offboarding_embedding_cleanup.sql` runs afterward with a five-second lock
-timeout and a 30-second statement timeout. Separating cleanup means the scan and
-delete of old archived embeddings never runs while `0022` holds `ACCESS
-EXCLUSIVE` on `principals`. A timeout rolls back that migration intact; remove
-the blocker or schedule a larger maintenance window and retry.
+Migration `0022_offboarding_principal_lifecycle.sql` contains only the short
+`principals` alteration and uses five-second lock and 30-second statement
+timeouts. Migration `0023_offboarding_erasure.sql` installs the ledgers and
+database guards after that lock is released. Migration
+`0024_offboarding_embedding_cleanup.sql` removes old archived embeddings in its
+own transaction. Migration `0025_offboarding_audit_indexes.sql` is marked
+no-transaction and creates the three audit indexes with `CREATE INDEX
+CONCURRENTLY IF NOT EXISTS`. The migrator serializes every file with its
+advisory lock; a crash before a no-transaction ledger write safely retries the
+idempotent index statements. A failed concurrent build can leave an `INVALID`
+index that still satisfies `IF NOT EXISTS`. Before retrying a file that failed
+during index construction, inspect `pg_index.indisvalid` in the target schema
+and use `DROP INDEX CONCURRENTLY <exact-invalid-index>` only for an invalid
+remnant. Do not use an unqualified drop on a multi-schema search path. Old
+application versions do not depend on these new indexes. A timeout or failed
+build leaves the file unapplied so the operator can remove the blocker and retry.
 
-Apply both migrations before starting the new application version. Old
-instances can continue ordinary traffic after `0022`, but they do not know the
+Apply all four migrations before starting the new application version. Old
+instances can continue ordinary traffic after `0023`, but they do not know the
 offboarding workflow and an old authenticated request may already be in flight.
-Do not invoke offboarding until both migrations are recorded on every shared
+Do not invoke offboarding until all four migrations are recorded on every shared
 database and all old application instances have drained. Rollback is
 application-first: stop invoking offboarding, drain the new instances, and
 deploy the old application. Do not drop the new columns, tables, functions, or

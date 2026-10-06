@@ -5,10 +5,6 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '30s';
 
-ALTER TABLE principals
-  ADD COLUMN offboarded_at TIMESTAMPTZ,
-  ADD COLUMN reactivated_at TIMESTAMPTZ;
-
 CREATE TABLE principal_user_scopes (
   principal_id UUID PRIMARY KEY REFERENCES principals(id) ON DELETE RESTRICT,
   scope_id UUID NOT NULL UNIQUE REFERENCES scopes(id) ON DELETE RESTRICT,
@@ -17,6 +13,52 @@ CREATE TABLE principal_user_scopes (
   acknowledged_principal_ids UUID[] NOT NULL,
   acknowledged_evidence_hash TEXT NOT NULL
     CHECK (acknowledged_evidence_hash ~ '^[0-9a-f]{64}$')
+);
+
+CREATE TABLE principal_user_scope_approvals (
+  id BIGSERIAL PRIMARY KEY,
+  principal_id UUID NOT NULL REFERENCES principals(id) ON DELETE RESTRICT,
+  scope_id UUID NOT NULL REFERENCES scopes(id) ON DELETE RESTRICT,
+  approved_by UUID NOT NULL REFERENCES principals(id) ON DELETE RESTRICT,
+  approved_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  acknowledged_principal_ids UUID[] NOT NULL,
+  acknowledged_evidence_hash TEXT NOT NULL
+    CHECK (acknowledged_evidence_hash ~ '^[0-9a-f]{64}$')
+);
+
+CREATE FUNCTION continuum_preserve_user_scope_approval() RETURNS trigger AS $$
+BEGIN
+  RAISE EXCEPTION 'principal user-scope approval evidence is immutable';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER preserve_user_scope_approval
+BEFORE UPDATE OR DELETE ON principal_user_scope_approvals
+FOR EACH ROW EXECUTE FUNCTION continuum_preserve_user_scope_approval();
+
+CREATE TABLE principal_offboarding_runs (
+  principal_id UUID PRIMARY KEY REFERENCES principals(id) ON DELETE RESTRICT,
+  scope_id UUID NOT NULL REFERENCES scopes(id) ON DELETE RESTRICT,
+  initiated_by UUID NOT NULL REFERENCES principals(id) ON DELETE RESTRICT,
+  approval_id BIGINT NOT NULL REFERENCES principal_user_scope_approvals(id) ON DELETE RESTRICT,
+  started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  initial_memories INTEGER NOT NULL CHECK (initial_memories >= 0),
+  initial_embeddings INTEGER NOT NULL CHECK (initial_embeddings >= 0),
+  initial_memberships INTEGER NOT NULL CHECK (initial_memberships >= 0),
+  initial_aliases INTEGER NOT NULL CHECK (initial_aliases >= 0),
+  initial_entra_bindings INTEGER NOT NULL CHECK (initial_entra_bindings >= 0),
+  initial_audit_rows INTEGER NOT NULL CHECK (initial_audit_rows >= 0),
+  initial_audit_queries INTEGER NOT NULL CHECK (initial_audit_queries >= 0),
+  memories_processed INTEGER NOT NULL DEFAULT 0 CHECK (memories_processed >= 0),
+  audit_rows_processed INTEGER NOT NULL DEFAULT 0 CHECK (audit_rows_processed >= 0),
+  batches INTEGER NOT NULL DEFAULT 0 CHECK (batches >= 0),
+  completed_at TIMESTAMPTZ
+);
+
+CREATE TABLE principal_offboarding_audit_requests (
+  principal_id UUID NOT NULL REFERENCES principals(id) ON DELETE RESTRICT,
+  request_id TEXT NOT NULL,
+  PRIMARY KEY (principal_id, request_id)
 );
 
 -- This compact privacy-safe ledger is deliberately outside audit_log so the
@@ -34,16 +76,14 @@ CREATE TABLE principal_offboarding_events (
   aliases INTEGER NOT NULL CHECK (aliases >= 0),
   entra_bindings INTEGER NOT NULL CHECK (entra_bindings >= 0),
   audit_rows INTEGER NOT NULL CHECK (audit_rows >= 0),
+  audit_queries INTEGER NOT NULL CHECK (audit_queries >= 0),
+  approval_id BIGINT NOT NULL REFERENCES principal_user_scope_approvals(id) ON DELETE RESTRICT,
+  batches INTEGER NOT NULL CHECK (batches > 0),
   evidence JSONB NOT NULL
 );
 
 CREATE INDEX principal_offboarding_events_principal_idx
   ON principal_offboarding_events (principal_id, id);
-CREATE INDEX audit_log_scope_idx ON audit_log (scope_id) WHERE scope_id IS NOT NULL;
-CREATE INDEX audit_log_request_id_idx ON audit_log ((metadata->>'request_id'))
-  WHERE metadata ? 'request_id';
-CREATE INDEX audit_log_scope_ids_gin_idx ON audit_log
-  USING gin ((metadata->'scope_ids')) WHERE metadata ? 'scope_ids';
 
 CREATE FUNCTION continuum_validate_principal_user_scope() RETURNS trigger AS $$
 BEGIN
@@ -217,6 +257,7 @@ FOR EACH ROW EXECUTE FUNCTION continuum_remove_archived_memory_embedding();
 CREATE FUNCTION continuum_reject_offboarded_principal_audit() RETURNS trigger AS $$
 DECLARE
   principal_offboarded_at TIMESTAMPTZ;
+  owner_principal_id UUID;
 BEGIN
   SELECT p.offboarded_at INTO principal_offboarded_at
     FROM principals p
@@ -225,18 +266,40 @@ BEGIN
   IF principal_offboarded_at IS NOT NULL THEN
     RAISE EXCEPTION 'audit insert forbidden for offboarded principal';
   END IF;
+  SELECT p.id, p.offboarded_at INTO owner_principal_id, principal_offboarded_at
+    FROM principal_user_scopes pus
+    JOIN principals p ON p.id = pus.principal_id
+   WHERE pus.scope_id = NEW.scope_id
+   FOR KEY SHARE OF p;
+  IF FOUND AND principal_offboarded_at IS NOT NULL THEN
+    IF NOT (NEW.action = 'archive' AND NEW.query IS NULL
+      AND NEW.metadata->>'principal_id' = owner_principal_id::text
+      AND (
+        (NEW.memory_id IS NOT NULL AND NEW.metadata = jsonb_build_object(
+          'operation', 'principal_memory_erased', 'principal_id', owner_principal_id::text
+        ))
+        OR (NEW.memory_id IS NULL AND NEW.metadata->>'operation' IN
+          ('principal_offboarded', 'principal_offboarding_repaired')
+          AND NEW.metadata - ARRAY[
+            'operation', 'principal_id', 'approval_id', 'acknowledged_evidence_hash',
+            'memories', 'audit_rows', 'batches'
+          ]::text[] = '{}'::jsonb)
+      )) THEN
+      RAISE EXCEPTION 'audit insert forbidden for an offboarded owned scope';
+    END IF;
+  END IF;
+
   FOR principal_offboarded_at IN
     SELECT p.offboarded_at
-      FROM principal_user_scopes pus
+      FROM jsonb_array_elements_text(
+        CASE WHEN jsonb_typeof(NEW.metadata->'scope_ids') = 'array'
+             THEN NEW.metadata->'scope_ids' ELSE '[]'::jsonb END
+      ) AS carried(value)
+      JOIN principal_user_scopes pus
+        ON pus.scope_id = CASE
+          WHEN carried.value ~* '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+          THEN carried.value::uuid ELSE NULL END
       JOIN principals p ON p.id = pus.principal_id
-     WHERE pus.scope_id = NEW.scope_id OR EXISTS (
-       SELECT 1
-         FROM jsonb_array_elements_text(
-           CASE WHEN jsonb_typeof(NEW.metadata->'scope_ids') = 'array'
-                THEN NEW.metadata->'scope_ids' ELSE '[]'::jsonb END
-         ) AS scope_id(value)
-        WHERE scope_id.value = pus.scope_id::text
-     )
      FOR KEY SHARE OF p
   LOOP
     IF principal_offboarded_at IS NOT NULL THEN

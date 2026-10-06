@@ -41,12 +41,13 @@ across rolling deploys and code rollbacks; REST and MCP also reject its UUID as
 defense in depth. Every state transition, embedding deletion for an archived
 context, and audit row commits atomically.
 
-Migration `0022_offboarding_erasure.sql` generalizes embedding cleanup: every
+Migration `0023_offboarding_erasure.sql` generalizes embedding cleanup: every
 transition to `archived`, including supersession, direct maintenance, and
 offboarding, deletes the derived row. New embedding writes lock and recheck the
-parent and are rejected unless it remains live. The migration first removes
-pre-existing embeddings whose memories are already archived, and uses a bounded
-lock timeout so operators can retry instead of queueing traffic indefinitely.
+parent and are rejected unless it remains live. Migration
+`0024_offboarding_embedding_cleanup.sql` removes pre-existing embeddings whose
+memories are already archived and uses a bounded lock timeout so operators can
+retry instead of queueing traffic indefinitely.
 
 ## Review queue
 

@@ -39,6 +39,20 @@ afterEach(async () => {
 });
 
 describe('runMigrations', () => {
+  it('keeps the principal alter short and builds offboarding audit indexes concurrently', async () => {
+    const migrations = join(process.cwd(), 'migrations');
+    const principal = await readFile(
+      join(migrations, '0022_offboarding_principal_lifecycle.sql'), 'utf8',
+    );
+    const erasure = await readFile(join(migrations, '0023_offboarding_erasure.sql'), 'utf8');
+    const indexes = await readFile(join(migrations, '0025_offboarding_audit_indexes.sql'), 'utf8');
+
+    expect(principal).toMatch(/ALTER TABLE principals/i);
+    expect(principal).not.toMatch(/CREATE TABLE|CREATE INDEX|CREATE FUNCTION/i);
+    expect(erasure).not.toMatch(/CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?!principal_offboarding_events)/i);
+    expect(indexes.trimStart()).toMatch(/^-- continuum:no-transaction/);
+    expect(indexes.match(/CREATE INDEX CONCURRENTLY IF NOT EXISTS/gi)).toHaveLength(3);
+  });
   it('removes pre-existing embeddings for archived memories during the offboarding migration', async () => {
     const schema = `migrator_offboarding_${Date.now()}_${Math.random().toString(16).slice(2)}`;
     const admin = new pg.Pool({ connectionString: DATABASE_URL });
@@ -49,7 +63,7 @@ describe('runMigrations', () => {
     directories.push(directory);
     const source = new URL('../../migrations/', import.meta.url);
     const files = (await readdir(source)).filter((file) => file.endsWith('.sql')).sort();
-    for (const file of files.filter((name) => name < '0022_offboarding_erasure.sql')) {
+    for (const file of files.filter((name) => name < '0022_offboarding_principal_lifecycle.sql')) {
       await copyFile(new URL(file, source), join(directory, file));
     }
     try {
@@ -72,17 +86,28 @@ describe('runMigrations', () => {
          VALUES ($1, 'test', 768, $2::vector)`,
         [memoryId, `[${Array(768).fill(0).join(',')}]`],
       );
-      await copyFile(new URL('0022_offboarding_erasure.sql', source), join(directory, '0022_offboarding_erasure.sql'));
-      expect(await readFile(new URL('0022_offboarding_erasure.sql', source), 'utf8'))
+      await copyFile(
+        new URL('0022_offboarding_principal_lifecycle.sql', source),
+        join(directory, '0022_offboarding_principal_lifecycle.sql'),
+      );
+      await copyFile(
+        new URL('0023_offboarding_erasure.sql', source),
+        join(directory, '0023_offboarding_erasure.sql'),
+      );
+      expect(await readFile(new URL('0022_offboarding_principal_lifecycle.sql', source), 'utf8'))
         .toMatch(/SET LOCAL lock_timeout = '5s'/i);
-      expect(await readFile(new URL('0022_offboarding_erasure.sql', source), 'utf8'))
+      expect(await readFile(new URL('0023_offboarding_erasure.sql', source), 'utf8'))
         .not.toMatch(/DELETE FROM memory_embeddings e USING memories m/);
       await runMigrations(pool, directory);
       await copyFile(
-        new URL('0023_offboarding_embedding_cleanup.sql', source),
-        join(directory, '0023_offboarding_embedding_cleanup.sql'),
+        new URL('0024_offboarding_embedding_cleanup.sql', source),
+        join(directory, '0024_offboarding_embedding_cleanup.sql'),
       );
-      expect(await readFile(new URL('0023_offboarding_embedding_cleanup.sql', source), 'utf8'))
+      await copyFile(
+        new URL('0025_offboarding_audit_indexes.sql', source),
+        join(directory, '0025_offboarding_audit_indexes.sql'),
+      );
+      expect(await readFile(new URL('0024_offboarding_embedding_cleanup.sql', source), 'utf8'))
         .toMatch(/SET LOCAL statement_timeout = '30s'/i);
       await runMigrations(pool, directory);
       expect((await pool.query('SELECT 1 FROM memory_embeddings WHERE memory_id = $1', [memoryId])).rowCount)

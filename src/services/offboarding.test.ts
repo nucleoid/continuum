@@ -10,7 +10,7 @@ import { createPrincipal, upsertPrincipalByExternalId } from '../storage/princip
 import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import {
-  mapOwnedUserScope, MAX_OFFBOARD_AFFECTED_ROWS, offboardPrincipal,
+  mapOwnedUserScope, MAX_OFFBOARD_AFFECTED_ROWS, MAX_OFFBOARD_MEMORIES, offboardPrincipal,
 } from './offboarding.js';
 import { provisionEntraGroupBinding } from './membership-sync.js';
 import { disablePrincipal, reactivatePrincipal } from './principal-admin.js';
@@ -194,6 +194,67 @@ describe('offboarding and erasure', () => {
     expect(gaps.candidates).toEqual([]);
   });
 
+  it('retains the original query count in retry receipts', async () => {
+    const value = await fixture();
+    await pool.query(
+      `INSERT INTO audit_log (principal_id, action, query, metadata) VALUES
+       ($1, 'read', 'first private query', '{}'),
+       ($1, 'read', 'second private query', '{}')`,
+      [value.target.id],
+    );
+    const erased = await offboardPrincipal(pool, value.admin, value.target.id);
+    expect(erased.auditQueries).toBe(2);
+    const retry = await offboardPrincipal(pool, value.admin, value.target.id);
+    expect(retry.originalOffboarding?.auditQueries).toBe(2);
+    expect((await pool.query(
+      `SELECT audit_queries FROM principal_offboarding_events
+        WHERE principal_id = $1 AND NOT repair`, [value.target.id],
+    )).rows).toEqual([{ audit_queries: 2 }]);
+  });
+
+  it('uses the online audit indexes for each metadata selection branch', async () => {
+    const value = await fixture();
+    const requestId = 'plan-request';
+    await pool.query(
+      `INSERT INTO audit_log (principal_id, action, scope_id, query, metadata) VALUES
+       ($1, 'read', $2, 'scope', '{}'),
+       ($1, 'read', NULL, 'scopes', $3::jsonb),
+       ($1, 'read', NULL, 'request', $4::jsonb)`,
+      [value.admin.id, value.personal.id,
+        JSON.stringify({ scope_ids: [value.personal.id] }),
+        JSON.stringify({ request_id: requestId })],
+    );
+    const client = await pool.connect();
+    try {
+      await client.query('SET enable_seqscan = off');
+      const explain = async (sql: string, parameters: unknown[]) => JSON.stringify(
+        (await client.query(`EXPLAIN (FORMAT JSON) ${sql}`, parameters)).rows[0],
+      );
+      expect(await explain(
+        `SELECT id FROM audit_log WHERE scope_id = $1 AND scope_id IS NOT NULL`,
+        [value.personal.id],
+      )).toContain('audit_log_scope_idx');
+      expect(await explain(
+        `SELECT id FROM audit_log WHERE metadata ? 'scope_ids'
+          AND metadata->'scope_ids' @> jsonb_build_array($1::text)`,
+        [value.personal.id],
+      )).toContain('audit_log_scope_ids_gin_idx');
+      expect(await explain(
+        `SELECT id FROM audit_log WHERE metadata ? 'request_id'
+          AND metadata->>'request_id' = $1`,
+        [requestId],
+      )).toContain('audit_log_request_id_idx');
+      expect(await explain(
+        `SELECT pus.principal_id
+           FROM jsonb_array_elements_text($1::jsonb) carried(value)
+           JOIN principal_user_scopes pus ON pus.scope_id = carried.value::uuid`,
+        [JSON.stringify([value.personal.id])],
+      )).toContain('principal_user_scopes_scope_id_key');
+    } finally {
+      client.release();
+    }
+  });
+
   it('scrubs free-text audit metadata and scope names and reports dirty retry counts', async () => {
     const value = await fixture();
     await pool.query(
@@ -205,7 +266,7 @@ describe('offboarding and erasure', () => {
       })],
     );
     const preview = await offboardPrincipal(pool, value.admin, value.target.id, true);
-    expect(preview).toMatchObject({ dirtyAuditRows: 2, dirtyMemories: 1 });
+    expect(preview).toMatchObject({ dirtyAuditRows: 1, dirtyMemories: 1 });
     const erased = await offboardPrincipal(pool, value.admin, value.target.id);
     expect((await pool.query('SELECT name FROM scopes WHERE id = $1', [value.personal.id])).rows[0].name)
       .toBe(erased.scopePseudonym);
@@ -445,7 +506,7 @@ describe('offboarding and erasure', () => {
     { scopeName: '%', collateral: 'collateral-percent-match' },
     { scopeName: '_', collateral: 'x' },
     { scopeName: 'a_b', collateral: 'axb' },
-  ])('redacts exact JSON scope-name value "$scopeName" without wildcard collateral damage', async ({
+  ])('ignores unsupported free-form scope-name metadata "$scopeName" and wildcard collateral', async ({
     scopeName, collateral,
   }) => {
     const value = await fixture();
@@ -464,7 +525,7 @@ describe('offboarding and erasure', () => {
       `SELECT metadata FROM audit_log
         WHERE principal_id = $1 AND action = 'read' ORDER BY id`, [value.admin.id],
     )).rows;
-    expect(rows[0].metadata).toEqual({ redacted: 'principal_offboarding' });
+    expect(rows[0].metadata).toEqual({ nested: { scope: scopeName } });
     expect(rows[1].metadata).toEqual({ nested: { scope: collateral }, marker: 'unrelated' });
   });
 
@@ -567,6 +628,10 @@ describe('offboarding and erasure', () => {
        VALUES ($1, 'read', 'late delegate secret', $2::jsonb)`,
       [delegate.id, JSON.stringify({ scope_ids: [value.personal.id] })],
     ).finally(() => { settled = true; });
+    const lateAuditError = lateAudit.then(
+      () => null,
+      (error: unknown) => error as Error,
+    );
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(settled).toBe(false);
     await transition.query(
@@ -574,7 +639,7 @@ describe('offboarding and erasure', () => {
     );
     await transition.query('COMMIT');
     transition.release();
-    await expect(lateAudit).rejects.toThrow(/offboarded owned scope/i);
+    expect((await lateAuditError)?.message).toMatch(/offboarded owned scope/i);
     expect((await pool.query(
       `SELECT count(*)::int AS count FROM audit_log
         WHERE principal_id = $1 AND query = 'late delegate secret'`, [delegate.id],
@@ -593,6 +658,10 @@ describe('offboarding and erasure', () => {
     const lateMembership = addMembership(
       pool, member.id, value.personal.id, 'reader',
     ).finally(() => { settled = true; });
+    const lateMembershipError = lateMembership.then(
+      () => null,
+      (error: unknown) => error as Error,
+    );
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(settled).toBe(false);
     await transition.query(
@@ -600,7 +669,7 @@ describe('offboarding and erasure', () => {
     );
     await transition.query('COMMIT');
     transition.release();
-    await expect(lateMembership).rejects.toThrow(/offboarded owned scope/i);
+    expect((await lateMembershipError)?.message).toMatch(/offboarded owned scope/i);
     expect((await pool.query(
       `SELECT count(*)::int AS count FROM scope_memberships
         WHERE principal_id = $1 AND scope_id = $2 AND active`,
@@ -626,21 +695,128 @@ describe('offboarding and erasure', () => {
     )).rejects.toThrow(/archived memory content is immutable/i);
   });
 
-  it('fails closed before mutation when the affected-row cap is exceeded', async () => {
+  it('starts a bounded fenced batch when more than the former affected-row cap is selected', async () => {
     const value = await fixture();
+    await pool.query(
+      `INSERT INTO memories
+         (id, scope_id, type, title, body, author_id, source)
+       SELECT gen_random_uuid(), $1, 'context', 'bulk ' || n, 'private ' || n, $2, 'manual'
+         FROM generate_series(1, $3) n`,
+      [value.personal.id, value.target.id, MAX_OFFBOARD_MEMORIES],
+    );
     await pool.query(
       `INSERT INTO audit_log (principal_id, action, scope_id, query, metadata)
        SELECT $1, 'read', $2, 'bounded secret', '{}'::jsonb
          FROM generate_series(1, $3)`,
       [value.admin.id, value.personal.id, MAX_OFFBOARD_AFFECTED_ROWS + 1],
     );
-    await expect(offboardPrincipal(pool, value.admin, value.target.id))
-      .rejects.toThrow(/affected-row limit/i);
+    const preview = await offboardPrincipal(pool, value.admin, value.target.id, true);
+    expect(preview.memories).toBe(MAX_OFFBOARD_MEMORIES + 1);
+    expect(preview.auditRows).toBe(MAX_OFFBOARD_AFFECTED_ROWS + 1);
+    const first = await offboardPrincipal(pool, value.admin, value.target.id, { batchSize: 10 });
+    expect(first).toMatchObject({
+      complete: false,
+      progress: { memoriesProcessed: 10, auditRowsProcessed: 10 },
+    });
     expect((await pool.query(
-      'SELECT disabled_at FROM principals WHERE id = $1', [value.target.id],
-    )).rows[0].disabled_at).toBeNull();
+      `SELECT disabled_at IS NOT NULL AS disabled, offboarded_at IS NOT NULL AS fenced
+         FROM principals WHERE id = $1`, [value.target.id],
+    )).rows[0]).toEqual({ disabled: true, fenced: true });
     expect((await pool.query(
-      'SELECT title FROM memories WHERE id = $1', [value.personalMemory.id],
-    )).rows[0].title).toBe('Private title');
+      `SELECT count(*)::int AS count FROM memories
+        WHERE scope_id = $1 AND title = '[erased]'`, [value.personal.id],
+    )).rows[0].count).toBe(10);
+  });
+
+  it('does not select unrelated audit metadata merely because it contains a common scope name', async () => {
+    const value = await fixture();
+    await pool.query('UPDATE scopes SET name = $2 WHERE id = $1', [value.personal.id, 'admin']);
+    const unrelated = await pool.query(
+      `INSERT INTO audit_log (principal_id, action, metadata)
+       VALUES ($1, 'write', '{"operation":"principal_disabled","reason":"admin"}')
+       RETURNING id`,
+      [value.admin.id],
+    );
+
+    const preview = await offboardPrincipal(pool, value.admin, value.target.id, true);
+    expect(preview.auditSelection).toMatchObject({ scopeName: 0 });
+    await offboardPrincipal(pool, value.admin, value.target.id);
+
+    expect((await pool.query(
+      'SELECT metadata FROM audit_log WHERE id = $1', [unrelated.rows[0].id],
+    )).rows[0].metadata).toEqual({ operation: 'principal_disabled', reason: 'admin' });
+  });
+
+  it('preserves immutable mapping approval evidence after erasure and retry', async () => {
+    const value = await fixture();
+    const before = (await pool.query(
+      `SELECT principal_id, scope_id, approved_by, approved_at,
+              acknowledged_principal_ids, acknowledged_evidence_hash
+         FROM principal_user_scope_approvals
+        WHERE principal_id = $1 ORDER BY id`,
+      [value.target.id],
+    )).rows;
+    expect(before).toHaveLength(1);
+    expect(before[0]).toMatchObject({
+      principal_id: value.target.id,
+      scope_id: value.personal.id,
+      approved_by: value.admin.id,
+    });
+
+    await offboardPrincipal(pool, value.admin, value.target.id);
+    await offboardPrincipal(pool, value.admin, value.target.id);
+
+    expect((await pool.query(
+      `SELECT principal_id, scope_id, approved_by, approved_at,
+              acknowledged_principal_ids, acknowledged_evidence_hash
+         FROM principal_user_scope_approvals
+        WHERE principal_id = $1 ORDER BY id`,
+      [value.target.id],
+    )).rows).toEqual(before);
+    await expect(pool.query(
+      'DELETE FROM principal_user_scope_approvals WHERE principal_id = $1', [value.target.id],
+    )).rejects.toThrow(/immutable/i);
+  });
+
+  it('resumes fenced bounded batches until a principal is completely erased', async () => {
+    const value = await fixture();
+    await pool.query(
+      `INSERT INTO memories
+         (id, scope_id, type, title, body, author_id, source)
+       SELECT gen_random_uuid(), $1, 'context', 'Private ' || n, 'Body ' || n, $2, 'manual'
+         FROM generate_series(1, 3) n`,
+      [value.personal.id, value.target.id],
+    );
+    await pool.query(
+      `INSERT INTO audit_log (principal_id, action, scope_id, query, metadata)
+       SELECT $1, 'read', $2, 'private ' || n, '{}'::jsonb
+         FROM generate_series(1, 3) n`,
+      [value.admin.id, value.personal.id],
+    );
+
+    const first = await offboardPrincipal(pool, value.admin, value.target.id, {
+      batchSize: 1,
+    });
+    expect(first).toMatchObject({ complete: false, alreadyOffboarded: false });
+    expect(first.progress).toMatchObject({ memoriesProcessed: 1 });
+    expect((await pool.query(
+      `SELECT disabled_at IS NOT NULL AS disabled, offboarded_at IS NOT NULL AS fenced
+         FROM principals WHERE id = $1`, [value.target.id],
+    )).rows[0]).toEqual({ disabled: true, fenced: true });
+
+    let current = first;
+    for (let attempt = 0; attempt < 10 && !current.complete; attempt += 1) {
+      current = await offboardPrincipal(pool, value.admin, value.target.id, { batchSize: 1 });
+    }
+    expect(current.complete).toBe(true);
+    expect((await pool.query(
+      `SELECT count(*)::int AS count FROM memories
+        WHERE scope_id = $1 AND (title <> '[erased]' OR state <> 'archived')`,
+      [value.personal.id],
+    )).rows[0].count).toBe(0);
+    expect((await pool.query(
+      `SELECT count(*)::int AS count FROM audit_log
+        WHERE scope_id = $1 AND query IS NOT NULL`, [value.personal.id],
+    )).rows[0].count).toBe(0);
   });
 });

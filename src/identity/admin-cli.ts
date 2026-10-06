@@ -77,20 +77,26 @@ async function main(): Promise<void> {
       const dryRun = args.includes('--dry-run');
       const confirmIndex = args.indexOf('--confirm-scope');
       const confirmationScopeId = confirmIndex >= 0 ? args[confirmIndex + 1] : undefined;
+      const batchIndex = args.indexOf('--batch-size');
+      const batchText = batchIndex >= 0 ? args[batchIndex + 1] : undefined;
+      const batchSize = batchText === undefined ? undefined : Number(batchText);
       const consumed = new Set<number>();
       if (dryRun) consumed.add(args.indexOf('--dry-run'));
       if (confirmIndex >= 0) { consumed.add(confirmIndex); consumed.add(confirmIndex + 1); }
+      if (batchIndex >= 0) { consumed.add(batchIndex); consumed.add(batchIndex + 1); }
       const positional = args.filter((_value, index) => !consumed.has(index));
       if (!positional[0] || positional.length !== 1
         || (!dryRun && !confirmationScopeId)
         || (dryRun && confirmIndex >= 0)
+        || (batchIndex >= 0 && (!Number.isInteger(batchSize)
+          || (batchSize ?? 0) < 1 || (batchSize ?? 0) > 5_000))
         || args.some((value, index) => value.startsWith('--') && !consumed.has(index))) {
-        throw new Error('usage: offboard-principal <principal-id> (--dry-run | --confirm-scope <user-scope-id>)');
+        throw new Error('usage: offboard-principal <principal-id> (--dry-run | --confirm-scope <user-scope-id>) [--batch-size <1-5000>]');
       }
       process.stdout.write(`${JSON.stringify({
         operation,
         ...await offboardPrincipal(pool, actor, positional[0], {
-          dryRun, confirmationScopeId,
+          dryRun, confirmationScopeId, batchSize,
         }),
       })}\n`);
     } else throw new Error('unknown admin operation');

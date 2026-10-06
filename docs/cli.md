@@ -3,8 +3,9 @@
 Org-admin identity, group-binding, and offboarding commands are exposed through
 `npm run admin`; see [authentication.md](./authentication.md) and
 [offboarding.md](./offboarding.md). Offboarding supports a non-mutating
-`--dry-run` count and bounded UUID evidence before the bounded atomic operation;
-execution requires `--confirm-scope <user-scope-id>` matching the locked mapping.
+`--dry-run` count and bounded UUID evidence before execution. Execution requires
+`--confirm-scope <user-scope-id>` matching the locked mapping and accepts
+`--batch-size <1-5000>` for the resumable fenced procedure.
 Mapping a legitimately shared personal scope requires the explicit
 `map-user-scope ... --allow-other-active-members` acknowledgement.
 

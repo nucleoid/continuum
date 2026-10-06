@@ -1,4 +1,4 @@
--- Cleanup is intentionally separate from 0022. In particular, it never runs
+-- Cleanup is intentionally separate from the schema migrations. It never runs
 -- while that migration holds ACCESS EXCLUSIVE on principals.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '30s';
