@@ -403,12 +403,13 @@ deactivates every membership on that scope, and writes per-memory plus
 operation-summary audit records. Immutable approval and completion ledgers bind
 the approver, reviewed UUIDs, evidence hash, bounded preview semantics, exact
 cumulative completion counts, and batch progress.
-Database guards close an
-offboarded owned scope to non-tombstone writes, active memberships, and active
-Entra bindings; retries verify that no dirty memories, embeddings, aliases,
-active access, or linked raw audit rows remain. Audit selection uses indexed
-UUID and explicit metadata-key branches; mutable or recursive name matching is
-not an erasure criterion.
+Database guards close an offboarded owned scope to non-tombstone writes, active
+memberships, and active Entra bindings. Durable memory, scope-cleanup, direct
+audit, and linked-audit phases establish completion without rescanning the
+subject's full history on every retry. Memory and `scope_ids` audit relationships
+are maintained in an ordered selector relation; principal, scope, request, and
+selector branches all advance on indexed keyset cursors. Mutable or recursive
+name matching is not an erasure criterion.
 Shared scopes and stable UUID references remain intact. Database archive and
 embedding triggers enforce cleanup for lifecycle, supersession, offboarding,
 and direct state transitions. See `docs/offboarding.md` for limits, retry

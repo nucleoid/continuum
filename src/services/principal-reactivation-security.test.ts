@@ -209,4 +209,41 @@ describe('principal reactivation database trust boundary', () => {
       [target.id, outsider.id],
     )).rejects.toThrow(/effective org administrator/i);
   });
+
+  it('does not let pg_temp shadow the reactivation capability relation', async () => {
+    const { target } = await fixture(pool);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`CREATE TEMP TABLE continuum_principal_reactivation_requests (
+        principal_id uuid, backend_pid integer, transaction_id bigint
+      )`);
+      await client.query(
+        `INSERT INTO pg_temp.continuum_principal_reactivation_requests VALUES
+         ($1, pg_backend_pid(), txid_current())`, [target.id],
+      );
+      await expect(client.query(
+        `UPDATE principals SET disabled_at = NULL, offboarded_at = NULL,
+                reactivated_at = now() WHERE id = $1`, [target.id],
+      )).rejects.toThrow(/guarded database function/i);
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
+  });
+
+  it('rejects forged completed ledger events without the completion capability', async () => {
+    const { admin, target } = await fixture(pool);
+    const run = (await pool.query(
+      'SELECT * FROM principal_offboarding_runs WHERE principal_id = $1', [target.id],
+    )).rows[0];
+    await expect(pool.query(
+      `INSERT INTO principal_offboarding_run_events
+         (run_id, principal_id, scope_id, phase, initiated_by, finalized_by,
+          approval_id, approval_evidence_hash, evidence)
+       VALUES ($1, $2, $3, 'completed', $4, $4, $5, $6, '{}'::jsonb)`,
+      [run.run_id, target.id, run.scope_id, admin.id, run.approval_id,
+        run.approval_evidence_hash],
+    )).rejects.toThrow(/completion capability|immutable/i);
+  });
 });

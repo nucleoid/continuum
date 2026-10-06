@@ -85,10 +85,12 @@ describe('runMigrations', () => {
     const pool = schemaPool(schema);
     try {
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-3).map((migration) => migration.name)).toEqual([
+      expect(applied.slice(-5).map((migration) => migration.name)).toEqual([
         '0030_offboarding_round7_integrity.sql',
         '0031_offboarding_round7_indexes.sql',
         '0032_offboarding_round7_compatibility.sql',
+        '0033_offboarding_bounded_selectors.sql',
+        '0034_offboarding_completion_invariants.sql',
       ]);
       expect((await pool.query(
         `SELECT indisvalid AS valid FROM pg_index
@@ -105,10 +107,93 @@ describe('runMigrations', () => {
       )).rows.map((row) => row.column_name)).toEqual([
         'audit_linked_complete', 'audit_linked_request_cursor', 'audit_memory_key_cursor',
       ]);
+      expect((await pool.query(
+        `SELECT indexdef FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND indexname = 'audit_log_offboarding_scopes_pkey'`,
+      )).rows[0].indexdef).toMatch(/selector_kind, scope_id, audit_id/i);
+      expect((await pool.query(
+        `SELECT proname, proconfig
+           FROM pg_proc
+          WHERE pronamespace = current_schema()::regnamespace
+            AND proname IN (
+              'continuum_complete_offboarding_run',
+              'continuum_guard_principal_reactivation',
+              'continuum_reactivate_principal'
+            ) ORDER BY proname`,
+      )).rows).toEqual([
+        expect.objectContaining({
+          proname: 'continuum_complete_offboarding_run',
+          proconfig: [`search_path=pg_catalog, ${schema}, pg_temp`],
+        }),
+        expect.objectContaining({
+          proname: 'continuum_guard_principal_reactivation',
+          proconfig: [`search_path=pg_catalog, ${schema}, pg_temp`],
+        }),
+        expect.objectContaining({
+          proname: 'continuum_reactivate_principal',
+          proconfig: [`search_path=pg_catalog, ${schema}, pg_temp`],
+        }),
+      ]);
+      expect(await runMigrations(pool, join(process.cwd(), 'migrations'))).toEqual([]);
     } finally {
       await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
     }
   });
+  it('backfills ordered offboarding selectors on upgrade and retries idempotently', async () => {
+    const schema = `migrator_selector_upgrade_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-selector-upgrade-'));
+    directories.push(directory);
+    const source = new URL('../../migrations/', import.meta.url);
+    const files = (await readdir(source)).filter((file) => file.endsWith('.sql')).sort();
+    for (const file of files.filter((name) => name <= '0032_offboarding_round7_compatibility.sql')) {
+      await copyFile(new URL(file, source), join(directory, file));
+    }
+    try {
+      await runMigrations(pool, directory);
+      const principalId = (await pool.query(
+        `INSERT INTO principals (id, external_id, kind, display_name)
+         VALUES (gen_random_uuid(), 'selector-upgrade', 'user', 'Selector') RETURNING id`,
+      )).rows[0].id;
+      const scopeId = (await pool.query(
+        `INSERT INTO scopes (id, kind, name)
+         VALUES (gen_random_uuid(), 'user', 'selector-upgrade') RETURNING id`,
+      )).rows[0].id;
+      const memoryId = (await pool.query(
+        `INSERT INTO memories (id, scope_id, type, title, body, author_id, source)
+         VALUES (gen_random_uuid(), $1, 'context', 'private', 'private', $2, 'manual')
+         RETURNING id`, [scopeId, principalId],
+      )).rows[0].id;
+      await pool.query(
+        `INSERT INTO audit_log (principal_id, action, memory_id, metadata)
+         VALUES ($1, 'read', $2, $3::jsonb)`,
+        [principalId, memoryId, JSON.stringify({ scope_ids: [scopeId] })],
+      );
+      await copyFile(
+        new URL('0033_offboarding_bounded_selectors.sql', source),
+        join(directory, '0033_offboarding_bounded_selectors.sql'),
+      );
+
+      await expect(runMigrations(pool, directory)).resolves.toEqual([
+        expect.objectContaining({ name: '0033_offboarding_bounded_selectors.sql' }),
+      ]);
+      expect((await pool.query(
+        `SELECT selector_kind, scope_id::text
+           FROM audit_log_offboarding_scopes ORDER BY selector_kind`,
+      )).rows).toEqual([
+        { selector_kind: 'memory', scope_id: scopeId },
+        { selector_kind: 'scope_ids', scope_id: scopeId },
+      ]);
+      await expect(runMigrations(pool, directory)).resolves.toEqual([]);
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  });
+
   it('removes pre-existing embeddings for archived memories during the offboarding migration', async () => {
     const schema = `migrator_offboarding_${Date.now()}_${Math.random().toString(16).slice(2)}`;
     const admin = new pg.Pool({ connectionString: DATABASE_URL });

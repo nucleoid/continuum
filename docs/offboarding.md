@@ -59,16 +59,17 @@ memories and audit rows are processed in retry-safe batches. `batchSize`
 defaults to 1,000 and accepts 1 through 5,000 through REST or CLI
 `--batch-size`; each response reports cumulative processed counts, bounded
 remaining-work indicators, batch number, and `complete`. Durable UUID and audit
-ID keyset cursors ensure every resumed batch scans bounded windows. Memory audit
-rows use a durable `(memory_id, audit_id)` cursor over subject-owned memories;
-linked rows use a durable request-ID cursor plus a per-request audit-ID cursor
-and process at most one request ID per batch. `scope_ids` uses its GIN predicate
-before its audit-ID cursor, rather than walking the global audit log. After the
+ID keyset cursors ensure every resumed batch scans bounded windows. Memory and
+`scope_ids` relationships are normalized at audit insertion into an indexed
+`(selector_kind, scope_id, audit_id)` relation, then traversed by audit ID.
+Linked rows use a compound `(request_id, audit_id)` cursor and one batch can
+cross many request IDs without creating one transaction per request. After the
 principal and owned-scope write fence is closed, the run records one immutable
 audit high-water ID. Every selector exhausts only its window through that fence;
 the linked-request selector starts after request-ID discovery is complete.
-Cursor exhaustion, rather than repeated dirty-history scans or full recounts,
-decides audit completion. Principals with more than 10,000 memories
+Durable memory, one-time scope cleanup, and audit cursor exhaustion, rather
+than repeated dirty-history scans or full recounts, decide completion.
+Principals with more than 10,000 memories
 or 50,000 audit rows use the same path and are not rejected. Reissue the exact
 confirmed REST operation until `complete: true`. The admin CLI does this loop by
 default; `--once` performs one batch for external orchestration, and
@@ -76,12 +77,12 @@ default; `--once` performs one batch for external orchestration, and
 is deactivated, including delegate and ingest identities. Database triggers
 reject later active memberships or bindings while its owner remains offboarded.
 Safe retries return `alreadyOffboarded: true` only when an immutable `completed`
-run event exists for the current run UUID and after verifying the exact memory tombstone fields,
-principal and scope pseudonyms, zero embeddings, aliases, active memberships,
-and zero unrevoked Entra bindings,
-and the database write fences remain closed. Historical audit cleanliness is
-trusted from that immutable completion receipt and fixed fence; completed
-retries do not rescan clean pre-fence history. Rows above the fence are rejected
+run event exists for the current run UUID, the principal and scope pseudonyms
+remain in place, and the database write fences remain closed. Memory, embedding,
+access, alias, binding, and historical audit cleanliness are trusted from the
+guarded immutable completion receipt and durable phase cursors; completed
+retries do not rescan clean pre-fence history. A legacy state without a run
+receipt is never accepted from a truncated preview. Rows above the fence are rejected
 at the principal/owned-scope audit boundary. Dry-run and retry output includes
 dirty-memory and dirty-audit indicators. Retry output also includes the first durable
 evidence ID, timestamp, and exact cumulative processed counts from the completed
@@ -170,9 +171,11 @@ Database triggers delete derived embeddings whenever any path changes a memory
 to `archived`, including lifecycle, supersession, direct maintenance, and
 offboarding. Archived tombstone content in an offboarded owned scope is
 database-immutable; the guarded repair path can only move dirty content toward
-the canonical tombstone. Embedding writes lock and recheck the parent memory, so they cannot
-commit for archived content and cannot race cleanup. Expired but still-live
-rows remain the lifecycle sweeper's responsibility until its atomic transition.
+the canonical tombstone. Embedding writes take a key-share lock and recheck the
+parent memory, so they cannot commit for archived content and cannot race
+cleanup. Expired but still-live rows in an offboarding-fenced owned scope are
+skipped by lifecycle preview and sweep until offboarding tombstones them, so
+they cannot stall unrelated scopes.
 The database also rejects inserting a live memory, or changing a memory back to
 live, in a scope whose mapped owner is currently offboarded.
 
@@ -210,10 +213,28 @@ subject-memory cursor index concurrently and requires it to be valid before the
 migration is recorded. Read-audit producers also discard caller-supplied
 `operation`, `source`, `request_id`, and `record_kind` policy keys.
 
-Continuum uses one shared `CONTINUUM_DATABASE_URL` role for migrations and
-application queries. PostgreSQL therefore cannot bind a per-request caller to
+Migration `0033_offboarding_bounded_selectors.sql` installs the normalized
+ordered selector relation and insert trigger, durable memory/scope phases,
+batched linked traversal support, immutable owner mapping identity, a guarded
+completion capability, hardened `SECURITY DEFINER` search paths with `pg_temp`
+last, and the reduced embedding lock. Its historical selector backfill is
+transactional: a timeout leaves the migration unapplied and a retry safely
+repeats it. Existing incomplete runs whose linked phase began too early are
+rewound to the idempotent linked cursor before the phase guard resumes.
+Migration `0034_offboarding_completion_invariants.sql` is an upgrade-safe
+replacement of the completion function and phase trigger: it verifies every
+durable phase and exact cumulative receipt field inside the database before a
+`completed` event can be appended.
+
+Production must use separate migration-owner and application roles. Run
+`continuum-migrate` with `CONTINUUM_DATABASE_URL` set to the migration owner,
+then start Continuum with the same variable set to a non-owner application
+role. The application role must not own the event ledger, completion-capability
+table, or security-definer functions, and receives no direct privilege on the
+capability table. Direct `completed` inserts then fail at the trigger.
+PostgreSQL still cannot bind a per-request caller to
 the administrator UUID supplied to the security-definer function. Arbitrary
-SQL running as the shared function-owning role can present any current
+SQL running as the migration/function-owning role can present any current
 effective administrator UUID. That role, database-owner access, and later
 privileged audit mutation are trusted administrative capabilities, not
 end-user authentication boundaries. Within the supported function call, an
@@ -228,10 +249,10 @@ requires the exact index to exist and be valid before the migration ledger can
 record success. A timeout or failed build leaves the file unapplied and safely
 retryable.
 
-Apply all eleven offboarding migrations before starting the new application version. Old
+Apply all thirteen offboarding migrations before starting the new application version. Old
 instances can continue ordinary traffic after `0023`, but they do not know the
 offboarding workflow and an old authenticated request may already be in flight.
-Do not invoke offboarding until all eleven migrations are recorded on every shared
+Do not invoke offboarding until all thirteen migrations are recorded on every shared
 database and all old application instances have drained. Rollback is
 application-first: stop invoking offboarding, drain the new instances, and
 deploy the old application only after `list-incomplete-offboarding` reports

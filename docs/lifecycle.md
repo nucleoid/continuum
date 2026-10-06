@@ -45,9 +45,12 @@ Migration `0023_offboarding_erasure.sql` generalizes embedding cleanup: every
 transition to `archived`, including supersession, direct maintenance, and
 offboarding, deletes the derived row. New embedding writes lock and recheck the
 parent and are rejected unless it remains live. Migration
-`0024_offboarding_embedding_cleanup.sql` removes pre-existing embeddings whose
-memories are already archived and uses a bounded lock timeout so operators can
-retry instead of queueing traffic indefinitely.
+`0024_offboarding_embedding_cleanup.sql` installs a bounded cleanup function and
+runs one 1,000-row upgrade batch. Operators call the function in committed
+batches until it returns zero; the migration does not claim a complete backfill.
+The sweeper excludes expired rows in offboarding-fenced owned scopes, which are
+the offboarding run's responsibility, so one incomplete erasure cannot stall
+lifecycle work in other scopes.
 
 ## Review queue
 

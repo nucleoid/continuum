@@ -46,7 +46,9 @@ continuum recall "deployment rollback" --json
 
 Installed packages also expose `continuum-migrate`; set
 `CONTINUUM_DATABASE_URL` and run it as a trusted operator before starting a
-newly installed application version.
+newly installed application version. Production uses a migration-owner URL for
+that command and a distinct non-owner application URL for running Continuum;
+the offboarding completion ledger relies on that PostgreSQL privilege boundary.
 
 The CLI supports capture, recall, audit, scope membership administration,
 promotion, verification, and AGENTS.md generation through the same authenticated
