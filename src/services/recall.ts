@@ -1,7 +1,7 @@
 import type pg from 'pg';
 import type { Principal, RecallInput, RecallResult } from '../types.js';
 import { asEmbeddingRouter, type EmbeddingRouting } from '../embeddings/router.js';
-import { recall } from '../storage/recall.js';
+import { recall, type RecallDiagnostics } from '../storage/recall.js';
 import { recordRead as recordReadAudit } from '../audit/log.js';
 import { resolveReadableScopeIds, type AccessibleScope } from './access.js';
 import { asServiceError } from './errors.js';
@@ -10,6 +10,12 @@ import { parseScopeString } from './scopes.js';
 export interface PrincipalRecallResult {
   results: RecallResult[];
   accessible: Map<string, AccessibleScope>;
+  diagnostics: RecallDiagnostics & { localOnlyUnavailableScopes?: number };
+}
+
+export interface RecallLogger {
+  error(message: string, error: unknown): void;
+  info?(event: Record<string, unknown>): void;
 }
 
 export async function recallForPrincipal(
@@ -18,6 +24,7 @@ export async function recallForPrincipal(
   principal: Principal,
   input: RecallInput,
   auditMetadata: Record<string, unknown> = {},
+  logger?: RecallLogger,
 ): Promise<PrincipalRecallResult> {
   try {
     const refs = input.scopes?.map(parseScopeString);
@@ -46,28 +53,39 @@ export async function recallForPrincipal(
       grouped.set(key, group);
     }
     const embeddingGroups = [...grouped.values()];
-    const embeddingGroupResults = new Map<string, 'succeeded' | 'failed'>();
-    const results = await recall(pool, {
+    const recalled = await recall(pool, {
       query: input.query,
       scopeIds,
       types: input.types,
       limit: input.limit ?? 10,
       embeddingGroups,
-      onEmbeddingGroupResult: ({ provider, status }) => {
-        embeddingGroupResults.set(`${provider.id}\u0000${provider.dim}`, status);
-      },
     });
-    const embeddingAuditGroups = embeddingGroups.map((group) => ({
-      provider: group.provider.id,
-      dim: group.provider.dim,
-      scopes: group.scopeIds.length,
-      status: embeddingGroupResults.get(`${group.provider.id}\u0000${group.provider.dim}`)
-        ?? 'failed' as const,
+    const embeddingAuditGroups = recalled.diagnostics.groups.map((group) => ({
+      provider: group.provider,
+      dim: group.dim,
+      scopes: embeddingGroups.find((candidate) => candidate.provider.id === group.provider
+        && candidate.provider.dim === group.dim)?.scopeIds.length ?? 0,
+      status: group.status === 'used' ? 'succeeded' as const : 'failed' as const,
     }));
     const succeededEmbeddingGroups = embeddingAuditGroups
       .filter((group) => group.status === 'succeeded').length;
     const failedEmbeddingGroups = embeddingAuditGroups
       .filter((group) => group.status === 'failed').length;
+    const diagnostics = {
+      ...recalled.diagnostics,
+      ...(localOnlyUnavailable > 0
+        ? { localOnlyUnavailableScopes: localOnlyUnavailable }
+        : {}),
+    };
+    if (diagnostics.vector === 'failed' || diagnostics.vector === 'partial') {
+      logger?.info?.({
+        event: 'embedding_recall_fallback',
+        vectorStatus: diagnostics.vector,
+        failedGroups: diagnostics.groups.filter((group) => group.status === 'failed').length,
+        totalGroups: diagnostics.groups.length,
+      });
+    }
+    const results = recalled.results;
 
     // Recall auditing is required. Results are not returned if this write fails.
     await recordReadAudit(pool, {
@@ -82,6 +100,7 @@ export async function recallForPrincipal(
           ? 'degraded'
           : succeededEmbeddingGroups > 0 ? 'succeeded' : 'not-requested',
         embedding_groups: embeddingAuditGroups,
+        vector_status: diagnostics.vector,
         ...(localOnlyUnavailable > 0
           ? { local_only_unavailable_scopes: localOnlyUnavailable }
           : {}),
@@ -93,7 +112,7 @@ export async function recallForPrincipal(
         metadata: { rank: index + 1, score: result.score },
       })),
     });
-    return { results, accessible };
+    return { results, accessible, diagnostics };
   } catch (error) {
     throw asServiceError(error);
   }

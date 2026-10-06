@@ -16,6 +16,8 @@ export async function resetData(pool: pg.Pool): Promise<void> {
       ingest_deliveries,
       principal_aliases,
       audit_log,
+      embedding_backfill_failures,
+      embedding_backfill_checkpoints,
       memory_embeddings,
       memories,
       scope_memberships,

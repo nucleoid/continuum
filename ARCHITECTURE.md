@@ -95,14 +95,37 @@ CREATE INDEX memories_tags_gin        ON memories USING gin (tags);
 CREATE INDEX memories_metadata_gin    ON memories USING gin (metadata);
 
 CREATE TABLE memory_embeddings (
-  memory_id       UUID PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+  memory_id       UUID NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
   provider        TEXT NOT NULL,         -- 'ollama:nomic-embed-text', 'voyage-3', etc.
   dim             INT  NOT NULL,
   embedding       VECTOR,                -- pgvector
-  embedded_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+  embedded_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (memory_id, provider, dim)
 );
 
 CREATE INDEX memory_embeddings_ivf ON memory_embeddings USING ivfflat (embedding vector_cosine_ops);
+
+-- Deterministic provider input failures are durable operational state. Audit
+-- retention may remove their corresponding event rows, so backfill resume
+-- must not use audit_log as its retry-suppression store.
+CREATE TABLE embedding_backfill_failures (
+  memory_id      UUID NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  provider       TEXT NOT NULL,
+  dim            INT NOT NULL CHECK (dim > 0),
+  disposition    TEXT NOT NULL CHECK (disposition IN ('durable', 'suspect')),
+  reason         TEXT NOT NULL,
+  failed_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (memory_id, provider, dim)
+);
+
+CREATE TABLE embedding_backfill_checkpoints (
+  provider       TEXT NOT NULL,
+  dim            INT NOT NULL,
+  scope_filter   TEXT NOT NULL DEFAULT '',
+  cursor         UUID,
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (provider, dim, scope_filter)
+);
 
 CREATE TABLE audit_log (
   id              BIGSERIAL PRIMARY KEY,
@@ -221,6 +244,18 @@ Content-Type: application/json
 Response includes ranked memories with `score`, `scope`, `type`, `source_ref`, and a short `excerpt`. Reading is logged to `audit_log` per principal.
 
 Search is hybrid: vector similarity on `memory_embeddings` plus full-text on `memories.body`, fused by reciprocal rank fusion. Scope filter is applied pre-rank.
+Routed vector arms run concurrently under one shared overall deadline. Its
+implicit value is the longest configured routed-provider timeout, capped at 30
+seconds; each provider also retains its local request timeout. A provider or vector
+query failure degrades only that arm to full-text search and is returned as
+sanitized retrieval diagnostics. Provider qualification is materialized before
+distance ordering so rows from another provider cannot consume approximate-index
+candidates and underfill the requested route. This makes the provider arm an
+exact scan of that provider's rows rather than an ANN lookup; the shared
+statement deadline bounds recall degradation as the table grows. Deployments
+that outgrow exact provider scans need provider-specific vector partitions or
+indexes before removing that correctness fence. AGENTS.md generation remains deterministic
+scope-ordered retrieval and does not depend on embedding availability.
 Every serving query also excludes memories whose `expires_at` is at or before
 the database's current time. The full-text and vector candidate queries apply
 this filter before ranking, and recall hydration repeats it so a memory that
@@ -338,8 +373,9 @@ candidates remain advisory and never authorize or trigger supersession. After
 commit, provider I/O embeds the new chain head outside the write transaction.
 The successor vector, archived-vector removal, and a bounded provider/status
 audit then commit together. Provider, post-commit pool, vector-storage, or
-derived-audit failure returns `EMBEDDING_FAILED`, retains the archived vector,
-and leaves the live successor available to full-text recall. A failed outcome
+derived-audit failure returns `EMBEDDING_FAILED`; the archived vector is already
+deleted transactionally with supersession, and the live successor remains
+available to full-text recall. A failed outcome
 audit is best-effort because the database failure may also make observability
 unavailable. If a local-only route has no local provider, a best-effort derived
 audit records `embedding_policy: "local-only-unavailable"`; the successor stays

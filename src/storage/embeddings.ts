@@ -13,9 +13,9 @@ export async function storeMemoryEmbedding(
   memoryId: string,
   text: string,
   provider: EmbeddingProvider,
-): Promise<void> {
+): Promise<boolean> {
   const [vector] = await provider.embed([text]);
-  await storeMemoryEmbeddingVector(pool, memoryId, vector, provider);
+  return storeMemoryEmbeddingVector(pool, memoryId, vector, provider);
 }
 
 export async function storeMemoryEmbeddingVector(
@@ -23,18 +23,23 @@ export async function storeMemoryEmbeddingVector(
   memoryId: string,
   vector: number[],
   provider: Pick<EmbeddingProvider, 'id' | 'dim'>,
-): Promise<void> {
+): Promise<boolean> {
   assertEmbeddingVectorDimension(vector, provider);
-  await pool.query(
+  const result = await pool.query(
     `INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
-     VALUES ($1, $2, $3, $4::vector)
-     ON CONFLICT (memory_id) DO UPDATE
-       SET provider = EXCLUDED.provider,
-           dim = EXCLUDED.dim,
-           embedding = EXCLUDED.embedding,
-           embedded_at = now()`,
+     SELECT m.id, $2, $3, $4::vector
+       FROM memories m
+      WHERE m.id = $1
+        AND m.state = 'live'
+        AND (m.expires_at IS NULL OR m.expires_at > clock_timestamp())
+      FOR SHARE OF m
+     ON CONFLICT (memory_id, provider, dim) DO UPDATE
+       SET embedding = EXCLUDED.embedding,
+           embedded_at = now()
+     RETURNING memory_id`,
     [memoryId, provider.id, provider.dim, toPgVector(vector)],
   );
+  return (result.rowCount ?? result.rows.length) > 0;
 }
 
 export async function vectorSearchMemoryIds(
@@ -61,15 +66,18 @@ export async function vectorSearchMemoryIds(
   params.push(limit);
   const limitIdx = params.length;
   const { rows } = await pool.query(
-    `SELECT m.id, e.embedding <=> $1::vector AS distance
-       FROM memory_embeddings e
-       JOIN memories m ON m.id = e.memory_id
-      WHERE m.scope_id = ANY($2::uuid[])
-        AND m.state = 'live'
-        AND (m.expires_at IS NULL OR m.expires_at > now())
-        AND e.provider = $3
-        AND e.dim = $4
-        ${typeFilter}
+    `WITH provider_embeddings AS MATERIALIZED (
+       SELECT m.id AS memory_id, e.embedding
+         FROM memory_embeddings e
+         JOIN memories m ON m.id = e.memory_id
+        WHERE e.provider = $3 AND e.dim = $4
+          AND m.scope_id = ANY($2::uuid[])
+          AND m.state = 'live'
+          AND (m.expires_at IS NULL OR m.expires_at > clock_timestamp())
+          ${typeFilter}
+     )
+     SELECT e.memory_id AS id, e.embedding <=> $1::vector AS distance
+       FROM provider_embeddings e
       ORDER BY e.embedding <=> $1::vector
       LIMIT $${limitIdx}`,
     params,
@@ -95,19 +103,26 @@ export async function vectorSearchRelatedMemories(
   if (scopeIds.length === 0) return [];
   assertEmbeddingVectorDimension(queryVector, provider);
   const { rows } = await pool.query(
-    `SELECT m.id, m.type, m.title, m.body,
-            e.embedding <=> $1::vector AS distance
-       FROM memory_embeddings e
-       JOIN memories m ON m.id = e.memory_id
-      WHERE m.scope_id = ANY($2::uuid[])
-        AND m.state = 'live'
-        AND (m.expires_at IS NULL OR m.expires_at > now())
-        AND e.provider = $3
-        AND e.dim = $4
-        AND m.id <> $5::uuid
-        AND 1 - (e.embedding <=> $1::vector) >= $6
-      ORDER BY distance ASC, m.id ASC
-      LIMIT $7`,
+    `WITH provider_embeddings AS MATERIALIZED (
+       SELECT m.id AS memory_id, e.embedding
+         FROM memory_embeddings e
+         JOIN memories m ON m.id = e.memory_id
+        WHERE e.provider = $3 AND e.dim = $4
+          AND m.scope_id = ANY($2::uuid[])
+          AND m.state = 'live'
+          AND (m.expires_at IS NULL OR m.expires_at > clock_timestamp())
+          AND m.id <> $5::uuid
+     )
+     SELECT ranked.memory_id AS id, m.type, m.title, m.body, ranked.distance
+       FROM (
+         SELECT e.memory_id, e.embedding <=> $1::vector AS distance
+           FROM provider_embeddings e
+          WHERE 1 - (e.embedding <=> $1::vector) >= $6
+          ORDER BY distance ASC, e.memory_id ASC
+          LIMIT $7
+       ) ranked
+       JOIN memories m ON m.id = ranked.memory_id
+      ORDER BY ranked.distance ASC, ranked.memory_id ASC`,
     [
       toPgVector(queryVector), scopeIds, provider.id, provider.dim,
       options.excludeMemoryId, options.threshold, options.limit,

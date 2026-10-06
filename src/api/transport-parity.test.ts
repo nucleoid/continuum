@@ -296,7 +296,7 @@ describe('REST/MCP semantic parity matrix', () => {
       type: 'fact', title: 'Shape marker', excerpt: 'Exact shape marker content.',
       bodyTruncated: false,
       sourceRef: 'shape-ref', createdAt: expect.any(String),
-    }] });
+    }], diagnostics: { vector: 'disabled', groups: [] } });
     expect(toolJson(mcp)).toEqual([{
       id: expect.any(String), score: expect.any(Number), scope: 'project:shape',
       type: 'fact', title: 'Shape marker', excerpt: 'Exact shape marker content.',

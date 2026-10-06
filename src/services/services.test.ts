@@ -7,7 +7,7 @@ import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import { accessibleScopes, canReadScope, canWriteScope } from './access.js';
-import { captureMemory } from './capture.js';
+import { captureMemory, embedCapturedMemory } from './capture.js';
 import { recallForPrincipal } from './recall.js';
 import { renderAgentsMdForPrincipal } from './agents-md.js';
 import { ServiceError } from './errors.js';
@@ -383,7 +383,7 @@ describe('shared services', () => {
     };
 
     const result = await captureMemory(
-      poolRejecting(pool, 'SELECT m.id, m.type, m.title'), provider, principal,
+      poolRejecting(pool, 'SELECT ranked.memory_id AS id, m.type, m.title'), provider, principal,
       {
         scope: { kind: 'team', name: 'payments' }, type: 'fact',
         title: 'Probe fallback', body: 'private-probe-body', source: 'manual',
@@ -453,6 +453,29 @@ describe('shared services', () => {
     );
     expect(rows).toHaveLength(1);
     expect(rows[0].metadata.embedding_error_code).toBe('EMBEDDING_FAILED');
+  });
+
+  it('does not report a post-commit embedding when the memory is no longer live', async () => {
+    const { principal } = await seedWriter();
+    const captured = await captureMemory(pool, null, principal, {
+      scope: { kind: 'team', name: 'payments' },
+      type: 'fact',
+      title: 'Archived before embedding',
+      body: 'Must remain without a vector.',
+      source: 'manual',
+    });
+    await pool.query(`UPDATE memories SET state = 'archived' WHERE id = $1`, [captured.memory.id]);
+    const provider: EmbeddingProvider = {
+      id: 'test:lifecycle-noop', dim: 768, async embed() { return [unitVector(1)]; },
+    };
+
+    const result = await embedCapturedMemory(pool, provider, captured);
+
+    expect(result.embedded).toBe(false);
+    expect((await pool.query(
+      'SELECT count(*)::int AS count FROM memory_embeddings WHERE memory_id = $1',
+      [captured.memory.id],
+    )).rows[0].count).toBe(0);
   });
 
   it('recovers when related metadata persistence fails after embedding storage', async () => {

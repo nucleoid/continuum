@@ -51,6 +51,8 @@ export async function auditAgentsMdRead(
       principalId: principal.id,
       metadata: {
         view: 'agents-md',
+        // AGENTS.md uses deterministic scoped selection, not hybrid recall.
+        vector_status: 'not_applicable',
         project: input.project ?? null,
         team: input.team ?? null,
         hits: memories.length,

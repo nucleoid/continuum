@@ -61,6 +61,16 @@ Vector recall uses only rows whose provider ID and dimension exactly match the
 active provider. Changing models therefore leaves existing embedding rows
 untouched and temporarily makes their memories full-text-only until they are
 re-embedded. Switching back to the old model makes those rows usable again.
+Ollama uses the normalized, batch-capable `/api/embed` contract introduced in
+Ollama 0.3.4; older `/api/embeddings` installations are not normalized by
+Continuum and must be upgraded. Hosted providers use their native embeddings endpoint.
+Every provider sends bounded requests with a 10 second per-request deadline and
+a default batch size of 32. Override these with
+`CONTINUUM_EMBEDDING_TIMEOUT_MS` and `CONTINUUM_EMBEDDING_BATCH_SIZE` or the
+`timeout_ms` and `batch_size` fields in any routed provider definition. Invalid,
+non-finite, wrong-size, or wrong-cardinality responses fail the complete HTTP
+batch. Recall then returns full-text results with bounded diagnostics instead
+of failing the request.
 
 For per-scope routing, set `CONTINUUM_EMBEDDING_CONFIG` to a JSON object with
 provider definitions and a routing policy:
@@ -108,6 +118,10 @@ default is 10000 ms and the maximum is 300000 ms. Cancellation is forwarded to
 `fetch`; a provider implementation that ignores cancellation is still bounded
 by the local deadline.
 
+Recall shares one deadline across routed provider arms and their vector SQL. By
+default it follows the longest routed provider timeout but is capped at 30000
+ms so a permissive provider setting cannot hold a recall open indefinitely.
+
 OpenAI and Voyage credentials are read only from `OPENAI_API_KEY` and
 `VOYAGE_API_KEY`. Inline credentials are rejected. Ollama definitions must
 explicitly declare locality; a non-loopback endpoint marked local emits a
@@ -134,6 +148,41 @@ historical recall candidate. Live recall still routes each readable scope to
 its provider group and safely fuses the separate results. Provider outages
 degrade to exact/FTS behavior with explicit, content-free status and counts in
 the report audit.
+
+### Embedding backfill
+
+Preview missing embeddings before writing:
+
+```sh
+npm run embed-backfill -- --count
+npm run embed-backfill -- --dry-run --max-rows 100
+```
+
+Run a bounded provider-specific batch:
+
+```sh
+npm run embed-backfill -- --provider ollama:nomic-embed-text --batch-size 32 --max-rows 1000
+```
+
+The command routes every memory by its scope policy before sending text to a
+provider. A scope pinned to `local-only` is never sent to a hosted provider.
+Progress is checkpointed by provider, dimension, and optional `--scope` in
+stable memory-ID order. A provider-specific advisory lock prevents concurrent
+runs, successful writes are idempotent, and poison records are isolated with
+bounded diagnostics and sanitized durable failure entries. Use `--cursor UUID`
+together with `--provider` for an explicit restart point. The JSON report keeps
+per-provider cursors and safe error codes, continues healthy providers, and
+exits nonzero if any provider is incomplete. Known failures are retried only
+with the explicit provider-scoped `--retry-failures` control. See
+[`docs/embedding-backfill.md`](./docs/embedding-backfill.md) for no-wrap,
+mark-failed, rollout, deduplication, and rollback procedures.
+
+The scanner pages IDs and byte-count metadata first, then fetches title/body
+only for the current count- and byte-bounded provider batch; `--count` never
+selects bodies. Vector recall deliberately uses an exact provider-qualified
+scan for correctness. Large deployments must measure that scan and add
+provider-specific partitioning/indexing before it exceeds the 30-second recall
+cap; this change does not introduce an ANN redesign.
 
 ## License
 

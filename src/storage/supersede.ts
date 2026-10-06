@@ -88,6 +88,9 @@ async function supersedeInTransaction(client: pg.PoolClient, input: SupersedeWri
     [predecessor.id],
   );
   if (!archived.rows[0]) throw new SupersedeStorageError('not_live');
+  // Derived rows for the archived predecessor are removed in the same
+  // transaction as the lifecycle transition, independent of successor I/O.
+  await client.query('DELETE FROM memory_embeddings WHERE memory_id = $1', [predecessor.id]);
   await recordAudit(client, {
     principalId: input.principalId, action: 'write', memoryId: successor.id, scopeId: scope.id,
     metadata: {

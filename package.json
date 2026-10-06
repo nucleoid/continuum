@@ -22,6 +22,7 @@
     "docs/audit-api.md",
     "docs/audit-retention.md",
     "docs/cli.md",
+    "docs/embedding-backfill.md",
     "docs/knowledge-gap-insights.md",
     "docs/lifecycle.md",
     "docs/memory-api.md",
@@ -50,7 +51,9 @@
     "sweep:dev": "tsx src/lifecycle/sweep-cli.ts",
     "audit-retention": "node dist/maintenance/audit-retention-cli.js",
     "audit-retention:dev": "tsx src/maintenance/audit-retention-cli.ts",
-    "smoke:cli-package": "node scripts/cli-package-smoke.mjs"
+    "smoke:cli-package": "node scripts/cli-package-smoke.mjs",
+    "embed-backfill": "node dist/maintenance/embed-backfill-cli.js",
+    "embed-backfill:dev": "tsx src/maintenance/embed-backfill-cli.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
