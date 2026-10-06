@@ -368,7 +368,7 @@ describe('runMigrations', () => {
       )).rows).toEqual([
         expect.objectContaining({
           proname: 'continuum_offboarding_actual_state_is_erased',
-          prosrc: expect.stringContaining('CROSS JOIN linked_request'),
+          prosrc: expect.stringContaining('FROM linked_request request'),
         }),
         expect.objectContaining({
           proname: 'continuum_protect_offboarded_audit_tombstone',

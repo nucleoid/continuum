@@ -249,7 +249,21 @@ that file would not replay it. Migration
 `0040_offboarding_post_completion_integrity.sql` is the corresponding
 upgrade-safe follow-up for installations that already recorded `0039`: it
 protects the verified principal, owned-scope, and audit tombstones against
-post-completion mutation and reapplies owner-scoped function hardening.
+post-completion mutation and reapplies owner-scoped function hardening. It does
+not rewrite application tables or backfill rows, but it does replace guard
+functions and take the associated short catalog/function-definition locks.
+Its five-second `lock_timeout` and 30-second `statement_timeout` make lock
+contention a visible, retryable migration failure instead of an unbounded
+deployment stall; rerun the unapplied migration after the conflicting
+transaction drains.
+
+The post-completion scope and audit guards use `NOWAIT` when they key-share-lock
+the owning principal. This avoids the opposite lock-order deadlock between a
+dirty write and offboarding/reactivation. A concurrent conflict therefore
+fails immediately with PostgreSQL `55P03` (`lock_not_available`). The caller
+must roll back and retry the entire transaction after the lifecycle operation
+commits; do not retry only the rejected statement inside an aborted
+transaction.
 
 Linked-request erasure selects a bounded ordered request-ID window from
 `principal_offboarding_audit_requests`, then performs one indexed
@@ -258,10 +272,13 @@ never walks the global request-history index to discover another principal's
 request IDs. The durable request-ID and audit-ID cursor pair advances across
 full and final partial batches without rescanning unrelated users.
 
-Production must use separate migration-owner and application roles. Run
-`continuum-migrate` with `CONTINUUM_DATABASE_URL` set to the migration owner,
-then start Continuum with the same variable set to a non-owner application
-role. The application role must not own the event ledger, completion-capability
+Production must use separate migration-owner and application roles. Drain old
+offboarding-capable API, MCP, admin, and membership-sync processes; run
+`continuum-migrate` through `0040` with `CONTINUUM_DATABASE_URL` set to the
+migration owner; apply the exact grant script below; and only then start the new
+binaries with the same variable set to a non-owner application role. Do not run
+offboarding across mixed `0038`/`0039`/`0040` application or grant versions.
+The application role must not own the event ledger, completion-capability
 table, or security-definer functions, and receives no direct privilege on the
 capability table. Direct `completed` inserts then fail at the trigger.
 Apply the repository's exact offboarding grants after migration (the role must
