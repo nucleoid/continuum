@@ -806,21 +806,37 @@ describe('PromotionEventWorker', () => {
     vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
     const releaseSlow = deferred();
     try {
+      const probeRegistry = new PromotionWebhookRegistry();
+      probeRegistry.register({ id: 'capacity-probe', onPromoted: async () => undefined });
+      const probeStore = mockStore();
+      const probe = new PromotionEventWorker(
+        pool,
+        probeRegistry,
+        workerOptions({ claimBatch: 100, leaseMs: 90, callbackTimeoutMs: 20 }),
+        probeStore,
+      );
+      await probe.drainOnce();
+      const observableCapacity = (probeStore.claim as ReturnType<typeof vi.fn>).mock.calls[0][1]
+        .limit as number;
+      expect(observableCapacity).toBeGreaterThan(1);
+
       const slowEntered = deferred();
       const slowRegistry = new PromotionWebhookRegistry();
       slowRegistry.register({
-        id: 'slow',
+        id: 'fairness-slow',
         onPromoted: async () => {
           slowEntered.resolve();
           await releaseSlow.promise;
         },
       });
       const healthyRegistry = new PromotionWebhookRegistry();
-      healthyRegistry.register({ id: 'slow', onPromoted: async () => undefined });
-      healthyRegistry.register({ id: 'healthy', onPromoted: async () => undefined });
+      healthyRegistry.register({ id: 'fairness-slow', onPromoted: async () => undefined });
+      healthyRegistry.register({ id: 'fairness-healthy', onPromoted: async () => undefined });
       const store = mockStore({
         claim: vi.fn().mockResolvedValueOnce([{
-          ...claimedDelivery, webhookId: 'slow',
+          ...claimedDelivery,
+          event: { ...claimedDelivery.event, eventId: 'fairness-event' },
+          webhookId: 'fairness-slow',
         }]).mockResolvedValue([]),
       });
       const slowWorker = new PromotionEventWorker(
@@ -844,9 +860,15 @@ describe('PromotionEventWorker', () => {
       await instance.drainOnce();
       const inputs = (store.claim as ReturnType<typeof vi.fn>).mock.calls
         .map((call) => call[1]);
-      expect(inputs.reduce((sum, input) => sum + input.limit, 0)).toBe(99);
+      const availableAfterSlowOccupant = observableCapacity - 1;
+      expect(inputs.reduce((sum, input) => sum + input.limit, 0))
+        .toBe(availableAfterSlowOccupant);
+      const finalObservableOccupancy = availableAfterSlowOccupant + 1;
       expect(Object.fromEntries(inputs.map((input) => [input.webhookIds[0], input.limit])))
-        .toEqual({ slow: 49, healthy: 50 });
+        .toEqual({
+          'fairness-slow': Math.floor(finalObservableOccupancy / 2) - 1,
+          'fairness-healthy': Math.ceil(finalObservableOccupancy / 2),
+        });
     } finally {
       releaseSlow.resolve();
       await vi.runAllTimersAsync();
