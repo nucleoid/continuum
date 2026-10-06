@@ -46,7 +46,11 @@ limit and every truncated field; an unlisted field is exact. It also
 returns bounded, sorted member and author principal UUID evidence, explicit
 truncation flags, and audit selection counts by principal, scope, memory,
 `scope_ids`, and linked request. This lets the operator detect a mistaken
-mapping without exposing names or memory content.
+mapping without exposing names or memory content. Audit preview limits apply to
+rows examined before redaction-policy filtering. If a branch reaches that
+limit, or linked-request truth cannot be established within the same bounded
+sample, `auditRows` and `auditQueries` are explicitly truncated/unknown even
+when the returned dirty-row count is zero.
 
 Execution immediately disables and pseudonymizes the principal and scope,
 deactivates owned-scope access, quarantines its Entra bindings, and deletes
@@ -55,7 +59,11 @@ memories and audit rows are processed in retry-safe batches. `batchSize`
 defaults to 1,000 and accepts 1 through 5,000 through REST or CLI
 `--batch-size`; each response reports cumulative processed counts, bounded
 remaining-work indicators, batch number, and `complete`. Durable UUID and audit
-ID keyset cursors ensure every resumed batch scans bounded windows. After the
+ID keyset cursors ensure every resumed batch scans bounded windows. Memory audit
+rows use a durable `(memory_id, audit_id)` cursor over subject-owned memories;
+linked rows use a durable request-ID cursor plus a per-request audit-ID cursor
+and process at most one request ID per batch. `scope_ids` uses its GIN predicate
+before its audit-ID cursor, rather than walking the global audit log. After the
 principal and owned-scope write fence is closed, the run records one immutable
 audit high-water ID. Every selector exhausts only its window through that fence;
 the linked-request selector starts after request-ID discovery is complete.
@@ -67,11 +75,14 @@ default; `--once` performs one batch for external orchestration, and
 `list-incomplete-offboarding` lists durable unfinished runs. Every membership on the owned scope
 is deactivated, including delegate and ingest identities. Database triggers
 reject later active memberships or bindings while its owner remains offboarded.
-Safe retries return
-`alreadyOffboarded: true` only after verifying the exact memory tombstone fields,
+Safe retries return `alreadyOffboarded: true` only when an immutable `completed`
+run event exists for the current run UUID and after verifying the exact memory tombstone fields,
 principal and scope pseudonyms, zero embeddings, aliases, active memberships,
 and zero unrevoked Entra bindings,
-and no dirty audit query or metadata rows. Dry-run and retry output includes
+and the database write fences remain closed. Historical audit cleanliness is
+trusted from that immutable completion receipt and fixed fence; completed
+retries do not rescan clean pre-fence history. Rows above the fence are rejected
+at the principal/owned-scope audit boundary. Dry-run and retry output includes
 dirty-memory and dirty-audit indicators. Retry output also includes the first durable
 evidence ID, timestamp, and exact cumulative processed counts from the completed
 run. A dirty
@@ -128,7 +139,12 @@ UUID, initiator UUID, exact approval ID, and acknowledgement hash is appended to
 preserves the initiator, identifies the finalizer, and records exact cumulative
 processed counts. The ledger rejects update,
 delete, and truncate; mutable cursor progress is never the sole authorization
-record.
+record. Direct deletion of run progress is rejected, `completed_at` cannot be
+set without the matching append-only completion row, and fences/cursors cannot
+move backwards within a run. Reactivation reads the immutable completed event,
+not mutable `completed_at`, and appends a `reactivated` event with the presented
+administrator UUID before committing. This evidence survives ordinary
+`audit_log` retention.
 
 Disabling the principal atomically deactivates all sourced memberships and
 revokes service credentials. Provider aliases resolving to the user are deleted
@@ -186,6 +202,13 @@ UUID as `authorization_principal_id`. It does not claim that UUID is the SQL
 caller. The application writes the authenticated actor's
 `principal_reactivated` audit in the same transaction, so failure of either
 audit rolls back the lifecycle update.
+Migration `0030_offboarding_round7_integrity.sql` closes two-step marker
+clearing, protects mutable run progress, adds compound memory/request cursors,
+records immutable reactivation evidence, and resolves memory-only audit rows to
+their owned scope. Migration `0031_offboarding_round7_indexes.sql` builds the
+subject-memory cursor index concurrently and requires it to be valid before the
+migration is recorded. Read-audit producers also discard caller-supplied
+`operation`, `source`, `request_id`, and `record_kind` policy keys.
 
 Continuum uses one shared `CONTINUUM_DATABASE_URL` role for migrations and
 application queries. PostgreSQL therefore cannot bind a per-request caller to
@@ -205,10 +228,10 @@ requires the exact index to exist and be valid before the migration ledger can
 record success. A timeout or failed build leaves the file unapplied and safely
 retryable.
 
-Apply all eight offboarding migrations before starting the new application version. Old
+Apply all ten offboarding migrations before starting the new application version. Old
 instances can continue ordinary traffic after `0023`, but they do not know the
 offboarding workflow and an old authenticated request may already be in flight.
-Do not invoke offboarding until all eight migrations are recorded on every shared
+Do not invoke offboarding until all ten migrations are recorded on every shared
 database and all old application instances have drained. Rollback is
 application-first: stop invoking offboarding, drain the new instances, and
 deploy the old application only after `list-incomplete-offboarding` reports

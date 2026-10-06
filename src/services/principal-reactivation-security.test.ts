@@ -3,9 +3,10 @@ import type pg from 'pg';
 import { LIFECYCLE_PRINCIPAL_ID } from '../lifecycle/principal.js';
 import { addMembership } from '../storage/memberships.js';
 import { createPrincipal } from '../storage/principals.js';
-import { getScopeByRef } from '../storage/scopes.js';
+import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { reactivatePrincipal } from './principal-admin.js';
+import { mapOwnedUserScope, offboardPrincipal } from './offboarding.js';
 
 async function fixture(pool: pg.Pool) {
   const admin = await createPrincipal(pool, {
@@ -16,10 +17,15 @@ async function fixture(pool: pg.Pool) {
   });
   const org = await getScopeByRef(pool, { kind: 'org', name: '' });
   await addMembership(pool, admin.id, org!.id, 'admin');
-  await pool.query(
-    'UPDATE principals SET disabled_at = now(), offboarded_at = now() WHERE id = $1',
-    [target.id],
-  );
+  const scope = await createScope(pool, { kind: 'user', name: 'reactivation-security-owned' });
+  await addMembership(pool, target.id, scope.id, 'writer');
+  await mapOwnedUserScope(pool, admin, target.id, scope.id);
+  let offboarded = await offboardPrincipal(pool, admin, target.id, {
+    confirmationScopeId: scope.id,
+  });
+  while (!offboarded.complete) offboarded = await offboardPrincipal(pool, admin, target.id, {
+    confirmationScopeId: scope.id,
+  });
   return { admin, target };
 }
 

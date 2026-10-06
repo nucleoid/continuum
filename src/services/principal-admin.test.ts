@@ -3,9 +3,10 @@ import type pg from 'pg';
 import { createAuthenticator } from '../api/auth.js';
 import { addMembership } from '../storage/memberships.js';
 import { createPrincipal } from '../storage/principals.js';
-import { getScopeByRef } from '../storage/scopes.js';
+import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { issueApiKey } from './api-keys.js';
+import { mapOwnedUserScope, offboardPrincipal } from './offboarding.js';
 import {
   disablePrincipal, provisionServicePrincipal, reactivatePrincipal,
 } from './principal-admin.js';
@@ -71,9 +72,15 @@ describe('principal administration', () => {
     });
     const org = await getScopeByRef(pool, { kind: 'org', name: '' });
     await addMembership(pool, admin.id, org!.id, 'admin');
-    await pool.query(
-      'UPDATE principals SET disabled_at = now(), offboarded_at = now() WHERE id = $1', [target.id],
-    );
+    const scope = await createScope(pool, { kind: 'user', name: 'reactivation-owned' });
+    await addMembership(pool, target.id, scope.id, 'writer');
+    await mapOwnedUserScope(pool, admin, target.id, scope.id);
+    let offboarded = await offboardPrincipal(pool, admin, target.id, {
+      confirmationScopeId: scope.id,
+    });
+    while (!offboarded.complete) offboarded = await offboardPrincipal(pool, admin, target.id, {
+      confirmationScopeId: scope.id,
+    });
     await reactivatePrincipal(pool, admin, target.id);
     expect((await pool.query(
       'SELECT disabled_at, offboarded_at, reactivated_at IS NOT NULL AS reactivated FROM principals WHERE id = $1',

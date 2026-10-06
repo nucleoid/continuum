@@ -57,6 +57,15 @@ export async function recordRead(
 ): Promise<void> {
   const requestId = randomUUID();
   const transport = entry.metadata?.transport;
+  // These keys select retention/redaction policy and are owned by audit
+  // producers. Read callers may supply request context, never a policy label.
+  const {
+    operation: _operation,
+    source: _source,
+    request_id: _requestId,
+    record_kind: _recordKind,
+    ...requestMetadata
+  } = entry.metadata ?? {};
   const seen = new Set<string>();
   const memories = entry.memories.filter((memory) => {
     if (seen.has(memory.memoryId)) return false;
@@ -69,7 +78,7 @@ export async function recordRead(
       scope_id: null,
       query: entry.query ?? null,
       metadata: {
-        ...entry.metadata,
+        ...requestMetadata,
         request_id: requestId,
         record_kind: 'summary',
       },

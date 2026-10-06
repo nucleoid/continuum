@@ -373,37 +373,37 @@ const AUDIT_NOT_PRESERVED = `COALESCE(a.metadata->>'operation', '')
   <> ALL($3::text[])`;
 
 type AuditCursorColumn = 'audit_principal_cursor' | 'audit_scope_cursor'
-  | 'audit_memory_cursor' | 'audit_scope_ids_cursor' | 'audit_linked_cursor';
+  | 'audit_scope_ids_cursor';
 type AuditSelectionReason = 'principal' | 'scope' | 'memory'
   | 'scope_ids' | 'linked_request';
+
+interface RunAuditState extends Record<string, unknown> {
+  audit_fence_id: string | null;
+  audit_principal_cursor: string;
+  audit_scope_cursor: string;
+  audit_scope_ids_cursor: string;
+  audit_memory_key_cursor: string | null;
+  audit_memory_item_cursor: string;
+  audit_memory_complete: boolean;
+  audit_linked_request_cursor: string | null;
+  audit_linked_request_item_cursor: string;
+  audit_linked_request_exhausted: boolean;
+  audit_linked_complete: boolean;
+}
 
 export function offboardingAuditBranchSql(
   reason: AuditSelectionReason,
   from: string,
   where: string,
 ): string {
-  // The memory and scope_ids selectors intentionally filter after a bounded
-  // primary-key window. Their predicates cannot drive one selective composite
-  // cursor index without an unbounded ID set or JSON expansion.
-  const globalWindow = reason === 'memory' || reason === 'scope_ids';
-  const boundedScan = globalWindow
-    ? `SELECT a.* FROM audit_log a
-        WHERE a.id > $4 AND a.id <= $7
-          AND $1::uuid IS NOT NULL AND $2::uuid IS NOT NULL
-        ORDER BY a.id LIMIT $5`
-    : `SELECT a.* ${from}
+  if (reason === 'memory' || reason === 'linked_request') {
+    throw new Error(`${reason} uses its durable compound cursor selector`);
+  }
+  return `WITH candidates AS MATERIALIZED (
+       SELECT a.* ${from}
         WHERE a.id > $4 AND a.id <= $7
           AND $1::uuid IS NOT NULL AND $2::uuid IS NOT NULL AND ${where}
-        ORDER BY a.id LIMIT $5`;
-  const candidateSelection = reason === 'memory'
-    ? `SELECT a.* FROM scan a JOIN memories m ON m.id = a.memory_id
-        WHERE m.scope_id = $1`
-    : reason === 'scope_ids'
-      ? `SELECT a.* FROM scan a WHERE ${where}`
-      : 'SELECT a.* FROM scan a';
-  return `WITH scan AS MATERIALIZED (${boundedScan}),
-     candidates AS MATERIALIZED (
-       ${candidateSelection}
+        ORDER BY a.id LIMIT $5
      ), requests AS (
        INSERT INTO principal_offboarding_audit_requests (principal_id, request_id)
        SELECT DISTINCT $2, a.metadata->>'request_id'
@@ -420,8 +420,8 @@ export function offboardingAuditBranchSql(
        ON CONFLICT (id) DO NOTHING RETURNING id
      )
      SELECT CASE
-              WHEN (SELECT count(*) FROM scan) < $5 THEN $7::bigint
-              ELSE COALESCE((SELECT max(id) FROM scan), $7::bigint)
+              WHEN (SELECT count(*) FROM candidates) < $5 THEN $7::bigint
+              ELSE COALESCE((SELECT max(id) FROM candidates), $7::bigint)
             END::text AS cursor,
             (SELECT count(*)::int FROM inserted) AS inserted`;
 }
@@ -451,31 +451,174 @@ async function selectAuditBranch(
   return Number(selected.rows[0].inserted);
 }
 
-function auditCursorsExhausted(
-  run: Record<AuditCursorColumn | 'audit_fence_id', string | null>,
-): boolean {
+export function offboardingMemoryAuditSql(): string {
+  return `WITH candidates AS MATERIALIZED (
+      SELECT a.*, m.id AS subject_memory_id
+        FROM memories m
+        JOIN audit_log a ON a.memory_id = m.id
+       WHERE m.scope_id = $1 AND a.id <= $7
+         AND ($4::uuid IS NULL OR m.id > $4
+           OR (m.id = $4 AND a.id > $5))
+       ORDER BY m.id, a.id LIMIT $6
+    ), requests AS (
+      INSERT INTO principal_offboarding_audit_requests (principal_id, request_id)
+      SELECT DISTINCT $2::uuid, metadata->>'request_id' FROM candidates
+       WHERE metadata->>'request_id' IS NOT NULL
+      ON CONFLICT DO NOTHING RETURNING request_id
+    ), selected AS (
+      SELECT a.id, a.metadata->>'request_id' AS request_id FROM candidates a
+       WHERE ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED}
+    ), inserted AS (
+      INSERT INTO offboarding_audit_targets (id, request_id, reason)
+      SELECT id, request_id, 'memory' FROM selected
+      ON CONFLICT (id) DO NOTHING RETURNING id
+    )
+    SELECT (SELECT subject_memory_id::text FROM candidates
+             ORDER BY subject_memory_id DESC, id DESC LIMIT 1) AS memory_cursor,
+           (SELECT id::text FROM candidates
+             ORDER BY subject_memory_id DESC, id DESC LIMIT 1) AS item_cursor,
+           (SELECT count(*)::int FROM candidates) AS examined,
+           (SELECT count(*)::int FROM inserted) AS inserted`;
+}
+
+export function offboardingLinkedAuditSql(): string {
+  return `WITH candidates AS MATERIALIZED (
+       SELECT a.* FROM audit_log a
+        WHERE a.metadata ? 'request_id' AND a.metadata->>'request_id' = $1
+          AND a.id > $2 AND a.id <= $5 ORDER BY a.id LIMIT $4
+     ), selected AS (
+       SELECT a.id, a.metadata->>'request_id' AS request_id FROM candidates a
+        WHERE ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED}
+     ), inserted AS (
+       INSERT INTO offboarding_audit_targets (id, request_id, reason)
+       SELECT id, request_id, 'linked_request' FROM selected
+       ON CONFLICT (id) DO NOTHING RETURNING id
+     )
+     SELECT (SELECT count(*)::int FROM candidates) AS examined,
+            (SELECT max(id)::text FROM candidates) AS item_cursor,
+            (SELECT count(*)::int FROM inserted) AS inserted`;
+}
+
+async function selectMemoryAuditBranch(
+  client: pg.PoolClient, run: RunAuditState,
+  args: { principalId: string; scopeId: string; remaining: number },
+): Promise<number> {
+  if (args.remaining <= 0 || run.audit_memory_complete) return 0;
+  const selected = await client.query(offboardingMemoryAuditSql(), [
+    args.scopeId, args.principalId, [...PRESERVED_AUDIT_OPERATIONS],
+    run.audit_memory_key_cursor, run.audit_memory_item_cursor,
+    args.remaining, run.audit_fence_id,
+  ]);
+  const row = selected.rows[0];
+  if (Number(row.examined) < args.remaining) {
+    await client.query(
+      `UPDATE principal_offboarding_runs
+          SET audit_memory_complete = TRUE, audit_memory_cursor = audit_fence_id
+        WHERE principal_id = $1`, [args.principalId],
+    );
+    run.audit_memory_complete = true;
+  } else {
+    await client.query(
+      `UPDATE principal_offboarding_runs
+          SET audit_memory_key_cursor = $2, audit_memory_item_cursor = $3
+        WHERE principal_id = $1`,
+      [args.principalId, row.memory_cursor, row.item_cursor],
+    );
+    run.audit_memory_key_cursor = row.memory_cursor as string;
+    run.audit_memory_item_cursor = row.item_cursor as string;
+  }
+  return Number(row.inserted);
+}
+
+async function selectLinkedAuditBranch(
+  client: pg.PoolClient, run: RunAuditState,
+  args: { principalId: string; remaining: number },
+): Promise<number> {
+  if (args.remaining <= 0 || run.audit_linked_complete) return 0;
+  const request = await client.query(
+    `SELECT request_id FROM principal_offboarding_audit_requests
+      WHERE principal_id = $1 AND ($2::text IS NULL OR request_id > $2
+        OR (request_id = $2 AND NOT $3::boolean))
+      ORDER BY request_id LIMIT 1`,
+    [args.principalId, run.audit_linked_request_cursor,
+      run.audit_linked_request_exhausted],
+  );
+  if (!request.rowCount) {
+    await client.query(
+      `UPDATE principal_offboarding_runs
+          SET audit_linked_complete = TRUE, audit_linked_cursor = audit_fence_id
+        WHERE principal_id = $1`, [args.principalId],
+    );
+    run.audit_linked_complete = true;
+    return 0;
+  }
+  const requestId = request.rows[0].request_id as string;
+  const continuing = requestId === run.audit_linked_request_cursor
+    && !run.audit_linked_request_exhausted;
+  const itemCursor = continuing
+    ? run.audit_linked_request_item_cursor : '0';
+  const selected = await client.query(
+    offboardingLinkedAuditSql(),
+    [requestId, itemCursor, [...PRESERVED_AUDIT_OPERATIONS], args.remaining,
+      run.audit_fence_id],
+  );
+  const row = selected.rows[0];
+  if (Number(row.examined) < args.remaining) {
+    const moreRequests = await client.query(
+      `SELECT 1 FROM principal_offboarding_audit_requests
+        WHERE principal_id = $1 AND request_id > $2 LIMIT 1`,
+      [args.principalId, requestId],
+    );
+    await client.query(
+      `UPDATE principal_offboarding_runs
+          SET audit_linked_request_cursor = $2,
+              audit_linked_request_item_cursor = $3,
+              audit_linked_request_exhausted = TRUE,
+              audit_linked_complete = $4,
+              audit_linked_cursor = CASE WHEN $4 THEN audit_fence_id
+                                         ELSE audit_linked_cursor END
+        WHERE principal_id = $1`,
+      [args.principalId, requestId, row.item_cursor ?? itemCursor, !moreRequests.rowCount],
+    );
+    run.audit_linked_request_cursor = requestId;
+    run.audit_linked_request_item_cursor = (row.item_cursor ?? itemCursor) as string;
+    run.audit_linked_request_exhausted = true;
+    run.audit_linked_complete = !moreRequests.rowCount;
+  } else {
+    await client.query(
+      `UPDATE principal_offboarding_runs
+          SET audit_linked_request_cursor = $2,
+              audit_linked_request_item_cursor = $3,
+              audit_linked_request_exhausted = FALSE
+        WHERE principal_id = $1`, [args.principalId, requestId, row.item_cursor],
+    );
+    run.audit_linked_request_cursor = requestId;
+    run.audit_linked_request_item_cursor = row.item_cursor as string;
+    run.audit_linked_request_exhausted = false;
+  }
+  return Number(row.inserted);
+}
+
+function auditCursorsExhausted(run: RunAuditState): boolean {
   if (run.audit_fence_id === null) return false;
   const fence = BigInt(run.audit_fence_id);
-  return ([
-    'audit_principal_cursor', 'audit_scope_cursor', 'audit_memory_cursor',
-    'audit_scope_ids_cursor', 'audit_linked_cursor',
-  ] as const).every((cursor) => BigInt(run[cursor] ?? '0') >= fence);
+  return BigInt(run.audit_principal_cursor) >= fence
+    && BigInt(run.audit_scope_cursor) >= fence
+    && BigInt(run.audit_scope_ids_cursor) >= fence
+    && run.audit_memory_complete && run.audit_linked_complete;
 }
 
 async function stateWorkRemains(
-  client: pg.PoolClient, scopeId: string, principalId: string, memoryCursor?: string | null,
+  client: pg.PoolClient, scopeId: string, principalId: string, _memoryCursor?: string | null,
 ): Promise<{ memories: boolean; embeddings: boolean; memberships: boolean;
   aliases: boolean; entraBindings: boolean }> {
   const result = await client.query(
     `SELECT
        EXISTS (SELECT 1 FROM memories WHERE scope_id = $1 AND (
-         ($3::uuid IS NOT NULL AND id > $3)
-         OR ($3::uuid IS NULL AND (
-           type <> 'context' OR title <> '[erased]' OR body <> '[erased]'
-           OR metadata <> '{}'::jsonb OR tags <> '{}'::text[] OR source <> 'erased'
-           OR source_ref IS NOT NULL OR state <> 'archived' OR supersedes_id IS NOT NULL
-           OR promoted_to_id IS NOT NULL OR expires_at IS NOT NULL OR last_verified IS NOT NULL
-         ))
+         type <> 'context' OR title <> '[erased]' OR body <> '[erased]'
+         OR metadata <> '{}'::jsonb OR tags <> '{}'::text[] OR source <> 'erased'
+         OR source_ref IS NOT NULL OR state <> 'archived' OR supersedes_id IS NOT NULL
+         OR promoted_to_id IS NOT NULL OR expires_at IS NOT NULL OR last_verified IS NOT NULL
        ) LIMIT 1) AS memories,
        EXISTS (SELECT 1 FROM memory_embeddings e JOIN memories m ON m.id = e.memory_id
          WHERE m.scope_id = $1 LIMIT 1) AS embeddings,
@@ -483,7 +626,7 @@ async function stateWorkRemains(
        EXISTS (SELECT 1 FROM principal_aliases WHERE principal_id = $2 LIMIT 1) AS aliases,
        EXISTS (SELECT 1 FROM entra_groups WHERE scope_id = $1
          AND (active OR approval_revoked_at IS NULL) LIMIT 1) AS entra_bindings`,
-    [scopeId, principalId, memoryCursor ?? null],
+    [scopeId, principalId],
   );
   return result.rows[0] as {
     memories: boolean; embeddings: boolean; memberships: boolean;
@@ -498,48 +641,39 @@ async function boundedAuditPreview(
   limit: number,
 ): Promise<{ selection: AuditSelectionCounts; queries: number; truncated: boolean }> {
   const selected = await client.query(
-    `WITH direct_candidates AS (
-       (SELECT a.id, a.query, a.metadata->>'request_id' AS request_id,
-              'principal'::text AS reason, 1 AS priority
-         FROM audit_log a
-        WHERE a.principal_id = $2 AND ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED}
-        ORDER BY a.id LIMIT ($4 + 1))
+    `WITH examined AS MATERIALIZED (
+       (SELECT a.*, 'principal'::text AS reason, 1 AS priority
+          FROM audit_log a WHERE a.principal_id = $2
+         ORDER BY a.id LIMIT ($4 + 1))
        UNION ALL
-       (SELECT a.id, a.query, a.metadata->>'request_id', 'scope', 2
-         FROM audit_log a
-        WHERE a.scope_id = $1 AND ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED}
-        ORDER BY a.id LIMIT ($4 + 1))
+       (SELECT a.*, 'scope', 2 FROM audit_log a WHERE a.scope_id = $1
+         ORDER BY a.id LIMIT ($4 + 1))
        UNION ALL
-       (SELECT a.id, a.query, a.metadata->>'request_id', 'memory', 3
-         FROM memories m JOIN audit_log a ON a.memory_id = m.id
-        WHERE m.scope_id = $1 AND ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED}
-        ORDER BY a.id LIMIT ($4 + 1))
+       (SELECT a.*, 'memory', 3 FROM memories m
+          JOIN audit_log a ON a.memory_id = m.id WHERE m.scope_id = $1
+         ORDER BY m.id, a.id LIMIT ($4 + 1))
        UNION ALL
-       (SELECT a.id, a.query, a.metadata->>'request_id', 'scope_ids', 4
-         FROM audit_log a
-        WHERE a.metadata ? 'scope_ids'
-          AND a.metadata->'scope_ids' @> jsonb_build_array($1::text)
-          AND ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED}
-        ORDER BY a.id LIMIT ($4 + 1))
+       (SELECT a.*, 'scope_ids', 4 FROM audit_log a
+         WHERE a.metadata ? 'scope_ids'
+           AND a.metadata->'scope_ids' @> jsonb_build_array($1::text)
+         ORDER BY a.id LIMIT ($4 + 1))
      ), direct AS (
-       SELECT DISTINCT ON (id) id, query, request_id, reason
-         FROM direct_candidates ORDER BY id, priority
+       SELECT DISTINCT ON (id) examined.* FROM examined ORDER BY id, priority
      ), request_ids AS (
-       SELECT DISTINCT request_id FROM direct WHERE request_id IS NOT NULL
-       UNION
-       SELECT request_id FROM principal_offboarding_audit_requests
-        WHERE principal_id = $2
-     ), linked AS (
-       SELECT a.id, a.query, 'linked_request'::text AS reason
-         FROM request_ids r JOIN audit_log a
-           ON a.metadata ? 'request_id' AND a.metadata->>'request_id' = r.request_id
-        WHERE ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED}
-          AND NOT EXISTS (SELECT 1 FROM direct d WHERE d.id = a.id)
+       SELECT DISTINCT metadata->>'request_id' AS request_id FROM direct
+        WHERE metadata->>'request_id' IS NOT NULL ORDER BY request_id LIMIT ($4 + 1)
+     ), linked_examined AS MATERIALIZED (
+       SELECT a.* FROM audit_log a
+        WHERE a.metadata ? 'request_id' AND a.metadata->>'request_id' =
+          (SELECT request_id FROM request_ids ORDER BY request_id LIMIT 1)
         ORDER BY a.id LIMIT ($4 + 1)
      ), targets AS (
-       SELECT id, query, reason FROM direct
+       SELECT a.id, a.query, a.reason FROM direct a
+        WHERE ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED}
        UNION ALL
-       SELECT id, query, reason FROM linked
+       SELECT a.id, a.query, 'linked_request' FROM linked_examined a
+        WHERE ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED}
+          AND NOT EXISTS (SELECT 1 FROM direct d WHERE d.id = a.id)
      ), bounded_targets AS (
        SELECT * FROM targets ORDER BY id LIMIT ($4 + 1)
      ), sample AS (
@@ -552,7 +686,12 @@ async function boundedAuditPreview(
             count(*) FILTER (WHERE reason = 'linked_request')::int AS linked_request,
             count(*)::int AS total,
             count(*) FILTER (WHERE query IS NOT NULL)::int AS queries,
-            ((SELECT count(*) FROM bounded_targets) > $4) AS truncated
+            ((SELECT count(*) FROM bounded_targets) > $4
+              OR EXISTS (
+                SELECT 1 FROM examined GROUP BY reason HAVING count(*) > $4
+              )
+              OR (SELECT count(*) FROM request_ids) > 1
+              OR (SELECT count(*) FROM linked_examined) > $4) AS truncated
        FROM sample`,
     [scopeId, principalId, [...PRESERVED_AUDIT_OPERATIONS], limit],
   );
@@ -731,12 +870,17 @@ async function offboardPrincipalCore(
       `SELECT * FROM principal_offboarding_runs WHERE principal_id = $1${dryRun ? '' : ' FOR UPDATE'}`,
       [principalId],
     );
-    const resumedRun = run.rows[0]?.completed_at === null;
+    const completedEvidence = run.rowCount ? await client.query(
+      `SELECT 1 FROM principal_offboarding_run_events
+        WHERE run_id = $1 AND phase = 'completed' LIMIT 1`, [run.rows[0].run_id],
+    ) : null;
+    const runCompleted = (completedEvidence?.rowCount ?? 0) > 0;
+    const resumedRun = Boolean(run.rowCount) && !runCompleted;
     const resumedState = resumedRun
       ? await stateWorkRemains(client, scopeId, principalId, run.rows[0].memory_cursor) : null;
     const resumedAuditRemains = resumedRun
       ? !auditCursorsExhausted(
-        run.rows[0] as Record<AuditCursorColumn | 'audit_fence_id', string | null>,
+        run.rows[0] as RunAuditState,
       ) : false;
     const state = resumedRun ? null : await client.query(
       `SELECT
@@ -760,6 +904,13 @@ async function offboardPrincipalCore(
       selection: run.rows[0].initial_audit_selection as AuditSelectionCounts,
       queries: Number(run.rows[0].initial_audit_queries),
       truncated: (run.rows[0].initial_count_truncated as string[]).includes('auditRows'),
+    } : runCompleted ? {
+      selection: {
+        principal: 0, scope: 0, memory: 0, scopeIds: 0,
+        linkedRequest: 0, scopeName: 0, total: 0,
+      },
+      queries: 0,
+      truncated: false,
     } : await boundedAuditPreview(client, scopeId, principalId, batchSize);
     const row = resumedRun ? {
       memories: run.rows[0].initial_memories,
@@ -845,7 +996,7 @@ async function offboardPrincipalCore(
     if (dryRun) { await client.query('ROLLBACK'); return baseResult; }
     if (alreadyOffboarded) { await client.query('COMMIT'); return baseResult; }
 
-    if (run.rows[0]?.completed_at !== null && run.rows[0]?.completed_at !== undefined) {
+    if (runCompleted) {
       await client.query(
         `UPDATE principal_offboarding_runs
             SET run_id = gen_random_uuid(), initiated_by = $2::uuid, approval_id = $3,
@@ -861,6 +1012,10 @@ async function offboardPrincipalCore(
                 audit_queries_processed = 0, batches = 0,
                 memory_cursor = NULL, audit_principal_cursor = 0, audit_scope_cursor = 0,
                 audit_memory_cursor = 0, audit_scope_ids_cursor = 0, audit_linked_cursor = 0,
+                audit_memory_key_cursor = NULL, audit_memory_item_cursor = 0,
+                audit_memory_complete = FALSE, audit_linked_request_cursor = NULL,
+                audit_linked_request_item_cursor = 0,
+                audit_linked_request_exhausted = FALSE, audit_linked_complete = FALSE,
                 audit_fence_id = NULL, completed_at = NULL
           WHERE principal_id = $1`,
         [principalId, actor.id, approvalId, memories, embeddings, memberships, aliases,
@@ -1006,36 +1161,34 @@ async function offboardPrincipalCore(
     };
     await branch('audit_principal_cursor', 'principal', 'FROM audit_log a', 'a.principal_id = $2');
     await branch('audit_scope_cursor', 'scope', 'FROM audit_log a', 'a.scope_id = $1');
-    await branch(
-      'audit_memory_cursor', 'memory',
-      'FROM memories m JOIN audit_log a ON a.memory_id = m.id', 'm.scope_id = $1',
-    );
+    auditBatch += await selectMemoryAuditBranch(client, run.rows[0] as RunAuditState, {
+      principalId, scopeId, remaining: batchSize - auditBatch,
+    });
     await branch(
       'audit_scope_ids_cursor', 'scope_ids', 'FROM audit_log a',
       `a.metadata ? 'scope_ids' AND a.metadata->'scope_ids' @> jsonb_build_array($1::text)`,
     );
     const directCursors = await client.query(
       `SELECT audit_fence_id, audit_principal_cursor, audit_scope_cursor,
-              audit_memory_cursor, audit_scope_ids_cursor
+              audit_scope_ids_cursor, audit_memory_key_cursor,
+              audit_memory_item_cursor, audit_memory_complete,
+              audit_linked_request_cursor, audit_linked_request_item_cursor,
+              audit_linked_request_exhausted, audit_linked_complete
          FROM principal_offboarding_runs WHERE principal_id = $1`,
       [principalId],
     );
     const direct = directCursors.rows[0];
     const directExhausted = direct.audit_fence_id !== null
-      && (['audit_principal_cursor', 'audit_scope_cursor', 'audit_memory_cursor',
+      && (['audit_principal_cursor', 'audit_scope_cursor',
         'audit_scope_ids_cursor'] as const)
         .every((cursor) => BigInt(direct[cursor]) >= BigInt(direct.audit_fence_id));
     // Linked request IDs are complete only after all direct selectors exhaust
     // the immutable fence. Starting this stream later avoids resetting and
     // rescanning an ever-growing clean prefix whenever a new request is found.
     if (directExhausted) {
-      await branch(
-        'audit_linked_cursor', 'linked_request',
-        `FROM principal_offboarding_audit_requests r
-         JOIN audit_log a ON a.metadata ? 'request_id'
-          AND a.metadata->>'request_id' = r.request_id`,
-        'r.principal_id = $2',
-      );
+      auditBatch += await selectLinkedAuditBranch(client, direct as RunAuditState, {
+        principalId, remaining: batchSize - auditBatch,
+      });
     }
     const auditedRows = Number((await client.query(
       'SELECT count(*)::int AS count FROM offboarding_audit_targets',
@@ -1051,15 +1204,18 @@ async function offboardPrincipalCore(
 
     const currentRun = await client.query(
       `SELECT memory_cursor, audit_principal_cursor, audit_scope_cursor,
-              audit_memory_cursor, audit_scope_ids_cursor, audit_linked_cursor,
-              audit_fence_id
+              audit_scope_ids_cursor, audit_fence_id,
+              audit_memory_key_cursor, audit_memory_item_cursor,
+              audit_memory_complete, audit_linked_request_cursor,
+              audit_linked_request_item_cursor,
+              audit_linked_request_exhausted, audit_linked_complete
          FROM principal_offboarding_runs WHERE principal_id = $1`, [principalId],
     );
     const remaining = await stateWorkRemains(
       client, scopeId, principalId, currentRun.rows[0].memory_cursor,
     );
     const remainingAudit = !auditCursorsExhausted(
-      currentRun.rows[0] as Record<AuditCursorColumn | 'audit_fence_id', string | null>,
+      currentRun.rows[0] as RunAuditState,
     );
     const completionReady = !remaining.memories && !remaining.embeddings
       && !remaining.memberships && !remaining.aliases

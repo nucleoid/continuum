@@ -77,6 +77,37 @@ describe('runMigrations', () => {
     expect(trustBoundary).toMatch(/principal_reactivation_guarded/i);
     expect(trustBoundary).toMatch(/00000000-0000-4000-8000-000000000011/i);
   });
+  it('applies round-seven integrity and online cursor-index migrations from a fresh schema', async () => {
+    const schema = `migrator_offboarding_round7_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    try {
+      const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
+      expect(applied.slice(-2).map((migration) => migration.name)).toEqual([
+        '0030_offboarding_round7_integrity.sql',
+        '0031_offboarding_round7_indexes.sql',
+      ]);
+      expect((await pool.query(
+        `SELECT indisvalid AS valid FROM pg_index
+          WHERE indexrelid = 'memories_scope_id_cursor_idx'::regclass`,
+      )).rows).toEqual([{ valid: true }]);
+      expect((await pool.query(
+        `SELECT column_name FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = 'principal_offboarding_runs'
+            AND column_name IN (
+              'audit_memory_key_cursor', 'audit_linked_request_cursor',
+              'audit_linked_complete'
+            ) ORDER BY column_name`,
+      )).rows.map((row) => row.column_name)).toEqual([
+        'audit_linked_complete', 'audit_linked_request_cursor', 'audit_memory_key_cursor',
+      ]);
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  });
   it('removes pre-existing embeddings for archived memories during the offboarding migration', async () => {
     const schema = `migrator_offboarding_${Date.now()}_${Math.random().toString(16).slice(2)}`;
     const admin = new pg.Pool({ connectionString: DATABASE_URL });
