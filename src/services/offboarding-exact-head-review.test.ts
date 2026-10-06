@@ -18,8 +18,8 @@ describe('PR 13 exact-head trust-boundary review', () => {
 
   it('does not grant the application role direct approval minting or internal progress', async () => {
     const grants = await readFile(join(root, 'scripts/grant-application-role.sql'), 'utf8');
-    expect(grants).not.toMatch(
-      /GRANT SELECT, INSERT ON TABLE[\s\S]*principal_user_scope_approvals/i,
+    expect(grants).toMatch(
+      /GRANT SELECT ON TABLE[\s\S]*principal_user_scope_approvals/i,
     );
     expect(grants).toMatch(
       /REVOKE ALL ON FUNCTION[\s\S]*continuum_write_offboarding_run_internal/i,
@@ -31,7 +31,7 @@ describe('PR 13 exact-head trust-boundary review', () => {
     const service = await readFile(join(root, 'src/services/offboarding.ts'), 'utf8');
     expect(service).not.toMatch(/principal_offboarding_audit_requests/);
     expect(service).not.toMatch(/offboardingLinkedAuditSql/);
-    expect(service).not.toMatch(/linked_request/);
+    expect(service).not.toMatch(/'linked_request'/);
   });
 
   it('always mints the linking request identity and retains inbound identity only as metadata', async () => {

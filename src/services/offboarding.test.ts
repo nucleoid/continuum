@@ -12,7 +12,7 @@ import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import {
   DEFAULT_OFFBOARD_BATCH_SIZE, listIncompleteOffboardingRuns, mapOwnedUserScope,
   MAX_OFFBOARD_AFFECTED_ROWS, MAX_OFFBOARD_MEMORIES,
-  offboardingAuditBranchSql, offboardingLinkedAuditSql, offboardingMemoryAuditSql,
+  offboardingAuditBranchSql, offboardingMemoryAuditSql,
   offboardPrincipal as serviceOffboardPrincipal, type OffboardingOptions,
 } from './offboarding.js';
 import { provisionEntraGroupBinding } from './membership-sync.js';
@@ -355,8 +355,7 @@ describe('offboarding and erasure', () => {
       )).toMatch(/audit_log_scope_(?:cursor_)?idx/);
       expect(await explainAnalyze(
         offboardingMemoryAuditSql(),
-        [value.personal.id, value.target.id, [], 0, 100,
-          9_223_372_036_854_775_807n],
+        [value.personal.id, [], 0, 100, 9_223_372_036_854_775_807n],
       )).toContain('audit_log_offboarding_memory_cursor_idx');
       const scopeIdsPlan = await explainAnalyze(
         offboardingAuditBranchSql(
@@ -377,30 +376,12 @@ describe('offboarding and erasure', () => {
       if (scopeIdsIndexName === 'audit_log_offboarding_scopes_pkey') {
         expect(scopeIdsIndexCond).toMatch(/selector_kind = 'scope_ids'/);
       }
-      const linkedPlan = await explainAnalyze(
-        offboardingLinkedAuditSql(),
-        [value.target.id, 'production-request', 9_223_372_036_854_775_807n, [], 100,
-          9_223_372_036_854_775_807n],
-      );
-      expect(linkedPlan).toContain('audit_log_request_cursor_idx');
-      expect(linkedPlan).toContain('"Actual Rows":20');
       expect(offboardingAuditBranchSql(
         'scope_ids',
         `FROM audit_log_offboarding_scopes selector
           JOIN audit_log a ON a.id = selector.audit_id`,
         `selector.selector_kind = 'scope_ids' AND selector.scope_id = $1`,
       )).toMatch(/ORDER BY selector\.audit_id LIMIT/);
-      expect(offboardingLinkedAuditSql()).toMatch(
-        /CROSS JOIN LATERAL[\s\S]*candidate\.metadata->>'request_id' = request\.request_id[\s\S]*candidate\.id > CASE/i,
-      );
-      expect(offboardingLinkedAuditSql()).not.toMatch(
-        /\(a\.metadata->>'request_id', a\.id\)[\s\S]*> \(COALESCE\(\$2, ''\), \$3::bigint\)/,
-      );
-      expect(await explain(
-        `SELECT request_id FROM principal_offboarding_audit_requests
-          WHERE principal_id = $1 AND request_id > $2 ORDER BY request_id LIMIT 1`,
-        [value.target.id, 'request-000100'],
-      )).toContain('principal_offboarding_audit_requests_pkey');
       expect(await explain(
         `SELECT id FROM audit_log WHERE id > $1 ORDER BY id LIMIT $2`,
         [0, 100],
@@ -477,15 +458,9 @@ describe('offboarding and erasure', () => {
                jsonb_build_object('scope_ids', jsonb_build_array($2::text)))`,
       [value.admin.id, value.personal.id],
     );
-    await pool.query(
-      `INSERT INTO principal_offboarding_audit_requests (principal_id, request_id)
-       VALUES ($1, 'stored-request')`,
-      [value.target.id],
-    );
     await offboardPrincipal(pool, value.admin, value.target.id);
     await pool.query('ANALYZE audit_log');
     await pool.query('ANALYZE audit_log_offboarding_scopes');
-    await pool.query('ANALYZE principal_offboarding_audit_requests');
 
     const runId = (await pool.query(
       'SELECT run_id::text AS run_id FROM principal_offboarding_runs WHERE principal_id = $1',
@@ -512,12 +487,11 @@ describe('offboarding and erasure', () => {
     expect(indexes).toMatch(/audit_log_scope_(?:cursor_)?idx/);
     expect(indexes).toContain('audit_log_offboarding_memory_cursor_idx');
     expect(indexes).toContain('audit_log_offboarding_scope_ids_cursor_idx');
-    expect(indexes).toContain('principal_offboarding_audit_requests_pkey');
-    expect(indexes).toContain('audit_log_request_cursor_idx');
+    expect(indexes).not.toContain('principal_offboarding_audit_requests_pkey');
+    expect(indexes).not.toContain('audit_log_request_cursor_idx');
     expect(nodes.filter((node) =>
       node['Node Type'] === 'Seq Scan'
-      && ['audit_log', 'audit_log_offboarding_scopes',
-        'principal_offboarding_audit_requests'].includes(String(node['Relation Name'])),
+      && ['audit_log', 'audit_log_offboarding_scopes'].includes(String(node['Relation Name'])),
     )).toEqual([]);
   }, 60_000);
 
@@ -973,7 +947,7 @@ describe('offboarding and erasure', () => {
     )).rejects.toThrow(/offboarded owned scope/i);
   });
 
-  it('redacts delegate summaries through scope_ids and request_id linkage', async () => {
+  it('redacts verified scope_ids rows without following colliding request IDs', async () => {
     const value = await fixture();
     const delegate = await createPrincipal(pool, {
       externalId: 'audit-delegate', kind: 'user', displayName: 'Audit delegate',
@@ -994,7 +968,7 @@ describe('offboarding and erasure', () => {
     )).rows;
     expect(rows).toEqual([
       { query: null, metadata: { redacted: 'principal_offboarding' } },
-      { query: null, metadata: { redacted: 'principal_offboarding' } },
+      { query: 'linked secret', metadata: { request_id: requestId } },
     ]);
     await expect(pool.query(
       `INSERT INTO audit_log (principal_id, action, query, metadata)
@@ -1003,7 +977,7 @@ describe('offboarding and erasure', () => {
     )).rejects.toThrow(/offboarded owned scope/i);
   });
 
-  it('discovers linked request IDs from clean direct carrier rows', async () => {
+  it('does not treat a clean direct carrier request ID as erasure authority', async () => {
     const value = await fixture();
     const delegate = await createPrincipal(pool, {
       externalId: 'clean-request-carrier', kind: 'user', displayName: 'Delegate',
@@ -1027,11 +1001,11 @@ describe('offboarding and erasure', () => {
       `SELECT query, metadata FROM audit_log
         WHERE principal_id = $1 ORDER BY id DESC LIMIT 1`, [delegate.id],
     )).rows[0]).toEqual({
-      query: null, metadata: { redacted: 'principal_offboarding' },
+      query: 'linked private query', metadata: { request_id: requestId },
     });
   });
 
-  it('traverses many linked request IDs with a durable compound keyset cursor', async () => {
+  it('keeps common request IDs non-linking across many unrelated rows', async () => {
     const value = await fixture();
     const delegate = await createPrincipal(pool, {
       externalId: 'many-linked-requests', kind: 'user', displayName: 'Delegate',
@@ -1051,26 +1025,15 @@ describe('offboarding and erasure', () => {
        ) FROM generate_series(1, 25) n`, [delegate.id],
     );
 
-    const linkedCursors: string[] = [];
     let result = await offboardPrincipal(pool, value.admin, value.target.id, { batchSize: 5 });
     for (let attempt = 0; attempt < 80 && !result.complete; attempt += 1) {
-      const state = (await pool.query(
-        `SELECT audit_linked_request_cursor FROM principal_offboarding_runs
-          WHERE principal_id = $1`, [value.target.id],
-      )).rows[0];
-      if (state.audit_linked_request_cursor !== null
-          && linkedCursors.at(-1) !== state.audit_linked_request_cursor) {
-        linkedCursors.push(state.audit_linked_request_cursor);
-      }
       result = await offboardPrincipal(pool, value.admin, value.target.id, { batchSize: 5 });
     }
     expect(result.complete).toBe(true);
-    expect(linkedCursors).toEqual([...linkedCursors].sort());
-    expect(new Set(linkedCursors).size).toBe(linkedCursors.length);
     expect((await pool.query(
       `SELECT count(*)::int AS count FROM audit_log
         WHERE principal_id = $1 AND query IS NOT NULL`, [delegate.id],
-    )).rows[0].count).toBe(0);
+    )).rows[0].count).toBe(25);
   });
 
   it('fails a concurrent delegate audit closed when the owner transition wins', async () => {
@@ -1241,7 +1204,7 @@ describe('offboarding and erasure', () => {
     })).resolves.toMatchObject({ principalId: value.target.id });
   });
 
-  it('retains linked request IDs and refuses reactivation while erasure is incomplete', async () => {
+  it('does not mint request-ID erasure mappings and refuses reactivation while incomplete', async () => {
     const value = await fixture();
     const requestId = 'retained-until-complete';
     await pool.query(
@@ -1263,13 +1226,13 @@ describe('offboarding and erasure', () => {
     expect((await pool.query(
       `SELECT request_id FROM principal_offboarding_audit_requests WHERE principal_id = $1`,
       [value.target.id],
-    )).rows).toEqual([{ request_id: requestId }]);
+    )).rows).toEqual([]);
     await expect(reactivatePrincipal(pool, value.admin, value.target.id))
       .rejects.toThrow(/offboarding.*incomplete/i);
     expect((await pool.query(
       `SELECT request_id FROM principal_offboarding_audit_requests WHERE principal_id = $1`,
       [value.target.id],
-    )).rows).toEqual([{ request_id: requestId }]);
+    )).rows).toEqual([]);
   });
 
   it('batches many linked request IDs and waits for every direct selector', async () => {

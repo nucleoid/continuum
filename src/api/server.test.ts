@@ -52,8 +52,9 @@ describe('createApp operational middleware', () => {
     }))).toThrow(/provider dimension.*768.*database vector\(768\)/i);
   });
 
-  it('preserves a conservative inbound request ID and replaces unsafe values', async () => {
+  it('always mints request identity and never uses inbound IDs as linking identity', async () => {
     const requestIdFactory = vi.fn()
+      .mockReturnValueOnce('generated-for-safe-client')
       .mockReturnValueOnce('generated-for-control-char')
       .mockReturnValueOnce('generated-for-oversized');
     const app = createApp(unusedPool, appOptions({ requestIdFactory }));
@@ -62,10 +63,10 @@ describe('createApp operational middleware', () => {
     const control = await request(app).get('/health').set('X-Request-Id', 'unsafe value');
     const oversized = await request(app).get('/health').set('X-Request-Id', 'x'.repeat(65));
 
-    expect(accepted.headers['x-request-id']).toBe('safe.ID:42-abc');
+    expect(accepted.headers['x-request-id']).toBe('generated-for-safe-client');
     expect(control.headers['x-request-id']).toBe('generated-for-control-char');
     expect(oversized.headers['x-request-id']).toBe('generated-for-oversized');
-    expect(requestIdFactory).toHaveBeenCalledTimes(2);
+    expect(requestIdFactory).toHaveBeenCalledTimes(3);
   });
 
   it('adds request identity to authentication failures and API 404s', async () => {

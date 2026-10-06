@@ -94,9 +94,10 @@ recognizes its existing check, `0008` validates it, and `0009` safely rebuilds
 its index before the new migration names are recorded. All three migration
 files are included in the npm package and discovered by `continuum-migrate`.
 
-Every response carries `X-Request-Id`. A conservative inbound ID is preserved;
-other values are replaced with a generated UUID. JSON errors also include the
-request ID in the existing REST envelope:
+Every response carries a server-minted `X-Request-Id`. A conservative inbound
+ID may be retained as non-linking request metadata, but it is never used as the
+server correlation identity or an offboarding selector. JSON errors also include
+the server request ID in the existing REST envelope:
 
 ```json
 { "code": "INVALID_INPUT", "error": "Invalid request", "requestId": "..." }

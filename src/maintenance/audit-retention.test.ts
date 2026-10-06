@@ -202,6 +202,13 @@ describe('audit retention', () => {
         `UPDATE audit_log SET metadata = '{"forged":true}'::jsonb WHERE id = $1`,
         [oldId],
       )).rejects.toThrow(/permission denied/i);
+      await expect(rolePool.query(
+        `SELECT continuum_apply_audit_retention(
+           $1, 'infinity'::timestamptz, 30, gen_random_uuid(), 1,
+           '[]'::jsonb, 'none', NULL
+         )`,
+        [admin.id],
+      )).rejects.toThrow(/database-enforced cutoff/i);
 
       await expect(runAuditRetention(rolePool, options())).resolves.toMatchObject({
         status: 'completed', deleted: 1, batches: 1,

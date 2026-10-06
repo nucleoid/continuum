@@ -1,5 +1,10 @@
 # Audit retention operations
 
+The database owns the minimum retention policy. Migration `0045` seeds a
+30-day minimum in `continuum_audit_retention_policy`; only the migration owner
+may change it. The deletion function derives its cutoff from database time and
+rejects a caller cutoff or retention period that would delete newer history.
+
 Continuum keeps audit records indefinitely by default. Audit retention is an
 external, one-shot maintenance command. Schedule it with the platform scheduler
 of your choice. Do not run it as an API or MCP process timer.

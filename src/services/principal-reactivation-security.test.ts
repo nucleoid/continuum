@@ -623,7 +623,11 @@ describe('principal reactivation database trust boundary', () => {
       expect((await rolePool.query(
         `SELECT count(*)::int AS count FROM audit_log
           WHERE metadata->>'request_id' = 'app-linked' AND query IS NOT NULL`,
-      )).rows[0].count).toBe(0);
+      )).rows[0].count).toBe(1);
+      expect((await rolePool.query(
+        `SELECT query FROM audit_log
+          WHERE metadata->>'request_id' = 'app-linked' AND query IS NOT NULL`,
+      )).rows).toEqual([{ query: 'linked secret' }]);
       expect((await rolePool.query(
         `SELECT count(*)::int AS count FROM audit_log
           WHERE metadata->>'operation' = 'principal_offboarded'`,
@@ -709,6 +713,20 @@ describe('principal reactivation database trust boundary', () => {
         max: 2,
         options: `-c role=${role}`,
       });
+      await expect(rolePool.query(
+        `INSERT INTO entra_groups
+           (external_id, display_name, scope_id, role, active, approved_by, approved_at)
+         VALUES ('99999999-9999-4999-8999-999999999999', 'forged-admin',
+                 $1, 'admin', TRUE, $2, now())`,
+        [org!.id, admin.id],
+      )).rejects.toThrow(/guarded database function/i);
+      await expect(rolePool.query(
+        `INSERT INTO principal_user_scope_approvals
+           (principal_id, scope_id, approved_by, acknowledged_principal_ids,
+            acknowledged_evidence_hash)
+         VALUES ($1, $1, $1, '{}'::uuid[], repeat('0', 64))`,
+        [admin.id],
+      )).rejects.toThrow(/permission denied/i);
       const project = await createScope(rolePool, { kind: 'project', name: 'runtime-role' });
       const service = await provisionServicePrincipal(
         rolePool, admin, '12345678-1234-4234-8234-123456789abc', 'Runtime Service',

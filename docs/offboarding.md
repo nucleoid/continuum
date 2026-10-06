@@ -45,11 +45,10 @@ writing an audit or changing state. `countEvidence` identifies the preview
 limit and every truncated field; an unlisted field is exact. It also
 returns bounded, sorted member and author principal UUID evidence, explicit
 truncation flags, and audit selection counts by principal, scope, memory,
-`scope_ids`, and linked request. This lets the operator detect a mistaken
+and `scope_ids`. This lets the operator detect a mistaken
 mapping without exposing names or memory content. Audit preview limits apply to
 rows examined before redaction-policy filtering. If a branch reaches that
-limit, or linked-request truth cannot be established within the same bounded
-sample, `auditRows` and `auditQueries` are explicitly truncated/unknown even
+limit, `auditRows` and `auditQueries` are explicitly truncated/unknown even
 when the returned dirty-row count is zero.
 
 Execution immediately disables and pseudonymizes the principal and scope,
@@ -62,11 +61,9 @@ remaining-work indicators, batch number, and `complete`. Durable UUID and audit
 ID keyset cursors ensure every resumed batch scans bounded windows. Memory and
 `scope_ids` relationships are normalized at audit insertion into an indexed
 `(selector_kind, scope_id, audit_id)` relation, then traversed by audit ID.
-Linked rows use a compound `(request_id, audit_id)` cursor and one batch can
-cross many request IDs without creating one transaction per request. After the
+Request IDs remain correlation metadata and never expand an erasure target set. After the
 principal and owned-scope write fence is closed, the run records one immutable
-audit high-water ID. Every selector exhausts only its window through that fence;
-the linked-request selector starts after request-ID discovery is complete.
+audit high-water ID. Every selector exhausts only its window through that fence.
 Durable memory, one-time scope cleanup, and audit cursor exhaustion, rather
 than repeated dirty-history scans or full recounts, decide completion.
 Principals with more than 10,000 memories
@@ -103,8 +100,8 @@ the pseudonym, never the removed display name or memory content. Raw recall text
 and free-text audit metadata (including verification notes) on rows tied to the
 principal, owned scope, or its memories are replaced by a fixed tombstone in the
 same batch transaction. Selection uses separately indexed `UNION` branches for
-UUID columns, exact `metadata.scope_ids` membership, and exact `request_id`
-linkage. Free-form or recursive scope-name matching is not used. This also reaches
+UUID columns and exact `metadata.scope_ids` membership. Free-form,
+request-ID, or recursive scope-name matching is not used. This also reaches
 delegate/admin summaries whose `scope_id` is null, so they cannot remain visible through the audit API or
 knowledge-gap output. Audit inserts lock the principal row and are rejected
 after offboarding; an in-flight recall that loses this race fails closed instead
@@ -280,9 +277,11 @@ Migration `0043_audit_retention_selection_order.sql` preserves the retention
 selection's `(at,id)` endpoints while
 comparing exported rows in ID order, including histories where timestamp order
 and insertion order differ.
-Migration `0044_offboarding_restart_evidence.sql` is the exact final migration.
-It preserves honest application-reported counter labels and permits a guarded
-fresh run for either explicit reactivation or demonstrably dirty repair state.
+Migration `0044_offboarding_restart_evidence.sql` preserves honest
+application-reported counter labels. Migration
+`0045_offboarding_trust_boundary.sql` enforces owner-controlled audit retention,
+trusted approval and Entra administrator paths, server-generated correlation,
+upgrade-safe function ACLs, per-takeover evidence, and one bounded restart proof.
 
 The final database verification is exact and executes once: the completion
 event trigger checks every memory and every audit row linked to the run's
@@ -308,20 +307,13 @@ must roll back and retry the entire transaction after the lifecycle operation
 commits; do not retry only the rejected statement inside an aborted
 transaction.
 
-Linked-request erasure selects a bounded ordered request-ID window from
-`principal_offboarding_audit_requests`, then performs one indexed
-`audit_log_request_cursor_idx` seek per request through a lateral join. A batch
-never walks the global request-history index to discover another principal's
-request IDs. The durable request-ID and audit-ID cursor pair advances across
-full and final partial batches without rescanning unrelated users.
-
 Production must use separate migration-owner and application roles. Drain old
 offboarding-capable API, MCP, admin, and membership-sync processes; run
-`continuum-migrate` through `0044_offboarding_restart_evidence.sql` with
+`continuum-migrate` through `0045_offboarding_trust_boundary.sql` with
 `CONTINUUM_DATABASE_URL` set to the
 migration owner; apply the exact grant script below; and only then start the new
-binaries with the same variable set to a non-owner application role. Do not run
-offboarding across mixed pre-`0044` and `0044` application or grant versions.
+binaries with the same variable set to a non-owner application role. Do not mix pre-`0045` and `0045`
+application or grant versions.
 The application role must not own the event ledger, completion-capability
 table, or security-definer functions, and receives no direct privilege on the
 capability table. Direct `completed` inserts then fail at the trigger.
@@ -356,12 +348,12 @@ requires the exact index to exist and be valid before the migration ledger can
 record success. A timeout or failed build leaves the file unapplied and safely
 retryable.
 
-Apply migrations through `0044_offboarding_restart_evidence.sql` before starting the new application version. Old
+Apply migrations through `0045_offboarding_trust_boundary.sql` before starting the new application version. Old
 instances can continue ordinary traffic after `0023`, but they do not know the
 offboarding workflow and an old authenticated request may already be in flight.
-Do not invoke offboarding until `0044_offboarding_restart_evidence.sql` is recorded on every shared
-database and all old application instances have drained. Rollback is
-application-first: stop invoking offboarding, drain the new instances, and
+Do not invoke offboarding until `0045_offboarding_trust_boundary.sql` is recorded on every shared
+database and all old application instances have drained. Use application-first rollback:
+stop invoking offboarding, drain the new instances, and
 deploy the old application only after `list-incomplete-offboarding` reports
 zero incomplete runs. An old application must never resume against an
 unfinished erasure. Do not drop the new columns, tables, functions, or

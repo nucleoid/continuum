@@ -43,6 +43,7 @@ export { createReadinessState } from './readiness.js';
 declare module 'express-serve-static-core' {
   interface Request {
     requestId: string;
+    clientRequestId?: string;
     rawBody?: Buffer;
   }
 }
@@ -174,12 +175,9 @@ function requestContext(
 ): express.RequestHandler {
   return (req, res, next) => {
     const inbound = req.header('x-request-id');
-    if (inbound && REQUEST_ID_PATTERN.test(inbound)) {
-      req.requestId = inbound;
-    } else {
-      const generated = requestIdFactory();
-      req.requestId = REQUEST_ID_PATTERN.test(generated) ? generated : randomUUID();
-    }
+    if (inbound && REQUEST_ID_PATTERN.test(inbound)) req.clientRequestId = inbound;
+    const generated = requestIdFactory();
+    req.requestId = REQUEST_ID_PATTERN.test(generated) ? generated : randomUUID();
     res.setHeader('X-Request-Id', req.requestId);
 
     const originalJson = res.json.bind(res);

@@ -18,6 +18,8 @@ export async function resetData(pool: pg.Pool): Promise<void> {
       DISABLE TRIGGER preserve_offboarding_event_truncate;
     ALTER TABLE principal_offboarding_run_events
       DISABLE TRIGGER preserve_offboarding_run_event_truncate;
+    ALTER TABLE principal_offboarding_takeover_events
+      DISABLE TRIGGER preserve_offboarding_takeover_event;
     ALTER TABLE principal_offboarding_runs
       DISABLE TRIGGER guard_offboarding_run_truncate;
   `);
@@ -33,6 +35,7 @@ export async function resetData(pool: pg.Pool): Promise<void> {
         continuum_offboarding_completion_requests,
         principal_offboarding_audit_requests,
         audit_log_offboarding_scopes,
+        principal_offboarding_takeover_events,
         principal_offboarding_run_events,
         principal_offboarding_runs,
         principal_offboarding_events,
@@ -53,6 +56,8 @@ export async function resetData(pool: pg.Pool): Promise<void> {
         ENABLE TRIGGER preserve_offboarding_event_truncate;
       ALTER TABLE principal_offboarding_run_events
         ENABLE TRIGGER preserve_offboarding_run_event_truncate;
+    ALTER TABLE principal_offboarding_takeover_events
+      ENABLE TRIGGER preserve_offboarding_takeover_event;
       ALTER TABLE principal_offboarding_runs
         ENABLE TRIGGER guard_offboarding_run_truncate;
     `);

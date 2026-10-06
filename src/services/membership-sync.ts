@@ -150,23 +150,8 @@ export async function provisionEntraGroupBinding(
       }
     }
     await client.query(
-      `INSERT INTO entra_groups
-         (external_id, display_name, scope_id, role, active, approved_by, approved_at,
-          deactivated_at, last_seen_at)
-       VALUES ($1, $2, $3, $4, TRUE, $5, now(), NULL, NULL)
-       ON CONFLICT (external_id) DO UPDATE SET
-         display_name = EXCLUDED.display_name,
-         scope_id = EXCLUDED.scope_id,
-         role = EXCLUDED.role,
-         active = TRUE,
-         approved_by = EXCLUDED.approved_by,
-         approved_at = now(),
-         approval_revoked_by = NULL,
-         approval_revoked_at = NULL,
-         deactivated_at = NULL,
-         quarantined_at = NULL,
-         quarantine_reason = NULL`,
-      [externalId, displayName, scopeId, input.role, actor.id],
+      `SELECT continuum_upsert_entra_group_binding($1, $2, $3, $4, $5)`,
+      [actor.id, externalId, displayName, scopeId, input.role],
     );
     await client.query(
       `INSERT INTO audit_log (principal_id, action, scope_id, metadata)
@@ -614,18 +599,11 @@ export async function syncEntraMemberships(
         .filter((row) => row.disabled_at === null)
         .map((row) => row.id as string);
       if (principalIds.length > 0) {
-        const activated = await client.query(
-          `INSERT INTO scope_memberships
-             (principal_id, scope_id, role, source_kind, source_id, active, synced_at)
-           SELECT member_id, $2, $3, 'entra', $4, TRUE, now()
-             FROM unnest($1::uuid[]) member_id
-           ON CONFLICT (principal_id, scope_id, source_kind, source_id)
-           DO UPDATE SET role = EXCLUDED.role, active = TRUE,
-                         deactivated_at = NULL, synced_at = now()
-           RETURNING 1`,
-          [principalIds, binding.scope_id, binding.role, snapshot.id],
+        const activated = await client.query<{ count: number }>(
+          `SELECT continuum_activate_entra_memberships($1, $2, $3::uuid[])::int AS count`,
+          [actor.id, snapshot.id, principalIds],
         );
-        result.membershipsActive += activated.rowCount ?? 0;
+        result.membershipsActive += Number(activated.rows[0]?.count ?? 0);
       }
       const deactivated = await client.query(
         `UPDATE scope_memberships SET active = FALSE, deactivated_at = now(), synced_at = now()
