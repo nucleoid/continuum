@@ -61,4 +61,27 @@ describe('principal administration', () => {
       'service_principal_provisioned', 'principal_disabled', 'principal_reactivated',
     ]);
   });
+
+  it('marks reactivation of an offboarded principal and reopens its lifecycle state', async () => {
+    const admin = await createPrincipal(pool, {
+      externalId: 'reactivation-admin', kind: 'user', displayName: 'Admin',
+    });
+    const target = await createPrincipal(pool, {
+      externalId: 'reactivation-target', kind: 'user', displayName: 'Target',
+    });
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    await addMembership(pool, admin.id, org!.id, 'admin');
+    await pool.query(
+      'UPDATE principals SET disabled_at = now(), offboarded_at = now() WHERE id = $1', [target.id],
+    );
+    await reactivatePrincipal(pool, admin, target.id);
+    expect((await pool.query(
+      'SELECT disabled_at, offboarded_at, reactivated_at IS NOT NULL AS reactivated FROM principals WHERE id = $1',
+      [target.id],
+    )).rows[0]).toEqual({ disabled_at: null, offboarded_at: null, reactivated: true });
+    expect((await pool.query(
+      `SELECT metadata->>'previously_offboarded' AS previously_offboarded
+         FROM audit_log WHERE metadata->>'operation' = 'principal_reactivated'`,
+    )).rows).toEqual([{ previously_offboarded: 'true' }]);
+  });
 });

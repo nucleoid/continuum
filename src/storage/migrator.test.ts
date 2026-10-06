@@ -39,6 +39,47 @@ afterEach(async () => {
 });
 
 describe('runMigrations', () => {
+  it('removes pre-existing embeddings for archived memories during the offboarding migration', async () => {
+    const schema = `migrator_offboarding_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-offboarding-migrations-'));
+    directories.push(directory);
+    const source = new URL('../../migrations/', import.meta.url);
+    const files = (await readdir(source)).filter((file) => file.endsWith('.sql')).sort();
+    for (const file of files.filter((name) => name < '0022_offboarding_erasure.sql')) {
+      await copyFile(new URL(file, source), join(directory, file));
+    }
+    try {
+      await runMigrations(pool, directory);
+      const principalId = (await pool.query(
+        `INSERT INTO principals (id, external_id, kind, display_name)
+         VALUES (gen_random_uuid(), 'archived-owner', 'user', 'Owner') RETURNING id`,
+      )).rows[0].id;
+      const scopeId = (await pool.query(
+        `INSERT INTO scopes (id, kind, name) VALUES (gen_random_uuid(), 'user', 'archived-scope')
+         RETURNING id`,
+      )).rows[0].id;
+      const memoryId = (await pool.query(
+        `INSERT INTO memories (id, scope_id, type, title, body, author_id, source, state)
+         VALUES (gen_random_uuid(), $1, 'fact', 'Archived', 'Archived', $2, 'manual', 'archived')
+         RETURNING id`, [scopeId, principalId],
+      )).rows[0].id;
+      await pool.query(
+        `INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
+         VALUES ($1, 'test', 768, $2::vector)`,
+        [memoryId, `[${Array(768).fill(0).join(',')}]`],
+      );
+      await copyFile(new URL('0022_offboarding_erasure.sql', source), join(directory, '0022_offboarding_erasure.sql'));
+      await runMigrations(pool, directory);
+      expect((await pool.query('SELECT 1 FROM memory_embeddings WHERE memory_id = $1', [memoryId])).rowCount)
+        .toBe(0);
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  });
   it('aliases exact review-era Entra ledger names without replaying renamed migrations', async () => {
     const schema = `migrator_entra_rename_${Date.now()}_${Math.random().toString(16).slice(2)}`;
     const admin = new pg.Pool({ connectionString: DATABASE_URL });

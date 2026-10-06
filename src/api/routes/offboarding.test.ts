@@ -25,6 +25,7 @@ describe('offboarding REST administration', () => {
     const org = await getScopeByRef(pool, { kind: 'org', name: '' });
     const personal = await createScope(pool, { kind: 'user', name: 'rest-owned-scope' });
     await addMembership(pool, admin.id, org!.id, 'admin');
+    await addMembership(pool, target.id, personal.id, 'writer');
     const app = createApp(pool, { logger: { info() {}, error() {} } });
     const path = `/api/v0/admin/principals/${target.id}`;
 
@@ -46,5 +47,25 @@ describe('offboarding REST administration', () => {
       .set('Authorization', 'Bearer admin-rest').send({});
     expect(executed.status).toBe(200);
     expect(executed.body).toMatchObject({ principalId: target.id, dryRun: false, alreadyOffboarded: false });
+  });
+
+  it('maps the last-admin offboarding guard to the stable conflict contract', async () => {
+    const admin = await createPrincipal(pool, {
+      externalId: 'only-admin-rest', kind: 'user', displayName: 'Only admin',
+    });
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    const personal = await createScope(pool, { kind: 'user', name: 'only-admin-rest-scope' });
+    await addMembership(pool, admin.id, org!.id, 'admin');
+    await addMembership(pool, admin.id, personal.id, 'writer');
+    const app = createApp(pool, { logger: { info() {}, error() {} } });
+    const path = `/api/v0/admin/principals/${admin.id}`;
+    expect((await request(app).put(`${path}/owned-user-scope`)
+      .set('Authorization', 'Bearer only-admin-rest').send({ scopeId: personal.id })).status).toBe(201);
+    const response = await request(app).post(`${path}/offboard`)
+      .set('Authorization', 'Bearer only-admin-rest').send({});
+    expect(response.status).toBe(409);
+    expect(response.body).toEqual({
+      code: 'CONFLICT', error: 'cannot remove the last effective manual org administrator',
+    });
   });
 });
