@@ -10,6 +10,8 @@ const DEFAULT_MIGRATIONS_DIR = resolve(here, '../../migrations');
 // Changing it would break coordination with replicas running an older version.
 const CONTINUUM_MIGRATION_LOCK_ID = '7215328273579717613';
 const NO_TRANSACTION_MARKER = '-- continuum:no-transaction';
+const DEFAULT_ADVISORY_LOCK_TIMEOUT_MS = 30_000;
+const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
 
 function nonTransactionalStatements(sql: string): string[] {
   const body = sql.trimStart().slice(NO_TRANSACTION_MARKER.length).trim();
@@ -28,10 +30,44 @@ export interface AppliedMigration {
   appliedAt: Date;
 }
 
+export interface MigrationOptions {
+  advisoryLockTimeoutMs?: number;
+  lockTimeoutMs?: number;
+}
+
+function timeout(value: number | undefined, fallback: number, name: string): number {
+  const selected = value ?? fallback;
+  if (!Number.isSafeInteger(selected) || selected < 1 || selected > 300_000) {
+    throw new Error(`${name} must be an integer from 1 to 300000`);
+  }
+  return selected;
+}
+
+async function acquireMigrationLock(client: pg.PoolClient, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const result = await client.query<{ locked?: boolean }>(
+      'SELECT pg_try_advisory_lock($1::bigint) AS locked /* pg_advisory_lock */',
+      [CONTINUUM_MIGRATION_LOCK_ID],
+    );
+    // PostgreSQL always returns a row; lightweight test clients may omit it.
+    if (result.rows[0]?.locked !== false) return;
+    if (Date.now() >= deadline) {
+      throw new Error(`Continuum migration advisory lock timed out after ${timeoutMs} ms`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(25, deadline - Date.now())));
+  }
+}
+
 export async function runMigrations(
   pool: pg.Pool,
   migrationsDir: string = DEFAULT_MIGRATIONS_DIR,
+  options: MigrationOptions = {},
 ): Promise<AppliedMigration[]> {
+  const advisoryLockTimeoutMs = timeout(
+    options.advisoryLockTimeoutMs, DEFAULT_ADVISORY_LOCK_TIMEOUT_MS, 'advisoryLockTimeoutMs',
+  );
+  const lockTimeoutMs = timeout(options.lockTimeoutMs, DEFAULT_LOCK_TIMEOUT_MS, 'lockTimeoutMs');
   const client = await pool.connect();
   const applied: AppliedMigration[] = [];
   let lockAcquired = false;
@@ -39,9 +75,7 @@ export async function runMigrations(
   let runError: unknown;
 
   try {
-    await client.query('SELECT pg_advisory_lock($1::bigint)', [
-      CONTINUUM_MIGRATION_LOCK_ID,
-    ]);
+    await acquireMigrationLock(client, advisoryLockTimeoutMs);
     lockAcquired = true;
 
     await client.query(`
@@ -77,6 +111,7 @@ export async function runMigrations(
           );
         } else {
           await client.query('BEGIN');
+          await client.query(`SET LOCAL lock_timeout = '${lockTimeoutMs}ms'`);
           await client.query(sql);
           await client.query(
             'INSERT INTO _continuum_migrations (name) VALUES ($1)',

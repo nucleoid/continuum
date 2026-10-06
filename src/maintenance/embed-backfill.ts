@@ -50,6 +50,7 @@ export interface EmbeddingBackfillProviderReport {
   failuresCleared: number;
   completed: boolean;
   cursor: string | null;
+  unresolvedIds: string[];
   errorCode?: string;
 }
 
@@ -66,11 +67,19 @@ export interface EmbeddingBackfillReport {
   countOnly: boolean;
   providerReports: EmbeddingBackfillProviderReport[];
   errorCodes: string[];
+  unresolvedIds: string[];
 }
 
 type ProviderRunResult = Pick<EmbeddingBackfillReport,
   'scanned' | 'eligible' | 'embedded' | 'failed' | 'failuresCleared'
-  | 'completed' | 'cursor'>;
+  | 'completed' | 'cursor' | 'unresolvedIds'>;
+
+class PartialInvalidVectorsError extends Error {
+  constructor(readonly items: Candidate[]) {
+    super('Embedding provider returned some invalid vectors');
+    this.name = 'PartialInvalidVectorsError';
+  }
+}
 
 class ProviderRunError extends Error {
   constructor(
@@ -103,6 +112,11 @@ function sameProvider(left: EmbeddingProvider | null, right: EmbeddingProvider):
   return left?.id === right.id && left.dim === right.dim;
 }
 
+function validVector(vector: unknown, provider: EmbeddingProvider): vector is number[] {
+  return Array.isArray(vector) && vector.length === provider.dim
+    && vector.every((value) => typeof value === 'number' && Number.isFinite(value));
+}
+
 function validateVectors(vectors: number[][], expected: number, provider: EmbeddingProvider): void {
   if (!Array.isArray(vectors) || vectors.length !== expected) {
     throw new EmbeddingProviderError(
@@ -110,8 +124,7 @@ function validateVectors(vectors: number[][], expected: number, provider: Embedd
     );
   }
   for (const vector of vectors) {
-    if (!Array.isArray(vector) || vector.length !== provider.dim
-      || !vector.every((value) => typeof value === 'number' && Number.isFinite(value))) {
+    if (!validVector(vector, provider)) {
       throw new EmbeddingProviderError(
         'EMBEDDING_INVALID_RESPONSE', 'Embedding provider returned an invalid vector',
       );
@@ -146,6 +159,12 @@ async function storeBatch(
     for (let index = 0; index < items.length; index += 1) {
       if (await storeMemoryEmbeddingVector(client, items[index]!.id, vectors[index]!, provider)) {
         stored += 1;
+        await client.query(
+          `DELETE FROM embedding_backfill_failures
+            WHERE memory_id = $1 AND provider = $2 AND dim = $3
+              AND disposition = 'suspect'`,
+          [items[index]!.id, provider.id, provider.dim],
+        );
       }
     }
     await client.query('COMMIT');
@@ -164,9 +183,11 @@ async function recordFailure(
   await client.query('BEGIN');
   try {
     await client.query(
-      `INSERT INTO embedding_backfill_failures (memory_id, provider, dim)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (memory_id, provider, dim) DO NOTHING`,
+      `INSERT INTO embedding_backfill_failures
+         (memory_id, provider, dim, disposition, reason)
+       VALUES ($1, $2, $3, 'durable', 'EMBEDDING_ITEM_FAILED')
+       ON CONFLICT (memory_id, provider, dim) DO UPDATE
+         SET disposition = 'durable', reason = 'EMBEDDING_ITEM_FAILED', failed_at = now()`,
       [item.id, provider.id, provider.dim],
     );
     await client.query(
@@ -190,6 +211,31 @@ async function recordFailure(
     await client.query('ROLLBACK');
     throw error;
   }
+}
+
+async function recordSuspect(
+  client: pg.PoolClient,
+  provider: EmbeddingProvider,
+  item: Candidate,
+  reason: string,
+): Promise<void> {
+  await client.query(
+    `INSERT INTO embedding_backfill_failures
+       (memory_id, provider, dim, disposition, reason)
+     VALUES ($1, $2, $3, 'suspect', $4)
+     ON CONFLICT (memory_id, provider, dim) DO UPDATE
+       SET disposition = CASE
+             WHEN embedding_backfill_failures.disposition = 'durable' THEN 'durable'
+             ELSE 'suspect'
+           END,
+           reason = CASE
+             WHEN embedding_backfill_failures.disposition = 'durable'
+               THEN embedding_backfill_failures.reason
+             ELSE EXCLUDED.reason
+           END,
+           failed_at = now()`,
+    [item.id, provider.id, provider.dim, reason],
+  );
 }
 
 async function runProvider(
@@ -218,6 +264,7 @@ async function runProvider(
   let failed = 0;
   let failuresCleared = 0;
   let completed = false;
+  const unresolvedIds = new Set<string>();
 
   try {
     if (!options.dryRun && !options.countOnly) {
@@ -267,7 +314,10 @@ async function runProvider(
       completed = true;
       cursor = null;
       if (!options.dryRun && !options.countOnly) await checkpoint(client, provider, filter, null);
-      return { scanned, eligible, embedded, failed, failuresCleared, completed, cursor };
+      return {
+        scanned, eligible, embedded, failed, failuresCleared, completed, cursor,
+        unresolvedIds: [],
+      };
     }
 
     if (options.markFailed) {
@@ -288,6 +338,7 @@ async function runProvider(
             AND NOT EXISTS (
               SELECT 1 FROM embedding_backfill_failures f
                WHERE f.memory_id = m.id AND f.provider = $3 AND f.dim = $4
+                 AND f.disposition = 'durable'
             )`,
         [options.markFailed, routedScopeIds, provider.id, provider.dim],
       );
@@ -304,7 +355,10 @@ async function runProvider(
       failed = 1;
       cursor = item.id;
       await checkpoint(client, provider, filter, cursor);
-      return { scanned: 1, eligible: 1, embedded, failed, failuresCleared, completed: true, cursor };
+      return {
+        scanned: 1, eligible: 1, embedded, failed, failuresCleared,
+        completed: true, cursor, unresolvedIds: [],
+      };
     }
 
     const processItems = async (items: Candidate[]): Promise<boolean> => {
@@ -313,9 +367,29 @@ async function runProvider(
         let vectors: number[][];
         try {
           vectors = await provider.embed(part.map(memoryEmbeddingText));
+          if (!Array.isArray(vectors) || vectors.length !== part.length) {
+            validateVectors(vectors, part.length, provider);
+          }
+          const validItems: Candidate[] = [];
+          const validVectors: number[][] = [];
+          const invalidItems: Candidate[] = [];
+          for (let index = 0; index < part.length; index += 1) {
+            const vector = vectors[index];
+            if (validVector(vector, provider)) {
+              validItems.push(part[index]!);
+              validVectors.push(vector);
+            } else {
+              invalidItems.push(part[index]!);
+            }
+          }
+          if (invalidItems.length > 0 && validItems.length > 0) {
+            embedded += await storeBatch(client, provider, validItems, validVectors);
+            throw new PartialInvalidVectorsError(invalidItems);
+          }
           validateVectors(vectors, part.length, provider);
         } catch (error) {
-          if (error instanceof EmbeddingProviderError || isEmbeddingItemError(error)) throw error;
+          if (error instanceof EmbeddingProviderError || isEmbeddingItemError(error)
+            || error instanceof PartialInvalidVectorsError) throw error;
           throw new EmbeddingProviderError(
             'EMBEDDING_FAILED', 'Embedding backfill provider failed',
             { cause: error, diagnostic: true },
@@ -335,6 +409,11 @@ async function runProvider(
         cursor = items.at(-1)!.id;
         return true;
       } catch (initialError) {
+        if (initialError instanceof PartialInvalidVectorsError) {
+          const canContinue = await processItems(initialError.items);
+          cursor = items.at(-1)!.id;
+          return canContinue;
+        }
         if (isEmbeddingItemError(initialError)) {
           if (items.length > 1) {
             const middle = Math.floor(items.length / 2);
@@ -348,8 +427,13 @@ async function runProvider(
         if (!(initialError instanceof EmbeddingProviderError)
           || !['EMBEDDING_SERVER', 'EMBEDDING_INVALID_RESPONSE', 'EMBEDDING_FAILED']
             .includes(initialError.code)
-          || initialError.diagnostic === false
-          || items.length === 1) throw initialError;
+          || initialError.diagnostic === false) throw initialError;
+        if (items.length === 1) {
+          await recordSuspect(client, provider, items[0]!, initialError.code);
+          unresolvedIds.add(items[0]!.id);
+          cursor = items[0]!.id;
+          return true;
+        }
 
         const ambiguous: Candidate[] = [];
         let successes = 0;
@@ -363,8 +447,14 @@ async function runProvider(
             successes += part.length;
             return;
           } catch (error) {
-            if (isEmbeddingItemError(error) && part.length === 1) {
-              canContinue &&= await mark(part[0]!);
+            if (isEmbeddingItemError(error)) {
+              if (part.length === 1) {
+                canContinue &&= await mark(part[0]!);
+                return;
+              }
+              const middle = Math.floor(part.length / 2);
+              await diagnose(part.slice(0, middle));
+              await diagnose(part.slice(middle));
               return;
             }
             if (error instanceof EmbeddingProviderError
@@ -387,7 +477,10 @@ async function runProvider(
         await diagnose(items.slice(0, middle));
         await diagnose(items.slice(middle));
         if (successes === 0 && ambiguous.length > 0) throw initialError;
-        for (const item of ambiguous) canContinue &&= await mark(item);
+        for (const item of ambiguous) {
+          await recordSuspect(client, provider, item, initialError.code);
+          unresolvedIds.add(item.id);
+        }
         cursor = items.at(-1)!.id;
         return canContinue;
       }
@@ -423,6 +516,7 @@ async function runProvider(
                WHERE f.memory_id = m.id
                  AND f.provider = $2
                  AND f.dim = $3
+                 AND f.disposition = 'durable'
             )
           ORDER BY m.id
           LIMIT $${limitIndex}`,
@@ -471,12 +565,17 @@ async function runProvider(
       if (!options.countOnly && eligible >= options.maxRows) break;
     }
 
-    return { scanned, eligible, embedded, failed, failuresCleared, completed, cursor };
+    return {
+      scanned, eligible, embedded, failed, failuresCleared,
+      completed: completed && unresolvedIds.size === 0,
+      cursor,
+      unresolvedIds: [...unresolvedIds],
+    };
   } catch (error) {
     if (error instanceof EmbeddingProviderError || error instanceof BackfillControlError) {
       throw new ProviderRunError(error.code, {
         scanned, eligible, embedded, failed, failuresCleared,
-        completed: false, cursor,
+        completed: false, cursor, unresolvedIds: [...unresolvedIds],
       }, error);
     }
     throw error;
@@ -529,7 +628,7 @@ export async function runEmbeddingBackfill(
     scanned: 0, eligible: 0, embedded: 0, failed: 0, failuresCleared: 0,
     providers: providers.length, completed: true, cursor: null,
     dryRun: options.dryRun ?? false, countOnly: options.countOnly ?? false,
-    providerReports: [], errorCodes: [],
+    providerReports: [], errorCodes: [], unresolvedIds: [],
   };
   for (const provider of providers) {
     let result;
@@ -548,10 +647,20 @@ export async function runEmbeddingBackfill(
         markFailed: options.markFailed,
       });
     } catch (error) {
-      if (!(error instanceof ProviderRunError)) throw error;
-      errorCode = error.code;
-      result = error.report;
-      report.errorCodes.push(error.code);
+      if (error instanceof ProviderRunError) {
+        errorCode = error.code;
+        result = error.report;
+      } else {
+        if (providers.length === 1) throw error;
+        errorCode = error instanceof Error && /already running/i.test(error.message)
+          ? 'BACKFILL_LOCK'
+          : 'BACKFILL_DATABASE';
+        result = {
+          scanned: 0, eligible: 0, embedded: 0, failed: 0, failuresCleared: 0,
+          completed: false, cursor: null, unresolvedIds: [],
+        };
+      }
+      report.errorCodes.push(errorCode);
     }
     report.scanned += result.scanned;
     report.eligible += result.eligible;
@@ -559,6 +668,7 @@ export async function runEmbeddingBackfill(
     report.failed += result.failed;
     report.failuresCleared += result.failuresCleared;
     report.completed &&= result.completed;
+    report.unresolvedIds.push(...result.unresolvedIds);
     report.cursor = providers.length === 1 ? result.cursor : null;
     report.providerReports.push({
       provider: provider.id, dim: provider.dim, ...result,

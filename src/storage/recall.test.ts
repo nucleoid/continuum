@@ -171,6 +171,32 @@ describe('recall expiry enforcement', () => {
     });
   });
 
+  it('cancels vector SQL inside the shared recall deadline', async () => {
+    const { scope } = await seedMemory('bounded vector sql');
+    const blocker = await pool.connect();
+    await blocker.query('BEGIN');
+    await blocker.query('LOCK TABLE memory_embeddings IN ACCESS EXCLUSIVE MODE');
+    const provider = {
+      id: 'provider:sql-timeout', dim: 768,
+      async embed() { return [Array(768).fill(0) as number[]]; },
+    };
+    const started = Date.now();
+    try {
+      const recalled = await recall(pool, {
+        query: 'bounded vector sql', scopeIds: [scope.id], limit: 10,
+        embeddingDeadlineMs: 100,
+        embeddingGroups: [{ scopeIds: [scope.id], provider }],
+      });
+      expect(Date.now() - started).toBeLessThan(750);
+      expect(recalled.diagnostics.groups).toEqual([
+        { provider: provider.id, dim: 768, status: 'failed', errorCode: 'EMBEDDING_TIMEOUT' },
+      ]);
+    } finally {
+      await blocker.query('ROLLBACK');
+      blocker.release();
+    }
+  });
+
   it.each([
     [199, false],
     [200, false],

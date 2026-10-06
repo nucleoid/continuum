@@ -11,6 +11,9 @@ import {
 
 const DEFAULT_BATCH_SIZE = 32;
 const MAX_BATCH_SIZE = 1_000;
+const SUCCESS_BODY_BASE_BYTES = 16 * 1024;
+const SUCCESS_VECTOR_VALUE_BYTES = 32;
+const MAX_SUCCESS_BODY_BYTES = 64 * 1024 * 1024;
 
 export interface OllamaProviderOptions {
   baseUrl: string;
@@ -23,6 +26,46 @@ export interface OllamaProviderOptions {
 
 interface OllamaEmbedResponse {
   embeddings?: unknown;
+}
+
+function invalidResponse(message: string, cause?: unknown): EmbeddingProviderError {
+  return new EmbeddingProviderError(
+    'EMBEDDING_INVALID_RESPONSE', message, { cause, diagnostic: true },
+  );
+}
+
+async function boundedSuccessJson(response: Response, count: number, dim: number): Promise<unknown> {
+  if (!response.body) return response.json() as Promise<unknown>;
+  const maximum = Math.min(
+    MAX_SUCCESS_BODY_BYTES,
+    SUCCESS_BODY_BASE_BYTES + count * dim * SUCCESS_VECTOR_VALUE_BYTES,
+  );
+  const declaredLength = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declaredLength) && declaredLength > maximum) {
+    await response.body.cancel().catch(() => undefined);
+    throw invalidResponse('Ollama returned an oversized response');
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  while (true) {
+    const next = await reader.read();
+    if (next.done) break;
+    length += next.value.byteLength;
+    if (length > maximum) {
+      await reader.cancel().catch(() => undefined);
+      throw invalidResponse('Ollama returned an oversized response');
+    }
+    chunks.push(next.value);
+  }
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try { return JSON.parse(new TextDecoder().decode(bytes)) as unknown; }
+  catch (error) { throw invalidResponse('Ollama returned invalid JSON', error); }
 }
 
 export class EmbeddingTimeoutError extends EmbeddingProviderError {
@@ -91,8 +134,9 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
           if (!res.ok) throw await embeddingProviderHttpError(res, 'ollama');
           let json: OllamaEmbedResponse;
           try {
-            json = (await res.json()) as OllamaEmbedResponse;
+            json = (await boundedSuccessJson(res, chunk.length, this.dim)) as OllamaEmbedResponse;
           } catch (error) {
+            if (error instanceof EmbeddingProviderError) throw error;
             throw new EmbeddingProviderError(
               'EMBEDDING_INVALID_RESPONSE',
               'Ollama returned invalid JSON',

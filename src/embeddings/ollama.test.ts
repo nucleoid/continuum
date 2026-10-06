@@ -43,6 +43,25 @@ describe('OllamaEmbeddingProvider', () => {
     }));
   });
 
+  it('cancels an oversized successful response body before buffering it all', async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(32 * 1024));
+      },
+      cancel() { cancelled = true; },
+    });
+    const provider = new OllamaEmbeddingProvider({
+      baseUrl: 'http://x', model: 'm', dim: 4,
+      fetchImpl: vi.fn(async () => new Response(body, { status: 200 })),
+    });
+
+    await expect(provider.embed(['one'])).rejects.toMatchObject({
+      code: 'EMBEDDING_INVALID_RESPONSE',
+    });
+    expect(cancelled).toBe(true);
+  });
+
   it.each([
     ['cardinality', { embeddings: [[0, 0, 0, 0]] }],
     ['dimension', { embeddings: [[0, 0], [0, 0, 0, 0]] }],

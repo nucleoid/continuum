@@ -3,6 +3,9 @@ CREATE TABLE IF NOT EXISTS embedding_backfill_failures (
   memory_id  UUID NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
   provider   TEXT NOT NULL,
   dim        INT NOT NULL CHECK (dim > 0),
+  disposition TEXT NOT NULL DEFAULT 'durable'
+    CHECK (disposition IN ('durable', 'suspect')),
+  reason      TEXT NOT NULL DEFAULT 'EMBEDDING_ITEM_FAILED',
   failed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (memory_id, provider, dim)
 );
@@ -14,10 +17,13 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_log_embedding_backfill_failed_seed
     AND metadata->>'embedded' = 'false'
     AND metadata->>'embedding_error_code' = 'EMBEDDING_FAILED';
 
-INSERT INTO embedding_backfill_failures (memory_id, provider, dim, failed_at)
+INSERT INTO embedding_backfill_failures
+  (memory_id, provider, dim, disposition, reason, failed_at)
 SELECT a.memory_id,
        a.metadata->>'provider',
        (a.metadata->>'dim')::INT,
+       'durable',
+       'EMBEDDING_ITEM_FAILED',
        min(a.at)
   FROM audit_log a
   JOIN memories m ON m.id = a.memory_id

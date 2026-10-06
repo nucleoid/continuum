@@ -47,6 +47,47 @@ export class EmbeddingProviderUnavailableError extends Error {
   }
 }
 
+class VectorSearchTimeoutError extends Error {
+  readonly code = 'EMBEDDING_TIMEOUT';
+}
+
+function connectable(pool: Queryable): pool is Queryable & Pick<pg.Pool, 'connect'> {
+  return typeof (pool as Partial<pg.Pool>).connect === 'function';
+}
+
+async function boundedVectorSearch(
+  pool: Queryable,
+  remainingMs: number,
+  queryVec: number[],
+  scopeIds: string[],
+  provider: EmbeddingProvider,
+  limit: number,
+  types: MemoryType[] | undefined,
+): Promise<Array<{ id: string; distance: number }>> {
+  if (remainingMs < 1) throw new VectorSearchTimeoutError('Vector search deadline exceeded');
+  if (!connectable(pool)) {
+    return vectorSearchMemoryIds(pool, queryVec, scopeIds, provider, limit, types);
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`SET LOCAL statement_timeout = '${remainingMs}ms'`);
+    const hits = await vectorSearchMemoryIds(
+      client, queryVec, scopeIds, provider, limit, types,
+    );
+    await client.query('COMMIT');
+    return hits;
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch { /* preserve the search failure */ }
+    if ((error as { code?: unknown })?.code === '57014') {
+      throw new VectorSearchTimeoutError('Vector search deadline exceeded');
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 function buildExcerpt(body: string, query: string): string {
   const max = 200;
   const lower = body.toLowerCase();
@@ -172,6 +213,7 @@ export async function recall(
     diagnostic: RecallDiagnostics['groups'][number];
   };
   const controller = new AbortController();
+  const deadlineAt = Date.now() + deadlineMs;
   let deadlineTimer: NodeJS.Timeout | undefined;
   const deadline = new Promise<'deadline'>((resolve) => {
     deadlineTimer = setTimeout(() => {
@@ -198,8 +240,9 @@ export async function recall(
         };
       }
       try {
-        const hits = await vectorSearchMemoryIds(
-          pool, queryVec, group.scopeIds, group.provider, overFetch, opts.types,
+        const hits = await boundedVectorSearch(
+          pool, deadlineAt - Date.now(), queryVec, group.scopeIds,
+          group.provider, overFetch, opts.types,
         );
         return {
           list: hits.map((hit, index) => ({
@@ -209,12 +252,15 @@ export async function recall(
             provider: group.provider.id, dim: group.provider.dim, status: 'used',
           },
         };
-      } catch {
+      } catch (error) {
         return {
           list: [],
           diagnostic: {
             provider: group.provider.id, dim: group.provider.dim,
-            status: 'failed', errorCode: 'VECTOR_SEARCH_FAILED',
+            status: 'failed',
+            errorCode: (error as { code?: unknown })?.code === 'EMBEDDING_TIMEOUT'
+              ? 'EMBEDDING_TIMEOUT'
+              : 'VECTOR_SEARCH_FAILED',
           },
         };
       }

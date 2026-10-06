@@ -47,6 +47,7 @@ describe('runMigrations', () => {
     expect(keySwap.trimStart()).toMatch(/^-- continuum:no-transaction/);
     expect(keySwap).toMatch(/CREATE UNIQUE INDEX CONCURRENTLY/i);
     expect(keySwap).toMatch(/PRIMARY KEY\s+USING INDEX/i);
+    expect(keySwap).toMatch(/BEGIN;[\s\S]*DROP CONSTRAINT[\s\S]*ADD CONSTRAINT[\s\S]*COMMIT;/i);
 
     const failureSeed = await readFile(
       join(process.cwd(), 'migrations/0011_embedding_backfill_failures.sql'),
@@ -55,6 +56,31 @@ describe('runMigrations', () => {
     expect(failureSeed).toMatch(/metadata->>'embedded'\s*=\s*'false'/i);
     expect(failureSeed).toMatch(/metadata->>'embedding_error_code'\s*=\s*'EMBEDDING_FAILED'/i);
     expect(failureSeed).toMatch(/CREATE INDEX CONCURRENTLY/i);
+    expect(failureSeed).toMatch(/disposition/i);
+    expect(failureSeed).toMatch(/reason/i);
+  });
+
+  it('bounds advisory-lock acquisition', async () => {
+    const release = vi.fn();
+    const client = {
+      query: vi.fn(async (query: string) => {
+        if (query.includes('pg_try_advisory_lock')) return { rows: [{ locked: false }], rowCount: 1 };
+        return { rows: [], rowCount: 0 };
+      }),
+      release,
+    };
+    const directory = await migrationDirectory('SELECT 42;');
+
+    await expect(runMigrations(
+      { connect: vi.fn(async () => client) } as unknown as pg.Pool,
+      directory,
+      { advisoryLockTimeoutMs: 20, lockTimeoutMs: 50 },
+    )).rejects.toThrow(/migration advisory lock.*20 ms/i);
+    expect(client.query).toHaveBeenCalledWith(
+      expect.stringContaining('pg_try_advisory_lock'),
+      expect.any(Array),
+    );
+    expect(release).toHaveBeenCalledOnce();
   });
 
   it('ships decision constraints after ingestion with nonblocking validation and indexing', async () => {

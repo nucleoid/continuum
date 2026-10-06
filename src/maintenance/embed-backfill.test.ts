@@ -372,7 +372,7 @@ describe('embedding backfill', () => {
     ['server response', new EmbeddingProviderError('EMBEDDING_SERVER', 'ambiguous upstream failure')],
     ['invalid response', new EmbeddingProviderError('EMBEDDING_INVALID_RESPONSE', 'ambiguous response')],
     ['unclassified response', new EmbeddingProviderError('EMBEDDING_FAILED', 'ambiguous rejection')],
-  ])('diagnostically isolates one poison row after an ambiguous %s', async (_label, failure) => {
+  ])('diagnostically isolates one suspect row after an ambiguous %s', async (_label, failure) => {
     const { memories } = await seed('project', `ambiguous-${_label}`, [
       'healthy one', 'poison item', 'healthy two', 'healthy three',
     ]);
@@ -386,9 +386,11 @@ describe('embedding backfill', () => {
 
     const report = await runEmbeddingBackfill(pool, provider, { batchSize: 4, maxRows: 10 });
 
-    expect(report).toMatchObject({ embedded: 3, failed: 1, completed: true });
+    expect(report).toMatchObject({ embedded: 3, failed: 0, completed: false });
+    expect(report.unresolvedIds).toEqual([memories[1]!.id]);
     expect((await pool.query(
-      'SELECT memory_id FROM embedding_backfill_failures WHERE provider = $1',
+      `SELECT memory_id FROM embedding_backfill_failures
+        WHERE provider = $1 AND disposition = 'suspect'`,
       [provider.id],
     )).rows).toEqual([{ memory_id: memories[1]!.id }]);
   });
@@ -788,6 +790,125 @@ describe('embedding backfill', () => {
       `SELECT count(*)::int AS count FROM audit_log
         WHERE metadata->>'operation' = 'embedding_backfill'`,
     )).rows[0].count).toBe(0);
+  });
+
+  it('contains token-limit item errors raised during diagnostic sub-batches', async () => {
+    await seed('project', 'diagnostic-token-limit', ['healthy one', 'poison item', 'healthy two', 'healthy three']);
+    const embed = vi.fn(async (texts: string[]) => {
+      if (texts.length === 4) {
+        throw new EmbeddingProviderError('EMBEDDING_SERVER', 'ambiguous batch failure', { diagnostic: true });
+      }
+      if (texts.some((text) => text.includes('poison item'))) {
+        throw new EmbeddingItemError('aggregate token limit');
+      }
+      return vectors.embed(texts);
+    });
+    const provider: EmbeddingProvider = {
+      id: 'voyage:diagnostic-token-limit', dim: 768, local: false, embed,
+    };
+
+    const report = await runEmbeddingBackfill(pool, provider, { batchSize: 4, maxRows: 10 });
+
+    expect(report).toMatchObject({ embedded: 3, failed: 1, completed: true });
+    expect(report.errorCodes).toEqual([]);
+  });
+
+  it('records intermittent 5xx isolation as a retryable suspect, not durable poison', async () => {
+    const { memories } = await seed('project', 'transient-suspect', ['healthy one', 'transient item', 'healthy two']);
+    let unhealthy = true;
+    const embed = vi.fn(async (texts: string[]) => {
+      if (unhealthy && texts.some((text) => text.includes('transient item'))) {
+        throw new EmbeddingProviderError('EMBEDDING_SERVER', 'temporary upstream failure', { diagnostic: true });
+      }
+      return vectors.embed(texts);
+    });
+    const provider: EmbeddingProvider = {
+      id: 'openai:transient-suspect', dim: 768, local: false, embed,
+    };
+
+    const first = await runEmbeddingBackfill(pool, provider, { batchSize: 3, maxRows: 10 });
+    expect(first).toMatchObject({ embedded: 2, failed: 0, completed: false });
+    expect(first.unresolvedIds).toEqual([memories[1]!.id]);
+    expect((await pool.query(
+      `SELECT disposition, reason FROM embedding_backfill_failures WHERE memory_id = $1`,
+      [memories[1]!.id],
+    )).rows).toEqual([{ disposition: 'suspect', reason: 'EMBEDDING_SERVER' }]);
+
+    unhealthy = false;
+    const second = await runEmbeddingBackfill(pool, provider, { batchSize: 3, maxRows: 10 });
+    expect(second).toMatchObject({ embedded: 1, failed: 0, completed: true });
+    expect(second.unresolvedIds).toEqual([]);
+    expect((await pool.query(
+      `SELECT count(*)::int AS count FROM embedding_backfill_failures WHERE memory_id = $1`,
+      [memories[1]!.id],
+    )).rows[0].count).toBe(0);
+  });
+
+  it('advances past one ambiguous row and reports its unresolved id without wrapping forever', async () => {
+    const { memories } = await seed('project', 'single-ambiguous', ['ambiguous item']);
+    const provider: EmbeddingProvider = {
+      id: 'ollama:single-ambiguous', dim: 768, local: true,
+      async embed() {
+        throw new EmbeddingProviderError('EMBEDDING_SERVER', 'temporary upstream failure', { diagnostic: true });
+      },
+    };
+
+    const report = await runEmbeddingBackfill(pool, provider, { batchSize: 1, maxRows: 10 });
+
+    expect(report).toMatchObject({ embedded: 0, failed: 0, completed: false, cursor: null });
+    expect(report.unresolvedIds).toEqual([memories[0]!.id]);
+  });
+
+  it('stores already-paid valid vectors and retries only invalid response items', async () => {
+    await seed('project', 'partial-invalid', ['one', 'two', 'three']);
+    const embed = vi.fn(async (texts: string[]) => {
+      if (texts.length === 3) {
+        const valid = await vectors.embed(texts);
+        valid[1] = [0];
+        return valid;
+      }
+      return vectors.embed(texts);
+    });
+    const provider: EmbeddingProvider = {
+      id: 'ollama:partial-invalid', dim: 768, local: true, embed,
+    };
+
+    const report = await runEmbeddingBackfill(pool, provider, { batchSize: 3, maxRows: 10 });
+
+    expect(report).toMatchObject({ embedded: 3, failed: 0, completed: true });
+    expect(embed.mock.calls.map(([texts]) => texts.length)).toEqual([3, 1]);
+  });
+
+  it('reports a provider-local lock error and continues an unrelated provider', async () => {
+    await seed('project', 'locked-provider-scope', ['locked row']);
+    await seed('project', 'healthy-provider-scope', ['healthy row']);
+    const lockedProvider: EmbeddingProvider = {
+      id: 'hosted:locked-provider', dim: 768, local: false, embed: (texts) => vectors.embed(texts),
+    };
+    const healthyProvider: EmbeddingProvider = {
+      id: 'ollama:healthy-provider', dim: 768, local: true, embed: (texts) => vectors.embed(texts),
+    };
+    const router = new ScopeEmbeddingRouter(
+      new EmbeddingRegistry([['locked', lockedProvider], ['healthy', healthyProvider]]),
+      {
+        default: 'healthy',
+        rules: [{ match: { kind: 'project', name: 'locked-provider-scope' }, provider: 'locked' }],
+      },
+    );
+    const lockName = `continuum:embed-backfill:${lockedProvider.id}:${lockedProvider.dim}`;
+    const lockClient = await pool.connect();
+    await lockClient.query('SELECT pg_advisory_lock(hashtextextended($1, 0))', [lockName]);
+    try {
+      const report = await runEmbeddingBackfill(pool, router, { maxRows: 10 });
+      expect(report).toMatchObject({ embedded: 1, completed: false });
+      expect(report.providerReports).toEqual(expect.arrayContaining([
+        expect.objectContaining({ provider: lockedProvider.id, errorCode: 'BACKFILL_LOCK' }),
+        expect.objectContaining({ provider: healthyProvider.id, embedded: 1 }),
+      ]));
+    } finally {
+      await lockClient.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [lockName]);
+      lockClient.release();
+    }
   });
 
   it('supports count-only and dry-run without embeddings or checkpoint writes', async () => {

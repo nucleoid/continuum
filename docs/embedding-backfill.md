@@ -37,15 +37,18 @@ completed or audited memory is checkpointed before an exhausted error budget
 stops the command. Authentication,
 rate-limit, network, and timeout failures stop that provider immediately. Ambiguous
 5xx, invalid-response, non-JSON limit, and unrecognized request failures receive a
-bounded diagnostic bisection. A row is marked failed only when another item from
-the same batch succeeds. If every diagnostic leaf fails, the result remains a
-provider outage and no row is suppressed. Diagnostic probing is capped at 64
-sub-batch requests per failed batch.
+bounded diagnostic bisection. An isolated ambiguous row is recorded as a retryable
+`suspect`, not durable poison; it is retried on the next run and removed after a
+successful write. If every diagnostic leaf fails, the result remains a provider
+outage and no row is suppressed. Diagnostic probing is capped at 64 sub-batch
+requests per failed batch.
 
 The JSON report includes `providerReports`, preserving each provider's counters,
-cursor, completion state, and sanitized `errorCode`. A provider failure does not
-prevent later routed providers from running. Any incomplete provider or provider
-error makes the CLI exit nonzero after printing the report.
+cursor, completion state, sanitized `errorCode`, and `unresolvedIds`. The top-level
+`unresolvedIds` aggregates retryable suspects across providers. Provider-local
+database and advisory-lock failures do not prevent later routed providers from
+running. Any incomplete provider or provider error makes the CLI exit nonzero
+after printing the report.
 
 `--cursor UUID` requires `--provider`. Saved and explicit cursors wrap once at
 the end of the UUID range, and completion is reported only after the lower
@@ -61,8 +64,9 @@ a hosted provider.
 ## Migration 0010 rollout and rollback
 
 Migration `0010_provider_embeddings_backfill.sql` builds the new unique index
-concurrently, then attaches it as the primary key. The migrator runs this file
-without a transaction because PostgreSQL forbids concurrent index creation in a
+concurrently, then attaches it as the primary key in a short transaction with a
+bounded lock timeout. The migrator runs the mixed online DDL file through its
+no-transaction path because PostgreSQL forbids concurrent index creation in a
 transaction block.
 
 Before applying 0010, drain every process running the old write path. Old writers

@@ -100,6 +100,17 @@ describe('vector search filters', () => {
     ]);
   });
 
+  it('materializes the provider-qualified candidate set before vector ordering', async () => {
+    const db = queryable();
+    vi.mocked(db.query).mockResolvedValue({ rows: [] } as never);
+
+    await vectorSearchMemoryIds(db, vector, scopeIds, provider, 10);
+
+    const [sql] = vi.mocked(db.query).mock.calls[0] as [string, unknown[]];
+    expect(sql).toMatch(/WITH provider_embeddings AS MATERIALIZED/i);
+    expect(sql.indexOf('e.provider = $3')).toBeLessThan(sql.indexOf('ORDER BY'));
+  });
+
   it('combines multiple requested types with provider and dimension filters', async () => {
     const db = queryable();
     vi.mocked(db.query).mockResolvedValue({ rows: [] } as never);

@@ -66,14 +66,17 @@ export async function vectorSearchMemoryIds(
   params.push(limit);
   const limitIdx = params.length;
   const { rows } = await pool.query(
-    `SELECT m.id, e.embedding <=> $1::vector AS distance
-       FROM memory_embeddings e
+    `WITH provider_embeddings AS MATERIALIZED (
+       SELECT e.memory_id, e.embedding
+         FROM memory_embeddings e
+        WHERE e.provider = $3 AND e.dim = $4
+     )
+     SELECT m.id, e.embedding <=> $1::vector AS distance
+       FROM provider_embeddings e
        JOIN memories m ON m.id = e.memory_id
       WHERE m.scope_id = ANY($2::uuid[])
         AND m.state = 'live'
         AND (m.expires_at IS NULL OR m.expires_at > clock_timestamp())
-        AND e.provider = $3
-        AND e.dim = $4
         ${typeFilter}
       ORDER BY e.embedding <=> $1::vector
       LIMIT $${limitIdx}`,
@@ -100,15 +103,18 @@ export async function vectorSearchRelatedMemories(
   if (scopeIds.length === 0) return [];
   assertEmbeddingVectorDimension(queryVector, provider);
   const { rows } = await pool.query(
-    `SELECT m.id, m.type, m.title, m.body,
+    `WITH provider_embeddings AS MATERIALIZED (
+       SELECT e.memory_id, e.embedding
+         FROM memory_embeddings e
+        WHERE e.provider = $3 AND e.dim = $4
+     )
+     SELECT m.id, m.type, m.title, m.body,
             e.embedding <=> $1::vector AS distance
-       FROM memory_embeddings e
+       FROM provider_embeddings e
        JOIN memories m ON m.id = e.memory_id
       WHERE m.scope_id = ANY($2::uuid[])
         AND m.state = 'live'
         AND (m.expires_at IS NULL OR m.expires_at > clock_timestamp())
-        AND e.provider = $3
-        AND e.dim = $4
         AND m.id <> $5::uuid
         AND 1 - (e.embedding <=> $1::vector) >= $6
       ORDER BY distance ASC, m.id ASC
