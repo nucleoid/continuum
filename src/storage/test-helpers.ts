@@ -16,6 +16,8 @@ export async function resetData(pool: pg.Pool): Promise<void> {
       DISABLE TRIGGER preserve_user_scope_approval_truncate;
     ALTER TABLE principal_offboarding_events
       DISABLE TRIGGER preserve_offboarding_event_truncate;
+    ALTER TABLE principal_offboarding_run_events
+      DISABLE TRIGGER preserve_offboarding_run_event_truncate;
   `);
   try {
     await pool.query(`
@@ -27,6 +29,7 @@ export async function resetData(pool: pg.Pool): Promise<void> {
         entra_sync_state,
         entra_groups,
         principal_offboarding_audit_requests,
+        principal_offboarding_run_events,
         principal_offboarding_runs,
         principal_offboarding_events,
         principal_user_scope_approvals,
@@ -44,6 +47,8 @@ export async function resetData(pool: pg.Pool): Promise<void> {
         ENABLE TRIGGER preserve_user_scope_approval_truncate;
       ALTER TABLE principal_offboarding_events
         ENABLE TRIGGER preserve_offboarding_event_truncate;
+      ALTER TABLE principal_offboarding_run_events
+        ENABLE TRIGGER preserve_offboarding_run_event_truncate;
     `);
   }
   // Re-seed static rows inserted by migrations.
