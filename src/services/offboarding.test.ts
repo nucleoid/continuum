@@ -1,6 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import type pg from 'pg';
 import { createAuthenticator } from '../api/auth.js';
+import type { EmbeddingProvider } from '../embeddings/provider.js';
 import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
 import { addMembership } from '../storage/memberships.js';
 import { createMemory } from '../storage/memories.js';
@@ -10,6 +11,7 @@ import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { mapOwnedUserScope, offboardPrincipal } from './offboarding.js';
 import { disablePrincipal, reactivatePrincipal } from './principal-admin.js';
+import { recallForPrincipal } from './recall.js';
 
 describe('offboarding and erasure', () => {
   let pool: pg.Pool;
@@ -192,6 +194,40 @@ describe('offboarding and erasure', () => {
     expect(gaps.candidates).toEqual([]);
   });
 
+  it('scrubs free-text audit metadata and scope names and reports dirty retry counts', async () => {
+    const value = await fixture();
+    await pool.query(
+      `INSERT INTO audit_log (principal_id, action, memory_id, scope_id, query, metadata)
+       VALUES ($1, 'verify', $2, $3, 'private query', $4::jsonb)`,
+      [value.target.id, value.personalMemory.id, value.personal.id, JSON.stringify({
+        note: 'private verification note', scope: 'opaque-personal-scope',
+        nested: { title: 'Private title' },
+      })],
+    );
+    const preview = await offboardPrincipal(pool, value.admin, value.target.id, true);
+    expect(preview).toMatchObject({ dirtyAuditRows: 2, dirtyMemories: 1 });
+    const erased = await offboardPrincipal(pool, value.admin, value.target.id);
+    expect((await pool.query('SELECT name FROM scopes WHERE id = $1', [value.personal.id])).rows[0].name)
+      .toBe(erased.scopePseudonym);
+    const audit = await pool.query(
+      `SELECT query, metadata FROM audit_log
+        WHERE principal_id = $1 OR scope_id = $2 OR memory_id = $3 ORDER BY id`,
+      [value.target.id, value.personal.id, value.personalMemory.id],
+    );
+    expect(JSON.stringify(audit.rows)).not.toContain('private');
+    expect(JSON.stringify(audit.rows)).not.toContain('opaque-personal-scope');
+    expect(audit.rows.every((row) => row.query === null)).toBe(true);
+    await pool.query(
+      `UPDATE audit_log SET query = 'retry secret', metadata = '{"note":"retry note"}'
+        WHERE principal_id = $1`, [value.target.id],
+    );
+    const retry = await offboardPrincipal(pool, value.admin, value.target.id);
+    expect(retry).toMatchObject({ alreadyOffboarded: false, dirtyAuditRows: 1 });
+    expect(JSON.stringify((await pool.query(
+      'SELECT query, metadata FROM audit_log WHERE principal_id = $1', [value.target.id],
+    )).rows)).not.toContain('retry');
+  });
+
   it('requires membership history and explicit override for another active scope member', async () => {
     const admin = await createPrincipal(pool, {
       externalId: 'mapping-admin', kind: 'user', displayName: 'Admin',
@@ -213,6 +249,47 @@ describe('offboarding and erasure', () => {
       .rejects.toThrow(/other active members/i);
     await expect(mapOwnedUserScope(pool, admin, target.id, personal.id, true))
       .resolves.toMatchObject({ created: true, allowOtherActiveMembers: true });
+  });
+
+  it('requires writer ownership proof and override for any other history or authorship', async () => {
+    const admin = await createPrincipal(pool, {
+      externalId: 'ownership-admin', kind: 'user', displayName: 'Admin',
+    });
+    const target = await createPrincipal(pool, {
+      externalId: 'ownership-target', kind: 'user', displayName: 'Target',
+    });
+    const other = await createPrincipal(pool, {
+      externalId: 'ownership-other', kind: 'user', displayName: 'Other',
+    });
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    const personal = await createScope(pool, { kind: 'user', name: 'ownership-scope' });
+    await addMembership(pool, admin.id, org!.id, 'admin');
+    await addMembership(pool, target.id, personal.id, 'reader');
+    await expect(mapOwnedUserScope(pool, admin, target.id, personal.id))
+      .rejects.toThrow(/writer or admin membership history/i);
+    await addMembership(pool, target.id, personal.id, 'writer');
+    await addMembership(pool, other.id, personal.id, 'reader');
+    await pool.query(
+      `UPDATE scope_memberships SET active = FALSE, deactivated_at = now()
+        WHERE principal_id = $1 AND scope_id = $2`, [other.id, personal.id],
+    );
+    await createMemory(pool, {
+      scopeId: personal.id, scopeKind: 'user', type: 'fact', title: 'Other authored',
+      body: 'Other authored body', authorId: other.id, source: 'manual',
+    });
+    await expect(mapOwnedUserScope(pool, admin, target.id, personal.id))
+      .rejects.toThrow(/other principal history or authorship/i);
+    await mapOwnedUserScope(pool, admin, target.id, personal.id, true);
+    const evidence = (await pool.query(
+      `SELECT metadata FROM audit_log
+        WHERE metadata->>'operation' = 'principal_user_scope_mapped'`,
+    )).rows[0].metadata;
+    expect(evidence).toMatchObject({
+      other_member_principal_ids: [other.id],
+      other_author_principal_ids: [other.id],
+      other_member_principal_ids_truncated: false,
+      other_author_principal_ids_truncated: false,
+    });
   });
 
   it('offboards an already disabled principal and denies membership reprovisioning', async () => {
@@ -282,6 +359,69 @@ describe('offboarding and erasure', () => {
     await mapOwnedUserScope(pool, onlyAdmin, onlyAdmin.id, personal.id);
     await expect(offboardPrincipal(pool, onlyAdmin, onlyAdmin.id)).rejects.toThrow(/last effective manual org administrator/i);
     expect((await pool.query('SELECT disabled_at FROM principals WHERE id = $1', [onlyAdmin.id])).rows[0].disabled_at).toBeNull();
+  });
+
+  it('fails an in-flight recall closed after offboarding wins the principal lock', async () => {
+    const value = await fixture();
+    let releaseEmbedding!: () => void;
+    let embeddingStarted!: () => void;
+    const started = new Promise<void>((resolve) => { embeddingStarted = resolve; });
+    const release = new Promise<void>((resolve) => { releaseEmbedding = resolve; });
+    const provider: EmbeddingProvider = {
+      id: 'blocking-test', dim: 768,
+      async embed() {
+        embeddingStarted();
+        await release;
+        return [Array(768).fill(0)];
+      },
+    };
+    const recall = recallForPrincipal(pool, provider, value.target, {
+      query: 'Private body', limit: 10,
+    });
+    await started;
+    await offboardPrincipal(pool, value.admin, value.target.id);
+    releaseEmbedding();
+    await expect(recall).rejects.toMatchObject({ code: 'INTERNAL' });
+    expect((await pool.query(
+      `SELECT count(*)::int AS count FROM audit_log
+        WHERE principal_id = $1 AND query IS NOT NULL`, [value.target.id],
+    )).rows[0].count).toBe(0);
+  });
+
+  it('leaves an exact redacted clean state and durable evidence outside audit retention', async () => {
+    const value = await fixture();
+    await pool.query(
+      `UPDATE memories SET expires_at = now(), last_verified = now() WHERE id = $1`,
+      [value.personalMemory.id],
+    );
+    const result = await offboardPrincipal(pool, value.admin, value.target.id);
+    expect((await pool.query(
+      `SELECT type, title, body, metadata, tags, source, source_ref, state,
+              supersedes_id, promoted_to_id, expires_at, last_verified
+         FROM memories WHERE id = $1`, [value.personalMemory.id],
+    )).rows[0]).toEqual({
+      type: 'context', title: '[erased]', body: '[erased]', metadata: {}, tags: [],
+      source: 'erased', source_ref: null, state: 'archived', supersedes_id: null,
+      promoted_to_id: null, expires_at: null, last_verified: null,
+    });
+    expect((await pool.query(
+      `SELECT p.display_name, s.name
+         FROM principals p JOIN principal_user_scopes pus ON pus.principal_id = p.id
+         JOIN scopes s ON s.id = pus.scope_id WHERE p.id = $1`, [value.target.id],
+    )).rows[0]).toEqual({ display_name: result.pseudonym, name: result.scopePseudonym });
+    const durable = (await pool.query(
+      `SELECT memories, embeddings, memberships, audit_rows, evidence
+         FROM principal_offboarding_events WHERE principal_id = $1 ORDER BY id`,
+      [value.target.id],
+    )).rows[0];
+    expect(durable).toMatchObject({ memories: 1, embeddings: 1, memberships: 1 });
+    expect(durable.evidence).toMatchObject({ memberPrincipalIds: [value.target.id] });
+    await pool.query('DELETE FROM audit_log');
+    const retry = await offboardPrincipal(pool, value.admin, value.target.id);
+    expect(retry.alreadyOffboarded).toBe(true);
+    expect(retry.originalOffboarding).toMatchObject({
+      memories: 1, embeddings: 1, memberships: 1,
+    });
   });
 
   it('orders embedding writes with archive and removes either race winner', async () => {

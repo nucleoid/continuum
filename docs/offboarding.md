@@ -20,13 +20,15 @@ The REST equivalents are `PUT
 "dryRun": true|false }`. Normal authentication applies and the service checks
 active org-admin authority inside the transaction.
 
-Mapping requires the target principal to have current or historical membership
-on the scope. A scope with another active member is rejected by default. If a
-review confirms that a delegate or ingest identity legitimately shares the
-personal scope, the operator must acknowledge that all of those memberships
-will be deactivated by using `--allow-other-active-members`, or REST field
-`"allowOtherActiveMembers": true`. Names and authorship are never ownership
-evidence.
+Mapping requires the target principal to have current or historical `writer` or
+`admin` membership on the scope; reader access alone is not ownership proof. A
+scope with any membership history or authorship from another principal is
+rejected by default, even when that membership is now inactive. If a review
+confirms that a delegate, ingest identity, or prior author legitimately shares
+the personal scope, the operator must acknowledge that history by using
+`--allow-other-active-members`, or REST field `"allowOtherActiveMembers": true`.
+The mapping audit contains only bounded, sorted UUID lists and explicit
+truncation flags. Names alone are never ownership evidence.
 
 Dry-run reports personal-memory, live-memory, embedding, active scope-membership,
 and raw audit-query counts without writing an audit or changing state. It also
@@ -34,26 +36,40 @@ returns bounded, sorted member and author principal UUID evidence, with explicit
 truncation flags, so the operator can detect a mistaken mapping without exposing
 names or memory content. Execution is limited to 10,000 memories so
 the redaction, archive transition, embedding deletion, membership deactivation,
-principal disablement, pseudonymization, and audit commit remain one bounded
-transaction. Every membership on the owned scope is deactivated, including
+principal disablement, principal and scope pseudonymization, and audit commit
+remain one bounded transaction. Every membership on the owned scope is deactivated, including
 delegate and ingest identities. Larger scopes are rejected intact and require a reviewed retention
 plan; the service never partially erases one owned scope. Safe retries return
-`alreadyOffboarded: true` only after verifying that no live memories, embeddings,
-active scope memberships, or raw target queries remain. Retry output includes
-the first offboarding audit ID, timestamp, and original counts. A dirty retry
+`alreadyOffboarded: true` only after verifying the exact memory tombstone fields,
+principal and scope pseudonyms, zero embeddings and active scope memberships,
+and no dirty audit query or metadata rows. Dry-run and retry output includes
+dirty-memory and dirty-audit counts. Retry output also includes the first durable
+evidence ID, timestamp, and original counts. A dirty retry
 runs the complete erasure again and records a repair event rather than silently
 reporting success.
 
 Every memory in the mapped user scope has its title and body replaced with the
-fixed `[erased]` tombstone, metadata and tags cleared, source identifiers
-removed, and state set to `archived`. Memories in team, project, role, and org
+fixed `[erased]` tombstone, type normalized to `context`, metadata and tags
+cleared, source identifiers and memory-to-memory links removed, lifecycle dates
+cleared, and state set to `archived`. The owned user scope name is replaced by
+a deterministic UUID-derived pseudonym. Memories in team, project, role, and org
 scopes are preserved even when the departing principal authored them. Their
 stable author UUID remains an audit reference and resolves to the principal's
 stable `erased-<uuid-prefix>` pseudonym. The original display name is removed
 from the ordinary `principals` table. Audit metadata contains UUIDs, counts, and
 the pseudonym, never the removed display name or memory content. Raw recall text
-in the departing principal's `audit_log.query` rows is set to null in the same
-transaction, so it cannot remain visible through audit or knowledge-gap output.
+and free-text audit metadata (including verification notes) on rows tied to the
+principal, owned scope, or its memories are replaced by a fixed tombstone in the
+same transaction, so they cannot remain visible through the audit API or
+knowledge-gap output. Audit inserts lock the principal row and are rejected
+after offboarding; an in-flight recall that loses this race fails closed instead
+of returning results with an unsanitized late audit row.
+
+The original count and bounded-ID receipt is also written to
+`principal_offboarding_events`. That compact privacy-safe ledger is outside
+ordinary `audit_log` retention and is the authoritative retry evidence after
+audit rows have been pruned. It contains UUIDs, counts, timestamps, and
+truncation flags only, never memory text, names, queries, or verification notes.
 
 Disabling the principal atomically deactivates all sourced memberships and
 revokes service credentials. The existing final-manual-org-admin guard can
@@ -77,13 +93,25 @@ The database also rejects inserting a live memory, or changing a memory back to
 live, in a scope whose mapped owner is currently offboarded.
 
 Migration `0022_offboarding_erasure.sql` uses a five-second `lock_timeout` and
-deletes embeddings already attached to archived memories before installing the
-ongoing triggers. Apply it before starting the new application version, during
-a window where long membership-sync and write transactions can be allowed to
-finish. A lock-timeout failure rolls the migration back intact and should be
-retried after the blocker is removed. During a rolling deploy, old instances do
-not expose the new operator workflow; complete the migration before invoking
-offboarding.
+installs the columns, ledgers, and database guards. Migration
+`0023_offboarding_embedding_cleanup.sql` runs afterward with a five-second lock
+timeout and a 30-second statement timeout. Separating cleanup means the scan and
+delete of old archived embeddings never runs while `0022` holds `ACCESS
+EXCLUSIVE` on `principals`. A timeout rolls back that migration intact; remove
+the blocker or schedule a larger maintenance window and retry.
+
+Apply both migrations before starting the new application version. Old
+instances can continue ordinary traffic after `0022`, but they do not know the
+offboarding workflow and an old authenticated request may already be in flight.
+Do not invoke offboarding until both migrations are recorded on every shared
+database and all old application instances have drained. Rollback is
+application-first: stop invoking offboarding, drain the new instances, and
+deploy the old application. Do not drop the new columns, tables, functions, or
+triggers during that rollback; the old application tolerates them, while
+dropping the guards would reopen late-write races. Schema removal requires a
+separate reviewed migration only after no offboarded principals or owned-scope
+mappings remain. Offboarding erasure itself is irreversible and is not undone
+by an application rollback.
 
 This is an application-data boundary. Operators must separately apply their
 documented retention policy to encrypted database backups, database/WAL logs,

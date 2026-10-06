@@ -37,6 +37,14 @@ Operators are responsible for encryption, backup, access control, and a separate
 retention policy for exported files. Exports contain sensitive complete audit
 rows, including queries and metadata.
 
+An export created before principal offboarding can retain query text,
+verification notes, scope names, and other metadata that the live database later
+tombstones. Offboarding cannot rewrite already published JSONL files. Treat each
+export as a separate personal-data store: restrict access, encrypt it, index it
+by principal, scope, or memory UUID where needed for erasure, and apply the
+organization's deletion schedule to every replica and backup. Do not restore a
+pre-offboarding row over its live tombstone.
+
 Durable JSONL export is supported on POSIX hosts only. Windows runs without an
 export directory remain supported, but configuring export on Windows fails
 before a database connection is opened. Node does not expose the Windows
@@ -99,5 +107,10 @@ digest. It never includes raw queries, metadata, payloads, or credentials.
 
 Keep normal autovacuum enabled and monitor dead tuples, table size, command
 duration, and replica lag. Increase limits only from measured evidence. This
-feature does not partition `audit_log`, implement issue #27 erasure, or invent
-the issue #24 credential model.
+feature does not partition `audit_log` or invent the issue #24 credential model.
+
+Principal offboarding receipts are stored separately in
+`principal_offboarding_events` and are intentionally not selected or deleted by
+this command. They contain bounded UUID evidence, counts, and timestamps rather
+than audit payloads. Govern that ledger under the organization's minimal legal
+and security evidence retention policy; deleting `audit_log` does not remove it.

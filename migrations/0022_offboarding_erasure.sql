@@ -15,6 +15,25 @@ CREATE TABLE principal_user_scopes (
   allow_other_active_members BOOLEAN NOT NULL DEFAULT FALSE
 );
 
+-- This compact privacy-safe ledger is deliberately outside audit_log so the
+-- original erasure receipt survives ordinary audit retention pruning.
+CREATE TABLE principal_offboarding_events (
+  id BIGSERIAL PRIMARY KEY,
+  principal_id UUID NOT NULL REFERENCES principals(id) ON DELETE RESTRICT,
+  scope_id UUID NOT NULL REFERENCES scopes(id) ON DELETE RESTRICT,
+  actor_principal_id UUID NOT NULL REFERENCES principals(id) ON DELETE RESTRICT,
+  at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  repair BOOLEAN NOT NULL DEFAULT FALSE,
+  memories INTEGER NOT NULL CHECK (memories >= 0),
+  embeddings INTEGER NOT NULL CHECK (embeddings >= 0),
+  memberships INTEGER NOT NULL CHECK (memberships >= 0),
+  audit_rows INTEGER NOT NULL CHECK (audit_rows >= 0),
+  evidence JSONB NOT NULL
+);
+
+CREATE INDEX principal_offboarding_events_principal_idx
+  ON principal_offboarding_events (principal_id, id);
+
 CREATE FUNCTION continuum_validate_principal_user_scope() RETURNS trigger AS $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM principals p WHERE p.id = NEW.principal_id AND p.kind = 'user') THEN
@@ -73,10 +92,6 @@ CREATE TRIGGER require_embeddable_memory
 BEFORE INSERT OR UPDATE ON memory_embeddings
 FOR EACH ROW EXECUTE FUNCTION continuum_require_embeddable_memory();
 
--- Clean up derived rows that predate the archive trigger.
-DELETE FROM memory_embeddings e USING memories m
- WHERE e.memory_id = m.id AND m.state = 'archived';
-
 CREATE FUNCTION continuum_remove_archived_memory_embedding() RETURNS trigger AS $$
 BEGIN
   IF NEW.state = 'archived' AND OLD.state IS DISTINCT FROM NEW.state THEN
@@ -89,3 +104,24 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER remove_archived_memory_embedding
 AFTER UPDATE OF state ON memories
 FOR EACH ROW EXECUTE FUNCTION continuum_remove_archived_memory_embedding();
+
+-- Order every audit write against offboarding through the principal row. An
+-- in-flight request that loses the race fails before returning unaudited data.
+CREATE FUNCTION continuum_reject_offboarded_principal_audit() RETURNS trigger AS $$
+DECLARE
+  principal_offboarded_at TIMESTAMPTZ;
+BEGIN
+  SELECT p.offboarded_at INTO principal_offboarded_at
+    FROM principals p
+   WHERE p.id = NEW.principal_id
+   FOR KEY SHARE;
+  IF principal_offboarded_at IS NOT NULL THEN
+    RAISE EXCEPTION 'audit insert forbidden for offboarded principal';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER reject_offboarded_principal_audit
+BEFORE INSERT ON audit_log
+FOR EACH ROW EXECUTE FUNCTION continuum_reject_offboarded_principal_audit();

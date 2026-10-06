@@ -49,6 +49,37 @@ describe('offboarding REST administration', () => {
     expect(executed.body).toMatchObject({ principalId: target.id, dryRun: false, alreadyOffboarded: false });
   });
 
+  it('does not expose erased audit free text through GET /audit', async () => {
+    const admin = await createPrincipal(pool, {
+      externalId: 'audit-admin', kind: 'user', displayName: 'Admin',
+    });
+    const target = await createPrincipal(pool, {
+      externalId: 'audit-target', kind: 'user', displayName: 'Target',
+    });
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    const personal = await createScope(pool, { kind: 'user', name: 'private-scope-name' });
+    await addMembership(pool, admin.id, org!.id, 'admin');
+    await addMembership(pool, target.id, personal.id, 'writer');
+    const app = createApp(pool, { logger: { info() {}, error() {} } });
+    const path = `/api/v0/admin/principals/${target.id}`;
+    await request(app).put(`${path}/owned-user-scope`)
+      .set('Authorization', 'Bearer audit-admin').send({ scopeId: personal.id });
+    await pool.query(
+      `INSERT INTO audit_log (principal_id, action, scope_id, query, metadata)
+       VALUES ($1, 'verify', $2, 'private query',
+               '{"note":"private note","scope":"private-scope-name"}')`,
+      [target.id, personal.id],
+    );
+    expect((await request(app).post(`${path}/offboard`)
+      .set('Authorization', 'Bearer audit-admin').send({})).status).toBe(200);
+    const response = await request(app).get('/api/v0/audit')
+      .set('Authorization', 'Bearer audit-admin');
+    expect(response.status).toBe(200);
+    expect(JSON.stringify(response.body)).not.toContain('private query');
+    expect(JSON.stringify(response.body)).not.toContain('private note');
+    expect(JSON.stringify(response.body)).not.toContain('private-scope-name');
+  });
+
   it('maps the last-admin offboarding guard to the stable conflict contract', async () => {
     const admin = await createPrincipal(pool, {
       externalId: 'only-admin-rest', kind: 'user', displayName: 'Only admin',
