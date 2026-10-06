@@ -816,8 +816,8 @@ describe('PromotionEventWorker', () => {
         },
       });
       const healthyRegistry = new PromotionWebhookRegistry();
-      healthyRegistry.register({ id: 'healthy', onPromoted: async () => undefined });
       healthyRegistry.register({ id: 'slow', onPromoted: async () => undefined });
+      healthyRegistry.register({ id: 'healthy', onPromoted: async () => undefined });
       const store = mockStore({
         claim: vi.fn().mockResolvedValueOnce([{
           ...claimedDelivery, webhookId: 'slow',
@@ -826,7 +826,7 @@ describe('PromotionEventWorker', () => {
       const slowWorker = new PromotionEventWorker(
         pool,
         slowRegistry,
-        workerOptions({ owner: 'slow-owner', claimBatch: 2, leaseMs: 90, callbackTimeoutMs: 20 }),
+        workerOptions({ owner: 'slow-owner', claimBatch: 100, leaseMs: 90, callbackTimeoutMs: 20 }),
         store,
       );
       const slowDrain = slowWorker.drainOnce();
@@ -838,16 +838,16 @@ describe('PromotionEventWorker', () => {
       const instance = new PromotionEventWorker(
         pool,
         healthyRegistry,
-        workerOptions({ claimBatch: 2, leaseMs: 90, callbackTimeoutMs: 20 }),
+        workerOptions({ claimBatch: 100, leaseMs: 90, callbackTimeoutMs: 20 }),
         store,
       );
       await instance.drainOnce();
       const inputs = (store.claim as ReturnType<typeof vi.fn>).mock.calls
         .map((call) => call[1]);
-      expect(inputs.reduce((sum, input) => sum + input.limit, 0)).toBe(3);
+      expect(inputs.reduce((sum, input) => sum + input.limit, 0)).toBe(99);
       expect(inputs.map((input) => [input.webhookIds, input.limit])).toEqual([
-        [['healthy'], 2],
-        [['slow'], 1],
+        [['slow'], 49],
+        [['healthy'], 50],
       ]);
     } finally {
       releaseSlow.resolve();
