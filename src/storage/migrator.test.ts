@@ -68,6 +68,14 @@ describe('runMigrations', () => {
     expect(authorization).toMatch(/continuum_membership_is_effective/i);
     expect(authorization).toMatch(/principal_reactivated/i);
     expect(authorization).toMatch(/SECURITY DEFINER/i);
+    const trustBoundary = await readFile(
+      join(process.cwd(), 'migrations/0029_offboarding_reactivation_trust_boundary.sql'), 'utf8',
+    );
+    expect(trustBoundary).toMatch(
+      /REVOKE ALL ON FUNCTION continuum_reactivate_principal\(UUID, UUID\) FROM PUBLIC/i,
+    );
+    expect(trustBoundary).toMatch(/principal_reactivation_guarded/i);
+    expect(trustBoundary).toMatch(/00000000-0000-4000-8000-000000000011/i);
   });
   it('removes pre-existing embeddings for archived memories during the offboarding migration', async () => {
     const schema = `migrator_offboarding_${Date.now()}_${Math.random().toString(16).slice(2)}`;
