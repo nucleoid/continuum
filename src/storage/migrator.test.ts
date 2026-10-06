@@ -51,7 +51,10 @@ describe('runMigrations', () => {
     expect(principal).not.toMatch(/CREATE TABLE|CREATE INDEX|CREATE FUNCTION/i);
     expect(erasure).not.toMatch(/CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?!principal_offboarding_events)/i);
     expect(indexes.trimStart()).toMatch(/^-- continuum:no-transaction/);
-    expect(indexes.match(/CREATE INDEX CONCURRENTLY IF NOT EXISTS/gi)).toHaveLength(3);
+    expect(indexes.match(/DROP INDEX CONCURRENTLY/gi)).toHaveLength(3);
+    expect(indexes.match(/CREATE INDEX CONCURRENTLY/gi)).toHaveLength(3);
+    expect(indexes).toMatch(/pg_index[\s\S]*indisvalid/i);
+    expect(indexes).toMatch(/RAISE EXCEPTION[\s\S]*invalid/i);
   });
   it('removes pre-existing embeddings for archived memories during the offboarding migration', async () => {
     const schema = `migrator_offboarding_${Date.now()}_${Math.random().toString(16).slice(2)}`;

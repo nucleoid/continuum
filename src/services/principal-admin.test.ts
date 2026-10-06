@@ -84,4 +84,35 @@ describe('principal administration', () => {
          FROM audit_log WHERE metadata->>'operation' = 'principal_reactivated'`,
     )).rows).toEqual([{ previously_offboarded: 'true' }]);
   });
+  it('refuses reactivation when the durable offboarding run is incomplete', async () => {
+    const admin = await createPrincipal(pool, {
+      externalId: 'incomplete-admin', kind: 'user', displayName: 'Admin',
+    });
+    const target = await createPrincipal(pool, {
+      externalId: 'incomplete-target', kind: 'user', displayName: 'Target',
+    });
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    await addMembership(pool, admin.id, org!.id, 'admin');
+    const scope = (await pool.query(
+      `INSERT INTO scopes (id, kind, name) VALUES (gen_random_uuid(), 'user', 'incomplete') RETURNING id`,
+    )).rows[0];
+    const approval = (await pool.query(
+      `INSERT INTO principal_user_scope_approvals
+         (principal_id, scope_id, approved_by, acknowledged_principal_ids,
+          acknowledged_evidence_hash)
+       VALUES ($1, $2, $1, '{}', repeat('0', 64)) RETURNING id`, [target.id, scope.id],
+    )).rows[0];
+    await pool.query(
+      `INSERT INTO principal_offboarding_runs
+         (principal_id, scope_id, initiated_by, approval_id, initial_memories,
+          initial_embeddings, initial_memberships, initial_aliases,
+          initial_entra_bindings, initial_audit_rows, initial_audit_queries)
+       VALUES ($1, $2, $1, $3, 0, 0, 0, 0, 0, 0, 0)`, [target.id, scope.id, approval.id],
+    );
+    await pool.query(
+      `UPDATE principals SET disabled_at = now(), offboarded_at = now() WHERE id = $1`, [target.id],
+    );
+    await expect(reactivatePrincipal(pool, admin, target.id))
+      .rejects.toThrow(/offboarding.*incomplete/i);
+  });
 });
