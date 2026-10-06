@@ -85,12 +85,13 @@ describe('runMigrations', () => {
     const pool = schemaPool(schema);
     try {
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-5).map((migration) => migration.name)).toEqual([
+      expect(applied.slice(-6).map((migration) => migration.name)).toEqual([
         '0030_offboarding_round7_integrity.sql',
         '0031_offboarding_round7_indexes.sql',
         '0032_offboarding_round7_compatibility.sql',
         '0033_offboarding_bounded_selectors.sql',
         '0034_offboarding_completion_invariants.sql',
+        '0035_offboarding_selector_cursor_indexes.sql',
       ]);
       expect((await pool.query(
         `SELECT indisvalid AS valid FROM pg_index
@@ -112,6 +113,17 @@ describe('runMigrations', () => {
           WHERE schemaname = current_schema()
             AND indexname = 'audit_log_offboarding_scopes_pkey'`,
       )).rows[0].indexdef).toMatch(/selector_kind, scope_id, audit_id/i);
+      expect((await pool.query(
+        `SELECT indexname FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND indexname IN (
+              'audit_log_offboarding_memory_cursor_idx',
+              'audit_log_offboarding_scope_ids_cursor_idx'
+            ) ORDER BY indexname`,
+      )).rows.map((row) => row.indexname)).toEqual([
+        'audit_log_offboarding_memory_cursor_idx',
+        'audit_log_offboarding_scope_ids_cursor_idx',
+      ]);
       expect((await pool.query(
         `SELECT proname, proconfig
            FROM pg_proc

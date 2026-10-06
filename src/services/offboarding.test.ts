@@ -249,7 +249,23 @@ describe('offboarding and erasure', () => {
               jsonb_build_object('request_id', 'production-request')
          FROM generate_series(1, 20) n`, [value.admin.id],
     );
-    await pool.query('ANALYZE audit_log');
+    await pool.query(
+      `INSERT INTO audit_log (principal_id, action, memory_id, query, metadata)
+       VALUES ($1, 'read', $2, 'production memory selector', '{}'::jsonb)`,
+      [value.admin.id, value.personalMemory.id],
+    );
+    // Model a production history where the linked request is old and a large
+    // unrelated tail follows it. A global id walk is deliberately unattractive;
+    // the ordered request cursor index should fetch only the twenty linked rows.
+    await pool.query(
+      `INSERT INTO audit_log (principal_id, action, query, metadata)
+       SELECT $1, 'read', 'newer unrelated ' || n,
+              jsonb_build_object(
+                'request_id', 'newer-' || lpad(n::text, 6, '0'),
+                'scope_ids', jsonb_build_array($2::text)
+              )
+         FROM generate_series(1, 10000) n`, [value.admin.id, value.shared.id],
+    );
     const requestId = 'plan-request';
     await pool.query(
       `INSERT INTO audit_log (principal_id, action, scope_id, query, metadata) VALUES
@@ -260,6 +276,7 @@ describe('offboarding and erasure', () => {
         JSON.stringify({ scope_ids: [value.personal.id] }),
         JSON.stringify({ request_id: requestId })],
     );
+    await pool.query('ANALYZE audit_log');
     await pool.query(
       `INSERT INTO principal_offboarding_audit_requests (principal_id, request_id)
        VALUES ($1, 'production-request')`, [value.target.id],
@@ -293,7 +310,7 @@ describe('offboarding and erasure', () => {
         offboardingMemoryAuditSql(),
         [value.personal.id, value.target.id, [], 0, 100,
           9_223_372_036_854_775_807n],
-      )).toContain('audit_log_offboarding_scopes_pkey');
+      )).toContain('audit_log_offboarding_memory_cursor_idx');
       expect(await explainAnalyze(
         offboardingAuditBranchSql(
           'scope_ids',
@@ -303,7 +320,7 @@ describe('offboarding and erasure', () => {
         ),
         [value.personal.id, value.target.id, [], 0, 100, 'scope_ids',
           9_223_372_036_854_775_807n],
-      )).toContain('audit_log_offboarding_scopes_pkey');
+      )).toContain('audit_log_offboarding_scope_ids_cursor_idx');
       const linkedPlan = await explainAnalyze(
         offboardingLinkedAuditSql(),
         [value.target.id, null, 0, [], 100,
