@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import type pg from 'pg';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { createPrincipal } from '../storage/principals.js';
-import { getScopeByRef } from '../storage/scopes.js';
+import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 
 const execFileAsync = promisify(execFile);
@@ -21,6 +21,9 @@ const removeAdminScript = fileURLToPath(
 );
 const restoreAdminScript = fileURLToPath(
   new URL('../../scripts/restore-org-admin.sql', import.meta.url),
+);
+const setUserScopeOwnerScript = fileURLToPath(
+  new URL('../../scripts/set-user-scope-owner.sql', import.meta.url),
 );
 const hasPsql = spawnSync('psql', ['--version'], { stdio: 'ignore' }).status === 0;
 const fallbackDatabaseUrl = process.env.CONTINUUM_TEST_DATABASE_URL
@@ -80,6 +83,11 @@ describe('ensure-scope operator client', () => {
     const invalid = await execFileAsync(process.execPath, [script, 'bad', 'name'])
       .catch((error: unknown) => error as { code: number });
     expect(invalid.code).toBe(2);
+
+    const missingUserOwner = await execFileAsync(process.execPath, [script, 'user', 'opaque-user'])
+      .catch((error: unknown) => error as { code: number; stderr: string });
+    expect(missingUserOwner.code).toBe(2);
+    expect(missingUserOwner.stderr).toContain('User scopes require the owner UUID');
 
     const unknownCredential = 'c'.repeat(64);
     const startupFailure = await execFileAsync(process.execPath, [
@@ -162,4 +170,46 @@ describe('ensure-scope operator client', () => {
     ]).catch((error: unknown) => error as { code: number });
     expect(lastAdminAttempt.code).not.toBe(0);
   }, 20_000);
+
+  it.skipIf(!hasPsql)('backfills one reviewed user-scope owner and audits the admin', async () => {
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    const admin = await createPrincipal(pool, {
+      externalId: 'scope-owner-admin', kind: 'user', displayName: 'Owner Admin',
+    });
+    const owner = await createPrincipal(pool, {
+      externalId: 'scope-owner-user', kind: 'user', displayName: 'Reviewed Owner',
+    });
+    const other = await createPrincipal(pool, {
+      externalId: 'scope-owner-other', kind: 'user', displayName: 'Other Owner',
+    });
+    const scope = await createScope(pool, { kind: 'user', name: 'legacy-opaque-scope' });
+    await addMembership(pool, admin.id, org.id, 'admin');
+
+    await execFileAsync('psql', [
+      databaseUrl, '-v', 'ON_ERROR_STOP=1', '-v', `scope_id=${scope.id}`,
+      '-v', `owner_principal_id=${owner.id}`, '-v', `admin_principal_id=${admin.id}`,
+      '-f', setUserScopeOwnerScript,
+    ]);
+    const stored = await pool.query(
+      `SELECT s.owner_principal_id, a.principal_id, a.metadata
+         FROM scopes s
+         JOIN audit_log a ON a.scope_id = s.id
+        WHERE s.id = $1`,
+      [scope.id],
+    );
+    expect(stored.rows).toEqual([{
+      owner_principal_id: owner.id,
+      principal_id: admin.id,
+      metadata: { operation: 'set_user_scope_owner', owner_principal_id: owner.id },
+    }]);
+
+    const conflict = await execFileAsync('psql', [
+      databaseUrl, '-v', 'ON_ERROR_STOP=1', '-v', `scope_id=${scope.id}`,
+      '-v', `owner_principal_id=${other.id}`, '-v', `admin_principal_id=${admin.id}`,
+      '-f', setUserScopeOwnerScript,
+    ]).catch((error: unknown) => error as { code: number });
+    expect(conflict.code).not.toBe(0);
+    expect((await getScopeByRef(pool, { kind: 'user', name: 'legacy-opaque-scope' }))
+      ?.ownerPrincipalId).toBe(owner.id);
+  });
 });

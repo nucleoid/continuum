@@ -9,6 +9,10 @@ import {
 } from '../scopes/access.js';
 import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
 import { computeExpiry } from './expiry.js';
+import {
+  createActivityAttribution,
+  getActivityAttributionForUpdate,
+} from './activity-attributions.js';
 
 export interface PromoteResult {
   source: Memory;
@@ -88,6 +92,10 @@ async function promoteOperation(
     throw new PromoteError(`principal lacks ${roleName} role on target scope`, 403);
   }
 
+  const sourceAttribution = await getActivityAttributionForUpdate(client, source.id);
+  const trustCeiling = sourceAttribution
+    ? earliestDate(source.expiresAt, sourceAttribution.trustExpiresAt)
+    : null;
   const destinationMetadata = { ...source.metadata };
   delete destinationMetadata.related;
   const destination = await createMemory(client, {
@@ -101,7 +109,21 @@ async function promoteOperation(
     sourceRef: source.sourceRef ?? null,
     tags: source.tags,
     metadata: { ...destinationMetadata, promoted_from: source.id },
+    expiresAtCeiling: trustCeiling,
   });
+  if (sourceAttribution) {
+    await createActivityAttribution(client, {
+      memoryId: destination.id,
+      actorPrincipalId: sourceAttribution.actorPrincipalId,
+      mappingId: sourceAttribution.mappingId,
+      mappingAuthority: sourceAttribution.mappingAuthority,
+      actorLabel: sourceAttribution.actorLabel,
+      threadKey: sourceAttribution.threadKey,
+      closesThreadKeys: [],
+      activityAt: sourceAttribution.activityAt,
+      trustExpiresAt: trustCeiling,
+    });
+  }
   const { rows } = await client.query(
     `UPDATE memories
         SET state = 'promoted', promoted_to_id = $2, updated_at = now()
@@ -120,6 +142,12 @@ async function promoteOperation(
     });
   }
   return { source: updatedSource, destination };
+}
+
+function earliestDate(left: Date | null, right: Date | null): Date | null {
+  if (!left) return right;
+  if (!right) return left;
+  return left < right ? left : right;
 }
 
 export async function verifyMemory(
@@ -174,9 +202,20 @@ async function verifyOperation(
     'SELECT statement_timestamp() AS verified_at',
   );
   const verifiedAt = clockRows[0].verified_at as Date;
-  const expiresAt = stillTrue
+  let expiresAt = stillTrue
     ? computeExpiry(memory.type, memoryScope.kind, verifiedAt)
     : memory.expiresAt;
+  if (stillTrue) {
+    const trust = await client.query<{ trust_expires_at: Date | null }>(
+      `SELECT trust_expires_at
+         FROM memory_activity_attributions
+        WHERE memory_id = $1
+        FOR SHARE`,
+      [memory.id],
+    );
+    const ceiling = trust.rows[0]?.trust_expires_at;
+    if (ceiling && (!expiresAt || ceiling < expiresAt)) expiresAt = ceiling;
+  }
   const nextState = stillTrue ? 'live' : 'stale';
   const { rows } = await client.query(
     `UPDATE memories

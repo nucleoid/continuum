@@ -6,6 +6,7 @@ export interface GitHubBranchEvent {
   ref_type: 'branch' | 'tag';
   master_branch?: string;
   repository: {
+    id: number;
     full_name: string;
     name: string;
     html_url: string;
@@ -13,20 +14,34 @@ export interface GitHubBranchEvent {
   sender: { id: number; login: string };
 }
 
+function githubIdentity(user: { id: number }): { authority: string; externalId: string } | null {
+  return Number.isSafeInteger(user.id) && user.id > 0
+    ? { authority: 'github', externalId: String(user.id) }
+    : null;
+}
+
 export const githubBranchPlugin: CapturePlugin<GitHubBranchEvent> = {
   id: 'github-branch',
+  trustedActivityMetadata: true,
+  activityIdentityAuthority: 'github',
+
+  actorIdentity(event) {
+    return githubIdentity(event.sender);
+  },
 
   transform(event, ctx: CaptureContext = {}): CaptureInput[] {
     if (event.ref_type !== 'branch') return [];
 
-    const actor = String(event.sender.id);
-    const actorLogin = event.sender.login;
-    const userScopeName = ctx.resolveUserScope?.(actor) ?? actor;
+    const actor = event.sender.login;
+    const identity = githubIdentity(event.sender);
+    if (!identity) return [];
+    const userScopeName = ctx.resolveUserScope?.(identity) ?? identity.externalId;
+    const actorPrincipalId = ctx.resolveActorPrincipalId?.(identity) ?? null;
 
     const lines = [
       `Branch ${event.ref} created in ${event.repository.full_name}.`,
       `Base: ${event.master_branch ?? 'unknown'}`,
-      `Author: ${actorLogin}`,
+      `Author: ${actor}`,
     ];
 
     return [
@@ -43,7 +58,10 @@ export const githubBranchPlugin: CapturePlugin<GitHubBranchEvent> = {
           ref: event.ref,
           base: event.master_branch ?? null,
           actor,
-          actorLogin,
+          ...(actorPrincipalId ? { actor_principal_id: actorPrincipalId } : {}),
+          ...(actorPrincipalId ? { thread_owner_principal_id: actorPrincipalId } : {}),
+          thread_key: `${ctx.activityNamespace ?? 'github'}:repo:${event.repository.id}:branch:${event.ref}`,
+          closes_thread_keys: [],
         },
       },
     ];

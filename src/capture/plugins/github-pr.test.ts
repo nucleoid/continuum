@@ -18,11 +18,25 @@ function mergedEvent(overrides: Partial<GitHubPrEvent['pull_request']> = {}): Gi
       head: { ref: 'feature/checkout-v2' },
       ...overrides,
     },
-    repository: { full_name: 'exampleorg/booking-engine', name: 'booking-engine' },
+    repository: { id: 987654321, full_name: 'exampleorg/booking-engine', name: 'booking-engine' },
   };
 }
 
 describe('github-pr plugin', () => {
+  it('uses the immutable numeric repository id in PR and branch closure keys', () => {
+    const event = mergedEvent();
+    (event.repository as typeof event.repository & { id: number }).id = 987654321;
+    const [memory] = githubPrPlugin.transform(event, {
+      activityNamespace: 'github',
+      resolveActorPrincipalId: () => '11111111-1111-4111-8111-111111111111',
+    });
+
+    expect(memory.metadata?.thread_key).toBe('github:repo:987654321:pr:4421');
+    expect(memory.metadata?.closes_thread_keys).toContain(
+      'github:repo:987654321:branch:feature/checkout-v2',
+    );
+  });
+
   it('emits one context memory at project scope for a merged PR', () => {
     const out = githubPrPlugin.transform(mergedEvent());
     expect(out).toHaveLength(1);
@@ -43,12 +57,56 @@ describe('github-pr plugin', () => {
     expect(out[0].metadata).toMatchObject({
       repo: 'exampleorg/booking-engine',
       number: 4421,
-      author: '1001',
-      authorLogin: 'cass-exampleorg',
-      mergedBy: '1002',
-      mergedByLogin: 'scott-exampleorg',
+      actor: 'cass-exampleorg',
+      merged_by: 'scott-exampleorg',
+      thread_key: 'github:repo:987654321:pr:4421',
+      closes_thread_keys: [
+        'github:repo:987654321:pr:4421',
+        'github:repo:987654321:branch:feature/checkout-v2',
+      ],
       baseRef: 'main',
       headRef: 'feature/checkout-v2',
+    });
+  });
+
+  it('keeps the PR author as actor and merger/reviewers separate', () => {
+    const ev = mergedEvent({ requested_reviewers: [{ login: 'reviewer-exampleorg' }] });
+    ev.reviews = [{ user: { login: 'actual-reviewer-exampleorg' } }];
+    const out = githubPrPlugin.transform(ev, {
+      resolveActorPrincipalId: (identity) => (
+        identity.authority === 'github' && identity.externalId === '1001'
+      )
+        ? '11111111-1111-4111-8111-111111111111'
+        : null,
+    });
+    expect(out[0].metadata).toMatchObject({
+      actor: 'cass-exampleorg',
+      actor_principal_id: '11111111-1111-4111-8111-111111111111',
+      thread_owner_principal_id: '11111111-1111-4111-8111-111111111111',
+      merged_by: 'scott-exampleorg',
+      reviewers: ['actual-reviewer-exampleorg'],
+      requested_reviewers: ['reviewer-exampleorg'],
+    });
+  });
+
+  it('uses the immutable GitHub user id when a login is renamed', () => {
+    const renamed = mergedEvent({ user: { id: 1001, login: 'cass-renamed' } });
+    const identities: Array<{ authority: string; externalId: string }> = [];
+    const out = githubPrPlugin.transform(renamed, {
+      resolveActorPrincipalId: (identity) => {
+        identities.push(identity);
+        return identity.externalId === '1001'
+          ? '11111111-1111-4111-8111-111111111111'
+          : null;
+      },
+    });
+    expect(githubPrPlugin.actorIdentity?.(renamed)).toEqual({
+      authority: 'github', externalId: '1001',
+    });
+    expect(identities).toEqual([{ authority: 'github', externalId: '1001' }]);
+    expect(out[0].metadata).toMatchObject({
+      actor: 'cass-renamed',
+      actor_principal_id: '11111111-1111-4111-8111-111111111111',
     });
   });
 

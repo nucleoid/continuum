@@ -14,6 +14,8 @@ export interface IngestPluginConfig {
   enabled: true;
   principalExternalId: string;
   auth: IngestAuth;
+  activityNamespace?: string;
+  actorExternalId?: string;
 }
 
 export interface IngestConfig {
@@ -37,6 +39,48 @@ function required(env: NodeJS.ProcessEnv, name: string): string {
   const value = env[name]?.trim();
   if (!value) throw new Error(`${name} is required when ingestion is enabled`);
   return value;
+}
+
+const ACTIVITY_NAMESPACE = /^[a-z0-9][a-z0-9._-]{0,99}$/;
+
+export function defaultActivityNamespace(id: IngestPluginId): string {
+  if (id === 'github-pr' || id === 'github-branch') return 'github';
+  return id;
+}
+
+export function validateIngestConfig(config: IngestConfig): void {
+  for (const [id, plugin] of Object.entries(config.plugins)) {
+    if (!plugin) continue;
+    const namespace = plugin.activityNamespace ?? defaultActivityNamespace(id as IngestPluginId);
+    if (!ACTIVITY_NAMESPACE.test(namespace)) {
+      throw new Error(`${id} activity namespace must match ${ACTIVITY_NAMESPACE}`);
+    }
+    if (namespace === 'github' && id !== 'github-pr' && id !== 'github-branch') {
+      throw new Error('github namespace is reserved for GitHub-signed producers');
+    }
+  }
+  const githubPr = config.plugins['github-pr'];
+  const githubBranch = config.plugins['github-branch'];
+  if (githubPr && githubBranch) {
+    const prNamespace = githubPr.activityNamespace ?? defaultActivityNamespace('github-pr');
+    const branchNamespace = githubBranch.activityNamespace ?? defaultActivityNamespace('github-branch');
+    if (prNamespace !== branchNamespace) {
+      throw new Error('GitHub PR and branch ingestion must use the same activity namespace');
+    }
+  }
+  const deploy = config.plugins['deploy-event'];
+  const terminal = config.plugins['terminal-summary'];
+  if (deploy && terminal) {
+    if (deploy.principalExternalId === terminal.principalExternalId) {
+      throw new Error('Deploy and terminal ingestion require distinct service principals');
+    }
+    const deployNamespace = deploy.activityNamespace ?? defaultActivityNamespace('deploy-event');
+    const terminalNamespace =
+      terminal.activityNamespace ?? defaultActivityNamespace('terminal-summary');
+    if (deployNamespace === terminalNamespace) {
+      throw new Error('Deploy and terminal ingestion require distinct activity namespaces');
+    }
+  }
 }
 
 export function ingestConfigFromEnv(env: NodeJS.ProcessEnv = process.env): IngestConfig {
@@ -64,7 +108,19 @@ export function ingestConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Inges
     } else {
       auth = { kind: 'bearer' };
     }
-    plugins[spec.id] = { enabled: true, principalExternalId, auth };
+    const activityNamespace = env[`${spec.prefix}_ACTIVITY_NAMESPACE`]?.trim() || undefined;
+    const actorExternalId = spec.auth === 'bearer'
+      ? required(env, `${spec.prefix}_ACTOR_EXTERNAL_ID`)
+      : undefined;
+    plugins[spec.id] = {
+      enabled: true,
+      principalExternalId,
+      auth,
+      ...(activityNamespace ? { activityNamespace } : {}),
+      ...(actorExternalId ? { actorExternalId } : {}),
+    };
   }
-  return { plugins };
+  const config = { plugins };
+  validateIngestConfig(config);
+  return config;
 }

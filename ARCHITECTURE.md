@@ -57,6 +57,7 @@ CREATE TABLE scopes (
   id              UUID PRIMARY KEY,
   kind            TEXT NOT NULL,         -- 'org' | 'team' | 'project' | 'user' | 'role'
   name            TEXT NOT NULL,         -- '' for org, otherwise the scope name
+  owner_principal_id UUID UNIQUE REFERENCES principals(id), -- explicit for user scopes
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (kind, name)
 );
@@ -317,6 +318,32 @@ Entra validation lands in M4, so database and process-launch access remain
 trusted administrative capabilities rather than security boundaries. The v0
 REST bearer is the principal `external_id`; org-admin bootstrap therefore uses
 a high-entropy identity and requires trusted-network REST restriction.
+
+User-scope identity is stored explicitly as `scopes.owner_principal_id`; it is
+never inferred from a scope name, display name, author, or membership. Existing
+unowned user scopes fail closed until an administrator reviews and audits a
+one-to-one backfill. Standup activity similarly requires explicit
+`metadata.actor_principal_id`, `actor`, a stable `thread_key`, and an internal
+post-authorization provenance marker; pre-migration metadata is not backfilled.
+Thread ownership must be explicit and equal to the activity actor. Closure uses
+only trusted `closes_thread_keys` from that same actor. Raw REST/MCP capture and
+plugins not explicitly trusted for activity cannot set actor, thread, closure,
+provenance, or activity-time fields. Mapped plugin capture resolves immutable
+external IDs through historical, database-audited org-admin mappings.
+Revocation retains the immutable old row; replacement atomically revokes it and
+inserts a new active row. Revoked mapping history no longer authorizes old
+standup activity, and replacement does not reactivate it. GitHub uses numeric
+webhook user IDs, never mutable logins, under one configured namespace shared
+by PR and branch ingestion even when their service principals differ. Legacy
+login aliases can temporarily route branch capture but never authorize activity.
+Deploy and terminal identities and thread keys use stable configured namespaces.
+Deploy events self-close because they are terminal facts. PR authors and deploy
+actors are the activity actors, while mergers and reviewers remain separate
+metadata. Promotion preserves unexpired, internally trusted activity at its
+original time and caps destination expiry at source expiry, while stripping all
+activity trust fields from expired or untrusted legacy rows. Large standup
+indexes are built concurrently; reserved-field cleanup is an explicit bounded
+maintenance script, not an ordinary startup migration.
 
 ## Shared service layer
 

@@ -3,6 +3,7 @@ import type { CapturePlugin, CaptureContext } from '../plugin.js';
 
 export interface GitHubPrEvent {
   action: string;
+  reviews?: Array<{ user: { login: string } }>;
   pull_request: {
     number: number;
     title: string;
@@ -11,12 +12,14 @@ export interface GitHubPrEvent {
     state: string;
     merged: boolean;
     merged_at?: string | null;
-    merged_by?: { id: number; login: string } | null;
+    merged_by?: { id?: number; login: string } | null;
     user: { id: number; login: string };
+    requested_reviewers?: Array<{ login: string }>;
     base: { ref: string };
     head: { ref: string };
   };
   repository: {
+    id: number;
     full_name: string;
     name: string;
   };
@@ -27,14 +30,33 @@ function projectName(repoFullName: string): string {
   return slash === -1 ? repoFullName : repoFullName.slice(slash + 1);
 }
 
+function githubIdentity(user: { id: number }): { authority: string; externalId: string } | null {
+  return Number.isSafeInteger(user.id) && user.id > 0
+    ? { authority: 'github', externalId: String(user.id) }
+    : null;
+}
+
 export const githubPrPlugin: CapturePlugin<GitHubPrEvent> = {
   id: 'github-pr',
+  trustedActivityMetadata: true,
+  activityIdentityAuthority: 'github',
+
+  actorIdentity(event) {
+    return githubIdentity(event.pull_request.user);
+  },
 
   transform(event, ctx: CaptureContext = {}): CaptureInput[] {
     if (event.action !== 'closed' || !event.pull_request.merged) return [];
 
     const pr = event.pull_request;
     const project = ctx.defaultProjectName ?? projectName(event.repository.full_name);
+    const identity = githubIdentity(pr.user);
+    const actorPrincipalId = identity
+      ? ctx.resolveActorPrincipalId?.(identity) ?? null
+      : null;
+    const threadPrefix = ctx.activityNamespace ?? 'github';
+    const repoKey = `${threadPrefix}:repo:${event.repository.id}`;
+    const threadKey = `${repoKey}:pr:${pr.number}`;
 
     const lines: string[] = [];
     if (pr.body && pr.body.trim()) lines.push(pr.body.trim());
@@ -56,10 +78,19 @@ export const githubPrPlugin: CapturePlugin<GitHubPrEvent> = {
         metadata: {
           repo: event.repository.full_name,
           number: pr.number,
-          author: String(pr.user.id),
-          authorLogin: pr.user.login,
-          mergedBy: pr.merged_by ? String(pr.merged_by.id) : null,
-          mergedByLogin: pr.merged_by?.login ?? null,
+          actor: pr.user.login,
+          ...(actorPrincipalId ? { actor_principal_id: actorPrincipalId } : {}),
+          ...(actorPrincipalId ? { thread_owner_principal_id: actorPrincipalId } : {}),
+          merged_by: pr.merged_by?.login ?? null,
+          reviewers: [...new Set((event.reviews ?? []).map((review) => review.user.login))],
+          requested_reviewers: [
+            ...new Set((pr.requested_reviewers ?? []).map((reviewer) => reviewer.login)),
+          ],
+          thread_key: threadKey,
+          closes_thread_keys: [
+            threadKey,
+            `${repoKey}:branch:${pr.head.ref}`,
+          ],
           baseRef: pr.base.ref,
           headRef: pr.head.ref,
           mergedAt: pr.merged_at ?? null,

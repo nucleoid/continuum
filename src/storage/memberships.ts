@@ -64,7 +64,7 @@ export async function getScopesForPrincipal(
   principalId: string,
 ): Promise<Array<Scope & { role: MembershipRole }>> {
   const { rows } = await pool.query(
-    `SELECT s.id, s.kind, s.name, s.created_at, m.role
+    `SELECT s.id, s.kind, s.name, s.owner_principal_id, s.created_at, m.role
        FROM scope_memberships m
        JOIN scopes s ON s.id = m.scope_id
       WHERE m.principal_id = $1`,
@@ -74,6 +74,7 @@ export async function getScopesForPrincipal(
     id: r.id as string,
     kind: r.kind,
     name: r.name as string,
+    ownerPrincipalId: (r.owner_principal_id as string | null) ?? null,
     createdAt: r.created_at as Date,
     role: r.role as MembershipRole,
   }));

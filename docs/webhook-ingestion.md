@@ -23,15 +23,27 @@ must resolve to that exact principal. Provider credentials never select the
 principal. Every transformed target scope must already exist and the service
 principal must have an explicit `writer` or `admin` membership.
 
-GitHub branch actors and terminal actors are resolved through
-`principal_aliases`. GitHub uses the immutable numeric user ID as the external
-actor for provider `github`; the mutable login is retained only as display
-metadata. Terminal summaries use provider `terminal`, including summaries with
-an explicit scope override. The alias must point to a user principal, and that
-principal's `external_id` is the default user scope name. Missing aliases and
-scopes are rejected. Every selected scope, including an override, still
-requires writer or admin access by the configured service principal. Ingestion
-never creates scopes.
+Standup attribution resolves actors through `actor_principal_mappings` under a
+stable configured activity namespace (`github`, `deploy-event`, or
+`terminal-summary` by default). GitHub PR and branch ingestion fail startup if
+configured with different namespaces, so separate service principals cannot
+silently fragment one thread. GitHub uses immutable numeric webhook user and
+repository IDs. Branch scope routing requires an explicit `alias_kind='id'`
+numeric alias and never falls back to a mutable login. Deploy and terminal
+ingestion must use distinct service principals and distinct activity
+namespaces. Their credentials bind one configured `*_ACTOR_EXTERNAL_ID`; a request body cannot
+select another mapped actor, and the `github` namespace is reserved for
+GitHub-signed producers. Missing
+mappings store ordinary non-standup memories after reserved activity metadata
+is removed. Every selected scope, including an override, still requires writer
+or admin access by the configured service principal. Ingestion never creates
+scopes.
+
+The configured deploy/terminal actor IDs are non-empty strings capped at 500
+characters. A body actor ID, when present for compatibility, must exactly match
+the credential-bound value. `terminal-summary.keepThreadOpen`
+is an optional boolean. Terminal summaries self-close unless that flag is true;
+deploy facts always self-close their canonical thread.
 
 ## Responses and replay
 

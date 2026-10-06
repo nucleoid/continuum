@@ -14,6 +14,7 @@ export interface Scope {
   id: string;
   kind: ScopeKind;
   name: string;
+  ownerPrincipalId: string | null;
   createdAt: Date;
 }
 
@@ -54,6 +55,15 @@ export interface CaptureInput {
   source: string;
   sourceRef?: string;
   metadata?: Record<string, unknown>;
+}
+
+export interface CaptureActivityMetadata {
+  actor_principal_id: string;
+  actor: string;
+  thread_key: string;
+  closes_thread_keys?: string[];
+  merged_by?: string | null;
+  reviewers?: string[];
 }
 
 export interface RecallInput {

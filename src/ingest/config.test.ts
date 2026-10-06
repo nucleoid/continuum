@@ -2,6 +2,22 @@ import { describe, expect, it } from 'vitest';
 import { ingestConfigFromEnv } from './config.js';
 
 describe('ingest configuration', () => {
+  it('requires bearer activity producers to bind one immutable actor identity', () => {
+    expect(() => ingestConfigFromEnv({
+      CONTINUUM_INGEST_DEPLOY_EVENT_ENABLED: 'true',
+      CONTINUUM_INGEST_DEPLOY_EVENT_PRINCIPAL: 'service:deploy',
+    })).toThrow(/ACTOR_EXTERNAL_ID is required/);
+  });
+
+  it('reserves the github namespace for GitHub-signed producers', () => {
+    expect(() => ingestConfigFromEnv({
+      CONTINUUM_INGEST_DEPLOY_EVENT_ENABLED: 'true',
+      CONTINUUM_INGEST_DEPLOY_EVENT_PRINCIPAL: 'service:deploy',
+      CONTINUUM_INGEST_DEPLOY_EVENT_ACTOR_EXTERNAL_ID: 'subject-1',
+      CONTINUUM_INGEST_DEPLOY_EVENT_ACTIVITY_NAMESPACE: 'github',
+    })).toThrow(/github namespace is reserved/i);
+  });
+
   it('keeps every plugin disabled by default', () => {
     expect(ingestConfigFromEnv({})).toEqual({ plugins: {} });
   });
@@ -30,5 +46,45 @@ describe('ingest configuration', () => {
       principalExternalId: 'service:ado',
       auth: { kind: 'ado-basic', username: 'hook-user', password: 'hook-password' },
     } } });
+  });
+
+  it('uses one explicit GitHub activity namespace across split service principals', () => {
+    const common = {
+      CONTINUUM_INGEST_GITHUB_PR_ENABLED: 'true',
+      CONTINUUM_INGEST_GITHUB_PR_PRINCIPAL: 'service:github-pr',
+      CONTINUUM_INGEST_GITHUB_PR_SECRET: 'pr-secret',
+      CONTINUUM_INGEST_GITHUB_BRANCH_ENABLED: 'true',
+      CONTINUUM_INGEST_GITHUB_BRANCH_PRINCIPAL: 'service:github-branch',
+      CONTINUUM_INGEST_GITHUB_BRANCH_SECRET: 'branch-secret',
+    };
+    expect(ingestConfigFromEnv(common).plugins['github-pr']?.activityNamespace)
+      .toBeUndefined();
+    expect(() => ingestConfigFromEnv({
+      ...common,
+      CONTINUUM_INGEST_GITHUB_PR_ACTIVITY_NAMESPACE: 'github.prod',
+      CONTINUUM_INGEST_GITHUB_BRANCH_ACTIVITY_NAMESPACE: 'github.other',
+    })).toThrow(/same activity namespace/);
+    expect(() => ingestConfigFromEnv({
+      ...common,
+      CONTINUUM_INGEST_GITHUB_PR_ACTIVITY_NAMESPACE: 'GitHub Invalid',
+    })).toThrow(/activity namespace/);
+  });
+
+  it('requires deploy and terminal ingestion to use distinct principals and namespaces', () => {
+    const common = {
+      CONTINUUM_INGEST_DEPLOY_EVENT_ENABLED: 'true',
+      CONTINUUM_INGEST_DEPLOY_EVENT_PRINCIPAL: 'service:shared',
+      CONTINUUM_INGEST_DEPLOY_EVENT_ACTOR_EXTERNAL_ID: 'deploy-subject',
+      CONTINUUM_INGEST_TERMINAL_SUMMARY_ENABLED: 'true',
+      CONTINUUM_INGEST_TERMINAL_SUMMARY_PRINCIPAL: 'service:shared',
+      CONTINUUM_INGEST_TERMINAL_SUMMARY_ACTOR_EXTERNAL_ID: 'terminal-subject',
+    };
+    expect(() => ingestConfigFromEnv(common)).toThrow(/distinct service principals/i);
+    expect(() => ingestConfigFromEnv({
+      ...common,
+      CONTINUUM_INGEST_TERMINAL_SUMMARY_PRINCIPAL: 'service:terminal',
+      CONTINUUM_INGEST_DEPLOY_EVENT_ACTIVITY_NAMESPACE: 'human-events',
+      CONTINUUM_INGEST_TERMINAL_SUMMARY_ACTIVITY_NAMESPACE: 'human-events',
+    })).toThrow(/distinct activity namespaces/i);
   });
 });

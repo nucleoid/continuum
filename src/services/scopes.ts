@@ -27,6 +27,7 @@ export async function ensureScopeForPrincipal(
   principal: Principal,
   ref: ScopeRef,
   auditMetadata: Record<string, unknown> = {},
+  ownerPrincipalId?: string,
 ): Promise<Awaited<ReturnType<typeof ensureScopeRow>>> {
   try {
     validateScopeRef(ref);
@@ -54,7 +55,33 @@ export async function ensureScopeForPrincipal(
         );
       }
 
-      const result = await ensureScopeRow(client, ref);
+      if (ref.kind === 'user' && !ownerPrincipalId) {
+        throw new ServiceError('INVALID_INPUT', 'User scope owner_principal_id is required');
+      }
+      if (ref.kind !== 'user' && ownerPrincipalId) {
+        throw new ServiceError('INVALID_INPUT', 'Only user scopes can have an owner principal');
+      }
+      if (ownerPrincipalId) {
+        const owner = await client.query(
+          'SELECT kind FROM principals WHERE id = $1 FOR UPDATE',
+          [ownerPrincipalId],
+        );
+        if (owner.rows[0]?.kind !== 'user') {
+          throw new ServiceError('INVALID_INPUT', 'User scope owner must be a user principal');
+        }
+        const existingOwner = await client.query(
+          'SELECT kind, name FROM scopes WHERE owner_principal_id = $1 FOR UPDATE',
+          [ownerPrincipalId],
+        );
+        if (existingOwner.rows[0]
+            && (existingOwner.rows[0].kind !== ref.kind || existingOwner.rows[0].name !== ref.name)) {
+          throw new ServiceError('CONFLICT', 'User principal already owns a user scope');
+        }
+      }
+      const result = await ensureScopeRow(client, ref, ownerPrincipalId ?? null);
+      if (ref.kind === 'user' && result.scope.ownerPrincipalId !== ownerPrincipalId) {
+        throw new ServiceError('CONFLICT', 'User scope ownership does not match');
+      }
       await record(client, {
         principalId: principal.id,
         action: 'write',
@@ -65,6 +92,7 @@ export async function ensureScopeForPrincipal(
           created: result.created,
           kind: ref.kind,
           name: ref.name,
+          owner_principal_id: ownerPrincipalId ?? null,
         },
       });
       await client.query('COMMIT');

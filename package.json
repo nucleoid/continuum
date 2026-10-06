@@ -26,6 +26,7 @@
     "docs/lifecycle.md",
     "docs/memory-api.md",
     "docs/scope-provisioning.md",
+    "docs/standup-digest.md",
     "!dist/**/tenants/**",
     "migrations",
     "scripts/ensure-scope.mjs",

@@ -49,6 +49,14 @@ describe('runMigrations', () => {
     expect(migrations.filter((file) => file.startsWith('0005_'))).toEqual([
       '0005_webhook_ingestion.sql',
     ]);
+    expect(migrations).toContain('0010_standup_ownership.sql');
+    expect(migrations).toContain('0011_standup_trust_hardening.sql');
+    expect(migrations).toContain('0012_actor_mapping_lifecycle.sql');
+    expect(migrations).toContain('0013_standup_indexes.sql');
+    expect(migrations).toContain('0016_retire_standup_metadata_indexes.sql');
+    expect(migrations).toContain('0017_standup_trust_invariants.sql');
+    expect(migrations).toContain('0018_standup_generation_indexes.sql');
+    expect(migrations.some((file) => file.includes('mapping_enforcement'))).toBe(false);
 
     const constraints = await readFile(
       join(process.cwd(), 'migrations/0007_decision_supersession_constraints.sql'),
@@ -72,6 +80,15 @@ describe('runMigrations', () => {
     );
     expect(uniqueIndex.trimStart()).toMatch(/^-- continuum:no-transaction/);
     expect(uniqueIndex).toMatch(/CREATE UNIQUE INDEX CONCURRENTLY memories_supersedes_unique_idx/i);
+
+    const standupIndexes = await readFile(
+      join(process.cwd(), 'migrations/0015_standup_query_indexes.sql'),
+      'utf8',
+    );
+    expect(standupIndexes.trimStart()).toMatch(/^-- continuum:no-transaction/);
+    expect(standupIndexes.match(/DROP INDEX CONCURRENTLY/g)).toHaveLength(3);
+    expect(standupIndexes.match(/CREATE INDEX CONCURRENTLY/g)).toHaveLength(3);
+    expect(standupIndexes).toMatch(/indisvalid/);
   });
 
   it('runs marked concurrent-index migrations outside a transaction', async () => {

@@ -18,6 +18,10 @@ import {
   validateRelationThreshold,
 } from './relations.js';
 import type { Queryable } from '../storage/queryable.js';
+import { validateCaptureMetadata } from '../capture/metadata.js';
+import type { ExternalActorIdentity } from '../capture/plugin.js';
+import { resolveActorIdentityMapping } from '../storage/actor-identities.js';
+import { createActivityAttribution } from '../storage/activity-attributions.js';
 
 export interface CaptureResult {
   memory: Memory;
@@ -48,6 +52,7 @@ export function validateCaptureContent(input: Pick<CaptureInput,
   if (input.metadata && Object.hasOwn(input.metadata, 'related')) {
     throw new ServiceError('INVALID_INPUT', 'metadata.related is reserved by Continuum');
   }
+  validateCaptureMetadata(input.metadata);
 }
 
 /** Insert one capture into a caller-owned transaction. */
@@ -228,6 +233,132 @@ export async function embedCapturedMemory(
   }
 }
 
+export interface MappedActorAttribution {
+  identity: ExternalActorIdentity;
+  mappingId: string;
+  authority: string;
+  principalId: string;
+}
+
+function activityAt(metadata: Record<string, unknown>, fallback: Date): Date {
+  for (const key of ['mergedAt', 'finishedAt', 'startedAt']) {
+    const value = metadata[key];
+    if (typeof value !== 'string') continue;
+    const parsed = new Date(value);
+    if (Number.isFinite(parsed.getTime())) return parsed;
+  }
+  return fallback;
+}
+
+async function persistActivityAttribution(
+  client: Queryable,
+  memory: Memory,
+  metadata: Record<string, unknown>,
+  attribution: MappedActorAttribution,
+  actorLabel: string,
+  trustExpiresAt: Date | null = null,
+): Promise<void> {
+  if (typeof metadata.thread_key !== 'string') {
+    throw new ServiceError('INVALID_INPUT', 'Mapped activity requires a thread key');
+  }
+  await createActivityAttribution(client, {
+    memoryId: memory.id,
+    actorPrincipalId: attribution.principalId,
+    mappingId: attribution.mappingId,
+    mappingAuthority: attribution.authority,
+    actorLabel,
+    threadKey: metadata.thread_key,
+    closesThreadKeys: Array.isArray(metadata.closes_thread_keys)
+      ? metadata.closes_thread_keys as string[]
+      : [],
+    activityAt: activityAt(metadata, memory.createdAt),
+    trustExpiresAt,
+  });
+}
+
+/** Insert one trusted mapped plugin capture into a caller-owned transaction. */
+export async function captureMappedPluginOne(
+  client: Queryable,
+  embeddingRouting: EmbeddingRouting,
+  principal: Principal,
+  input: CaptureInput,
+  attribution: MappedActorAttribution,
+  auditMetadata: Record<string, unknown> = {},
+): Promise<CaptureResult> {
+  validateCaptureContent(input);
+  validateScopeRef(input.scope);
+  const scope = await getScopeByRef(client, input.scope);
+  if (!scope) throw new ServiceError('SCOPE_NOT_FOUND', 'Scope not found');
+  if (!(await canWriteScopeForMutation(client, principal.id, scope.id))) {
+    throw new ServiceError('FORBIDDEN', 'Principal lacks writer role on scope');
+  }
+  if (input.metadata?.actor_principal_id !== attribution.principalId
+      || input.metadata?.thread_owner_principal_id !== attribution.principalId) {
+    throw new ServiceError('FORBIDDEN', 'Mapped plugin attribution does not match the event actor');
+  }
+  const mapping = await resolveActorIdentityMapping(client, attribution.identity, { lock: true });
+  if (mapping?.mappingId !== attribution.mappingId
+      || mapping.principalId !== attribution.principalId) {
+    throw new ServiceError('FORBIDDEN', 'Actor mapping is missing or changed');
+  }
+  const actor = await client.query(
+    'SELECT kind, display_name FROM principals WHERE id = $1 FOR KEY SHARE',
+    [attribution.principalId],
+  );
+  if (actor.rows[0]?.kind !== 'user') {
+    throw new ServiceError('INVALID_INPUT', 'Activity actor must be an existing user principal');
+  }
+  const metadata = {
+    ...input.metadata,
+    actor: actor.rows[0].display_name as string,
+  };
+  const route = asEmbeddingRouter(embeddingRouting).resolve(input.scope);
+  const memory = await createMemory(client, {
+    scopeId: scope.id,
+    scopeKind: scope.kind,
+    type: input.type,
+    title: input.title,
+    body: input.body,
+    authorId: principal.id,
+    source: input.source,
+    sourceRef: input.sourceRef ?? null,
+    tags: input.tags,
+    metadata: { ...metadata, related: [] },
+  });
+  await persistActivityAttribution(
+    client, memory, metadata, attribution, actor.rows[0].display_name as string,
+  );
+  await recordAudit(client, {
+    principalId: principal.id,
+    action: 'write',
+    memoryId: memory.id,
+    scopeId: scope.id,
+    metadata: {
+      source: input.source,
+      type: input.type,
+      embedded: false,
+      actor_mapping: {
+        mapping_id: attribution.mappingId,
+        authority: attribution.authority,
+      },
+      ...(route.provider ? {
+        embedding: { provider: route.provider.id, dim: route.provider.dim, status: 'failed' },
+        embedding_error_code: 'EMBEDDING_FAILED',
+      } : {}),
+      ...(route.policy === 'local-only-unavailable'
+        ? { embedding_policy: 'local-only-unavailable' }
+        : {}),
+      ...auditMetadata,
+    },
+  });
+  return {
+    memory,
+    embedded: false,
+    related: [],
+    ...(route.provider ? { embedErrorCode: 'EMBEDDING_FAILED' as const } : {}),
+  };
+}
+
 export async function captureMemory(
   pool: pg.Pool,
   embeddingRouting: EmbeddingRouting,
@@ -236,7 +367,43 @@ export async function captureMemory(
   auditMetadata: Record<string, unknown> = {},
   options: CaptureOptions = {},
 ): Promise<CaptureResult> {
+  return captureMemoryInternal(
+    pool, embeddingRouting, principal, input, auditMetadata, options,
+  );
+}
+
+export async function captureMappedPluginMemory(
+  pool: pg.Pool,
+  embeddingRouting: EmbeddingRouting,
+  principal: Principal,
+  input: CaptureInput,
+  attribution: MappedActorAttribution,
+  auditMetadata: Record<string, unknown> = {},
+  options: CaptureOptions = {},
+): Promise<CaptureResult> {
+  return captureMemoryInternal(
+    pool, embeddingRouting, principal, input, auditMetadata, options, attribution,
+  );
+}
+
+async function captureMemoryInternal(
+  pool: pg.Pool,
+  embeddingRouting: EmbeddingRouting,
+  principal: Principal,
+  input: CaptureInput,
+  auditMetadata: Record<string, unknown>,
+  options: CaptureOptions,
+  mappedAttribution?: MappedActorAttribution,
+): Promise<CaptureResult> {
   try {
+    if (!mappedAttribution && input.metadata
+        && ['actor', 'actor_principal_id', 'thread_owner_principal_id', 'thread_key', 'closes_thread_keys']
+          .some((key) => Object.hasOwn(input.metadata!, key))) {
+      throw new ServiceError(
+        'FORBIDDEN',
+        'Activity attribution, threads, closure, and provenance require trusted mapped plugin capture',
+      );
+    }
     validateCaptureContent(input);
     const relationThreshold = validateRelationThreshold(
       options.relationThreshold ?? DEFAULT_RELATION_THRESHOLD,
@@ -247,6 +414,42 @@ export async function captureMemory(
     if (!(await canWriteScope(pool, principal.id, scope.id))) {
       throw new ServiceError('FORBIDDEN', 'Principal lacks writer role on scope');
     }
+    const actorPrincipalId = input.metadata?.actor_principal_id;
+    const threadOwnerPrincipalId = input.metadata?.thread_owner_principal_id;
+    if (mappedAttribution) {
+      if (actorPrincipalId !== mappedAttribution.principalId
+          || threadOwnerPrincipalId !== mappedAttribution.principalId) {
+        throw new ServiceError('FORBIDDEN', 'Mapped plugin attribution does not match the event actor');
+      }
+      const mapping = await resolveActorIdentityMapping(pool, mappedAttribution.identity);
+      if (mapping?.mappingId !== mappedAttribution.mappingId
+          || mapping.principalId !== mappedAttribution.principalId) {
+        throw new ServiceError('FORBIDDEN', 'Actor mapping is missing or changed');
+      }
+    }
+    if (typeof actorPrincipalId === 'string') {
+      if (principal.kind === 'user' && actorPrincipalId !== principal.id) {
+        throw new ServiceError('FORBIDDEN', 'A user can attribute activity only to itself');
+      }
+      const actor = await pool.query('SELECT kind FROM principals WHERE id = $1', [actorPrincipalId]);
+      if (actor.rows[0]?.kind !== 'user') {
+        throw new ServiceError('INVALID_INPUT', 'Activity actor must be an existing user principal');
+      }
+    }
+    if (typeof threadOwnerPrincipalId === 'string') {
+      if (principal.kind === 'user' && threadOwnerPrincipalId !== principal.id) {
+        throw new ServiceError('FORBIDDEN', 'A user can own only its own activity thread');
+      }
+      const owner = await pool.query(
+        'SELECT kind FROM principals WHERE id = $1', [threadOwnerPrincipalId],
+      );
+      if (owner.rows[0]?.kind !== 'user') {
+        throw new ServiceError(
+          'INVALID_INPUT', 'Activity thread owner must be an existing user principal',
+        );
+      }
+    }
+    let persistedMetadata = { ...input.metadata };
 
     const memoryId = randomUUID();
     const route = asEmbeddingRouter(embeddingRouting).resolve({
@@ -304,6 +507,41 @@ export async function captureMemory(
       if (!(await canWriteScopeForMutation(client, principal.id, authorizedScope.id))) {
         throw new ServiceError('FORBIDDEN', 'Principal lacks writer role on scope');
       }
+      if (typeof actorPrincipalId === 'string') {
+        const actor = await client.query(
+          'SELECT kind, display_name FROM principals WHERE id = $1 FOR KEY SHARE',
+          [actorPrincipalId],
+        );
+        if (actor.rows[0]?.kind !== 'user') {
+          throw new ServiceError('INVALID_INPUT', 'Activity actor must be an existing user principal');
+        }
+        if (mappedAttribution) {
+          persistedMetadata = {
+            ...persistedMetadata,
+            actor: actor.rows[0].display_name as string,
+          };
+        }
+      }
+      if (typeof threadOwnerPrincipalId === 'string') {
+        const owner = await client.query(
+          'SELECT kind FROM principals WHERE id = $1 FOR KEY SHARE',
+          [threadOwnerPrincipalId],
+        );
+        if (owner.rows[0]?.kind !== 'user') {
+          throw new ServiceError(
+            'INVALID_INPUT', 'Activity thread owner must be an existing user principal',
+          );
+        }
+      }
+      if (mappedAttribution) {
+        const mapping = await resolveActorIdentityMapping(
+          client, mappedAttribution.identity, { lock: true },
+        );
+        if (mapping?.mappingId !== mappedAttribution.mappingId
+            || mapping.principalId !== mappedAttribution.principalId) {
+          throw new ServiceError('FORBIDDEN', 'Actor mapping is missing or changed');
+        }
+      }
 
       let memory = await createMemory(client, {
         id: memoryId,
@@ -316,8 +554,17 @@ export async function captureMemory(
         source: input.source,
         sourceRef: input.sourceRef ?? null,
         tags: input.tags,
-        metadata: { ...input.metadata, related: [] },
+        metadata: { ...persistedMetadata, related: [] },
       });
+      if (mappedAttribution) {
+        await persistActivityAttribution(
+          client,
+          memory,
+          persistedMetadata,
+          mappedAttribution,
+          persistedMetadata.actor as string,
+        );
+      }
 
       let embedded = false;
       if (embeddingProvider && embeddingVector) {
@@ -377,6 +624,12 @@ export async function captureMemory(
             ? { embedding_policy: 'local-only-unavailable' }
             : {}),
           ...auditMetadata,
+          ...(mappedAttribution ? {
+            actor_mapping: {
+              mapping_id: mappedAttribution.mappingId,
+              authority: mappedAttribution.authority,
+            },
+          } : {}),
         },
       });
       await client.query('COMMIT');

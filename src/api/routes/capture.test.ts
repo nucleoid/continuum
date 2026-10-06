@@ -113,6 +113,94 @@ describe('POST /api/v0/capture', () => {
     expect(sideEffects.rows[0]).toEqual({ memories: 0, embeddings: 0, audits: 0 });
   });
 
+  it('prevents user callers from attributing activity to another principal', async () => {
+    const { principal } = await seedActor();
+    const other = await createPrincipal(pool, {
+      externalId: 'entra:user:capture-other', kind: 'user', displayName: 'Other User',
+    });
+    const response = await request(app)
+      .post('/api/v0/capture')
+      .set('Authorization', 'Bearer entra:user:capture')
+      .send({
+        scope: { kind: 'team', name: 'payments' }, type: 'context',
+        title: 'Forged activity', body: 'Must not persist.', source: 'manual',
+        metadata: {
+          actor_principal_id: other.id, actor: 'other-user', thread_key: 'manual:forged',
+        },
+      });
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe('FORBIDDEN');
+    expect(principal.id).not.toBe(other.id);
+    expect((await pool.query("SELECT 1 FROM memories WHERE title = 'Forged activity'")).rowCount)
+      .toBe(0);
+  });
+
+  it('rejects all activity and provenance fields on raw user capture', async () => {
+    const { principal } = await seedActor();
+    const cases = [
+      { metadata: { actor: 'self' }, status: 403 },
+      { metadata: { thread_key: 'manual:self' }, status: 403 },
+      { metadata: { closes_thread_keys: ['manual:other'] }, status: 403 },
+      { metadata: {
+        actor_principal_id: principal.id, actor: 'self', thread_key: 'manual:self',
+      }, status: 403 },
+      { metadata: { _continuum_activity_provenance: 'capture-v1' }, status: 400 },
+      { metadata: { _continuum_activity_epoch_ms: 1_700_000_000_000 }, status: 400 },
+      { metadata: {
+        _continuum_actor_mapping_id: '11111111-1111-4111-8111-111111111111',
+      }, status: 400 },
+      { metadata: { _continuum_actor_mapping_authority: 'github.producer' }, status: 400 },
+    ];
+    for (const [index, item] of cases.entries()) {
+      const response = await request(app)
+        .post('/api/v0/capture')
+        .set('Authorization', 'Bearer entra:user:capture')
+        .send({
+          scope: { kind: 'team', name: 'payments' }, type: 'context',
+          title: `Forged raw activity ${index}`, body: 'Must not persist.', source: 'manual',
+          metadata: item.metadata,
+        });
+      expect(response.status).toBe(item.status);
+    }
+    expect((await pool.query("SELECT 1 FROM memories WHERE title LIKE 'Forged raw activity %'")).rowCount)
+      .toBe(0);
+  });
+
+  it.each([
+    ['actor attribution', (userId: string) => ({
+      actor_principal_id: userId, actor: 'forged-user', thread_key: 'manual:actor',
+    })],
+    ['thread closure', (userId: string) => ({
+      actor_principal_id: userId, actor: 'forged-user',
+      thread_owner_principal_id: userId, thread_key: 'manual:closure',
+      closes_thread_keys: ['terminal-session:victim'],
+    })],
+  ])('prevents a service from forging user %s through raw capture', async (_label, metadata) => {
+    const service = await createPrincipal(pool, {
+      externalId: 'svc:raw-capture', kind: 'service', displayName: 'Raw capture service',
+    });
+    const user = await createPrincipal(pool, {
+      externalId: 'entra:user:victim', kind: 'user', displayName: 'Victim user',
+    });
+    const scope = await createScope(pool, { kind: 'project', name: 'raw-capture-project' });
+    await addMembership(pool, service.id, scope.id, 'writer');
+
+    const response = await request(createApp(pool))
+      .post('/api/v0/capture')
+      .set('Authorization', 'Bearer svc:raw-capture')
+      .send({
+        scope: { kind: 'project', name: 'raw-capture-project' }, type: 'context',
+        title: 'Forged service activity', body: 'Must not persist.', source: 'manual',
+        metadata: metadata(user.id),
+      });
+
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe('FORBIDDEN');
+    expect((await pool.query(
+      "SELECT 1 FROM memories WHERE title = 'Forged service activity'",
+    )).rowCount).toBe(0);
+  });
+
   it('commits memory and sanitized audit when the embedding provider fails', async () => {
     const privateMessage = 'provider token private-provider-value';
     const provider: EmbeddingProvider = {

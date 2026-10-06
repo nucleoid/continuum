@@ -12,6 +12,10 @@ export interface DeployEventPayload {
   pr?: number;
   url?: string;
   actor?: string;
+  actorAuthority?: string;
+  actorExternalId?: string;
+  threadKey?: string;
+  closesThreadKeys?: string[];
   startedAt?: string;
   finishedAt?: string;
   notes?: string;
@@ -23,11 +27,25 @@ const STATUS_VERB: Record<DeployStatus, string> = {
   rollback: 'rolled back',
 };
 
+function deployActorIdentity(event: DeployEventPayload) {
+  return event.actorExternalId
+    ? { authority: 'deploy-event', externalId: event.actorExternalId }
+    : null;
+}
+
 export const deployEventPlugin: CapturePlugin<DeployEventPayload> = {
   id: 'deploy-event',
+  trustedActivityMetadata: true,
+  activityIdentityAuthority: 'deploy-event',
 
-  transform(event, _ctx: CaptureContext = {}): CaptureInput[] {
+  actorIdentity: deployActorIdentity,
+
+  transform(event, ctx: CaptureContext = {}): CaptureInput[] {
     const verb = STATUS_VERB[event.status];
+    const identity = deployActorIdentity(event);
+    const actorPrincipalId = identity
+      ? ctx.resolveActorPrincipalId?.(identity) ?? null
+      : null;
 
     const lines = [`${event.version} ${verb} on ${event.environment}.`];
     if (event.commit) lines.push(`Commit: ${event.commit}`);
@@ -40,6 +58,7 @@ export const deployEventPlugin: CapturePlugin<DeployEventPayload> = {
       lines.push(event.notes);
     }
 
+    const threadKey = `${ctx.activityNamespace ?? 'deploy-event'}:deploy:${event.project}:${event.environment}:${event.version}`;
     return [
       {
         scope: { kind: 'project', name: event.project },
@@ -56,7 +75,12 @@ export const deployEventPlugin: CapturePlugin<DeployEventPayload> = {
           status: event.status,
           commit: event.commit ?? null,
           pr: event.pr ?? null,
-          actor: event.actor ?? null,
+          ...(event.actor ? { actor: event.actor } : {}),
+          ...(actorPrincipalId ? { actor_principal_id: actorPrincipalId } : {}),
+          ...(actorPrincipalId ? { thread_owner_principal_id: actorPrincipalId } : {}),
+          thread_key: threadKey,
+          // A deployment notification is a terminal observation, not ongoing work.
+          closes_thread_keys: [threadKey],
           startedAt: event.startedAt ?? null,
           finishedAt: event.finishedAt ?? null,
         },

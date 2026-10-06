@@ -1,0 +1,118 @@
+import { readFile } from 'node:fs/promises';
+import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import type pg from 'pg';
+import { addMembership } from './memberships.js';
+import { createMemory } from './memories.js';
+import { createPrincipal } from './principals.js';
+import { createScope, getScopeByRef } from './scopes.js';
+import { makeTestPool, resetData } from './test-helpers.js';
+
+describe('standup remediation database boundary', () => {
+  let pool: pg.Pool;
+
+  beforeEach(async () => {
+    pool ??= await makeTestPool();
+    await resetData(pool);
+  });
+
+  afterAll(async () => pool?.end());
+
+  it('rejects reserved provenance written through the legacy memory path', async () => {
+    const writer = await createPrincipal(pool, {
+      externalId: 'service:legacy-writer', kind: 'service', displayName: 'Legacy writer',
+    });
+    const project = await createScope(pool, { kind: 'project', name: 'legacy-writer' });
+    await addMembership(pool, writer.id, project.id, 'writer');
+
+    await expect(createMemory(pool, {
+      scopeId: project.id,
+      scopeKind: project.kind,
+      type: 'context',
+      title: 'Forged activity',
+      body: 'An old binary attempts to mint trusted provenance.',
+      authorId: writer.id,
+      source: 'terminal-summary',
+      metadata: {
+        actor: 'forged',
+        actor_principal_id: writer.id,
+        thread_owner_principal_id: writer.id,
+        thread_key: 'terminal:forged',
+        _continuum_activity_provenance: 'capture-v1',
+        _continuum_actor_mapping_id: '11111111-1111-4111-8111-111111111111',
+        _continuum_actor_mapping_authority: 'terminal-summary',
+      },
+    })).rejects.toThrow(/reserved activity provenance/i);
+  });
+
+  it('has a separate immutable attribution relation with no metadata backfill', async () => {
+    const relation = await pool.query<{ name: string | null }>(
+      `SELECT to_regclass('public.memory_activity_attributions')::text AS name`,
+    );
+    expect(relation.rows[0]?.name).toBe('memory_activity_attributions');
+    expect((await pool.query('SELECT * FROM memory_activity_attributions')).rows).toEqual([]);
+
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    expect(org.kind).toBe('org');
+  });
+
+  it('repairs interrupted concurrent indexes and checks validity', async () => {
+    const sql = await readFile(
+      new URL('../../migrations/0015_standup_query_indexes.sql', import.meta.url),
+      'utf8',
+    );
+    expect(sql).toMatch(/DROP INDEX CONCURRENTLY IF EXISTS/);
+    expect(sql).toMatch(/indisvalid/);
+  });
+
+  it('keeps the published 0013 migration immutable and retires its indexes later', async () => {
+    const published = await readFile(
+      new URL('../../migrations/0013_standup_indexes.sql', import.meta.url),
+      'utf8',
+    );
+    const retirement = await readFile(
+      new URL('../../migrations/0016_retire_standup_metadata_indexes.sql', import.meta.url),
+      'utf8',
+    );
+    expect(published).toMatch(
+      /CREATE INDEX CONCURRENTLY IF NOT EXISTS memories_standup_actor_created_idx/,
+    );
+    expect(published).not.toMatch(/DROP INDEX CONCURRENTLY/);
+    expect(retirement).toMatch(
+      /DROP INDEX CONCURRENTLY IF EXISTS memories_standup_actor_created_idx/,
+    );
+  });
+
+  it('backs up and loops cleanup without deleting truthful labels or history', async () => {
+    const cleanup = await readFile(
+      new URL('../../scripts/run-standup-mapping-enforcement.sql', import.meta.url),
+      'utf8',
+    );
+    const restore = await readFile(
+      new URL('../../scripts/restore-standup-mapping-enforcement.sql', import.meta.url),
+      'utf8',
+    );
+    expect(cleanup).toContain('standup_metadata_cleanup_backup');
+    expect(cleanup).toMatch(/LOOP[\s\S]+EXIT WHEN changed = 0/);
+    expect(cleanup).not.toMatch(/- 'actor'\s/);
+    expect(cleanup).not.toMatch(/- 'thread_key'\s/);
+    expect(restore).toContain('jsonb_strip_nulls(jsonb_build_object(');
+    expect(restore).toMatch(/memory\.metadata\s+- '_continuum_activity_provenance'/);
+    expect(restore).not.toMatch(/SET metadata = backup\.metadata[,\s]/);
+  });
+
+  it('ships audited alias provisioning and inventories conversion candidates', async () => {
+    const preflight = await readFile(
+      new URL('../../scripts/preflight-standup-rollout.sql', import.meta.url),
+      'utf8',
+    );
+    const provision = await readFile(
+      new URL('../../scripts/provision-standup-actor.sql', import.meta.url),
+      'utf8',
+    );
+    expect(preflight).toContain('github_numeric_aliases_needing_conversion');
+    expect(preflight).toContain('terminal_subject_aliases_needing_conversion');
+    expect(provision).toContain('provision_standup_principal_alias');
+    expect(provision).toContain('actor_principal_mappings');
+    expect(provision).toContain('alias_kind');
+  });
+});

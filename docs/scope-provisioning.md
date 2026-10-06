@@ -4,6 +4,11 @@
 singleton org scope. This is an intentional breaking authorization change for
 callers that previously created scopes without permission.
 
+Every `user` scope creation also requires `owner_principal_id`, the reviewed
+UUID of the user principal that owns it. Other scope kinds reject an owner.
+Existing user scopes are not inferred from names or memberships and remain
+unowned until the reviewed backfill below succeeds.
+
 ## Before rollout
 
 1. Inventory every MCP client, hook, and agent that calls `ensure_scope`.
@@ -59,7 +64,9 @@ callers that previously created scopes without permission.
      -f scripts/restore-org-admin.sql
    ```
 3. Pre-create scopes required by non-admin callers or move provisioning into an
-   operator workflow.
+   operator workflow. Inventory every existing user scope with a null
+   `owner_principal_id`. Resolve each owner from reviewed identity-system
+   records, never from `scopes.name`, `principals.display_name`, or membership.
 4. Choose a dedicated operator principal with a high-entropy, non-enumerable
    `external_id`. Do not use a readable name and do not grant org admin to a
    shared agent or capture service merely to preserve the old behavior. During
@@ -102,6 +109,8 @@ callers that previously created scopes without permission.
    read -r -s -p 'Scope operator external_id: ' scope_operator_id
    CONTINUUM_PRINCIPAL_EXTERNAL_ID="$scope_operator_id" \
      node scripts/ensure-scope.mjs project booking-engine
+   CONTINUUM_PRINCIPAL_EXTERNAL_ID="$scope_operator_id" \
+     node scripts/ensure-scope.mjs user opaque-user-scope '<owner principal UUID>'
    unset scope_operator_id
    ```
 
@@ -110,6 +119,22 @@ callers that previously created scopes without permission.
    screen sharing. The startup error does not echo an unknown credential.
    Upgrade and restart every ordinary stdio MCP process too; old processes
    retain the unprotected implementation until they restart.
+
+9. Backfill reviewed existing user scopes one at a time. The checked script
+   locks the scope, verifies the owner is a user and the reviewer is a current
+   org admin, refuses conflicting one-to-one ownership, and writes an audit:
+
+   ```sh
+   psql "$CONTINUUM_DATABASE_URL" \
+     -v scope_id='<existing user scope UUID>' \
+     -v owner_principal_id='<reviewed user principal UUID>' \
+     -v admin_principal_id='<reviewing org-admin UUID>' \
+     -f scripts/set-user-scope-owner.sql
+   ```
+
+   Leave ambiguous scopes unowned. They remain excluded from standup output.
+   Record successful mappings in change control and verify no principal owns
+   more than one user scope before enabling standup consumers.
 
 The v0 stdio principal and REST bearer identity are self-asserted placeholders.
 Until Entra validation ships in M4, only trusted operators may launch MCP with
@@ -135,10 +160,12 @@ the MCP one-shot client tests still run.
 
 ## Rollback
 
-No migration or backfill is involved. Revert the application build and restart
-MCP processes. Existing scopes, memberships, and `create_scope` audit entries
-remain valid. Rolling back restores the insecure scope-creation behavior, so it
-is an emergency measure rather than a steady state.
+Revert the application build and restart MCP processes. Existing scopes,
+memberships, reviewed owner assignments, and audit entries remain valid. Do not
+clear owner assignments during application rollback: they are audited identity
+data, and removing them can expose ambiguous behavior to old readers. Rolling
+back restores the insecure scope-creation behavior, so it is an emergency
+measure rather than a steady state.
 
 Reverting application code does not undo an admin demotion or removal. Restore
 each recorded principal UUID with `scripts/restore-org-admin.sql`, verify the

@@ -7,11 +7,12 @@ function event(overrides: Partial<GitHubBranchEvent> = {}): GitHubBranchEvent {
     ref_type: 'branch',
     master_branch: 'main',
     repository: {
+      id: 987654321,
       full_name: 'exampleorg/booking-engine',
       name: 'booking-engine',
       html_url: 'https://github.com/exampleorg/booking-engine',
     },
-    sender: { id: 12345, login: 'cass-exampleorg' },
+    sender: { id: 1001, login: 'cass-exampleorg' },
     ...overrides,
   };
 }
@@ -21,7 +22,7 @@ describe('github-branch plugin', () => {
     const out = githubBranchPlugin.transform(event());
     expect(out).toHaveLength(1);
     const m = out[0];
-    expect(m.scope).toEqual({ kind: 'user', name: '12345' });
+    expect(m.scope).toEqual({ kind: 'user', name: '1001' });
     expect(m.type).toBe('context');
     expect(m.title).toBe('Started branch feature/checkout-v2 (booking-engine)');
     expect(m.source).toBe('github-branch');
@@ -37,8 +38,9 @@ describe('github-branch plugin', () => {
       repo: 'exampleorg/booking-engine',
       ref: 'feature/checkout-v2',
       base: 'main',
-      actor: '12345',
-      actorLogin: 'cass-exampleorg',
+      actor: 'cass-exampleorg',
+      thread_key: 'github:repo:987654321:branch:feature/checkout-v2',
+      closes_thread_keys: [],
     });
   });
 
@@ -47,18 +49,39 @@ describe('github-branch plugin', () => {
     expect(githubBranchPlugin.transform(ev)).toEqual([]);
   });
 
-  it('resolves user scope via context when supplied', () => {
-    const ev = event({ sender: { id: 12345, login: 'github-cass' } });
-    const out = githubBranchPlugin.transform(ev, {
-      resolveUserScope: (id) => (id === '12345' ? 'entra-cass' : null),
-    });
-    expect(out[0].scope).toEqual({ kind: 'user', name: 'entra-cass' });
+  it('rejects an invalid numeric GitHub identity instead of using its login', () => {
+    expect(githubBranchPlugin.transform(event({
+      sender: { id: 0, login: 'mutable-login' },
+    }))).toEqual([]);
   });
 
-  it('falls back to actor ID when resolveUserScope returns null', () => {
-    const out = githubBranchPlugin.transform(event(), {
+  it('resolves user scope via context when supplied', () => {
+    const ev = event({ sender: { id: 1001, login: 'github-cass' } });
+    const out = githubBranchPlugin.transform(ev, {
+      resolveUserScope: (identity) => (
+        identity.authority === 'github' && identity.externalId === '1001'
+          ? 'entra-cass'
+          : null
+      ),
+      resolveActorPrincipalId: () => '11111111-1111-4111-8111-111111111111',
+    });
+    expect(out[0].scope).toEqual({ kind: 'user', name: 'entra-cass' });
+    expect(out[0].metadata).toMatchObject({
+      actor: 'github-cass',
+      actor_principal_id: '11111111-1111-4111-8111-111111111111',
+      thread_owner_principal_id: '11111111-1111-4111-8111-111111111111',
+    });
+    expect(githubBranchPlugin.actorIdentity?.(ev)).toEqual({
+      authority: 'github', externalId: '1001',
+    });
+  });
+
+  it('falls back to the immutable numeric actor ID when a login changes', () => {
+    const out = githubBranchPlugin.transform(event({
+      sender: { id: 1001, login: 'renamed-login' },
+    }), {
       resolveUserScope: () => null,
     });
-    expect(out[0].scope).toEqual({ kind: 'user', name: '12345' });
+    expect(out[0].scope).toEqual({ kind: 'user', name: '1001' });
   });
 });

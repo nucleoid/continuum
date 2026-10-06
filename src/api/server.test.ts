@@ -11,6 +11,7 @@ import {
   errorMiddleware,
   formatOperationalError,
   mapRestError,
+  standupReaderEnabledFromEnv,
 } from './server.js';
 
 const unusedPool = { query: vi.fn() } as unknown as pg.Pool;
@@ -25,6 +26,14 @@ function appOptions(overrides: Parameters<typeof createApp>[1] = {}) {
 }
 
 describe('createApp operational middleware', () => {
+  it('keeps production standup readers disabled until explicitly enabled', () => {
+    expect(standupReaderEnabledFromEnv({})).toBe(false);
+    expect(standupReaderEnabledFromEnv({ CONTINUUM_STANDUP_READER_ENABLED: 'true' }))
+      .toBe(true);
+    expect(() => standupReaderEnabledFromEnv({ CONTINUUM_STANDUP_READER_ENABLED: 'yes' }))
+      .toThrow(/must be true or false/);
+  });
+
   it('lists every known operational log path once', async () => {
     const source = await readFile(new URL('./server.ts', import.meta.url), 'utf8');
     expect(source.match(/'\/api\/v0\/scopes'/g)).toHaveLength(1);
