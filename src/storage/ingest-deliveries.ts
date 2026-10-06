@@ -19,7 +19,8 @@ export async function resolvePrincipalAlias(
     `SELECT p.id, p.external_id, p.kind, p.display_name, p.created_at
        FROM principal_aliases a
        JOIN principals p ON p.id = a.principal_id
-      WHERE a.provider = $1 AND a.external_actor = $2`,
+      WHERE a.provider = $1 AND a.external_actor = $2
+        AND p.disabled_at IS NULL`,
     [provider, externalActor],
   );
   const row = rows[0];

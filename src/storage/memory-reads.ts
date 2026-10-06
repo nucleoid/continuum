@@ -45,9 +45,13 @@ export async function getReadableMemory(
        JOIN principals p ON p.id = m.author_id
       WHERE m.id = $1
         AND (m.expires_at IS NULL OR m.expires_at > now())
+        AND EXISTS (
+          SELECT 1 FROM principals caller WHERE caller.id = $2 AND caller.disabled_at IS NULL
+        )
         AND (s.kind = 'org' OR EXISTS (
           SELECT 1 FROM scope_memberships sm
-           WHERE sm.principal_id = $2 AND sm.scope_id = m.scope_id
+           WHERE sm.principal_id = $2 AND sm.scope_id = m.scope_id AND sm.active
+             AND continuum_membership_is_effective(sm.active, sm.source_kind)
         ))`,
     [memoryId, principalId],
   );
@@ -64,9 +68,13 @@ export async function listReadableMemories(
        FROM memories m
        JOIN scopes s ON s.id = m.scope_id
        JOIN principals p ON p.id = m.author_id
-      WHERE (s.kind = 'org' OR EXISTS (
+      WHERE EXISTS (
+          SELECT 1 FROM principals caller WHERE caller.id = $1 AND caller.disabled_at IS NULL
+        )
+        AND (s.kind = 'org' OR EXISTS (
           SELECT 1 FROM scope_memberships sm
-           WHERE sm.principal_id = $1 AND sm.scope_id = m.scope_id
+           WHERE sm.principal_id = $1 AND sm.scope_id = m.scope_id AND sm.active
+             AND continuum_membership_is_effective(sm.active, sm.source_kind)
         ))
         AND (m.expires_at IS NULL OR m.expires_at > now())
         AND m.state = $2

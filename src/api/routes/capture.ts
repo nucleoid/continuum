@@ -33,6 +33,11 @@ export function captureRouter(
       return;
     }
     const principal = req.principal!;
+    if (req.authContext?.allowedSource
+      && req.authContext.allowedSource !== parsed.data.source) {
+      res.status(403).json({ code: 'FORBIDDEN', error: 'credential is not allowed for this source' });
+      return;
+    }
     const result = await captureMemory(
       pool,
       embeddingProvider,

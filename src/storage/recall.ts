@@ -1,4 +1,3 @@
-import type pg from 'pg';
 import type { MemoryType, RecallResult } from '../types.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import { vectorSearchMemoryIds } from './embeddings.js';

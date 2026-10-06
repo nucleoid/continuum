@@ -440,6 +440,110 @@ describe('REST/MCP semantic parity matrix', () => {
     });
   });
 
+  it('keeps inactive decision access hidden across REST and MCP', async () => {
+    const scope = await createScope(pool, { kind: 'project', name: 'inactive-decision-parity' });
+    await addMembership(pool, principal.id, scope.id, 'writer');
+    const decision = await createMemory(pool, {
+      scopeId: scope.id, scopeKind: scope.kind, type: 'decision', title: 'Private decision',
+      body: 'Inactive members must not see this body', authorId: principal.id, source: 'manual',
+    });
+    await pool.query(
+      `UPDATE scope_memberships SET active = FALSE, deactivated_at = now()
+        WHERE principal_id = $1 AND scope_id = $2`,
+      [principal.id, scope.id],
+    );
+
+    const restHistory = await request(createApp(pool))
+      .get(`/api/v0/decisions/${decision.id}/history`)
+      .set('Authorization', 'Bearer entra:user:parity');
+    const mcpHistory = await client.callTool({
+      name: 'continuum.decision_history', arguments: { decision_id: decision.id },
+    }) as ToolResult;
+    const restSupersede = await request(createApp(pool)).post('/api/v0/supersede')
+      .set('Authorization', 'Bearer entra:user:parity')
+      .send({ supersededId: decision.id, title: 'Denied', body: 'Denied body' });
+    const mcpSupersede = await client.callTool({
+      name: 'continuum.supersede',
+      arguments: { superseded_id: decision.id, title: 'Denied', body: 'Denied body' },
+    }) as ToolResult;
+
+    expect(restHistory.status).toBe(404);
+    expect(restSupersede.status).toBe(404);
+    expect(toolJson(mcpHistory)).toEqual({ error: { code: 'MEMORY_NOT_FOUND', message: 'Memory not found' } });
+    expect(toolJson(mcpSupersede)).toEqual(toolJson(mcpHistory));
+  });
+
+  it('revokes REST and MCP point-fetch and browse access after membership deactivation', async () => {
+    const scope = await createScope(pool, { kind: 'project', name: 'deactivated-parity' });
+    await addMembership(pool, principal.id, scope.id, 'reader');
+    const memory = await createMemory(pool, {
+      scopeId: scope.id, scopeKind: 'project', type: 'fact', title: 'Revoked record',
+      body: 'must not remain readable', authorId: principal.id, source: 'manual',
+    });
+    await pool.query(
+      `UPDATE scope_memberships SET active = FALSE, deactivated_at = now()
+        WHERE principal_id = $1 AND scope_id = $2`,
+      [principal.id, scope.id],
+    );
+
+    const restFetch = await request(createApp(pool))
+      .get(`/api/v0/memories/${memory.id}`)
+      .set('Authorization', 'Bearer entra:user:parity');
+    const mcpFetch = (await client.callTool({
+      name: 'continuum.get_memory', arguments: { memory_id: memory.id },
+    })) as ToolResult;
+    const restList = await request(createApp(pool))
+      .get('/api/v0/memories')
+      .query({ scope: 'project:deactivated-parity' })
+      .set('Authorization', 'Bearer entra:user:parity');
+    const mcpList = toolJson((await client.callTool({
+      name: 'continuum.list_memories',
+      arguments: { scope: 'project:deactivated-parity' },
+    })) as ToolResult);
+
+    expect(restFetch.status).toBe(404);
+    expect(restFetch.body.code).toBe('MEMORY_NOT_FOUND');
+    expect(mcpFetch.isError).toBe(true);
+    expect(toolJson(mcpFetch).error.code).toBe('MEMORY_NOT_FOUND');
+    expect(restList.status).toBe(200);
+    expect(restList.body.items).toEqual([]);
+    expect(mcpList.items).toEqual([]);
+  });
+
+  it('fails closed for a disabled principal across REST and an existing MCP session', async () => {
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    const memory = await createMemory(pool, {
+      scopeId: org!.id, scopeKind: 'org', type: 'fact', title: 'Org secret',
+      body: 'disabled principals must not retain implicit org reads',
+      authorId: principal.id, source: 'manual',
+    });
+    await pool.query('UPDATE principals SET disabled_at = now() WHERE id = $1', [principal.id]);
+
+    const rest = await request(createApp(pool))
+      .get(`/api/v0/memories/${memory.id}`)
+      .set('Authorization', 'Bearer entra:user:parity');
+    const mcpFetch = await client.callTool({
+      name: 'continuum.get_memory', arguments: { memory_id: memory.id },
+    }) as ToolResult;
+    const mcpList = await client.callTool({
+      name: 'continuum.list_memories', arguments: { scope: 'org' },
+    }) as ToolResult;
+    const mcpCapture = await client.callTool({
+      name: 'continuum.capture',
+      arguments: {
+        scope_kind: 'team', scope_name: 'payments', type: 'fact',
+        title: 'Denied', body: 'Denied', source: 'manual',
+      },
+    }) as ToolResult;
+
+    expect(rest.status).toBe(401);
+    expect(mcpFetch.isError).toBe(true);
+    expect(toolJson(mcpFetch).error.code).toBe('MEMORY_NOT_FOUND');
+    expect(toolJson(mcpList).items).toEqual([]);
+    expect(mcpCapture.isError).toBe(true);
+    expect(toolJson(mcpCapture).error.code).toBe('FORBIDDEN');
+  });
+
   it('excludes expired full bodies before REST/MCP pagination and audits each delivered identity', async () => {
     const scope = await createScope(pool, { kind: 'project', name: 'expiry-parity' });
     await addMembership(pool, principal.id, scope.id, 'reader');

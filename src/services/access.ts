@@ -6,7 +6,6 @@ import { ServiceError } from './errors.js';
 import {
   canMutateScope,
   canReadScope,
-  canWriteScope,
   listReadableScopes,
   type ReadableScope,
 } from '../scopes/access.js';

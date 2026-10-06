@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pg from 'pg';
@@ -23,7 +23,7 @@ function schemaPool(schema: string): pg.Pool {
   const pool = new pg.Pool({
     connectionString: DATABASE_URL,
     max: 1,
-    options: `-c search_path=${schema}`,
+    options: `-c search_path=${schema},public`,
   });
   pools.push(pool);
   return pool;
@@ -39,6 +39,129 @@ afterEach(async () => {
 });
 
 describe('runMigrations', () => {
+  it('aliases exact review-era Entra ledger names without replaying renamed migrations', async () => {
+    const schema = `migrator_entra_rename_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-entra-rename-'));
+    directories.push(directory);
+    await writeFile(
+      join(directory, '0010_entra_auth.sql'),
+      "DO $$ BEGIN RAISE EXCEPTION 'renamed migration replayed'; END $$;",
+    );
+    try {
+      await pool.query(
+        `CREATE TABLE _continuum_migrations (
+           name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+         );
+         INSERT INTO _continuum_migrations (name) VALUES ('0005_entra_auth.sql')`,
+      );
+
+      await expect(runMigrations(pool, directory)).resolves.toEqual([]);
+      expect((await pool.query(
+        `SELECT name FROM _continuum_migrations
+          WHERE name IN ('0005_entra_auth.sql', '0010_entra_auth.sql')
+          ORDER BY name`,
+      )).rows).toEqual([
+        { name: '0005_entra_auth.sql' },
+        { name: '0010_entra_auth.sql' },
+      ]);
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  });
+
+  it('seeds Entra freshness from durable successful-sync evidence, never migration time', async () => {
+    const schema = `migrator_entra_freshness_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const migration = await readFile(
+      join(process.cwd(), 'migrations/0019_entra_sync_freshness.sql'),
+      'utf8',
+    );
+    const directory = await migrationDirectory(migration);
+    try {
+      await pool.query(
+        `CREATE TABLE scope_memberships (
+           source_kind TEXT NOT NULL, active BOOLEAN NOT NULL, synced_at TIMESTAMPTZ
+         );
+         CREATE TABLE audit_log (
+           at TIMESTAMPTZ NOT NULL, metadata JSONB
+         );
+         INSERT INTO scope_memberships (source_kind, active, synced_at)
+         VALUES ('entra', TRUE, now());
+         INSERT INTO audit_log (at, metadata)
+         VALUES (now() - interval '72 hours', '{"operation":"entra_membership_sync"}')`,
+      );
+
+      await runMigrations(pool, directory);
+
+      expect((await pool.query(
+        `SELECT last_success_at = (
+           SELECT max(at) FROM audit_log
+            WHERE metadata->>'operation' = 'entra_membership_sync'
+         ) AS derived,
+         now() >= last_success_at + max_staleness AS stale
+         FROM entra_sync_state WHERE singleton`,
+      )).rows).toEqual([{ derived: true, stale: true }]);
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  });
+
+  it('repairs review-era freshness state from durable sync evidence on upgrade', async () => {
+    const schema = `migrator_entra_upgrade_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const migration = await readFile(
+      join(process.cwd(), 'migrations/0020_entra_review_hardening.sql'),
+      'utf8',
+    );
+    const directory = await migrationDirectory(migration);
+    try {
+      await pool.query(
+        `CREATE TABLE audit_log (
+           at TIMESTAMPTZ NOT NULL, metadata JSONB
+         );
+         CREATE TABLE entra_sync_state (
+           singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+           last_success_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+           max_staleness INTERVAL NOT NULL DEFAULT interval '24 hours'
+         );
+         INSERT INTO audit_log (at, metadata)
+         VALUES (now() - interval '72 hours', '{"operation":"entra_membership_sync"}');
+         INSERT INTO entra_sync_state (singleton) VALUES (TRUE)`,
+      );
+
+      await runMigrations(pool, directory);
+
+      expect((await pool.query(
+        `SELECT last_success_at = (
+           SELECT max(at) FROM audit_log
+            WHERE metadata->>'operation' = 'entra_membership_sync'
+         ) AS derived,
+         now() >= last_success_at + max_staleness AS stale,
+         max_staleness = interval '48 hours' AS two_day_default
+         FROM entra_sync_state WHERE singleton`,
+      )).rows).toEqual([{ derived: true, stale: true, two_day_default: true }]);
+
+      await pool.query('DELETE FROM entra_sync_state');
+      expect((await pool.query(
+        `INSERT INTO entra_sync_state (singleton) VALUES (TRUE)
+         RETURNING last_success_at = TIMESTAMPTZ '1970-01-01 00:00:00+00' AS fail_closed,
+                   max_staleness = interval '48 hours' AS two_day_default`,
+      )).rows).toEqual([{ fail_closed: true, two_day_default: true }]);
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  });
+
   it('ships decision constraints after ingestion with nonblocking validation and indexing', async () => {
     const migrations = (await readdir(join(process.cwd(), 'migrations')))
       .filter((file) => file.endsWith('.sql'))
@@ -46,9 +169,9 @@ describe('runMigrations', () => {
     expect(migrations).toContain('0007_decision_supersession_constraints.sql');
     expect(migrations).toContain('0008_decision_supersession_validation.sql');
     expect(migrations).toContain('0009_decision_supersession_unique_index.sql');
-    expect(migrations.filter((file) => file.startsWith('0005_'))).toEqual([
-      '0005_webhook_ingestion.sql',
-    ]);
+    const sequenceNumbers = migrations.map((file) => file.slice(0, 4));
+    expect(new Set(sequenceNumbers).size).toBe(sequenceNumbers.length);
+    expect(migrations).toContain('0010_entra_auth.sql');
 
     const constraints = await readFile(
       join(process.cwd(), 'migrations/0007_decision_supersession_constraints.sql'),
@@ -72,6 +195,262 @@ describe('runMigrations', () => {
     );
     expect(uniqueIndex.trimStart()).toMatch(/^-- continuum:no-transaction/);
     expect(uniqueIndex).toMatch(/CREATE UNIQUE INDEX CONCURRENTLY memories_supersedes_unique_idx/i);
+  });
+
+  it('deactivates pre-approval Entra memberships during the approval migration', async () => {
+    const schema = `migrator_entra_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-entra-migrations-'));
+    directories.push(directory);
+    const source = new URL('../../migrations/', import.meta.url);
+    const files = (await readdir(source)).filter((file) => file.endsWith('.sql')).sort();
+    for (const file of files.filter((name) => name <= '0010_entra_auth.sql')) {
+      await copyFile(new URL(file, source), join(directory, file));
+    }
+
+    try {
+      await runMigrations(pool, directory);
+      const scope = (await pool.query("SELECT id FROM scopes WHERE kind = 'org' AND name = ''")).rows[0].id;
+      const principal = (await pool.query(
+        "INSERT INTO principals (id, external_id, kind, display_name) VALUES (gen_random_uuid(), 'legacy-user', 'user', 'Legacy') RETURNING id",
+      )).rows[0].id;
+      const groupId = '22222222-2222-4222-8222-222222222222';
+      await pool.query(
+        "INSERT INTO entra_groups (external_id, display_name, scope_id, role) VALUES ($1, 'continuum-org-admin', $2, 'admin')",
+        [groupId, scope],
+      );
+      await pool.query(
+        "INSERT INTO scope_memberships (principal_id, scope_id, role, source_kind, source_id) VALUES ($1, $2, 'admin', 'entra', $3)",
+        [principal, scope, groupId],
+      );
+      for (const file of files.filter((name) => name > '0010_entra_auth.sql')) {
+        await copyFile(new URL(file, source), join(directory, file));
+      }
+      await runMigrations(pool, directory);
+      expect((await pool.query(
+        "SELECT active, deactivated_at IS NOT NULL AS deactivated FROM scope_memberships WHERE source_kind = 'entra'",
+      )).rows).toEqual([{ active: false, deactivated: true }]);
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  });
+
+  it('repairs orphaned active memberships before installing binding guards', async () => {
+    const schema = `migrator_binding_guard_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-binding-migrations-'));
+    directories.push(directory);
+    const source = new URL('../../migrations/', import.meta.url);
+    const files = (await readdir(source)).filter((file) => file.endsWith('.sql')).sort();
+    for (const file of files.filter((name) => name <= '0014_lock_entra_binding_invariant.sql')) {
+      await copyFile(new URL(file, source), join(directory, file));
+    }
+
+    try {
+      await runMigrations(pool, directory);
+      const scope = (await pool.query(
+        "INSERT INTO scopes (id, kind, name) VALUES (gen_random_uuid(), 'team', 'repair') RETURNING id",
+      )).rows[0].id;
+      const approver = (await pool.query(
+        "INSERT INTO principals (id, external_id, kind, display_name) VALUES (gen_random_uuid(), 'approver', 'user', 'Approver') RETURNING id",
+      )).rows[0].id;
+      const member = (await pool.query(
+        "INSERT INTO principals (id, external_id, kind, display_name) VALUES (gen_random_uuid(), 'member', 'user', 'Member') RETURNING id",
+      )).rows[0].id;
+      const groupId = '22222222-2222-4222-8222-222222222222';
+      await pool.query(
+        `INSERT INTO entra_groups
+           (external_id, display_name, scope_id, role, active, approved_by, approved_at)
+         VALUES ($1, 'repair', $2, 'reader', TRUE, $3, now())`,
+        [groupId, scope, approver],
+      );
+      await pool.query(
+        `INSERT INTO scope_memberships
+           (principal_id, scope_id, role, source_kind, source_id, active)
+         VALUES ($1, $2, 'reader', 'entra', $3, TRUE)`,
+        [member, scope, groupId],
+      );
+      await pool.query(
+        'UPDATE entra_groups SET active = FALSE, deactivated_at = now() WHERE external_id = $1',
+        [groupId],
+      );
+
+      for (const file of files.filter((name) => name > '0014_lock_entra_binding_invariant.sql')) {
+        await copyFile(new URL(file, source), join(directory, file));
+      }
+      await runMigrations(pool, directory);
+
+      expect((await pool.query(
+        `SELECT active, deactivated_at IS NOT NULL AS deactivated
+           FROM scope_memberships WHERE source_kind = 'entra'`,
+      )).rows).toEqual([{ active: false, deactivated: true }]);
+      await pool.query(
+        `UPDATE entra_groups
+            SET active = TRUE, deactivated_at = NULL,
+                quarantined_at = NULL, quarantine_reason = NULL
+          WHERE external_id = $1`,
+        [groupId],
+      );
+      await pool.query(
+        `UPDATE scope_memberships SET active = TRUE, deactivated_at = NULL
+          WHERE source_kind = 'entra' AND source_id = $1`,
+        [groupId],
+      );
+      await expect(pool.query(
+        "UPDATE entra_groups SET role = 'writer' WHERE external_id = $1", [groupId],
+      )).rejects.toThrow(/active Entra memberships must match an approved binding/);
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  });
+
+  it('canonicalizes legacy Entra IDs and fail-closed consolidates case collisions', async () => {
+    const schema = `migrator_entra_case_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-entra-case-migrations-'));
+    directories.push(directory);
+    const source = new URL('../../migrations/', import.meta.url);
+    const files = (await readdir(source)).filter((file) => file.endsWith('.sql')).sort();
+    for (const file of files.filter((name) => name <= '0015_harden_entra_binding_invariants.sql')) {
+      await copyFile(new URL(file, source), join(directory, file));
+    }
+
+    try {
+      await runMigrations(pool, directory);
+      const scope = (await pool.query(
+        "INSERT INTO scopes (id, kind, name) VALUES (gen_random_uuid(), 'team', 'case') RETURNING id",
+      )).rows[0].id;
+      const approver = (await pool.query(
+        "INSERT INTO principals (id, external_id, kind, display_name) VALUES (gen_random_uuid(), 'approver', 'user', 'Approver') RETURNING id",
+      )).rows[0].id;
+      const member = (await pool.query(
+        "INSERT INTO principals (id, external_id, kind, display_name) VALUES (gen_random_uuid(), 'member', 'user', 'Member') RETURNING id",
+      )).rows[0].id;
+      const collision = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+      const ordinary = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+      for (const id of [collision, collision.toUpperCase(), ordinary.toUpperCase()]) {
+        await pool.query(
+          `INSERT INTO entra_groups
+             (external_id, display_name, scope_id, role, active, approved_by, approved_at)
+           VALUES ($1, $1, $2, 'reader', TRUE, $3, now())`,
+          [id, scope, approver],
+        );
+        await pool.query(
+          `INSERT INTO scope_memberships
+             (principal_id, scope_id, role, source_kind, source_id, active)
+           VALUES ($1, $2, 'reader', 'entra', $3, TRUE)`,
+          [member, scope, id],
+        );
+      }
+
+      for (const file of files.filter((name) => name > '0015_harden_entra_binding_invariants.sql')) {
+        await copyFile(new URL(file, source), join(directory, file));
+      }
+      await runMigrations(pool, directory);
+
+      expect((await pool.query(
+        `SELECT external_id, active, quarantine_reason FROM entra_groups ORDER BY external_id`,
+      )).rows).toEqual([
+        { external_id: collision, active: false, quarantine_reason: 'LEGACY_INACTIVE_REVIEW' },
+        { external_id: ordinary, active: true, quarantine_reason: null },
+      ]);
+      expect((await pool.query(
+        `SELECT source_id, active FROM scope_memberships
+          WHERE source_kind = 'entra' ORDER BY source_id`,
+      )).rows).toEqual([
+        { source_id: collision, active: false },
+        { source_id: ordinary, active: true },
+      ]);
+      await expect(pool.query(
+        `INSERT INTO entra_groups
+           (external_id, display_name, scope_id, role, active, approved_by, approved_at)
+         VALUES ($1, 'upper', $2, 'reader', TRUE, $3, now())`,
+        ['CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCCC', scope, approver],
+      )).rejects.toThrow();
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  });
+
+  it('canonicalizes UUID-shaped principal identities and enforces the invariant', async () => {
+    const schema = `migrator_principal_case_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const migration = await readFile(
+      join(process.cwd(), 'migrations/0018_canonicalize_principal_external_ids.sql'),
+      'utf8',
+    );
+    const directory = await migrationDirectory(migration);
+    const lower = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    try {
+      await pool.query(
+        `CREATE TABLE principals (
+           id UUID PRIMARY KEY, external_id TEXT UNIQUE, kind TEXT, display_name TEXT
+         )`,
+      );
+      await pool.query(
+        `INSERT INTO principals (id, external_id, kind, display_name) VALUES
+         (gen_random_uuid(), $1, 'user', 'UUID'),
+         (gen_random_uuid(), 'Service:Opaque', 'service', 'Opaque')`,
+        [lower.toUpperCase()],
+      );
+
+      await runMigrations(pool, directory);
+
+      expect((await pool.query('SELECT external_id FROM principals ORDER BY external_id')).rows)
+        .toEqual([{ external_id: lower }, { external_id: 'Service:Opaque' }]);
+      await expect(pool.query(
+        `INSERT INTO principals (id, external_id, kind, display_name)
+         VALUES (gen_random_uuid(), 'BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB', 'user', 'Invalid')`,
+      )).rejects.toThrow();
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  });
+
+  it('preflights principal UUID case collisions without changing rows', async () => {
+    const schema = `migrator_principal_collision_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const migration = await readFile(
+      join(process.cwd(), 'migrations/0018_canonicalize_principal_external_ids.sql'),
+      'utf8',
+    );
+    const directory = await migrationDirectory(migration);
+    const lower = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    try {
+      await pool.query(
+        `CREATE TABLE principals (
+           id UUID PRIMARY KEY, external_id TEXT UNIQUE, kind TEXT, display_name TEXT
+         )`,
+      );
+      await pool.query(
+        `INSERT INTO principals (id, external_id, kind, display_name) VALUES
+         (gen_random_uuid(), $1, 'user', 'Lower'),
+         (gen_random_uuid(), $2, 'user', 'Upper')`,
+        [lower, lower.toUpperCase()],
+      );
+
+      await expect(runMigrations(pool, directory))
+        .rejects.toThrow(/collide after lowercase canonicalization/);
+      expect((await pool.query('SELECT external_id FROM principals ORDER BY external_id')).rows)
+        .toEqual([{ external_id: lower }, { external_id: lower.toUpperCase() }]);
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
   });
 
   it('runs marked concurrent-index migrations outside a transaction', async () => {
@@ -141,7 +520,7 @@ describe('runMigrations', () => {
     expect(release).toHaveBeenCalledTimes(1);
   });
 
-  it('releases the client when lock acquisition fails', async () => {
+  it('destroys the client when lock acquisition fails', async () => {
     const release = vi.fn();
     const client = {
       query: vi.fn(async () => {
@@ -156,7 +535,7 @@ describe('runMigrations', () => {
       runMigrations(pool as unknown as pg.Pool, directory),
     ).rejects.toThrow('lock unavailable');
     expect(client.query).toHaveBeenCalledTimes(1);
-    expect(release).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledWith(expect.any(Error));
   });
 
   it('preserves migration and unlock errors while still releasing the client', async () => {

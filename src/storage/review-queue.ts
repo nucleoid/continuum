@@ -74,9 +74,17 @@ export async function listReviewQueue(
          FROM memories m
          JOIN scopes s ON s.id = m.scope_id
          JOIN principals p ON p.id = m.author_id
-         LEFT JOIN scope_memberships membership
-           ON membership.scope_id = m.scope_id AND membership.principal_id = $1
-        WHERE (s.kind = 'org' OR membership.role IS NOT NULL)
+         LEFT JOIN LATERAL (
+           SELECT sm.role FROM scope_memberships sm
+            WHERE sm.scope_id = m.scope_id AND sm.principal_id = $1 AND sm.active
+              AND continuum_membership_is_effective(sm.active, sm.source_kind)
+            ORDER BY CASE sm.role WHEN 'admin' THEN 3 WHEN 'writer' THEN 2 ELSE 1 END DESC
+            LIMIT 1
+         ) membership ON TRUE
+        WHERE EXISTS (
+            SELECT 1 FROM principals caller WHERE caller.id = $1 AND caller.disabled_at IS NULL
+          )
+          AND (s.kind = 'org' OR membership.role IS NOT NULL)
           AND (m.author_id = $1 OR membership.role IN ('writer', 'admin'))
           AND (
             (m.state = 'stale' AND m.type IN ('fact', 'relationship'))

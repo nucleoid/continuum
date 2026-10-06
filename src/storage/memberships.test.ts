@@ -115,4 +115,28 @@ describe('memberships repository', () => {
     const m = await getMembership(pool, p.id, s.id);
     expect(m).toBeNull();
   });
+
+  it('database-blocks deleting or demoting the final effective manual org admin', async () => {
+    const principal = await createPrincipal(pool, {
+      externalId: 'break-glass', kind: 'user', displayName: 'Break glass',
+    });
+    const org = (await pool.query(
+      `SELECT id FROM scopes WHERE kind = 'org' AND name = ''`,
+    )).rows[0];
+    await addMembership(pool, principal.id, org.id, 'admin');
+
+    await expect(pool.query(
+      `DELETE FROM scope_memberships
+        WHERE principal_id = $1 AND scope_id = $2 AND source_kind = 'manual'`,
+      [principal.id, org.id],
+    )).rejects.toThrow(/last effective manual org administrator/i);
+    await expect(pool.query(
+      `UPDATE scope_memberships SET role = 'writer'
+        WHERE principal_id = $1 AND scope_id = $2 AND source_kind = 'manual'`,
+      [principal.id, org.id],
+    )).rejects.toThrow(/last effective manual org administrator/i);
+    await expect(pool.query(
+      'UPDATE principals SET disabled_at = now() WHERE id = $1', [principal.id],
+    )).rejects.toThrow(/last effective manual org administrator/i);
+  });
 });

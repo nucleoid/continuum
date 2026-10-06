@@ -2,7 +2,6 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { getPrincipalByExternalId } from '../storage/principals.js';
 import {
   asEmbeddingRouter,
   warnOnMissingEmbeddingRoutingScopes,
@@ -39,6 +38,9 @@ import {
   reviewQueueForPrincipal,
 } from '../services/review-queue.js';
 import { isLifecyclePrincipal } from '../lifecycle/principal.js';
+import {
+  authModeFromEnv, createAuthenticator, entraConfigFromEnv, warnOnDevAuthMode,
+} from './auth.js';
 import { gapConfigFromEnv, renderGapMarkdown, type GapConfig } from '../insights/gaps.js';
 import { getKnowledgeGaps } from '../services/gaps.js';
 import {
@@ -66,6 +68,7 @@ export interface McpDeps {
   gapConfig?: GapConfig;
   now?: () => Date;
   relationThreshold?: number;
+  allowedSource?: string;
 }
 
 function textResult(text: string): {
@@ -177,6 +180,12 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     },
     async (args) => {
       try {
+        if (deps.allowedSource && deps.allowedSource !== args.source) {
+          throw new ServiceError(
+            'FORBIDDEN',
+            'credential is not allowed for this source',
+          );
+        }
         const ref = { kind: args.scope_kind as ScopeKind, name: args.scope_name };
         const result = await captureMemory(
           pool,
@@ -323,7 +332,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         const result = await supersedeForPrincipal(pool, embeddingProvider, principal, {
           supersededId: args.superseded_id, title: args.title, body: args.body,
           tags: args.tags, source: args.source, sourceRef: args.source_ref, metadata: args.metadata,
-        }, { transport: 'mcp' });
+        }, { transport: 'mcp' }, deps.allowedSource);
         return jsonResult({
           superseded_id: result.predecessor.id, successor_id: result.successor.id,
           scope_id: result.successor.scopeId, predecessor_state: result.predecessor.state,
@@ -627,10 +636,37 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   const pool = getPool();
-  const principal = await getPrincipalByExternalId(pool, tokenEnv);
-  if (!principal || isLifecyclePrincipal(principal)) {
+  const authMode = authModeFromEnv();
+  warnOnDevAuthMode(authMode);
+  const authenticator = createAuthenticator(
+    pool, authMode, authMode === 'entra' ? entraConfigFromEnv() : undefined,
+  );
+  const authenticated = await authenticator.authenticate('Bearer', tokenEnv);
+  const principal = authenticated?.principal ?? null;
+  if (!authenticated || !principal || isLifecyclePrincipal(principal)) {
     process.stderr.write('continuum-mcp: unknown principal\n');
     process.exit(1);
+  }
+  // Stdio MCP sessions are long-lived. Revalidate revocation/rotation and token
+  // expiry instead of treating process startup authentication as permanent.
+  const revalidate = async () => {
+    const current = await authenticator.authenticate('Bearer', tokenEnv);
+    if (!current || current.principal.id !== principal.id
+      || (current.expiresAt && current.expiresAt.getTime() <= Date.now())) {
+      process.stderr.write('continuum-mcp: credential expired or revoked\n');
+      process.exit(1);
+    }
+  };
+  const credentialTimer = setInterval(() => { void revalidate().catch(() => process.exit(1)); }, 30_000);
+  credentialTimer.unref();
+  if (authenticated.expiresAt) {
+    const remaining = authenticated.expiresAt.getTime() - Date.now();
+    if (remaining <= 0) {
+      process.stderr.write('continuum-mcp: credential expired\n');
+      process.exit(1);
+    }
+    const expiryTimer = setTimeout(() => process.exit(1), Math.min(remaining + 1, 2_147_483_647));
+    expiryTimer.unref();
   }
   const embeddingProvider = makeEmbeddingRouterFromEnv();
   await warnOnMissingEmbeddingRoutingScopes(pool, embeddingProvider);
@@ -640,6 +676,7 @@ async function main(): Promise<void> {
     principal,
     reviewHorizonDays: configuredReviewHorizonDays(),
     relationThreshold: relationThresholdFromEnv(),
+    allowedSource: authenticated?.allowedSource,
   });
   const transport = new StdioServerTransport();
   await server.connect(transport);

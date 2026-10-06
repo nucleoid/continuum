@@ -10,6 +10,19 @@ const DEFAULT_MIGRATIONS_DIR = resolve(here, '../../migrations');
 // Changing it would break coordination with replicas running an older version.
 const CONTINUUM_MIGRATION_LOCK_ID = '7215328273579717613';
 const NO_TRANSACTION_MARKER = '-- continuum:no-transaction';
+const REVIEW_ENTRA_MIGRATION_RENAMES = [
+  ['0005_entra_auth.sql', '0010_entra_auth.sql'],
+  ['0006_entra_binding_approval.sql', '0011_entra_binding_approval.sql'],
+  ['0007_entra_binding_revocation.sql', '0012_entra_binding_revocation.sql'],
+  ['0008_entra_binding_membership_invariant.sql', '0013_entra_binding_membership_invariant.sql'],
+  ['0009_lock_entra_binding_invariant.sql', '0014_lock_entra_binding_invariant.sql'],
+  ['0010_harden_entra_binding_invariants.sql', '0015_harden_entra_binding_invariants.sql'],
+  ['0011_canonicalize_entra_ids.sql', '0016_canonicalize_entra_ids.sql'],
+  ['0012_entra_quarantine_state.sql', '0017_entra_quarantine_state.sql'],
+  ['0013_canonicalize_principal_external_ids.sql', '0018_canonicalize_principal_external_ids.sql'],
+  ['0014_entra_sync_freshness.sql', '0019_entra_sync_freshness.sql'],
+  ['0015_entra_review_hardening.sql', '0020_entra_review_hardening.sql'],
+] as const;
 
 function nonTransactionalStatements(sql: string): string[] {
   const body = sql.trimStart().slice(NO_TRANSACTION_MARKER.length).trim();
@@ -56,6 +69,16 @@ export async function runMigrations(
       .sort();
 
     for (const file of files) {
+    for (const [reviewName, publicName] of REVIEW_ENTRA_MIGRATION_RENAMES) {
+      if (!files.includes(publicName)) continue;
+      await client.query(
+        `INSERT INTO _continuum_migrations (name, applied_at)
+         SELECT $2, applied_at FROM _continuum_migrations WHERE name = $1
+         ON CONFLICT (name) DO NOTHING`,
+        [reviewName, publicName],
+      );
+    }
+
       const { rowCount } = await client.query(
         'SELECT 1 FROM _continuum_migrations WHERE name = $1',
         [file],
@@ -125,13 +148,15 @@ export async function runMigrations(
 
   try {
     const unlockError = cleanupErrors[0];
+    const lockError = !lockAcquired && runFailed ? runError : undefined;
+    const releaseError = unlockError ?? lockError;
     client.release(
-      unlockError instanceof Error
-        ? unlockError
-        : unlockError === undefined
+      releaseError instanceof Error
+        ? releaseError
+        : releaseError === undefined
           ? undefined
-          : new Error('Migration advisory lock cleanup failed', {
-              cause: unlockError,
+          : new Error('Migration advisory lock connection is unsafe', {
+              cause: releaseError,
             }),
     );
   } catch (error) {

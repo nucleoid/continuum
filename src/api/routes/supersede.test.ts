@@ -3,7 +3,7 @@ import type pg from 'pg';
 import request from 'supertest';
 import { createApp } from '../server.js';
 import { makeTestPool, resetData } from '../../storage/test-helpers.js';
-import { createPrincipal } from '../../storage/principals.js';
+import { createPrincipal, getPrincipal } from '../../storage/principals.js';
 import { createScope } from '../../storage/scopes.js';
 import { addMembership } from '../../storage/memberships.js';
 import { createMemory } from '../../storage/memories.js';
@@ -147,6 +147,46 @@ describe('decision supersession REST API', () => {
       .set('Authorization', 'Bearer entra:user:reader');
     expect(history.status).toBe(200);
     expect(history.body.currentId).toBe(decisionId);
+  });
+
+  it('treats an inactive membership as no access for supersede and decision history', async () => {
+    await pool.query(
+      `UPDATE scope_memberships SET active = FALSE, deactivated_at = now()
+        WHERE principal_id = $1 AND scope_id = $2`,
+      [principalId, scopeId],
+    );
+    const app = createApp(pool);
+    const supersede = await request(app).post('/api/v0/supersede')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ supersededId: decisionId, title: 'Denied', body: 'Must stay private' });
+    const history = await request(app).get(`/api/v0/decisions/${decisionId}/history`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(supersede.status).toBe(404);
+    expect(history.status).toBe(404);
+    expect(supersede.body).toMatchObject({ code: 'MEMORY_NOT_FOUND', error: 'Memory not found' });
+    expect(history.body).toMatchObject({ code: 'MEMORY_NOT_FOUND', error: 'Memory not found' });
+  });
+
+  it('enforces a source-bound API key on supersession', async () => {
+    const authenticated = await getPrincipal(pool, principalId);
+    const app = createApp(pool, { authenticator: {
+      mode: 'entra',
+      async authenticate() {
+        return authenticated ? {
+          principal: authenticated, credential: 'api-key' as const, allowedSource: 'github-pr',
+        } : null;
+      },
+    } });
+
+    const denied = await request(app).post('/api/v0/supersede')
+      .set('Authorization', 'ApiKey ctm_placeholder')
+      .send({ supersededId: decisionId, title: 'Denied', body: 'Denied body', source: 'manual' });
+    expect(denied.status).toBe(403);
+    expect(denied.body).toMatchObject({
+      code: 'FORBIDDEN', error: 'credential is not allowed for this source',
+    });
+    expect((await pool.query('SELECT count(*)::int AS count FROM memories')).rows[0].count).toBe(1);
   });
 
   it('masks unreadable predecessors like missing while preserving forbidden for readers', async () => {

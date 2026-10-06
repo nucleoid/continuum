@@ -1,0 +1,180 @@
+import { describe, expect, it, vi } from 'vitest';
+import { fetchMembershipSnapshot, GraphSnapshotUnavailableError } from './graph-membership.js';
+
+describe('Microsoft Graph membership snapshot', () => {
+  const groupId = '22222222-2222-4222-8222-222222222222';
+  const userId = '11111111-1111-4111-8111-111111111111';
+
+  it('fetches every approved group by immutable ID and accepts arbitrary renames', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: groupId, displayName: 'renamed-outside-continuum' }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ value: [{ id: userId }] }), { status: 200 }));
+    expect(await fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher)).toEqual([{
+      id: groupId, status: 'present', displayName: 'renamed-outside-continuum', memberObjectIds: [userId],
+    }]);
+    expect(String(fetcher.mock.calls[0][0])).toContain(`/groups/${groupId}?`);
+    expect(String(fetcher.mock.calls[1][0])).toContain('/members/microsoft.graph.user');
+    expect(fetcher.mock.calls[0][1].headers.authorization).toBe(`Bearer ${'x'.repeat(32)}`);
+    expect(fetcher.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('represents 404 as definitive disappearance but contains malformed group failures', async () => {
+    const other = '33333333-3333-4333-8333-333333333333';
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response('', { status: 404 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'wrong', displayName: 'bad' }), { status: 200 }));
+    expect(await fetchMembershipSnapshot([groupId, other], 'x'.repeat(32), fetcher)).toEqual([
+      { id: groupId, status: 'missing' },
+      { id: other, status: 'invalid', errorCode: 'MALFORMED_GROUP' },
+    ]);
+  });
+
+  it('treats untrusted pagination links as a snapshot outage', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: groupId, displayName: 'renamed' }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        value: [], '@odata.nextLink': 'https://evil.example/steal',
+      }), { status: 200 }));
+    await expect(fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher))
+      .rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE' });
+  });
+
+  it.each([401, 403, 429, 500, 503])(
+    'aborts the whole snapshot on operational Graph status %s',
+    async (status) => {
+      const fetcher = vi.fn().mockResolvedValue(new Response('', { status }));
+      await expect(fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher))
+        .rejects.toBeInstanceOf(GraphSnapshotUnavailableError);
+    },
+  );
+
+  it.each([429, 500, 503])('retries Graph status %s using Retry-After before succeeding', async (status) => {
+    const sleep = vi.fn(async () => undefined);
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response('', { status, headers: { 'Retry-After': '2' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: groupId, displayName: 'group' })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ value: [] })));
+
+    await expect(fetchMembershipSnapshot(
+      [groupId], 'x'.repeat(32), fetcher, 10_000, { sleep },
+    )).resolves.toMatchObject([{ id: groupId, status: 'present' }]);
+    expect(sleep).toHaveBeenCalledOnce();
+    expect(sleep).toHaveBeenCalledWith(2_000);
+  });
+
+  it('bounds 503 retries and preserves the stable dependency code', async () => {
+    const sleep = vi.fn(async () => undefined);
+    const fetcher = vi.fn().mockResolvedValue(
+      new Response('', { status: 503, headers: { 'Retry-After': '1' } }),
+    );
+
+    await expect(fetchMembershipSnapshot(
+      [groupId], 'x'.repeat(32), fetcher, 10_000, { maxRetries: 2, sleep },
+    )).rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE' });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledTimes(2);
+  });
+
+  it('aborts the whole snapshot on a transport failure', async () => {
+    const fetcher = vi.fn().mockRejectedValue(new Error('socket reset'));
+    await expect(fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher))
+      .rejects.toBeInstanceOf(GraphSnapshotUnavailableError);
+  });
+
+  it.each([
+    ['body timeout', new DOMException('timed out', 'TimeoutError')],
+    ['connection drop', new TypeError('terminated')],
+    ['truncated or non-JSON body', new SyntaxError('Unexpected end of JSON input')],
+  ])('aborts the whole snapshot on %s while reading a successful response', async (_name, failure) => {
+    const response = {
+      ok: true, status: 200, json: vi.fn().mockRejectedValue(failure),
+    } as unknown as Response;
+    const fetcher = vi.fn().mockResolvedValue(response);
+    await expect(fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher))
+      .rejects.toBeInstanceOf(GraphSnapshotUnavailableError);
+  });
+
+  it('aborts when a member-page body is truncated instead of quarantining the group', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: groupId, displayName: 'group' })))
+      .mockResolvedValueOnce({
+        ok: true, status: 200,
+        json: vi.fn().mockRejectedValue(new SyntaxError('Unexpected end of JSON input')),
+      } as unknown as Response);
+    await expect(fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher))
+      .rejects.toBeInstanceOf(GraphSnapshotUnavailableError);
+  });
+
+  it('accepts short Graph pages beyond the requested-page estimate', async () => {
+    const fetcher = vi.fn(async (url: URL) => {
+      if (!String(url).includes('/members/')) {
+        return new Response(JSON.stringify({ id: groupId, displayName: 'group' }));
+      }
+      const pageNumber = fetcher.mock.calls.length - 1;
+      return new Response(JSON.stringify({
+        value: [{ id: `${String(pageNumber).padStart(8, '0')}-0000-4000-8000-000000000000` }],
+        ...(pageNumber < 12 ? {
+          '@odata.nextLink': `https://graph.microsoft.com/v1.0/groups/${groupId}/members/microsoft.graph.user?$skiptoken=${pageNumber + 1}`,
+        } : {}),
+      }));
+    });
+
+    const snapshot = await fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher);
+
+    expect(snapshot[0]).toMatchObject({ status: 'present' });
+    expect(snapshot[0]?.memberObjectIds).toHaveLength(12);
+    expect(fetcher).toHaveBeenCalledTimes(13);
+  });
+
+  it('treats repeating next links as a snapshot outage', async () => {
+    const next = `https://graph.microsoft.com/v1.0/groups/${groupId}/members/microsoft.graph.user?$skiptoken=repeat`;
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: groupId, displayName: 'group' })))
+      .mockImplementation(async () => new Response(JSON.stringify({ value: [], '@odata.nextLink': next })));
+
+    await expect(fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher))
+      .rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE' });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it('treats malformed next-link metadata as a snapshot outage', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: groupId, displayName: 'group' })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ value: [], '@odata.nextLink': 42 })));
+
+    await expect(fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher))
+      .rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE' });
+  });
+
+  it('treats malformed member-page values as a snapshot outage', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: groupId, displayName: 'group' })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ value: null })));
+
+    await expect(fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher))
+      .rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE' });
+  });
+
+  it('treats short-page safety-cap exhaustion as a snapshot outage', async () => {
+    let memberPage = 0;
+    const fetcher = vi.fn(async () => {
+      if (memberPage === 0) {
+        memberPage += 1;
+        return new Response(JSON.stringify({ id: groupId, displayName: 'group' }));
+      }
+      const next = memberPage++;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          value: [],
+          '@odata.nextLink': `https://graph.microsoft.com/v1.0/groups/${groupId}/members/microsoft.graph.user?$skiptoken=${next}`,
+        }),
+      } as unknown as Response;
+    });
+
+    await expect(fetchMembershipSnapshot([groupId], 'x'.repeat(32), fetcher))
+      .rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE' });
+    expect(fetcher).toHaveBeenCalledTimes(10_002);
+  }, 10_000);
+});

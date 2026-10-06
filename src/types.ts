@@ -25,6 +25,13 @@ export interface Principal {
   createdAt: Date;
 }
 
+export interface AuthenticatedPrincipal {
+  principal: Principal;
+  allowedSource?: string;
+  credential: 'dev' | 'entra' | 'api-key';
+  expiresAt?: Date;
+}
+
 export interface Memory {
   id: string;
   scopeId: string;

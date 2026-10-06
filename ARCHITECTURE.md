@@ -366,9 +366,30 @@ Five interfaces. Engram and any future system integrate through these. Continuum
 
 ## Authentication
 
-- End-user auth: Entra ID SSO (OIDC). Token cached server-side, refreshed on demand.
-- Service accounts: long-lived API keys, rotated quarterly, scoped to specific capture plugins.
+- End-user auth: Entra ID SSO (OIDC). Discovery and JWKS validation enforce
+  signature, tenant issuer, audience, and expiry. The immutable `oid` claim is
+  principal identity; `name` is mutable display metadata.
+- Service accounts: high-entropy API keys are stored only as SHA-256 hashes,
+  expire after the quarterly rotation window, and can be restricted to one
+  capture source. Entra service tokens require a pre-provisioned service
+  principal and never create or reactivate one during authentication.
 - All tokens map to a `principal` row. Audit log references principals, never raw tokens.
+
+Principal disablement deactivates all memberships and permanently revokes all
+current service keys at the database boundary. Explicit audited reactivation
+does not restore either. Database triggers also prevent deletion, demotion, or
+disablement of the final effective manually managed org administrator.
+
+Entra groups are explicitly approved by immutable object ID and bound to one
+exact scope and role before sync. Renames only update group display metadata.
+Missing groups and missing
+members soft-deactivate only their Entra-sourced membership rows, retaining
+history and preserving manual or differently sourced grants. A durable
+last-success deadline denies stale Entra-sourced rows after 48 hours by default,
+allowing a delayed nightly run and token refresh/recovery;
+failed attempts after the deadline soft-deactivate those rows and audit the
+count. Sync is bounded, org-admin controlled, serialized, and atomically audited. See
+`docs/authentication.md` for the operational contract.
 
 ## What is explicitly out of scope for v0
 

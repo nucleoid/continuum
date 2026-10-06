@@ -81,6 +81,7 @@ export async function sweepLifecycleBatch(
         WHERE p.id = $1
           AND p.external_id IS NULL
           AND p.kind = 'service'
+          AND p.disabled_at IS NULL
           AND NOT EXISTS (
             SELECT 1 FROM scope_memberships sm WHERE sm.principal_id = p.id
           )`,

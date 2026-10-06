@@ -15,6 +15,10 @@ export async function canReadScope(
   principalId: string,
   scope: AccessScope,
 ): Promise<boolean> {
+  const active = await queryable.query(
+    'SELECT 1 FROM principals WHERE id = $1 AND disabled_at IS NULL', [principalId],
+  );
+  if (!active.rowCount) return false;
   return scope.kind === 'org'
     || hasRole(queryable, principalId, scope.id, 'reader');
 }
@@ -61,9 +65,12 @@ export async function hasExplicitRoleForMutation(
   required: MembershipRole,
 ): Promise<boolean> {
   const { rows } = await queryable.query(
-    `SELECT role
-       FROM scope_memberships
-      WHERE principal_id = $1 AND scope_id = $2
+    `SELECT m.role
+       FROM scope_memberships m JOIN principals p ON p.id = m.principal_id
+      WHERE m.principal_id = $1 AND m.scope_id = $2 AND m.active
+        AND p.disabled_at IS NULL
+        AND continuum_membership_is_effective(m.active, m.source_kind)
+      ORDER BY CASE m.role WHEN 'admin' THEN 3 WHEN 'writer' THEN 2 ELSE 1 END DESC
       FOR UPDATE`,
     [principalId, scopeId],
   );

@@ -31,4 +31,12 @@ describe('ingest configuration', () => {
       auth: { kind: 'ado-basic', username: 'hook-user', password: 'hook-password' },
     } } });
   });
+
+  it('canonicalizes UUID-shaped configured principals', () => {
+    expect(ingestConfigFromEnv({
+      CONTINUUM_INGEST_DEPLOY_EVENT_ENABLED: 'true',
+      CONTINUUM_INGEST_DEPLOY_EVENT_PRINCIPAL: 'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA',
+    }).plugins['deploy-event']?.principalExternalId)
+      .toBe('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+  });
 });

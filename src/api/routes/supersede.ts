@@ -25,6 +25,7 @@ export function supersedeRouter(pool: pg.Pool, embeddingRouting: EmbeddingRoutin
     }
     const result = await supersedeForPrincipal(
       pool, embeddingRouting, req.principal!, parsed.data, { transport: 'rest' },
+      req.authContext?.allowedSource,
     );
     res.status(201).json({
       supersededId: result.predecessor.id,
