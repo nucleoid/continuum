@@ -53,6 +53,8 @@ describe('runMigrations', () => {
     expect(migrations).toContain('0011_standup_trust_hardening.sql');
     expect(migrations).toContain('0012_actor_mapping_lifecycle.sql');
     expect(migrations).toContain('0013_standup_indexes.sql');
+    expect(migrations).toContain('0016_retire_standup_metadata_indexes.sql');
+    expect(migrations).toContain('0017_standup_trust_invariants.sql');
     expect(migrations.some((file) => file.includes('mapping_enforcement'))).toBe(false);
 
     const constraints = await readFile(

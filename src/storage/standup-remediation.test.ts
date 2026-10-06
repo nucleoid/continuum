@@ -64,6 +64,24 @@ describe('standup remediation database boundary', () => {
     expect(sql).toMatch(/indisvalid/);
   });
 
+  it('keeps the published 0013 migration immutable and retires its indexes later', async () => {
+    const published = await readFile(
+      new URL('../../migrations/0013_standup_indexes.sql', import.meta.url),
+      'utf8',
+    );
+    const retirement = await readFile(
+      new URL('../../migrations/0016_retire_standup_metadata_indexes.sql', import.meta.url),
+      'utf8',
+    );
+    expect(published).toMatch(
+      /CREATE INDEX CONCURRENTLY IF NOT EXISTS memories_standup_actor_created_idx/,
+    );
+    expect(published).not.toMatch(/DROP INDEX CONCURRENTLY/);
+    expect(retirement).toMatch(
+      /DROP INDEX CONCURRENTLY IF EXISTS memories_standup_actor_created_idx/,
+    );
+  });
+
   it('backs up and loops cleanup without deleting truthful labels or history', async () => {
     const cleanup = await readFile(
       new URL('../../scripts/run-standup-mapping-enforcement.sql', import.meta.url),
@@ -77,6 +95,24 @@ describe('standup remediation database boundary', () => {
     expect(cleanup).toMatch(/LOOP[\s\S]+EXIT WHEN changed = 0/);
     expect(cleanup).not.toMatch(/- 'actor'\s/);
     expect(cleanup).not.toMatch(/- 'thread_key'\s/);
-    expect(restore).toContain('backup.metadata');
+    expect(restore).toContain('jsonb_strip_nulls(jsonb_build_object(');
+    expect(restore).toContain("memory.metadata - '_continuum_activity_provenance'");
+    expect(restore).not.toMatch(/SET metadata = backup\.metadata[,\s]/);
+  });
+
+  it('ships audited alias provisioning and inventories conversion candidates', async () => {
+    const preflight = await readFile(
+      new URL('../../scripts/preflight-standup-rollout.sql', import.meta.url),
+      'utf8',
+    );
+    const provision = await readFile(
+      new URL('../../scripts/provision-standup-actor.sql', import.meta.url),
+      'utf8',
+    );
+    expect(preflight).toContain('github_numeric_aliases_needing_conversion');
+    expect(preflight).toContain('terminal_subject_aliases_needing_conversion');
+    expect(provision).toContain('provision_standup_principal_alias');
+    expect(provision).toContain('actor_principal_mappings');
+    expect(provision).toContain('alias_kind');
   });
 });
