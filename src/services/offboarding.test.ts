@@ -10,7 +10,8 @@ import { createPrincipal, upsertPrincipalByExternalId } from '../storage/princip
 import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import {
-  listIncompleteOffboardingRuns, mapOwnedUserScope, MAX_OFFBOARD_AFFECTED_ROWS, MAX_OFFBOARD_MEMORIES,
+  DEFAULT_OFFBOARD_BATCH_SIZE, listIncompleteOffboardingRuns, mapOwnedUserScope,
+  MAX_OFFBOARD_AFFECTED_ROWS, MAX_OFFBOARD_MEMORIES,
   offboardPrincipal as serviceOffboardPrincipal, type OffboardingOptions,
 } from './offboarding.js';
 import { provisionEntraGroupBinding } from './membership-sync.js';
@@ -252,9 +253,20 @@ describe('offboarding and erasure', () => {
         (await client.query(`EXPLAIN (FORMAT JSON) ${sql}`, parameters)).rows[0],
       );
       expect(await explain(
-        `SELECT id FROM audit_log WHERE scope_id = $1 AND scope_id IS NOT NULL`,
-        [value.personal.id],
-      )).toContain('audit_log_scope_idx');
+        `SELECT id FROM audit_log
+          WHERE principal_id = $1 AND id > $2 ORDER BY id LIMIT $3`,
+        [value.admin.id, 0, 100],
+      )).toContain('audit_log_principal_cursor_idx');
+      expect(await explain(
+        `SELECT id FROM audit_log
+          WHERE scope_id = $1 AND id > $2 ORDER BY id LIMIT $3`,
+        [value.personal.id, 0, 100],
+      )).toContain('audit_log_scope_cursor_idx');
+      expect(await explain(
+        `SELECT id FROM audit_log
+          WHERE memory_id = $1 AND id > $2 ORDER BY id LIMIT $3`,
+        [value.personalMemory.id, 0, 100],
+      )).toContain('audit_log_memory_cursor_idx');
       expect(await explain(
         `SELECT id FROM audit_log WHERE metadata ? 'scope_ids'
           AND metadata->'scope_ids' @> jsonb_build_array($1::text)`,
@@ -262,9 +274,13 @@ describe('offboarding and erasure', () => {
       )).toContain('audit_log_scope_ids_gin_idx');
       expect(await explain(
         `SELECT id FROM audit_log WHERE metadata ? 'request_id'
-          AND metadata->>'request_id' = $1`,
-        [requestId],
-      )).toContain('audit_log_request_id_idx');
+          AND metadata->>'request_id' = $1 AND id > $2 ORDER BY id LIMIT $3`,
+        [requestId, 0, 100],
+      )).toContain('audit_log_request_cursor_idx');
+      expect(await explain(
+        `SELECT id FROM audit_log WHERE id > $1 ORDER BY id LIMIT $2`,
+        [0, 100],
+      )).toContain('audit_log_pkey');
       expect(await explain(
         `SELECT pus.principal_id
            FROM jsonb_array_elements_text($1::jsonb) carried(value)
@@ -732,8 +748,8 @@ describe('offboarding and erasure', () => {
       [value.admin.id, value.personal.id, MAX_OFFBOARD_AFFECTED_ROWS + 1],
     );
     const preview = await offboardPrincipal(pool, value.admin, value.target.id, true);
-    expect(preview.memories).toBe(MAX_OFFBOARD_MEMORIES + 1);
-    expect(preview.auditRows).toBe(MAX_OFFBOARD_AFFECTED_ROWS + 1);
+    expect(preview.memories).toBe(DEFAULT_OFFBOARD_BATCH_SIZE + 1);
+    expect(preview.auditRows).toBe(DEFAULT_OFFBOARD_BATCH_SIZE);
     const first = await offboardPrincipal(pool, value.admin, value.target.id, { batchSize: 10 });
     expect(first).toMatchObject({ complete: false, progress: { memoriesProcessed: 10 } });
     expect(first.progress.auditRowsProcessed).toBeGreaterThan(0);
