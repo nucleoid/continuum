@@ -256,6 +256,9 @@ export class PromotionEventWorker implements RuntimeWorker {
     const eligible = webhookIds
       .map((webhookId) => ({
         webhookId,
+        occupied:
+          (inFlightByWebhook.get(webhookId) ?? 0)
+          + (callbackReservations.get(webhookId) ?? 0),
         available: Math.max(
           0,
           this.options.claimBatch
@@ -266,9 +269,27 @@ export class PromotionEventWorker implements RuntimeWorker {
       .filter(({ available }) => available > 0);
     if (eligible.length === 0) return 0;
     let remainingGlobal = globalAvailable;
-    const admissions = eligible.flatMap(({ webhookId, available }) => {
-      const limit = Math.min(available, remainingGlobal);
-      remainingGlobal -= limit;
+    const allocations = new Map<string, number>();
+    while (remainingGlobal > 0) {
+      let leastOccupied = Number.POSITIVE_INFINITY;
+      for (const { webhookId, occupied, available } of eligible) {
+        const allocated = allocations.get(webhookId) ?? 0;
+        if (allocated < available) {
+          leastOccupied = Math.min(leastOccupied, occupied + allocated);
+        }
+      }
+      if (!Number.isFinite(leastOccupied)) break;
+      for (const { webhookId, occupied, available } of eligible) {
+        if (remainingGlobal === 0) break;
+        const allocated = allocations.get(webhookId) ?? 0;
+        if (allocated < available && occupied + allocated === leastOccupied) {
+          allocations.set(webhookId, allocated + 1);
+          remainingGlobal -= 1;
+        }
+      }
+    }
+    const admissions = eligible.flatMap(({ webhookId }) => {
+      const limit = allocations.get(webhookId) ?? 0;
       return limit > 0 ? [{ webhookId, limit }] : [];
     });
     for (const { webhookId, limit } of admissions) {

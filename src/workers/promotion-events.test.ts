@@ -845,10 +845,8 @@ describe('PromotionEventWorker', () => {
       const inputs = (store.claim as ReturnType<typeof vi.fn>).mock.calls
         .map((call) => call[1]);
       expect(inputs.reduce((sum, input) => sum + input.limit, 0)).toBe(99);
-      expect(inputs.map((input) => [input.webhookIds, input.limit])).toEqual([
-        [['slow'], 49],
-        [['healthy'], 50],
-      ]);
+      expect(Object.fromEntries(inputs.map((input) => [input.webhookIds[0], input.limit])))
+        .toEqual({ slow: 49, healthy: 50 });
     } finally {
       releaseSlow.resolve();
       await vi.runAllTimersAsync();
