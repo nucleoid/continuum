@@ -85,9 +85,10 @@ describe('runMigrations', () => {
     const pool = schemaPool(schema);
     try {
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-2).map((migration) => migration.name)).toEqual([
+      expect(applied.slice(-3).map((migration) => migration.name)).toEqual([
         '0030_offboarding_round7_integrity.sql',
         '0031_offboarding_round7_indexes.sql',
+        '0032_offboarding_round7_compatibility.sql',
       ]);
       expect((await pool.query(
         `SELECT indisvalid AS valid FROM pg_index

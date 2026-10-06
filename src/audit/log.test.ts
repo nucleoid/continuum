@@ -133,4 +133,25 @@ describe('recordRead', () => {
       request_id: expect.any(String),
     });
   });
+
+  it('preserves only a producer-owned read operation outside caller metadata', async () => {
+    await recordRead(pool, {
+      principalId,
+      operation: 'get_memory',
+      metadata: {
+        operation: 'principal_offboarded',
+        source: 'audit-retention',
+        transport: 'rest',
+      },
+      memories: [],
+    });
+
+    const { rows } = await pool.query('SELECT metadata FROM audit_log');
+    expect(rows[0].metadata).toEqual({
+      operation: 'get_memory',
+      transport: 'rest',
+      record_kind: 'summary',
+      request_id: expect.any(String),
+    });
+  });
 });
