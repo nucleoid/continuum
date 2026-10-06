@@ -242,6 +242,10 @@ owning application schema, and finally `pg_temp` for every Continuum
 security-definer and trigger function. This prevents an application session
 from substituting temporary relations during completion, reactivation,
 offboarded-audit, embedding, membership, or other database guard checks.
+Migration `0039_offboarding_completion_state.sql` is the upgrade-safe boundary
+for the least-privilege run capabilities and completion-state validation. It is
+separate because deployed databases may already have recorded `0038`; changing
+that file would not replay it.
 
 Linked-request erasure selects a bounded ordered request-ID window from
 `principal_offboarding_audit_requests`, then performs one indexed
@@ -291,10 +295,10 @@ requires the exact index to exist and be valid before the migration ledger can
 record success. A timeout or failed build leaves the file unapplied and safely
 retryable.
 
-Apply all seventeen offboarding migrations before starting the new application version. Old
+Apply all eighteen offboarding migrations before starting the new application version. Old
 instances can continue ordinary traffic after `0023`, but they do not know the
 offboarding workflow and an old authenticated request may already be in flight.
-Do not invoke offboarding until all sixteen migrations are recorded on every shared
+Do not invoke offboarding until all eighteen migrations are recorded on every shared
 database and all old application instances have drained. Rollback is
 application-first: stop invoking offboarding, drain the new instances, and
 deploy the old application only after `list-incomplete-offboarding` reports

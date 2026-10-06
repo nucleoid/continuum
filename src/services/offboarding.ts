@@ -331,8 +331,12 @@ const AUDIT_OPERATION_POLICIES = [
   { operation: 'list_memories', safeFields: ['request_id', 'record_kind', 'state', 'scope_filtered', 'type_filter', 'limit', 'offset', 'count'] },
   { operation: 'principal_disabled', safeFields: ['principal_id'] },
   { operation: 'principal_memory_erased', safeFields: ['principal_id'] },
+  { operation: 'principal_offboarded', safeFields: ['principal_id', 'approval_id', 'acknowledged_evidence_hash', 'memories', 'audit_rows', 'batches'] },
+  { operation: 'principal_offboarding_repaired', safeFields: ['principal_id', 'approval_id', 'acknowledged_evidence_hash', 'memories', 'audit_rows', 'batches'] },
   { operation: 'principal_reactivation_guarded', safeFields: ['principal_id', 'authorization_principal_id', 'previously_offboarded'] },
   { operation: 'principal_reactivated', safeFields: ['principal_id', 'previously_offboarded'] },
+  { operation: 'principal_user_scope_mapped', safeFields: ['principal_id', 'shared_scope_acknowledged', 'acknowledged_principal_ids', 'acknowledged_evidence_hash', 'approval_id', 'other_member_principal_ids', 'other_author_principal_ids', 'other_member_principal_ids_truncated', 'other_author_principal_ids_truncated'] },
+  { operation: 'principal_user_scope_acknowledgement_replaced', safeFields: ['principal_id', 'shared_scope_acknowledged', 'acknowledged_principal_ids', 'acknowledged_evidence_hash', 'approval_id', 'other_member_principal_ids', 'other_author_principal_ids', 'other_member_principal_ids_truncated', 'other_author_principal_ids_truncated'] },
   { operation: 'service_principal_provisioned', safeFields: ['service_principal_id', 'external_id'] },
 ] as const;
 
@@ -347,25 +351,8 @@ const AUDIT_SOURCE_POLICIES = [
   { source: 'terminal-summary', safeFields: [] },
 ] as const;
 
-function policyMetadataSql(discriminator: 'operation' | 'source', value: string,
-  safeFields: readonly string[]): string {
-  const fields = [discriminator, ...safeFields].map((field) => `'${field}'`).join(',');
-  return `(SELECT COALESCE(jsonb_object_agg(entry.key, entry.value), '{}'::jsonb)
-    FROM jsonb_each(a.metadata) entry WHERE entry.key = ANY(ARRAY[${fields}]::text[]))`;
-}
-
-const AUDIT_CLASSIFIED_METADATA = `(CASE
-${AUDIT_OPERATION_POLICIES.map((policy) =>
-    `WHEN a.metadata->>'operation' = '${policy.operation}' THEN ${policyMetadataSql('operation', policy.operation, policy.safeFields)}`)
-    .join('\n')}
-${AUDIT_SOURCE_POLICIES.map((policy) =>
-    `WHEN a.metadata->>'source' = '${policy.source}' THEN ${policyMetadataSql('source', policy.source, policy.safeFields)}`)
-    .join('\n')}
-ELSE NULL END)`;
-const AUDIT_REDACTED_METADATA = `'${JSON.stringify({ redacted: 'principal_offboarding' })}'::jsonb`;
-const AUDIT_EXPECTED_METADATA = `(CASE
-  WHEN ${AUDIT_CLASSIFIED_METADATA} IS NOT NULL THEN ${AUDIT_CLASSIFIED_METADATA}
-  ELSE ${AUDIT_REDACTED_METADATA} END)`;
+const AUDIT_EXPECTED_METADATA =
+  'continuum_offboarding_expected_audit_metadata(a.metadata)';
 
 const AUDIT_DIRTY = `(a.query IS NOT NULL
   OR a.metadata IS DISTINCT FROM ${AUDIT_EXPECTED_METADATA})`;
@@ -391,6 +378,19 @@ interface RunAuditState extends Record<string, unknown> {
   audit_linked_complete: boolean;
   memory_complete: boolean;
   scope_cleanup_complete: boolean;
+}
+
+async function writeOffboardingRun(
+  client: pg.PoolClient,
+  principalId: string,
+  actorId: string,
+  command: string,
+  details: Record<string, unknown> = {},
+): Promise<pg.QueryResult> {
+  return client.query(
+    `SELECT * FROM continuum_write_offboarding_run($1, $2, $3, $4::jsonb)`,
+    [principalId, actorId, command, JSON.stringify(details)],
+  );
 }
 
 export function offboardingAuditBranchSql(
@@ -432,7 +432,7 @@ export function offboardingAuditBranchSql(
 async function selectAuditBranch(
   client: pg.PoolClient,
   args: {
-    principalId: string; scopeId: string; cursor: string; fence: string;
+    principalId: string; actorId: string; scopeId: string; cursor: string; fence: string;
     cursorColumn: AuditCursorColumn;
     reason: AuditSelectionReason;
     from: string; where: string; remaining: number;
@@ -446,10 +446,9 @@ async function selectAuditBranch(
   );
   const cursor = selected.rows[0].cursor as string;
   if (BigInt(cursor) > BigInt(args.cursor)) {
-    await client.query(
-      `UPDATE principal_offboarding_runs SET ${args.cursorColumn} = $2 WHERE principal_id = $1`,
-      [args.principalId, cursor],
-    );
+    await writeOffboardingRun(client, args.principalId, args.actorId, 'audit_cursor', {
+      column: args.cursorColumn, cursor,
+    });
   }
   return Number(selected.rows[0].inserted);
 }
@@ -521,7 +520,7 @@ export function offboardingLinkedAuditSql(): string {
 
 async function selectMemoryAuditBranch(
   client: pg.PoolClient, run: RunAuditState,
-  args: { principalId: string; scopeId: string; remaining: number },
+  args: { principalId: string; actorId: string; scopeId: string; remaining: number },
 ): Promise<number> {
   if (args.remaining <= 0 || run.audit_memory_complete) return 0;
   const selected = await client.query(offboardingMemoryAuditSql(), [
@@ -530,19 +529,14 @@ async function selectMemoryAuditBranch(
   ]);
   const row = selected.rows[0];
   if (Number(row.examined) < args.remaining) {
-    await client.query(
-      `UPDATE principal_offboarding_runs
-          SET audit_memory_complete = TRUE, audit_memory_cursor = audit_fence_id
-        WHERE principal_id = $1`, [args.principalId],
+    await writeOffboardingRun(
+      client, args.principalId, args.actorId, 'audit_memory_complete',
     );
     run.audit_memory_complete = true;
   } else {
-    await client.query(
-      `UPDATE principal_offboarding_runs
-          SET audit_memory_item_cursor = $2
-        WHERE principal_id = $1`,
-      [args.principalId, row.item_cursor],
-    );
+    await writeOffboardingRun(client, args.principalId, args.actorId, 'audit_memory_cursor', {
+      cursor: row.item_cursor,
+    });
     run.audit_memory_item_cursor = row.item_cursor as string;
   }
   return Number(row.inserted);
@@ -550,7 +544,7 @@ async function selectMemoryAuditBranch(
 
 async function selectLinkedAuditBranch(
   client: pg.PoolClient, run: RunAuditState,
-  args: { principalId: string; remaining: number },
+  args: { principalId: string; actorId: string; remaining: number },
 ): Promise<number> {
   if (args.remaining <= 0 || run.audit_linked_complete) return 0;
   const selected = await client.query(
@@ -562,16 +556,9 @@ async function selectLinkedAuditBranch(
   const row = selected.rows[0];
   const examined = Number(row.examined);
   if (examined < args.remaining && row.request_window_full !== true) {
-    await client.query(
-      `UPDATE principal_offboarding_runs
-          SET audit_linked_request_cursor = COALESCE($2, audit_linked_request_cursor),
-              audit_linked_request_item_cursor = COALESCE($3, audit_linked_request_item_cursor),
-              audit_linked_request_exhausted = TRUE,
-              audit_linked_complete = TRUE,
-              audit_linked_cursor = audit_fence_id
-        WHERE principal_id = $1`,
-      [args.principalId, row.request_cursor, row.item_cursor],
-    );
+    await writeOffboardingRun(client, args.principalId, args.actorId, 'linked_complete', {
+      request_cursor: row.request_cursor, item_cursor: row.item_cursor,
+    });
     run.audit_linked_request_cursor = (row.request_cursor
       ?? run.audit_linked_request_cursor) as string | null;
     run.audit_linked_request_item_cursor = (row.item_cursor
@@ -582,13 +569,9 @@ async function selectLinkedAuditBranch(
     const requestCursor = examined < args.remaining
       ? row.request_window_cursor : row.request_cursor;
     const itemCursor = examined < args.remaining ? '0' : row.item_cursor;
-    await client.query(
-      `UPDATE principal_offboarding_runs
-          SET audit_linked_request_cursor = $2,
-              audit_linked_request_item_cursor = $3,
-              audit_linked_request_exhausted = FALSE
-        WHERE principal_id = $1`, [args.principalId, requestCursor, itemCursor],
-    );
+    await writeOffboardingRun(client, args.principalId, args.actorId, 'linked_cursor', {
+      request_cursor: requestCursor, item_cursor: itemCursor,
+    });
     run.audit_linked_request_cursor = requestCursor as string;
     run.audit_linked_request_item_cursor = itemCursor as string;
     run.audit_linked_request_exhausted = false;
@@ -700,13 +683,8 @@ async function startOffboardingRunEvent(
 ): Promise<void> {
   // phase started: immutable authorization exists before the first fence/write.
   await client.query(
-    `INSERT INTO principal_offboarding_run_events
-       (run_id, principal_id, scope_id, phase, initiated_by, finalized_by,
-        approval_id, approval_evidence_hash, evidence)
-     VALUES ($1, $2, $3, 'started', $4, NULL, $5, $6, $7::jsonb)
-     ON CONFLICT (run_id, phase) DO NOTHING`,
-    [run.run_id, run.principal_id, run.scope_id, initiatedBy, run.approval_id,
-      run.approval_evidence_hash, JSON.stringify(evidence)],
+    `SELECT continuum_start_offboarding_run($1, $2, $3::jsonb)`,
+    [run.run_id, initiatedBy, JSON.stringify(evidence)],
   );
 }
 
@@ -811,10 +789,13 @@ async function offboardPrincipalCore(
         'CONFLICT', 'principal has no writer or admin membership history on the owned user scope',
       );
     }
-    let run = await client.query(
-      `SELECT * FROM principal_offboarding_runs WHERE principal_id = $1${dryRun ? '' : ' FOR UPDATE'}`,
-      [principalId],
-    );
+    let run = dryRun
+      ? await client.query(
+        'SELECT * FROM principal_offboarding_runs WHERE principal_id = $1', [principalId],
+      )
+      : await client.query(
+        'SELECT * FROM continuum_get_offboarding_run($1, $2)', [principalId, actor.id],
+      );
     const completedEvidence = run.rowCount ? await client.query(
       `SELECT 1 FROM principal_offboarding_run_events
         WHERE run_id = $1 AND phase = 'completed' LIMIT 1`, [run.rows[0].run_id],
@@ -985,49 +966,23 @@ async function offboardPrincipalCore(
     if (alreadyOffboarded) { await client.query('COMMIT'); return baseResult; }
 
     if (runCompleted) {
-      await client.query(
-        `UPDATE principal_offboarding_runs
-            SET run_id = gen_random_uuid(), initiated_by = $2::uuid, approval_id = $3,
-                approval_evidence_hash = $12, started_at = now(),
-                initial_memories = $4, initial_embeddings = $5, initial_memberships = $6,
-                initial_aliases = $7, initial_entra_bindings = $8,
-                initial_audit_rows = $9, initial_audit_queries = $10,
-                initial_audit_selection = $11::jsonb,
-                initial_count_truncated = $13::text[],
-                memories_processed = 0, embeddings_processed = 0,
-                memberships_processed = 0, aliases_processed = 0,
-                entra_bindings_processed = 0, audit_rows_processed = 0,
-                audit_queries_processed = 0, batches = 0,
-                memory_cursor = NULL, audit_principal_cursor = 0, audit_scope_cursor = 0,
-                audit_memory_cursor = 0, audit_scope_ids_cursor = 0, audit_linked_cursor = 0,
-                audit_memory_key_cursor = NULL, audit_memory_item_cursor = 0,
-                audit_memory_complete = FALSE, audit_linked_request_cursor = NULL,
-                audit_linked_request_item_cursor = 0,
-                audit_linked_request_exhausted = FALSE, audit_linked_complete = FALSE,
-                memory_complete = FALSE, scope_cleanup_complete = FALSE,
-                audit_fence_id = NULL, completed_at = NULL
-          WHERE principal_id = $1`,
-        [principalId, actor.id, approvalId, memories, embeddings, memberships, aliases,
-          entraBindings, auditRows, auditQueries, JSON.stringify(audit.selection),
-          acknowledgedEvidenceHash, truncated],
-      );
-      run = await client.query(
-        'SELECT * FROM principal_offboarding_runs WHERE principal_id = $1 FOR UPDATE', [principalId],
-      );
+      run = await writeOffboardingRun(client, principalId, actor.id, 'restart', {
+        approval_id: approvalId, approval_evidence_hash: acknowledgedEvidenceHash,
+        initial_memories: memories, initial_embeddings: embeddings,
+        initial_memberships: memberships, initial_aliases: aliases,
+        initial_entra_bindings: entraBindings, initial_audit_rows: auditRows,
+        initial_audit_queries: auditQueries, initial_audit_selection: audit.selection,
+        initial_count_truncated: truncated,
+      });
     } else if (!run.rowCount) {
-      run = await client.query(
-        `INSERT INTO principal_offboarding_runs
-           (principal_id, scope_id, initiated_by, approval_id, initial_memories,
-            initial_embeddings, initial_memberships, initial_aliases,
-            initial_entra_bindings, initial_audit_rows, initial_audit_queries,
-            initial_audit_selection, approval_evidence_hash, initial_count_truncated)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13,
-                 $14::text[])
-         RETURNING *`,
-        [principalId, scopeId, actor.id, approvalId, memories, embeddings, memberships,
-          aliases, entraBindings, auditRows, auditQueries, JSON.stringify(audit.selection),
-          acknowledgedEvidenceHash, truncated],
-      );
+      run = await writeOffboardingRun(client, principalId, actor.id, 'create', {
+        scope_id: scopeId, approval_id: approvalId,
+        approval_evidence_hash: acknowledgedEvidenceHash, initial_memories: memories,
+        initial_embeddings: embeddings, initial_memberships: memberships,
+        initial_aliases: aliases, initial_entra_bindings: entraBindings,
+        initial_audit_rows: auditRows, initial_audit_queries: auditQueries,
+        initial_audit_selection: audit.selection, initial_count_truncated: truncated,
+      });
     }
 
     await startOffboardingRunEvent(
@@ -1062,10 +1017,7 @@ async function offboardPrincipalCore(
       membershipCount = membershipUpdate.rowCount ?? 0;
       entraCount = entraUpdate.rowCount ?? 0;
       aliasCount = aliasDelete.rowCount ?? 0;
-      await client.query(
-        `UPDATE principal_offboarding_runs SET scope_cleanup_complete = TRUE
-          WHERE principal_id = $1`, [principalId],
-      );
+      await writeOffboardingRun(client, principalId, actor.id, 'scope_complete');
     }
     await client.query(
       `UPDATE principals SET display_name = $2, disabled_at = COALESCE(disabled_at, now()),
@@ -1073,13 +1025,7 @@ async function offboardPrincipalCore(
         WHERE id = $1`, [principalId, pseudonym],
     );
     if (run.rows[0].audit_fence_id === null) {
-      run = await client.query(
-        `UPDATE principal_offboarding_runs
-            SET audit_fence_id = (SELECT COALESCE(max(id), 0) FROM audit_log)
-          WHERE principal_id = $1 AND audit_fence_id IS NULL
-          RETURNING *`,
-        [principalId],
-      );
+      run = await writeOffboardingRun(client, principalId, actor.id, 'set_fence');
     }
 
     await client.query(
@@ -1093,19 +1039,15 @@ async function offboardPrincipalCore(
       'SELECT count(*)::int AS count FROM offboarding_memory_candidates',
     )).rows[0].count);
     if (memoryCandidates > 0) {
-      await client.query(
-        `UPDATE principal_offboarding_runs
-            SET memory_cursor = (
-              SELECT id FROM offboarding_memory_candidates ORDER BY id DESC LIMIT 1
-            )
-          WHERE principal_id = $1`, [principalId],
+      const memoryCursor = await client.query(
+        'SELECT id FROM offboarding_memory_candidates ORDER BY id DESC LIMIT 1',
       );
+      await writeOffboardingRun(client, principalId, actor.id, 'memory_cursor', {
+        cursor: memoryCursor.rows[0].id,
+      });
     }
     if (memoryCandidates < batchSize) {
-      await client.query(
-        'UPDATE principal_offboarding_runs SET memory_complete = TRUE WHERE principal_id = $1',
-        [principalId],
-      );
+      await writeOffboardingRun(client, principalId, actor.id, 'memory_complete');
     }
     await client.query(
       `CREATE TEMP TABLE offboarding_memory_targets ON COMMIT DROP AS
@@ -1121,8 +1063,8 @@ async function offboardPrincipalCore(
       'SELECT count(*)::int AS count FROM offboarding_memory_targets',
     )).rows[0].count);
     const targetEmbeddingDelete = await client.query(
-      `DELETE FROM memory_embeddings e USING offboarding_memory_targets t
-        WHERE e.memory_id = t.id`,
+      `DELETE FROM memory_embeddings e USING offboarding_memory_candidates candidate
+        WHERE e.memory_id = candidate.id`,
     );
     await client.query(
       `UPDATE memories m SET type = 'context', title = '[erased]', body = '[erased]',
@@ -1151,7 +1093,7 @@ async function offboardPrincipalCore(
       from: string, where: string,
     ) => {
       const inserted = await selectAuditBranch(client, {
-        principalId, scopeId, cursorColumn, reason, from, where,
+        principalId, actorId: actor.id, scopeId, cursorColumn, reason, from, where,
         cursor: String(run.rows[0][cursorColumn]),
         fence: String(run.rows[0].audit_fence_id),
         remaining: batchSize - auditBatch,
@@ -1161,7 +1103,7 @@ async function offboardPrincipalCore(
     await branch('audit_principal_cursor', 'principal', 'FROM audit_log a', 'a.principal_id = $2');
     await branch('audit_scope_cursor', 'scope', 'FROM audit_log a', 'a.scope_id = $1');
     auditBatch += await selectMemoryAuditBranch(client, run.rows[0] as RunAuditState, {
-      principalId, scopeId, remaining: batchSize - auditBatch,
+      principalId, actorId: actor.id, scopeId, remaining: batchSize - auditBatch,
     });
     await branch(
       'audit_scope_ids_cursor', 'scope_ids',
@@ -1189,7 +1131,7 @@ async function offboardPrincipalCore(
     // rescanning an ever-growing clean prefix whenever a new request is found.
     if (directExhausted) {
       auditBatch += await selectLinkedAuditBranch(client, direct as RunAuditState, {
-        principalId, remaining: batchSize - auditBatch,
+        principalId, actorId: actor.id, remaining: batchSize - auditBatch,
       });
     }
     const auditedRows = Number((await client.query(
@@ -1220,20 +1162,13 @@ async function offboardPrincipalCore(
       currentRun.rows[0] as RunAuditState,
     );
     const completionReady = memoryComplete && scopeCleanupComplete && !remainingAudit;
-    const progressUpdate = await client.query(
-      `UPDATE principal_offboarding_runs
-          SET memories_processed = memories_processed + $2,
-              audit_rows_processed = audit_rows_processed + $3,
-              embeddings_processed = embeddings_processed + $4,
-              memberships_processed = memberships_processed + $5,
-              aliases_processed = aliases_processed + $6,
-              entra_bindings_processed = entra_bindings_processed + $7,
-              audit_queries_processed = audit_queries_processed + $8,
-              batches = batches + 1
-        WHERE principal_id = $1 RETURNING *`,
-      [principalId, memoryBatch, auditedRows,
-        targetEmbeddingDelete.rowCount ?? 0,
-        membershipCount, aliasCount, entraCount, auditedQueries],
+    const progressUpdate = await writeOffboardingRun(
+      client, principalId, actor.id, 'add_progress', {
+        memories: memoryBatch, audit_rows: auditedRows,
+        embeddings: targetEmbeddingDelete.rowCount ?? 0,
+        memberships: membershipCount, aliases: aliasCount,
+        entra_bindings: entraCount, audit_queries: auditedQueries,
+      },
     );
     const progressRow = progressUpdate.rows[0];
     if (completionReady) {

@@ -13,10 +13,13 @@ BEGIN
            pg_get_function_identity_arguments(procedure.oid) AS arguments
       FROM pg_proc procedure
      WHERE procedure.pronamespace = current_schema()::regnamespace
-       AND (
-         procedure.prosecdef
-         OR procedure.prorettype = 'pg_catalog.trigger'::pg_catalog.regtype
-         OR procedure.proname LIKE 'continuum\_%' ESCAPE '\'
+       AND procedure.proname LIKE 'continuum\_%' ESCAPE '\'
+       AND procedure.proowner = current_user::regrole
+       AND NOT EXISTS (
+         SELECT 1 FROM pg_depend dependency
+          WHERE dependency.classid = 'pg_proc'::regclass
+            AND dependency.objid = procedure.oid
+            AND dependency.deptype = 'e'
        )
   LOOP
     EXECUTE format(

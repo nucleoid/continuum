@@ -182,19 +182,35 @@ describe('offboarding and erasure', () => {
       authorId: delegate.id, source: 'manual',
     });
     await pool.query('ALTER TABLE memories ENABLE TRIGGER require_open_owned_user_scope');
+    await pool.query('ALTER TABLE memories DISABLE TRIGGER require_open_owned_user_scope');
+    const canonical = await createMemory(pool, {
+      scopeId: value.personal.id, scopeKind: 'user', type: 'context',
+      title: '[erased]', body: '[erased]', authorId: delegate.id, source: 'erased',
+    });
+    await pool.query('ALTER TABLE memories ENABLE TRIGGER require_open_owned_user_scope');
+    await pool.query(
+      `UPDATE memories SET metadata = '{}'::jsonb, tags = '{}'::text[],
+              source_ref = NULL, state = 'archived', supersedes_id = NULL,
+              promoted_to_id = NULL, expires_at = NULL, last_verified = NULL
+        WHERE id = $1`,
+      [canonical.id],
+    );
     await pool.query('ALTER TABLE memory_embeddings DISABLE TRIGGER require_embeddable_memory');
     await pool.query(
       `INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
-       VALUES ($1, 'test', 768, $2::vector)`,
-      [dirty.id, `[${Array(768).fill(0).join(',')}]`],
+       VALUES ($1, 'test', 768, $3::vector), ($2, 'test', 768, $3::vector)`,
+      [dirty.id, canonical.id, `[${Array(768).fill(0).join(',')}]`],
     );
     await pool.query('ALTER TABLE memory_embeddings ENABLE TRIGGER require_embeddable_memory');
     const repaired = await offboardPrincipal(pool, value.admin, value.target.id);
-    expect(repaired).toMatchObject({ alreadyOffboarded: false, liveMemories: 1, embeddings: 1 });
+    expect(repaired).toMatchObject({ alreadyOffboarded: false, liveMemories: 1, embeddings: 2 });
     expect((await pool.query('SELECT title, state FROM memories WHERE id = $1', [dirty.id])).rows[0])
       .toEqual({ title: '[erased]', state: 'archived' });
     expect((await pool.query('SELECT 1 FROM memory_embeddings WHERE memory_id = $1', [dirty.id])).rowCount)
       .toBe(0);
+    expect((await pool.query(
+      'SELECT 1 FROM memory_embeddings WHERE memory_id = $1', [canonical.id],
+    )).rowCount).toBe(0);
   });
 
   it('tombstones target audit queries atomically so gaps cannot expose them', async () => {

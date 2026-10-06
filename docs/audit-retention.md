@@ -97,6 +97,11 @@ available for `--batch-size`, `--max-batches`, and `--max-rows`. All output is a
 single structured JSON summary. A disabled or lock-busy invocation exits without
 mutation. Failures exit nonzero and do not log credentials or audit payloads.
 
+Run this command as the documented non-owner Continuum application role after
+applying `scripts/grant-application-role.sql`, never as the migration/function
+owner. The configured principal supplies the audited org-admin identity; the
+database role supplies only the least-privilege execution boundary.
+
 Only one runner can hold the dedicated advisory lock. Successful batches delete
 exactly their selected IDs and verify the deleted values still byte-match the
 selected export candidate. A concurrent row change rolls the delete back. The

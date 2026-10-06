@@ -83,11 +83,16 @@ async function runNonTransactionalStatement(
     // must finish its retry-safe indexes without resolving another schema's
     // function or failing before the compatibility migration can run.
     if (available.rows[0]?.available !== true) return;
-    for (;;) {
-      const result = await client.query<{ completed: boolean }>(
-        `SELECT continuum_backfill_audit_offboarding_scopes(1000) AS completed`,
-      );
-      if (result.rows[0]?.completed === true) return;
+    await client.query("SET statement_timeout = '30s'");
+    try {
+      for (;;) {
+        const result = await client.query<{ completed: boolean }>(
+          `SELECT continuum_backfill_audit_offboarding_scopes(1000) AS completed`,
+        );
+        if (result.rows[0]?.completed === true) return;
+      }
+    } finally {
+      await client.query('RESET statement_timeout');
     }
   }
   const repairName = directiveIndexName(statement, REPAIR_INVALID_INDEX);

@@ -103,8 +103,14 @@ describe('runMigrations', () => {
     await admin.query(`CREATE SCHEMA ${schema}`);
     const pool = schemaPool(schema);
     try {
+      await pool.query(`
+        CREATE FUNCTION vendor_shared_guard() RETURNS trigger
+        LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+        BEGIN RETURN NEW; END;
+        $$;
+      `);
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-9).map((migration) => migration.name)).toEqual([
+      expect(applied.slice(-10).map((migration) => migration.name)).toEqual([
         '0030_offboarding_round7_integrity.sql',
         '0031_offboarding_round7_indexes.sql',
         '0032_offboarding_round7_compatibility.sql',
@@ -114,6 +120,7 @@ describe('runMigrations', () => {
         '0036_offboarding_round8_upgrade.sql',
         '0037_offboarding_round8_online_finish.sql',
         '0038_offboarding_search_path_hardening.sql',
+        '0039_offboarding_completion_state.sql',
       ]);
       expect((await pool.query(
         `SELECT indisvalid AS valid FROM pg_index
@@ -188,18 +195,68 @@ describe('runMigrations', () => {
         `SELECT proname
            FROM pg_proc
           WHERE pronamespace = current_schema()::regnamespace
-            AND (prosecdef OR prorettype = 'pg_catalog.trigger'::pg_catalog.regtype
-                 OR proname LIKE 'continuum\\_%' ESCAPE '\\')
+            AND proname LIKE 'continuum\\_%' ESCAPE '\\'
+            AND proowner = current_user::regrole
             AND NOT (proconfig @> ARRAY[
               format('search_path=pg_catalog, %s, pg_temp', current_schema())
             ])
           ORDER BY proname`,
       )).rows).toEqual([]);
+      expect((await pool.query(
+        `SELECT proconfig FROM pg_proc
+          WHERE pronamespace = current_schema()::regnamespace
+            AND proname = 'vendor_shared_guard'`,
+      )).rows).toEqual([{ proconfig: ['search_path=public'] }]);
       expect(await runMigrations(pool, join(process.cwd(), 'migrations'))).toEqual([]);
     } finally {
       await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
     }
-  });
+  }, 60_000);
+  it('applies completion-state hardening after an installation already ledgered 0038', async () => {
+    const schema = `migrator_offboarding_0039_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-offboarding-0039-'));
+    directories.push(directory);
+    const source = new URL('../../migrations/', import.meta.url);
+    const files = (await readdir(source)).filter((file) => file.endsWith('.sql')).sort();
+    for (const file of files.filter((name) => name !== '0039_offboarding_completion_state.sql')) {
+      await copyFile(new URL(file, source), join(directory, file));
+    }
+    try {
+      const oldApplied = await runMigrations(pool, directory);
+      expect(oldApplied.at(-1)?.name).toBe('0038_offboarding_search_path_hardening.sql');
+      await copyFile(
+        new URL('0039_offboarding_completion_state.sql', source),
+        join(directory, '0039_offboarding_completion_state.sql'),
+      );
+      expect((await runMigrations(pool, directory)).map((migration) => migration.name))
+        .toEqual(['0039_offboarding_completion_state.sql']);
+      expect((await pool.query(
+        `SELECT proname FROM pg_proc
+          WHERE pronamespace = current_schema()::regnamespace
+            AND proname IN (
+              'continuum_write_offboarding_run',
+              'continuum_offboarding_actual_state_is_erased',
+              'continuum_require_actual_offboarding_erasure'
+            ) ORDER BY proname`,
+      )).rows.map((row) => row.proname)).toEqual([
+        'continuum_offboarding_actual_state_is_erased',
+        'continuum_require_actual_offboarding_erasure',
+        'continuum_write_offboarding_run',
+      ]);
+      expect((await pool.query(
+        `SELECT tgname FROM pg_trigger
+          WHERE tgrelid = 'principal_offboarding_run_events'::regclass
+            AND tgname = 'require_actual_offboarding_erasure' AND NOT tgisinternal`,
+      )).rows).toEqual([{ tgname: 'require_actual_offboarding_erasure' }]);
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  }, 60_000);
+
   it('upgrades the 5e0ab45 intermediate state where 0035 lacks its backfill function', async () => {
     const schema = `migrator_missing_backfill_${Date.now()}_${Math.random().toString(16).slice(2)}`;
     const admin = new pg.Pool({ connectionString: DATABASE_URL });
@@ -414,7 +471,7 @@ describe('runMigrations', () => {
     } finally {
       await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
     }
-  });
+  }, 30_000);
   it('aliases exact review-era Entra ledger names without replaying renamed migrations', async () => {
     const schema = `migrator_entra_rename_${Date.now()}_${Math.random().toString(16).slice(2)}`;
     const admin = new pg.Pool({ connectionString: DATABASE_URL });
@@ -863,8 +920,10 @@ describe('runMigrations', () => {
 
   it('runs a commented selector-backfill directive until its watermark completes', async () => {
     let batches = 0;
+    const queries: string[] = [];
     const client = {
       query: vi.fn(async (query: string) => {
+        queries.push(query.trim());
         if (query.includes('SELECT 1 FROM _continuum_migrations')) {
           return { rowCount: 0, rows: [] };
         }
@@ -891,6 +950,8 @@ describe('runMigrations', () => {
     await runMigrations({ connect: vi.fn(async () => client) } as unknown as pg.Pool, directory);
 
     expect(batches).toBe(2);
+    expect(queries).toContain("SET statement_timeout = '30s'");
+    expect(queries).toContain('RESET statement_timeout');
   });
 
   it('drops only an invalid exact-schema index and verifies the replacement before ledgering', async () => {
