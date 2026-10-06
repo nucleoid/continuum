@@ -495,6 +495,7 @@ BEGIN
         'continuum_invoking_database_role', 'continuum_register_trusted_database_identity',
         'continuum_require_trusted_database_identity', 'continuum_create_user_scope_approval',
         'continuum_upsert_entra_group_binding', 'continuum_activate_entra_memberships',
+        'continuum_guard_entra_admin_sources', 'continuum_guard_manual_org_admin_membership',
         'continuum_change_manual_org_admin', 'continuum_takeover_manual_org_admin',
         'continuum_redact_offboarding_audit', 'continuum_protect_offboarded_audit_tombstone',
         'continuum_apply_audit_retention', 'continuum_audit_retention_minimum_days',
