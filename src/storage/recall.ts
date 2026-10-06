@@ -6,6 +6,9 @@ import { assertEmbeddingVectorDimension } from './schema.js';
 import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
 import type { Queryable } from './queryable.js';
 
+export const DEFAULT_RECALL_EMBEDDING_DEADLINE_MS = 10_000;
+export const MAX_RECALL_EMBEDDING_DEADLINE_MS = 30_000;
+
 export interface RecallOptions {
   query: string;
   scopeIds: string[];
@@ -45,6 +48,20 @@ export class EmbeddingProviderUnavailableError extends Error {
     super('embedding provider unavailable', { cause });
     this.name = 'EmbeddingProviderUnavailableError';
   }
+}
+
+export function routedEmbeddingDeadlineMs(
+  groups: Array<{ provider: EmbeddingProvider }>,
+): number {
+  const routedTimeouts = groups
+    .map((group) => group.provider.timeoutMs)
+    .filter((timeout): timeout is number => Number.isSafeInteger(timeout) && timeout! > 0);
+  return Math.min(
+    MAX_RECALL_EMBEDDING_DEADLINE_MS,
+    routedTimeouts.length > 0
+      ? Math.max(...routedTimeouts)
+      : DEFAULT_RECALL_EMBEDDING_DEADLINE_MS,
+  );
 }
 
 class VectorSearchTimeoutError extends Error {
@@ -269,9 +286,10 @@ export async function recall(
     ?? (opts.embeddingProvider
       ? [{ scopeIds: opts.scopeIds, provider: opts.embeddingProvider }]
       : []);
-  const deadlineMs = opts.embeddingDeadlineMs ?? 10_000;
-  if (!Number.isSafeInteger(deadlineMs) || deadlineMs < 1 || deadlineMs > 300_000) {
-    throw new Error('embeddingDeadlineMs must be an integer from 1 to 300000');
+  const deadlineMs = opts.embeddingDeadlineMs ?? routedEmbeddingDeadlineMs(groups);
+  if (!Number.isSafeInteger(deadlineMs) || deadlineMs < 1
+    || deadlineMs > MAX_RECALL_EMBEDDING_DEADLINE_MS) {
+    throw new Error(`embeddingDeadlineMs must be an integer from 1 to ${MAX_RECALL_EMBEDDING_DEADLINE_MS}`);
   }
   type GroupResult = {
     list: Array<{ id: string; rank: number; distance: number }>;

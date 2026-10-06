@@ -2,7 +2,8 @@
 
 ## Implemented runtime behavior
 
-Continuum sends every provider bounded arrays (`/api/embed` for Ollama and the
+Continuum sends every provider bounded arrays (`/api/embed` for Ollama 0.3.4+
+and the
 native embeddings endpoint for hosted providers). Routed-provider `batch_size`
 is the maximum number of texts in each HTTP request, not the backfill scan size;
 the CLI `--batch-size` controls how many selected memories are handed to a
@@ -19,6 +20,12 @@ same object in result `_meta.diagnostics`. Audit summaries record
 `embedding_recall_fallback` counts without queries, memory text, vectors, or
 raw exception messages.
 
+The shared recall deadline follows the longest routed provider timeout and is
+hard-capped at 30 seconds. Provider-local timeouts still apply. Vector SQL is an
+exact provider-and-dimension-qualified scan under the same deadline; deployments
+that outgrow it require provider-specific partitioning or indexes. ANN redesign
+is outside this feature.
+
 ## Operator backfill procedure
 
 1. Apply migrations and configure the same scope routing used by the API.
@@ -27,6 +34,11 @@ raw exception messages.
    `--scope project:name`.
 4. Run bounded batches. Start conservatively for local GPU or CPU capacity.
 5. Inspect the JSON counts and sanitized `embedding_backfill` audit failures.
+
+The scanner first pages only IDs, scope metadata, and text byte counts. It then
+loads title/body for one count- and byte-bounded provider batch. `--count`
+never loads title/body, so memory does not grow with the aggregate candidate
+body set. Cursor progress remains in stable UUID order.
 
 Useful controls are `--provider`, `--batch-size`, `--max-rows`, `--scope`, and
 `--max-errors`. Deterministic input rejections are bisected to a single memory,
@@ -69,6 +81,14 @@ cannot be combined with preview, retry, or cursor controls. Do not use it during
 a provider-wide outage. The command never falls back from a local-only route to
 a hosted provider.
 
+Checkpoint rows are keyed by `(provider, dim, scope_filter)` and contain
+`cursor` plus `updated_at`. Failure rows are keyed by
+`(memory_id, provider, dim)` and contain `disposition` (`durable` or `suspect`),
+sanitized `reason`, and `failed_at`. A checkpoint is never advanced past a
+suspect row; this is especially important for `--cursor --no-wrap`, whose next
+run must still encounter that row. `--mark-failed` records operator disposition
+without moving sequential scan progress.
+
 ## Operator migration 0010 rollout and rollback
 
 Migration `0010_provider_embeddings_backfill.sql` builds the new unique index
@@ -77,12 +97,29 @@ bounded lock timeout. The migrator runs the mixed online DDL file through its
 no-transaction path because PostgreSQL forbids concurrent index creation in a
 transaction block.
 
+Migration `0011_embedding_backfill_failures.sql` creates the durable state table
+without scanning `audit_log`. No released version emitted embedding-backfill
+failure audits before this feature's supported upgrade path, so a whole-audit
+seed index and scan would add rollout cost without recoverable supported data.
+
+The installed migrator takes one deployment-wide advisory lock and gives up
+after its bounded acquisition deadline (30 seconds by default). It does not
+wait indefinitely or start a second migration stream. Treat that nonzero exit
+as a deployment failure: do not route new application binaries until one
+migrator has completed all pending files.
+
 Before applying 0010, drain every process running the old write path. Old writers
 use the former `memory_id` conflict target and are incompatible after the primary
 key changes to `(memory_id, provider, dim)`. Keep old writers drained until every
 API, MCP, lifecycle, and maintenance process is running the new version. The
 table remains readable throughout the concurrent index build, but the short
 constraint swap takes a table lock.
+
+The bounded scanner, checkpoints, durable/suspect isolation, provider routing,
+and deadline behavior are implemented by this release. Draining old writers,
+upgrading Ollama to 0.3.4+, running migrations successfully, choosing batch
+sizes, monitoring exact-scan latency, and executing any future partition/index
+plan are deployment responsibilities.
 
 To roll back, first stop all embedding writers and take a database backup. Choose
 the one provider row to retain for each memory, then deduplicate before restoring

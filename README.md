@@ -61,7 +61,9 @@ Vector recall uses only rows whose provider ID and dimension exactly match the
 active provider. Changing models therefore leaves existing embedding rows
 untouched and temporarily makes their memories full-text-only until they are
 re-embedded. Switching back to the old model makes those rows usable again.
-Ollama uses `/api/embed`; hosted providers use their native embeddings endpoint.
+Ollama uses the normalized, batch-capable `/api/embed` contract introduced in
+Ollama 0.3.4; older `/api/embeddings` installations are not normalized by
+Continuum and must be upgraded. Hosted providers use their native embeddings endpoint.
 Every provider sends bounded requests with a 10 second per-request deadline and
 a default batch size of 32. Override these with
 `CONTINUUM_EMBEDDING_TIMEOUT_MS` and `CONTINUUM_EMBEDDING_BATCH_SIZE` or the
@@ -115,6 +117,10 @@ or `CONTINUUM_EMBEDDING_TIMEOUT_MS` for the legacy Ollama configuration). The
 default is 10000 ms and the maximum is 300000 ms. Cancellation is forwarded to
 `fetch`; a provider implementation that ignores cancellation is still bounded
 by the local deadline.
+
+Recall shares one deadline across routed provider arms and their vector SQL. By
+default it follows the longest routed provider timeout but is capped at 30000
+ms so a permissive provider setting cannot hold a recall open indefinitely.
 
 OpenAI and Voyage credentials are read only from `OPENAI_API_KEY` and
 `VOYAGE_API_KEY`. Inline credentials are rejected. Ollama definitions must
@@ -170,6 +176,13 @@ exits nonzero if any provider is incomplete. Known failures are retried only
 with the explicit provider-scoped `--retry-failures` control. See
 [`docs/embedding-backfill.md`](./docs/embedding-backfill.md) for no-wrap,
 mark-failed, rollout, deduplication, and rollback procedures.
+
+The scanner pages IDs and byte-count metadata first, then fetches title/body
+only for the current count- and byte-bounded provider batch; `--count` never
+selects bodies. Vector recall deliberately uses an exact provider-qualified
+scan for correctness. Large deployments must measure that scan and add
+provider-specific partitioning/indexing before it exceeds the 30-second recall
+cap; this change does not introduce an ANN redesign.
 
 ## License
 

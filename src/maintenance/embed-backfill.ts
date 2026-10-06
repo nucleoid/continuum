@@ -20,6 +20,13 @@ const MAX_BATCH_SIZE = 1_000;
 const MAX_DIAGNOSTIC_PROBES = 64;
 const MAX_AMBIGUOUS_DIAGNOSTIC_FAILURES = 8;
 const MAX_REPORTED_UNRESOLVED_IDS = 25;
+const MAX_HYDRATED_TEXT_BYTES = 4 * 1024 * 1024;
+
+interface CandidateRef {
+  id: string;
+  textBytes: number;
+  scope: ScopeRef;
+}
 
 interface Candidate {
   id: string;
@@ -272,8 +279,10 @@ async function runProvider(
   let completed = false;
   const unresolvedIds = new Set<string>();
   let unresolvedCount = 0;
+  let activeBatchUnresolvedIds: string[] | null = null;
   const addUnresolved = (id: string): void => {
     unresolvedCount += 1;
+    activeBatchUnresolvedIds?.push(id);
     if (unresolvedIds.size < MAX_REPORTED_UNRESOLVED_IDS) unresolvedIds.add(id);
   };
 
@@ -364,14 +373,55 @@ async function runProvider(
       }
       await recordFailure(client, provider, item);
       failed = 1;
-      cursor = item.id;
       await checkpoint(client, provider, filter, cursor);
       return {
         scanned: 1, eligible: 1, embedded, failed, failuresCleared,
-        completed: true, cursor, unresolvedIds: [],
+        completed: false, cursor, unresolvedIds: [],
         unresolvedCount: 0, unresolvedTruncated: false,
       };
     }
+
+    const runStartedAt = !options.dryRun && !options.countOnly
+      ? (await client.query<{ started_at: Date }>(
+        'SELECT clock_timestamp() AS started_at',
+      )).rows[0]!.started_at
+      : null;
+
+    const hydrate = async (refs: CandidateRef[]): Promise<Candidate[]> => {
+      if (refs.length === 0) return [];
+      const hydrated = await client.query<{
+        id: string; title: string; body: string; kind: ScopeKind; name: string;
+      }>(
+        `SELECT m.id, m.title, m.body, s.kind, s.name
+           FROM memories m
+           JOIN scopes s ON s.id = m.scope_id
+          WHERE m.id = ANY($1::uuid[])
+            AND m.state = 'live'
+            AND (m.expires_at IS NULL OR m.expires_at > clock_timestamp())
+            AND NOT EXISTS (
+              SELECT 1 FROM memory_embeddings e
+               WHERE e.memory_id = m.id AND e.provider = $2 AND e.dim = $3
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM embedding_backfill_failures f
+               WHERE f.memory_id = m.id AND f.provider = $2 AND f.dim = $3
+                 AND f.disposition = 'durable'
+            )`,
+        [refs.map((ref) => ref.id), provider.id, provider.dim],
+      );
+      const byId = new Map(hydrated.rows.map((row) => [row.id, row]));
+      return refs.flatMap((ref) => {
+        const row = byId.get(ref.id);
+        if (!row) return [];
+        const candidate: Candidate = {
+          id: row.id, title: row.title, body: row.body,
+          scope: { kind: row.kind, name: row.name },
+        };
+        return sameProvider(router.resolve(candidate.scope).provider, provider)
+          ? [candidate]
+          : [];
+      });
+    };
 
     const processItems = async (items: Candidate[]): Promise<boolean> => {
       if (items.length === 0) return true;
@@ -425,9 +475,20 @@ async function runProvider(
         return true;
       } catch (initialError) {
         if (initialError instanceof PartialInvalidVectorsError) {
-          const canContinue = await processItems(initialError.items);
-          if (canContinue) cursor = items.at(-1)!.id;
-          return canContinue;
+          try {
+            const canContinue = await processItems(initialError.items);
+            if (canContinue) cursor = items.at(-1)!.id;
+            return canContinue;
+          } catch (error) {
+            if (!(error instanceof EmbeddingProviderError)
+              || error.code !== 'EMBEDDING_INVALID_RESPONSE'
+              || error.diagnostic === false) throw error;
+            for (const item of initialError.items) {
+              await recordSuspect(client, provider, item, error.code);
+              addUnresolved(item.id);
+            }
+            return true;
+          }
         }
         if (isEmbeddingItemError(initialError)) {
           if (items.length > 1) {
@@ -497,19 +558,49 @@ async function runProvider(
             throw error;
           }
         };
+        const finalizeAmbiguous = async (): Promise<boolean> => {
+          if (successes === 0 || ambiguous.length === 0) return false;
+          for (const item of ambiguous) {
+            await recordSuspect(client, provider, item, initialError.code);
+            addUnresolved(item.id);
+          }
+          return true;
+        };
         const middle = Math.floor(items.length / 2);
         await diagnose(items.slice(0, middle));
-        if (!canContinue) return false;
-        await diagnose(items.slice(middle));
-        if (!canContinue) return false;
-        if (successes === 0 && ambiguous.length > 0) throw initialError;
-        for (const item of ambiguous) {
-          await recordSuspect(client, provider, item, initialError.code);
-          addUnresolved(item.id);
-          cursor = item.id;
+        if (!canContinue) {
+          await finalizeAmbiguous();
+          return false;
         }
+        await diagnose(items.slice(middle));
+        if (!canContinue) {
+          await finalizeAmbiguous();
+          return false;
+        }
+        if (successes === 0 && ambiguous.length > 0) throw initialError;
+        await finalizeAmbiguous();
         cursor = items.at(-1)!.id;
         return canContinue;
+      }
+    };
+
+    const processRefs = async (refs: CandidateRef[]): Promise<boolean> => {
+      if (refs.length === 0) return true;
+      const cursorBeforeBatch = cursor;
+      activeBatchUnresolvedIds = [];
+      try {
+        const items = await hydrate(refs);
+        const canContinue = await processItems(items);
+        if (activeBatchUnresolvedIds.length > 0) {
+          const unresolved = new Set(activeBatchUnresolvedIds);
+          const first = refs.findIndex((ref) => unresolved.has(ref.id));
+          cursor = first <= 0 ? cursorBeforeBatch : refs[first - 1]!.id;
+        } else if (canContinue) {
+          cursor = refs.at(-1)!.id;
+        }
+        return canContinue;
+      } finally {
+        activeBatchUnresolvedIds = null;
       }
     };
 
@@ -520,13 +611,16 @@ async function runProvider(
         provider.dim,
         routedScopeIds,
         wrapped ? wrapBoundary : null,
+        runStartedAt,
       ];
       params.push(Math.max(100, options.batchSize * 4));
       const limitIndex = params.length;
       const rows = await client.query<{
-        id: string; title: string; body: string; kind: ScopeKind; name: string;
+        id: string; text_bytes: string; kind: ScopeKind; name: string;
       }>(
-        `SELECT m.id, m.title, m.body, s.kind, s.name
+        `SELECT m.id,
+                octet_length(m.title) + octet_length(m.body) AS text_bytes,
+                s.kind, s.name
            FROM memories m
            JOIN scopes s ON s.id = m.scope_id
           WHERE ($1::uuid IS NULL OR m.id > $1::uuid)
@@ -543,7 +637,8 @@ async function runProvider(
                WHERE f.memory_id = m.id
                  AND f.provider = $2
                  AND f.dim = $3
-                 AND f.disposition = 'durable'
+                 AND (f.disposition = 'durable'
+                   OR (f.disposition = 'suspect' AND f.failed_at >= $6))
             )
           ORDER BY m.id
           LIMIT $${limitIndex}`,
@@ -555,17 +650,20 @@ async function runProvider(
           wrapped = true;
           continue;
         }
-        completed = true;
-        cursor = null;
-        if (!options.dryRun && !options.countOnly) await checkpoint(client, provider, filter, null);
+        completed = unresolvedCount === 0;
+        if (completed) cursor = null;
+        if (!options.dryRun && !options.countOnly) {
+          await checkpoint(client, provider, filter, cursor);
+        }
         break;
       }
 
-      const batch: Candidate[] = [];
+      const batch: CandidateRef[] = [];
+      let batchTextBytes = 0;
       for (const row of rows.rows) {
         scanned += 1;
-        const candidate: Candidate = {
-          id: row.id, title: row.title, body: row.body,
+        const candidate: CandidateRef = {
+          id: row.id, textBytes: Number(row.text_bytes),
           scope: { kind: row.kind, name: row.name },
         };
         if (!sameProvider(router.resolve(candidate.scope).provider, provider)) {
@@ -573,10 +671,21 @@ async function runProvider(
           continue;
         }
         eligible += 1;
-        if (!options.dryRun && !options.countOnly) batch.push(candidate);
-        else cursor = row.id;
+        if (!options.dryRun && !options.countOnly) {
+          if (batch.length > 0 && batchTextBytes + candidate.textBytes > MAX_HYDRATED_TEXT_BYTES) {
+            const canContinue = await processRefs(batch.splice(0));
+            batchTextBytes = 0;
+            await checkpoint(client, provider, filter, cursor);
+            if (!canContinue) {
+              throw new BackfillControlError('Embedding backfill exceeded its error budget');
+            }
+          }
+          batch.push(candidate);
+          batchTextBytes += candidate.textBytes;
+        } else cursor = row.id;
         if (batch.length >= options.batchSize) {
-          const canContinue = await processItems(batch.splice(0));
+          const canContinue = await processRefs(batch.splice(0));
+          batchTextBytes = 0;
           await checkpoint(client, provider, filter, cursor);
           if (!canContinue) {
             throw new BackfillControlError('Embedding backfill exceeded its error budget');
@@ -584,7 +693,7 @@ async function runProvider(
         }
         if (!options.countOnly && eligible >= options.maxRows) break;
       }
-      const canContinue = batch.length === 0 || await processItems(batch);
+      const canContinue = batch.length === 0 || await processRefs(batch);
       if (!options.dryRun && !options.countOnly) await checkpoint(client, provider, filter, cursor);
       if (!canContinue) {
         throw new BackfillControlError('Embedding backfill exceeded its error budget');

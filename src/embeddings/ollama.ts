@@ -134,7 +134,11 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
           if (!res.ok) throw await embeddingProviderHttpError(res, 'ollama');
           let json: OllamaEmbedResponse;
           try {
-            json = (await boundedSuccessJson(res, chunk.length, this.dim)) as OllamaEmbedResponse;
+            const decoded = await boundedSuccessJson(res, chunk.length, this.dim);
+            if (!decoded || typeof decoded !== 'object' || Array.isArray(decoded)) {
+              throw invalidResponse('Ollama returned an invalid response object');
+            }
+            json = decoded as OllamaEmbedResponse;
           } catch (error) {
             if (error instanceof EmbeddingProviderError) throw error;
             throw new EmbeddingProviderError(

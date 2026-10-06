@@ -1,7 +1,11 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type pg from 'pg';
 import { createPrincipal } from './principals.js';
-import { recall } from './recall.js';
+import {
+  MAX_RECALL_EMBEDDING_DEADLINE_MS,
+  recall,
+  routedEmbeddingDeadlineMs,
+} from './recall.js';
 import { createScope } from './scopes.js';
 import { makeTestPool, resetData } from './test-helpers.js';
 import { createMemory } from './memories.js';
@@ -169,6 +173,19 @@ describe('recall expiry enforcement', () => {
         { provider: 'provider:stuck', dim: 768, status: 'failed', errorCode: 'EMBEDDING_TIMEOUT' },
       ],
     });
+  });
+
+  it('aligns the implicit shared deadline with routed provider timeouts under a hard cap', () => {
+    expect(routedEmbeddingDeadlineMs([
+      { provider: { id: 'short', dim: 768, timeoutMs: 2_500, async embed() { return []; } } },
+      { provider: { id: 'long', dim: 768, timeoutMs: 25_000, async embed() { return []; } } },
+    ])).toBe(25_000);
+    expect(routedEmbeddingDeadlineMs([
+      { provider: { id: 'unsafe', dim: 768, timeoutMs: 300_000, async embed() { return []; } } },
+    ])).toBe(MAX_RECALL_EMBEDDING_DEADLINE_MS);
+    expect(routedEmbeddingDeadlineMs([
+      { provider: { id: 'custom', dim: 768, async embed() { return []; } } },
+    ])).toBe(10_000);
   });
 
   it('cancels vector SQL inside the shared recall deadline', async () => {

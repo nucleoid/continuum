@@ -115,7 +115,7 @@ abstract class HostedEmbeddingProvider implements EmbeddingProvider {
   protected readonly apiKey: string;
   protected readonly model: string;
   protected readonly endpoint: string;
-  protected readonly timeoutMs: number;
+  readonly timeoutMs: number;
   readonly batchSize: number;
   protected readonly fetchImpl: typeof fetch;
 

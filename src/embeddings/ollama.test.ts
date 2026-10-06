@@ -63,6 +63,9 @@ describe('OllamaEmbeddingProvider', () => {
   });
 
   it.each([
+    ['null response', null],
+    ['array response', []],
+    ['scalar response', 'invalid'],
     ['cardinality', { embeddings: [[0, 0, 0, 0]] }],
     ['dimension', { embeddings: [[0, 0], [0, 0, 0, 0]] }],
     ['non-finite value', { embeddings: [[0, 0, 0, 0], [0, Number.NaN, 0, 0]] }],
@@ -77,6 +80,21 @@ describe('OllamaEmbeddingProvider', () => {
     await expect(provider.embed(['one', 'two'])).rejects.toMatchObject({
       code: 'EMBEDDING_INVALID_RESPONSE', failureScope: 'provider',
     });
+  });
+
+  it('sanitizes null and invalid JSON objects without leaking a TypeError', async () => {
+    const provider = new OllamaEmbeddingProvider({
+      baseUrl: 'http://x', model: 'private-model', dim: 4,
+      fetchImpl: vi.fn(async () => response(null)),
+    });
+
+    const error = await provider.embed(['sensitive text']).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({
+      name: 'EmbeddingProviderError', code: 'EMBEDDING_INVALID_RESPONSE',
+      message: 'Ollama returned an invalid response object',
+    });
+    expect(error).not.toBeInstanceOf(TypeError);
+    expect(String(error)).not.toContain('sensitive text');
   });
 
   it('normalizes its request deadline to a typed timeout error', async () => {

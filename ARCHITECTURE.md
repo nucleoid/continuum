@@ -112,8 +112,19 @@ CREATE TABLE embedding_backfill_failures (
   memory_id      UUID NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
   provider       TEXT NOT NULL,
   dim            INT NOT NULL CHECK (dim > 0),
+  disposition    TEXT NOT NULL CHECK (disposition IN ('durable', 'suspect')),
+  reason         TEXT NOT NULL,
   failed_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (memory_id, provider, dim)
+);
+
+CREATE TABLE embedding_backfill_checkpoints (
+  provider       TEXT NOT NULL,
+  dim            INT NOT NULL,
+  scope_filter   TEXT NOT NULL DEFAULT '',
+  cursor         UUID,
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (provider, dim, scope_filter)
 );
 
 CREATE TABLE audit_log (
@@ -233,8 +244,9 @@ Content-Type: application/json
 Response includes ranked memories with `score`, `scope`, `type`, `source_ref`, and a short `excerpt`. Reading is logged to `audit_log` per principal.
 
 Search is hybrid: vector similarity on `memory_embeddings` plus full-text on `memories.body`, fused by reciprocal rank fusion. Scope filter is applied pre-rank.
-Routed vector arms run concurrently under one shared overall deadline, while
-each provider also retains its local request timeout. A provider or vector
+Routed vector arms run concurrently under one shared overall deadline. Its
+implicit value is the longest configured routed-provider timeout, capped at 30
+seconds; each provider also retains its local request timeout. A provider or vector
 query failure degrades only that arm to full-text search and is returned as
 sanitized retrieval diagnostics. Provider qualification is materialized before
 distance ordering so rows from another provider cannot consume approximate-index

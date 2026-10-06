@@ -1,6 +1,8 @@
 export interface EmbeddingProvider {
   readonly id: string;
   readonly dim: number;
+  /** Provider request deadline, used to size the routed recall budget when known. */
+  readonly timeoutMs?: number;
   /** Maximum input count accepted by one provider request, when known. */
   readonly batchSize?: number;
   /** Explicit data-residency capability. Never infer this from an endpoint URL. */

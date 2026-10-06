@@ -39,7 +39,7 @@ afterEach(async () => {
 });
 
 describe('runMigrations', () => {
-  it('ships the embedding key swap as concurrent attachable DDL and seeds failed audits only', async () => {
+  it('ships the embedding key swap as concurrent attachable DDL without a whole-audit seed scan', async () => {
     const keySwap = await readFile(
       join(process.cwd(), 'migrations/0010_provider_embeddings_backfill.sql'),
       'utf8',
@@ -53,9 +53,9 @@ describe('runMigrations', () => {
       join(process.cwd(), 'migrations/0011_embedding_backfill_failures.sql'),
       'utf8',
     );
-    expect(failureSeed).toMatch(/metadata->>'embedded'\s*=\s*'false'/i);
-    expect(failureSeed).toMatch(/metadata->>'embedding_error_code'\s*=\s*'EMBEDDING_FAILED'/i);
-    expect(failureSeed).toMatch(/CREATE INDEX CONCURRENTLY/i);
+    expect(failureSeed).toMatch(/CREATE TABLE IF NOT EXISTS embedding_backfill_failures/i);
+    expect(failureSeed).not.toMatch(/audit_log/i);
+    expect(failureSeed).not.toMatch(/CREATE INDEX/i);
     expect(failureSeed).toMatch(/disposition/i);
     expect(failureSeed).toMatch(/reason/i);
 
@@ -495,61 +495,4 @@ describe('runMigrations', () => {
     }
   });
 
-  it('migrates valid historical poison audits into durable backfill state', async () => {
-    const schema = `migrator_backfill_failures_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-    const admin = new pg.Pool({ connectionString: DATABASE_URL });
-    pools.push(admin);
-    await admin.query(`CREATE SCHEMA ${schema}`);
-    const pool = schemaPool(schema);
-    const migrationSql = await readFile(
-      new URL('../../migrations/0011_embedding_backfill_failures.sql', import.meta.url),
-      'utf8',
-    );
-    const directory = await migrationDirectory(migrationSql);
-    const memoryId = '11111111-1111-4111-8111-111111111111';
-
-    try {
-      await pool.query(`
-        CREATE TABLE memories (id UUID PRIMARY KEY);
-        CREATE TABLE audit_log (
-          at TIMESTAMPTZ NOT NULL,
-          action TEXT NOT NULL,
-          memory_id UUID,
-          metadata JSONB
-        );
-        INSERT INTO memories (id) VALUES ('${memoryId}');
-        INSERT INTO audit_log (at, action, memory_id, metadata) VALUES
-          ('2026-01-02T00:00:00Z', 'write', '${memoryId}',
-           '{"operation":"embedding_backfill","provider":"ollama:model","dim":768,"embedded":false,"embedding_error_code":"EMBEDDING_FAILED"}'),
-          ('2026-01-01T00:00:00Z', 'write', '${memoryId}',
-           '{"operation":"embedding_backfill","provider":"ollama:model","dim":768,"embedded":false,"embedding_error_code":"EMBEDDING_FAILED"}'),
-          ('2026-01-01T00:00:00Z', 'write', '${memoryId}',
-           '{"operation":"embedding_backfill","provider":"ollama:model","dim":"invalid","embedded":false,"embedding_error_code":"EMBEDDING_FAILED"}'),
-          ('2025-12-31T00:00:00Z', 'write', '${memoryId}',
-           '{"operation":"embedding_backfill","provider":"successful:model","dim":768,"embedded":true}'),
-          ('2026-01-01T00:00:00Z', 'read', '${memoryId}',
-           '{"operation":"embedding_backfill","provider":"ignored","dim":768,"embedded":false,"embedding_error_code":"EMBEDDING_FAILED"}');
-      `);
-
-      await expect(runMigrations(pool, directory)).resolves.toHaveLength(1);
-      await expect(runMigrations(pool, directory)).resolves.toHaveLength(0);
-      const failures = await pool.query(
-        `SELECT memory_id, provider, dim, failed_at
-           FROM embedding_backfill_failures`,
-      );
-      expect(failures.rows).toEqual([{
-        memory_id: memoryId,
-        provider: 'ollama:model',
-        dim: 768,
-        failed_at: new Date('2026-01-01T00:00:00Z'),
-      }]);
-
-      await pool.query('DELETE FROM memories WHERE id = $1', [memoryId]);
-      expect((await pool.query(
-        'SELECT count(*)::int AS count FROM embedding_backfill_failures',
-      )).rows[0].count).toBe(0);
-    } finally {
-      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
-    }
-  });
 });
