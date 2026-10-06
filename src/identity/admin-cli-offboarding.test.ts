@@ -6,7 +6,8 @@ describe('admin CLI offboarding orchestration', () => {
     const source = await readFile(new URL('./admin-cli.ts', import.meta.url), 'utf8');
     expect(source).toMatch(/const once = args\.includes\('--once'\)/);
     expect(source).toMatch(/while \(!dryRun && !once && !result\.complete\)/);
-    expect(source).toMatch(/confirmationScopeId, batchSize/);
+    expect(source).toMatch(/confirmationScopeId, batchSize, verificationTimeoutMs/);
+    expect(source).toContain("args.indexOf('--verification-timeout-ms')");
   });
 
   it('exposes durable incomplete-run listing', async () => {

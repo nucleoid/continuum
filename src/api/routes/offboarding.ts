@@ -13,6 +13,7 @@ const offboardBody = z.object({
   dryRun: z.boolean().optional(),
   confirmScopeId: uuid.optional(),
   batchSize: z.number().int().min(1).max(5_000).optional(),
+  verificationTimeoutMs: z.number().int().min(1).max(300_000).optional(),
 }).strict();
 const invalid = () => new ServiceError('INVALID_INPUT', 'Invalid request');
 const requireInteractiveAdminCredential = (credential: string | undefined) => {
@@ -51,6 +52,7 @@ export function offboardingRouter(pool: pg.Pool): Router {
       res.json(await offboardPrincipal(pool, req.principal!, principalId.data, {
         dryRun, confirmationScopeId: body.data.confirmScopeId,
         batchSize: body.data.batchSize,
+        verificationTimeoutMs: body.data.verificationTimeoutMs,
       }));
     } catch (error) { next(error); }
   });

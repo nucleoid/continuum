@@ -269,15 +269,6 @@ class UnusableAuditRetentionConnectionError extends Error {
   }
 }
 
-function sameRows(left: AuditRow[], right: AuditRow[]): boolean {
-  const byId = (a: AuditRow, b: AuditRow) => {
-    const leftId = BigInt(a.id);
-    const rightId = BigInt(b.id);
-    return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
-  };
-  return serializeRows([...left].sort(byId)).equals(serializeRows([...right].sort(byId)));
-}
-
 async function deleteBatch(
   client: pg.PoolClient,
   rows: AuditRow[],
@@ -294,43 +285,17 @@ async function deleteBatch(
     await client.query('BEGIN');
     const principalId = await authorizedPrincipalId(client, principalExternalId);
     await afterExport?.(batchNumber);
-    const deletion = await client.query<AuditRow>(
-      `DELETE FROM audit_log
-        WHERE id = ANY($1::bigint[])
-          AND at < $2
-      RETURNING id::text,
-                ${AUDIT_TIMESTAMP_SQL} AS at,
-                principal_id, action, memory_id, scope_id, query,
-                metadata::text AS metadata_json`,
-      [rows.map((row) => row.id), cutoff],
+    const deletion = await client.query<{ deleted_count: number }>(
+      `SELECT continuum_apply_audit_retention(
+         $1::uuid, $2::timestamptz, $3::integer, $4::uuid, $5::integer,
+         $6::jsonb, $7::text, $8::text
+       ) AS deleted_count`,
+      [principalId, cutoff, retentionDays, runId, batchNumber,
+        JSON.stringify(rows), exported ? 'jsonl' : 'none', exported?.sha256 ?? null],
     );
-    if (deletion.rowCount !== rows.length) {
+    if (Number(deletion.rows[0]?.deleted_count) !== rows.length) {
       throw new Error('Audit retention delete count did not match the selected batch');
     }
-    if (!sameRows(deletion.rows, rows)) {
-      throw new Error('Audit retention row changed after export; delete rolled back');
-    }
-    const first = rows[0];
-    const last = rows[rows.length - 1];
-    await client.query(
-      `INSERT INTO audit_log (principal_id, action, metadata)
-       VALUES ($1, 'archive', $2::jsonb)`,
-      [principalId, JSON.stringify({
-        source: 'audit-retention',
-        cutoff,
-        retention_days: retentionDays,
-        first_id: first.id,
-        last_id: last.id,
-        first_at: first.at,
-        last_at: last.at,
-        deleted_count: rows.length,
-        export_mode: exported ? 'jsonl' : 'none',
-        export_filename: exported?.filename ?? null,
-        export_sha256: exported?.sha256 ?? null,
-        run_id: runId,
-        batch_number: batchNumber,
-      })],
-    );
     await client.query('COMMIT');
   } catch (error) {
     try {

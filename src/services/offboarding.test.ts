@@ -1419,7 +1419,7 @@ describe('offboarding and erasure', () => {
     await expect(pool.query(
       `SELECT continuum_complete_offboarding_run($1, $2, '{}'::jsonb)`,
       [run.run_id, value.admin.id],
-    )).rejects.toThrow(/verified erasure and the initiating effective org administrator/i);
+    )).rejects.toThrow(/ready state and a current effective org administrator/i);
     expect((await pool.query(
       `SELECT count(*)::int AS count FROM principal_offboarding_run_events
         WHERE run_id = $1 AND phase = 'completed'`, [run.run_id],

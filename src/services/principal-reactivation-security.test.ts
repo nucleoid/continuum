@@ -103,7 +103,7 @@ describe('principal reactivation database trust boundary', () => {
       /GRANT SELECT ON TABLE[^\n]*principal_offboarding_runs/i,
     );
     expect(grants).toMatch(
-      /GRANT SELECT ON TABLE[^\n]*principal_offboarding_run_events/i,
+      /GRANT SELECT ON TABLE[\s\S]*principal_offboarding_run_events/i,
     );
     expect(grants).toMatch(
       /REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE[\s\S]*principal_offboarding_runs/i,
@@ -125,8 +125,12 @@ describe('principal reactivation database trust boundary', () => {
       /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE[\s\S]*memory_embeddings/i,
     );
     expect(grants).toMatch(
-      /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE[\s\S]*audit_log/i,
+      /GRANT SELECT, INSERT ON TABLE[^\n]*audit_log/i,
     );
+    expect(grants).toMatch(/REVOKE UPDATE, DELETE, TRUNCATE ON TABLE[^\n]*audit_log/i);
+    expect(grants).toMatch(/continuum_apply_audit_retention\(/i);
+    expect(grants).toMatch(/continuum_redact_offboarding_audit\(/i);
+    expect(grants).toMatch(/continuum_record_offboarding_event\(UUID\)/i);
   });
 
   it('supports lifecycle functions as a separately granted non-owner role', async () => {
@@ -268,7 +272,7 @@ describe('principal reactivation database trust boundary', () => {
              "initial_audit_queries":999,"initial_audit_selection":{},
              "initial_count_truncated":[]}'::jsonb)`,
         [target.id, admin.id],
-      )).rejects.toThrow(/completed erased offboarding run cannot be restarted/i);
+      )).rejects.toThrow(/fresh offboarding restart requires the guarded restart function/i);
 
       expect((await rolePool.query(
         `SELECT run_id::text, initiated_by::text, completed_at,
@@ -426,7 +430,7 @@ describe('principal reactivation database trust boundary', () => {
       const expectGuardRejects = async () => {
         expect(await actualStateIsErased()).toBe(false);
         await expect(completion()).rejects.toThrow(
-          /verified erasure and the initiating effective org administrator/i,
+          /actual indexed erasure state is incomplete|current effective org administrator/i,
         );
       };
 
@@ -454,7 +458,7 @@ describe('principal reactivation database trust boundary', () => {
         [forged.run_id, target.id, JSON.stringify({
           ...evidence, finalized_by: target.id, memories_processed: 999,
         })],
-      )).rejects.toThrow(/initiating effective org administrator/i);
+      )).rejects.toThrow(/current effective org administrator/i);
 
       await pool.query(
         'ALTER TABLE principals DISABLE TRIGGER protect_offboarded_principal_identity',
@@ -651,11 +655,11 @@ describe('principal reactivation database trust boundary', () => {
       await expect(rolePool.query(
         `UPDATE audit_log SET query = 'restored audit identity' WHERE id = $1`,
         [redactedAuditId],
-      )).rejects.toThrow(/offboarded audit tombstone is immutable/i);
+      )).rejects.toThrow(/permission denied/i);
       await expect(rolePool.query(
         'UPDATE audit_log SET scope_id = NULL WHERE id = $1',
         [redactedAuditId],
-      )).rejects.toThrow(/offboarded audit linkage is immutable/i);
+      )).rejects.toThrow(/permission denied/i);
       await expect(rolePool.query(
         'UPDATE audit_log SET metadata = $2::jsonb WHERE id = $1',
         [redactedAuditId, JSON.stringify({
@@ -663,7 +667,7 @@ describe('principal reactivation database trust boundary', () => {
           service_principal_id: '00000000-0000-4000-8000-000000000099',
           external_id: 'restored@example.test',
         })],
-      )).rejects.toThrow(/offboarded audit tombstone is immutable/i);
+      )).rejects.toThrow(/permission denied/i);
       const preservedAuditId = (await rolePool.query(
         `SELECT id::text AS id FROM audit_log
           WHERE metadata->>'operation' = 'principal_offboarded'
@@ -673,7 +677,7 @@ describe('principal reactivation database trust boundary', () => {
         `UPDATE audit_log SET metadata = '{"redacted":"principal_offboarding"}'::jsonb
           WHERE id = $1`,
         [preservedAuditId],
-      )).rejects.toThrow(/preserved offboarding audit evidence is immutable/i);
+      )).rejects.toThrow(/permission denied/i);
       await expect(reactivatePrincipal(rolePool, admin, target.id)).resolves.toBeUndefined();
       expect((await rolePool.query(
         `SELECT disabled_at, offboarded_at, reactivated_at IS NOT NULL AS reactivated

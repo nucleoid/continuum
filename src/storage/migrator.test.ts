@@ -126,7 +126,7 @@ describe('runMigrations', () => {
     expect(completionTrigger.match(/continuum_offboarding_actual_state_is_erased\s*\(/gi))
       .toHaveLength(1);
     const docs = await readFile(join(process.cwd(), 'docs/offboarding.md'), 'utf8');
-    expect(docs).toMatch(/through `0042_offboarding_final_remediation\.sql`/i);
+    expect(docs).toMatch(/through `0044_offboarding_restart_evidence\.sql`/i);
     expect(docs).not.toMatch(/all nineteen offboarding migrations/i);
   });
   it('applies round-seven integrity and online cursor-index migrations from a fresh schema', async () => {
@@ -143,7 +143,7 @@ describe('runMigrations', () => {
         $$;
       `);
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-13).map((migration) => migration.name)).toEqual([
+      expect(applied.slice(-15).map((migration) => migration.name)).toEqual([
         '0030_offboarding_round7_integrity.sql',
         '0031_offboarding_round7_indexes.sql',
         '0032_offboarding_round7_compatibility.sql',
@@ -157,6 +157,8 @@ describe('runMigrations', () => {
         '0040_offboarding_post_completion_integrity.sql',
         '0041_offboarding_completion_trust.sql',
         '0042_offboarding_final_remediation.sql',
+        '0043_audit_retention_selection_order.sql',
+        '0044_offboarding_restart_evidence.sql',
       ]);
       expect((await pool.query(
         `SELECT indisvalid AS valid FROM pg_index
@@ -385,7 +387,10 @@ describe('runMigrations', () => {
     for (const file of files.filter((name) =>
       name !== '0039_offboarding_completion_state.sql'
       && name !== '0040_offboarding_post_completion_integrity.sql'
-      && name !== '0041_offboarding_completion_trust.sql')) {
+      && name !== '0041_offboarding_completion_trust.sql'
+      && name !== '0042_offboarding_final_remediation.sql'
+      && name !== '0043_audit_retention_selection_order.sql'
+      && name !== '0044_offboarding_restart_evidence.sql')) {
       if (file === '0038_offboarding_search_path_hardening.sql') {
         await copyFile(
           new URL(
@@ -626,6 +631,27 @@ describe('runMigrations', () => {
       );
       expect((await runMigrations(pool, directory)).map((migration) => migration.name))
         .toEqual(['0041_offboarding_completion_trust.sql']);
+      expect(await readRunState()).toEqual(historicalState);
+      await copyFile(
+        new URL('0042_offboarding_final_remediation.sql', source),
+        join(directory, '0042_offboarding_final_remediation.sql'),
+      );
+      expect((await runMigrations(pool, directory)).map((migration) => migration.name))
+        .toEqual(['0042_offboarding_final_remediation.sql']);
+      expect(await readRunState()).toEqual(historicalState);
+      await copyFile(
+        new URL('0043_audit_retention_selection_order.sql', source),
+        join(directory, '0043_audit_retention_selection_order.sql'),
+      );
+      expect((await runMigrations(pool, directory)).map((migration) => migration.name))
+        .toEqual(['0043_audit_retention_selection_order.sql']);
+      expect(await readRunState()).toEqual(historicalState);
+      await copyFile(
+        new URL('0044_offboarding_restart_evidence.sql', source),
+        join(directory, '0044_offboarding_restart_evidence.sql'),
+      );
+      expect((await runMigrations(pool, directory)).map((migration) => migration.name))
+        .toEqual(['0044_offboarding_restart_evidence.sql']);
       expect(await readRunState()).toEqual(historicalState);
 
       await admin.query(`CREATE ROLE ${quotedRole} NOLOGIN`);

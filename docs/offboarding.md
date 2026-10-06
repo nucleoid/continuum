@@ -268,15 +268,30 @@ state is demonstrably dirty and repair is required. It also replaces completion
 evidence with the database-constructed trust labels above and reapplies the
 canonical quoted-schema `search_path` check for both fresh and upgraded custom
 schema names.
+Migration `0042_offboarding_final_remediation.sql` is the primary trust-boundary upgrade.
+It lets any current effective organization administrator resume an incomplete
+run, records the first cross-admin takeover and the finalizer immutably, and
+keeps fresh-run/restart authorization separate from resume authority. It also
+removes direct application-role audit mutation and completion-ledger insertion,
+routes those operations through cutoff/fence-checked functions, protects manual
+organization-admin membership changes, and fails closed on an unsafe
+foreign-owned Continuum `SECURITY DEFINER` function.
+Migration `0043_audit_retention_selection_order.sql` preserves the retention
+selection's `(at,id)` endpoints while
+comparing exported rows in ID order, including histories where timestamp order
+and insertion order differ.
+Migration `0044_offboarding_restart_evidence.sql` is the exact final migration.
+It preserves honest application-reported counter labels and permits a guarded
+fresh run for either explicit reactivation or demonstrably dirty repair state.
 
-The final database verification is exact: it checks every memory and every
-audit row linked to the run's bounded fence before appending completion. On very
-large per-subject histories this final read can exceed an operator's statement
-timeout even though destructive work was processed in bounded batches. A
-timeout commits no completion receipt; retain the run, inspect the indexed query
-plans and database load, then retry with a deliberately measured maintenance
-timeout. Do not weaken or skip verification, and do not claim completion from
-the progress counters alone.
+The final database verification is exact and executes once: the completion
+event trigger checks every memory and every audit row linked to the run's
+bounded fence before appending completion. On very large per-subject histories,
+set the supported `verificationTimeoutMs` API option or
+`--verification-timeout-ms <1-300000>` admin-CLI option from measured query plans
+and database load. The default is 30 seconds. A timeout rolls back the current
+batch and commits no completion receipt; retain the run and retry. Do not weaken
+or skip verification, and do not claim completion from progress counters alone.
 
 Directly setting `principals.offboarded_at` is an internal write fence, not a
 supported offboarding operation or evidence that erasure completed. It may be
@@ -302,10 +317,11 @@ full and final partial batches without rescanning unrelated users.
 
 Production must use separate migration-owner and application roles. Drain old
 offboarding-capable API, MCP, admin, and membership-sync processes; run
-`continuum-migrate` through `0041` with `CONTINUUM_DATABASE_URL` set to the
+`continuum-migrate` through `0044_offboarding_restart_evidence.sql` with
+`CONTINUUM_DATABASE_URL` set to the
 migration owner; apply the exact grant script below; and only then start the new
 binaries with the same variable set to a non-owner application role. Do not run
-offboarding across mixed `0038`/`0039`/`0040`/`0041` application or grant versions.
+offboarding across mixed pre-`0044` and `0044` application or grant versions.
 The application role must not own the event ledger, completion-capability
 table, or security-definer functions, and receives no direct privilege on the
 capability table. Direct `completed` inserts then fail at the trigger.
@@ -326,16 +342,12 @@ completion and reactivation entry points. It explicitly revokes both
 backend-local capability tables and the selector-backfill function from the
 application role. Do not
 replace it with ownership, schema `CREATE`, broad `ALL TABLES`, or `PUBLIC`
-function execution.
-PostgreSQL still cannot bind a per-request caller to
-the administrator UUID supplied to the security-definer function. Arbitrary
-SQL running as the migration/function-owning role can present any current
-effective administrator UUID. That role, database-owner access, and later
-privileged audit mutation are trusted administrative capabilities, not
-end-user authentication boundaries. Within the supported function call, an
-effective administrator is still required, incomplete offboarding is refused,
-ordinary updates and old custom-GUC spoofing remain blocked, and the lifecycle
-change cannot commit without its lifecycle-attributed guard audit.
+function execution. The application role has no direct `UPDATE` or `DELETE` on
+`audit_log`, no insert privilege on `principal_offboarding_events`, and no path
+to create or alter a manual organization administrator. The guarded functions
+derive completion/event fields from the locked run and re-check that the
+presented actor is a current effective administrator. The migration/function
+owner remains a trusted database-administration boundary.
 
 Before each concurrent create, the migrator resolves the named index in
 `current_schema()`, drops that exact schema-qualified object concurrently only
@@ -344,10 +356,10 @@ requires the exact index to exist and be valid before the migration ledger can
 record success. A timeout or failed build leaves the file unapplied and safely
 retryable.
 
-Apply all nineteen offboarding migrations before starting the new application version. Old
+Apply migrations through `0044_offboarding_restart_evidence.sql` before starting the new application version. Old
 instances can continue ordinary traffic after `0023`, but they do not know the
 offboarding workflow and an old authenticated request may already be in flight.
-Do not invoke offboarding until all nineteen migrations are recorded on every shared
+Do not invoke offboarding until `0044_offboarding_restart_evidence.sql` is recorded on every shared
 database and all old application instances have drained. Rollback is
 application-first: stop invoking offboarding, drain the new instances, and
 deploy the old application only after `list-incomplete-offboarding` reports

@@ -9,6 +9,8 @@ const SYNC_LOCK_ID = '834641726154302119';
 export const MAX_OFFBOARD_EVIDENCE_IDS = 100;
 export const DEFAULT_OFFBOARD_BATCH_SIZE = 1_000;
 export const MAX_OFFBOARD_BATCH_SIZE = 5_000;
+export const DEFAULT_OFFBOARD_VERIFICATION_TIMEOUT_MS = 30_000;
+export const MAX_OFFBOARD_VERIFICATION_TIMEOUT_MS = 300_000;
 // Retained as a wire-compatibility constant for older operators. It is no
 // longer a whole-operation rejection threshold; execution is resumable.
 export const MAX_OFFBOARD_AFFECTED_ROWS = 50_000;
@@ -79,6 +81,7 @@ export interface OffboardingOptions {
   dryRun?: boolean;
   confirmationScopeId?: string;
   batchSize?: number;
+  verificationTimeoutMs?: number;
 }
 
 export interface IncompleteOffboardingRun {
@@ -672,6 +675,18 @@ function requestedBatchSize(value: number | undefined): number {
   return batchSize;
 }
 
+function requestedVerificationTimeout(value: number | undefined): number {
+  const timeout = value ?? DEFAULT_OFFBOARD_VERIFICATION_TIMEOUT_MS;
+  if (!Number.isSafeInteger(timeout) || timeout < 1
+      || timeout > MAX_OFFBOARD_VERIFICATION_TIMEOUT_MS) {
+    throw new ServiceError(
+      'INVALID_INPUT',
+      `verification timeout must be an integer from 1 through ${MAX_OFFBOARD_VERIFICATION_TIMEOUT_MS}`,
+    );
+  }
+  return timeout;
+}
+
 async function startOffboardingRunEvent(
   client: pg.PoolClient,
   run: Record<string, unknown>,
@@ -729,6 +744,7 @@ async function offboardPrincipalCore(
     ? { dryRun: dryRunOrOptions } : dryRunOrOptions;
   const dryRun = options.dryRun ?? false;
   const batchSize = requestedBatchSize(options.batchSize);
+  const verificationTimeoutMs = requestedVerificationTimeout(options.verificationTimeoutMs);
   const confirmationScopeId = options.confirmationScopeId === undefined
     ? undefined : id(options.confirmationScopeId, 'confirmation scope id');
   const client = await pool.connect();
@@ -966,14 +982,17 @@ async function offboardPrincipalCore(
     if (alreadyOffboarded) { await client.query('COMMIT'); return baseResult; }
 
     if (runCompleted) {
-      run = await writeOffboardingRun(client, principalId, actor.id, 'restart', {
-        approval_id: approvalId, approval_evidence_hash: acknowledgedEvidenceHash,
-        initial_memories: memories, initial_embeddings: embeddings,
-        initial_memberships: memberships, initial_aliases: aliases,
-        initial_entra_bindings: entraBindings, initial_audit_rows: auditRows,
-        initial_audit_queries: auditQueries, initial_audit_selection: audit.selection,
-        initial_count_truncated: truncated,
-      });
+      run = await client.query(
+        `SELECT * FROM continuum_restart_offboarding_run($1, $2, $3::jsonb)`,
+        [principalId, actor.id, JSON.stringify({
+          approval_id: approvalId, approval_evidence_hash: acknowledgedEvidenceHash,
+          initial_memories: memories, initial_embeddings: embeddings,
+          initial_memberships: memberships, initial_aliases: aliases,
+          initial_entra_bindings: entraBindings, initial_audit_rows: auditRows,
+          initial_audit_queries: auditQueries, initial_audit_selection: audit.selection,
+          initial_count_truncated: truncated,
+        })],
+      );
     } else if (!run.rowCount) {
       run = await writeOffboardingRun(client, principalId, actor.id, 'create', {
         scope_id: scopeId, approval_id: approvalId,
@@ -985,13 +1004,19 @@ async function offboardPrincipalCore(
       });
     }
 
-    await startOffboardingRunEvent(
-      client, run.rows[0], String(run.rows[0].initiated_by), {
-        ...evidence,
-        countPreview: countEvidence,
-        repair: wasOffboarded || originalOffboarding !== null,
-      },
-    );
+    if (resumedRun) {
+      await client.query('SELECT continuum_resume_offboarding_run($1, $2)', [
+        run.rows[0].run_id, actor.id,
+      ]);
+    } else {
+      await startOffboardingRunEvent(
+        client, run.rows[0], actor.id, {
+          ...evidence,
+          countPreview: countEvidence,
+          repair: wasOffboarded || originalOffboarding !== null,
+        },
+      );
+    }
     let membershipCount = 0;
     let entraCount = 0;
     let aliasCount = 0;
@@ -1134,17 +1159,15 @@ async function offboardPrincipalCore(
         principalId, actorId: actor.id, remaining: batchSize - auditBatch,
       });
     }
-    const auditedRows = Number((await client.query(
-      'SELECT count(*)::int AS count FROM offboarding_audit_targets',
-    )).rows[0].count);
-    const auditedQueries = Number((await client.query(
-      'SELECT count(*)::int AS count FROM audit_log a JOIN offboarding_audit_targets t ON t.id = a.id WHERE a.query IS NOT NULL',
-    )).rows[0].count);
-    await client.query(
-      `UPDATE audit_log a SET query = NULL,
-              metadata = ${AUDIT_EXPECTED_METADATA}
-         FROM offboarding_audit_targets t WHERE t.id = a.id`,
+    const redaction = await client.query(
+      `SELECT * FROM continuum_redact_offboarding_audit(
+         $1, $2,
+         ARRAY(SELECT id FROM offboarding_audit_targets ORDER BY id)::bigint[]
+       )`,
+      [principalId, actor.id],
     );
+    const auditedRows = Number(redaction.rows[0]?.redacted_rows ?? 0);
+    const auditedQueries = Number(redaction.rows[0]?.redacted_queries ?? 0);
 
     const currentRun = await client.query(
       `SELECT memory_cursor, audit_principal_cursor, audit_scope_cursor,
@@ -1179,6 +1202,10 @@ async function offboardPrincipalCore(
         [progressRow.run_id],
       );
       const repair = startedEvidence.rows[0]?.repair === 'true';
+      await client.query(
+        `SELECT set_config('statement_timeout', $1, TRUE)`,
+        [`${verificationTimeoutMs}ms`],
+      );
       await finalizeOffboardingRun(client, progressRow, actor.id, {
         run_id: progressRow.run_id,
         initiated_by: progressRow.initiated_by,
@@ -1195,18 +1222,7 @@ async function offboardPrincipalCore(
         audit_queries_processed: Number(progressRow.audit_queries_processed),
         batches: Number(progressRow.batches),
       });
-      await client.query(
-        `INSERT INTO principal_offboarding_events
-           (principal_id, scope_id, actor_principal_id, repair, memories, embeddings,
-            memberships, aliases, entra_bindings, audit_rows, audit_queries,
-            approval_id, batches, evidence)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb)`,
-        [principalId, scopeId, actor.id, repair, progressRow.memories_processed,
-          progressRow.embeddings_processed, progressRow.memberships_processed,
-          progressRow.aliases_processed, progressRow.entra_bindings_processed,
-          progressRow.audit_rows_processed, progressRow.audit_queries_processed,
-          approvalId, progressRow.batches, JSON.stringify(evidence)],
-      );
+      await client.query('SELECT continuum_record_offboarding_event($1)', [progressRow.run_id]);
       await client.query(
         `INSERT INTO audit_log (principal_id, action, scope_id, metadata)
          VALUES ($1, 'archive', $2, $3::jsonb)`,

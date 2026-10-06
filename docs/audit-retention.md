@@ -101,17 +101,18 @@ Run this command as the documented non-owner Continuum application role after
 applying `scripts/grant-application-role.sql`, never as the migration/function
 owner. The configured principal supplies the audited org-admin identity; the
 database role supplies only the least-privilege execution boundary.
-The grant script includes `DELETE` on `audit_log` because bounded retention
-cannot otherwise perform its documented mutation; it does not grant table
-ownership, `TRUNCATE`, or any privilege on the offboarding capability tables.
+The application role has no `UPDATE`, `DELETE`, or `TRUNCATE` privilege on
+`audit_log`. It can execute only the guarded retention function, which rechecks
+the current administrator, strict cutoff, exact exported rows, preserved
+offboarding evidence, and batch bounds before deleting and writing the summary.
 
 Only one runner can hold the dedicated advisory lock. Successful batches delete
 exactly their selected IDs and verify the deleted values still byte-match the
 selected export candidate. A concurrent row change rolls the delete back. The
 runner then writes one sanitized `action='archive'` summary in the same
-transaction. The summary includes the cutoff, ID and time
-range, row count, run and batch identifiers, and only the export basename and
-digest. It never includes raw queries, metadata, payloads, or credentials.
+transaction. The immutable summary includes the cutoff, ID and time range, row
+count, run and batch identifiers, export mode, and digest. It never includes raw
+queries, metadata, payloads, credentials, or a host path.
 
 Keep normal autovacuum enabled and monitor dead tuples, table size, command
 duration, and replica lag. Increase limits only from measured evidence. This
