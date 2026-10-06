@@ -235,6 +235,26 @@ describe('offboarding and erasure', () => {
     )).rows).toEqual([{ audit_queries: 2 }]);
   });
 
+  it('refuses erasure until the historical selector watermark is complete', async () => {
+    const value = await fixture();
+    await pool.query(
+      `UPDATE audit_log_offboarding_backfill_state SET completed = FALSE
+        WHERE singleton = TRUE`,
+    );
+    try {
+      await expect(offboardPrincipal(pool, value.admin, value.target.id))
+        .rejects.toThrow(/selector backfill is incomplete/i);
+      expect((await pool.query(
+        `SELECT offboarded_at FROM principals WHERE id = $1`, [value.target.id],
+      )).rows[0].offboarded_at).toBeNull();
+    } finally {
+      await pool.query(
+        `UPDATE audit_log_offboarding_backfill_state SET completed = TRUE,
+                cursor_id = fence_id WHERE singleton = TRUE`,
+      );
+    }
+  });
+
   it('uses the online audit indexes for each metadata selection branch', async () => {
     const value = await fixture();
     await pool.query(
@@ -346,7 +366,7 @@ describe('offboarding and erasure', () => {
         `selector.selector_kind = 'scope_ids' AND selector.scope_id = $1`,
       )).toMatch(/ORDER BY selector\.audit_id LIMIT/);
       expect(offboardingLinkedAuditSql()).toMatch(
-        /JOIN LATERAL[\s\S]*a\.id > CASE[\s\S]*ORDER BY a\.id LIMIT/,
+        /\(a\.metadata->>'request_id', a\.id\)[\s\S]*> \(COALESCE\(\$2, ''\), \$3::bigint\)/,
       );
       expect(await explain(
         `SELECT request_id FROM principal_offboarding_audit_requests

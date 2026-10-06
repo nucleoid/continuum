@@ -401,11 +401,12 @@ export function offboardingAuditBranchSql(
   if (reason === 'memory' || reason === 'linked_request') {
     throw new Error(`${reason} uses its durable compound cursor selector`);
   }
+  const cursor = reason === 'scope_ids' ? 'selector.audit_id' : 'a.id';
   return `WITH candidates AS MATERIALIZED (
        SELECT a.* ${from}
-        WHERE a.id > $4 AND a.id <= $7
+        WHERE ${cursor} > $4 AND ${cursor} <= $7
           AND $1::uuid IS NOT NULL AND $2::uuid IS NOT NULL AND ${where}
-        ORDER BY a.id LIMIT $5
+        ORDER BY ${cursor} LIMIT $5
      ), requests AS (
        INSERT INTO principal_offboarding_audit_requests (principal_id, request_id)
        SELECT DISTINCT $2, a.metadata->>'request_id'
@@ -482,14 +483,15 @@ export function offboardingMemoryAuditSql(): string {
 export function offboardingLinkedAuditSql(): string {
   return `WITH candidates AS MATERIALIZED (
        SELECT a.*, request.request_id
-         FROM principal_offboarding_audit_requests request
-         JOIN audit_log a
-           ON a.metadata ? 'request_id'
-          AND a.metadata->>'request_id' = request.request_id
-        WHERE request.principal_id = $1
-          AND (request.request_id, a.id) > (COALESCE($2, ''), $3)
+         FROM audit_log a
+         JOIN principal_offboarding_audit_requests request
+           ON request.principal_id = $1
+          AND request.request_id = a.metadata->>'request_id'
+        WHERE a.metadata ? 'request_id'
+          AND (a.metadata->>'request_id', a.id)
+              > (COALESCE($2, ''), $3::bigint)
           AND a.id <= $6
-        ORDER BY request.request_id, a.id LIMIT $5
+        ORDER BY a.metadata->>'request_id', a.id LIMIT $5
      ), selected AS (
        SELECT a.id, a.request_id FROM candidates a
         WHERE ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED.replace('$3', '$4')}
@@ -746,6 +748,14 @@ async function offboardPrincipalCore(
       await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [SYNC_LOCK_ID]);
     }
     await requireOrgAdmin(client, actor.id);
+    const selectorBackfill = await client.query(
+      `SELECT completed FROM audit_log_offboarding_backfill_state WHERE singleton = TRUE`,
+    );
+    if (selectorBackfill.rows[0]?.completed !== true) {
+      throw new ServiceError(
+        'CONFLICT', 'offboarding selector backfill is incomplete; finish migrations before erasure',
+      );
+    }
     const target = await client.query(
       `SELECT id, display_name, disabled_at, offboarded_at, reactivated_at
          FROM principals WHERE id = $1 AND kind = 'user'${dryRun ? '' : ' FOR UPDATE'}`, [principalId],
@@ -805,7 +815,7 @@ async function offboardPrincipalCore(
     )) {
       throw new ServiceError('CONFLICT', 'owned-scope acknowledgement evidence hash is invalid');
     }
-    const ownership = resumedRun ? (await client.query(
+    const ownership = (resumedRun || runCompleted) ? (await client.query(
       `SELECT evidence FROM principal_offboarding_run_events
         WHERE run_id = $1 AND phase = 'started'`, [run.rows[0].run_id],
     )).rows[0].evidence as Omit<OffboardingEvidence,
@@ -826,7 +836,26 @@ async function offboardPrincipalCore(
       ? !auditCursorsExhausted(
         run.rows[0] as RunAuditState,
       ) : false;
-    const state = resumedRun ? null : await client.query(
+    const state = resumedRun ? null : runCompleted ? await client.query(
+      `SELECT
+         (EXISTS (SELECT 1 FROM memories WHERE scope_id = $1 AND (
+           type <> 'context' OR title <> '[erased]' OR body <> '[erased]'
+           OR metadata <> '{}'::jsonb OR tags <> '{}'::text[] OR source <> 'erased'
+           OR source_ref IS NOT NULL OR state <> 'archived' OR supersedes_id IS NOT NULL
+           OR promoted_to_id IS NOT NULL OR expires_at IS NOT NULL OR last_verified IS NOT NULL
+         )))::int AS dirty_memories,
+         (EXISTS (SELECT 1 FROM memories WHERE scope_id = $1 AND state = 'live'))::int
+           AS live_memories,
+         (EXISTS (SELECT 1 FROM memories WHERE scope_id = $1))::int AS memories,
+         (EXISTS (SELECT 1 FROM memory_embeddings embedding JOIN memories memory
+           ON memory.id = embedding.memory_id WHERE memory.scope_id = $1))::int AS embeddings,
+         (EXISTS (SELECT 1 FROM scope_memberships
+           WHERE scope_id = $1 AND active))::int AS memberships,
+         (EXISTS (SELECT 1 FROM principal_aliases WHERE principal_id = $2))::int AS aliases,
+         (EXISTS (SELECT 1 FROM entra_groups WHERE scope_id = $1
+           AND (active OR approval_revoked_at IS NULL)))::int AS entra_bindings`,
+      [scopeId, principalId],
+    ) : await client.query(
       `SELECT
          (SELECT count(*)::int FROM (SELECT 1 FROM memories WHERE scope_id = $1 LIMIT $3) x) AS memories,
          (SELECT count(*)::int FROM (SELECT 1 FROM memories WHERE scope_id = $1 AND state = 'live' LIMIT $3) x) AS live_memories,

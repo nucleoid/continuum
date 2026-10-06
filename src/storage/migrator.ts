@@ -12,6 +12,7 @@ const CONTINUUM_MIGRATION_LOCK_ID = '7215328273579717613';
 const NO_TRANSACTION_MARKER = '-- continuum:no-transaction';
 const REPAIR_INVALID_INDEX = '-- continuum:repair-invalid-index ';
 const REQUIRE_VALID_INDEX = '-- continuum:require-valid-index ';
+const BACKFILL_OFFBOARDING_SELECTORS = '-- continuum:backfill-offboarding-selectors';
 const REVIEW_ENTRA_MIGRATION_RENAMES = [
   ['0005_entra_auth.sql', '0010_entra_auth.sql'],
   ['0006_entra_binding_approval.sql', '0011_entra_binding_approval.sql'],
@@ -69,6 +70,16 @@ async function indexState(
 async function runNonTransactionalStatement(
   client: pg.PoolClient, statement: string,
 ): Promise<void> {
+  if (statement.split(/\r?\n/).some(
+    (line) => line.trim() === BACKFILL_OFFBOARDING_SELECTORS,
+  )) {
+    for (;;) {
+      const result = await client.query<{ completed: boolean }>(
+        `SELECT continuum_backfill_audit_offboarding_scopes(1000) AS completed`,
+      );
+      if (result.rows[0]?.completed === true) return;
+    }
+  }
   const repairName = directiveIndexName(statement, REPAIR_INVALID_INDEX);
   if (repairName) {
     const state = await indexState(client, repairName);

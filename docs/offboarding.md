@@ -217,14 +217,26 @@ Migration `0033_offboarding_bounded_selectors.sql` installs the normalized
 ordered selector relation and insert trigger, durable memory/scope phases,
 batched linked traversal support, immutable owner mapping identity, a guarded
 completion capability, hardened `SECURITY DEFINER` search paths with `pg_temp`
-last, and the reduced embedding lock. Its historical selector backfill is
-transactional: a timeout leaves the migration unapplied and a retry safely
-repeats it. Existing incomplete runs whose linked phase began too early are
-rewound to the idempotent linked cursor before the phase guard resumes.
+last, and the reduced embedding lock. It does not copy audit history in that
+schema/trigger transaction. Instead it records an immutable high-water fence
+and installs `continuum_backfill_audit_offboarding_scopes(batch_size)`; the
+migrator advances that history in ordered batches of 1,000, each in its own
+transaction. The insert trigger synchronously captures rows above the fence.
+Offboarding refuses to begin, and database completion refuses to append its
+receipt, until the completion watermark is true. Existing incomplete
+round-seven runs have their normalized memory, `scope_ids`, and linked cursors
+rewound because those review-era cursors cannot prove coverage of the new
+relation. Completed immutable receipts are preserved.
 Migration `0034_offboarding_completion_invariants.sql` is an upgrade-safe
 replacement of the completion function and phase trigger: it verifies every
 durable phase and exact cumulative receipt field inside the database before a
-`completed` event can be appended.
+`completed` event can be appended. Migration
+`0035_offboarding_selector_cursor_indexes.sql` builds both selective cursor
+indexes concurrently, verifies that each is valid, and drives the resumable
+selector backfill before recording itself. Migrations `0036` and `0037` safely
+translate an installation that had already applied the rejected round-seven
+0033/0035 pair: the old blocking copy is recognized as caught up, incomplete
+run cursors are rewound, and the same bounded finisher is invoked.
 
 Production must use separate migration-owner and application roles. Run
 `continuum-migrate` with `CONTINUUM_DATABASE_URL` set to the migration owner,
@@ -232,6 +244,21 @@ then start Continuum with the same variable set to a non-owner application
 role. The application role must not own the event ledger, completion-capability
 table, or security-definer functions, and receives no direct privilege on the
 capability table. Direct `completed` inserts then fail at the trigger.
+Apply the repository's exact offboarding grants after migration (the role must
+already exist and must not own the schema or functions):
+
+```sh
+psql "$CONTINUUM_MIGRATION_OWNER_URL" \
+  --set=continuum_schema=public \
+  --set=continuum_app_role=continuum_app \
+  --file=scripts/grant-application-role.sql
+```
+
+The script enumerates the required tables, sequences, and the completion and
+reactivation entry points. It explicitly revokes both backend-local capability
+tables and the selector-backfill function from the application role. Do not
+replace it with ownership, schema `CREATE`, broad `ALL TABLES`, or `PUBLIC`
+function execution.
 PostgreSQL still cannot bind a per-request caller to
 the administrator UUID supplied to the security-definer function. Arbitrary
 SQL running as the migration/function-owning role can present any current
@@ -249,10 +276,10 @@ requires the exact index to exist and be valid before the migration ledger can
 record success. A timeout or failed build leaves the file unapplied and safely
 retryable.
 
-Apply all thirteen offboarding migrations before starting the new application version. Old
+Apply all sixteen offboarding migrations before starting the new application version. Old
 instances can continue ordinary traffic after `0023`, but they do not know the
 offboarding workflow and an old authenticated request may already be in flight.
-Do not invoke offboarding until all thirteen migrations are recorded on every shared
+Do not invoke offboarding until all sixteen migrations are recorded on every shared
 database and all old application instances have drained. Rollback is
 application-first: stop invoking offboarding, drain the new instances, and
 deploy the old application only after `list-incomplete-offboarding` reports

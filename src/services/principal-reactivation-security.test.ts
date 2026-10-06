@@ -57,17 +57,94 @@ describe('principal reactivation database trust boundary', () => {
       join(process.cwd(), 'scripts/grant-application-role.sql'), 'utf8',
     );
     expect(grants).toMatch(
-      /GRANT EXECUTE ON FUNCTION continuum_complete_offboarding_run\(UUID, UUID, JSONB\)/i,
+      /GRANT EXECUTE ON FUNCTION[\s\S]*continuum_complete_offboarding_run\(UUID, UUID, JSONB\)/i,
     );
     expect(grants).toMatch(
-      /GRANT EXECUTE ON FUNCTION continuum_reactivate_principal\(UUID, UUID\)/i,
+      /GRANT EXECUTE ON FUNCTION[\s\S]*continuum_reactivate_principal\(UUID, UUID\)/i,
     );
     expect(grants).toMatch(
-      /REVOKE ALL ON TABLE continuum_offboarding_completion_requests/i,
+      /REVOKE ALL ON TABLE[^\n]*continuum_offboarding_completion_requests/i,
     );
     expect(grants).toMatch(
-      /REVOKE ALL ON TABLE continuum_principal_reactivation_requests/i,
+      /REVOKE ALL ON TABLE[^\n]*continuum_principal_reactivation_requests/i,
     );
+    expect(grants).toMatch(
+      /GRANT SELECT, INSERT, UPDATE ON TABLE[\s\S]*principal_offboarding_runs/i,
+    );
+    expect(grants).toMatch(
+      /GRANT SELECT, INSERT ON TABLE[\s\S]*principal_offboarding_run_events/i,
+    );
+    expect(grants).toMatch(
+      /GRANT SELECT, INSERT, UPDATE ON TABLE[\s\S]*principal_offboarding_runs/i,
+    );
+    expect(grants).toMatch(
+      /GRANT SELECT, INSERT ON TABLE[\s\S]*principal_offboarding_run_events/i,
+    );
+  });
+
+  it('supports lifecycle functions as a separately granted non-owner role', async () => {
+    const { admin, target } = await fixture(pool);
+    const role = `continuum_app_test_${Date.now()}`;
+    const quotedRole = `"${role}"`;
+    await pool.query(`CREATE ROLE ${quotedRole} NOLOGIN`);
+    try {
+      await pool.query(`GRANT ${quotedRole} TO CURRENT_USER`);
+      await pool.query(`GRANT USAGE ON SCHEMA public TO ${quotedRole}`);
+      await pool.query(`GRANT EXECUTE ON FUNCTION
+        continuum_complete_offboarding_run(UUID, UUID, JSONB),
+        continuum_reactivate_principal(UUID, UUID) TO ${quotedRole}`);
+      await pool.query(`REVOKE ALL ON TABLE
+        continuum_offboarding_completion_requests,
+        continuum_principal_reactivation_requests FROM ${quotedRole}`);
+
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(`SET LOCAL ROLE ${quotedRole}`);
+        expect((await client.query(
+          `SELECT current_user <> tableowner AS non_owner
+             FROM pg_tables WHERE schemaname = current_schema()
+              AND tablename = 'principal_offboarding_runs'`,
+        )).rows[0].non_owner).toBe(true);
+        expect((await client.query(
+          `SELECT has_function_privilege(current_user,
+                    'continuum_complete_offboarding_run(uuid,uuid,jsonb)', 'EXECUTE')
+                    AS complete_execute,
+                  has_function_privilege(current_user,
+                    'continuum_reactivate_principal(uuid,uuid)', 'EXECUTE')
+                    AS reactivate_execute,
+                  has_table_privilege(current_user,
+                    'continuum_offboarding_completion_requests', 'INSERT')
+                    AS forge_completion,
+                  has_table_privilege(current_user,
+                    'continuum_principal_reactivation_requests', 'INSERT')
+                    AS forge_reactivation`,
+        )).rows[0]).toEqual({
+          complete_execute: true, reactivate_execute: true,
+          forge_completion: false, forge_reactivation: false,
+        });
+        await expect(client.query(
+          `INSERT INTO continuum_offboarding_completion_requests
+             (run_id, backend_pid, transaction_id)
+           VALUES (gen_random_uuid(), pg_backend_pid(), txid_current())`,
+        )).rejects.toThrow(/permission denied/i);
+        await client.query('ROLLBACK');
+
+        await client.query('BEGIN');
+        await client.query(`SET LOCAL ROLE ${quotedRole}`);
+        await expect(client.query(
+          `SELECT continuum_reactivate_principal($1::uuid, $2::uuid)`,
+          [target.id, admin.id],
+        )).resolves.toBeDefined();
+        await client.query('ROLLBACK');
+      } finally {
+        client.release();
+      }
+    } finally {
+      await pool.query(`DROP OWNED BY ${quotedRole}`);
+      await pool.query(`REVOKE ${quotedRole} FROM CURRENT_USER`);
+      await pool.query(`DROP ROLE ${quotedRole}`);
+    }
   });
 
   it('attributes direct capability use to the lifecycle guard, not the presented administrator', async () => {

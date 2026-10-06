@@ -36,6 +36,10 @@ BEGIN
        AND (completion_evidence->>'audit_rows_processed')::integer = run.audit_rows_processed
        AND (completion_evidence->>'audit_queries_processed')::integer = run.audit_queries_processed
        AND (completion_evidence->>'batches')::integer = run.batches
+       AND EXISTS (
+         SELECT 1 FROM audit_log_offboarding_backfill_state backfill
+          WHERE backfill.singleton = TRUE AND backfill.completed
+       )
   ) THEN
     RAISE EXCEPTION 'offboarding completion requires exhausted phases and exact receipt evidence';
   END IF;

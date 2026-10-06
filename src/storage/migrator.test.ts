@@ -104,13 +104,15 @@ describe('runMigrations', () => {
     const pool = schemaPool(schema);
     try {
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-6).map((migration) => migration.name)).toEqual([
+      expect(applied.slice(-8).map((migration) => migration.name)).toEqual([
         '0030_offboarding_round7_integrity.sql',
         '0031_offboarding_round7_indexes.sql',
         '0032_offboarding_round7_compatibility.sql',
         '0033_offboarding_bounded_selectors.sql',
         '0034_offboarding_completion_invariants.sql',
         '0035_offboarding_selector_cursor_indexes.sql',
+        '0036_offboarding_round8_upgrade.sql',
+        '0037_offboarding_round8_online_finish.sql',
       ]);
       expect((await pool.query(
         `SELECT indisvalid AS valid FROM pg_index
@@ -204,6 +206,33 @@ describe('runMigrations', () => {
          VALUES ($1, 'read', $2, $3::jsonb)`,
         [principalId, memoryId, JSON.stringify({ scope_ids: [scopeId] })],
       );
+      await pool.query(
+        `INSERT INTO principal_user_scopes
+           (principal_id, scope_id, mapped_by, acknowledged_principal_ids,
+            acknowledged_evidence_hash)
+         VALUES ($1, $2, $1, '{}', repeat('0', 64))`, [principalId, scopeId],
+      );
+      const approvalId = (await pool.query(
+        `INSERT INTO principal_user_scope_approvals
+           (principal_id, scope_id, approved_by, acknowledged_principal_ids,
+            acknowledged_evidence_hash)
+         VALUES ($1, $2, $1, '{}', repeat('0', 64)) RETURNING id`,
+        [principalId, scopeId],
+      )).rows[0].id;
+      await pool.query(
+        `INSERT INTO principal_offboarding_runs
+           (principal_id, scope_id, initiated_by, approval_id,
+            initial_memories, initial_embeddings, initial_memberships,
+            initial_aliases, initial_entra_bindings, initial_audit_rows,
+            initial_audit_queries, audit_fence_id, audit_memory_cursor,
+            audit_scope_ids_cursor, audit_linked_cursor,
+            audit_memory_item_cursor, audit_memory_complete,
+            audit_linked_request_cursor, audit_linked_request_item_cursor,
+            audit_linked_complete)
+         VALUES ($1, $2, $1, $3, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1,
+                 1, TRUE, 'old-request', 1, TRUE)`,
+        [principalId, scopeId, approvalId],
+      );
       await copyFile(
         new URL('0033_offboarding_bounded_selectors.sql', source),
         join(directory, '0033_offboarding_bounded_selectors.sql'),
@@ -213,12 +242,45 @@ describe('runMigrations', () => {
         expect.objectContaining({ name: '0033_offboarding_bounded_selectors.sql' }),
       ]);
       expect((await pool.query(
+        `SELECT cursor_id::text, completed
+           FROM audit_log_offboarding_backfill_state WHERE singleton = TRUE`,
+      )).rows).toEqual([{ cursor_id: '0', completed: false }]);
+      expect((await pool.query(
+        `SELECT audit_memory_cursor::text, audit_scope_ids_cursor::text,
+                audit_memory_item_cursor::text, audit_memory_complete,
+                audit_linked_request_cursor, audit_linked_complete
+           FROM principal_offboarding_runs WHERE principal_id = $1`, [principalId],
+      )).rows).toEqual([{
+        audit_memory_cursor: '0', audit_scope_ids_cursor: '0',
+        audit_memory_item_cursor: '0', audit_memory_complete: false,
+        audit_linked_request_cursor: null, audit_linked_complete: false,
+      }]);
+      expect((await pool.query(
+        `SELECT count(*)::int AS count FROM audit_log_offboarding_scopes`,
+      )).rows[0].count).toBe(0);
+      await copyFile(
+        new URL('0034_offboarding_completion_invariants.sql', source),
+        join(directory, '0034_offboarding_completion_invariants.sql'),
+      );
+      await copyFile(
+        new URL('0035_offboarding_selector_cursor_indexes.sql', source),
+        join(directory, '0035_offboarding_selector_cursor_indexes.sql'),
+      );
+      await expect(runMigrations(pool, directory)).resolves.toEqual([
+        expect.objectContaining({ name: '0034_offboarding_completion_invariants.sql' }),
+        expect.objectContaining({ name: '0035_offboarding_selector_cursor_indexes.sql' }),
+      ]);
+      expect((await pool.query(
         `SELECT selector_kind, scope_id::text
            FROM audit_log_offboarding_scopes ORDER BY selector_kind`,
       )).rows).toEqual([
         { selector_kind: 'memory', scope_id: scopeId },
         { selector_kind: 'scope_ids', scope_id: scopeId },
       ]);
+      expect((await pool.query(
+        `SELECT cursor_id = fence_id AS caught_up, completed
+           FROM audit_log_offboarding_backfill_state WHERE singleton = TRUE`,
+      )).rows).toEqual([{ caught_up: true, completed: true }]);
       await expect(runMigrations(pool, directory)).resolves.toEqual([]);
     } finally {
       await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
@@ -732,6 +794,35 @@ describe('runMigrations', () => {
     expect(drop).toBeGreaterThan(-1);
     expect(index).toBeGreaterThan(drop);
     expect(ledger).toBeGreaterThan(index);
+  });
+
+  it('runs a commented selector-backfill directive until its watermark completes', async () => {
+    let batches = 0;
+    const client = {
+      query: vi.fn(async (query: string) => {
+        if (query.includes('SELECT 1 FROM _continuum_migrations')) {
+          return { rowCount: 0, rows: [] };
+        }
+        if (query.includes('continuum_backfill_audit_offboarding_scopes')) {
+          batches += 1;
+          return { rowCount: 1, rows: [{ completed: batches === 2 }] };
+        }
+        if (query.includes('pg_advisory_unlock')) {
+          return { rowCount: 1, rows: [{ unlocked: true }] };
+        }
+        return { rowCount: 1, rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    const directory = await migrationDirectory(
+      `-- continuum:no-transaction
+-- explanatory rollout comment
+-- continuum:backfill-offboarding-selectors;`,
+    );
+
+    await runMigrations({ connect: vi.fn(async () => client) } as unknown as pg.Pool, directory);
+
+    expect(batches).toBe(2);
   });
 
   it('drops only an invalid exact-schema index and verifies the replacement before ledgering', async () => {
