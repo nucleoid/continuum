@@ -358,7 +358,7 @@ describe('offboarding and erasure', () => {
         [value.personal.id, value.target.id, [], 0, 100,
           9_223_372_036_854_775_807n],
       )).toContain('audit_log_offboarding_memory_cursor_idx');
-      expect(await explainAnalyze(
+      const scopeIdsPlan = await explainAnalyze(
         offboardingAuditBranchSql(
           'scope_ids',
           `FROM audit_log_offboarding_scopes selector
@@ -367,7 +367,16 @@ describe('offboarding and erasure', () => {
         ),
         [value.shared.id, value.target.id, [], scopeIdsMidCursor, 100, 'scope_ids',
           9_223_372_036_854_775_807n],
-      )).toContain('audit_log_offboarding_scope_ids_cursor_idx');
+      );
+      const scopeIdsIndexAccess = scopeIdsPlan.match(
+        /"Node Type":"Index(?: Only)? Scan"[^{}]*"Index Name":"(audit_log_offboarding_scope_ids_cursor_idx|audit_log_offboarding_scopes_pkey)"[^{}]*"Index Cond":"([^"]+)"/,
+      );
+      expect(scopeIdsIndexAccess).not.toBeNull();
+      const [, scopeIdsIndexName, scopeIdsIndexCond] = scopeIdsIndexAccess!;
+      expect(scopeIdsIndexCond).toMatch(/scope_id = .*audit_id > .*audit_id <=/);
+      if (scopeIdsIndexName === 'audit_log_offboarding_scopes_pkey') {
+        expect(scopeIdsIndexCond).toMatch(/selector_kind = 'scope_ids'/);
+      }
       const linkedPlan = await explainAnalyze(
         offboardingLinkedAuditSql(),
         [value.target.id, 'production-request', 9_223_372_036_854_775_807n, [], 100,
@@ -579,7 +588,7 @@ describe('offboarding and erasure', () => {
     });
   });
 
-  it('labels capped previews as lower bounds and records exact cumulative completion counts', async () => {
+  it('labels capped previews as lower bounds and marks cumulative completion counts application-reported', async () => {
     const value = await fixture();
     await pool.query(
       `INSERT INTO memories (id, scope_id, type, title, body, author_id, source)
@@ -619,8 +628,12 @@ describe('offboarding and erasure', () => {
       `SELECT evidence FROM principal_offboarding_run_events
         WHERE principal_id = $1 AND phase = 'completed'`, [value.target.id],
     )).rows[0].evidence).toMatchObject({
-      counts_exact: true, memories_processed: 4,
-      audit_rows_processed: 3, audit_queries_processed: 3,
+      completion_basis: 'database_verified_erasure',
+      attribution_basis: 'application_supplied_effective_org_admin',
+      telemetry: {
+        trust: 'application_reported', memories_processed: 4,
+        audit_rows_processed: 3, audit_queries_processed: 3,
+      },
     });
   });
 
@@ -1406,7 +1419,7 @@ describe('offboarding and erasure', () => {
     await expect(pool.query(
       `SELECT continuum_complete_offboarding_run($1, $2, '{}'::jsonb)`,
       [run.run_id, value.admin.id],
-    )).rejects.toThrow(/exhausted phases and exact receipt/i);
+    )).rejects.toThrow(/verified erasure and the initiating effective org administrator/i);
     expect((await pool.query(
       `SELECT count(*)::int AS count FROM principal_offboarding_run_events
         WHERE run_id = $1 AND phase = 'completed'`, [run.run_id],

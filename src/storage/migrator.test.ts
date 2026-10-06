@@ -29,6 +29,22 @@ function schemaPool(schema: string): pg.Pool {
   return pool;
 }
 
+async function grantApplicationRole(
+  pool: pg.Pool,
+  schema: string,
+  role: string,
+): Promise<void> {
+  const source = await readFile(
+    join(process.cwd(), 'scripts/grant-application-role.sql'), 'utf8',
+  );
+  const sql = source.split(/\r?\n/)
+    .filter((line) => !line.trimStart().startsWith('\\'))
+    .join('\n')
+    .replaceAll(':"continuum_schema"', `"${schema}"`)
+    .replaceAll(':"continuum_app_role"', `"${role}"`);
+  await pool.query(sql);
+}
+
 afterEach(async () => {
   await Promise.all(pools.splice(0).map((pool) => pool.end()));
   await Promise.all(
@@ -110,7 +126,7 @@ describe('runMigrations', () => {
         $$;
       `);
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-11).map((migration) => migration.name)).toEqual([
+      expect(applied.slice(-12).map((migration) => migration.name)).toEqual([
         '0030_offboarding_round7_integrity.sql',
         '0031_offboarding_round7_indexes.sql',
         '0032_offboarding_round7_compatibility.sql',
@@ -122,6 +138,7 @@ describe('runMigrations', () => {
         '0038_offboarding_search_path_hardening.sql',
         '0039_offboarding_completion_state.sql',
         '0040_offboarding_post_completion_integrity.sql',
+        '0041_offboarding_completion_trust.sql',
       ]);
       expect((await pool.query(
         `SELECT indisvalid AS valid FROM pg_index
@@ -299,18 +316,24 @@ describe('runMigrations', () => {
     }
   }, 60_000);
   it('applies completion and integrity hardening after ledgered 0038 and 0039', async () => {
-    const schema = `migrator_offboarding_0039_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const suffix = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const schema = `migrator_offboarding_0039_${suffix}`;
+    const role = `continuum_upgrade_app_${suffix}`;
+    const quotedRole = `"${role}"`;
     const admin = new pg.Pool({ connectionString: DATABASE_URL });
     pools.push(admin);
     await admin.query(`CREATE SCHEMA ${schema}`);
     const pool = schemaPool(schema);
+    let rolePool: pg.Pool | undefined;
+    let roleCreated = false;
     const directory = await mkdtemp(join(tmpdir(), 'continuum-offboarding-0039-'));
     directories.push(directory);
     const source = new URL('../../migrations/', import.meta.url);
     const files = (await readdir(source)).filter((file) => file.endsWith('.sql')).sort();
     for (const file of files.filter((name) =>
       name !== '0039_offboarding_completion_state.sql'
-      && name !== '0040_offboarding_post_completion_integrity.sql')) {
+      && name !== '0040_offboarding_post_completion_integrity.sql'
+      && name !== '0041_offboarding_completion_trust.sql')) {
       if (file === '0038_offboarding_search_path_hardening.sql') {
         await copyFile(
           new URL(
@@ -326,12 +349,175 @@ describe('runMigrations', () => {
     try {
       const oldApplied = await runMigrations(pool, directory);
       expect(oldApplied.at(-1)?.name).toBe('0038_offboarding_search_path_hardening.sql');
+      const orgScopeId = (await pool.query(
+        `SELECT id FROM scopes WHERE kind = 'org' AND name = ''`,
+      )).rows[0].id as string;
+      const adminId = (await pool.query(
+        `INSERT INTO principals (id, external_id, kind, display_name)
+         VALUES (gen_random_uuid(), 'upgrade-admin', 'user', 'Upgrade admin')
+         RETURNING id`,
+      )).rows[0].id as string;
+      await pool.query(
+        `INSERT INTO scope_memberships (principal_id, scope_id, role)
+         VALUES ($1, $2, 'admin')`,
+        [adminId, orgScopeId],
+      );
+
+      const seedRun = async (name: string, completed: boolean) => {
+        const principalId = (await pool.query(
+          `INSERT INTO principals (id, external_id, kind, display_name)
+           VALUES (gen_random_uuid(), $1, 'user', $2) RETURNING id`,
+          [`upgrade-${name}`, `Upgrade ${name}`],
+        )).rows[0].id as string;
+        const scopeId = (await pool.query(
+          `INSERT INTO scopes (id, kind, name)
+           VALUES (gen_random_uuid(), 'user', $1) RETURNING id`,
+          [`upgrade-${name}`],
+        )).rows[0].id as string;
+        const approvalId = (await pool.query(
+          `INSERT INTO principal_user_scope_approvals
+             (principal_id, scope_id, approved_by, acknowledged_principal_ids,
+              acknowledged_evidence_hash)
+           VALUES ($1, $2, $3, '{}', repeat($4, 64)) RETURNING id::text AS id`,
+          [principalId, scopeId, adminId, completed ? 'b' : 'a'],
+        )).rows[0].id as string;
+        await pool.query(
+          `INSERT INTO principal_user_scopes
+             (principal_id, scope_id, mapped_by, acknowledged_principal_ids,
+              acknowledged_evidence_hash)
+           VALUES ($1, $2, $3, '{}', repeat($4, 64))`,
+          [principalId, scopeId, adminId, completed ? 'b' : 'a'],
+        );
+        if (completed) {
+          await pool.query(
+            `UPDATE scopes SET name = 'erased-user-' || id::text WHERE id = $1`,
+            [scopeId],
+          );
+          await pool.query(
+            `UPDATE principals
+                SET display_name = 'erased-' || left(replace(id::text, '-', ''), 12),
+                    disabled_at = now(), offboarded_at = now()
+              WHERE id = $1`,
+            [principalId],
+          );
+        }
+        const run = (await pool.query(
+          `INSERT INTO principal_offboarding_runs
+             (principal_id, scope_id, initiated_by, approval_id,
+              initial_memories, initial_embeddings, initial_memberships,
+              initial_aliases, initial_entra_bindings, initial_audit_rows,
+              initial_audit_queries, initial_audit_selection,
+              approval_evidence_hash, initial_count_truncated,
+              memories_processed, embeddings_processed, memberships_processed,
+              aliases_processed, entra_bindings_processed, audit_rows_processed,
+              audit_queries_processed, batches, memory_cursor, audit_fence_id,
+              audit_principal_cursor, audit_scope_cursor, audit_memory_cursor,
+              audit_scope_ids_cursor, audit_linked_cursor,
+              audit_memory_key_cursor, audit_memory_item_cursor,
+              audit_memory_complete, audit_linked_request_cursor,
+              audit_linked_request_item_cursor, audit_linked_request_exhausted,
+              audit_linked_complete, memory_complete, scope_cleanup_complete)
+           VALUES
+             ($1, $2, $3, $4, 5, 2, 1, 1, 0, 7, 3, '{"source":"upgrade"}',
+              repeat($5, 64), '{}', $6, $7, $8, $9, $10, $11, $12, $13,
+              $14::uuid, $15, $16, $17, $18, $19, $20, $21::uuid, $22,
+              $23, $24, $25, $26, $27, $28, TRUE)
+           RETURNING run_id::text AS run_id`,
+          completed
+            ? [principalId, scopeId, adminId, approvalId, 'b', 5, 2, 1, 1, 0, 7, 3, 4,
+              null, 0, 0, 0, 0, 0, 0, null, 0, true, null, 0, true, true, true]
+            : [principalId, scopeId, adminId, approvalId, 'a', 2, 1, 1, 0, 0, 3, 1, 2,
+              '10000000-0000-4000-8000-000000000001', 9, 4, 3, 2, 1, 0,
+              '20000000-0000-4000-8000-000000000002', 2, false,
+              'upgrade-request', 3, false, false, false],
+        )).rows[0];
+        await pool.query(
+          `INSERT INTO principal_offboarding_run_events
+             (run_id, principal_id, scope_id, phase, initiated_by, finalized_by,
+              approval_id, approval_evidence_hash, evidence)
+           VALUES ($1, $2, $3, 'started', $4, NULL, $5, repeat($6, 64),
+                   '{"source":"upgrade"}')`,
+          [run.run_id, principalId, scopeId, adminId, approvalId, completed ? 'b' : 'a'],
+        );
+        if (completed) {
+          await pool.query(
+            `SELECT continuum_complete_offboarding_run($1::uuid, $2::uuid, $3::jsonb)`,
+            [run.run_id, adminId, JSON.stringify({
+              run_id: run.run_id,
+              initiated_by: adminId,
+              finalized_by: adminId,
+              approval_id: approvalId,
+              approval_evidence_hash: 'b'.repeat(64),
+              counts_exact: true,
+              memories_processed: 5,
+              embeddings_processed: 2,
+              memberships_processed: 1,
+              aliases_processed: 1,
+              entra_bindings_processed: 0,
+              audit_rows_processed: 7,
+              audit_queries_processed: 3,
+              batches: 4,
+            })],
+          );
+        }
+        return run.run_id as string;
+      };
+
+      const inProgressRunId = await seedRun('in-progress', false);
+      const completedRunId = await seedRun('completed', true);
+      const readRunState = async () => (await pool.query(
+        `SELECT run.run_id::text, principal.external_id,
+                run.memories_processed, run.audit_rows_processed, run.batches,
+                run.memory_cursor::text, run.audit_fence_id::text,
+                run.audit_principal_cursor::text, run.audit_scope_cursor::text,
+                run.audit_memory_cursor::text, run.audit_scope_ids_cursor::text,
+                run.audit_memory_key_cursor::text,
+                run.audit_memory_item_cursor::text,
+                run.audit_memory_complete, run.audit_linked_request_cursor,
+                run.audit_linked_request_item_cursor::text,
+                run.audit_linked_request_exhausted, run.audit_linked_complete,
+                run.memory_complete, run.scope_cleanup_complete,
+                run.completed_at IS NOT NULL AS completed,
+                ARRAY(SELECT event.phase
+                        FROM principal_offboarding_run_events event
+                       WHERE event.run_id = run.run_id ORDER BY event.id) AS phases
+           FROM principal_offboarding_runs run
+           JOIN principals principal ON principal.id = run.principal_id
+          ORDER BY principal.external_id`,
+      )).rows;
+      const historicalState = await readRunState();
+      expect(historicalState).toEqual([
+        expect.objectContaining({
+          run_id: completedRunId, external_id: 'upgrade-completed',
+          memories_processed: 5, audit_rows_processed: 7, batches: 4,
+          audit_fence_id: '0', audit_memory_complete: true,
+          audit_linked_complete: true, memory_complete: true,
+          scope_cleanup_complete: true, completed: true,
+          phases: ['started', 'completed'],
+        }),
+        expect.objectContaining({
+          run_id: inProgressRunId, external_id: 'upgrade-in-progress',
+          memories_processed: 2, audit_rows_processed: 3, batches: 2,
+          memory_cursor: '10000000-0000-4000-8000-000000000001',
+          audit_fence_id: '9', audit_principal_cursor: '4',
+          audit_scope_cursor: '3', audit_memory_cursor: '2',
+          audit_scope_ids_cursor: '1',
+          audit_memory_key_cursor: '20000000-0000-4000-8000-000000000002',
+          audit_memory_item_cursor: '2', audit_memory_complete: false,
+          audit_linked_request_cursor: 'upgrade-request',
+          audit_linked_request_item_cursor: '3',
+          audit_linked_request_exhausted: false, audit_linked_complete: false,
+          memory_complete: false, scope_cleanup_complete: true,
+          completed: false, phases: ['started'],
+        }),
+      ]);
       await copyFile(
         new URL('0039_offboarding_completion_state.sql', source),
         join(directory, '0039_offboarding_completion_state.sql'),
       );
       expect((await runMigrations(pool, directory)).map((migration) => migration.name))
         .toEqual(['0039_offboarding_completion_state.sql']);
+      expect(await readRunState()).toEqual(historicalState);
       expect((await pool.query(
         `SELECT proname FROM pg_proc
           WHERE pronamespace = current_schema()::regnamespace
@@ -356,6 +542,7 @@ describe('runMigrations', () => {
       );
       expect((await runMigrations(pool, directory)).map((migration) => migration.name))
         .toEqual(['0040_offboarding_post_completion_integrity.sql']);
+      expect(await readRunState()).toEqual(historicalState);
       expect((await pool.query(
         `SELECT proname, prosrc
            FROM pg_proc
@@ -377,8 +564,63 @@ describe('runMigrations', () => {
           ),
         }),
       ]);
+      expect((await pool.query(
+        `SELECT continuum_offboarding_actual_state_is_erased($1::uuid) AS erased`,
+        [completedRunId],
+      )).rows).toEqual([{ erased: true }]);
+      await copyFile(
+        new URL('0041_offboarding_completion_trust.sql', source),
+        join(directory, '0041_offboarding_completion_trust.sql'),
+      );
+      expect((await runMigrations(pool, directory)).map((migration) => migration.name))
+        .toEqual(['0041_offboarding_completion_trust.sql']);
+      expect(await readRunState()).toEqual(historicalState);
+
+      await admin.query(`CREATE ROLE ${quotedRole} NOLOGIN`);
+      roleCreated = true;
+      await admin.query(`GRANT ${quotedRole} TO CURRENT_USER`);
+      await grantApplicationRole(pool, schema, role);
+      rolePool = new pg.Pool({
+        connectionString: DATABASE_URL,
+        max: 1,
+        options: `-c search_path=${schema} -c role=${role}`,
+      });
+      expect((await rolePool.query(
+        `SELECT has_function_privilege(current_user,
+                  'continuum_write_offboarding_run(uuid,uuid,text,jsonb)', 'EXECUTE')
+                  AS write_execute,
+                has_function_privilege(current_user,
+                  'continuum_get_offboarding_run(uuid,uuid)', 'EXECUTE')
+                  AS get_execute,
+                has_function_privilege(current_user,
+                  'continuum_start_offboarding_run(uuid,uuid,jsonb)', 'EXECUTE')
+                  AS start_execute,
+                has_function_privilege(current_user,
+                  'continuum_complete_offboarding_run(uuid,uuid,jsonb)', 'EXECUTE')
+                  AS complete_execute,
+                has_function_privilege(current_user,
+                  'continuum_offboarding_actual_state_is_erased(uuid)', 'EXECUTE')
+                  AS verifier_execute`,
+      )).rows).toEqual([{
+        write_execute: true,
+        get_execute: true,
+        start_execute: true,
+        complete_execute: true,
+        verifier_execute: false,
+      }]);
+      await expect(rolePool.query(
+        `SELECT continuum_offboarding_actual_state_is_erased($1::uuid)`,
+        [completedRunId],
+      )).rejects.toThrow(/permission denied/i);
+      expect(await runMigrations(pool, directory)).toEqual([]);
+      expect(await readRunState()).toEqual(historicalState);
     } finally {
+      await rolePool?.end();
       await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+      if (roleCreated) {
+        await admin.query(`REVOKE ${quotedRole} FROM CURRENT_USER`);
+        await admin.query(`DROP ROLE ${quotedRole}`);
+      }
     }
   }, 60_000);
 
@@ -420,6 +662,31 @@ describe('runMigrations', () => {
       await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
     }
   });
+  it('pins migration-owned functions in a canonically quoted schema search path', async () => {
+    const schema = `migrator-quoted-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA "${schema}"`);
+    const pool = schemaPool(schema);
+    try {
+      await expect(runMigrations(pool)).resolves.toBeDefined();
+      const expected = `search_path=pg_catalog, "${schema}", pg_temp`;
+      const unsafe = await pool.query(
+        `SELECT proname, proconfig
+           FROM pg_proc
+          WHERE pronamespace = current_schema()::regnamespace
+            AND (proname LIKE 'continuum\\_%' ESCAPE '\\'
+                 OR proname = 'reject_lifecycle_principal_membership')
+            AND proowner = current_user::regrole
+            AND NOT COALESCE(proconfig @> ARRAY[$1], FALSE)`,
+        [expected],
+      );
+      expect(unsafe.rows).toEqual([]);
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    }
+  }, 60_000);
+
   it('backfills ordered offboarding selectors on upgrade and retries idempotently', async () => {
     const schema = `migrator_selector_upgrade_${Date.now()}_${Math.random().toString(16).slice(2)}`;
     const admin = new pg.Pool({ connectionString: DATABASE_URL });

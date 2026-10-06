@@ -127,18 +127,23 @@ and audit-retention counts, hashes, and run IDs. Each changed
 ownership acknowledgement is written to the immutable
 `principal_user_scope_approvals` ledger with approver UUID, timestamp, reviewed
 UUIDs, and evidence hash. UUID-only mapping and erasure receipt audit operations
-are excluded from redaction. The exact cumulative processed-count and bounded-ID
-receipt is also written to
-`principal_offboarding_events`. Both evidence ledgers reject update, delete,
-and truncate operations. The compact privacy-safe event ledger is outside
+are excluded from redaction. The cumulative processed-count and bounded-ID
+operational receipt is also written to `principal_offboarding_events`. Those
+counts and the presented actor UUID are application-reported telemetry, not
+independently measured database facts. Both evidence ledgers reject update,
+delete, and truncate operations. The compact privacy-safe event ledger is outside
 ordinary `audit_log` retention and is the authoritative retry evidence after
 audit rows have been pruned. It contains UUIDs, counts, timestamps, and
 truncation flags only, never memory text, names, queries, or verification notes.
 Before the first irreversible batch write, a `started` row containing the run
 UUID, initiator UUID, exact approval ID, and acknowledgement hash is appended to
 `principal_offboarding_run_events`. Finalization appends a `completed` row that
-preserves the initiator, identifies the finalizer, and records exact cumulative
-processed counts. The ledger rejects update,
+preserves the initiator and records
+`completion_basis: database_verified_erasure`. The function constructs this
+evidence itself, requires the same currently effective org administrator that
+initiated the run, and labels cumulative counters under
+`telemetry.trust: application_reported`; caller JSON cannot become immutable
+completion evidence. The ledger rejects update,
 delete, and truncate; mutable cursor progress is never the sole authorization
 record. Direct deletion of run progress is rejected, `completed_at` cannot be
 set without the matching append-only completion row, and fences/cursors cannot
@@ -256,6 +261,29 @@ Its five-second `lock_timeout` and 30-second `statement_timeout` make lock
 contention a visible, retryable migration failure instead of an unbounded
 deployment stall; rerun the unapplied migration after the conflicting
 transaction drains.
+Migration `0041_offboarding_completion_trust.sql` prevents any progress rewrite
+after completion and refuses to restart a completed run while its indexed
+erasure state remains true. A completed run can be replaced only when later
+state is demonstrably dirty and repair is required. It also replaces completion
+evidence with the database-constructed trust labels above and reapplies the
+canonical quoted-schema `search_path` check for both fresh and upgraded custom
+schema names.
+
+The final database verification is exact: it checks every memory and every
+audit row linked to the run's bounded fence before appending completion. On very
+large per-subject histories this final read can exceed an operator's statement
+timeout even though destructive work was processed in bounded batches. A
+timeout commits no completion receipt; retain the run, inspect the indexed query
+plans and database load, then retry with a deliberately measured maintenance
+timeout. Do not weaken or skip verification, and do not claim completion from
+the progress counters alone.
+
+Directly setting `principals.offboarded_at` is an internal write fence, not a
+supported offboarding operation or evidence that erasure completed. It may be
+used by migration-owner diagnostics and tests, but application workflows must
+create and finish the durable run through the service. Reactivation and all
+completion claims continue to require the immutable run events; a bare marker
+has neither effect.
 
 The post-completion scope and audit guards use `NOWAIT` when they key-share-lock
 the owning principal. This avoids the opposite lock-order deadlock between a
@@ -274,10 +302,10 @@ full and final partial batches without rescanning unrelated users.
 
 Production must use separate migration-owner and application roles. Drain old
 offboarding-capable API, MCP, admin, and membership-sync processes; run
-`continuum-migrate` through `0040` with `CONTINUUM_DATABASE_URL` set to the
+`continuum-migrate` through `0041` with `CONTINUUM_DATABASE_URL` set to the
 migration owner; apply the exact grant script below; and only then start the new
 binaries with the same variable set to a non-owner application role. Do not run
-offboarding across mixed `0038`/`0039`/`0040` application or grant versions.
+offboarding across mixed `0038`/`0039`/`0040`/`0041` application or grant versions.
 The application role must not own the event ledger, completion-capability
 table, or security-definer functions, and receives no direct privilege on the
 capability table. Direct `completed` inserts then fail at the trigger.

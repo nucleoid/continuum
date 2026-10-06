@@ -246,7 +246,7 @@ BEGIN
             AND dependency.deptype = 'e'
        )
        AND NOT COALESCE(procedure.proconfig @> ARRAY[
-         format('search_path=pg_catalog, %s, pg_temp', schema_name)
+         format('search_path=pg_catalog, %I, pg_temp', schema_name)
        ], FALSE)
   ) THEN
     RAISE EXCEPTION 'Continuum function search_path hardening is incomplete';

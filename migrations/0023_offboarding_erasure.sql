@@ -245,7 +245,8 @@ CREATE TRIGGER require_open_entra_binding_scope
 BEFORE INSERT OR UPDATE OF scope_id, active ON entra_groups
 FOR EACH ROW EXECUTE FUNCTION continuum_require_open_entra_binding_scope();
 
--- Parent locking orders embedding writes against every archive path.
+-- The memory-row UPDATE lock orders embedding writes against archive updates;
+-- the BEFORE trigger rechecks liveness while holding that same row lock.
 CREATE FUNCTION continuum_require_embeddable_memory() RETURNS trigger AS $$
 BEGIN
   IF NOT EXISTS (

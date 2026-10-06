@@ -101,6 +101,9 @@ Run this command as the documented non-owner Continuum application role after
 applying `scripts/grant-application-role.sql`, never as the migration/function
 owner. The configured principal supplies the audited org-admin identity; the
 database role supplies only the least-privilege execution boundary.
+The grant script includes `DELETE` on `audit_log` because bounded retention
+cannot otherwise perform its documented mutation; it does not grant table
+ownership, `TRUNCATE`, or any privilege on the offboarding capability tables.
 
 Only one runner can hold the dedicated advisory lock. Successful batches delete
 exactly their selected IDs and verify the deleted values still byte-match the

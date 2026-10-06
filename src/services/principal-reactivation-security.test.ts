@@ -124,6 +124,9 @@ describe('principal reactivation database trust boundary', () => {
     expect(grants).toMatch(
       /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE[\s\S]*memory_embeddings/i,
     );
+    expect(grants).toMatch(
+      /GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE[\s\S]*audit_log/i,
+    );
   });
 
   it('supports lifecycle functions as a separately granted non-owner role', async () => {
@@ -179,6 +182,102 @@ describe('principal reactivation database trust boundary', () => {
         client.release();
       }
     } finally {
+      await pool.query(`DROP OWNED BY ${quotedRole}`);
+      await pool.query(`REVOKE ${quotedRole} FROM CURRENT_USER`);
+      await pool.query(`DROP ROLE ${quotedRole}`);
+    }
+  });
+
+  it('fails promptly when a post-completion scope mutation meets the principal lock first and retries atomically', async () => {
+    const { target, scope } = await fixture(pool);
+    const principalClient = await pool.connect();
+    const scopeClient = await pool.connect();
+    try {
+      await principalClient.query('BEGIN');
+      await principalClient.query(
+        'SELECT id FROM principals WHERE id = $1 FOR UPDATE',
+        [target.id],
+      );
+
+      await scopeClient.query('BEGIN');
+      // Keep a generous server-side escape hatch while proving the trigger's
+      // NOWAIT lock fails materially sooner than the fallback timeout.
+      await scopeClient.query("SET LOCAL lock_timeout = '5s'");
+      const startedAt = Date.now();
+      await expect(scopeClient.query(
+        'UPDATE scopes SET name = name WHERE id = $1',
+        [scope.id],
+      )).rejects.toMatchObject({ code: '55P03' });
+      expect(Date.now() - startedAt).toBeLessThan(2_000);
+      await scopeClient.query('ROLLBACK');
+
+      await principalClient.query('COMMIT');
+      await scopeClient.query('BEGIN');
+      await scopeClient.query("SET LOCAL lock_timeout = '5s'");
+      await expect(scopeClient.query(
+        'UPDATE scopes SET name = name WHERE id = $1 RETURNING id',
+        [scope.id],
+      )).resolves.toMatchObject({ rowCount: 1 });
+      await scopeClient.query('COMMIT');
+    } finally {
+      await Promise.allSettled([
+        principalClient.query('ROLLBACK'),
+        scopeClient.query('ROLLBACK'),
+      ]);
+      principalClient.release();
+      scopeClient.release();
+    }
+  });
+
+  it('does not let the application role rewrite or restart a completed erased run', async () => {
+    const { admin, target } = await fixture(pool);
+    const role = `continuum_completed_run_${Date.now()}`;
+    const quotedRole = `"${role}"`;
+    await pool.query(`CREATE ROLE ${quotedRole} NOLOGIN`);
+    let rolePool: pg.Pool | undefined;
+    try {
+      await pool.query(`GRANT ${quotedRole} TO CURRENT_USER`);
+      await applyApplicationRoleGrants(pool, role);
+      rolePool = new pg.Pool({
+        ...(pool as unknown as { options: PoolConfig }).options,
+        max: 1,
+        options: `-c role=${role}`,
+      });
+      const before = (await rolePool.query(
+        `SELECT run_id::text, initiated_by::text, completed_at,
+                memories_processed, batches
+           FROM principal_offboarding_runs WHERE principal_id = $1`,
+        [target.id],
+      )).rows[0];
+
+      await expect(rolePool.query(
+        `SELECT * FROM continuum_write_offboarding_run(
+           $1, $2, 'add_progress',
+           '{"memories":999,"audit_rows":999,"embeddings":999,
+             "memberships":999,"aliases":999,"entra_bindings":999,
+             "audit_queries":999}'::jsonb)`,
+        [target.id, admin.id],
+      )).rejects.toThrow(/completed offboarding run is immutable/i);
+      await expect(rolePool.query(
+        `SELECT * FROM continuum_write_offboarding_run(
+           $1, $2, 'restart',
+           '{"approval_id":1,"approval_evidence_hash":"forged",
+             "initial_memories":999,"initial_embeddings":999,
+             "initial_memberships":999,"initial_aliases":999,
+             "initial_entra_bindings":999,"initial_audit_rows":999,
+             "initial_audit_queries":999,"initial_audit_selection":{},
+             "initial_count_truncated":[]}'::jsonb)`,
+        [target.id, admin.id],
+      )).rejects.toThrow(/completed erased offboarding run cannot be restarted/i);
+
+      expect((await rolePool.query(
+        `SELECT run_id::text, initiated_by::text, completed_at,
+                memories_processed, batches
+           FROM principal_offboarding_runs WHERE principal_id = $1`,
+        [target.id],
+      )).rows[0]).toEqual(before);
+    } finally {
+      await rolePool?.end();
       await pool.query(`DROP OWNED BY ${quotedRole}`);
       await pool.query(`REVOKE ${quotedRole} FROM CURRENT_USER`);
       await pool.query(`DROP ROLE ${quotedRole}`);
@@ -326,7 +425,9 @@ describe('principal reactivation database trust boundary', () => {
       )).rows[0].erased as boolean;
       const expectGuardRejects = async () => {
         expect(await actualStateIsErased()).toBe(false);
-        await expect(completion()).rejects.toThrow(/actual indexed erasure state is incomplete/i);
+        await expect(completion()).rejects.toThrow(
+          /verified erasure and the initiating effective org administrator/i,
+        );
       };
 
       expect((await pool.query(
@@ -348,6 +449,12 @@ describe('principal reactivation database trust boundary', () => {
       );
       expect(BigInt(postFenceAuditId)).toBeGreaterThan(BigInt(fence));
       expect(await actualStateIsErased()).toBe(true);
+      await expect(rolePool.query(
+        `SELECT continuum_complete_offboarding_run($1::uuid, $2::uuid, $3::jsonb)`,
+        [forged.run_id, target.id, JSON.stringify({
+          ...evidence, finalized_by: target.id, memories_processed: 999,
+        })],
+      )).rejects.toThrow(/initiating effective org administrator/i);
 
       await pool.query(
         'ALTER TABLE principals DISABLE TRIGGER protect_offboarded_principal_identity',

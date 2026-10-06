@@ -36,7 +36,7 @@ TO :"continuum_app_role";
 GRANT SELECT ON TABLE :"continuum_schema".principal_offboarding_runs
 TO :"continuum_app_role";
 
-GRANT SELECT, INSERT, UPDATE ON TABLE :"continuum_schema".audit_log
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE :"continuum_schema".audit_log
 TO :"continuum_app_role";
 GRANT SELECT, DELETE ON TABLE :"continuum_schema".principal_aliases
 TO :"continuum_app_role";
