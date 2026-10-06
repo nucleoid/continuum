@@ -112,6 +112,23 @@ describe('runMigrations', () => {
     expect(trustBoundary).toMatch(/principal_reactivation_guarded/i);
     expect(trustBoundary).toMatch(/00000000-0000-4000-8000-000000000011/i);
   });
+  it('ships one bounded final verification path and names the exact rollout migration', async () => {
+    const migration = await readFile(
+      join(process.cwd(), 'migrations/0042_offboarding_final_remediation.sql'), 'utf8',
+    );
+    const completion = migration.match(
+      /CREATE OR REPLACE FUNCTION continuum_complete_offboarding_run[\s\S]*?\n\$\$;/i,
+    )?.[0] ?? '';
+    const completionTrigger = migration.match(
+      /CREATE OR REPLACE FUNCTION continuum_require_actual_offboarding_erasure[\s\S]*?\n\$\$;/i,
+    )?.[0] ?? '';
+    expect(completion).not.toMatch(/continuum_offboarding_actual_state_is_erased\s*\(/i);
+    expect(completionTrigger.match(/continuum_offboarding_actual_state_is_erased\s*\(/gi))
+      .toHaveLength(1);
+    const docs = await readFile(join(process.cwd(), 'docs/offboarding.md'), 'utf8');
+    expect(docs).toMatch(/through `0042_offboarding_final_remediation\.sql`/i);
+    expect(docs).not.toMatch(/all nineteen offboarding migrations/i);
+  });
   it('applies round-seven integrity and online cursor-index migrations from a fresh schema', async () => {
     const schema = `migrator_offboarding_round7_${Date.now()}_${Math.random().toString(16).slice(2)}`;
     const admin = new pg.Pool({ connectionString: DATABASE_URL });
@@ -126,7 +143,7 @@ describe('runMigrations', () => {
         $$;
       `);
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-12).map((migration) => migration.name)).toEqual([
+      expect(applied.slice(-13).map((migration) => migration.name)).toEqual([
         '0030_offboarding_round7_integrity.sql',
         '0031_offboarding_round7_indexes.sql',
         '0032_offboarding_round7_compatibility.sql',
@@ -139,6 +156,7 @@ describe('runMigrations', () => {
         '0039_offboarding_completion_state.sql',
         '0040_offboarding_post_completion_integrity.sql',
         '0041_offboarding_completion_trust.sql',
+        '0042_offboarding_final_remediation.sql',
       ]);
       expect((await pool.query(
         `SELECT indisvalid AS valid FROM pg_index
@@ -229,6 +247,40 @@ describe('runMigrations', () => {
       expect(await runMigrations(pool, join(process.cwd(), 'migrations'))).toEqual([]);
     } finally {
       await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  }, 60_000);
+  it('fails closed when a foreign owner leaves a Continuum definer unsafe', async () => {
+    const suffix = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const schema = `migrator_foreign_owner_${suffix}`;
+    const role = `continuum_foreign_owner_${suffix}`;
+    const quotedRole = `"${role}"`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE ROLE ${quotedRole} NOLOGIN`);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-foreign-owner-'));
+    directories.push(directory);
+    const source = new URL('../../migrations/', import.meta.url);
+    const files = (await readdir(source)).filter((file) => file.endsWith('.sql')).sort();
+    for (const file of files.filter((name) => name < '0042_offboarding_final_remediation.sql')) {
+      await copyFile(new URL(file, source), join(directory, file));
+    }
+    try {
+      await runMigrations(pool, directory);
+      await pool.query(
+        `CREATE FUNCTION continuum_foreign_unsafe() RETURNS boolean
+         LANGUAGE sql SECURITY DEFINER SET search_path = public AS $$ SELECT TRUE $$`,
+      );
+      await pool.query(`ALTER FUNCTION continuum_foreign_unsafe() OWNER TO ${quotedRole}`);
+      await copyFile(
+        new URL('0042_offboarding_final_remediation.sql', source),
+        join(directory, '0042_offboarding_final_remediation.sql'),
+      );
+      await expect(runMigrations(pool, directory)).rejects.toThrow(/foreign-owned.*unsafe/i);
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+      await admin.query(`DROP ROLE ${quotedRole}`);
     }
   }, 60_000);
   it('rejects canonical audit-evidence tampering by the application role', async () => {

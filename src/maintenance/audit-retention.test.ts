@@ -180,6 +180,7 @@ describe('audit retention', () => {
   it('deletes and summarizes retention as the documented non-owner application role', async () => {
     const admin = await seedPrincipal('svc:retention', 'admin');
     const oldId = await insertAudit(admin.id, new Date('2026-01-01T00:00:00Z'));
+    const recentId = await insertAudit(admin.id, new Date(cutoff.getTime() + 60_000));
     const role = `continuum_retention_${Date.now()}`;
     const quotedRole = `"${role}"`;
     await pool.query(`CREATE ROLE ${quotedRole} NOLOGIN`);
@@ -193,11 +194,32 @@ describe('audit retention', () => {
         options: `-c role=${role}`,
       });
 
+      await expect(rolePool.query('DELETE FROM audit_log WHERE id = $1', [oldId]))
+        .rejects.toThrow(/permission denied/i);
+      await expect(rolePool.query('DELETE FROM audit_log WHERE id = $1', [recentId]))
+        .rejects.toThrow(/permission denied/i);
+      await expect(rolePool.query(
+        `UPDATE audit_log SET metadata = '{"forged":true}'::jsonb WHERE id = $1`,
+        [oldId],
+      )).rejects.toThrow(/permission denied/i);
+
       await expect(runAuditRetention(rolePool, options())).resolves.toMatchObject({
         status: 'completed', deleted: 1, batches: 1,
       });
       expect((await pool.query('SELECT 1 FROM audit_log WHERE id = $1', [oldId])).rowCount)
         .toBe(0);
+      expect((await pool.query('SELECT 1 FROM audit_log WHERE id = $1', [recentId])).rowCount)
+        .toBe(1);
+      const summary = (await pool.query(
+        `SELECT id, metadata FROM audit_log
+          WHERE metadata->>'source' = 'audit-retention' ORDER BY id DESC LIMIT 1`,
+      )).rows[0];
+      await expect(pool.query(
+        `UPDATE audit_log SET metadata = '{"forged":true}'::jsonb WHERE id = $1`,
+        [summary.id],
+      )).rejects.toThrow(/retention evidence is immutable/i);
+      await expect(pool.query('DELETE FROM audit_log WHERE id = $1', [summary.id]))
+        .rejects.toThrow(/retention evidence is immutable/i);
     } finally {
       await rolePool?.end();
       await pool.query(`DROP OWNED BY ${quotedRole}`);
