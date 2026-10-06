@@ -245,7 +245,11 @@ offboarded-audit, embedding, membership, or other database guard checks.
 Migration `0039_offboarding_completion_state.sql` is the upgrade-safe boundary
 for the least-privilege run capabilities and completion-state validation. It is
 separate because deployed databases may already have recorded `0038`; changing
-that file would not replay it.
+that file would not replay it. Migration
+`0040_offboarding_post_completion_integrity.sql` is the corresponding
+upgrade-safe follow-up for installations that already recorded `0039`: it
+protects the verified principal, owned-scope, and audit tombstones against
+post-completion mutation and reapplies owner-scoped function hardening.
 
 Linked-request erasure selects a bounded ordered request-ID window from
 `principal_offboarding_audit_requests`, then performs one indexed
@@ -295,10 +299,10 @@ requires the exact index to exist and be valid before the migration ledger can
 record success. A timeout or failed build leaves the file unapplied and safely
 retryable.
 
-Apply all eighteen offboarding migrations before starting the new application version. Old
+Apply all nineteen offboarding migrations before starting the new application version. Old
 instances can continue ordinary traffic after `0023`, but they do not know the
 offboarding workflow and an old authenticated request may already be in flight.
-Do not invoke offboarding until all eighteen migrations are recorded on every shared
+Do not invoke offboarding until all nineteen migrations are recorded on every shared
 database and all old application instances have drained. Rollback is
 application-first: stop invoking offboarding, drain the new instances, and
 deploy the old application only after `list-incomplete-offboarding` reports
