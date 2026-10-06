@@ -67,7 +67,8 @@ export async function getMemoryForPrincipal(
     }
     await recordRead(client, {
       principalId: principal.id,
-      metadata: { operation: 'get_memory', ...auditMetadata },
+      operation: 'get_memory',
+      metadata: auditMetadata,
       memories: [{
         memoryId: recordValue.memory.id,
         scopeId: recordValue.memory.scopeId,
@@ -118,8 +119,8 @@ export async function listMemoriesForPrincipal(
     });
     await recordRead(client, {
       principalId: principal.id,
+      operation: 'list_memories',
       metadata: {
-        operation: 'list_memories',
         state,
         scope_filtered: scope !== undefined,
         type_filter: input.type ?? null,

@@ -228,10 +228,10 @@ requires the exact index to exist and be valid before the migration ledger can
 record success. A timeout or failed build leaves the file unapplied and safely
 retryable.
 
-Apply all ten offboarding migrations before starting the new application version. Old
+Apply all eleven offboarding migrations before starting the new application version. Old
 instances can continue ordinary traffic after `0023`, but they do not know the
 offboarding workflow and an old authenticated request may already be in flight.
-Do not invoke offboarding until all ten migrations are recorded on every shared
+Do not invoke offboarding until all eleven migrations are recorded on every shared
 database and all old application instances have drained. Rollback is
 application-first: stop invoking offboarding, drain the new instances, and
 deploy the old application only after `list-incomplete-offboarding` reports

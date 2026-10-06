@@ -41,6 +41,8 @@ export interface ReadAuditMemory {
 
 export interface ReadAuditEntry {
   principalId: string;
+  /** Producer-owned policy label. Never source this value from request metadata. */
+  operation?: 'get_memory' | 'list_memories';
   query?: string | null;
   metadata?: Record<string, unknown>;
   memories: ReadAuditMemory[];
@@ -79,6 +81,7 @@ export async function recordRead(
       query: entry.query ?? null,
       metadata: {
         ...requestMetadata,
+        ...(entry.operation === undefined ? {} : { operation: entry.operation }),
         request_id: requestId,
         record_kind: 'summary',
       },
