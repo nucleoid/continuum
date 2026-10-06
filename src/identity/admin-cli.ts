@@ -7,6 +7,7 @@ import {
 } from '../services/principal-admin.js';
 import type { MembershipRole } from '../types.js';
 import { cliFailure } from './cli-errors.js';
+import { mapOwnedUserScope, offboardPrincipal } from '../services/offboarding.js';
 
 async function main(): Promise<void> {
   const [operation, ...args] = process.argv.slice(2);
@@ -59,6 +60,16 @@ async function main(): Promise<void> {
       if (!args[0]) throw new Error('usage: reactivate-principal <principal-id>');
       await reactivatePrincipal(pool, actor, args[0]);
       process.stdout.write(`${JSON.stringify({ operation, principalId: args[0] })}\n`);
+    } else if (operation === 'map-user-scope') {
+      const [principalId, scopeId] = args;
+      if (!principalId || !scopeId) throw new Error('usage: map-user-scope <principal-id> <user-scope-id>');
+      process.stdout.write(`${JSON.stringify({ operation, ...await mapOwnedUserScope(pool, actor, principalId, scopeId) })}\n`);
+    } else if (operation === 'offboard-principal') {
+      const positional = args.filter((value) => value !== '--dry-run');
+      if (!positional[0] || positional.length !== 1 || args.some((value) => value.startsWith('--') && value !== '--dry-run')) {
+        throw new Error('usage: offboard-principal <principal-id> [--dry-run]');
+      }
+      process.stdout.write(`${JSON.stringify({ operation, ...await offboardPrincipal(pool, actor, positional[0], args.includes('--dry-run')) })}\n`);
     } else throw new Error('unknown admin operation');
   } finally { await pool.end(); }
 }

@@ -102,6 +102,10 @@ npm run admin -- reactivate-principal <principal-id>
 After reactivation, explicitly restore required access and issue a new service
 key. Old keys never become valid again.
 
+For user erasure, use the separate explicit ownership mapping and offboarding
+workflow in [offboarding.md](./offboarding.md). A disabled offboarded external ID
+cannot be silently provisioned by sign-in or membership sync.
+
 ## Approved group bindings
 
 Group names never grant access. Before sync can activate membership, an org

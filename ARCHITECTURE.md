@@ -380,6 +380,16 @@ current service keys at the database boundary. Explicit audited reactivation
 does not restore either. Database triggers also prevent deletion, demotion, or
 disablement of the final effective manually managed org administrator.
 
+Offboarding uses an explicit `principal_user_scopes` UUID mapping; mutable names
+never establish ownership. An org-admin transaction locks against membership
+sync, tombstones and archives only the mapped user scope, deletes embeddings,
+disables access, applies a stable UUID-derived pseudonym, and writes atomic
+per-memory plus operation-summary audit records.
+Shared scopes and stable UUID references remain intact. Database archive and
+embedding triggers enforce cleanup for lifecycle, supersession, offboarding,
+and direct state transitions. See `docs/offboarding.md` for limits, retry
+semantics, operator surfaces, and the application-data privacy boundary.
+
 Entra groups are explicitly approved by immutable object ID and bound to one
 exact scope and role before sync. Renames only update group display metadata.
 Missing groups and missing

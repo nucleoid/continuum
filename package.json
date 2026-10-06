@@ -25,6 +25,7 @@
     "docs/cli.md",
     "docs/knowledge-gap-insights.md",
     "docs/lifecycle.md",
+    "docs/offboarding.md",
     "docs/memory-api.md",
     "docs/scope-provisioning.md",
     "!dist/**/tenants/**",

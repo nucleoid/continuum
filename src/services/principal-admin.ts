@@ -103,7 +103,7 @@ export async function reactivatePrincipal(
     await client.query('BEGIN');
     await requireOrgAdmin(client, actor.id);
     const reactivated = await client.query(
-      `UPDATE principals SET disabled_at = NULL
+      `UPDATE principals SET disabled_at = NULL, reactivated_at = now()
         WHERE id = $1 AND disabled_at IS NOT NULL RETURNING id`, [principalId],
     );
     if (!reactivated.rowCount) {

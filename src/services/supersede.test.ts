@@ -120,7 +120,7 @@ describe('decision history service', () => {
     expect((await pool.query('SELECT 1 FROM audit_log')).rowCount).toBe(0);
   });
 
-  it('durably records successor embedding failure and retains the archived vector', async () => {
+  it('durably records successor embedding failure and removes the archived vector', async () => {
     const scope = await createScope(pool, { kind: 'project', name: 'embedding-failure' });
     await addMembership(pool, author.id, scope.id, 'writer');
     const predecessor = await createMemory(pool, {
@@ -140,7 +140,7 @@ describe('decision history service', () => {
     expect(result).toMatchObject({ embedded: false, embedErrorCode: 'EMBEDDING_FAILED' });
     expect((await pool.query(
       'SELECT memory_id FROM memory_embeddings ORDER BY memory_id',
-    )).rows).toEqual([{ memory_id: predecessor.id }]);
+    )).rows).toEqual([]);
     const embeddingAudit = await pool.query(
       `SELECT memory_id, metadata FROM audit_log
         WHERE metadata->>'record_kind' = 'embedding'`,

@@ -1,5 +1,10 @@
 # Continuum CLI
 
+Org-admin identity, group-binding, and offboarding commands are exposed through
+`npm run admin`; see [authentication.md](./authentication.md) and
+[offboarding.md](./offboarding.md). Offboarding supports a non-mutating
+`--dry-run` count before the bounded atomic operation.
+
 The `continuum` command uses the authenticated HTTP API. It never connects to
 PostgreSQL directly. Install the package, then run `continuum --help`.
 
