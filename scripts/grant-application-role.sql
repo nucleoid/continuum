@@ -65,7 +65,6 @@ GRANT EXECUTE ON FUNCTION
   :"continuum_schema".continuum_get_offboarding_run(UUID, UUID),
   :"continuum_schema".continuum_start_offboarding_run(UUID, UUID, JSONB),
   :"continuum_schema".continuum_offboarding_expected_audit_metadata(JSONB),
-  :"continuum_schema".continuum_offboarding_actual_state_is_erased(UUID),
   :"continuum_schema".continuum_reactivate_principal(UUID, UUID)
 TO :"continuum_app_role";
 

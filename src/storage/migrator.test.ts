@@ -110,7 +110,7 @@ describe('runMigrations', () => {
         $$;
       `);
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-10).map((migration) => migration.name)).toEqual([
+      expect(applied.slice(-11).map((migration) => migration.name)).toEqual([
         '0030_offboarding_round7_integrity.sql',
         '0031_offboarding_round7_indexes.sql',
         '0032_offboarding_round7_compatibility.sql',
@@ -121,6 +121,7 @@ describe('runMigrations', () => {
         '0037_offboarding_round8_online_finish.sql',
         '0038_offboarding_search_path_hardening.sql',
         '0039_offboarding_completion_state.sql',
+        '0040_offboarding_post_completion_integrity.sql',
       ]);
       expect((await pool.query(
         `SELECT indisvalid AS valid FROM pg_index
@@ -195,7 +196,8 @@ describe('runMigrations', () => {
         `SELECT proname
            FROM pg_proc
           WHERE pronamespace = current_schema()::regnamespace
-            AND proname LIKE 'continuum\\_%' ESCAPE '\\'
+            AND (proname LIKE 'continuum\\_%' ESCAPE '\\'
+                 OR proname = 'reject_lifecycle_principal_membership')
             AND proowner = current_user::regrole
             AND NOT (proconfig @> ARRAY[
               format('search_path=pg_catalog, %s, pg_temp', current_schema())
@@ -212,7 +214,91 @@ describe('runMigrations', () => {
       await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
     }
   }, 60_000);
-  it('applies completion-state hardening after an installation already ledgered 0038', async () => {
+  it('rejects canonical audit-evidence tampering by the application role', async () => {
+    const suffix = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const schema = `migrator_audit_tamper_${suffix}`;
+    const role = `continuum_audit_tamper_${suffix}`;
+    const quotedRole = `"${role}"`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    let rolePool: pg.Pool | undefined;
+    let roleCreated = false;
+    try {
+      await runMigrations(pool, join(process.cwd(), 'migrations'));
+      const tombstoneGuardSource = (await pool.query(
+        `SELECT prosrc FROM pg_proc
+          WHERE oid = 'continuum_protect_offboarded_audit_tombstone()'::regprocedure`,
+      )).rows[0].prosrc as string;
+      expect(tombstoneGuardSource).toMatch(
+        /continuum_offboarding_expected_audit_metadata\(OLD\.metadata\)/,
+      );
+      expect(tombstoneGuardSource).not.toMatch(
+        /continuum_offboarding_expected_audit_metadata\(NEW\.metadata\)/,
+      );
+      const targetId = (await pool.query(
+        `INSERT INTO principals
+           (id, external_id, kind, display_name)
+         VALUES
+           (gen_random_uuid(), 'audit-tamper-target', 'user', 'Audit tamper target')
+         RETURNING id`,
+      )).rows[0].id as string;
+      const auditRows = await pool.query(
+        `INSERT INTO audit_log (principal_id, action, query, metadata)
+         VALUES
+           ($1::uuid, 'archive', NULL,
+            jsonb_build_object('operation', 'principal_offboarded',
+                               'principal_id', $1::text,
+                               'approval_id', 7,
+                               'acknowledged_evidence_hash', repeat('a', 64),
+                               'memories', 0, 'audit_rows', 0, 'batches', 1)),
+           ($1::uuid, 'read', NULL, '{"redacted":"principal_offboarding"}'::jsonb)
+         RETURNING id`,
+        [targetId],
+      );
+      await pool.query(
+        `UPDATE principals
+            SET display_name = 'erased-' || left(replace(id::text, '-', ''), 12),
+                disabled_at = now(), offboarded_at = now()
+          WHERE id = $1`,
+        [targetId],
+      );
+      await pool.query(`CREATE ROLE ${quotedRole} NOLOGIN`);
+      roleCreated = true;
+      await pool.query(`GRANT ${quotedRole} TO CURRENT_USER`);
+      await pool.query(`GRANT USAGE ON SCHEMA ${schema} TO ${quotedRole}`);
+      await pool.query(`GRANT SELECT, UPDATE ON ${schema}.audit_log TO ${quotedRole}`);
+      rolePool = new pg.Pool({
+        connectionString: DATABASE_URL,
+        max: 1,
+        options: `-c search_path=${schema} -c role=${role}`,
+      });
+
+      await expect(rolePool.query(
+        `UPDATE audit_log
+            SET metadata = jsonb_set(metadata, '{approval_id}', '999'::jsonb)
+          WHERE id = $1`,
+        [auditRows.rows[0].id],
+      )).rejects.toThrow(/preserved offboarding audit evidence is immutable/i);
+      await expect(rolePool.query(
+        `UPDATE audit_log SET metadata = $2::jsonb WHERE id = $1`,
+        [auditRows.rows[1].id, JSON.stringify({
+          operation: 'service_principal_provisioned',
+          service_principal_id: '00000000-0000-4000-8000-000000000099',
+          external_id: 'restored@example.test',
+        })],
+      )).rejects.toThrow(/offboarded audit tombstone is immutable/i);
+    } finally {
+      await rolePool?.end();
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+      if (roleCreated) {
+        await admin.query(`REVOKE ${quotedRole} FROM CURRENT_USER`);
+        await admin.query(`DROP ROLE ${quotedRole}`);
+      }
+    }
+  }, 60_000);
+  it('applies completion and integrity hardening after ledgered 0038 and 0039', async () => {
     const schema = `migrator_offboarding_0039_${Date.now()}_${Math.random().toString(16).slice(2)}`;
     const admin = new pg.Pool({ connectionString: DATABASE_URL });
     pools.push(admin);
@@ -222,8 +308,20 @@ describe('runMigrations', () => {
     directories.push(directory);
     const source = new URL('../../migrations/', import.meta.url);
     const files = (await readdir(source)).filter((file) => file.endsWith('.sql')).sort();
-    for (const file of files.filter((name) => name !== '0039_offboarding_completion_state.sql')) {
-      await copyFile(new URL(file, source), join(directory, file));
+    for (const file of files.filter((name) =>
+      name !== '0039_offboarding_completion_state.sql'
+      && name !== '0040_offboarding_post_completion_integrity.sql')) {
+      if (file === '0038_offboarding_search_path_hardening.sql') {
+        await copyFile(
+          new URL(
+            'fixtures/7499ada-0038_offboarding_search_path_hardening.sql',
+            import.meta.url,
+          ),
+          join(directory, file),
+        );
+      } else {
+        await copyFile(new URL(file, source), join(directory, file));
+      }
     }
     try {
       const oldApplied = await runMigrations(pool, directory);
@@ -252,6 +350,33 @@ describe('runMigrations', () => {
           WHERE tgrelid = 'principal_offboarding_run_events'::regclass
             AND tgname = 'require_actual_offboarding_erasure' AND NOT tgisinternal`,
       )).rows).toEqual([{ tgname: 'require_actual_offboarding_erasure' }]);
+      await copyFile(
+        new URL('0040_offboarding_post_completion_integrity.sql', source),
+        join(directory, '0040_offboarding_post_completion_integrity.sql'),
+      );
+      expect((await runMigrations(pool, directory)).map((migration) => migration.name))
+        .toEqual(['0040_offboarding_post_completion_integrity.sql']);
+      expect((await pool.query(
+        `SELECT proname, prosrc
+           FROM pg_proc
+          WHERE pronamespace = current_schema()::regnamespace
+            AND proname IN (
+              'continuum_offboarding_actual_state_is_erased',
+              'continuum_protect_offboarded_audit_tombstone'
+            )
+          ORDER BY proname`,
+      )).rows).toEqual([
+        expect.objectContaining({
+          proname: 'continuum_offboarding_actual_state_is_erased',
+          prosrc: expect.stringContaining('CROSS JOIN linked_request'),
+        }),
+        expect.objectContaining({
+          proname: 'continuum_protect_offboarded_audit_tombstone',
+          prosrc: expect.stringContaining(
+            'continuum_offboarding_expected_audit_metadata(OLD.metadata)',
+          ),
+        }),
+      ]);
     } finally {
       await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
     }

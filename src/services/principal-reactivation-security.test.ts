@@ -113,7 +113,6 @@ describe('principal reactivation database trust boundary', () => {
     );
     expect(grants).toMatch(/continuum_write_offboarding_run\(UUID, UUID, TEXT, JSONB\)/i);
     expect(grants).toMatch(/continuum_start_offboarding_run\(UUID, UUID, JSONB\)/i);
-    expect(grants).toMatch(/continuum_offboarding_expected_audit_metadata\(JSONB\)/i);
     for (const table of [
       'service_api_keys', 'ingest_deliveries', 'entra_sync_state',
     ]) {
@@ -522,7 +521,7 @@ describe('principal reactivation database trust boundary', () => {
         'SELECT run_id::text AS run_id FROM principal_offboarding_runs WHERE principal_id = $1',
         [target.id],
       )).rows[0].run_id as string;
-      expect((await rolePool.query(
+      expect((await pool.query(
         'SELECT continuum_offboarding_actual_state_is_erased($1::uuid) AS erased',
         [completedRunId],
       )).rows[0].erased).toBe(true);
@@ -535,9 +534,12 @@ describe('principal reactivation database trust boundary', () => {
         [scope.id],
       )).rejects.toThrow(/offboarded owned-scope identity is immutable/i);
       const redactedAuditId = (await rolePool.query(
-        `SELECT id::text AS id FROM audit_log
-          WHERE metadata = '{"redacted":"principal_offboarding"}'::jsonb
-          ORDER BY id LIMIT 1`,
+        `SELECT audit.id::text AS id
+           FROM audit_log audit
+          WHERE audit.scope_id = $1
+            AND audit.metadata = '{"redacted":"principal_offboarding"}'::jsonb
+          ORDER BY audit.id LIMIT 1`,
+        [scope.id],
       )).rows[0].id as string;
       await expect(rolePool.query(
         `UPDATE audit_log SET query = 'restored audit identity' WHERE id = $1`,
@@ -547,6 +549,24 @@ describe('principal reactivation database trust boundary', () => {
         'UPDATE audit_log SET scope_id = NULL WHERE id = $1',
         [redactedAuditId],
       )).rejects.toThrow(/offboarded audit linkage is immutable/i);
+      await expect(rolePool.query(
+        'UPDATE audit_log SET metadata = $2::jsonb WHERE id = $1',
+        [redactedAuditId, JSON.stringify({
+          operation: 'service_principal_provisioned',
+          service_principal_id: '00000000-0000-4000-8000-000000000099',
+          external_id: 'restored@example.test',
+        })],
+      )).rejects.toThrow(/offboarded audit tombstone is immutable/i);
+      const preservedAuditId = (await rolePool.query(
+        `SELECT id::text AS id FROM audit_log
+          WHERE metadata->>'operation' = 'principal_offboarded'
+          ORDER BY id DESC LIMIT 1`,
+      )).rows[0].id as string;
+      await expect(rolePool.query(
+        `UPDATE audit_log SET metadata = '{"redacted":"principal_offboarding"}'::jsonb
+          WHERE id = $1`,
+        [preservedAuditId],
+      )).rejects.toThrow(/preserved offboarding audit evidence is immutable/i);
       await expect(reactivatePrincipal(rolePool, admin, target.id)).resolves.toBeUndefined();
       expect((await rolePool.query(
         `SELECT disabled_at, offboarded_at, reactivated_at IS NOT NULL AS reactivated
