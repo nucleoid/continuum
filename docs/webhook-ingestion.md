@@ -33,6 +33,12 @@ scopes are rejected. Every selected scope, including an override, still
 requires writer or admin access by the configured service principal. Ingestion
 never creates scopes.
 
+Offboarding preserves memories in shared scopes. Their stable author UUID and
+source provenance remain, and GitHub-derived shared metadata can retain a
+mutable GitHub login. This is the documented shared-memory identity exception;
+personal-scope text, metadata, embeddings, and raw audit queries are still
+erased by the offboarding workflow.
+
 ## Responses and replay
 
 - `202`: a new delivery created one or more memories.

@@ -4,6 +4,7 @@ import { createAuthenticator } from '../api/auth.js';
 import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
 import { addMembership } from '../storage/memberships.js';
 import { createMemory } from '../storage/memories.js';
+import { selectGapCandidates } from '../storage/gaps.js';
 import { createPrincipal, upsertPrincipalByExternalId } from '../storage/principals.js';
 import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
@@ -146,6 +147,9 @@ describe('offboarding and erasure', () => {
       scopeId: value.personal.id, scopeKind: 'user', type: 'context', title: 'Late', body: 'Late',
       authorId: delegate.id, source: 'terminal-summary',
     })).rejects.toThrow(/offboarded principal/i);
+    await expect(pool.query(
+      `UPDATE memories SET state = 'live' WHERE id = $1`, [value.personalMemory.id],
+    )).rejects.toThrow(/offboarded principal/i);
 
     await pool.query('ALTER TABLE memories DISABLE TRIGGER require_open_owned_user_scope');
     const dirty = await createMemory(pool, {
@@ -153,13 +157,13 @@ describe('offboarding and erasure', () => {
       authorId: delegate.id, source: 'manual',
     });
     await pool.query('ALTER TABLE memories ENABLE TRIGGER require_open_owned_user_scope');
+    await pool.query('ALTER TABLE memory_embeddings DISABLE TRIGGER require_embeddable_memory');
     await pool.query(
-      `ALTER TABLE memory_embeddings DISABLE TRIGGER require_embeddable_memory;
-       INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
-       VALUES ($1, 'test', 768, $2::vector);
-       ALTER TABLE memory_embeddings ENABLE TRIGGER require_embeddable_memory`,
+      `INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
+       VALUES ($1, 'test', 768, $2::vector)`,
       [dirty.id, `[${Array(768).fill(0).join(',')}]`],
     );
+    await pool.query('ALTER TABLE memory_embeddings ENABLE TRIGGER require_embeddable_memory');
     const repaired = await offboardPrincipal(pool, value.admin, value.target.id);
     expect(repaired).toMatchObject({ alreadyOffboarded: false, liveMemories: 1, embeddings: 1 });
     expect((await pool.query('SELECT title, state FROM memories WHERE id = $1', [dirty.id])).rows[0])
@@ -181,6 +185,11 @@ describe('offboarding and erasure', () => {
     expect((await pool.query(
       `SELECT query FROM audit_log WHERE principal_id = $1 AND action = 'read'`, [value.target.id],
     )).rows).toEqual([{ query: null }]);
+    const gaps = await selectGapCandidates(pool, {
+      since: new Date(Date.now() - 86_400_000), scanLimit: 50,
+      candidateLimit: 10, maxQueryChars: 2_000,
+    });
+    expect(gaps.candidates).toEqual([]);
   });
 
   it('requires membership history and explicit override for another active scope member', async () => {
@@ -269,6 +278,7 @@ describe('offboarding and erasure', () => {
     const org = await getScopeByRef(pool, { kind: 'org', name: '' });
     const personal = await createScope(pool, { kind: 'user', name: 'only-admin-scope' });
     await addMembership(pool, onlyAdmin.id, org!.id, 'admin');
+    await addMembership(pool, onlyAdmin.id, personal.id, 'writer');
     await mapOwnedUserScope(pool, onlyAdmin, onlyAdmin.id, personal.id);
     await expect(offboardPrincipal(pool, onlyAdmin, onlyAdmin.id)).rejects.toThrow(/last effective manual org administrator/i);
     expect((await pool.query('SELECT disabled_at FROM principals WHERE id = $1', [onlyAdmin.id])).rows[0].disabled_at).toBeNull();

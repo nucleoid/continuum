@@ -381,10 +381,15 @@ does not restore either. Database triggers also prevent deletion, demotion, or
 disablement of the final effective manually managed org administrator.
 
 Offboarding uses an explicit `principal_user_scopes` UUID mapping; mutable names
-never establish ownership. An org-admin transaction locks against membership
-sync, tombstones and archives only the mapped user scope, deletes embeddings,
+never establish ownership. Mapping requires target membership history and
+rejects other active members unless an operator records the explicit shared
+scope override. An org-admin transaction locks against membership sync,
+tombstones and archives only the mapped user scope, deletes embeddings, nulls
+the target's raw audit queries, deactivates every membership on that scope,
 disables access, applies a stable UUID-derived pseudonym, and writes atomic
-per-memory plus operation-summary audit records.
+per-memory plus operation-summary audit records. Database guards close an
+offboarded owned scope to new live memories and retries verify that no live
+rows, embeddings, active memberships, or raw target queries remain.
 Shared scopes and stable UUID references remain intact. Database archive and
 embedding triggers enforce cleanup for lifecycle, supersession, offboarding,
 and direct state transitions. See `docs/offboarding.md` for limits, retry

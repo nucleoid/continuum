@@ -61,9 +61,18 @@ async function main(): Promise<void> {
       await reactivatePrincipal(pool, actor, args[0]);
       process.stdout.write(`${JSON.stringify({ operation, principalId: args[0] })}\n`);
     } else if (operation === 'map-user-scope') {
-      const [principalId, scopeId] = args;
-      if (!principalId || !scopeId) throw new Error('usage: map-user-scope <principal-id> <user-scope-id>');
-      process.stdout.write(`${JSON.stringify({ operation, ...await mapOwnedUserScope(pool, actor, principalId, scopeId) })}\n`);
+      const positional = args.filter((value) => value !== '--allow-other-active-members');
+      const [principalId, scopeId] = positional;
+      if (!principalId || !scopeId || positional.length !== 2
+        || args.some((value) => value.startsWith('--') && value !== '--allow-other-active-members')) {
+        throw new Error('usage: map-user-scope <principal-id> <user-scope-id> [--allow-other-active-members]');
+      }
+      process.stdout.write(`${JSON.stringify({
+        operation,
+        ...await mapOwnedUserScope(
+          pool, actor, principalId, scopeId, args.includes('--allow-other-active-members'),
+        ),
+      })}\n`);
     } else if (operation === 'offboard-principal') {
       const positional = args.filter((value) => value !== '--dry-run');
       if (!positional[0] || positional.length !== 1 || args.some((value) => value.startsWith('--') && value !== '--dry-run')) {

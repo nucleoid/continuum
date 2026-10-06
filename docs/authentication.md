@@ -92,15 +92,18 @@ deactivates every membership and permanently revokes every current service key.
 Database triggers enforce those effects even for direct database changes and
 prevent deletion, demotion, or disabling of the final effective manual
 break-glass org administrator. Reactivation is also explicit and audited, but
-does not restore memberships or keys:
+does not itself restore memberships or keys:
 
 ```text
 npm run admin -- disable-principal <principal-id>
 npm run admin -- reactivate-principal <principal-id>
 ```
 
-After reactivation, explicitly restore required access and issue a new service
-key. Old keys never become valid again.
+After reactivation, review required access and issue a new service key. A later
+authoritative membership sync can restore eligible Entra-sourced memberships;
+manual memberships require explicit restoration. Old keys never become valid
+again. Reactivating an offboarded user clears the lifecycle marker so any later
+offboarding performs a complete new erasure pass.
 
 For user erasure, use the separate explicit ownership mapping and offboarding
 workflow in [offboarding.md](./offboarding.md). A disabled offboarded external ID

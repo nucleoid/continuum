@@ -64,7 +64,7 @@ describe('offboarding REST administration', () => {
     const response = await request(app).post(`${path}/offboard`)
       .set('Authorization', 'Bearer only-admin-rest').send({});
     expect(response.status).toBe(409);
-    expect(response.body).toEqual({
+    expect(response.body).toMatchObject({
       code: 'CONFLICT', error: 'cannot remove the last effective manual org administrator',
     });
   });

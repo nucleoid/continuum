@@ -44,7 +44,9 @@ context, and audit row commits atomically.
 Migration `0022_offboarding_erasure.sql` generalizes embedding cleanup: every
 transition to `archived`, including supersession, direct maintenance, and
 offboarding, deletes the derived row. New embedding writes lock and recheck the
-parent and are rejected unless it remains live.
+parent and are rejected unless it remains live. The migration first removes
+pre-existing embeddings whose memories are already archived, and uses a bounded
+lock timeout so operators can retry instead of queueing traffic indefinitely.
 
 ## Review queue
 

@@ -102,9 +102,18 @@ export async function reactivatePrincipal(
   try {
     await client.query('BEGIN');
     await requireOrgAdmin(client, actor.id);
+    const disabled = await client.query(
+      `SELECT offboarded_at FROM principals
+        WHERE id = $1 AND disabled_at IS NOT NULL FOR UPDATE`, [principalId],
+    );
+    if (!disabled.rowCount) {
+      throw new ServiceError('INVALID_INPUT', 'disabled principal not found');
+    }
+    const previouslyOffboarded = disabled.rows[0].offboarded_at !== null;
     const reactivated = await client.query(
-      `UPDATE principals SET disabled_at = NULL, reactivated_at = now()
-        WHERE id = $1 AND disabled_at IS NOT NULL RETURNING id`, [principalId],
+      `UPDATE principals
+          SET disabled_at = NULL, offboarded_at = NULL, reactivated_at = now()
+        WHERE id = $1 RETURNING id`, [principalId],
     );
     if (!reactivated.rowCount) {
       throw new ServiceError('INVALID_INPUT', 'disabled principal not found');
@@ -112,7 +121,10 @@ export async function reactivatePrincipal(
     await client.query(
       `INSERT INTO audit_log (principal_id, action, metadata)
        VALUES ($1, 'write', $2::jsonb)`,
-      [actor.id, JSON.stringify({ operation: 'principal_reactivated', principal_id: principalId })],
+      [actor.id, JSON.stringify({
+        operation: 'principal_reactivated', principal_id: principalId,
+        previously_offboarded: previouslyOffboarded,
+      })],
     );
     await client.query('COMMIT');
   } catch (error) {

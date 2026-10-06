@@ -5,7 +5,10 @@ import { mapOwnedUserScope, offboardPrincipal } from '../../services/offboarding
 import { ServiceError } from '../../services/errors.js';
 
 const uuid = z.string().uuid();
-const mappingBody = z.object({ scopeId: uuid }).strict();
+const mappingBody = z.object({
+  scopeId: uuid,
+  allowOtherActiveMembers: z.boolean().optional(),
+}).strict();
 const offboardBody = z.object({ dryRun: z.boolean().optional() }).strict();
 const invalid = () => new ServiceError('INVALID_INPUT', 'Invalid request');
 
@@ -16,7 +19,10 @@ export function offboardingRouter(pool: pg.Pool): Router {
       const principalId = uuid.safeParse(req.params.principalId);
       const body = mappingBody.safeParse(req.body);
       if (!principalId.success || !body.success) throw invalid();
-      const result = await mapOwnedUserScope(pool, req.principal!, principalId.data, body.data.scopeId);
+      const result = await mapOwnedUserScope(
+        pool, req.principal!, principalId.data, body.data.scopeId,
+        body.data.allowOtherActiveMembers ?? false,
+      );
       res.status(result.created ? 201 : 200).json(result);
     } catch (error) { next(error); }
   });

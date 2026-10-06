@@ -73,6 +73,8 @@ describe('runMigrations', () => {
         [memoryId, `[${Array(768).fill(0).join(',')}]`],
       );
       await copyFile(new URL('0022_offboarding_erasure.sql', source), join(directory, '0022_offboarding_erasure.sql'));
+      expect(await readFile(new URL('0022_offboarding_erasure.sql', source), 'utf8'))
+        .toMatch(/SET LOCAL lock_timeout = '5s'/i);
       await runMigrations(pool, directory);
       expect((await pool.query('SELECT 1 FROM memory_embeddings WHERE memory_id = $1', [memoryId])).rowCount)
         .toBe(0);
