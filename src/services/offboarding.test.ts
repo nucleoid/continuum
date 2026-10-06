@@ -263,19 +263,30 @@ describe('offboarding and erasure', () => {
         [value.personal.id, 0, 100],
       )).toContain('audit_log_scope_cursor_idx');
       expect(await explain(
-        `SELECT id FROM audit_log
-          WHERE memory_id = $1 AND id > $2 ORDER BY id LIMIT $3`,
-        [value.personalMemory.id, 0, 100],
-      )).toContain('audit_log_memory_cursor_idx');
+        `WITH scan AS MATERIALIZED (
+           SELECT a.* FROM audit_log a
+            WHERE a.id > $2 AND a.id <= $3 ORDER BY a.id LIMIT $4
+         )
+         SELECT a.id FROM scan a JOIN memories m ON m.id = a.memory_id
+          WHERE m.scope_id = $1`,
+        [value.personal.id, 0, 9_223_372_036_854_775_807n, 100],
+      )).toMatch(/audit_log_pkey[\s\S]*CTE Scan|CTE Scan[\s\S]*audit_log_pkey/);
       expect(await explain(
-        `SELECT id FROM audit_log WHERE metadata ? 'scope_ids'
-          AND metadata->'scope_ids' @> jsonb_build_array($1::text)`,
-        [value.personal.id],
-      )).toContain('audit_log_scope_ids_gin_idx');
+        `WITH scan AS MATERIALIZED (
+           SELECT a.* FROM audit_log a
+            WHERE a.id > $2 AND a.id <= $3 ORDER BY a.id LIMIT $4
+         )
+         SELECT a.id FROM scan a WHERE a.metadata ? 'scope_ids'
+          AND a.metadata->'scope_ids' @> jsonb_build_array($1::text)`,
+        [value.personal.id, 0, 9_223_372_036_854_775_807n, 100],
+      )).toMatch(/audit_log_pkey[\s\S]*CTE Scan|CTE Scan[\s\S]*audit_log_pkey/);
       expect(await explain(
-        `SELECT id FROM audit_log WHERE metadata ? 'request_id'
-          AND metadata->>'request_id' = $1 AND id > $2 ORDER BY id LIMIT $3`,
-        [requestId, 0, 100],
+        `SELECT a.id FROM principal_offboarding_audit_requests r
+           JOIN audit_log a ON a.metadata ? 'request_id'
+            AND a.metadata->>'request_id' = r.request_id
+          WHERE r.principal_id = $1 AND a.id > $2 AND a.id <= $3
+          ORDER BY a.id LIMIT $4`,
+        [value.target.id, 0, 9_223_372_036_854_775_807n, 100],
       )).toContain('audit_log_request_cursor_idx');
       expect(await explain(
         `SELECT id FROM audit_log WHERE id > $1 ORDER BY id LIMIT $2`,
@@ -290,6 +301,95 @@ describe('offboarding and erasure', () => {
     } finally {
       client.release();
     }
+  });
+
+  it('fences audit history once and completes only after every durable selector cursor exhausts it', async () => {
+    const value = await fixture();
+    await pool.query(
+      `INSERT INTO audit_log (principal_id, action, query, metadata)
+       SELECT $1, 'read', NULL, '{"source":"manual"}'::jsonb
+         FROM generate_series(1, 40)`,
+      [value.admin.id],
+    );
+    await pool.query(
+      `INSERT INTO audit_log (principal_id, action, scope_id, query, metadata) VALUES
+       ($1, 'read', $2, 'scope secret', '{}'),
+       ($1, 'read', NULL, 'scope ids secret', $3::jsonb)`,
+      [value.admin.id, value.personal.id,
+        JSON.stringify({ scope_ids: [value.personal.id] })],
+    );
+
+    let result = await offboardPrincipal(pool, value.admin, value.target.id, { batchSize: 1 });
+    const firstRun = (await pool.query(
+      `SELECT audit_fence_id::text, audit_principal_cursor::text,
+              audit_scope_cursor::text, audit_memory_cursor::text,
+              audit_scope_ids_cursor::text, audit_linked_cursor::text
+         FROM principal_offboarding_runs WHERE principal_id = $1`,
+      [value.target.id],
+    )).rows[0];
+    expect(BigInt(firstRun.audit_fence_id)).toBeGreaterThan(0n);
+    expect(Object.entries(firstRun).filter(([key]) => key !== 'audit_fence_id')
+      .every(([, cursor]) => BigInt(cursor as string) <= BigInt(firstRun.audit_fence_id))).toBe(true);
+
+    for (let attempt = 0; attempt < 100 && !result.complete; attempt += 1) {
+      result = await offboardPrincipal(pool, value.admin, value.target.id, { batchSize: 1 });
+    }
+    expect(result.complete).toBe(true);
+    expect((await pool.query(
+      `SELECT audit_principal_cursor = audit_fence_id AS principal_done,
+              audit_scope_cursor = audit_fence_id AS scope_done,
+              audit_memory_cursor = audit_fence_id AS memory_done,
+              audit_scope_ids_cursor = audit_fence_id AS scope_ids_done,
+              audit_linked_cursor = audit_fence_id AS linked_done
+         FROM principal_offboarding_runs WHERE principal_id = $1`,
+      [value.target.id],
+    )).rows[0]).toEqual({
+      principal_done: true, scope_done: true, memory_done: true,
+      scope_ids_done: true, linked_done: true,
+    });
+  });
+
+  it('labels capped previews as lower bounds and records exact cumulative completion counts', async () => {
+    const value = await fixture();
+    await pool.query(
+      `INSERT INTO memories (id, scope_id, type, title, body, author_id, source)
+       SELECT gen_random_uuid(), $1, 'context', 'Private ' || n, 'Body ' || n, $2, 'manual'
+         FROM generate_series(1, 3) n`,
+      [value.personal.id, value.target.id],
+    );
+    await pool.query(
+      `INSERT INTO audit_log (principal_id, action, scope_id, query, metadata)
+       SELECT $1, 'read', $2, 'private ' || n, '{}'::jsonb FROM generate_series(1, 3) n`,
+      [value.admin.id, value.personal.id],
+    );
+
+    const preview = await offboardPrincipal(pool, value.admin, value.target.id, {
+      dryRun: true, batchSize: 1,
+    });
+    expect(preview).toMatchObject({ memories: 1, auditRows: 1 });
+    expect((preview as any).countEvidence).toEqual({
+      exact: false, limit: 1,
+      truncated: expect.arrayContaining(['memories', 'liveMemories', 'dirtyMemories', 'auditRows']),
+    });
+
+    let result = await offboardPrincipal(pool, value.admin, value.target.id, { batchSize: 1 });
+    for (let attempt = 0; attempt < 100 && !result.complete; attempt += 1) {
+      result = await offboardPrincipal(pool, value.admin, value.target.id, { batchSize: 1 });
+    }
+    expect(result.complete).toBe(true);
+    expect((result as any).countEvidence).toEqual({ exact: true, limit: null, truncated: [] });
+    expect(result).toMatchObject({ memories: 4, auditRows: 3, auditQueries: 3 });
+    expect((await pool.query(
+      `SELECT memories, audit_rows, audit_queries FROM principal_offboarding_events
+        WHERE principal_id = $1 AND NOT repair`, [value.target.id],
+    )).rows).toEqual([{ memories: 4, audit_rows: 3, audit_queries: 3 }]);
+    expect((await pool.query(
+      `SELECT evidence FROM principal_offboarding_run_events
+        WHERE principal_id = $1 AND phase = 'completed'`, [value.target.id],
+    )).rows[0].evidence).toMatchObject({
+      counts_exact: true, memories_processed: 4,
+      audit_rows_processed: 3, audit_queries_processed: 3,
+    });
   });
 
   it('scrubs free-text audit metadata and scope names and reports dirty retry counts', async () => {
@@ -843,6 +943,33 @@ describe('offboarding and erasure', () => {
       `SELECT request_id FROM principal_offboarding_audit_requests WHERE principal_id = $1`,
       [value.target.id],
     )).rows).toEqual([{ request_id: requestId }]);
+  });
+
+  it('rejects a caller-spoofed reactivation GUC while preserving guarded reactivation', async () => {
+    const value = await fixture();
+    let result = await offboardPrincipal(pool, value.admin, value.target.id, { batchSize: 1 });
+    for (let attempt = 0; attempt < 50 && !result.complete; attempt += 1) {
+      result = await offboardPrincipal(pool, value.admin, value.target.id, { batchSize: 1 });
+    }
+    expect(result.complete).toBe(true);
+
+    const attacker = await pool.connect();
+    try {
+      await attacker.query('BEGIN');
+      await attacker.query(
+        `SELECT set_config('continuum.reactivation_principal_id', $1, true)`,
+        [value.target.id],
+      );
+      await expect(attacker.query(
+        `UPDATE principals SET disabled_at = NULL, offboarded_at = NULL,
+                reactivated_at = now() WHERE id = $1`,
+        [value.target.id],
+      )).rejects.toThrow(/guarded database function/i);
+    } finally {
+      await attacker.query('ROLLBACK');
+      attacker.release();
+    }
+    await expect(reactivatePrincipal(pool, value.admin, value.target.id)).resolves.toBeUndefined();
   });
 
   it('makes approval evidence and completed erasure receipts immutable to all writes', async () => {

@@ -55,6 +55,14 @@ describe('runMigrations', () => {
     expect(indexes.match(/CREATE INDEX CONCURRENTLY/gi)).toHaveLength(5);
     expect(indexes.match(/continuum:require-valid-index/gi)).toHaveLength(5);
   });
+  it('hardens round-six offboarding without a caller-spoofable reactivation GUC', async () => {
+    const hardening = await readFile(
+      join(process.cwd(), 'migrations/0027_offboarding_bounded_completion.sql'), 'utf8',
+    );
+    expect(hardening).toMatch(/ADD COLUMN audit_fence_id BIGINT/i);
+    expect(hardening).toMatch(/SECURITY DEFINER/i);
+    expect(hardening).not.toMatch(/current_setting|set_config/i);
+  });
   it('removes pre-existing embeddings for archived memories during the offboarding migration', async () => {
     const schema = `migrator_offboarding_${Date.now()}_${Math.random().toString(16).slice(2)}`;
     const admin = new pg.Pool({ connectionString: DATABASE_URL });
