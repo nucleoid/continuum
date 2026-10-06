@@ -301,37 +301,58 @@ const PRESERVED_AUDIT_OPERATIONS = [
   'principal_offboarding_repaired',
 ] as const;
 
-const UUID_ONLY_ADMIN_AUDIT_OPERATIONS = [
-  'api_key_issued',
-  'api_key_rotated',
-  'api_key_revoked',
-  'principal_disabled',
-  'principal_reactivated',
-  'service_principal_provisioned',
-  'entra_group_binding_provisioned',
-  'entra_group_binding_revoked',
-  'entra_membership_sync_rejected',
-  'entra_membership_sync_screened',
-  'entra_membership_sync',
+// Every producer is classified explicitly. A UUID-looking string or number is
+// not safe merely because of its JSON shape: only named fields for the exact
+// operation/source survive erasure.
+const AUDIT_OPERATION_POLICIES = [
+  { operation: 'api_key_issued', safeFields: ['key_id', 'service_principal_id'] },
+  { operation: 'api_key_revoked', safeFields: ['key_id', 'service_principal_id', 'key_revoked_at'] },
+  { operation: 'api_key_rotated', safeFields: ['key_id', 'service_principal_id', 'key_rotated_at'] },
+  { operation: 'create_scope', safeFields: ['created', 'kind'] },
+  { operation: 'entra_group_binding_provisioned', safeFields: ['group_id', 'scope_id', 'role', 'previous_scope_id', 'previous_role'] },
+  { operation: 'entra_group_binding_reactivated', safeFields: ['group_id', 'scope_id', 'role', 'previous_scope_id', 'previous_role'] },
+  { operation: 'entra_group_binding_updated', safeFields: ['group_id', 'scope_id', 'role', 'previous_scope_id', 'previous_role'] },
+  { operation: 'entra_group_binding_revoked', safeFields: ['group_id', 'role', 'memberships_deactivated'] },
+  { operation: 'entra_membership_sync', safeFields: ['groups_seen', 'groups_reactivated', 'groups_deactivated', 'memberships_active', 'memberships_deactivated', 'groups_skipped'] },
+  { operation: 'entra_membership_sync_rejected', safeFields: ['reason', 'last_success_at', 'max_staleness_hours', 'stale', 'stale_memberships_deactivated', 'groups_deactivated', 'memberships_deactivated'] },
+  { operation: 'entra_membership_sync_screened', safeFields: ['groups_seen', 'groups_reactivated', 'groups_deactivated', 'memberships_active', 'memberships_deactivated', 'groups_skipped'] },
+  { operation: 'get_memory', safeFields: ['request_id', 'record_kind'] },
+  { operation: 'list_memories', safeFields: ['request_id', 'record_kind', 'state', 'scope_filtered', 'type_filter', 'limit', 'offset', 'count'] },
+  { operation: 'principal_disabled', safeFields: ['principal_id'] },
+  { operation: 'principal_memory_erased', safeFields: ['principal_id'] },
+  { operation: 'principal_reactivated', safeFields: ['principal_id', 'previously_offboarded'] },
+  { operation: 'service_principal_provisioned', safeFields: ['service_principal_id', 'external_id'] },
 ] as const;
 
-const ADMIN_OPERATION_SQL = `ARRAY[${UUID_ONLY_ADMIN_AUDIT_OPERATIONS
-  .map((operation) => `'${operation}'`).join(',')}]::text[]`;
-const AUDIT_SAFE_METADATA = `(SELECT COALESCE(jsonb_object_agg(entry.key, entry.value), '{}'::jsonb)
-  FROM jsonb_each(a.metadata) entry
- WHERE entry.key = 'operation'
-    OR jsonb_typeof(entry.value) IN ('number', 'boolean')
-    OR (jsonb_typeof(entry.value) = 'string'
-        AND trim(both '"' from entry.value::text)
-          ~* '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$')
-    OR (jsonb_typeof(entry.value) = 'array'
-        AND NOT EXISTS (
-          SELECT 1 FROM jsonb_array_elements_text(entry.value) item(value)
-           WHERE item.value !~* '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
-        )))`;
+const AUDIT_SOURCE_POLICIES = [
+  { source: 'ado-workitem', safeFields: [] },
+  { source: 'audit-retention', safeFields: ['cutoff', 'retention_days', 'first_id', 'last_id', 'first_at', 'last_at', 'deleted_count', 'export_mode', 'export_sha256', 'run_id', 'batch_number'] },
+  { source: 'deploy-event', safeFields: [] },
+  { source: 'github-branch', safeFields: [] },
+  { source: 'github-pr', safeFields: [] },
+  { source: 'lifecycle', safeFields: [] },
+  { source: 'manual', safeFields: [] },
+  { source: 'terminal-summary', safeFields: [] },
+] as const;
+
+function policyMetadataSql(discriminator: 'operation' | 'source', value: string,
+  safeFields: readonly string[]): string {
+  const fields = [discriminator, ...safeFields].map((field) => `'${field}'`).join(',');
+  return `(SELECT COALESCE(jsonb_object_agg(entry.key, entry.value), '{}'::jsonb)
+    FROM jsonb_each(a.metadata) entry WHERE entry.key = ANY(ARRAY[${fields}]::text[]))`;
+}
+
+const AUDIT_CLASSIFIED_METADATA = `(CASE
+${AUDIT_OPERATION_POLICIES.map((policy) =>
+    `WHEN a.metadata->>'operation' = '${policy.operation}' THEN ${policyMetadataSql('operation', policy.operation, policy.safeFields)}`)
+    .join('\n')}
+${AUDIT_SOURCE_POLICIES.map((policy) =>
+    `WHEN a.metadata->>'source' = '${policy.source}' THEN ${policyMetadataSql('source', policy.source, policy.safeFields)}`)
+    .join('\n')}
+ELSE NULL END)`;
 const AUDIT_REDACTED_METADATA = `'${JSON.stringify({ redacted: 'principal_offboarding' })}'::jsonb`;
 const AUDIT_EXPECTED_METADATA = `(CASE
-  WHEN a.metadata->>'operation' = ANY(${ADMIN_OPERATION_SQL}) THEN ${AUDIT_SAFE_METADATA}
+  WHEN ${AUDIT_CLASSIFIED_METADATA} IS NOT NULL THEN ${AUDIT_CLASSIFIED_METADATA}
   ELSE ${AUDIT_REDACTED_METADATA} END)`;
 
 const AUDIT_DIRTY = `(a.query IS NOT NULL
@@ -351,12 +372,18 @@ async function selectAuditBranch(
   },
 ): Promise<number> {
   if (args.remaining <= 0) return 0;
-  const selected = await client.query(
-    `WITH candidates AS MATERIALIZED (
-       SELECT a.*
-         ${args.from}
+  const boundedScan = args.reason === 'scope_ids'
+    ? `SELECT a.* FROM audit_log a
+        WHERE a.id > $4 AND $1::uuid IS NOT NULL AND $2::uuid IS NOT NULL
+        ORDER BY a.id LIMIT $5`
+    : `SELECT a.* ${args.from}
         WHERE a.id > $4 AND $1::uuid IS NOT NULL AND $2::uuid IS NOT NULL AND ${args.where}
-        ORDER BY a.id LIMIT $5
+        ORDER BY a.id LIMIT $5`;
+  const selected = await client.query(
+    `WITH scan AS MATERIALIZED (${boundedScan}),
+     candidates AS MATERIALIZED (
+       SELECT a.* FROM scan a
+        WHERE ${args.reason === 'scope_ids' ? args.where : 'TRUE'}
      ), selected AS (
        SELECT a.id, a.metadata->>'request_id' AS request_id
          FROM candidates a
@@ -366,7 +393,7 @@ async function selectAuditBranch(
        SELECT id, request_id, $6 FROM selected
        ON CONFLICT (id) DO NOTHING RETURNING id
      )
-     SELECT COALESCE((SELECT max(id) FROM candidates), $4::bigint)::text AS cursor,
+     SELECT COALESCE((SELECT max(id) FROM scan), $4::bigint)::text AS cursor,
             (SELECT count(*)::int FROM inserted) AS inserted`,
     [args.scopeId, args.principalId, [...PRESERVED_AUDIT_OPERATIONS], args.cursor,
       args.remaining, args.reason],
@@ -469,31 +496,36 @@ async function stateWorkRemains(
   };
 }
 
-async function auditSelectionCounts(
+async function boundedAuditPreview(
   client: pg.PoolClient,
   scopeId: string,
   principalId: string,
+  limit: number,
 ): Promise<{ selection: AuditSelectionCounts; queries: number }> {
   const selected = await client.query(
     `WITH direct_candidates AS (
-       SELECT a.id, a.query, a.metadata->>'request_id' AS request_id,
+       (SELECT a.id, a.query, a.metadata->>'request_id' AS request_id,
               'principal'::text AS reason, 1 AS priority
          FROM audit_log a
         WHERE a.principal_id = $2 AND ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED}
+        ORDER BY a.id LIMIT $4)
        UNION ALL
-       SELECT a.id, a.query, a.metadata->>'request_id', 'scope', 2
+       (SELECT a.id, a.query, a.metadata->>'request_id', 'scope', 2
          FROM audit_log a
         WHERE a.scope_id = $1 AND ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED}
+        ORDER BY a.id LIMIT $4)
        UNION ALL
-       SELECT a.id, a.query, a.metadata->>'request_id', 'memory', 3
+       (SELECT a.id, a.query, a.metadata->>'request_id', 'memory', 3
          FROM memories m JOIN audit_log a ON a.memory_id = m.id
         WHERE m.scope_id = $1 AND ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED}
+        ORDER BY a.id LIMIT $4)
        UNION ALL
-       SELECT a.id, a.query, a.metadata->>'request_id', 'scope_ids', 4
+       (SELECT a.id, a.query, a.metadata->>'request_id', 'scope_ids', 4
          FROM audit_log a
         WHERE a.metadata ? 'scope_ids'
           AND a.metadata->'scope_ids' @> jsonb_build_array($1::text)
           AND ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED}
+        ORDER BY a.id LIMIT $4)
      ), direct AS (
        SELECT DISTINCT ON (id) id, query, request_id, reason
          FROM direct_candidates ORDER BY id, priority
@@ -508,10 +540,13 @@ async function auditSelectionCounts(
            ON a.metadata ? 'request_id' AND a.metadata->>'request_id' = r.request_id
         WHERE ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED}
           AND NOT EXISTS (SELECT 1 FROM direct d WHERE d.id = a.id)
+        ORDER BY a.id LIMIT $4
      ), targets AS (
        SELECT id, query, reason FROM direct
        UNION ALL
        SELECT id, query, reason FROM linked
+     ), bounded_targets AS (
+       SELECT * FROM targets ORDER BY id LIMIT $4
      )
      SELECT count(*) FILTER (WHERE reason = 'principal')::int AS principal,
             count(*) FILTER (WHERE reason = 'scope')::int AS scope,
@@ -520,8 +555,8 @@ async function auditSelectionCounts(
             count(*) FILTER (WHERE reason = 'linked_request')::int AS linked_request,
             count(*)::int AS total,
             count(*) FILTER (WHERE query IS NOT NULL)::int AS queries
-       FROM targets`,
-    [scopeId, principalId, [...PRESERVED_AUDIT_OPERATIONS]],
+       FROM bounded_targets`,
+    [scopeId, principalId, [...PRESERVED_AUDIT_OPERATIONS], limit],
   );
   const row = selected.rows[0];
   return {
@@ -544,7 +579,71 @@ function requestedBatchSize(value: number | undefined): number {
   return batchSize;
 }
 
+async function startOffboardingRunEvent(
+  client: pg.PoolClient,
+  run: Record<string, unknown>,
+  initiatedBy: string,
+  evidence: OffboardingEvidence,
+): Promise<void> {
+  // phase started: immutable authorization exists before the first fence/write.
+  await client.query(
+    `INSERT INTO principal_offboarding_run_events
+       (run_id, principal_id, scope_id, phase, initiated_by, finalized_by,
+        approval_id, approval_evidence_hash, evidence)
+     VALUES ($1, $2, $3, 'started', $4, NULL, $5, $6, $7::jsonb)
+     ON CONFLICT (run_id, phase) DO NOTHING`,
+    [run.run_id, run.principal_id, run.scope_id, initiatedBy, run.approval_id,
+      run.approval_evidence_hash, JSON.stringify(evidence)],
+  );
+}
+
+async function finalizeOffboardingRun(
+  client: pg.PoolClient,
+  run: Record<string, unknown>,
+  finalizedBy: string,
+  completionEvidence: Record<string, unknown>,
+): Promise<void> {
+  // phase completed: preserve both the original initiator and finalizer.
+  const inserted = await client.query(
+    `INSERT INTO principal_offboarding_run_events
+       (run_id, principal_id, scope_id, phase, initiated_by, finalized_by,
+        approval_id, approval_evidence_hash, evidence)
+     SELECT started.run_id, started.principal_id, started.scope_id, 'completed',
+            started.initiated_by, $2, started.approval_id,
+            started.approval_evidence_hash, $3::jsonb
+       FROM principal_offboarding_run_events started
+      WHERE started.run_id = $1 AND started.phase = 'started'
+     ON CONFLICT (run_id, phase) DO NOTHING RETURNING run_id`,
+    [run.run_id, finalizedBy, JSON.stringify(completionEvidence)],
+  );
+  if (!inserted.rowCount) {
+    throw new Error('offboarding completion evidence could not be appended');
+  }
+  const completed = await client.query(
+    `UPDATE principal_offboarding_runs SET completed_at = now()
+      WHERE run_id = $1 AND completed_at IS NULL RETURNING run_id`, [run.run_id],
+  );
+  if (!completed.rowCount) throw new Error('offboarding run could not be finalized');
+}
+
 export async function offboardPrincipal(
+  pool: pg.Pool, actor: Principal, principalId: string,
+  dryRunOrOptions: boolean | OffboardingOptions = false,
+): Promise<OffboardingResult> {
+  const options = typeof dryRunOrOptions === 'boolean'
+    ? { dryRun: dryRunOrOptions } : dryRunOrOptions;
+  const dryRun = options.dryRun ?? false;
+  if (dryRun) return previewOffboarding(pool, actor, principalId, options);
+  return offboardPrincipalCore(pool, actor, principalId, options);
+}
+
+async function previewOffboarding(
+  pool: pg.Pool, actor: Principal, principalId: string, options: OffboardingOptions,
+): Promise<OffboardingResult> {
+  return offboardPrincipalCore(pool, actor, principalId, { ...options, dryRun: true });
+}
+
+async function offboardPrincipalCore(
   pool: pg.Pool, actor: Principal, principalId: string,
   dryRunOrOptions: boolean | OffboardingOptions = false,
 ): Promise<OffboardingResult> {
@@ -561,11 +660,13 @@ export async function offboardPrincipal(
     await client.query('BEGIN');
     await client.query("SET LOCAL lock_timeout = '5s'");
     await client.query("SET LOCAL statement_timeout = '30s'");
-    await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [SYNC_LOCK_ID]);
+    if (!dryRun) {
+      await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [SYNC_LOCK_ID]);
+    }
     await requireOrgAdmin(client, actor.id);
     const target = await client.query(
       `SELECT id, display_name, disabled_at, offboarded_at, reactivated_at
-         FROM principals WHERE id = $1 AND kind = 'user' FOR UPDATE`, [principalId],
+         FROM principals WHERE id = $1 AND kind = 'user'${dryRun ? '' : ' FOR UPDATE'}`, [principalId],
     );
     if (!target.rowCount) throw new ServiceError('INVALID_INPUT', 'user principal not found');
     const mapping = await client.query(
@@ -578,7 +679,7 @@ export async function offboardPrincipal(
             WHERE principal_id = pus.principal_id AND scope_id = pus.scope_id
             ORDER BY id DESC LIMIT 1
          ) approval ON TRUE
-        WHERE pus.principal_id = $1 FOR UPDATE OF pus, s`, [principalId],
+        WHERE pus.principal_id = $1${dryRun ? '' : ' FOR UPDATE OF pus, s'}`, [principalId],
     );
     if (!mapping.rowCount) {
       throw new ServiceError('CONFLICT', 'principal has no explicit owned user scope mapping');
@@ -625,7 +726,8 @@ export async function offboardPrincipal(
       ...ownership, acknowledgedPrincipalIds, acknowledgedEvidenceHash,
     };
     let run = await client.query(
-      'SELECT * FROM principal_offboarding_runs WHERE principal_id = $1 FOR UPDATE', [principalId],
+      `SELECT * FROM principal_offboarding_runs WHERE principal_id = $1${dryRun ? '' : ' FOR UPDATE'}`,
+      [principalId],
     );
     const resumedRun = run.rows[0]?.completed_at === null;
     const resumedState = resumedRun
@@ -636,26 +738,26 @@ export async function offboardPrincipal(
       ) : false;
     const state = resumedRun ? null : await client.query(
       `SELECT
-         (SELECT count(*)::int FROM memories WHERE scope_id = $1) AS memories,
-         (SELECT count(*)::int FROM memories WHERE scope_id = $1 AND state = 'live') AS live_memories,
-         (SELECT count(*)::int FROM memories WHERE scope_id = $1 AND (
+         (SELECT count(*)::int FROM (SELECT 1 FROM memories WHERE scope_id = $1 LIMIT $3) x) AS memories,
+         (SELECT count(*)::int FROM (SELECT 1 FROM memories WHERE scope_id = $1 AND state = 'live' LIMIT $3) x) AS live_memories,
+         (SELECT count(*)::int FROM (SELECT 1 FROM memories WHERE scope_id = $1 AND (
            type <> 'context' OR title <> '[erased]' OR body <> '[erased]'
            OR metadata <> '{}'::jsonb OR tags <> '{}'::text[] OR source <> 'erased'
            OR source_ref IS NOT NULL OR state <> 'archived' OR supersedes_id IS NOT NULL
            OR promoted_to_id IS NOT NULL OR expires_at IS NOT NULL OR last_verified IS NOT NULL
-         )) AS dirty_memories,
-         (SELECT count(*)::int FROM memory_embeddings e
-           JOIN memories m ON m.id = e.memory_id WHERE m.scope_id = $1) AS embeddings,
-         (SELECT count(*)::int FROM scope_memberships WHERE scope_id = $1 AND active) AS memberships,
-         (SELECT count(*)::int FROM principal_aliases WHERE principal_id = $2) AS aliases,
-         (SELECT count(*)::int FROM entra_groups WHERE scope_id = $1
-           AND (active OR approval_revoked_at IS NULL)) AS entra_bindings`,
-      [scopeId, principalId],
+         ) LIMIT $3) x) AS dirty_memories,
+         (SELECT count(*)::int FROM (SELECT 1 FROM memory_embeddings e
+           JOIN memories m ON m.id = e.memory_id WHERE m.scope_id = $1 LIMIT $3) x) AS embeddings,
+         (SELECT count(*)::int FROM (SELECT 1 FROM scope_memberships WHERE scope_id = $1 AND active LIMIT $3) x) AS memberships,
+         (SELECT count(*)::int FROM (SELECT 1 FROM principal_aliases WHERE principal_id = $2 LIMIT $3) x) AS aliases,
+         (SELECT count(*)::int FROM (SELECT 1 FROM entra_groups WHERE scope_id = $1
+           AND (active OR approval_revoked_at IS NULL) LIMIT $3) x) AS entra_bindings`,
+      [scopeId, principalId, batchSize + 1],
     );
     const audit = resumedRun ? {
       selection: run.rows[0].initial_audit_selection as AuditSelectionCounts,
       queries: Number(run.rows[0].initial_audit_queries),
-    } : await auditSelectionCounts(client, scopeId, principalId);
+    } : await boundedAuditPreview(client, scopeId, principalId, batchSize);
     const row = resumedRun ? {
       memories: run.rows[0].initial_memories,
       live_memories: run.rows[0].initial_memories,
@@ -701,7 +803,7 @@ export async function offboardPrincipal(
       : dirtyMemories === 0 && embeddings === 0 && memberships === 0
         && aliases === 0 && entraBindings === 0 && auditRows === 0;
     const wasOffboarded = target.rows[0].offboarded_at !== null;
-    const alreadyOffboarded = wasOffboarded
+    const alreadyOffboarded = !resumedRun && wasOffboarded
       && target.rows[0].disabled_at !== null
       && target.rows[0].reactivated_at === null
       && target.rows[0].display_name === pseudonym
@@ -722,7 +824,8 @@ export async function offboardPrincipal(
     if (run.rows[0]?.completed_at !== null && run.rows[0]?.completed_at !== undefined) {
       await client.query(
         `UPDATE principal_offboarding_runs
-            SET initiated_by = $2, approval_id = $3, started_at = now(),
+            SET run_id = gen_random_uuid(), initiated_by = $2::uuid, approval_id = $3,
+                approval_evidence_hash = $12, started_at = now(),
                 initial_memories = $4, initial_embeddings = $5, initial_memberships = $6,
                 initial_aliases = $7, initial_entra_bindings = $8,
                 initial_audit_rows = $9, initial_audit_queries = $10,
@@ -733,7 +836,8 @@ export async function offboardPrincipal(
                 completed_at = NULL
           WHERE principal_id = $1`,
         [principalId, actor.id, approvalId, memories, embeddings, memberships, aliases,
-          entraBindings, auditRows, auditQueries, JSON.stringify(audit.selection)],
+          entraBindings, auditRows, auditQueries, JSON.stringify(audit.selection),
+          acknowledgedEvidenceHash],
       );
       run = await client.query(
         'SELECT * FROM principal_offboarding_runs WHERE principal_id = $1 FOR UPDATE', [principalId],
@@ -744,13 +848,18 @@ export async function offboardPrincipal(
            (principal_id, scope_id, initiated_by, approval_id, initial_memories,
             initial_embeddings, initial_memberships, initial_aliases,
             initial_entra_bindings, initial_audit_rows, initial_audit_queries,
-            initial_audit_selection)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb) RETURNING *`,
+            initial_audit_selection, approval_evidence_hash)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13)
+         RETURNING *`,
         [principalId, scopeId, actor.id, approvalId, memories, embeddings, memberships,
-          aliases, entraBindings, auditRows, auditQueries, JSON.stringify(audit.selection)],
+          aliases, entraBindings, auditRows, auditQueries, JSON.stringify(audit.selection),
+          acknowledgedEvidenceHash],
       );
     }
 
+    await startOffboardingRunEvent(
+      client, run.rows[0], String(run.rows[0].initiated_by), evidence,
+    );
     await client.query('UPDATE scopes SET name = $2 WHERE id = $1', [scopeId, scopePseudonym]);
     await client.query(
       `UPDATE scope_memberships
@@ -887,52 +996,39 @@ export async function offboardPrincipal(
          FROM offboarding_audit_targets t WHERE t.id = a.id`,
     );
 
-    await client.query(
-      `DELETE FROM principal_offboarding_audit_requests r
-        WHERE (r.principal_id, r.request_id) IN (
-          SELECT candidate.principal_id, candidate.request_id
-            FROM principal_offboarding_audit_requests candidate
-           WHERE candidate.principal_id = $1
-             AND NOT EXISTS (
-               SELECT 1 FROM audit_log a
-                WHERE a.metadata ? 'request_id'
-                  AND a.metadata->>'request_id' = candidate.request_id
-                  AND ${AUDIT_DIRTY} AND ${AUDIT_NOT_PRESERVED}
-             )
-           ORDER BY candidate.request_id LIMIT $2
-        )`, [principalId, batchSize, [...PRESERVED_AUDIT_OPERATIONS]],
-    );
-
     const currentRun = await client.query(
       `SELECT memory_cursor, audit_principal_cursor, audit_scope_cursor,
               audit_memory_cursor, audit_scope_ids_cursor, audit_linked_cursor
          FROM principal_offboarding_runs WHERE principal_id = $1`, [principalId],
     );
-    const remaining = await stateWorkRemains(
-      client, scopeId, principalId, currentRun.rows[0].memory_cursor,
-    );
-    const remainingAudit = await auditCursorWorkRemains(
-      client, scopeId, principalId,
-      currentRun.rows[0] as Record<AuditCursorColumn, string>,
-    );
-    const complete = !remaining.memories && !remaining.embeddings
+    // Finalization re-probes all dirty state through indexed EXISTS checks. An
+    // exhausted cursor alone is never evidence that an interrupted run is done.
+    const remaining = await stateWorkRemains(client, scopeId, principalId, null);
+    const remainingAudit = await auditWorkRemains(client, scopeId, principalId);
+    const completionReady = !remaining.memories && !remaining.embeddings
       && !remaining.memberships && !remaining.aliases
       && !remaining.entraBindings && !remainingAudit;
     const progressUpdate = await client.query(
       `UPDATE principal_offboarding_runs
           SET memories_processed = memories_processed + $2,
               audit_rows_processed = audit_rows_processed + $3,
-              batches = batches + 1,
-              completed_at = CASE WHEN $4 THEN now() ELSE NULL END
+              batches = batches + 1
         WHERE principal_id = $1 RETURNING *`,
-      [principalId, memoryBatch, auditedRows, complete],
+      [principalId, memoryBatch, auditedRows],
     );
     const progressRow = progressUpdate.rows[0];
-    if (complete) {
-      await client.query(
-        'DELETE FROM principal_offboarding_audit_requests WHERE principal_id = $1', [principalId],
-      );
+    if (completionReady) {
       const repair = wasOffboarded || originalOffboarding !== null;
+      await finalizeOffboardingRun(client, progressRow, actor.id, {
+        run_id: progressRow.run_id,
+        initiated_by: progressRow.initiated_by,
+        finalized_by: actor.id,
+        approval_id: progressRow.approval_id,
+        approval_evidence_hash: progressRow.approval_evidence_hash,
+        memories_processed: Number(progressRow.memories_processed),
+        audit_rows_processed: Number(progressRow.audit_rows_processed),
+        batches: Number(progressRow.batches),
+      });
       await client.query(
         `INSERT INTO principal_offboarding_events
            (principal_id, scope_id, actor_principal_id, repair, memories, embeddings,
@@ -975,7 +1071,7 @@ export async function offboardPrincipal(
       entraBindings: Number(progressRow.initial_entra_bindings),
       auditRows: Number(progressRow.initial_audit_rows),
       auditQueries: Number(progressRow.initial_audit_queries),
-      dryRun: false, alreadyOffboarded: false, complete, progress,
+      dryRun: false, alreadyOffboarded: false, complete: completionReady, progress,
     };
   } catch (error) {
     try { await client.query('ROLLBACK'); } catch { destroyClient = true; }

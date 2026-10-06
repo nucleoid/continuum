@@ -99,9 +99,12 @@ as active privacy work and resume it promptly. A query already copied into a
 preserved shared org knowledge-gap memory is shared provenance, not an owned
 scope row; offboarding does not rewrite that shared record.
 
-When the departing principal acted as an administrator, UUID-only API-key,
-principal-admin, Entra-binding, and membership-sync metadata is retained for
-audit integrity; `query` and free-text/name fields are removed. Each changed
+When the departing principal acted as an administrator, API-key,
+principal-admin, Entra-binding, membership-sync, and audit-retention metadata is
+retained only through an explicit per-operation or per-source field allowlist;
+`query`, names, arbitrary numbers/booleans, and merely UUID-looking values are
+removed. This includes binding provision/update/reactivation/revocation history
+and audit-retention counts, hashes, and run IDs. Each changed
 ownership acknowledgement is written to the immutable
 `principal_user_scope_approvals` ledger with approver UUID, timestamp, reviewed
 UUIDs, and evidence hash. UUID-only mapping and erasure receipt audit operations
@@ -111,6 +114,12 @@ and truncate operations. The compact privacy-safe event ledger is outside
 ordinary `audit_log` retention and is the authoritative retry evidence after
 audit rows have been pruned. It contains UUIDs, counts, timestamps, and
 truncation flags only, never memory text, names, queries, or verification notes.
+Before the first irreversible batch write, a `started` row containing the run
+UUID, initiator UUID, exact approval ID, and acknowledgement hash is appended to
+`principal_offboarding_run_events`. Finalization appends a `completed` row that
+preserves the initiator and identifies the finalizer. The ledger rejects update,
+delete, and truncate; mutable cursor progress is never the sole authorization
+record.
 
 Disabling the principal atomically deactivates all sourced memberships and
 revokes service credentials. Provider aliases resolving to the user are deleted
@@ -146,22 +155,29 @@ Migration `0022_offboarding_principal_lifecycle.sql` contains only the short
 `principals` alteration and uses five-second lock and 30-second statement
 timeouts. Migration `0023_offboarding_erasure.sql` installs the ledgers and
 database guards after that lock is released. Migration
-`0024_offboarding_embedding_cleanup.sql` removes old archived embeddings in its
-own transaction. Migration `0025_offboarding_audit_indexes.sql` is marked
-no-transaction and creates the three audit indexes concurrently. Before each
+`0024_offboarding_embedding_cleanup.sql` installs the bounded maintenance
+function `continuum_cleanup_archived_embeddings(batch_size)`; it does not claim
+that historical cleanup completed. Call it in separate committed transactions
+with a batch size from 1 through 5,000 until it returns zero. Migration
+`0025_offboarding_audit_indexes.sql` is marked no-transaction and creates the
+selector-plus-ID cursor indexes and metadata indexes concurrently. Migration
+`0026_offboarding_round6_hardening.sql` installs append-only run evidence and
+the database reactivation guard. Before each concurrent
 create, the migrator resolves the named index in `current_schema()`, drops that
 exact schema-qualified object concurrently only when `pg_index.indisvalid` is
 false, and then creates it. A post-create directive requires the exact index to
 exist and be valid before the migration ledger can record success. A timeout or
 failed build leaves the file unapplied and safely retryable.
 
-Apply all four migrations before starting the new application version. Old
+Apply all five migrations before starting the new application version. Old
 instances can continue ordinary traffic after `0023`, but they do not know the
 offboarding workflow and an old authenticated request may already be in flight.
-Do not invoke offboarding until all four migrations are recorded on every shared
+Do not invoke offboarding until all five migrations are recorded on every shared
 database and all old application instances have drained. Rollback is
 application-first: stop invoking offboarding, drain the new instances, and
-deploy the old application. Do not drop the new columns, tables, functions, or
+deploy the old application only after `list-incomplete-offboarding` reports
+zero incomplete runs. An old application must never resume against an
+unfinished erasure. Do not drop the new columns, tables, functions, or
 triggers during that rollback; the old application tolerates them, while
 dropping the guards would reopen late-write races. Schema removal requires a
 separate reviewed migration only after no offboarded principals or owned-scope
