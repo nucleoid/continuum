@@ -6,45 +6,73 @@ SET LOCAL statement_timeout = '30s';
 
 CREATE OR REPLACE FUNCTION continuum_offboarding_actual_state_is_erased(target_run_id UUID)
 RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER AS $$
-  WITH target_run AS (
+  WITH target_run AS NOT MATERIALIZED (
     SELECT run.* FROM principal_offboarding_runs run
      WHERE run.run_id = target_run_id
   ), direct_audit AS (
-    SELECT audit.id, audit.metadata->>'request_id' AS request_id
-      FROM target_run run JOIN audit_log audit
-        ON audit.principal_id = run.principal_id AND audit.id <= run.audit_fence_id
-    UNION
-    SELECT audit.id, audit.metadata->>'request_id'
-      FROM target_run run JOIN audit_log audit
-        ON audit.scope_id = run.scope_id AND audit.id <= run.audit_fence_id
-    UNION
-    SELECT audit.id, audit.metadata->>'request_id'
+    -- OFFSET 0 preserves each parameterized, ordered selector as its own
+    -- planner path instead of allowing a fence-wide audit_log join.
+    SELECT audit.id, audit.request_id
       FROM target_run run
-      JOIN audit_log_offboarding_scopes selector
-        ON selector.scope_id = run.scope_id AND selector.selector_kind = 'memory'
-      JOIN audit_log audit ON audit.id = selector.audit_id
-                          AND audit.id <= run.audit_fence_id
+      CROSS JOIN LATERAL (
+        SELECT candidate.id, candidate.metadata->>'request_id' AS request_id
+          FROM audit_log candidate
+         WHERE candidate.principal_id = run.principal_id
+           AND candidate.id <= run.audit_fence_id
+         ORDER BY candidate.principal_id, candidate.id OFFSET 0
+      ) audit
     UNION
-    SELECT audit.id, audit.metadata->>'request_id'
+    SELECT audit.id, audit.request_id
       FROM target_run run
-      JOIN audit_log_offboarding_scopes selector
-        ON selector.scope_id = run.scope_id AND selector.selector_kind = 'scope_ids'
-      JOIN audit_log audit ON audit.id = selector.audit_id
-                          AND audit.id <= run.audit_fence_id
+      CROSS JOIN LATERAL (
+        SELECT candidate.id, candidate.metadata->>'request_id' AS request_id
+          FROM audit_log candidate
+         WHERE candidate.scope_id = run.scope_id
+           AND candidate.id <= run.audit_fence_id
+         ORDER BY candidate.scope_id, candidate.id OFFSET 0
+      ) audit
+    UNION
+    SELECT audit.id, audit.request_id
+      FROM target_run run
+      CROSS JOIN LATERAL (
+        SELECT candidate.id, candidate.metadata->>'request_id' AS request_id
+          FROM audit_log_offboarding_scopes selector
+          JOIN audit_log candidate ON candidate.id = selector.audit_id
+                                  AND candidate.id <= run.audit_fence_id
+         WHERE selector.scope_id = run.scope_id AND selector.selector_kind = 'memory'
+         ORDER BY selector.audit_id OFFSET 0
+      ) audit
+    UNION
+    SELECT audit.id, audit.request_id
+      FROM target_run run
+      CROSS JOIN LATERAL (
+        SELECT candidate.id, candidate.metadata->>'request_id' AS request_id
+          FROM audit_log_offboarding_scopes selector
+          JOIN audit_log candidate ON candidate.id = selector.audit_id
+                                  AND candidate.id <= run.audit_fence_id
+         WHERE selector.scope_id = run.scope_id AND selector.selector_kind = 'scope_ids'
+         ORDER BY selector.audit_id OFFSET 0
+      ) audit
   ), linked_request AS (
     SELECT request.request_id FROM target_run run
-      JOIN principal_offboarding_audit_requests request
-        ON request.principal_id = run.principal_id
+      CROSS JOIN LATERAL (
+        SELECT candidate.request_id FROM principal_offboarding_audit_requests candidate
+         WHERE candidate.principal_id = run.principal_id
+         ORDER BY candidate.request_id OFFSET 0
+      ) request
     UNION
     SELECT request_id FROM direct_audit WHERE request_id IS NOT NULL
   ), target_audit AS (
     SELECT id FROM direct_audit
     UNION
-    SELECT audit.id FROM target_run run
-      CROSS JOIN linked_request request
-      JOIN audit_log audit ON audit.metadata ? 'request_id'
-                          AND audit.metadata->>'request_id' = request.request_id
-                          AND audit.id <= run.audit_fence_id
+    SELECT audit.id FROM linked_request request
+      CROSS JOIN LATERAL (
+        SELECT linked.id FROM target_run run
+          JOIN audit_log linked ON linked.metadata ? 'request_id'
+                               AND linked.metadata->>'request_id' = request.request_id
+                               AND linked.id <= run.audit_fence_id
+         ORDER BY linked.id OFFSET 0
+      ) audit
   )
   SELECT COALESCE((
     SELECT NOT (

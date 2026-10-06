@@ -408,6 +408,110 @@ describe('offboarding and erasure', () => {
     }
   });
 
+  it('keeps the exact completion verifier index-driven with unrelated audit noise', async () => {
+    const value = await fixture();
+    await pool.query(
+      `INSERT INTO principals (id, external_id, kind, display_name)
+       SELECT gen_random_uuid(), 'completion-noise-' || lpad(n::text, 3, '0'), 'service',
+              'Completion noise ' || n
+         FROM generate_series(1, 100) n;
+       INSERT INTO scopes (id, kind, name)
+       SELECT gen_random_uuid(), 'team', 'completion-noise-' || lpad(n::text, 3, '0')
+         FROM generate_series(1, 100) n`,
+    );
+    await pool.query(
+      `WITH noise_principals AS (
+         SELECT id, row_number() OVER (ORDER BY external_id) AS ordinal
+           FROM principals WHERE external_id LIKE 'completion-noise-%'
+       ), noise_scopes AS (
+         SELECT id, row_number() OVER (ORDER BY name) AS ordinal
+           FROM scopes WHERE name LIKE 'completion-noise-%'
+       )
+       INSERT INTO audit_log (principal_id, action, query, metadata)
+       SELECT principal.id, 'read', 'unrelated completion noise ' || n,
+              jsonb_build_object(
+                'request_id', 'unrelated-completion-' || lpad(n::text, 6, '0'),
+                'scope_ids', jsonb_build_array(scope.id::text)
+              )
+         FROM generate_series(1, 10000) n
+         JOIN noise_principals principal ON principal.ordinal = ((n - 1) % 100) + 1
+         JOIN noise_scopes scope ON scope.ordinal = ((n - 1) % 100) + 1`,
+    );
+    await pool.query(
+      `WITH noise_principals AS (
+         SELECT id, row_number() OVER (ORDER BY external_id) AS ordinal
+           FROM principals WHERE external_id LIKE 'completion-noise-%'
+       )
+       INSERT INTO principal_offboarding_audit_requests (principal_id, request_id)
+       SELECT principal.id, 'unrelated-request-' || lpad(n::text, 6, '0')
+         FROM generate_series(1, 5000) n
+         JOIN noise_principals principal ON principal.ordinal = ((n - 1) % 100) + 1`,
+    );
+    await pool.query(
+      `INSERT INTO audit_log (principal_id, action, scope_id, query, metadata) VALUES
+       ($1, 'read', NULL, 'target principal',
+        jsonb_build_object('request_id', 'direct-request')),
+       ($2, 'read', $3, 'target scope',
+        jsonb_build_object('request_id', 'scope-request')),
+       ($2, 'read', NULL, 'linked request',
+        jsonb_build_object('request_id', 'stored-request'))`,
+      [value.target.id, value.admin.id, value.personal.id],
+    );
+    await pool.query(
+      `INSERT INTO audit_log (principal_id, action, memory_id, query, metadata)
+       VALUES ($1, 'read', $2, 'target memory selector', '{}'::jsonb)`,
+      [value.admin.id, value.personalMemory.id],
+    );
+    await pool.query(
+      `INSERT INTO audit_log (principal_id, action, query, metadata)
+       VALUES ($1, 'read', 'target scope-ids selector',
+               jsonb_build_object('scope_ids', jsonb_build_array($2::text)))`,
+      [value.admin.id, value.personal.id],
+    );
+    await pool.query(
+      `INSERT INTO principal_offboarding_audit_requests (principal_id, request_id)
+       VALUES ($1, 'stored-request')`,
+      [value.target.id],
+    );
+    await offboardPrincipal(pool, value.admin, value.target.id);
+    await pool.query('ANALYZE audit_log');
+    await pool.query('ANALYZE audit_log_offboarding_scopes');
+    await pool.query('ANALYZE principal_offboarding_audit_requests');
+
+    const runId = (await pool.query(
+      'SELECT run_id::text AS run_id FROM principal_offboarding_runs WHERE principal_id = $1',
+      [value.target.id],
+    )).rows[0].run_id as string;
+    const verifierSource = (await pool.query(
+      `SELECT prosrc FROM pg_proc
+        WHERE oid = 'continuum_offboarding_actual_state_is_erased(uuid)'::regprocedure`,
+    )).rows[0].prosrc as string;
+    expect(verifierSource.match(/target_run_id/g)).toHaveLength(1);
+    const exactVerifierQuery = verifierSource.replace('target_run_id', '$1::uuid');
+    const plan = (await pool.query(
+      `EXPLAIN (FORMAT JSON) ${exactVerifierQuery}`,
+      [runId],
+    )).rows[0]['QUERY PLAN'][0].Plan as Record<string, unknown>;
+    const nodes: Array<Record<string, unknown>> = [];
+    const visit = (node: Record<string, unknown>) => {
+      nodes.push(node);
+      for (const child of (node.Plans ?? []) as Array<Record<string, unknown>>) visit(child);
+    };
+    visit(plan);
+    const indexes = nodes.map((node) => node['Index Name']).filter(Boolean).join('\n');
+    expect(indexes).toMatch(/audit_log_principal_(?:cursor_)?idx/);
+    expect(indexes).toMatch(/audit_log_scope_(?:cursor_)?idx/);
+    expect(indexes).toContain('audit_log_offboarding_memory_cursor_idx');
+    expect(indexes).toContain('audit_log_offboarding_scope_ids_cursor_idx');
+    expect(indexes).toContain('principal_offboarding_audit_requests_pkey');
+    expect(indexes).toContain('audit_log_request_cursor_idx');
+    expect(nodes.filter((node) =>
+      node['Node Type'] === 'Seq Scan'
+      && ['audit_log', 'audit_log_offboarding_scopes',
+        'principal_offboarding_audit_requests'].includes(String(node['Relation Name'])),
+    )).toEqual([]);
+  }, 60_000);
+
   it('caps clean-history preview examination and reports unknown audit counts truthfully', async () => {
     const value = await fixture();
     await pool.query(
