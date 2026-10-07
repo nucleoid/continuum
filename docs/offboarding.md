@@ -159,7 +159,13 @@ re-scrub and therefore is not in that list. After upgrade, use
 `offboarded` or `disabled_only` without granting direct progress-table reads.
 Page the list with `--limit <1-1000>` and the returned `nextCursor`. Pass that
 value back with `--after <principal-id>` until `nextCursor` is null. The cursor
-is deterministic by principal UUID and does not repeat a row.
+is deterministic, exclusive, and based on the last eligible disabled principal
+returned. Active or reactivated principals never consume a page slot. A
+principal that becomes ineligible after an earlier page is omitted from later
+pages; a newly eligible principal sorts after the cursor and can appear on a
+later page, while one sorting at or before the cursor is left for the next full
+discovery pass. A short page therefore means there were no later eligible rows
+in that statement's snapshot.
 For `offboarded` rows, rerun the normal `offboard-principal --confirm-scope`
 command. For `disabled_only` rows, run the non-lifecycle
 `repair-coordination-privacy <principal-id> --confirm-scope <scope-id>` command
@@ -178,6 +184,12 @@ offboarding, each repair call commits its bounded privacy page without reopening
 the immutable lifecycle run; repeat until the command returns `complete: true`.
 A response is complete only when coordination privacy and the full
 database-verified lifecycle state are both clean.
+
+The ordinary `offboard-principal` loop treats durable cursor movement and phase
+completion as progress even when a page contains only already-canonical or
+preserved rows. It stops automatically only for truthful completion or a typed
+blocking state such as `live_lease`. Reaching the bounded attempt cap or an
+untyped no-progress state is incomplete and returns a nonzero CLI status.
 
 Offboarding is not globally atomic across all batches. Until `complete: true`,
 audit rows beyond the current keyset cursors can still contain raw query text and

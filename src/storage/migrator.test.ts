@@ -555,9 +555,9 @@ describe('runMigrations', () => {
 
   it('rejects tampering in every ledgered issue-7 migration', async () => {
     const names = (await readdir(join(process.cwd(), 'migrations')))
-      .filter((name) => /^(?:005[4-9]|006[0-8])_.*\.sql$/.test(name))
+      .filter((name) => /^(?:005[4-9]|006\d|007[01])_.*\.sql$/.test(name))
       .sort();
-    expect(names).toHaveLength(15);
+    expect(names).toHaveLength(18);
     const schema = `migrator_issue7_checksums_${Date.now()}`;
     const admin = new pg.Pool({ connectionString: DATABASE_URL });
     pools.push(admin);

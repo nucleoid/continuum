@@ -361,6 +361,13 @@ current-state verification, preserves existing least-privilege repair-list
 grants during upgrade, and purges expired detached receipts before calculating
 quota availability. Apply both migrations before re-enabling offboarding.
 
+The forward repair after 0071 drives discovery from mapped, disabled
+principals in UUID order before applying the page limit. Completed version-3
+rows use per-principal `EXISTS` probes against the linkable-audit, receipt, and
+lease indexes; active and reactivated histories are never scanned as a global
+dirty set. Detached-receipt purge skips rows locked by another scrub and relies
+on the caller's transaction-local timeout rather than a function `SET` clause.
+
 Migration 0061 contains the historical installation-wide receipt-counter
 recount and takes coordination table locks. An installation upgrading from
 0060 or earlier must apply 0061 in a maintenance window with coordination
