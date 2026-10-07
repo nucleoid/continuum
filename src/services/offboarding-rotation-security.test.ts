@@ -188,12 +188,27 @@ describe('sync database identity rotation security', () => {
         `SELECT has_schema_privilege($1, 'public', 'USAGE') AS schema_usage`,
         [oldRole],
       )).rows[0]).toEqual({ schema_usage: false });
+      const oldRoleOid = (await pool.query(
+        'SELECT oid::text FROM pg_roles WHERE rolname = $1', [oldRole],
+      )).rows[0].oid;
       await expect(applyGrantScript(pool, 'retire-sync-role.sql', {
         continuum_schema: 'public', retired_sync_role: oldRole,
+        confirm_retired_sync_role_oid: '0',
+      })).rejects.toThrow(/confirmation|OID/i);
+      await expect(applyGrantScript(pool, 'retire-sync-role.sql', {
+        continuum_schema: 'public', retired_sync_role: oldRole,
+        confirm_retired_sync_role_oid: oldRoleOid,
       })).resolves.toBeUndefined();
       await expect(applyGrantScript(pool, 'retire-sync-role.sql', {
         continuum_schema: 'public', retired_sync_role: nextRole,
+        confirm_retired_sync_role_oid: (await pool.query(
+          'SELECT oid::text FROM pg_roles WHERE rolname = $1', [nextRole],
+        )).rows[0].oid,
       })).rejects.toThrow(/active trusted database identity/i);
+      await pool.query(
+        'GRANT ' + quoteRole(oldRole)
+        + ' TO CURRENT_USER WITH ADMIN OPTION, SET FALSE, INHERIT FALSE',
+      );
       await expect(applyGrantScript(pool, 'verify-database-identities.sql', {
         continuum_schema: 'public',
         continuum_app_role: applicationRole,
@@ -233,6 +248,7 @@ describe('sync database identity rotation security', () => {
       })).rejects.toThrow(/retired sync role.*login|authority/i);
       await pool.query('ALTER ROLE ' + quoteRole(oldRole) + ' NOLOGIN');
     } finally {
+      await pool.query('REVOKE ' + quoteRole(oldRole) + ' FROM CURRENT_USER');
       await fixture.operator.end();
       await dropRoles(pool, [oldRole, nextRole, applicationRole, fixture.operatorRole]);
     }
@@ -296,6 +312,44 @@ describe('sync database identity rotation security', () => {
       await pool.query('REVOKE ' + quoteRole(role) + ' FROM CURRENT_USER');
       await pool.query('DROP ROLE ' + quoteRole(role));
       await pool.query('DELETE FROM continuum_trusted_database_identities WHERE database_role = $1::name', [role]);
+    }
+  });
+
+  it('explicitly rebinds restored database identities to recreated role OIDs', async () => {
+    const service = await createPrincipal(pool, {
+      externalId: 'logical-restore-service', kind: 'service', displayName: 'Restored',
+    });
+    const role = 'continuum_restored_sync_' + Date.now();
+    await pool.query('CREATE ROLE ' + quoteRole(role) + ' NOLOGIN');
+    await pool.query(
+      'SELECT continuum_register_trusted_database_identity($1, $2, FALSE, TRUE)',
+      [role, service.id],
+    );
+    const oldOid = (await pool.query(
+      'SELECT oid::text FROM pg_roles WHERE rolname = $1', [role],
+    )).rows[0].oid;
+    await pool.query('DROP OWNED BY ' + quoteRole(role));
+    await pool.query('DROP ROLE ' + quoteRole(role));
+    await pool.query('CREATE ROLE ' + quoteRole(role) + ' NOLOGIN');
+    try {
+      await expect(pool.query(
+        "SELECT continuum_rebind_database_identity_oids('REBIND AFTER LOGICAL RESTORE')",
+      )).resolves.toBeDefined();
+      const rebound = (await pool.query(
+        `SELECT identity.database_role_oid::text AS oid, role.oid::text AS current_oid
+           FROM continuum_trusted_database_identities identity
+           JOIN pg_roles role ON role.rolname = identity.database_role::text
+          WHERE identity.database_role = $1::name`, [role],
+      )).rows[0];
+      expect(rebound.oid).toBe(rebound.current_oid);
+      expect(rebound.oid).not.toBe(oldOid);
+    } finally {
+      await pool.query(
+        'DELETE FROM continuum_trusted_database_identities WHERE database_role = $1::name',
+        [role],
+      );
+      await pool.query('DROP OWNED BY ' + quoteRole(role));
+      await pool.query('DROP ROLE ' + quoteRole(role));
     }
   });
 
