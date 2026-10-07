@@ -12,13 +12,15 @@ async function source(path: string): Promise<string> {
 describe('coordination review remediation contract', () => {
   it('grants the application role exactly the coordination table privileges it needs', async () => {
     const grants = await source('scripts/grant-application-role.sql');
-    expect(grants).toMatch(/SELECT, INSERT, DELETE[\s\S]+coordination_operation_receipts/i);
-    expect(grants).toMatch(/REVOKE UPDATE, TRUNCATE[\s\S]+coordination_operation_receipts/i);
-    expect(grants).toMatch(/SELECT, INSERT, UPDATE[\s\S]+coordination_resources/i);
-    expect(grants).toMatch(/SELECT, INSERT, UPDATE[\s\S]+coordination_leases/i);
-    expect(grants).not.toMatch(/GRANT[\s\S]{0,80}UPDATE[\s\S]{0,160}coordination_scope_usage/i);
-    expect(grants).not.toMatch(/GRANT[\s\S]{0,80}UPDATE[\s\S]{0,160}coordination_principal_usage/i);
-    expect(grants).toMatch(/REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE[\s\S]+coordination_scope_usage[\s\S]+coordination_principal_usage/i);
+    const current = grants.slice(
+      grants.indexOf("'%I.continuum_operator_set_coordination_principal_quota"),
+      grants.indexOf('ELSIF to_regprocedure'),
+    );
+    expect(current).toMatch(/SELECT, INSERT, DELETE[\s\S]+coordination_operation_receipts/i);
+    expect(current).toMatch(/REVOKE UPDATE, TRUNCATE[\s\S]+coordination_operation_receipts/i);
+    expect(current).not.toMatch(/GRANT[\s\S]{0,80}UPDATE[\s\S]{0,160}coordination_scope_usage/i);
+    expect(current).not.toMatch(/GRANT[\s\S]{0,80}UPDATE[\s\S]{0,160}coordination_principal_usage/i);
+    expect(current).toMatch(/REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE[\s\S]+coordination_scope_usage[\s\S]+coordination_principal_usage/i);
     expect(grants).toMatch(/continuum\.application_grant_schema/);
     expect(grants).not.toMatch(/schema_name TEXT := current_schema\(\)/);
   });
@@ -62,7 +64,8 @@ describe('coordination review remediation contract', () => {
       mcp.indexOf("'continuum.list_scopes'"),
     );
     expect(coordination).not.toMatch(/z\.string\(\)/);
-    expect(coordination).toMatch(/z\.unknown\(\)/);
+    expect(coordination).toMatch(/inputSchema: rawCoordinationInputSchema/);
+    expect(mcp).toMatch(/const rawCoordinationInputSchema = z\.preprocess\([\s\S]+z\.object\(/);
     expect(coordination).toMatch(/strictCoordinationInput/);
   });
 

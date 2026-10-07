@@ -304,7 +304,7 @@ vectors. Audit failure rolls back the whole operation.
 
 ## Deployment, mixed versions, and rollback
 
-Apply through migration `0065_coordination_review_remediation.sql` (0064 remains
+Apply through migration `0066_coordination_upgrade_privacy_repair.sql` (0064 remains
 the concurrent-index step), then **re-run
 `scripts/grant-application-role.sql`** for every application and dedicated
 operator role. Re-run `scripts/grant-operator-role.sql` immediately afterward
@@ -358,8 +358,10 @@ principal's lease/receipt identity is detached. Lock audit metadata is reduced
 to `operation`, `outcome`, `fencing_token`, `resource_bytes`, `transport`, and
 `own_lease`; request, run, lease, resource, resource digest, and unknown keys
 are removed. Unrelated immutable retention/offboarding evidence is untouched.
-Privacy version 2 reopens progress previously completed by 0059 or 0060 and
-re-scrubs every shared kind, including role and another user's scope. Audit
+Privacy version 2 reopens progress previously completed by 0059 or 0060, and
+migration 0066 reopens completed version-2 rows after the 0065 lock-audit
+classifier change. The ordinary bounded scrub re-scrubs every shared kind,
+including role and another user's scope. Audit
 metadata advances on a durable `(principal_id,id)` cursor and completion is
 recorded only after an empty page proves exhaustion. Operators may restart the
 same offboarding command after timeout or interruption; counters and cursors

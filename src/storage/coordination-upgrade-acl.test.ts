@@ -32,10 +32,24 @@ afterEach(async () => {
 });
 
 describe('coordination operator ACL upgrade', () => {
-  it('profiles and re-profiles an application role at schema 0064', async () => {
+  it.each([
+    ['0054_coordination_leases.sql', false],
+    ['0055_coordination_review_remediation.sql', false],
+    ['0056_coordination_final_remediation.sql', true],
+    ['0057_coordination_privacy_race_remediation.sql', true],
+    ['0058_coordination_online_prep.sql', true],
+    ['0059_coordination_bounded_privacy.sql', true],
+    ['0060_coordination_online_finish.sql', true],
+    ['0061_coordination_forward_security_repair.sql', true],
+    ['0062_coordination_forward_online_finish.sql', true],
+    ['0063_coordination_final_privacy_repair.sql', true],
+    ['0064_coordination_final_online_indexes.sql', true],
+  ] as const)('profiles and re-profiles an application role through %s', async (
+    cutoff, reserveExpected,
+  ) => {
     const suffix = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
-    const schema = `coord_acl_0064_${suffix}`;
-    const role = `coord_acl_0064_app_${suffix}`;
+    const schema = `coord_acl_pre0065_${suffix}`;
+    const role = `coord_acl_pre0065_app_${suffix}`;
     const base = await makeTestPool();
     pools.push(base);
     const admin = new pg.Pool((base as unknown as { options: PoolConfig }).options);
@@ -47,11 +61,11 @@ describe('coordination operator ACL upgrade', () => {
       max: 1, options: `-c search_path=${schema},public`,
     });
     pools.push(pool);
-    const before = await mkdtemp(join(tmpdir(), 'continuum-0064-acl-'));
+    const before = await mkdtemp(join(tmpdir(), 'continuum-pre0065-acl-'));
     directories.push(before);
     const source = new URL('../../migrations/', import.meta.url);
     const files = (await readdir(source)).filter((name) => name.endsWith('.sql')).sort();
-    await Promise.all(files.filter((name) => name <= '0064_coordination_final_online_indexes.sql')
+    await Promise.all(files.filter((name) => name <= cutoff)
       .map((name) => copyFile(new URL(name, source), join(before, name))));
     try {
       await runMigrations(pool, before);
@@ -63,14 +77,17 @@ describe('coordination operator ACL upgrade', () => {
       })).resolves.toBeUndefined();
       expect((await pool.query(
         `SELECT
-           has_function_privilege($1,
-             format('%I.continuum_coordination_reserve_resource_creation(uuid)', $2::text),
-             'EXECUTE') AS reserve_execute,
+           COALESCE(has_function_privilege($1,
+             to_regprocedure(format(
+               '%I.continuum_coordination_reserve_resource_creation(uuid)', $2::text
+             )), 'EXECUTE'), FALSE) AS reserve_execute,
            to_regprocedure(format(
              '%I.continuum_coordination_privacy_state(uuid,uuid)', $2::text
            )) IS NULL AS privacy_not_installed`,
         [role, schema],
-      )).rows).toEqual([{ reserve_execute: true, privacy_not_installed: true }]);
+      )).rows).toEqual([{
+        reserve_execute: reserveExpected, privacy_not_installed: true,
+      }]);
     } finally {
       await admin.query(`DROP SCHEMA IF EXISTS ${quote(schema)} CASCADE`);
       await admin.query(`DROP OWNED BY ${quote(role)}`);

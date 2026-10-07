@@ -136,15 +136,20 @@ export async function lockCoordinationAuthorization(
   principalId: string,
   scopeId: string,
 ): Promise<boolean> {
+  const principal = await client.query(
+    `SELECT 1 FROM principals
+      WHERE id = $1 AND disabled_at IS NULL
+      FOR SHARE`,
+    [principalId],
+  );
+  if (!principal.rowCount) return false;
   const candidates = await client.query(
     `SELECT m.source_kind
        FROM scope_memberships m
-       JOIN principals p ON p.id = m.principal_id
       WHERE m.principal_id = $1 AND m.scope_id = $2
         AND m.active AND m.role IN ('writer', 'admin')
-        AND p.disabled_at IS NULL
       ORDER BY m.source_kind, m.source_id
-      FOR SHARE OF m, p`,
+      FOR SHARE`,
     [principalId, scopeId],
   );
   if (!candidates.rowCount) return false;

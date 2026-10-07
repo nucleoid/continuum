@@ -61,7 +61,7 @@ describe('runMigrations', () => {
     const files = (await readdir(join(process.cwd(), 'migrations')))
       .filter((name) => name.endsWith('.sql'))
       .sort();
-    expect(files.slice(-12)).toEqual([
+    expect(files.slice(-13)).toEqual([
       '0054_coordination_leases.sql',
       '0055_coordination_review_remediation.sql',
       '0056_coordination_final_remediation.sql',
@@ -74,6 +74,7 @@ describe('runMigrations', () => {
       '0063_coordination_final_privacy_repair.sql',
       '0064_coordination_final_online_indexes.sql',
       '0065_coordination_review_remediation.sql',
+      '0066_coordination_upgrade_privacy_repair.sql',
     ]);
     const migration = await readFile(
       join(process.cwd(), 'migrations/0054_coordination_leases.sql'),
@@ -516,7 +517,7 @@ describe('runMigrations', () => {
         $$;
       `);
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-36).map((migration) => migration.name)).toEqual([
+      expect(applied.slice(-37).map((migration) => migration.name)).toEqual([
         '0030_offboarding_round7_integrity.sql',
         '0031_offboarding_round7_indexes.sql',
         '0032_offboarding_round7_compatibility.sql',
@@ -553,6 +554,7 @@ describe('runMigrations', () => {
         '0063_coordination_final_privacy_repair.sql',
         '0064_coordination_final_online_indexes.sql',
         '0065_coordination_review_remediation.sql',
+        '0066_coordination_upgrade_privacy_repair.sql',
       ]);
       expect((await pool.query(
         `SELECT disabled_at IS NOT NULL AS disabled FROM principals
@@ -809,7 +811,8 @@ describe('runMigrations', () => {
       && name !== '0062_coordination_forward_online_finish.sql'
       && name !== '0063_coordination_final_privacy_repair.sql'
       && name !== '0064_coordination_final_online_indexes.sql'
-      && name !== '0065_coordination_review_remediation.sql')) {
+      && name !== '0065_coordination_review_remediation.sql'
+      && name !== '0066_coordination_upgrade_privacy_repair.sql')) {
       if (file === '0038_offboarding_search_path_hardening.sql') {
         await copyFile(
           new URL(
