@@ -156,10 +156,13 @@ where `privacy_version < 2 OR completed_at IS NULL`, map each principal to its
 owned user scope, and rerun the normal `offboard-principal --confirm-scope`
 command until it returns `complete: true`. Application and operator roles get
 only the narrow privacy-state function used by that command, not table reads.
-Migration 0066 also reopens completed version-2 rows for already offboarded
-principals and resets only their audit cursor so the same bounded command can
-apply the narrower 0065 lock-audit classifier without changing unrelated
-immutable evidence.
+Migrations 0066 and 0067 reopen completed version-2 rows and reset only their
+audit cursor so the same bounded command can apply the narrower 0065 lock-audit
+classifier without changing unrelated immutable evidence. Migration 0067 also
+includes disabled principals completed through direct scrubbing. For a
+previously completed offboarding, each repair call commits its bounded privacy
+page without reopening the immutable lifecycle run; repeat until the command
+returns `complete: true`.
 
 Offboarding is not globally atomic across all batches. Until `complete: true`,
 audit rows beyond the current keyset cursors can still contain raw query text and

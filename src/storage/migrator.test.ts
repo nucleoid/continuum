@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pg from 'pg';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { acquireLease, releaseLease } from '../services/coordination.js';
 import { mapOwnedUserScope, offboardPrincipal } from '../services/offboarding.js';
 import { addMembership } from './memberships.js';
 import { createPrincipal } from './principals.js';
@@ -97,23 +96,10 @@ describe('runMigrations', () => {
         await addMembership(pool, target.id, owned.id, 'writer');
         await addMembership(pool, target.id, shared.id, 'writer');
         await mapOwnedUserScope(pool, operator, target.id, owned.id);
-        for (let index = 0; index < leaseCount; index += 1) {
-          const runId = randomUUID();
-          const acquired = await acquireLease(pool, target, {
-            scope: `project:${shared.name}`, resource: `upgrade-${index}`, runId,
-            requestId: randomUUID(), ttlSeconds: 300,
-          });
-          if (!acquired.acquired) throw new Error('expected upgrade fixture acquisition');
-          if (index > 0) {
-            await releaseLease(pool, target, {
-              leaseId: acquired.leaseId, runId, requestId: randomUUID(),
-            });
-          }
-        }
         let completed = await offboardPrincipal(pool, operator, target.id, {
           confirmationScopeId: owned.id, batchSize: 100,
         });
-        if (!completed.complete) {
+        const finishHistoricalScopePhase = async () => {
           const privacyReady = (await pool.query(
             `SELECT principal.completed_at IS NOT NULL
                     AND scope.completed_at IS NOT NULL AS ready
@@ -128,13 +114,33 @@ describe('runMigrations', () => {
               [target.id, operator.id],
             );
           }
-        }
+        };
+        if (!completed.complete) await finishHistoricalScopePhase();
         for (let attempt = 0; !completed.complete && attempt < 100; attempt += 1) {
           completed = await offboardPrincipal(pool, operator, target.id, {
             confirmationScopeId: owned.id, batchSize: 100,
           });
+          if (!completed.complete) await finishHistoricalScopePhase();
         }
         expect(completed.complete, JSON.stringify(completed)).toBe(true);
+        if (leaseCount > 0) {
+          await pool.query('ALTER TABLE audit_log DISABLE TRIGGER reject_offboarded_principal_audit');
+          try {
+            await pool.query(
+              `INSERT INTO audit_log (principal_id, action, scope_id, metadata)
+               SELECT $1, 'write', $2, jsonb_build_object(
+                 'operation', 'lock_acquire', 'outcome', 'acquired',
+                 'request_id', gen_random_uuid(), 'run_id', gen_random_uuid(),
+                 'lease_id', gen_random_uuid(), 'fencing_token', n::text,
+                 'resource', 'upgrade-' || n, 'resource_sha256', repeat('c', 64),
+                 'resource_bytes', 9, 'transport', 'rest', 'own_lease', TRUE)
+                 FROM generate_series(1, $3::int) n`,
+              [target.id, shared.id, leaseCount],
+            );
+          } finally {
+            await pool.query('ALTER TABLE audit_log ENABLE TRIGGER reject_offboarded_principal_audit');
+          }
+        }
         const immutableBefore = (await pool.query(
           `SELECT phase, evidence FROM principal_offboarding_run_events
             WHERE principal_id = $1 ORDER BY id`, [target.id],
@@ -203,6 +209,19 @@ describe('runMigrations', () => {
              FROM coordination_principal_privacy_progress WHERE principal_id = $1`,
           [disabledOnly.id],
         )).rows).toEqual([{ reopened: true }]);
+        let disabledComplete = false;
+        for (let attempt = 0; !disabledComplete && attempt < 5; attempt += 1) {
+          const scrub = await pool.query<{ privacy: { complete?: boolean } }>(
+            `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 1) AS privacy`,
+            [operator.id, disabledOnly.id, disabledOwned.id],
+          );
+          disabledComplete = scrub.rows[0]?.privacy?.complete === true;
+        }
+        expect(disabledComplete).toBe(true);
+        await expect(pool.query(
+          `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 1) AS privacy`,
+          [operator.id, disabledOnly.id, disabledOwned.id],
+        )).resolves.toMatchObject({ rows: [{ privacy: { complete: true } }] });
       } finally {
         await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined);
       }
@@ -214,7 +233,7 @@ describe('runMigrations', () => {
     const files = (await readdir(join(process.cwd(), 'migrations')))
       .filter((name) => name.endsWith('.sql'))
       .sort();
-    expect(files.slice(-13)).toEqual([
+    expect(files.slice(-14)).toEqual([
       '0054_coordination_leases.sql',
       '0055_coordination_review_remediation.sql',
       '0056_coordination_final_remediation.sql',
@@ -228,6 +247,7 @@ describe('runMigrations', () => {
       '0064_coordination_final_online_indexes.sql',
       '0065_coordination_review_remediation.sql',
       '0066_coordination_upgrade_privacy_repair.sql',
+      '0067_coordination_rollout_repair.sql',
     ]);
     const migration = await readFile(
       join(process.cwd(), 'migrations/0054_coordination_leases.sql'),
@@ -382,10 +402,15 @@ describe('runMigrations', () => {
         options: `-c search_path=${schema},public -c role=${role}`,
       });
       pools.push(rolePool);
-      await expect(rolePool.query(
-        `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 1)`,
-        [operatorId, targetId, ownedId],
-      )).resolves.toBeDefined();
+      let privacyComplete = false;
+      for (let attempt = 0; !privacyComplete && attempt < 5; attempt += 1) {
+        const scrub = await rolePool.query<{ privacy: { complete?: boolean } }>(
+          `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 1) AS privacy`,
+          [operatorId, targetId, ownedId],
+        );
+        privacyComplete = scrub.rows[0]?.privacy?.complete === true;
+      }
+      expect(privacyComplete).toBe(true);
       expect((await pool.query(
         'SELECT metadata FROM audit_log WHERE id = $1', [auditId],
       )).rows).toEqual([{ metadata: {
@@ -670,7 +695,7 @@ describe('runMigrations', () => {
         $$;
       `);
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-37).map((migration) => migration.name)).toEqual([
+      expect(applied.slice(-38).map((migration) => migration.name)).toEqual([
         '0030_offboarding_round7_integrity.sql',
         '0031_offboarding_round7_indexes.sql',
         '0032_offboarding_round7_compatibility.sql',
@@ -708,6 +733,7 @@ describe('runMigrations', () => {
         '0064_coordination_final_online_indexes.sql',
         '0065_coordination_review_remediation.sql',
         '0066_coordination_upgrade_privacy_repair.sql',
+        '0067_coordination_rollout_repair.sql',
       ]);
       expect((await pool.query(
         `SELECT disabled_at IS NOT NULL AS disabled FROM principals
@@ -965,7 +991,8 @@ describe('runMigrations', () => {
       && name !== '0063_coordination_final_privacy_repair.sql'
       && name !== '0064_coordination_final_online_indexes.sql'
       && name !== '0065_coordination_review_remediation.sql'
-      && name !== '0066_coordination_upgrade_privacy_repair.sql')) {
+      && name !== '0066_coordination_upgrade_privacy_repair.sql'
+      && name !== '0067_coordination_rollout_repair.sql')) {
       if (file === '0038_offboarding_search_path_hardening.sql') {
         await copyFile(
           new URL(

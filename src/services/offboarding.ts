@@ -636,6 +636,24 @@ async function offboardPrincipalCore(
         'CONFLICT', 'offboarding selector backfill is incomplete; finish migrations before erasure',
       );
     }
+    if (!dryRun) {
+      await client.query(
+        `SELECT principal.id
+           FROM principals principal
+          WHERE principal.id = $1
+             OR EXISTS (
+               SELECT 1
+                 FROM principal_user_scopes mapping
+                 JOIN scope_memberships membership
+                   ON membership.scope_id = mapping.scope_id
+                  AND membership.principal_id = principal.id
+                WHERE mapping.principal_id = $1
+             )
+          ORDER BY principal.id
+          FOR UPDATE`,
+        [principalId],
+      );
+    }
     const target = await client.query(
       `SELECT id, display_name, disabled_at, offboarded_at, reactivated_at
          FROM principals WHERE id = $1 AND kind = 'user'${dryRun ? '' : ' FOR UPDATE'}`, [principalId],
@@ -870,6 +888,10 @@ async function offboardPrincipalCore(
     } satisfies OffboardingResult;
     if (dryRun) { await client.query('ROLLBACK'); return baseResult; }
     if (alreadyOffboarded) { await client.query('COMMIT'); return baseResult; }
+    if (runCompleted && wasOffboarded && coordinationPrivacyMutated) {
+      await client.query('COMMIT');
+      return { ...baseResult, complete: coordinationPrivacyComplete };
+    }
 
     if (runCompleted) {
       await client.query(
