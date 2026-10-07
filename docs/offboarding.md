@@ -325,6 +325,7 @@ operation: raw operator `UPDATE` on `entra_groups` is revoked, and revocation,
 quarantine, and deactivation triggers accept only transaction-local guarded
 mutation markers.
 
+Apply migrations through `0050_offboarding_startup_verification_fix.sql`.
 Migration `0049_offboarding_review_remediation.sql` makes principal disablement
 create bounded transaction-local guards for its existing membership cascade,
 binds owned-scope access cleanup to a started incomplete run and its mapped
@@ -336,6 +337,9 @@ registration also rejects privileged roles, ownership, raw Entra authority,
 and non-owner membership edges. The database owner may retain a test or
 maintenance `SET ROLE` edge because that role already owns the trusted
 security-definer boundary. All other membership edges fail closed.
+Migration `0050` repairs the startup identity verifier for installations that
+already recorded `0049`; fresh installations receive the corrected verifier
+from `0049` and then record the same forward repair.
 
 The final database verification is exact and executes once: the completion
 event trigger checks every memory and every audit row linked to the run's
@@ -392,7 +396,7 @@ operator binding with `grant-operator-role.sql` after 0049.
 Fresh 0048 execution changes its removed legacy sync role to `NOLOGIN`. If an
 installation already recorded the earlier 0048 revision, run the checked
 `scripts/retire-sync-role.sql` as the migration owner for that exact old role
-before starting 0049-aware processes. The script refuses an active trusted
+before starting 0050-aware processes. The script refuses an active trusted
 identity, membership edges, and application-object ownership before revoking
 the role's application authority and login.
 
@@ -484,10 +488,10 @@ retryable.
 
 Rollback is forward-only and requires the verified pre-migration backup for any
 data that bounded legacy cleanup has removed. Application rollback is supported
-only to an 0049-aware binary and its matching grant profile. Stop all processes
+only to a 0050-aware binary and its matching grant profile. Stop all processes
 and confirm there are zero incomplete runs with `list-incomplete-offboarding`;
-then deploy the selected `0049`-aware binary, reapply all three grant profiles,
-run identity verification, and restart. Pre-`0049` binaries are incompatible with the new
+then deploy the selected `0050`-aware binary, reapply all three grant profiles,
+run identity verification, and restart. Pre-`0050` binaries are incompatible with the new
 approval and sync boundary and are not a supported application-first rollback.
 Database rollback requires a separate forward migration; do not drop guards or
 regrant the shared role ad hoc. Completed offboarding erasure is irreversible

@@ -446,7 +446,7 @@ CREATE OR REPLACE FUNCTION continuum_verify_database_identity_configuration()
 RETURNS VOID LANGUAGE plpgsql STABLE SECURITY DEFINER AS $$
 DECLARE
   schema_name TEXT;
-  identity RECORD;
+  trusted_row RECORD;
 BEGIN
   SELECT namespace.nspname INTO schema_name
     FROM pg_class relation
@@ -459,18 +459,18 @@ BEGIN
     RAISE EXCEPTION 'exactly one active sync database identity is required';
   END IF;
   IF EXISTS (
-    SELECT 1 FROM continuum_trusted_database_identities identity
-    LEFT JOIN pg_roles role ON role.oid = identity.database_role_oid
-    LEFT JOIN principals principal ON principal.id = identity.principal_id
-     WHERE identity.can_approve = identity.can_sync
-        OR role.oid IS NULL OR role.rolname <> identity.database_role::text
+    SELECT 1 FROM continuum_trusted_database_identities registry
+    LEFT JOIN pg_roles role ON role.oid = registry.database_role_oid
+    LEFT JOIN principals principal ON principal.id = registry.principal_id
+     WHERE registry.can_approve = registry.can_sync
+        OR role.oid IS NULL OR role.rolname <> registry.database_role::text
         OR principal.disabled_at IS NOT NULL
-        OR (identity.can_sync AND principal.kind <> 'service')
-        OR (identity.can_approve AND principal.kind <> 'user')
-        OR (identity.can_approve AND NOT EXISTS (
+        OR (registry.can_sync AND principal.kind <> 'service')
+        OR (registry.can_approve AND principal.kind <> 'user')
+        OR (registry.can_approve AND NOT EXISTS (
           SELECT 1 FROM scope_memberships membership
           JOIN scopes scope ON scope.id = membership.scope_id
-           WHERE membership.principal_id = identity.principal_id
+           WHERE membership.principal_id = registry.principal_id
              AND scope.kind = 'org' AND scope.name = ''
              AND membership.source_kind = 'manual'
              AND membership.source_id = 'manual'
@@ -479,14 +479,14 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'trusted database identity configuration is invalid';
   END IF;
-  FOR identity IN
+  FOR trusted_row IN
     SELECT database_role, can_sync
       FROM continuum_trusted_database_identities
   LOOP
     PERFORM continuum_validate_trusted_database_role(
-      identity.database_role,
-      CASE WHEN identity.can_sync THEN 'sync' ELSE 'approve' END,
-      identity.can_sync
+      trusted_row.database_role,
+      CASE WHEN trusted_row.can_sync THEN 'sync' ELSE 'approve' END,
+      trusted_row.can_sync
     );
   END LOOP;
 END;
