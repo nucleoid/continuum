@@ -47,7 +47,10 @@ describe('coordination review remediation contract', () => {
 
   it('lets service validation own malformed MCP inputs', async () => {
     const mcp = await source('src/api/mcp.ts');
-    const coordination = mcp.slice(mcp.indexOf("'continuum.lock_acquire'"));
+    const coordination = mcp.slice(
+      mcp.indexOf("'continuum.lock_acquire'"),
+      mcp.indexOf("'continuum.list_scopes'"),
+    );
     expect(coordination).not.toMatch(/z\.string\(\)\.uuid\(\)/);
     expect(coordination).not.toMatch(/z\.number\(\)\.int\(\)\.min\(30\)\.max\(900\)/);
   });
@@ -55,7 +58,7 @@ describe('coordination review remediation contract', () => {
   it('uses a locale-independent database control-character contract', async () => {
     const migration = await source('migrations/0054_coordination_leases.sql');
     expect(migration).not.toContain('[[:cntrl:]]');
-    expect(migration).toMatch(/U&'\\0000'.*U&'\\001F'/s);
+    expect(migration).toMatch(/chr\(1\).*chr\(31\).*chr\(127\).*chr\(159\)/s);
     expect(() => validateResourceKey('line\u2028separator')).not.toThrow();
     expect(() => validateResourceKey('paragraph\u2029separator')).not.toThrow();
     expect(() => validateResourceKey('bad\u0001key')).toThrowError(/control/i);
@@ -72,6 +75,6 @@ describe('coordination review remediation contract', () => {
     expect(docs).toMatch(/mixed[- ]version/is);
     expect(docs).toMatch(/reclaim/is);
     expect(docs).toMatch(/rollback[\s\S]+re-enable/is);
-    expect(docs).toMatch(/acquire[\s\S]+renew[\s\S]+independent quota/is);
+    expect(docs).toMatch(/independent 10,000 retained renew\/release receipts/is);
   });
 });

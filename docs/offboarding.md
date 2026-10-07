@@ -115,6 +115,15 @@ knowledge-gap output. Audit inserts lock the principal row and are rejected
 after offboarding; an in-flight recall that loses this race fails closed instead
 of returning results with an unsanitized late audit row.
 
+Coordination state in the owned user scope is scrubbed in the same guarded
+scope-pseudonymization transaction. Exact resource text is replaced by an
+opaque random label and cascades to lease and receipt rows; lease IDs, request
+hashes, receipt outcomes, and fencing tokens remain unchanged. Preserved
+`lock_*` audit metadata excludes `resource_sha256` because low-entropy resource
+names can be recovered by dictionary attack. The operation, outcome, opaque
+request/run/lease IDs, fencing token, resource byte count, and transport remain
+available for audit integrity.
+
 Offboarding is not globally atomic across all batches. Until `complete: true`,
 audit rows beyond the current keyset cursors can still contain raw query text and
 remain visible to authorized audit and knowledge-gap readers. The principal and
@@ -631,7 +640,7 @@ Rollback is forward-only and requires the verified pre-migration backup for any
 data that bounded legacy cleanup has removed. Application rollback is supported
 only to a 0053-aware binary and its matching grant profile. Stop all processes
 and confirm there are zero incomplete runs with `list-incomplete-offboarding`;
-then deploy the selected `0053`-aware binary, reapply all three grant profiles,
+then deploy a binary aware of every applied schema migration, reapply all three grant profiles,
 run identity verification, and restart. Pre-`0053` binaries are incompatible with the new
 approval and sync boundary and are not a supported application-first rollback.
 Database rollback requires a separate forward migration; do not drop guards or

@@ -233,4 +233,35 @@ describe('coordination REST/MCP parity', () => {
     expect(conflict.status).toBe(409);
     expect(conflict.body.code).toBe('IDEMPOTENCY_CONFLICT');
   });
+
+  it.each([
+    { field: 'runId', restValue: 'not-a-uuid', mcpField: 'run_id', mcpValue: 'not-a-uuid' },
+    { field: 'requestId', restValue: 'bad', mcpField: 'request_id', mcpValue: 'bad' },
+    { field: 'ttlSeconds', restValue: 29, mcpField: 'ttl_seconds', mcpValue: 29 },
+    { field: 'ttlSeconds', restValue: '300', mcpField: 'ttl_seconds', mcpValue: '300' },
+  ])('returns the stable INVALID_INPUT envelope for malformed $field', async (sample) => {
+    const baseRest: Record<string, unknown> = {
+      scope: 'project:parity', resource: 'malformed',
+      runId: randomUUID(), requestId: randomUUID(), ttlSeconds: 300,
+    };
+    baseRest[sample.field] = sample.restValue;
+    const rest = await request(createApp(pool))
+      .post('/api/v0/locks/acquire')
+      .set('Authorization', 'Bearer service:coordination-parity')
+      .send(baseRest);
+
+    const baseMcp: Record<string, unknown> = {
+      scope: 'project:parity', resource: 'malformed',
+      run_id: randomUUID(), request_id: randomUUID(), ttl_seconds: 300,
+    };
+    baseMcp[sample.mcpField] = sample.mcpValue;
+    const mcp = await client.callTool({
+      name: 'continuum.lock_acquire', arguments: baseMcp,
+    }) as ToolResult;
+
+    expect(rest.status).toBe(400);
+    expect(rest.body.code).toBe('INVALID_INPUT');
+    expect(mcp.isError).toBe(true);
+    expect(toolJson(mcp)).toMatchObject({ error: { code: 'INVALID_INPUT' } });
+  });
 });

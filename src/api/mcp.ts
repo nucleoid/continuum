@@ -154,9 +154,9 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       inputSchema: {
         scope: z.string(),
         resource: z.string(),
-        run_id: z.string().uuid(),
-        request_id: z.string().uuid(),
-        ttl_seconds: z.number().int().min(30).max(900).default(300),
+        run_id: z.string(),
+        request_id: z.string(),
+        ttl_seconds: z.unknown().default(300),
       },
     },
     async (args, extra) => {
@@ -166,7 +166,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           resource: args.resource,
           runId: args.run_id,
           requestId: args.request_id,
-          ttlSeconds: args.ttl_seconds,
+          ttlSeconds: args.ttl_seconds as number,
         }, { signal: extra.signal, transport: 'mcp' });
         return jsonResult(result.acquired ? {
           acquired: true,
@@ -197,10 +197,10 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     {
       description: 'Renew the current lease generation owned by this principal and run.',
       inputSchema: {
-        lease_id: z.string().uuid(),
-        run_id: z.string().uuid(),
-        request_id: z.string().uuid(),
-        ttl_seconds: z.number().int().min(30).max(900).default(300),
+        lease_id: z.string(),
+        run_id: z.string(),
+        request_id: z.string(),
+        ttl_seconds: z.unknown().default(300),
       },
     },
     async (args, extra) => {
@@ -209,7 +209,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           leaseId: args.lease_id,
           runId: args.run_id,
           requestId: args.request_id,
-          ttlSeconds: args.ttl_seconds,
+          ttlSeconds: args.ttl_seconds as number,
         }, { signal: extra.signal, transport: 'mcp' });
         return jsonResult({
           renewed: true,
@@ -230,9 +230,9 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     {
       description: 'Release the current lease generation owned by this principal and run.',
       inputSchema: {
-        lease_id: z.string().uuid(),
-        run_id: z.string().uuid(),
-        request_id: z.string().uuid(),
+        lease_id: z.string(),
+        run_id: z.string(),
+        request_id: z.string(),
       },
     },
     async (args, extra) => {

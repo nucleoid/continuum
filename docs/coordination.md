@@ -74,9 +74,12 @@ TTL is an integer from 30 through 900 seconds and defaults to 300 seconds.
 
 Each successful takeover increments a durable PostgreSQL `BIGINT` fencing
 counter. Tokens are canonical decimal strings end-to-end and are never parsed
-as JavaScript numbers. Resource rows are never automatically deleted, so
-fencing history survives release, expiry, receipt cleanup, server restart, and
-binary rollback. At `9223372036854775807`, later acquisition fails permanently
+as JavaScript numbers. Resource rows are never automatically deleted by
+application traffic, so fencing history survives release, expiry, receipt
+cleanup, server restart, and binary rollback. An approval-bound operator may
+reclaim an inactive key; its SHA-256-keyed fencing floor seeds any later
+recreation, so the next token remains strictly greater. At
+`9223372036854775807`, later acquisition fails permanently
 with `FENCING_TOKEN_EXHAUSTED`; the counter never wraps or resets.
 
 ## MCP
@@ -232,20 +235,55 @@ uncertain, retry the exact request within the receipt horizon.
 
 V1 hard limits are:
 
-- 10,000 durable resource keys per scope;
-- 10,000 retained operation receipts per principal;
+- 10,000 active resource keys per scope by default (operator-adjustable from
+  1 through 1,000,000);
+- at most 100 newly created resource keys per principal per rolling hour;
+- 10,000 retained acquire receipts per principal;
+- an independent 10,000 retained renew/release receipts per principal, so
+  acquire contention saturation cannot starve lease maintenance;
 - at most 100 expired receipts and 100 eligible terminal lease histories
   reclaimed by one operation.
 
 An existing resource remains usable when its scope reaches the key limit.
-Continuum never evicts resource rows or fencing history. Quota, lease state,
+Continuum never automatically evicts resource rows or fencing history. Quota, lease state,
 receipt, usage counters, and audit metadata commit atomically.
+
+Operator maintenance is exposed only through the approval-bound database role:
+`continuum_operator_reclaim_coordination_resource` refuses a live lease or any
+retained receipt before preserving the fencing floor and freeing one active-key
+slot. `continuum_operator_set_coordination_scope_quota` adjusts a reviewed
+scope limit. The shared application role cannot execute either function.
 
 Audit metadata is bounded and server-generated. It includes operation, outcome,
 owned request/run/lease IDs where applicable, owned token, resource UTF-8
 length, and SHA-256 of exact resource bytes. It never contains resource text,
 credentials, request bodies, another holder's identifiers, memory bodies, or
 vectors. Audit failure rolls back the whole operation.
+
+## Deployment, mixed versions, and rollback
+
+Apply migration `0055_coordination_review_remediation.sql`, then **re-run
+`scripts/grant-application-role.sql`** for every application and dedicated
+operator role. Re-run `scripts/grant-operator-role.sql` immediately afterward
+for dedicated operators. The exact role verifier deliberately rejects both
+missing coordination grants and broader manual grants.
+
+During a mixed-version rollout, older nodes return the generic API `NOT_FOUND`
+for lock routes while upgraded nodes return coordination codes. Harnesses must
+branch on the response `code`, never HTTP 404 alone, and must fail closed until
+all target nodes advertise the coordination surface.
+
+A binary rollback leaves coordination tables, receipts, quota counters, and
+fencing floors in place. Do not drop or truncate them. Before re-enable, apply
+all forward migrations, re-run the grant scripts and identity verifier, and
+resume with the retained counters. This preserves idempotency and fencing
+across rollback/re-enable cycles.
+
+Offboarding a user scope replaces coordination resource text (and matching
+lease/receipt text through cascading foreign keys) with opaque random labels.
+Lease IDs, request hashes, receipts, and fencing values remain intact. Lock
+audit metadata retains operation evidence but removes the resource digest,
+which could otherwise disclose low-entropy resource names by brute force.
 
 ## Harness guidance
 

@@ -1,4 +1,4 @@
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -9,28 +9,17 @@ async function text(path: string): Promise<string> {
   return readFile(join(ROOT, path), 'utf8');
 }
 
-function literalValues(source: string, property: 'operation' | 'source'): string[] {
-  const expression = new RegExp(`${property}\\s*:\\s*['\"]([^'\"]+)['\"]`, 'g');
-  return [...source.matchAll(expression)].map((match) => match[1]).sort();
-}
-
 describe('offboarding round-six safety contract', () => {
-  it('classifies every emitted operation and source with explicit safe fields', async () => {
-    const files = (await readdir(join(ROOT, 'src'), { recursive: true }))
-      .filter((file) => file.endsWith('.ts') && !file.endsWith('.test.ts'));
-    const emitted = { operation: new Set<string>(), source: new Set<string>() };
-    for (const file of files) {
-      const source = await text(join('src', file));
-      literalValues(source, 'operation').forEach((value) => emitted.operation.add(value));
-      literalValues(source, 'source').forEach((value) => emitted.source.add(value));
-    }
+  it('keeps audit classification in the database rather than TypeScript placeholders', async () => {
     const offboarding = await text('src/services/offboarding.ts');
-    const classifiedOperations = new Set(literalValues(offboarding, 'operation'));
-    const classifiedSources = new Set(literalValues(offboarding, 'source'));
-    expect([...emitted.operation].filter((value) => !classifiedOperations.has(value))).toEqual([]);
-    expect([...emitted.source].filter((value) => !classifiedSources.has(value))).toEqual([]);
-    expect(offboarding).toContain("'entra_group_binding_reactivated'");
-    expect(offboarding).toContain("'entra_group_binding_updated'");
+    const migration = await text('migrations/0055_coordination_review_remediation.sql');
+    expect(offboarding).not.toContain('AUDIT_OPERATION_POLICIES');
+    expect(offboarding).not.toContain('AUDIT_SOURCE_POLICIES');
+    for (const operation of ['lock_acquire', 'lock_inspect', 'lock_release', 'lock_renew']) {
+      expect(migration).toContain(`''${operation}''`);
+    }
+    expect(migration).toContain('continuum_offboarding_expected_audit_metadata');
+    expect(migration).not.toMatch(/''resource_sha256''/);
     expect(offboarding).not.toMatch(/jsonb_typeof\(entry\.value\) IN \('number', 'boolean'\)/);
     expect(offboarding).not.toMatch(/item\.value !~\*/);
   });

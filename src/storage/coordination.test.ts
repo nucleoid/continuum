@@ -80,6 +80,21 @@ describe('coordination storage and service', () => {
     expect(state.rows).toEqual([{ token: '1', leases: 1 }]);
   });
 
+  it('serializes concurrent duplicate request IDs into one exact replay', async () => {
+    const requestId = randomUUID();
+    const runId = randomUUID();
+    const [first, second] = await Promise.all([
+      acquire(pool, 'duplicate-request', requestId, runId),
+      acquire(otherPool, 'duplicate-request', requestId, runId),
+    ]);
+    expect(second).toEqual(first);
+    expect((await pool.query(
+      `SELECT 1 FROM coordination_operation_receipts
+        WHERE principal_id = $1 AND operation = 'acquire' AND request_id = $2`,
+      [principal.id, requestId],
+    )).rowCount).toBe(1);
+  });
+
   it('is non-reentrant for fresh requests and exactly replays the original acquire', async () => {
     const runId = randomUUID();
     const requestId = randomUUID();
@@ -313,6 +328,31 @@ describe('coordination storage and service', () => {
     }
   });
 
+  it('maps database constraint violations to stable INVALID_INPUT', async () => {
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION coordination_test_reject_resource()
+      RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.resource = 'database-rejected' THEN
+          RAISE check_violation USING MESSAGE = 'injected storage validation';
+        END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER coordination_test_reject_resource
+      BEFORE INSERT ON coordination_resources
+      FOR EACH ROW EXECUTE FUNCTION coordination_test_reject_resource();
+    `);
+    try {
+      await expect(acquire(pool, 'database-rejected'))
+        .rejects.toEqual(expectCode('INVALID_INPUT'));
+    } finally {
+      await pool.query(
+        'DROP TRIGGER IF EXISTS coordination_test_reject_resource ON coordination_resources',
+      );
+      await pool.query('DROP FUNCTION IF EXISTS coordination_test_reject_resource()');
+    }
+  });
+
   it('enforces resource, receipt, and fencing exhaustion without partial mutation', async () => {
     const first = await acquire(pool, 'existing');
     expect(first.acquired).toBe(true);
@@ -331,7 +371,8 @@ describe('coordination storage and service', () => {
     expect((await acquire(pool, 'existing')).acquired).toBe(true);
 
     await pool.query(
-      'UPDATE coordination_principal_usage SET receipt_count = 10000 WHERE principal_id = $1',
+      `UPDATE coordination_principal_usage
+          SET acquire_receipt_count = 10000 WHERE principal_id = $1`,
       [principal.id],
     );
     await expect(acquire(pool, 'receipt-over-quota'))
@@ -484,6 +525,111 @@ describe('coordination storage and service', () => {
     expect(retained.rows[0]!.count).toBe(1);
   });
 
+  it('reuses an exact expired key even when bounded cleanup cannot reach it', async () => {
+    const requestId = randomUUID();
+    const runId = randomUUID();
+    await acquire(pool, 'expired-key-old', requestId, runId);
+    await pool.query(
+      `UPDATE coordination_operation_receipts
+          SET retain_until = clock_timestamp() - interval '1 microsecond'
+        WHERE principal_id = $1 AND operation = 'acquire' AND request_id = $2`,
+      [principal.id, requestId],
+    );
+    await pool.query(
+      `INSERT INTO coordination_operation_receipts (
+         principal_id, operation, request_id, payload_hash, outcome,
+         scope_id, resource, expires_at, server_time, retry_after_seconds, retain_until
+       )
+       SELECT $1, 'acquire', gen_random_uuid(), sha256(convert_to(series::text, 'UTF8')),
+              'contended', $2, 'expired-key-old', clock_timestamp(),
+              clock_timestamp() - interval '2 days', 0,
+              clock_timestamp() - interval '1 day'
+         FROM generate_series(1, 101) series`,
+      [principal.id, scope.id],
+    );
+    await pool.query(
+      `UPDATE coordination_principal_usage
+          SET acquire_receipt_count = (
+            SELECT count(*) FROM coordination_operation_receipts
+             WHERE principal_id = $1 AND operation = 'acquire'
+          )
+        WHERE principal_id = $1`,
+      [principal.id],
+    );
+    expect(await acquire(pool, 'expired-key-new', requestId, runId))
+      .toMatchObject({ acquired: true, resource: 'expired-key-new' });
+  });
+
+  it('keeps renew and release available when acquire receipts are saturated', async () => {
+    const runId = randomUUID();
+    const held = await acquire(pool, 'saturated-maintenance', randomUUID(), runId);
+    expect(held.acquired).toBe(true);
+    if (!held.acquired) throw new Error('expected acquisition');
+    await pool.query(
+      `UPDATE coordination_principal_usage SET acquire_receipt_count = 10000
+        WHERE principal_id = $1`,
+      [principal.id],
+    );
+    await expect(acquire(pool, 'saturated-new'))
+      .rejects.toEqual(expectCode('COORDINATION_QUOTA_EXCEEDED'));
+    await expect(renewLease(pool, principal, {
+      leaseId: held.leaseId, runId, requestId: randomUUID(),
+    })).resolves.toMatchObject({ renewed: true, leaseId: held.leaseId });
+    await expect(releaseLease(pool, principal, {
+      leaseId: held.leaseId, runId, requestId: randomUUID(),
+    })).resolves.toEqual({ released: true });
+  });
+
+  it('enforces the new-resource rate limit without blocking existing resources', async () => {
+    const held = await acquire(pool, 'rate-existing');
+    expect(held.acquired).toBe(true);
+    await pool.query(
+      `UPDATE coordination_principal_usage
+          SET resource_window_started_at = clock_timestamp(), resource_window_count = 100
+        WHERE principal_id = $1`,
+      [principal.id],
+    );
+    await expect(acquire(pool, 'rate-new'))
+      .rejects.toEqual(expectCode('COORDINATION_QUOTA_EXCEEDED'));
+    await expect(acquire(pool, 'rate-existing'))
+      .resolves.toMatchObject({ acquired: false, reason: 'LOCK_HELD' });
+  });
+
+  it('uses locale-independent checks and indexed bounded cleanup plans', async () => {
+    await expect(acquire(pool, 'line\u2028paragraph\u2029separators'))
+      .resolves.toMatchObject({ acquired: true });
+    await expect(pool.query(
+      `INSERT INTO coordination_resources (scope_id, resource) VALUES ($1, $2)`,
+      [scope.id, 'bad\u0085key'],
+    )).rejects.toMatchObject({ code: '23514' });
+
+    const plans = await pool.connect();
+    try {
+      await plans.query('SET enable_seqscan = off');
+      const leasePlan = await plans.query(
+        `EXPLAIN (FORMAT JSON)
+         SELECT lease_id FROM coordination_leases
+          WHERE principal_id = $1
+            AND COALESCE(released_at, expires_at) <= clock_timestamp()
+          ORDER BY COALESCE(released_at, expires_at), lease_id LIMIT 100`,
+        [principal.id],
+      );
+      const resourcePlan = await plans.query(
+        `EXPLAIN (FORMAT JSON)
+         SELECT 1 FROM coordination_resources WHERE current_lease_id = $1`,
+        [randomUUID()],
+      );
+      expect(JSON.stringify(leasePlan.rows)).toContain(
+        'coordination_leases_principal_terminal_idx',
+      );
+      expect(JSON.stringify(resourcePlan.rows)).toContain(
+        'coordination_resources_current_lease_idx',
+      );
+    } finally {
+      plans.release();
+    }
+  });
+
   it('uses server lock timeout and leaves no late receipt after a blocked request', async () => {
     const first = await acquire(pool, 'blocked');
     expect(first.acquired).toBe(true);
@@ -523,5 +669,35 @@ describe('coordination storage and service', () => {
         WHERE scope_id = $1 AND resource = 'cancelled'`,
       [scope.id],
     )).rowCount).toBe(0);
+  });
+
+  it('reports cancellation after commit as ambiguous and replays the committed receipt', async () => {
+    const controller = new AbortController();
+    const requestId = randomUUID();
+    const runId = randomUUID();
+    const commitInterceptPool = {
+      connect: async () => {
+        const client = await pool.connect();
+        return {
+          query: async (query: string, values?: unknown[]) => {
+            const result = await client.query(query, values);
+            if (query === 'COMMIT') controller.abort();
+            return result;
+          },
+          release: (destroy?: boolean) => client.release(destroy),
+        } as unknown as pg.PoolClient;
+      },
+    } as pg.Pool;
+    await expect(acquireLease(commitInterceptPool, principal, {
+      scope: 'project:coordination-tests', resource: 'commit-cancelled',
+      runId, requestId,
+    }, { signal: controller.signal })).rejects.toEqual(expectCode('COORDINATION_TIMEOUT'));
+
+    await expect(acquire(pool, 'commit-cancelled', requestId, runId))
+      .resolves.toMatchObject({ acquired: true, fencingToken: '1' });
+    expect((await pool.query(
+      'SELECT count(*)::int AS count FROM coordination_operation_receipts WHERE request_id = $1',
+      [requestId],
+    )).rows[0]?.count).toBe(1);
   });
 });

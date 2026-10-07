@@ -4,7 +4,6 @@ import type { CoordinationOperation } from '../coordination/model.js';
 import {
   RECEIPT_CLEANUP_BATCH,
   RECEIPT_QUOTA,
-  RESOURCE_QUOTA,
 } from '../coordination/model.js';
 
 const UTC = `YYYY-MM-DD"T"HH24:MI:SS.US"Z"`;
@@ -101,6 +100,7 @@ export async function withCoordinationTransaction<T>(
     const result = await work(client);
     checkCancelled(signal);
     await client.query('COMMIT');
+    checkCancelled(signal);
     return result;
   } catch (error) {
     try {
@@ -193,7 +193,10 @@ export async function preparePrincipalReceipts(
      VALUES ($1) ON CONFLICT (principal_id) DO NOTHING`,
     [principalId],
   );
-  const deleted = await client.query<{ count: number }>(
+  const deleted = await client.query<{
+    acquire_count: number;
+    mutation_count: number;
+  }>(
     `WITH doomed AS (
        SELECT principal_id, operation, request_id
          FROM coordination_operation_receipts
@@ -207,22 +210,28 @@ export async function preparePrincipalReceipts(
        WHERE r.principal_id = d.principal_id
          AND r.operation = d.operation
          AND r.request_id = d.request_id
-       RETURNING 1
+       RETURNING r.operation
      )
-     SELECT count(*)::int AS count FROM removed`,
+     SELECT count(*) FILTER (WHERE operation = 'acquire')::int AS acquire_count,
+            count(*) FILTER (WHERE operation <> 'acquire')::int AS mutation_count
+       FROM removed`,
     [principalId, RECEIPT_CLEANUP_BATCH],
   );
-  const removed = deleted.rows[0]?.count ?? 0;
+  const acquireRemoved = deleted.rows[0]?.acquire_count ?? 0;
+  const mutationRemoved = deleted.rows[0]?.mutation_count ?? 0;
   await client.query(
-    'SELECT receipt_count FROM coordination_principal_usage WHERE principal_id = $1 FOR UPDATE',
+    `SELECT acquire_receipt_count, mutation_receipt_count
+       FROM coordination_principal_usage WHERE principal_id = $1 FOR UPDATE`,
     [principalId],
   );
-  if (removed > 0) {
+  if (acquireRemoved > 0 || mutationRemoved > 0) {
     await client.query(
       `UPDATE coordination_principal_usage
-          SET receipt_count = receipt_count - $2, updated_at = clock_timestamp()
+          SET acquire_receipt_count = acquire_receipt_count - $2,
+              mutation_receipt_count = mutation_receipt_count - $3,
+              updated_at = clock_timestamp()
         WHERE principal_id = $1`,
-      [principalId, removed],
+      [principalId, acquireRemoved, mutationRemoved],
     );
   }
   await client.query(
@@ -248,10 +257,41 @@ export async function preparePrincipalReceipts(
     [principalId, RECEIPT_CLEANUP_BATCH],
   );
   const usage = await client.query<{ receipt_count: number }>(
-    'SELECT receipt_count FROM coordination_principal_usage WHERE principal_id = $1',
+    `SELECT (acquire_receipt_count + mutation_receipt_count)::int AS receipt_count
+       FROM coordination_principal_usage WHERE principal_id = $1`,
     [principalId],
   );
   return usage.rows[0]?.receipt_count ?? 0;
+}
+
+export async function lockReceiptRequest(
+  client: pg.PoolClient,
+  principalId: string,
+  operation: CoordinationOperation,
+  requestId: string,
+): Promise<void> {
+  await client.query(
+    `SELECT pg_advisory_xact_lock(
+       hashtextextended($1 || ':' || $2 || ':' || $3, 604692071)
+     )`,
+    [principalId, operation, requestId],
+  );
+  const removed = await client.query<{ operation: CoordinationOperation }>(
+    `DELETE FROM coordination_operation_receipts
+      WHERE principal_id = $1 AND operation = $2 AND request_id = $3
+        AND retain_until <= clock_timestamp()
+      RETURNING operation`,
+    [principalId, operation, requestId],
+  );
+  if (!removed.rowCount) return;
+  const counter = operation === 'acquire'
+    ? 'acquire_receipt_count' : 'mutation_receipt_count';
+  await client.query(
+    `UPDATE coordination_principal_usage
+        SET ${counter} = ${counter} - 1, updated_at = clock_timestamp()
+      WHERE principal_id = $1`,
+    [principalId],
+  );
 }
 
 function receiptFromRow(row: Record<string, unknown>): ReceiptRow {
@@ -339,8 +379,11 @@ export async function insertReceipt(
   client: pg.PoolClient,
   input: ReceiptInsert,
 ): Promise<void> {
+  const counter = input.operation === 'acquire'
+    ? 'acquire_receipt_count' : 'mutation_receipt_count';
   const usage = await client.query<{ receipt_count: number }>(
-    'SELECT receipt_count FROM coordination_principal_usage WHERE principal_id = $1 FOR UPDATE',
+    `SELECT ${counter}::int AS receipt_count
+       FROM coordination_principal_usage WHERE principal_id = $1 FOR UPDATE`,
     [input.principalId],
   );
   if ((usage.rows[0]?.receipt_count ?? 0) >= RECEIPT_QUOTA) {
@@ -366,7 +409,7 @@ export async function insertReceipt(
   );
   await client.query(
     `UPDATE coordination_principal_usage
-        SET receipt_count = receipt_count + 1, updated_at = clock_timestamp()
+        SET ${counter} = ${counter} + 1, updated_at = clock_timestamp()
       WHERE principal_id = $1`,
     [input.principalId],
   );
@@ -376,6 +419,7 @@ export async function ensureAndLockResource(
   client: pg.PoolClient,
   scopeId: string,
   resource: string,
+  principalId: string,
 ): Promise<void> {
   const existing = await client.query(
     `SELECT 1 FROM coordination_resources
@@ -389,8 +433,9 @@ export async function ensureAndLockResource(
      VALUES ($1) ON CONFLICT (scope_id) DO NOTHING`,
     [scopeId],
   );
-  const usage = await client.query<{ resource_count: number }>(
-    'SELECT resource_count FROM coordination_scope_usage WHERE scope_id = $1 FOR UPDATE',
+  const usage = await client.query<{ resource_count: number; resource_limit: number }>(
+    `SELECT resource_count, resource_limit
+       FROM coordination_scope_usage WHERE scope_id = $1 FOR UPDATE`,
     [scopeId],
   );
   const raced = await client.query(
@@ -399,12 +444,33 @@ export async function ensureAndLockResource(
     [scopeId, resource],
   );
   if (raced.rowCount) return;
-  if ((usage.rows[0]?.resource_count ?? 0) >= RESOURCE_QUOTA) {
+  if ((usage.rows[0]?.resource_count ?? 0) >= (usage.rows[0]?.resource_limit ?? 10_000)) {
+    throw new CoordinationStorageError('RESOURCE_QUOTA');
+  }
+  const rate = await client.query<{ allowed: boolean }>(
+    `UPDATE coordination_principal_usage
+        SET resource_window_started_at = CASE
+              WHEN resource_window_started_at <= clock_timestamp() - interval '1 hour'
+              THEN clock_timestamp() ELSE resource_window_started_at END,
+            resource_window_count = CASE
+              WHEN resource_window_started_at <= clock_timestamp() - interval '1 hour'
+              THEN 1 ELSE resource_window_count + 1 END,
+            updated_at = clock_timestamp()
+      WHERE principal_id = $1
+        AND (resource_window_started_at <= clock_timestamp() - interval '1 hour'
+             OR resource_window_count < 100)
+      RETURNING TRUE AS allowed`,
+    [principalId],
+  );
+  if (rate.rows[0]?.allowed !== true) {
     throw new CoordinationStorageError('RESOURCE_QUOTA');
   }
   await client.query(
-    `INSERT INTO coordination_resources (scope_id, resource)
-     VALUES ($1, $2)`,
+    `INSERT INTO coordination_resources (scope_id, resource, fencing_token)
+     SELECT $1, $2, COALESCE((
+       SELECT fencing_floor FROM coordination_fencing_floors
+        WHERE scope_id = $1 AND resource_hash = sha256(convert_to($2, 'UTF8'))
+     ), 0)`,
     [scopeId, resource],
   );
   await client.query(

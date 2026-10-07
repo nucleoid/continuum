@@ -8,7 +8,9 @@ CREATE TABLE coordination_resources (
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (scope_id, resource),
   CHECK (octet_length(convert_to(resource, 'UTF8')) BETWEEN 1 AND 512),
-  CHECK (resource !~ '[[:cntrl:]]'),
+  CHECK (resource !~ (
+    '[' || chr(1) || '-' || chr(31) || chr(127) || '-' || chr(159) || ']'
+  ) COLLATE "C"),
   CHECK (left(resource, 1) NOT IN (
     ' ', U&'\00A0', U&'\1680', U&'\2000', U&'\2001', U&'\2002', U&'\2003',
     U&'\2004', U&'\2005', U&'\2006', U&'\2007', U&'\2008', U&'\2009',
@@ -96,12 +98,19 @@ CREATE INDEX coordination_receipts_lease_idx
 
 CREATE TABLE coordination_scope_usage (
   scope_id       UUID PRIMARY KEY REFERENCES scopes(id) ON DELETE RESTRICT,
-  resource_count INTEGER NOT NULL DEFAULT 0 CHECK (resource_count BETWEEN 0 AND 10000),
+  resource_count INTEGER NOT NULL DEFAULT 0 CHECK (resource_count BETWEEN 0 AND 1000000),
+  resource_limit INTEGER NOT NULL DEFAULT 10000 CHECK (resource_limit BETWEEN 1 AND 1000000),
   updated_at     TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 
 CREATE TABLE coordination_principal_usage (
   principal_id  UUID PRIMARY KEY REFERENCES principals(id) ON DELETE RESTRICT,
-  receipt_count INTEGER NOT NULL DEFAULT 0 CHECK (receipt_count BETWEEN 0 AND 10000),
+  acquire_receipt_count INTEGER NOT NULL DEFAULT 0
+    CHECK (acquire_receipt_count BETWEEN 0 AND 10000),
+  mutation_receipt_count INTEGER NOT NULL DEFAULT 0
+    CHECK (mutation_receipt_count BETWEEN 0 AND 10000),
+  resource_window_started_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+  resource_window_count INTEGER NOT NULL DEFAULT 0
+    CHECK (resource_window_count BETWEEN 0 AND 100),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );

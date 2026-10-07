@@ -26,6 +26,8 @@ GRANT EXECUTE ON FUNCTION
   :"continuum_schema".continuum_operator_revoke_entra_group_binding(UUID, TEXT),
   :"continuum_schema".continuum_operator_offboard_scope_access(UUID, UUID),
   :"continuum_schema".continuum_operator_pseudonymize_scope(UUID, UUID, TEXT),
+  :"continuum_schema".continuum_operator_reclaim_coordination_resource(UUID, UUID, TEXT),
+  :"continuum_schema".continuum_operator_set_coordination_scope_quota(UUID, UUID, INTEGER),
   :"continuum_schema".continuum_change_manual_org_admin(UUID, UUID, TEXT, BOOLEAN),
   :"continuum_schema".continuum_takeover_manual_org_admin(UUID, UUID, UUID),
   :"continuum_schema".continuum_operator_complete_offboarding_run(UUID, UUID, JSONB),

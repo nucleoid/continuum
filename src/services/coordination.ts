@@ -32,6 +32,7 @@ import {
   insertReceipt,
   lockCoordinationAuthorization,
   lockExistingResource,
+  lockReceiptRequest,
   preparePrincipalReceipts,
   releaseLeaseGeneration,
   renewLeaseGeneration,
@@ -78,6 +79,16 @@ function safeCoordinationError(error: unknown): ServiceError {
     return new ServiceError(
       'COORDINATION_TIMEOUT',
       'Coordination request timed out',
+      { cause: error },
+    );
+  }
+  if (code === '23514') {
+    return new ServiceError('INVALID_INPUT', 'Coordination input violates the storage contract');
+  }
+  if (code === '42501' || code === '42P01' || code === '3F000') {
+    return new ServiceError(
+      'DEPENDENCY_UNAVAILABLE',
+      'Coordination storage is not provisioned for the application role',
       { cause: error },
     );
   }
@@ -193,6 +204,7 @@ export async function acquireLease(
       if (!scope) throw scopeNotFound();
       await requireAuthorization(client, principal.id, scope.id, 'scope');
       await preparePrincipalReceipts(client, principal.id);
+      await lockReceiptRequest(client, principal.id, 'acquire', requestId);
       const prior = await getReceipt(client, principal.id, 'acquire', requestId);
       if (prior) {
         assertMatchingReceipt(prior, payloadHash);
@@ -209,7 +221,7 @@ export async function acquireLease(
         return replayAcquire(prior, scopeLabel);
       }
 
-      await ensureAndLockResource(client, scope.id, resource);
+      await ensureAndLockResource(client, scope.id, resource, principal.id);
       const serverTime = await sampleServerTime(client);
       const current = await getCurrentLease(client, scope.id, resource, serverTime);
       if (current) {
@@ -349,6 +361,7 @@ export async function renewLease(
       );
       await requireAuthorization(client, principal.id, target.scopeId, 'lease');
       await preparePrincipalReceipts(client, principal.id);
+      await lockReceiptRequest(client, principal.id, 'renew', requestId);
       const prior = await getReceipt(client, principal.id, 'renew', requestId);
       if (prior) {
         assertMatchingReceipt(prior, payloadHash);
@@ -453,6 +466,7 @@ export async function releaseLease(
       );
       await requireAuthorization(client, principal.id, target.scopeId, 'lease');
       await preparePrincipalReceipts(client, principal.id);
+      await lockReceiptRequest(client, principal.id, 'release', requestId);
       const prior = await getReceipt(client, principal.id, 'release', requestId);
       if (prior) {
         assertMatchingReceipt(prior, payloadHash);
