@@ -571,7 +571,9 @@ Do this only after proving the recreated role is intentionally new rather than
 a later stage of the roles restore. Prior generations remain in owner-only
 history. A retired OID remains terminal if its role is renamed; verification
 checks retired authority by OID, and restore rebind rejects that ambiguous
-rename until the recorded name is restored or the role is retired again.
+rename until the recorded name is restored or the role is retired again. It
+also rejects any mapping that would make one restored OID both active and
+retired; a complete retired-role OID permutation is handled atomically.
 
 One operator database role is bound to one manual organization-administrator
 principal. A takeover changes application membership, but does not silently

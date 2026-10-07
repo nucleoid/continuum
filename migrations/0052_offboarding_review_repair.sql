@@ -1366,11 +1366,16 @@ BEGIN
       FROM continuum_retired_sync_database_identities history
       JOIN pg_roles live_role ON live_role.oid = history.database_role_oid
      WHERE live_role.rolname <> history.database_role
-       AND NOT EXISTS (
-         SELECT 1 FROM pg_roles restored_role
-          WHERE restored_role.rolname = history.database_role)
+       AND NOT (
+         EXISTS (
+           SELECT 1 FROM pg_roles restored_role
+            WHERE restored_role.rolname = history.database_role)
+         AND EXISTS (
+           SELECT 1 FROM continuum_retired_sync_database_identities peer_history
+            WHERE peer_history.database_role = live_role.rolname)
+       )
   ) THEN
-    RAISE EXCEPTION 'a live retired role OID was renamed; restore its recorded name or retire it again before rebind';
+    RAISE EXCEPTION 'a live retired role OID was renamed outside a complete retired-role restore mapping';
   END IF;
   UPDATE continuum_database_identity_epoch
      SET epoch = restored_epoch WHERE singleton;
@@ -1486,6 +1491,13 @@ BEGIN
      WHERE restored_oid IS NOT NULL GROUP BY restored_oid HAVING count(*) <> 1
   ) THEN
     RAISE EXCEPTION 'retired database identity restore mapping is ambiguous';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM continuum_retired_identity_rebind_plan retired
+    JOIN continuum_active_identity_rebind_plan active
+      ON active.restored_oid = retired.restored_oid
+  ) THEN
+    RAISE EXCEPTION 'a restored database role OID cannot be both active and retired';
   END IF;
   UPDATE continuum_unresolved_retired_sync_database_identities unresolved
      SET resolution_kind = 'superseded'
