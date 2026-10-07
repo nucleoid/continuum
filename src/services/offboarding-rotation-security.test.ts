@@ -112,6 +112,104 @@ describe('sync database identity rotation security', () => {
     }
   });
 
+  it('does not let sync registration bypass isolation, privilege, ownership, or memory-read checks', async () => {
+    const service = await createPrincipal(pool, {
+      externalId: 'registration-bypass-service', kind: 'service', displayName: 'Sync',
+    });
+    const suffix = Date.now();
+    const target = 'continuum_registration_target_' + suffix;
+    const bridge = 'continuum_registration_bridge_' + Date.now();
+    const privileged = 'continuum_registration_privileged_' + suffix;
+    const schemaCreate = 'continuum_registration_create_' + suffix;
+    const owner = 'continuum_registration_owner_' + suffix;
+    const reader = 'continuum_registration_reader_' + suffix;
+    await pool.query('CREATE ROLE ' + quoteRole(target) + ' NOLOGIN');
+    await pool.query('CREATE ROLE ' + quoteRole(bridge) + ' NOLOGIN');
+    await pool.query('CREATE ROLE ' + quoteRole(privileged) + ' NOLOGIN CREATEROLE');
+    await pool.query('CREATE ROLE ' + quoteRole(schemaCreate) + ' NOLOGIN');
+    await pool.query('CREATE ROLE ' + quoteRole(owner) + ' NOLOGIN');
+    await pool.query('CREATE ROLE ' + quoteRole(reader) + ' NOLOGIN');
+    await pool.query('GRANT ' + quoteRole(bridge) + ' TO ' + quoteRole(target));
+    await pool.query('GRANT CREATE ON SCHEMA public TO ' + quoteRole(schemaCreate));
+    await pool.query('CREATE TABLE continuum_registration_owned_probe (id integer)');
+    await pool.query('ALTER TABLE continuum_registration_owned_probe OWNER TO ' + quoteRole(owner));
+    await pool.query('GRANT SELECT ON TABLE memories TO ' + quoteRole(reader));
+    try {
+      for (const role of [target, privileged, schemaCreate, owner, reader]) {
+        await expect(pool.query(
+          'SELECT continuum_register_trusted_database_identity($1, $2, FALSE, TRUE)',
+          [role, service.id],
+        )).rejects.toThrow(/membership|SET ROLE|isolated|privileged|owner|CREATE|memory/i);
+      }
+      expect((await pool.query(
+        `SELECT count(*)::int AS count FROM continuum_trusted_database_identities
+          WHERE database_role = ANY($1::name[])`,
+        [[target, privileged, schemaCreate, owner, reader]],
+      )).rows[0].count).toBe(0);
+    } finally {
+      await dropRoles(pool, [target, bridge, privileged, schemaCreate, owner, reader]);
+    }
+  });
+
+  it('registration safely retires the previous sync identity and enforces one active binding', async () => {
+    const first = await createPrincipal(pool, {
+      externalId: 'registration-first-service', kind: 'service', displayName: 'First',
+    });
+    const second = await createPrincipal(pool, {
+      externalId: 'registration-second-service', kind: 'service', displayName: 'Second',
+    });
+    const oldRole = 'continuum_registration_old_' + Date.now();
+    const nextRole = 'continuum_registration_next_' + Date.now();
+    await pool.query('CREATE ROLE ' + quoteRole(oldRole) + ' LOGIN');
+    await pool.query('CREATE ROLE ' + quoteRole(nextRole) + ' NOLOGIN');
+    try {
+      await pool.query(
+        'SELECT continuum_register_trusted_database_identity($1, $2, FALSE, TRUE)',
+        [oldRole, first.id],
+      );
+      await pool.query(
+        'SELECT continuum_register_trusted_database_identity($1, $2, FALSE, TRUE)',
+        [nextRole, second.id],
+      );
+      expect((await pool.query(
+        `SELECT database_role::text, principal_id::text
+           FROM continuum_trusted_database_identities WHERE can_sync`,
+      )).rows).toEqual([{ database_role: nextRole, principal_id: second.id }]);
+      expect((await pool.query(
+        'SELECT rolcanlogin FROM pg_roles WHERE rolname = $1', [oldRole],
+      )).rows[0].rolcanlogin).toBe(false);
+      expect((await pool.query(
+        `SELECT has_schema_privilege($1, 'public', 'USAGE') AS schema_usage,
+                has_function_privilege($1,
+                  'public.continuum_require_sync_session(uuid)', 'EXECUTE') AS public_execute`,
+        [oldRole],
+      )).rows[0]).toEqual({ schema_usage: false, public_execute: false });
+    } finally { await dropRoles(pool, [oldRole, nextRole]); }
+  });
+
+  it('rejects membership edges and privileged approval registration targets', async () => {
+    const admin = await createPrincipal(pool, {
+      externalId: 'unsafe-approval-admin', kind: 'user', displayName: 'Admin',
+    });
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    await addMembership(pool, admin.id, org!.id, 'admin');
+    const target = 'continuum_approval_target_' + Date.now();
+    const bridge = 'continuum_approval_bridge_' + Date.now();
+    const privileged = 'continuum_approval_privileged_' + Date.now();
+    await pool.query('CREATE ROLE ' + quoteRole(target) + ' NOLOGIN');
+    await pool.query('CREATE ROLE ' + quoteRole(bridge) + ' NOLOGIN');
+    await pool.query('CREATE ROLE ' + quoteRole(privileged) + ' NOLOGIN BYPASSRLS');
+    await pool.query('GRANT ' + quoteRole(bridge) + ' TO ' + quoteRole(target));
+    try {
+      for (const role of [target, privileged]) {
+        await expect(pool.query(
+          'SELECT continuum_register_trusted_database_identity($1, $2, TRUE, FALSE)',
+          [role, admin.id],
+        )).rejects.toThrow(/membership|SET ROLE|isolated|unsafe|privileged/i);
+      }
+    } finally { await dropRoles(pool, [target, bridge, privileged]); }
+  });
+
   it('binds authority to role OID so a dropped role name cannot inherit stale sync authority', async () => {
     const service = await createPrincipal(pool, {
       externalId: 'stale-sync-service', kind: 'service', displayName: 'Stale service',

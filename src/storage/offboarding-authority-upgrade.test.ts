@@ -147,4 +147,20 @@ describe('0048 trusted database identity upgrade', () => {
       )).rows[0].count).toBe(mode === 'mixed' ? 1 : 2);
     }
   }, 120_000);
+
+  it('rejects a surviving operator name whose role was dropped and recreated', async () => {
+    const state = await fixture('0047_offboarding_role_boundary.sql');
+    const operatorRole = 'upgrade_recreated_operator_' + state.suffix;
+    await createRole(state.admin, operatorRole);
+    await state.pool.query(
+      'SELECT continuum_register_trusted_database_identity($1, $2, TRUE, FALSE)',
+      [operatorRole, state.operatorPrincipal.id],
+    );
+    await state.admin.query('DROP ROLE ' + quoteIdentifier(operatorRole));
+    roles.splice(roles.indexOf(operatorRole), 1);
+    await createRole(state.admin, operatorRole);
+    await addMigration(state.directory, '0048_offboarding_independent_review.sql');
+    await expect(runMigrations(state.pool, state.directory))
+      .rejects.toThrow(/operator.*re-register|provenance|role OID/i);
+  }, 60_000);
 });
