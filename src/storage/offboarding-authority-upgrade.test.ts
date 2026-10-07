@@ -286,6 +286,8 @@ describe('0048 trusted database identity upgrade', () => {
         ADD COLUMN edited_0051_extra TEXT NOT NULL DEFAULT 'legacy';
       ALTER TABLE continuum_principal_disable_requests
         ADD COLUMN edited_0051_extra TEXT NOT NULL DEFAULT 'legacy';
+      CREATE UNIQUE INDEX continuum_edited_0051_extra_index
+        ON continuum_entra_guarded_mutations (external_id);
     `);
     await addMigration(state.directory, '0052_offboarding_review_repair.sql');
     await expect(runMigrations(state.pool, state.directory)).resolves.toEqual([
@@ -316,6 +318,9 @@ describe('0048 trusted database identity upgrade', () => {
                           'continuum_principal_disable_requests'::regclass)
          AND attname = 'edited_0051_extra' AND NOT attisdropped
     `)).rows[0].count).toBe(0);
+    expect((await state.pool.query(`
+      SELECT to_regclass('continuum_edited_0051_extra_index') IS NULL AS absent
+    `)).rows[0].absent).toBe(true);
   }, 60_000);
 
   it('documents and checks migration-owner capabilities before 0051 changes', async () => {

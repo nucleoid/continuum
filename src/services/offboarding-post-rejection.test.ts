@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import pg, { type PoolConfig } from 'pg';
 import { addMembership } from '../storage/memberships.js';
@@ -66,7 +67,9 @@ describe('post-rejection database authority remediation', () => {
   });
 
   async function createRole(profile: 'application' | 'operator' | 'sync', principalId?: string) {
-    const role = `continuum_post_rejection_${profile}_${Date.now()}_${roles.length}`;
+    const role = profile === 'sync'
+      ? `Continuum-Sync-${Date.now()}-${roles.length}`
+      : `continuum_post_rejection_${profile}_${Date.now()}_${roles.length}`;
     roles.push(role);
     await pool.query(
       'CREATE ROLE ' + quoteRole(role)
@@ -162,6 +165,28 @@ describe('post-rejection database authority remediation', () => {
       await pool.query(
         'REVOKE EXECUTE ON FUNCTION continuum_operator_authorize_audit_retention(UUID) FROM PUBLIC',
       );
+    }
+  });
+
+  it('returns a failing psql exit code when a grant script is missing variables', () => {
+    const databaseUrl = (pool as unknown as { options: PoolConfig }).options.connectionString!;
+    const result = spawnSync('psql', [
+      databaseUrl,
+      '--file=' + join(process.cwd(), 'scripts/grant-application-role.sql'),
+    ], { encoding: 'utf8' });
+    expect(result.status).not.toBe(0);
+  });
+
+  it('does not exempt non-vector extension functions from PUBLIC drift checks', async () => {
+    const application = await createRole('application');
+    await pool.query('BEGIN');
+    try {
+      await pool.query('CREATE EXTENSION IF NOT EXISTS hstore WITH SCHEMA public');
+      await expect(pool.query(
+        'SELECT continuum_assert_application_role_allowlist($1)', [application.role],
+      )).rejects.toThrow(/PUBLIC|extension|function|privilege|drift/i);
+    } finally {
+      await pool.query('ROLLBACK');
     }
   });
 
