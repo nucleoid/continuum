@@ -45,6 +45,8 @@ GRANT EXECUTE ON FUNCTION
 TO :"continuum_operator_role";
 REVOKE ALL ON TABLE :"continuum_schema".continuum_trusted_database_identities
 FROM :"continuum_operator_role";
+REVOKE ALL ON TABLE :"continuum_schema".continuum_retired_sync_database_identities
+FROM :"continuum_operator_role";
 REVOKE ALL ON TABLE :"continuum_schema".continuum_entra_reapproval_requests
 FROM :"continuum_operator_role";
 REVOKE ALL ON TABLE :"continuum_schema".continuum_entra_guarded_mutations
@@ -67,4 +69,7 @@ FROM :"continuum_operator_role";
 REVOKE ALL ON FUNCTION
   :"continuum_schema".continuum_get_offboarding_run(UUID, UUID)
 FROM :"continuum_operator_role";
+SELECT :"continuum_schema".continuum_assert_operator_role_allowlist(
+  :'continuum_operator_role'::name
+);
 COMMIT;

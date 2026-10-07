@@ -1,7 +1,7 @@
+\set ON_ERROR_STOP on
 \if :{?retired_sync_role}
 \else
   \echo 'retired_sync_role must name the retired sync role'
-  \quit
 \endif
 \if :{?continuum_schema}
 \else
@@ -64,6 +64,9 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'retired sync role has membership or owns application objects';
   END IF;
+  EXECUTE format(
+    'SELECT %I.continuum_require_sync_retirement_authority($1)', application_schema
+  ) USING retired_oid;
   EXECUTE format('REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I FROM %I',
     application_schema, retired_sync);
   EXECUTE format('REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA %I FROM %I',
@@ -73,6 +76,14 @@ BEGIN
   EXECUTE format('REVOKE ALL PRIVILEGES ON SCHEMA %I FROM %I',
     application_schema, retired_sync);
   EXECUTE format('ALTER ROLE %I NOLOGIN', retired_sync);
+  EXECUTE format(
+    'INSERT INTO %I.continuum_retired_sync_database_identities
+       (database_role_oid, database_role)
+     VALUES ($1, $2)
+     ON CONFLICT (database_role_oid) DO UPDATE SET
+       database_role = EXCLUDED.database_role, retired_at = now()',
+    application_schema
+  ) USING retired_oid, retired_sync;
 END;
 $retire$;
 COMMIT;

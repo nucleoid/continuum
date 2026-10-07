@@ -157,6 +157,7 @@ FROM :"continuum_app_role";
 REVOKE ALL ON TABLE
   :"continuum_schema".continuum_audit_retention_policy,
   :"continuum_schema".continuum_trusted_database_identities,
+  :"continuum_schema".continuum_retired_sync_database_identities,
   :"continuum_schema".continuum_entra_reapproval_requests,
   :"continuum_schema".principal_offboarding_audit_requests,
   :"continuum_schema".continuum_offboarding_restart_requests

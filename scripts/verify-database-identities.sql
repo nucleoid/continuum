@@ -44,6 +44,7 @@ DECLARE
   application_schema NAME;
   active_sync_valid BOOLEAN;
   operator_valid BOOLEAN;
+  retired_identity RECORD;
 BEGIN
   SELECT input.application_role, input.active_sync, input.expected_operator, input.retired_sync,
          input.application_schema
@@ -76,24 +77,66 @@ BEGIN
   IF NOT operator_valid THEN
     RAISE EXCEPTION 'expected operator role is not OID-bound approval-only authority';
   END IF;
+  EXECUTE format(
+    'SELECT %I.continuum_assert_operator_role_allowlist($1)', application_schema
+  ) USING expected_operator;
   IF retired_sync <> '' AND NOT EXISTS (
     SELECT 1 FROM pg_roles role WHERE role.rolname = retired_sync
   ) THEN
     RAISE EXCEPTION 'retired sync role does not exist';
   END IF;
-  IF retired_sync <> '' AND EXISTS (
-    SELECT 1 FROM pg_roles role
-     WHERE role.rolname = retired_sync AND (
-       role.rolcanlogin
-       OR has_schema_privilege(retired_sync, application_schema, 'USAGE')
-       OR has_table_privilege(retired_sync,
-            format('%I.principals', application_schema), 'SELECT')
-       OR has_sequence_privilege(retired_sync,
-            format('%I.audit_log_id_seq', application_schema), 'USAGE')
-     )
-  ) THEN
-    RAISE EXCEPTION 'retired sync role remains login-capable or retains application authority';
-  END IF;
+  FOR retired_identity IN EXECUTE format(
+    'SELECT history.database_role_oid, history.database_role
+       FROM %I.continuum_retired_sync_database_identities history
+     UNION
+     SELECT role.oid, role.rolname FROM pg_roles role
+      WHERE $1 <> '''' AND role.rolname = $1', application_schema
+  ) USING retired_sync
+  LOOP
+    IF EXISTS (
+      SELECT 1 FROM pg_roles role
+       WHERE role.rolname = retired_identity.database_role
+         AND role.oid <> retired_identity.database_role_oid
+    ) THEN
+      RAISE EXCEPTION 'retired sync role name was reused by a different OID';
+    END IF;
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_roles role WHERE role.oid = retired_identity.database_role_oid
+    ) THEN
+      CONTINUE;
+    END IF;
+    IF EXISTS (
+      SELECT 1 FROM pg_roles role
+       WHERE role.oid = retired_identity.database_role_oid AND role.rolcanlogin
+    ) OR EXISTS (
+      SELECT 1 FROM pg_auth_members membership
+       WHERE retired_identity.database_role_oid IN (membership.roleid, membership.member)
+    ) OR EXISTS (
+      SELECT 1 FROM pg_namespace namespace
+      CROSS JOIN LATERAL aclexplode(COALESCE(
+        namespace.nspacl, acldefault('n', namespace.nspowner))) privilege
+       WHERE namespace.nspname = application_schema
+         AND privilege.grantee = retired_identity.database_role_oid
+    ) OR EXISTS (
+      SELECT 1 FROM pg_class relation
+      JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+      CROSS JOIN LATERAL aclexplode(COALESCE(
+        relation.relacl, acldefault(
+          CASE WHEN relation.relkind = 'S' THEN 's'::"char" ELSE 'r'::"char" END,
+          relation.relowner))) privilege
+       WHERE namespace.nspname = application_schema
+         AND privilege.grantee = retired_identity.database_role_oid
+    ) OR EXISTS (
+      SELECT 1 FROM pg_proc function
+      JOIN pg_namespace namespace ON namespace.oid = function.pronamespace
+      CROSS JOIN LATERAL aclexplode(COALESCE(
+        function.proacl, acldefault('f', function.proowner))) privilege
+       WHERE namespace.nspname = application_schema
+         AND privilege.grantee = retired_identity.database_role_oid
+    ) THEN
+      RAISE EXCEPTION 'retired sync role remains login-capable or retains membership/application authority';
+    END IF;
+  END LOOP;
 END;
 $verify$;
 ROLLBACK;

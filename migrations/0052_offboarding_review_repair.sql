@@ -8,10 +8,31 @@ SET LOCAL statement_timeout = '30s';
 DO $preflight$
 DECLARE
   migration_role_oid OID := (SELECT oid FROM pg_roles WHERE rolname = current_user);
+  schema_oid OID := quote_ident(current_schema())::regnamespace;
   migration_superuser BOOLEAN;
   migration_createrole BOOLEAN;
   organization_count INTEGER;
 BEGIN
+  IF (SELECT relowner FROM pg_class WHERE oid = 'principals'::regclass)
+       <> migration_role_oid
+     OR EXISTS (
+       SELECT 1 FROM pg_class relation
+        WHERE relation.relnamespace = schema_oid
+          AND relation.relowner <> migration_role_oid
+     ) OR EXISTS (
+       SELECT 1 FROM pg_proc function
+        WHERE function.pronamespace = schema_oid
+          AND function.proowner <> migration_role_oid
+          AND NOT EXISTS (
+            SELECT 1 FROM pg_depend dependency
+            JOIN pg_extension extension ON extension.oid = dependency.refobjid
+             WHERE dependency.classid = 'pg_proc'::regclass
+               AND dependency.objid = function.oid
+               AND dependency.refclassid = 'pg_extension'::regclass
+               AND dependency.deptype = 'e' AND extension.extname = 'vector')
+     ) THEN
+    RAISE EXCEPTION '0052 migration role must directly own every application object';
+  END IF;
   SELECT count(*)::integer INTO organization_count FROM scopes WHERE kind = 'org';
   IF organization_count <> 1 OR NOT EXISTS (
     SELECT 1 FROM scopes WHERE kind = 'org' AND name = ''
@@ -40,6 +61,13 @@ END;
 $preflight$;
 
 ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+
+CREATE TABLE IF NOT EXISTS continuum_retired_sync_database_identities (
+  database_role_oid OID PRIMARY KEY,
+  database_role NAME NOT NULL,
+  retired_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+REVOKE ALL ON TABLE continuum_retired_sync_database_identities FROM PUBLIC;
 
 -- Capability tables are transaction-local markers. Maintenance mode guarantees
 -- no legitimate rows survive, so recreate them instead of attempting a partial
@@ -823,6 +851,12 @@ BEGIN
       schema_name, old_identity.rolname);
     EXECUTE format('REVOKE ALL PRIVILEGES ON SCHEMA %I FROM %I', schema_name, old_identity.rolname);
     EXECUTE format('ALTER ROLE %I NOLOGIN', old_identity.rolname);
+    INSERT INTO continuum_retired_sync_database_identities
+      (database_role_oid, database_role)
+    VALUES (old_identity.database_role_oid, old_identity.rolname)
+    ON CONFLICT (database_role_oid) DO UPDATE SET
+      database_role = EXCLUDED.database_role,
+      retired_at = now();
     DELETE FROM continuum_trusted_database_identities
      WHERE database_role_oid = old_identity.database_role_oid AND can_sync AND NOT can_approve;
   END LOOP;
@@ -916,8 +950,9 @@ END;
 $$;
 REVOKE ALL ON FUNCTION continuum_operator_pseudonymize_scope(UUID, UUID, TEXT) FROM PUBLIC;
 
+DROP FUNCTION IF EXISTS continuum_assert_application_role_allowlist(NAME);
 CREATE OR REPLACE FUNCTION continuum_assert_application_role_allowlist(
-  target_database_role NAME
+  target_database_role NAME, operator_profile BOOLEAN DEFAULT FALSE
 ) RETURNS VOID LANGUAGE plpgsql STABLE SECURITY DEFINER AS $$
 DECLARE schema_oid OID; owner_oid OID; target_oid OID;
 BEGIN
@@ -928,6 +963,15 @@ BEGIN
   END IF;
   SELECT oid INTO target_oid FROM pg_roles WHERE rolname = target_database_role;
   IF target_oid IS NULL THEN RAISE EXCEPTION 'application role does not exist'; END IF;
+  IF operator_profile THEN
+    IF NOT EXISTS (
+      SELECT 1 FROM continuum_trusted_database_identities identity
+       WHERE identity.database_role_oid = target_oid
+         AND identity.can_approve AND NOT identity.can_sync
+    ) THEN RAISE EXCEPTION 'operator role is not OID-bound approval-only authority'; END IF;
+    PERFORM continuum_validate_trusted_database_role(
+      target_database_role, 'approve', FALSE);
+  END IF;
   IF EXISTS (
     SELECT 1 FROM pg_parameter_acl parameter_acl
     CROSS JOIN LATERAL aclexplode(parameter_acl.paracl) privilege
@@ -1022,12 +1066,38 @@ BEGIN
     UNION ALL (SELECT * FROM expected EXCEPT SELECT * FROM actual)
   ) THEN RAISE EXCEPTION 'application role sequence privilege drift from exact allow-list'; END IF;
   IF EXISTS (
-    WITH expected(signature) AS (VALUES
-      ('continuum_org_scope_id()'),
-      ('continuum_audit_retention_minimum_days()'),
-      ('continuum_offboarding_expected_audit_metadata(jsonb)'),
-      ('continuum_membership_is_effective(boolean,text)'),
-      ('continuum_disable_principal(uuid,uuid)')
+    WITH expected(signature) AS (
+      SELECT signature FROM (VALUES
+        ('continuum_org_scope_id()'),
+        ('continuum_audit_retention_minimum_days()'),
+        ('continuum_offboarding_expected_audit_metadata(jsonb)'),
+        ('continuum_membership_is_effective(boolean,text)'),
+        ('continuum_disable_principal(uuid,uuid)')
+      ) application(signature)
+      UNION ALL
+      SELECT signature FROM (VALUES
+        ('continuum_create_user_scope_approval(uuid,uuid,uuid,uuid[],text)'),
+        ('continuum_upsert_entra_group_binding(uuid,text,text,uuid,text)'),
+        ('continuum_operator_revoke_entra_group_binding(uuid,text)'),
+        ('continuum_operator_offboard_scope_access(uuid,uuid)'),
+        ('continuum_operator_pseudonymize_scope(uuid,uuid,text)'),
+        ('continuum_change_manual_org_admin(uuid,uuid,text,boolean)'),
+        ('continuum_takeover_manual_org_admin(uuid,uuid,uuid)'),
+        ('continuum_operator_complete_offboarding_run(uuid,uuid,jsonb)'),
+        ('continuum_operator_get_offboarding_run(uuid,uuid)'),
+        ('continuum_operator_authorize_audit_retention(uuid)'),
+        ('continuum_operator_resume_offboarding_run(uuid,uuid)'),
+        ('continuum_operator_restart_offboarding_run(uuid,uuid,jsonb)'),
+        ('continuum_operator_write_offboarding_run(uuid,uuid,text,jsonb)'),
+        ('continuum_operator_start_offboarding_run(uuid,uuid,jsonb)'),
+        ('continuum_operator_redact_offboarding_audit(uuid,uuid,bigint[])'),
+        ('continuum_operator_record_offboarding_event(uuid)'),
+        ('continuum_operator_apply_audit_retention(uuid,timestampwithtimezone,integer,uuid,integer,jsonb,text,text)'),
+        ('continuum_operator_reactivate_principal(uuid,uuid)'),
+        ('continuum_operator_remove_entra_membership(uuid,uuid,uuid,text)'),
+        ('continuum_rotate_sync_database_identity(uuid,name,uuid)'),
+        ('continuum_cleanup_legacy_offboarding_audit_requests(integer)')
+      ) operator(signature) WHERE operator_profile
     ), actual AS (
       SELECT function.proname || '(' || replace(oidvectortypes(function.proargtypes), ' ', '') || ')'
         FROM pg_proc function
@@ -1087,7 +1157,16 @@ BEGIN
   END IF;
 END;
 $$;
-REVOKE ALL ON FUNCTION continuum_assert_application_role_allowlist(NAME) FROM PUBLIC;
+REVOKE ALL ON FUNCTION continuum_assert_application_role_allowlist(NAME, BOOLEAN) FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION continuum_assert_operator_role_allowlist(
+  target_database_role NAME
+) RETURNS VOID LANGUAGE plpgsql STABLE SECURITY DEFINER AS $$
+BEGIN
+  PERFORM continuum_assert_application_role_allowlist(target_database_role, TRUE);
+END;
+$$;
+REVOKE ALL ON FUNCTION continuum_assert_operator_role_allowlist(NAME) FROM PUBLIC;
 
 -- Reinstall the extension grant refresher for databases that already ledgered
 -- an older 0051. Resolve application roles from the memories relation OID, not
@@ -1176,6 +1255,7 @@ BEGIN
          'continuum_install_sync_database_identity',
          'continuum_operator_pseudonymize_scope',
          'continuum_assert_application_role_allowlist',
+         'continuum_assert_operator_role_allowlist',
          'continuum_grant_application_vector_functions'
        ])
   LOOP

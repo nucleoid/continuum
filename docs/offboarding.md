@@ -354,10 +354,10 @@ owner-controlled UUID and fails closed if that marker is absent or ambiguous.
 The only empty-database bootstrap accepted is the single canonical `org/''`
 row, which immediately rebinds the marker. It restores all principal,
 Entra-group, and membership
-triggers, normalizes both transient capability-table shapes, and checks column
+triggers, normalizes all three transient capability-table shapes, and checks column
 ACLs as well as table ACLs. Sync startup rejects owner and superuser sessions
 and rechecks operator and sync membership edges at each privileged call. The
-application grant script revokes both marker tables and validates its exact
+application grant script revokes all three marker tables and validates its exact
 direct allow-list—including schema and ambient `PUBLIC` privileges—before
 returning success. The application role has no scope
 row update authority; the operator-only pseudonymization function owns the one
@@ -402,6 +402,14 @@ and old application code expects shared-role offboarding authority.
 The supported and CI-tested database major is PostgreSQL 16 with pgvector.
 Qualify another major independently before migration; successful SQL parsing
 alone is not a supported rollout.
+
+Before migration, confirm the named app, operator, and sync roles have no rows
+in `pg_db_role_setting` and no explicit or inherited entries in
+`pg_parameter_acl`; remove reviewed drift before continuing. Migration `0052`
+requires the connecting role to be the direct owner of every application
+relation and non-vector function. Merely inheriting the owner role is rejected
+before capability tables are dropped, so retained security definers and newly
+created marker tables cannot end up with different owners.
 
 Migration `0051` performs its privilege preflight before changing any object.
 The connecting migration role must directly own every application object and
@@ -460,6 +468,14 @@ installation already recorded the earlier 0048 revision, run the checked
 before starting 0051-aware processes. The script refuses an active trusted
 identity, membership edges, and application-object ownership before revoking
 the role's application authority and login.
+
+```sh
+psql "$CONTINUUM_MIGRATION_OWNER_URL" \
+  --set=ON_ERROR_STOP=1 \
+  --set=continuum_schema=public \
+  --set=retired_sync_role=continuum_sync_old \
+  --file=scripts/retire-sync-role.sql
+```
 
 ```sh
 psql "$CONTINUUM_MIGRATION_OWNER_URL" \
@@ -588,10 +604,13 @@ The script fails unless `PUBLIC` and the migration owner's application-schema
 default ACLs are closed, exactly one OID-bound sync row exists, every registry
 OID still resolves to its recorded name, the sync role matches the exact 0052
 allow-list, the shared application role matches its exact allow-list, the
-expected operator is approval-only, and a supplied retired role both exists and
-is `NOLOGIN` without schema, principal-table, or audit-sequence authority. Omit
-`--set=retired_sync_role=...` only on an initial install with no retired role;
-after rotation, supply the exact recorded old role name. Parameter ACLs or
+expected operator matches its exact application-plus-operator profile with no
+column or trigger privilege drift, and a supplied retired role both exists and
+is `NOLOGIN` without membership, schema, relation, sequence, or function
+authority. Retired sync identities are recorded by immutable role OID in an
+owner-only history table and every recorded identity is checked automatically;
+`--set=retired_sync_role=...` remains available for legacy roles that predate
+that history. Parameter ACLs or
 per-role settings on application, operator, or sync identities make validation
 fail because they can change trigger behavior. The
 membership-sync executable repeats the sync-role allow-list gate at every
@@ -601,6 +620,9 @@ Because 0048 and 0049 deliberately delete legacy registry rows, revoke grants,
 and disable the retired login, restoring pre-0049 behavior requires the verified pre-migration
 backup and matching old binaries. Regranting the retired credential by hand is
 not a rollback.
+Logical restore tools can assign new PostgreSQL role OIDs. After a logical
+restore, keep processes stopped and reapply the application, operator, and sync
+profiles so every trusted identity is rebound and verified before restart.
 
 This is an application-data boundary. Operators must separately apply their
 documented retention policy to encrypted database backups, database/WAL logs,

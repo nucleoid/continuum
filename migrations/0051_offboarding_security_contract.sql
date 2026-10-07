@@ -110,6 +110,13 @@ CREATE TABLE IF NOT EXISTS continuum_principal_disable_requests (
 );
 REVOKE ALL ON TABLE continuum_principal_disable_requests FROM PUBLIC;
 
+CREATE TABLE IF NOT EXISTS continuum_retired_sync_database_identities (
+  database_role_oid OID PRIMARY KEY,
+  database_role NAME NOT NULL,
+  retired_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+REVOKE ALL ON TABLE continuum_retired_sync_database_identities FROM PUBLIC;
+
 TRUNCATE continuum_entra_reapproval_requests;
 ALTER TABLE continuum_entra_reapproval_requests
   ADD COLUMN authorization_principal_id UUID NOT NULL REFERENCES principals(id);
@@ -830,6 +837,12 @@ BEGIN
     EXECUTE format('REVOKE ALL PRIVILEGES ON SCHEMA %I FROM %I',
       schema_name, old_identity.rolname);
     EXECUTE format('ALTER ROLE %I NOLOGIN', old_identity.rolname);
+    INSERT INTO continuum_retired_sync_database_identities
+      (database_role_oid, database_role)
+    VALUES (old_identity.database_role_oid, old_identity.rolname)
+    ON CONFLICT (database_role_oid) DO UPDATE SET
+      database_role = EXCLUDED.database_role,
+      retired_at = now();
     DELETE FROM continuum_trusted_database_identities
      WHERE database_role_oid = old_identity.database_role_oid
        AND can_sync AND NOT can_approve;

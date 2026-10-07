@@ -223,13 +223,15 @@ describe('sync database identity rotation security', () => {
         'REVOKE EXECUTE ON FUNCTION continuum_operator_offboard_scope_access(UUID, UUID) FROM '
         + quoteRole(applicationRole),
       );
+      await pool.query('ALTER ROLE ' + quoteRole(oldRole) + ' LOGIN');
       await expect(applyGrantScript(pool, 'verify-database-identities.sql', {
         continuum_schema: 'public',
         continuum_app_role: applicationRole,
         continuum_sync_role: nextRole,
         continuum_operator_role: fixture.operatorRole,
         retired_sync_role: '',
-      })).rejects.toThrow(/retired sync role.*required|rotation/i);
+      })).rejects.toThrow(/retired sync role.*login|authority/i);
+      await pool.query('ALTER ROLE ' + quoteRole(oldRole) + ' NOLOGIN');
     } finally {
       await fixture.operator.end();
       await dropRoles(pool, [oldRole, nextRole, applicationRole, fixture.operatorRole]);

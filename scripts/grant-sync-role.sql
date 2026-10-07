@@ -55,6 +55,8 @@ GRANT EXECUTE ON FUNCTION
 TO :"continuum_sync_role";
 REVOKE ALL ON TABLE :"continuum_schema".continuum_trusted_database_identities
 FROM :"continuum_sync_role";
+REVOKE ALL ON TABLE :"continuum_schema".continuum_retired_sync_database_identities
+FROM :"continuum_sync_role";
 REVOKE ALL ON TABLE :"continuum_schema".continuum_entra_reapproval_requests
 FROM :"continuum_sync_role";
 REVOKE ALL ON TABLE :"continuum_schema".continuum_entra_guarded_mutations
