@@ -255,6 +255,29 @@ REVOKE ALL ON FUNCTION
   :"continuum_schema".continuum_register_trusted_database_identity(NAME, UUID, BOOLEAN, BOOLEAN)
 FROM :"continuum_app_role";
 
+SELECT set_config('continuum.application_grant_target', :'continuum_app_role', TRUE);
+SELECT set_config('continuum.application_grant_schema', namespace.nspname, TRUE)
+FROM :"continuum_schema".scopes scope
+JOIN pg_catalog.pg_class relation ON relation.oid = scope.tableoid
+JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+LIMIT 1;
+DO $repair_function_revokes$
+DECLARE schema_name TEXT := current_setting('continuum.application_grant_schema');
+        target_role NAME := current_setting('continuum.application_grant_target')::name;
+        signature TEXT;
+BEGIN
+  FOREACH signature IN ARRAY ARRAY[
+    'continuum_operator_list_coordination_privacy_repairs(uuid,uuid,integer)',
+    'continuum_operator_offboarding_actual_state_is_erased(uuid,uuid)'
+  ] LOOP
+    IF to_regprocedure(format('%I.%s', schema_name, signature)) IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.%s FROM %I',
+        schema_name, signature, target_role);
+    END IF;
+  END LOOP;
+END;
+$repair_function_revokes$;
+
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE
   :"continuum_schema".principal_offboarding_runs,
   :"continuum_schema".principal_offboarding_run_events,

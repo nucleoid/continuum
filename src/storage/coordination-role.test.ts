@@ -308,9 +308,12 @@ describe('coordination database role profiles', () => {
     })).resolves.toBeUndefined();
     expect((await pool.query(
       `SELECT has_function_privilege(
-         $1, 'continuum_operator_scrub_coordination_principal(uuid,uuid,uuid,integer)',
-         'EXECUTE') AS allowed`, [operator.role],
-    )).rows).toEqual([{ allowed: false }]);
+                $1, 'continuum_operator_scrub_coordination_principal(uuid,uuid,uuid,integer)',
+                'EXECUTE') AS scrub_allowed,
+              has_function_privilege(
+                $1, 'continuum_operator_list_coordination_privacy_repairs(uuid,uuid,integer)',
+                'EXECUTE') AS discovery_allowed`, [operator.role],
+    )).rows).toEqual([{ scrub_allowed: false, discovery_allowed: false }]);
     await expect(applyGrantScript(pool, 'grant-operator-role.sql', {
       continuum_operator_role: operator.role,
       continuum_principal_id: operatorPrincipal.id,
@@ -321,10 +324,17 @@ describe('coordination database role profiles', () => {
               has_table_privilege(
                 $1, 'coordination_scope_privacy_progress', 'SELECT') AS scope_read,
               has_function_privilege(
-                $1, 'continuum_coordination_privacy_state(uuid,uuid)', 'EXECUTE') AS api_execute`,
+                $1, 'continuum_coordination_privacy_state(uuid,uuid)', 'EXECUTE') AS api_execute,
+              has_function_privilege(
+                $1, 'continuum_operator_list_coordination_privacy_repairs(uuid,uuid,integer)',
+                'EXECUTE') AS repair_discovery,
+              has_function_privilege(
+                $1, 'continuum_operator_offboarding_actual_state_is_erased(uuid,uuid)',
+                'EXECUTE') AS actual_state`,
       [operator.role],
     )).rows).toEqual([{
       principal_read: false, scope_read: false, api_execute: true,
+      repair_discovery: true, actual_state: true,
     }]);
     await expect(operator.connection.query(
       'SELECT * FROM continuum_coordination_privacy_state($1, $2)',

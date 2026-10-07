@@ -52,6 +52,8 @@ const FORWARD_MIGRATION_REQUIREMENTS = new Map([
     '0065_coordination_review_remediation.sql'],
   ['0067_coordination_rollout_repair.sql',
     '0066_coordination_upgrade_privacy_repair.sql'],
+  ['0068_coordination_production_repair.sql',
+    '0067_coordination_rollout_repair.sql'],
 ]);
 const REVIEW_ENTRA_MIGRATION_RENAMES = [
   ['0005_entra_auth.sql', '0010_entra_auth.sql'],

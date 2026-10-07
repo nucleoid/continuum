@@ -8,7 +8,8 @@ import {
 import type { MembershipRole } from '../types.js';
 import { cliFailure } from './cli-errors.js';
 import {
-  listIncompleteOffboardingRuns, mapOwnedUserScope, offboardPrincipal,
+  listCoordinationPrivacyRepairs, listIncompleteOffboardingRuns, mapOwnedUserScope,
+  offboardPrincipal, repairCoordinationPrivacy,
 } from '../services/offboarding.js';
 
 async function main(): Promise<void> {
@@ -123,6 +124,45 @@ async function main(): Promise<void> {
       process.stdout.write(`${JSON.stringify({
         operation, runs: await listIncompleteOffboardingRuns(pool, actor),
       })}\n`);
+    } else if (operation === 'list-coordination-privacy-repairs') {
+      const limitIndex = args.indexOf('--limit');
+      const limitText = limitIndex >= 0 ? args[limitIndex + 1] : undefined;
+      const limit = limitText === undefined ? undefined : Number(limitText);
+      if ((limitIndex < 0 && args.length)
+        || (limitIndex >= 0 && (args.length !== 2 || !Number.isInteger(limit)
+          || (limit ?? 0) < 1 || (limit ?? 0) > 1_000))) {
+        throw new Error('usage: list-coordination-privacy-repairs [--limit <1-1000>]');
+      }
+      process.stdout.write(`${JSON.stringify({
+        operation, repairs: await listCoordinationPrivacyRepairs(pool, actor, limit),
+      })}\n`);
+    } else if (operation === 'repair-coordination-privacy') {
+      const once = args.includes('--once');
+      const confirmIndex = args.indexOf('--confirm-scope');
+      const confirmationScopeId = confirmIndex >= 0 ? args[confirmIndex + 1] : undefined;
+      const batchIndex = args.indexOf('--batch-size');
+      const batchText = batchIndex >= 0 ? args[batchIndex + 1] : undefined;
+      const batchSize = batchText === undefined ? undefined : Number(batchText);
+      const consumed = new Set<number>();
+      if (once) consumed.add(args.indexOf('--once'));
+      if (confirmIndex >= 0) { consumed.add(confirmIndex); consumed.add(confirmIndex + 1); }
+      if (batchIndex >= 0) { consumed.add(batchIndex); consumed.add(batchIndex + 1); }
+      const positional = args.filter((_value, index) => !consumed.has(index));
+      if (!positional[0] || positional.length !== 1 || !confirmationScopeId
+        || (batchIndex >= 0 && (!Number.isInteger(batchSize)
+          || (batchSize ?? 0) < 1 || (batchSize ?? 0) > 5_000))
+        || args.some((value, index) => value.startsWith('--') && !consumed.has(index))) {
+        throw new Error('usage: repair-coordination-privacy <principal-id> --confirm-scope <user-scope-id> [--batch-size <1-5000>] [--once]');
+      }
+      let result = await repairCoordinationPrivacy(pool, actor, positional[0], {
+        confirmationScopeId, batchSize,
+      });
+      while (!once && !result.complete) {
+        result = await repairCoordinationPrivacy(pool, actor, positional[0], {
+          confirmationScopeId, batchSize,
+        });
+      }
+      process.stdout.write(`${JSON.stringify({ operation, ...result })}\n`);
     } else throw new Error('unknown admin operation');
   } finally { await pool.end(); }
 }

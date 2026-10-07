@@ -233,7 +233,7 @@ describe('runMigrations', () => {
     const files = (await readdir(join(process.cwd(), 'migrations')))
       .filter((name) => name.endsWith('.sql'))
       .sort();
-    expect(files.slice(-14)).toEqual([
+    expect(files.slice(-15)).toEqual([
       '0054_coordination_leases.sql',
       '0055_coordination_review_remediation.sql',
       '0056_coordination_final_remediation.sql',
@@ -248,6 +248,7 @@ describe('runMigrations', () => {
       '0065_coordination_review_remediation.sql',
       '0066_coordination_upgrade_privacy_repair.sql',
       '0067_coordination_rollout_repair.sql',
+      '0068_coordination_production_repair.sql',
     ]);
     const migration = await readFile(
       join(process.cwd(), 'migrations/0054_coordination_leases.sql'),

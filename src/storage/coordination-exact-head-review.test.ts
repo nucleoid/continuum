@@ -375,4 +375,81 @@ describe('coordination exact-head review regressions', () => {
       await operator.end();
     }
   }, 30_000);
+
+  it('lets an acquire already holding principal authorization finish before offboarding', async () => {
+    const value = await privacyFixture('acquire-first');
+    await mapOwnedUserScope(pool, value.operator, value.target.id, value.owned.id);
+    const applicationRole = `coord_acquire_first_${Date.now()}_${roles.length}`;
+    roles.push(applicationRole);
+    await pool.query('CREATE ROLE ' + quoteRole(applicationRole) + ' NOLOGIN');
+    await applyGrantScript(pool, 'grant-application-role.sql', {
+      continuum_app_role: applicationRole,
+    });
+    await pool.query(
+      'GRANT ' + quoteRole(applicationRole)
+      + ' TO CURRENT_USER WITH ADMIN OPTION, SET FALSE, INHERIT FALSE',
+    );
+    const schema = String((await pool.query('SELECT current_schema() AS schema')).rows[0].schema);
+    const application = new pg.Pool({
+      ...(pool as unknown as { options: PoolConfig }).options,
+      max: 1, options: `-c search_path=${schema},public -c role=${applicationRole}`,
+    });
+    const blocker = await pool.connect();
+    try {
+      const applicationPid = Number((await application.query(
+        'SELECT pg_backend_pid() AS pid',
+      )).rows[0].pid);
+      await blocker.query('BEGIN');
+      await blocker.query(
+        'SELECT pg_advisory_xact_lock(hashtextextended($1::text, 604692072))',
+        [value.owned.id],
+      );
+      const acquireRunId = randomUUID();
+      const acquire = acquireLease(application, value.target, {
+        scope: `user:${value.owned.name}`, resource: 'acquire-first',
+        runId: acquireRunId, requestId: randomUUID(), ttlSeconds: 300,
+      });
+      let acquireWaiting = false;
+      for (let attempt = 0; attempt < 100 && !acquireWaiting; attempt += 1) {
+        acquireWaiting = Boolean((await pool.query(
+          `SELECT wait_event_type = 'Lock' AS waiting
+             FROM pg_stat_activity WHERE pid = $1`, [applicationPid],
+        )).rows[0]?.waiting);
+        if (!acquireWaiting) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(acquireWaiting).toBe(true);
+      let offboardingSettled = false;
+      const offboarding = offboardPrincipal(pool, value.operator, value.target.id, {
+        confirmationScopeId: value.owned.id, batchSize: 100,
+      }).finally(() => { offboardingSettled = true; });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(offboardingSettled).toBe(false);
+      await blocker.query('COMMIT');
+      const acquired = await acquire;
+      expect(acquired).toMatchObject({ acquired: true });
+      await expect(offboarding).rejects.toThrow(/live coordination leases/i);
+      if (!acquired.acquired) throw new Error('expected acquire-first lease');
+      await releaseLease(application, value.target, {
+        leaseId: acquired.leaseId, runId: acquireRunId, requestId: randomUUID(),
+      });
+      let result = await offboardPrincipal(pool, value.operator, value.target.id, {
+        confirmationScopeId: value.owned.id, batchSize: 100,
+      });
+      for (let attempt = 0; !result.complete && attempt < 10; attempt += 1) {
+        result = await offboardPrincipal(pool, value.operator, value.target.id, {
+          confirmationScopeId: value.owned.id, batchSize: 100,
+        });
+      }
+      expect(result.complete).toBe(true);
+      expect((await pool.query(
+        `SELECT count(*)::int AS live FROM coordination_leases
+          WHERE principal_id = $1 AND released_at IS NULL AND expires_at > now()`,
+        [value.target.id],
+      )).rows).toEqual([{ live: 0 }]);
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => undefined);
+      blocker.release();
+      await application.end();
+    }
+  }, 30_000);
 });

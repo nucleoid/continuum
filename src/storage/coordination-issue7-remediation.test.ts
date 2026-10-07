@@ -187,6 +187,7 @@ describe('coordination issue 7 exact-head remediation', () => {
     expect(migrator).toMatch(/0065_coordination_review_remediation\.sql[\s\S]+0064_coordination_final_online_indexes\.sql/);
     expect(migrator).toMatch(/0066_coordination_upgrade_privacy_repair\.sql[\s\S]+0065_coordination_review_remediation\.sql/);
     expect(migrator).toMatch(/0067_coordination_rollout_repair\.sql[\s\S]+0066_coordination_upgrade_privacy_repair\.sql/);
+    expect(migrator).toMatch(/0068_coordination_production_repair\.sql[\s\S]+0067_coordination_rollout_repair\.sql/);
   });
 
   it('locks the principal before membership on every coordination authorization', async () => {

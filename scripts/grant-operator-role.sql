@@ -34,6 +34,8 @@ GRANT EXECUTE ON FUNCTION
   :"continuum_schema".continuum_operator_set_coordination_scope_quota(UUID, UUID, INTEGER),
   :"continuum_schema".continuum_operator_sweep_coordination_state(UUID, INTEGER),
   :"continuum_schema".continuum_operator_scrub_coordination_principal(UUID, UUID, UUID, INTEGER),
+  :"continuum_schema".continuum_operator_list_coordination_privacy_repairs(UUID, UUID, INTEGER),
+  :"continuum_schema".continuum_operator_offboarding_actual_state_is_erased(UUID, UUID),
   :"continuum_schema".continuum_operator_set_coordination_principal_quota(UUID, UUID, INTEGER, INTEGER),
   :"continuum_schema".continuum_change_manual_org_admin(UUID, UUID, TEXT, BOOLEAN),
   :"continuum_schema".continuum_takeover_manual_org_admin(UUID, UUID, UUID),
