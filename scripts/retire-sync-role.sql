@@ -3,6 +3,10 @@
 \else
   \echo 'retired_sync_role must name the retired sync role'
 \endif
+\if :{?confirm_retired_sync_role_oid}
+\else
+  \echo 'confirm_retired_sync_role_oid must equal the reviewed PostgreSQL role OID'
+\endif
 \if :{?continuum_schema}
 \else
   \set continuum_schema public
@@ -14,26 +18,32 @@
 BEGIN;
 CREATE TEMP TABLE continuum_retired_sync_input (
   retired_sync NAME NOT NULL,
+  confirmed_oid OID NOT NULL,
   application_schema NAME NOT NULL
 ) ON COMMIT DROP;
 INSERT INTO continuum_retired_sync_input
-VALUES (:'retired_sync_role', :'continuum_schema');
+VALUES (:'retired_sync_role', :'confirm_retired_sync_role_oid'::oid,
+        :'continuum_schema');
 
 DO $retire$
 DECLARE
   retired_sync NAME;
+  confirmed_oid OID;
   application_schema NAME;
   retired_oid OID;
   schema_oid OID;
   owner_oid OID;
   active_identity BOOLEAN;
 BEGIN
-  SELECT input.retired_sync, input.application_schema
-    INTO retired_sync, application_schema
+  SELECT input.retired_sync, input.confirmed_oid, input.application_schema
+    INTO retired_sync, confirmed_oid, application_schema
     FROM continuum_retired_sync_input input;
   SELECT role.oid INTO retired_oid FROM pg_roles role WHERE role.rolname = retired_sync;
   IF retired_oid IS NULL THEN
     RAISE EXCEPTION 'retired sync role does not exist';
+  END IF;
+  IF retired_oid <> confirmed_oid THEN
+    RAISE EXCEPTION 'retired sync role OID confirmation does not match reviewed target';
   END IF;
   SELECT namespace.oid, relation.relowner INTO schema_oid, owner_oid
     FROM pg_class relation

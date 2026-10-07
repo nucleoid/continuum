@@ -1168,6 +1168,76 @@ END;
 $$;
 REVOKE ALL ON FUNCTION continuum_assert_operator_role_allowlist(NAME) FROM PUBLIC;
 
+CREATE OR REPLACE FUNCTION continuum_rebind_database_identity_oids(
+  confirmation TEXT
+) RETURNS INTEGER LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE
+  owner_oid OID;
+  invoking_oid OID;
+  target_oid OID;
+  identity RECORD;
+  history RECORD;
+  changed_count INTEGER := 0;
+BEGIN
+  IF confirmation <> 'REBIND AFTER LOGICAL RESTORE' THEN
+    RAISE EXCEPTION 'logical-restore OID rebind requires exact confirmation';
+  END IF;
+  SELECT relowner INTO owner_oid FROM pg_class WHERE oid = 'principals'::regclass;
+  SELECT oid INTO invoking_oid FROM pg_roles WHERE rolname = continuum_invoking_database_role();
+  IF invoking_oid IS DISTINCT FROM owner_oid THEN
+    RAISE EXCEPTION 'only the migration owner may rebind database identity OIDs';
+  END IF;
+  LOCK TABLE continuum_trusted_database_identities,
+             continuum_retired_sync_database_identities IN ACCESS EXCLUSIVE MODE;
+  FOR identity IN
+    SELECT database_role, database_role_oid, can_sync
+      FROM continuum_trusted_database_identities FOR UPDATE
+  LOOP
+    SELECT oid INTO target_oid FROM pg_roles WHERE rolname = identity.database_role;
+    IF target_oid IS NULL THEN
+      RAISE EXCEPTION 'trusted database role % does not exist after restore',
+        identity.database_role;
+    END IF;
+    IF target_oid <> identity.database_role_oid THEN
+      IF EXISTS (
+        SELECT 1 FROM continuum_trusted_database_identities existing
+         WHERE existing.database_role_oid = target_oid
+           AND existing.database_role <> identity.database_role
+      ) THEN
+        RAISE EXCEPTION 'restored database role OID is already bound to another identity';
+      END IF;
+      UPDATE continuum_trusted_database_identities
+         SET database_role_oid = target_oid
+       WHERE database_role = identity.database_role;
+      changed_count := changed_count + 1;
+    END IF;
+    PERFORM continuum_validate_trusted_database_role(
+      identity.database_role,
+      CASE WHEN identity.can_sync THEN 'sync' ELSE 'approve' END,
+      identity.can_sync);
+  END LOOP;
+  FOR history IN
+    SELECT database_role_oid, database_role
+      FROM continuum_retired_sync_database_identities FOR UPDATE
+  LOOP
+    SELECT oid INTO target_oid FROM pg_roles WHERE rolname = history.database_role;
+    IF target_oid IS NOT NULL AND target_oid <> history.database_role_oid THEN
+      DELETE FROM continuum_retired_sync_database_identities
+       WHERE database_role_oid = history.database_role_oid;
+      INSERT INTO continuum_retired_sync_database_identities
+        (database_role_oid, database_role)
+      VALUES (target_oid, history.database_role)
+      ON CONFLICT (database_role_oid) DO UPDATE SET
+        database_role = EXCLUDED.database_role,
+        retired_at = now();
+      changed_count := changed_count + 1;
+    END IF;
+  END LOOP;
+  RETURN changed_count;
+END;
+$$;
+REVOKE ALL ON FUNCTION continuum_rebind_database_identity_oids(TEXT) FROM PUBLIC;
+
 -- Reinstall the extension grant refresher for databases that already ledgered
 -- an older 0051. Resolve application roles from the memories relation OID, not
 -- current_schema(), because hardened definers deliberately put pg_catalog first.
@@ -1256,6 +1326,7 @@ BEGIN
          'continuum_operator_pseudonymize_scope',
          'continuum_assert_application_role_allowlist',
          'continuum_assert_operator_role_allowlist',
+         'continuum_rebind_database_identity_oids',
          'continuum_grant_application_vector_functions'
        ])
   LOOP

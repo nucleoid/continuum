@@ -42,6 +42,7 @@ DECLARE
   expected_operator NAME;
   retired_sync NAME;
   application_schema NAME;
+  owner_oid OID;
   active_sync_valid BOOLEAN;
   operator_valid BOOLEAN;
   retired_identity RECORD;
@@ -50,6 +51,9 @@ BEGIN
          input.application_schema
     INTO application_role, active_sync, expected_operator, retired_sync, application_schema
     FROM continuum_identity_verification_input input;
+  SELECT relation.relowner INTO owner_oid
+    FROM pg_class relation
+   WHERE relation.oid = format('%I.principals', application_schema)::regclass;
   EXECUTE format(
     'SELECT %I.continuum_assert_application_role_allowlist($1)', application_schema
   ) USING application_role;
@@ -111,6 +115,12 @@ BEGIN
     ) OR EXISTS (
       SELECT 1 FROM pg_auth_members membership
        WHERE retired_identity.database_role_oid IN (membership.roleid, membership.member)
+         AND NOT (
+           membership.roleid = retired_identity.database_role_oid
+           AND membership.member = owner_oid
+           AND membership.admin_option
+           AND NOT membership.set_option
+           AND NOT membership.inherit_option)
     ) OR EXISTS (
       SELECT 1 FROM pg_namespace namespace
       CROSS JOIN LATERAL aclexplode(COALESCE(

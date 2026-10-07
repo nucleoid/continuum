@@ -474,6 +474,7 @@ psql "$CONTINUUM_MIGRATION_OWNER_URL" \
   --set=ON_ERROR_STOP=1 \
   --set=continuum_schema=public \
   --set=retired_sync_role=continuum_sync_old \
+  --set=confirm_retired_sync_role_oid='<reviewed-pg_roles-oid>' \
   --file=scripts/retire-sync-role.sql
 ```
 
@@ -610,7 +611,10 @@ is `NOLOGIN` without membership, schema, relation, sequence, or function
 authority. Retired sync identities are recorded by immutable role OID in an
 owner-only history table and every recorded identity is checked automatically;
 `--set=retired_sync_role=...` remains available for legacy roles that predate
-that history. Parameter ACLs or
+that history and should be omitted after that legacy role is dropped. The exact
+least-privilege owner ADMIN edge (`ADMIN OPTION, SET FALSE, INHERIT FALSE`) is
+allowed on retired roles; every other membership edge fails verification.
+Parameter ACLs or
 per-role settings on application, operator, or sync identities make validation
 fail because they can change trigger behavior. The
 membership-sync executable repeats the sync-role allow-list gate at every
@@ -621,8 +625,21 @@ and disable the retired login, restoring pre-0049 behavior requires the verified
 backup and matching old binaries. Regranting the retired credential by hand is
 not a rollback.
 Logical restore tools can assign new PostgreSQL role OIDs. After a logical
-restore, keep processes stopped and reapply the application, operator, and sync
-profiles so every trusted identity is rebound and verified before restart.
+restore, keep processes stopped, recreate the named roles without privileges,
+then explicitly rebind the owner-only registries before reapplying profiles:
+
+```sh
+psql "$CONTINUUM_MIGRATION_OWNER_URL" \
+  --set=ON_ERROR_STOP=1 \
+  --set=continuum_schema=public \
+  --set=confirm_rebind='REBIND AFTER LOGICAL RESTORE' \
+  --file=scripts/rebind-database-identities.sql
+```
+
+Then reapply the application, operator, and sync profiles and run verification
+before restart. The rebind operation is owner-only, locks both registries,
+resolves roles by exact name, rejects missing or conflicting active identities,
+and revalidates isolation before committing.
 
 This is an application-data boundary. Operators must separately apply their
 documented retention policy to encrypted database backups, database/WAL logs,
