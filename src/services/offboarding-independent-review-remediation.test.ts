@@ -176,12 +176,37 @@ describe('independent exact-head review remediation', () => {
         )).rejects.toThrow(/owner|application|operator|approve|least-privilege/i);
       }
       await expect(operator.query(
-        'SELECT continuum_require_trusted_database_identity($1, $2)', [admin.id, 'approve'],
+        'SELECT continuum_operator_authorize_audit_retention($1)', [admin.id],
       )).resolves.toBeDefined();
+      expect((await pool.query(
+        `SELECT can_approve, can_sync FROM continuum_trusted_database_identities
+          WHERE database_role = $1::name`, [operatorRole],
+      )).rows[0]).toEqual({ can_approve: true, can_sync: false });
     } finally {
       await dropRole(pool, app, appRole);
       await dropRole(pool, operator, operatorRole);
     }
+  });
+
+  it('keeps an approved Entra external ID immutable even for a real operator role', async () => {
+    const { admin } = await adminFixture('immutable-group');
+    const project = await createScope(pool, { kind: 'project', name: 'immutable-group-project' });
+    const role = 'continuum_immutable_operator_' + Date.now();
+    const operator = await createRolePool(pool, role, 'operator', admin.id);
+    const externalId = '35000000-0000-4000-8000-000000000001';
+    try {
+      await operator.query(
+        `SELECT continuum_upsert_entra_group_binding($1, $2, 'immutable', $3, 'reader')`,
+        [admin.id, externalId, project.id],
+      );
+      await expect(operator.query(
+        `UPDATE entra_groups SET external_id = $2 WHERE external_id = $1`,
+        [externalId, '35000000-0000-4000-8000-000000000002'],
+      )).rejects.toThrow(/external_id is immutable/i);
+      expect((await pool.query(
+        'SELECT external_id FROM entra_groups WHERE external_id = $1', [externalId],
+      )).rows).toEqual([{ external_id: externalId }]);
+    } finally { await dropRole(pool, operator, role); }
   });
 
   it('maps shared-app reactivation and retention authorization failures to FORBIDDEN', async () => {
@@ -193,6 +218,12 @@ describe('independent exact-head review remediation', () => {
     const role = 'continuum_forbidden_app_' + Date.now();
     const connection = await createRolePool(pool, role, 'application');
     try {
+      await expect(connection.query(
+        'SELECT * FROM continuum_get_offboarding_run($1, $2)', [target.id, admin.id],
+      )).rejects.toThrow(/permission denied/i);
+      await expect(connection.query(
+        'SELECT * FROM continuum_operator_get_offboarding_run($1, $2)', [target.id, admin.id],
+      )).rejects.toThrow(/permission denied/i);
       await expect(reactivatePrincipal(connection, admin, target.id))
         .rejects.toMatchObject({ code: 'FORBIDDEN', status: 403 });
       await expect(runAuditRetention(connection, {

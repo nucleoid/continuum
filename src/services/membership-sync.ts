@@ -242,33 +242,23 @@ function skip(result: MembershipSyncResult, code: string): void {
 
 async function quarantineBinding(
   client: pg.PoolClient,
+  actorId: string,
   externalId: string,
   result: MembershipSyncResult,
   reason: string,
 ): Promise<number> {
-  const memberships = await client.query(
-    `UPDATE scope_memberships
-        SET active = FALSE, deactivated_at = COALESCE(deactivated_at, now()), synced_at = now()
-      WHERE source_kind = 'entra' AND source_id = $1 AND active
-      RETURNING principal_id`,
-    [externalId],
+  const memberships = await client.query<{ count: number }>(
+    `SELECT continuum_sync_deactivate_entra_memberships(
+       $1, ARRAY[$2]::text[], NULL::uuid[])::int AS count`,
+    [actorId, externalId],
   );
-  const count = memberships.rowCount ?? 0;
+  const count = Number(memberships.rows[0]?.count ?? 0);
   result.membershipsDeactivated += count;
-  const group = await client.query(
-    `UPDATE entra_groups
-        SET active = FALSE, deactivated_at = COALESCE(deactivated_at, now())
-      WHERE external_id = $1 AND active
-      RETURNING external_id`,
-    [externalId],
+  const group = await client.query<{ changed: boolean }>(
+    `SELECT continuum_sync_quarantine_entra_group($1, $2, $3) AS changed`,
+    [actorId, externalId, reason],
   );
-  result.groupsDeactivated += group.rowCount ?? 0;
-  await client.query(
-    `UPDATE entra_groups
-        SET quarantined_at = COALESCE(quarantined_at, now()), quarantine_reason = $2
-      WHERE external_id = $1`,
-    [externalId, reason],
-  );
+  result.groupsDeactivated += group.rows[0]?.changed ? 1 : 0;
   return count;
 }
 
@@ -334,12 +324,10 @@ async function recordRejectedAttempt(
        FROM entra_sync_state WHERE singleton`,
   );
   if (!state.rows[0]) throw new Error('Entra sync freshness state is missing');
-  const staleDeactivated = state.rows[0].stale ? await client.query(
-    `UPDATE scope_memberships
-        SET active = FALSE, deactivated_at = COALESCE(deactivated_at, now()), synced_at = now()
-      WHERE source_kind = 'entra' AND active
-      RETURNING principal_id`,
-  ) : { rowCount: 0 };
+  const staleDeactivated = state.rows[0].stale ? Number((await client.query<{ count: number }>(
+    `SELECT continuum_sync_deactivate_entra_memberships(
+       $1, NULL::text[], NULL::uuid[])::int AS count`, [actor.id],
+  )).rows[0]?.count ?? 0) : 0;
   await client.query(
     `INSERT INTO audit_log (principal_id, action, metadata)
      VALUES ($1, 'write', $2::jsonb)`,
@@ -349,7 +337,7 @@ async function recordRejectedAttempt(
       last_success_at: state.rows[0].last_success_at,
       max_staleness_hours: maxStalenessHours,
       stale: state.rows[0].stale,
-      stale_memberships_deactivated: staleDeactivated.rowCount ?? 0,
+      stale_memberships_deactivated: staleDeactivated,
       groups_deactivated: quarantine.groupsDeactivated,
       memberships_deactivated: quarantine.membershipsDeactivated,
       quarantine: {
@@ -459,7 +447,7 @@ export async function syncEntraMemberships(
     await requireManualSyncActor(client, actor.id);
     const bindings = await client.query<BindingRow>(
       `SELECT external_id, scope_id, role, active, approval_revoked_at, quarantined_at FROM entra_groups
-        WHERE approved_by IS NOT NULL ORDER BY external_id FOR UPDATE`,
+        WHERE approved_by IS NOT NULL ORDER BY external_id`,
     );
     const byId = new Map(bindings.rows.map((row) => [row.external_id, row]));
     const idCounts = new Map<string, number>();
@@ -479,7 +467,7 @@ export async function syncEntraMemberships(
       if ((idCounts.get(snapshot.id) ?? 0) > 1) {
         skip(result, 'DUPLICATE_GROUP_ID');
         if (binding && !binding.approval_revoked_at && !quarantined.has(snapshot.id)) {
-          await quarantineBinding(client, snapshot.id, result, 'DUPLICATE_GROUP_ID');
+          await quarantineBinding(client, actor.id, snapshot.id, result, 'DUPLICATE_GROUP_ID');
           quarantined.add(snapshot.id);
         }
         continue;
@@ -490,19 +478,19 @@ export async function syncEntraMemberships(
       if (snapshot.status === 'invalid') {
         const code = snapshot.errorCode ?? 'INVALID_GROUP';
         skip(result, code);
-        await quarantineBinding(client, snapshot.id, result, code);
+        await quarantineBinding(client, actor.id, snapshot.id, result, code);
         continue;
       }
       if (snapshot.status === 'missing') { definitiveMissing.push(snapshot.id); continue; }
       if (typeof snapshot.displayName !== 'string' || snapshot.displayName.length > 256
         || !Array.isArray(snapshot.memberObjectIds)) {
         skip(result, 'MALFORMED_GROUP');
-        await quarantineBinding(client, snapshot.id, result, 'MALFORMED_GROUP');
+        await quarantineBinding(client, actor.id, snapshot.id, result, 'MALFORMED_GROUP');
         continue;
       }
       if (snapshot.memberObjectIds.length > MAX_GROUP_MEMBERS) {
         skip(result, 'GROUP_TOO_LARGE');
-        await quarantineBinding(client, snapshot.id, result, 'GROUP_TOO_LARGE');
+        await quarantineBinding(client, actor.id, snapshot.id, result, 'GROUP_TOO_LARGE');
         continue;
       }
       const unique = new Set<string>();
@@ -513,7 +501,7 @@ export async function syncEntraMemberships(
       }
       if (malformed) {
         skip(result, 'MALFORMED_MEMBERS');
-        await quarantineBinding(client, snapshot.id, result, 'MALFORMED_MEMBERS');
+        await quarantineBinding(client, actor.id, snapshot.id, result, 'MALFORMED_MEMBERS');
         continue;
       }
       prepared.push({
@@ -539,7 +527,7 @@ export async function syncEntraMemberships(
     await requireManualSyncActor(client, actor.id);
     const currentBindings = await client.query<BindingRow>(
       `SELECT external_id, scope_id, role, active, approval_revoked_at, quarantined_at FROM entra_groups
-        WHERE approved_by IS NOT NULL ORDER BY external_id FOR UPDATE`,
+        WHERE approved_by IS NOT NULL ORDER BY external_id`,
     );
     const currentById = new Map(currentBindings.rows.map((row) => [row.external_id, row]));
     const activeMembershipsBefore = await client.query(
@@ -553,13 +541,11 @@ export async function syncEntraMemberships(
       const binding = currentById.get(snapshot.id);
       if (!binding || binding.approval_revoked_at || binding.quarantined_at
         || quarantined.has(snapshot.id)) continue;
-      const reactivated = await client.query(
-        `UPDATE entra_groups SET display_name = $2, last_seen_at = now(), active = TRUE,
-                                 deactivated_at = NULL
-          WHERE external_id = $1 AND quarantined_at IS NULL`,
-        [snapshot.id, snapshot.displayName],
+      const reactivated = await client.query<{ changed: boolean }>(
+        `SELECT continuum_sync_observe_entra_group($1, $2, $3) AS changed`,
+        [actor.id, snapshot.id, snapshot.displayName],
       );
-      if (!candidate.binding.active && reactivated.rowCount) result.groupsReactivated += 1;
+      if (!candidate.binding.active && reactivated.rows[0]?.changed) result.groupsReactivated += 1;
       result.groupsSeen += 1;
       const externalIds = snapshot.memberObjectIds;
       if (externalIds.length > 0) {
@@ -595,13 +581,12 @@ export async function syncEntraMemberships(
         );
         result.membershipsActive += Number(activated.rows[0]?.count ?? 0);
       }
-      const deactivated = await client.query(
-        `UPDATE scope_memberships SET active = FALSE, deactivated_at = now(), synced_at = now()
-          WHERE source_kind = 'entra' AND source_id = $1 AND active
-            AND NOT (principal_id = ANY($2::uuid[])) RETURNING principal_id`,
-        [snapshot.id, principalIds],
+      const deactivated = await client.query<{ count: number }>(
+        `SELECT continuum_sync_deactivate_entra_memberships(
+           $1, ARRAY[$2]::text[], $3::uuid[])::int AS count`,
+        [actor.id, snapshot.id, principalIds],
       );
-      const removed = deactivated.rowCount ?? 0;
+      const removed = Number(deactivated.rows[0]?.count ?? 0);
       result.membershipsDeactivated += removed;
       authoritativeDeactivations += removed;
     }
@@ -618,20 +603,19 @@ export async function syncEntraMemberships(
       throw new ServiceError('CONFLICT', 'empty Entra snapshot cannot deactivate bound groups');
     }
     if (missingActive.length > 0) {
-      const memberships = await client.query(
-        `UPDATE scope_memberships SET active = FALSE, deactivated_at = now(), synced_at = now()
-          WHERE source_kind = 'entra' AND source_id = ANY($1::text[]) AND active`,
-        [missingActive],
+      const memberships = await client.query<{ count: number }>(
+        `SELECT continuum_sync_deactivate_entra_memberships(
+           $1, $2::text[], NULL::uuid[])::int AS count`,
+        [actor.id, missingActive],
       );
-      const removed = memberships.rowCount ?? 0;
+      const removed = Number(memberships.rows[0]?.count ?? 0);
       result.membershipsDeactivated += removed;
       authoritativeDeactivations += removed;
-      const disappeared = await client.query(
-        `UPDATE entra_groups SET active = FALSE, deactivated_at = now()
-          WHERE active AND external_id = ANY($1::text[]) RETURNING external_id`,
-        [missingActive],
+      const disappeared = await client.query<{ count: number }>(
+        `SELECT continuum_sync_deactivate_entra_groups($1, $2::text[])::int AS count`,
+        [actor.id, missingActive],
       );
-      result.groupsDeactivated += disappeared.rowCount ?? 0;
+      result.groupsDeactivated += Number(disappeared.rows[0]?.count ?? 0);
     }
 
     const priorMembershipCount = activeMembershipsBefore.rows[0]?.count ?? 0;

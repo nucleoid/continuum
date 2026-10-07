@@ -719,7 +719,7 @@ async function offboardPrincipalCore(
         'SELECT * FROM principal_offboarding_runs WHERE principal_id = $1', [principalId],
       )
       : await client.query(
-        'SELECT * FROM continuum_get_offboarding_run($1, $2)', [principalId, actor.id],
+        'SELECT * FROM continuum_operator_get_offboarding_run($1, $2)', [principalId, actor.id],
       );
     const completedEvidence = run.rowCount ? await client.query(
       `SELECT 1 FROM principal_offboarding_run_events

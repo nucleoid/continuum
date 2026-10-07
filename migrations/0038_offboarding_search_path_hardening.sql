@@ -12,7 +12,7 @@ BEGIN
     SELECT procedure.proname,
            pg_get_function_identity_arguments(procedure.oid) AS arguments
       FROM pg_proc procedure
-     WHERE procedure.pronamespace = current_schema()::regnamespace
+     WHERE procedure.pronamespace = quote_ident(current_schema())::regnamespace
        AND procedure.proname LIKE 'continuum\_%' ESCAPE '\'
        AND procedure.proowner = current_user::regrole
        AND NOT EXISTS (

@@ -30,10 +30,10 @@ GRANT SELECT ON TABLE
 TO :"continuum_sync_role";
 GRANT INSERT ON TABLE :"continuum_schema".principals, :"continuum_schema".audit_log
 TO :"continuum_sync_role";
-GRANT UPDATE ON TABLE
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE
   :"continuum_schema".entra_groups,
   :"continuum_schema".scope_memberships
-TO :"continuum_sync_role";
+FROM :"continuum_sync_role";
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE :"continuum_schema".entra_sync_state
 FROM :"continuum_sync_role";
 GRANT USAGE, SELECT ON SEQUENCE :"continuum_schema".audit_log_id_seq
@@ -42,7 +42,11 @@ GRANT EXECUTE ON FUNCTION
   :"continuum_schema".continuum_activate_entra_memberships(UUID, TEXT, UUID[]),
   :"continuum_schema".continuum_require_sync_session(UUID),
   :"continuum_schema".continuum_record_entra_sync_success(UUID, INTEGER),
-  :"continuum_schema".continuum_record_entra_sync_failure(UUID, TEXT, INTEGER)
+  :"continuum_schema".continuum_record_entra_sync_failure(UUID, TEXT, INTEGER),
+  :"continuum_schema".continuum_sync_observe_entra_group(UUID, TEXT, TEXT),
+  :"continuum_schema".continuum_sync_deactivate_entra_memberships(UUID, TEXT[], UUID[]),
+  :"continuum_schema".continuum_sync_deactivate_entra_groups(UUID, TEXT[]),
+  :"continuum_schema".continuum_sync_quarantine_entra_group(UUID, TEXT, TEXT)
 TO :"continuum_sync_role";
 REVOKE ALL ON TABLE :"continuum_schema".continuum_trusted_database_identities
 FROM :"continuum_sync_role";

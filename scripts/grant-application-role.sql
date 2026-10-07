@@ -64,7 +64,6 @@ GRANT USAGE, SELECT ON SEQUENCE
 TO :"continuum_app_role";
 
 GRANT EXECUTE ON FUNCTION
-  :"continuum_schema".continuum_get_offboarding_run(UUID, UUID),
   :"continuum_schema".continuum_audit_retention_minimum_days(),
   :"continuum_schema".continuum_offboarding_expected_audit_metadata(JSONB)
 TO :"continuum_app_role";
@@ -89,6 +88,13 @@ REVOKE ALL ON FUNCTION
   :"continuum_schema".continuum_record_entra_sync_failure(UUID, TEXT, INTEGER),
   :"continuum_schema".continuum_require_sync_session(UUID),
   :"continuum_schema".continuum_cleanup_legacy_offboarding_audit_requests(INTEGER),
+  :"continuum_schema".continuum_get_offboarding_run(UUID, UUID),
+  :"continuum_schema".continuum_operator_get_offboarding_run(UUID, UUID),
+  :"continuum_schema".continuum_operator_authorize_audit_retention(UUID),
+  :"continuum_schema".continuum_sync_observe_entra_group(UUID, TEXT, TEXT),
+  :"continuum_schema".continuum_sync_deactivate_entra_memberships(UUID, TEXT[], UUID[]),
+  :"continuum_schema".continuum_sync_deactivate_entra_groups(UUID, TEXT[]),
+  :"continuum_schema".continuum_sync_quarantine_entra_group(UUID, TEXT, TEXT),
   :"continuum_schema".continuum_operator_complete_offboarding_run(UUID, UUID, JSONB),
   :"continuum_schema".continuum_operator_resume_offboarding_run(UUID, UUID),
   :"continuum_schema".continuum_operator_restart_offboarding_run(UUID, UUID, JSONB),

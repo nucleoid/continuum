@@ -259,6 +259,7 @@ describe('offboarding database-role remediation', () => {
       )).rows[0]).toEqual({ principal_id: service.id, can_sync: true });
     } finally {
       await dropRole(pool, operator, operatorRole);
+      await pool.query('DROP OWNED BY ' + quoteRole(syncRole));
       await pool.query('DROP ROLE ' + quoteRole(syncRole));
     }
   });

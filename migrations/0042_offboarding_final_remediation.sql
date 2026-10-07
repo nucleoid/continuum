@@ -541,7 +541,7 @@ BEGIN
     SELECT procedure.proname,
            pg_get_function_identity_arguments(procedure.oid) AS arguments
       FROM pg_proc procedure
-     WHERE procedure.pronamespace = current_schema()::regnamespace
+     WHERE procedure.pronamespace = quote_ident(current_schema())::regnamespace
        AND (procedure.proname LIKE 'continuum\_%' ESCAPE '\'
             OR procedure.proname = 'reject_lifecycle_principal_membership')
        AND procedure.proowner = current_user::regrole
@@ -562,7 +562,7 @@ BEGIN
          pg_get_userbyid(procedure.proowner) AS owner_name
     INTO unsafe_record
     FROM pg_proc procedure
-   WHERE procedure.pronamespace = current_schema()::regnamespace
+   WHERE procedure.pronamespace = quote_ident(current_schema())::regnamespace
      AND procedure.prosecdef
      AND (procedure.proname LIKE 'continuum\_%' ESCAPE '\'
           OR procedure.proname = 'reject_lifecycle_principal_membership')

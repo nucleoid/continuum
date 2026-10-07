@@ -311,7 +311,7 @@ describe('rejected-head offboarding remediation', () => {
   it('documents the bounded rollout and rollback contract without old-binary compatibility claims', async () => {
     const docs = await readFile(join(process.cwd(), 'docs/offboarding.md'), 'utf8');
     expect(docs).toMatch(/stop[\s\S]*migrate[\s\S]*regrant[\s\S]*start/i);
-    expect(docs).toMatch(/rollback[\s\S]*0047-aware/i);
+    expect(docs).toMatch(/rollback[\s\S]*0048-aware/i);
     expect(docs).not.toMatch(/old application tolerates/i);
     expect(docs).toMatch(/takeover[\s\S]*current effective org administrator/i);
   });

@@ -126,7 +126,7 @@ describe('runMigrations', () => {
     expect(completionTrigger.match(/continuum_offboarding_actual_state_is_erased\s*\(/gi))
       .toHaveLength(1);
     const docs = await readFile(join(process.cwd(), 'docs/offboarding.md'), 'utf8');
-    expect(docs).toMatch(/through[\s\S]*`0047_offboarding_role_boundary\.sql`/i);
+    expect(docs).toMatch(/through[\s\S]*`0048_offboarding_independent_review\.sql`/i);
     expect(docs).not.toMatch(/all nineteen offboarding migrations/i);
   });
   it('applies round-seven integrity and online cursor-index migrations from a fresh schema', async () => {
@@ -143,7 +143,7 @@ describe('runMigrations', () => {
         $$;
       `);
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-18).map((migration) => migration.name)).toEqual([
+      expect(applied.slice(-19).map((migration) => migration.name)).toEqual([
         '0030_offboarding_round7_integrity.sql',
         '0031_offboarding_round7_indexes.sql',
         '0032_offboarding_round7_compatibility.sql',
@@ -162,6 +162,7 @@ describe('runMigrations', () => {
         '0045_offboarding_trust_boundary.sql',
         '0046_offboarding_authority_remediation.sql',
         '0047_offboarding_role_boundary.sql',
+        '0048_offboarding_independent_review.sql',
       ]);
       expect((await pool.query(
         `SELECT indisvalid AS valid FROM pg_index
@@ -396,7 +397,8 @@ describe('runMigrations', () => {
       && name !== '0044_offboarding_restart_evidence.sql'
       && name !== '0045_offboarding_trust_boundary.sql'
       && name !== '0046_offboarding_authority_remediation.sql'
-      && name !== '0047_offboarding_role_boundary.sql')) {
+      && name !== '0047_offboarding_role_boundary.sql'
+      && name !== '0048_offboarding_independent_review.sql')) {
       if (file === '0038_offboarding_search_path_hardening.sql') {
         await copyFile(
           new URL(
@@ -680,6 +682,13 @@ describe('runMigrations', () => {
       expect((await runMigrations(pool, directory)).map((migration) => migration.name))
         .toEqual(['0047_offboarding_role_boundary.sql']);
       expect(await readRunState()).toEqual(historicalState);
+      await copyFile(
+        new URL('0048_offboarding_independent_review.sql', source),
+        join(directory, '0048_offboarding_independent_review.sql'),
+      );
+      expect((await runMigrations(pool, directory)).map((migration) => migration.name))
+        .toEqual(['0048_offboarding_independent_review.sql']);
+      expect(await readRunState()).toEqual(historicalState);
 
       await admin.query(`CREATE ROLE ${quotedRole} NOLOGIN`);
       roleCreated = true;
@@ -708,7 +717,7 @@ describe('runMigrations', () => {
                   AS verifier_execute`,
       )).rows).toEqual([{
         write_execute: false,
-        get_execute: true,
+        get_execute: false,
         start_execute: false,
         complete_execute: false,
         verifier_execute: false,
@@ -768,18 +777,20 @@ describe('runMigrations', () => {
     }
   });
   it('pins migration-owned functions in a canonically quoted schema search path', async () => {
-    const schema = `migrator-quoted-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const schema = `Migrator-Quoted-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const admin = new pg.Pool({ connectionString: DATABASE_URL });
     pools.push(admin);
     await admin.query(`CREATE SCHEMA "${schema}"`);
-    const pool = schemaPool(schema);
+    const pool = new pg.Pool({ connectionString: DATABASE_URL, max: 1 });
+    pools.push(pool);
+    await pool.query(`SET search_path TO "${schema}", public`);
     try {
       await expect(runMigrations(pool)).resolves.toBeDefined();
       const expected = `search_path=pg_catalog, "${schema}", pg_temp`;
       const unsafe = await pool.query(
         `SELECT proname, proconfig
            FROM pg_proc
-          WHERE pronamespace = current_schema()::regnamespace
+          WHERE pronamespace = quote_ident(current_schema())::regnamespace
             AND (proname LIKE 'continuum\\_%' ESCAPE '\\'
                  OR proname = 'reject_lifecycle_principal_membership')
             AND proowner = current_user::regrole

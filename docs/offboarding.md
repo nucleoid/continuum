@@ -306,6 +306,11 @@ guarded binding reapproval and sync-identity rotation. The legacy
 catalog migration. After taking a database backup, an operator may call
 `continuum_cleanup_legacy_offboarding_audit_requests(batch_size)` repeatedly
 with a bounded batch size from 1 through 5,000 until it returns zero.
+Migration `0048_offboarding_independent_review.sql` removes table-level Entra
+and membership updates from the sync role, replaces them with field-limited
+security-definer operations, makes provider group IDs immutable, binds mutable
+run locking to the operator role, and makes database-role rotation revoke the
+old sync binding and grants in the same transaction.
 
 The final database verification is exact and executes once: the completion
 event trigger checks every memory and every audit row linked to the run's
@@ -336,9 +341,9 @@ operator, and dedicated sync login roles. The operator and sync roles must not
 be granted to the shared application role. Rollout is an explicit maintenance
 window: **stop** every API, MCP, admin, retention, and membership-sync process;
 take and verify a **backup**; **migrate** through
-`0047_offboarding_role_boundary.sql` as the owner; **regrant** the shared app,
-operator, and sync profiles; then **start** only the `0047`-aware binaries.
-Mixed pre-`0047`/`0047` binaries or grants are unsupported. Do not run migration
+`0048_offboarding_independent_review.sql` as the owner; **regrant** the shared app,
+operator, and sync profiles; then **start** only the `0048`-aware binaries.
+Mixed pre-`0048`/`0048` binaries or grants are unsupported. Do not run migration
 and old binaries concurrently, because old sync code writes freshness directly
 and old application code expects shared-role offboarding authority.
 The application role must not own the event ledger, completion-capability
@@ -368,18 +373,33 @@ psql "$CONTINUUM_MIGRATION_OWNER_URL" \
 
 The sync identity is a dedicated service principal with `kind = 'service'` and
 an enabled lifecycle state, never a
-named human administrator. Before disabling or replacing that service identity,
-an operator rotates the existing sync database role atomically:
+named human administrator. To rotate credentials or the bound service identity,
+create a fresh empty non-owner role and have the currently bound operator rotate
+to it atomically:
 
 ```sql
 SELECT continuum_rotate_sync_database_identity(
-  '<operator-admin-uuid>', 'continuum_sync', '<new-service-principal-uuid>'
+  '<operator-admin-uuid>', 'continuum_sync_next', '<new-service-principal-uuid>'
 );
 ```
 
-Apply `grant-sync-role.sql` for the same service principal, run one sync, and
-verify `entra_sync_state.last_success_at` before disabling the old service
-principal. Human offboarding or demotion therefore cannot silently stop sync.
+The rotation function validates that the target is not the owner, shared app,
+or an operator-related role; installs the least-privilege sync profile; binds
+the new service principal; and revokes the old role's mutating grants and
+registry row in one transaction. Run one sync and verify
+`entra_sync_state.last_success_at` before disabling or dropping the old service
+principal and database role. Human offboarding or demotion therefore cannot
+silently stop sync.
+
+One operator database role is bound to one manual organization-administrator
+principal. A takeover changes application membership, but does not silently
+rebind that database role. Before disabling or demoting the bound principal,
+use the migration owner (or another already bound operator role) in a reviewed
+maintenance transaction to call
+`continuum_register_trusted_database_identity(operator_role, new_admin_uuid,
+TRUE, FALSE)`, then reconnect as the operator role and verify its approval
+capability. Do not reuse sync rotation for operator rebinding and do not share a
+single operator login among multiple human principals.
 
 The shared-role script enumerates ordinary capture, embedding, identity,
 service-key, webhook, lifecycle, and read-only retention/offboarding previews.
@@ -409,10 +429,10 @@ retryable.
 
 Rollback is forward-only and requires the verified pre-migration backup for any
 data that bounded legacy cleanup has removed. Application rollback is supported
-only to an 0047-aware binary and its matching grant profile. Stop all processes
+only to an 0048-aware binary and its matching grant profile. Stop all processes
 and confirm there are zero incomplete runs with `list-incomplete-offboarding`;
-then deploy the selected `0047`-aware binary, reapply all three grant profiles,
-and restart. Pre-`0047` binaries are incompatible with the new
+then deploy the selected `0048`-aware binary, reapply all three grant profiles,
+and restart. Pre-`0048` binaries are incompatible with the new
 approval and sync boundary and are not a supported application-first rollback.
 Database rollback requires a separate forward migration; do not drop guards or
 regrant the shared role ad hoc. Completed offboarding erasure is irreversible

@@ -25,6 +25,8 @@ GRANT EXECUTE ON FUNCTION
   :"continuum_schema".continuum_change_manual_org_admin(UUID, UUID, TEXT, BOOLEAN),
   :"continuum_schema".continuum_takeover_manual_org_admin(UUID, UUID, UUID),
   :"continuum_schema".continuum_operator_complete_offboarding_run(UUID, UUID, JSONB),
+  :"continuum_schema".continuum_operator_get_offboarding_run(UUID, UUID),
+  :"continuum_schema".continuum_operator_authorize_audit_retention(UUID),
   :"continuum_schema".continuum_operator_resume_offboarding_run(UUID, UUID),
   :"continuum_schema".continuum_operator_restart_offboarding_run(UUID, UUID, JSONB),
   :"continuum_schema".continuum_operator_write_offboarding_run(UUID, UUID, TEXT, JSONB),
@@ -54,4 +56,7 @@ REVOKE ALL ON FUNCTION
   :"continuum_schema".continuum_record_offboarding_event(UUID),
   :"continuum_schema".continuum_apply_audit_retention(UUID, TIMESTAMPTZ, INTEGER, UUID, INTEGER, JSONB, TEXT, TEXT),
   :"continuum_schema".continuum_reactivate_principal(UUID, UUID)
+FROM :"continuum_operator_role";
+REVOKE ALL ON FUNCTION
+  :"continuum_schema".continuum_get_offboarding_run(UUID, UUID)
 FROM :"continuum_operator_role";

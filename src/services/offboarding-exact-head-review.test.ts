@@ -40,13 +40,14 @@ describe('PR 13 exact-head trust-boundary review', () => {
     expect(server).not.toMatch(/req\.requestId\s*=\s*inbound/);
   });
 
-  it('documents the 0047 maintenance rollout and constrained rollback without mixed versions', async () => {
+  it('documents the 0048 maintenance rollout and constrained rollback without mixed versions', async () => {
     const docs = await readFile(join(root, 'docs/offboarding.md'), 'utf8');
     expect(docs).toMatch(/0045_offboarding_trust_boundary\.sql/);
     expect(docs).toMatch(/0046_offboarding_authority_remediation\.sql/);
     expect(docs).toMatch(/0047_offboarding_role_boundary\.sql/);
+    expect(docs).toMatch(/0048_offboarding_independent_review\.sql/);
     expect(docs).toMatch(/stop[\s\S]*migrate[\s\S]*regrant[\s\S]*start/i);
-    expect(docs).toMatch(/rollback is forward-only[\s\S]*0047-aware binary/i);
+    expect(docs).toMatch(/rollback is forward-only[\s\S]*0048-aware binary/i);
     expect(docs).not.toMatch(/old application tolerates/i);
   });
 });

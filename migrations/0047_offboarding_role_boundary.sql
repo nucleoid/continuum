@@ -484,7 +484,7 @@ DECLARE schema_name TEXT := current_schema(); function_record RECORD;
 BEGIN
   FOR function_record IN
     SELECT p.proname, pg_get_function_identity_arguments(p.oid) AS arguments
-      FROM pg_proc p WHERE p.pronamespace = current_schema()::regnamespace
+      FROM pg_proc p WHERE p.pronamespace = quote_ident(current_schema())::regnamespace
        AND p.proname = ANY(ARRAY[
         'continuum_require_trusted_database_identity',
         'continuum_register_trusted_database_identity',

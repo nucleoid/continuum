@@ -121,6 +121,14 @@ export async function reactivatePrincipal(
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK');
+    const databaseError = error as { code?: string; message?: string };
+    if (databaseError.code === '42501'
+      || /DB-bound trusted approve identity|operator session/i.test(databaseError.message ?? '')) {
+      throw new ServiceError(
+        'FORBIDDEN', 'principal reactivation requires a DB-bound operator session',
+        { cause: error },
+      );
+    }
     throw error;
   } finally {
     client.release();

@@ -3,6 +3,7 @@ import { constants as fsConstants } from 'node:fs';
 import { lstat, link, open, realpath, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import type pg from 'pg';
+import { ServiceError } from '../services/errors.js';
 
 export const DEFAULT_AUDIT_RETENTION_BATCH_SIZE = 100;
 export const MAX_AUDIT_RETENTION_BATCH_SIZE = 1_000;
@@ -341,7 +342,13 @@ export async function runAuditRetention(
     let cutoff: string;
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
     try {
-      await authorizedPrincipalId(client, options.principalExternalId);
+      const authorizationPrincipalId = await authorizedPrincipalId(
+        client, options.principalExternalId,
+      );
+      await client.query(
+        'SELECT continuum_operator_authorize_audit_retention($1::uuid)',
+        [authorizationPrincipalId],
+      );
       const policy = await client.query<{ minimum_days: number }>(
         `SELECT continuum_audit_retention_minimum_days()::int AS minimum_days`,
       );
@@ -441,6 +448,14 @@ export async function runAuditRetention(
   } catch (error) {
     if (error instanceof UnusableAuditRetentionConnectionError) destroyClient = true;
     primaryError = error;
+    const databaseError = error as { code?: string; message?: string };
+    if (databaseError.code === '42501'
+      || /DB-bound trusted approve identity|operator session/i.test(databaseError.message ?? '')) {
+      throw new ServiceError(
+        'FORBIDDEN', 'audit retention requires a DB-bound operator session',
+        { cause: error },
+      );
+    }
     throw error;
   } finally {
     let unlockFailed = false;
