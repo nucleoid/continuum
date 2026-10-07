@@ -8,6 +8,7 @@ import {
   DEFAULT_MAX_STALENESS_HOURS, listBoundEntraGroupIds, MAX_SYNC_GROUPS, MAX_SYNC_MEMBERSHIPS,
   provisionEntraGroupBinding,
   rejectEntraMembershipSync, revokeEntraGroupBinding, syncEntraMemberships,
+  validateMembershipSyncActor,
 } from './membership-sync.js';
 import { ServiceError } from './errors.js';
 import { disablePrincipal } from './principal-admin.js';
@@ -757,6 +758,32 @@ describe('Entra membership sync', () => {
       expect.objectContaining({ message: 'unlock failed' }),
     ]);
     expect(release).toHaveBeenCalledWith(expect.objectContaining({ message: 'unlock failed' }));
+  });
+
+  it.each([
+    Object.assign(new Error('operation requires a DB-bound trusted sync identity'), { code: 'XX000' }),
+    Object.assign(new Error('operation requires a role-name/OID-bound trusted sync identity'), { code: 'XX000' }),
+    Object.assign(new Error('permission denied'), { code: '42501' }),
+  ])('maps a supported sync-session authorization failure to FORBIDDEN', async (failure) => {
+    const rejectingPool = {
+      query: vi.fn().mockRejectedValue(failure),
+    } as unknown as pg.Pool;
+    await expect(validateMembershipSyncActor(rejectingPool, admin)).rejects.toMatchObject({
+      code: 'FORBIDDEN',
+      publicMessage: 'membership sync requires the DB-bound sync service identity',
+    });
+  });
+
+  it.each([
+    Object.assign(new Error('deadlock detected'), { code: '40P01' }),
+    Object.assign(new Error('canceling statement due to timeout'), { code: '57014' }),
+    Object.assign(new Error('could not obtain lock'), { code: '55P03' }),
+    Object.assign(new Error('connection terminated unexpectedly'), { code: '08006' }),
+  ])('does not reclassify an unrelated sync-session failure', async (failure) => {
+    const rejectingPool = {
+      query: vi.fn().mockRejectedValue(failure),
+    } as unknown as pg.Pool;
+    await expect(validateMembershipSyncActor(rejectingPool, admin)).rejects.toBe(failure);
   });
 
   it('cannot sync after the manual org administrator is removed', async () => {

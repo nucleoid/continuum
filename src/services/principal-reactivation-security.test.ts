@@ -583,7 +583,7 @@ describe('principal reactivation database trust boundary', () => {
           WHERE run_id = $1 AND phase = 'completed'`, [forged.run_id],
       )).rows[0].count).toBe(0);
       await expect(reactivatePrincipal(rolePool, admin, target.id))
-        .rejects.toThrow(/incomplete|completion evidence/i);
+        .rejects.toMatchObject({ code: 'FORBIDDEN', status: 403 });
     } finally {
       await rolePool?.end();
       await pool.query(`DROP OWNED BY ${quotedRole}`);

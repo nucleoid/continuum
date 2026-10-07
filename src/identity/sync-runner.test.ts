@@ -56,6 +56,48 @@ describe('membership sync CLI runner', () => {
     return connection;
   }
 
+  it.each([
+    Object.assign(new Error('operation requires a DB-bound trusted sync identity'), { code: 'XX000' }),
+    Object.assign(new Error('operation requires a role-name/OID-bound trusted sync identity'), { code: 'XX000' }),
+    Object.assign(new Error('permission denied'), { code: '42501' }),
+  ])('maps a supported database identity authorization failure to FORBIDDEN', async (failure) => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('continuum_verify_sync_database_identity')) throw failure;
+      return { rowCount: 1, rows: [{
+        id: '50000000-0000-4000-8000-000000000001',
+        external_id: 'sync-service', kind: 'service', display_name: 'Sync service',
+        created_at: new Date('2026-01-01T00:00:00Z'), disabled_at: null,
+      }] };
+    });
+    const fakePool = { query } as unknown as pg.Pool;
+    await expect(runMembershipSync(fakePool, {
+      CONTINUUM_ENTRA_MEMBERSHIP_SYNC: 'true',
+      CONTINUUM_GRAPH_ACCESS_TOKEN: 'x'.repeat(32),
+      CONTINUUM_MEMBERSHIP_SYNC_ACTOR: 'sync-service',
+    })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  });
+
+  it.each([
+    Object.assign(new Error('deadlock detected'), { code: '40P01' }),
+    Object.assign(new Error('canceling statement due to timeout'), { code: '57014' }),
+    Object.assign(new Error('connection terminated unexpectedly'), { code: '08006' }),
+  ])('does not reclassify an unrelated database identity failure', async (failure) => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('continuum_verify_sync_database_identity')) throw failure;
+      return { rowCount: 1, rows: [{
+        id: '50000000-0000-4000-8000-000000000001',
+        external_id: 'sync-service', kind: 'service', display_name: 'Sync service',
+        created_at: new Date('2026-01-01T00:00:00Z'), disabled_at: null,
+      }] };
+    });
+    const fakePool = { query } as unknown as pg.Pool;
+    await expect(runMembershipSync(fakePool, {
+      CONTINUUM_ENTRA_MEMBERSHIP_SYNC: 'true',
+      CONTINUUM_GRAPH_ACCESS_TOKEN: 'x'.repeat(32),
+      CONTINUUM_MEMBERSHIP_SYNC_ACTOR: 'sync-service',
+    })).rejects.toBe(failure);
+  });
+
   it('audits a production Graph overflow and fail-closes stale access before surfacing its code', async () => {
     const admin = await createPrincipal(pool, {
       externalId: 'sync-admin', kind: 'user', displayName: 'Sync admin',
