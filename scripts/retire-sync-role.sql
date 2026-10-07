@@ -173,17 +173,20 @@ BEGIN
   ) USING retired_oid;
   EXECUTE format(
     'INSERT INTO %I.continuum_unresolved_retired_sync_database_identities
-       (database_role, previous_database_role_oid, resolution_kind, marked_at)
+       (database_role, previous_database_role_oid, resolution_kind, cluster_epoch, marked_at)
      SELECT history.database_role, history.database_role_oid,
-            ''superseded'', history.retired_at
+            ''superseded'', epoch.epoch, history.retired_at
        FROM %I.continuum_retired_sync_database_identities history
+       CROSS JOIN %I.continuum_database_identity_epoch epoch
       WHERE history.database_role = $1 AND history.database_role_oid <> $2
+        AND epoch.singleton
      ON CONFLICT (database_role, previous_database_role_oid) DO UPDATE SET
        resolution_kind = ''superseded'',
+       cluster_epoch = EXCLUDED.cluster_epoch,
        marked_at = LEAST(
          continuum_unresolved_retired_sync_database_identities.marked_at,
          EXCLUDED.marked_at)',
-    application_schema, application_schema
+    application_schema, application_schema, application_schema
   ) USING retired_sync, retired_oid;
   EXECUTE format(
     'DELETE FROM %I.continuum_retired_sync_database_identities
@@ -198,7 +201,7 @@ BEGIN
     application_schema, retired_sync);
   EXECUTE format('REVOKE ALL PRIVILEGES ON SCHEMA %I FROM %I',
     application_schema, retired_sync);
-  EXECUTE format('ALTER ROLE %I NOLOGIN', retired_sync);
+  EXECUTE format('ALTER ROLE %I NOLOGIN PASSWORD NULL', retired_sync);
   EXECUTE format(
     'INSERT INTO %I.continuum_retired_sync_database_identities
        (database_role_oid, database_role)

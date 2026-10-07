@@ -536,6 +536,17 @@ authority plus the old sync-only registry row in one transaction. The retired
 role is also changed to `NOLOGIN`. The sync role
 can read only `scopes`, `principals`, `entra_groups`, `scope_memberships`, and
 `entra_sync_state`; it cannot read `memories`, including titles or bodies.
+Retirement also clears the PostgreSQL password. `NOLOGIN` does not terminate an
+already connected backend, so after the rotation commits the migration owner
+must end any surviving old-role sessions before treating credential response as
+complete, for example after reviewing the exact role name:
+
+```sql
+SELECT pg_terminate_backend(pid)
+FROM pg_stat_activity
+WHERE usename = 'continuum_sync_old' AND pid <> pg_backend_pid();
+```
+
 Rotation fails rather than claiming cleanup if the retired role inherits from
 another role or owns an application-schema object; remove that authority in a
 separately reviewed maintenance change and retry. Run one sync and verify
@@ -655,7 +666,9 @@ planned and rewritten as complete sets, so swapped or cyclic OID assignments do
 not collide. Retired names that were intentionally dropped are moved to an
 owner-only unresolved-history ledger instead of retaining an OID that may now
 belong to another role. The ledger distinguishes terminal superseded
-generations from restore-pending rows. Re-run the same rebind command if global roles are
+generations from restore-pending rows. Rebind rotates an owner-only database
+identity epoch, so old-cluster OID numbers cannot make unrelated restored roles
+look terminal. Re-run the same rebind command if global roles are
 restored in stages: a uniquely resolved retired name is moved back into live
 history. Earlier generations of a deliberately reused active sync-role name
 remain archived by name and old OID; any unbound recreation still fails

@@ -70,19 +70,31 @@ CREATE TABLE IF NOT EXISTS continuum_retired_sync_database_identities (
 ALTER TABLE continuum_retired_sync_database_identities
   DROP CONSTRAINT IF EXISTS continuum_retired_sync_database_identities_database_role_key;
 REVOKE ALL ON TABLE continuum_retired_sync_database_identities FROM PUBLIC;
+CREATE TABLE IF NOT EXISTS continuum_database_identity_epoch (
+  singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+  epoch UUID NOT NULL
+);
+INSERT INTO continuum_database_identity_epoch (singleton, epoch)
+VALUES (TRUE, gen_random_uuid()) ON CONFLICT (singleton) DO NOTHING;
+REVOKE ALL ON TABLE continuum_database_identity_epoch FROM PUBLIC;
 CREATE TABLE IF NOT EXISTS continuum_unresolved_retired_sync_database_identities (
   database_role NAME NOT NULL,
   previous_database_role_oid OID NOT NULL,
   resolution_kind TEXT NOT NULL CHECK (resolution_kind IN ('superseded', 'restore_pending')),
+  cluster_epoch UUID NOT NULL,
   marked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (database_role, previous_database_role_oid)
 );
 ALTER TABLE continuum_unresolved_retired_sync_database_identities
-  ADD COLUMN IF NOT EXISTS resolution_kind TEXT;
+  ADD COLUMN IF NOT EXISTS resolution_kind TEXT,
+  ADD COLUMN IF NOT EXISTS cluster_epoch UUID;
 UPDATE continuum_unresolved_retired_sync_database_identities
-   SET resolution_kind = 'restore_pending' WHERE resolution_kind IS NULL;
+   SET resolution_kind = COALESCE(resolution_kind, 'restore_pending'),
+       cluster_epoch = COALESCE(cluster_epoch,
+         (SELECT epoch FROM continuum_database_identity_epoch WHERE singleton));
 ALTER TABLE continuum_unresolved_retired_sync_database_identities
   ALTER COLUMN resolution_kind SET NOT NULL,
+  ALTER COLUMN cluster_epoch SET NOT NULL,
   DROP CONSTRAINT IF EXISTS continuum_unresolved_retired_sync_database_identities_resolution_kind_check,
   ADD CONSTRAINT continuum_unresolved_retired_sync_database_identities_resolution_kind_check
     CHECK (resolution_kind IN ('superseded', 'restore_pending'));
@@ -876,7 +888,7 @@ BEGIN
     EXECUTE format('REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA %I FROM %I',
       schema_name, old_identity.rolname);
     EXECUTE format('REVOKE ALL PRIVILEGES ON SCHEMA %I FROM %I', schema_name, old_identity.rolname);
-    EXECUTE format('ALTER ROLE %I NOLOGIN', old_identity.rolname);
+    EXECUTE format('ALTER ROLE %I NOLOGIN PASSWORD NULL', old_identity.rolname);
     INSERT INTO continuum_retired_sync_database_identities
       (database_role_oid, database_role)
     VALUES (old_identity.database_role_oid, old_identity.rolname)
@@ -893,7 +905,7 @@ REVOKE ALL ON FUNCTION continuum_retire_sync_database_identities(OID) FROM PUBLI
 CREATE OR REPLACE FUNCTION continuum_install_sync_database_identity(
   target_database_role NAME, target_service_principal_id UUID
 ) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER AS $$
-DECLARE schema_name TEXT; target_oid OID; already_bound BOOLEAN;
+DECLARE schema_name TEXT; target_oid OID; already_bound BOOLEAN; current_epoch UUID;
 BEGIN
   PERFORM pg_advisory_xact_lock(834641726154302119::bigint);
   PERFORM pg_advisory_xact_lock(834641726154302120::bigint);
@@ -910,12 +922,15 @@ BEGIN
   ) INTO already_bound;
   target_oid := continuum_validate_trusted_database_role(
     target_database_role, 'sync', already_bound);
+  SELECT epoch INTO current_epoch
+    FROM continuum_database_identity_epoch WHERE singleton;
   IF EXISTS (
     SELECT 1 FROM continuum_retired_sync_database_identities
      WHERE database_role_oid = target_oid
   ) OR EXISTS (
     SELECT 1 FROM continuum_unresolved_retired_sync_database_identities
      WHERE previous_database_role_oid = target_oid
+       AND cluster_epoch = current_epoch
   ) THEN
     RAISE EXCEPTION 'previously retired sync role OID is terminal and cannot be reinstalled';
   END IF;
@@ -930,13 +945,20 @@ BEGIN
   -- A role name can be deliberately reused only as a new OID-bound identity.
   -- Preserve prior generations outside the live retired-role registry before
   -- the new generation can later be retired under the same name.
+  UPDATE continuum_unresolved_retired_sync_database_identities
+     SET resolution_kind = 'superseded'
+   WHERE database_role = target_database_role
+     AND resolution_kind = 'restore_pending';
   INSERT INTO continuum_unresolved_retired_sync_database_identities
-    (database_role, previous_database_role_oid, resolution_kind, marked_at)
-  SELECT history.database_role, history.database_role_oid, 'superseded', history.retired_at
+    (database_role, previous_database_role_oid, resolution_kind, cluster_epoch, marked_at)
+  SELECT history.database_role, history.database_role_oid, 'superseded',
+         current_epoch, history.retired_at
     FROM continuum_retired_sync_database_identities history
    WHERE history.database_role = target_database_role
      AND history.database_role_oid <> target_oid
   ON CONFLICT (database_role, previous_database_role_oid) DO UPDATE SET
+    resolution_kind = 'superseded',
+    cluster_epoch = EXCLUDED.cluster_epoch,
     marked_at = LEAST(
       continuum_unresolved_retired_sync_database_identities.marked_at,
       EXCLUDED.marked_at);
@@ -979,6 +1001,55 @@ BEGIN
 END;
 $$;
 REVOKE ALL ON FUNCTION continuum_install_sync_database_identity(NAME, UUID) FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION continuum_register_trusted_database_identity(
+  target_database_role NAME, target_principal_id UUID,
+  approve_capability BOOLEAN, sync_capability BOOLEAN
+) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE target_role_oid OID; current_epoch UUID;
+BEGIN
+  IF NOT (approve_capability OR sync_capability) OR (approve_capability AND sync_capability) THEN
+    RAISE EXCEPTION 'exactly one trusted database capability is required';
+  END IF;
+  IF sync_capability THEN
+    PERFORM continuum_install_sync_database_identity(target_database_role, target_principal_id);
+    RETURN;
+  END IF;
+  PERFORM pg_advisory_xact_lock(834641726154302120::bigint);
+  IF NOT EXISTS (
+    SELECT 1 FROM principals principal
+    JOIN scope_memberships membership ON membership.principal_id = principal.id
+    JOIN scopes scope ON scope.id = membership.scope_id
+     WHERE principal.id = target_principal_id
+       AND principal.kind = 'user' AND principal.disabled_at IS NULL
+       AND scope.id = continuum_org_scope_id()
+       AND membership.source_kind = 'manual' AND membership.source_id = 'manual'
+       AND membership.role = 'admin' AND membership.active
+  ) THEN RAISE EXCEPTION 'operator identity must be an effective manual org administrator'; END IF;
+  target_role_oid := continuum_validate_trusted_database_role(
+    target_database_role, 'approve', FALSE);
+  SELECT epoch INTO current_epoch
+    FROM continuum_database_identity_epoch WHERE singleton;
+  IF EXISTS (
+    SELECT 1 FROM continuum_retired_sync_database_identities
+     WHERE database_role_oid = target_role_oid
+  ) OR EXISTS (
+    SELECT 1 FROM continuum_unresolved_retired_sync_database_identities
+     WHERE previous_database_role_oid = target_role_oid
+       AND cluster_epoch = current_epoch
+  ) THEN
+    RAISE EXCEPTION 'previously retired sync role OID is terminal and cannot become approval authority';
+  END IF;
+  INSERT INTO continuum_trusted_database_identities
+    (database_role, database_role_oid, principal_id, can_approve, can_sync)
+  VALUES (target_database_role, target_role_oid, target_principal_id, TRUE, FALSE)
+  ON CONFLICT (database_role) DO UPDATE SET
+    database_role_oid = EXCLUDED.database_role_oid,
+    principal_id = EXCLUDED.principal_id, can_approve = TRUE, can_sync = FALSE;
+END;
+$$;
+REVOKE ALL ON FUNCTION continuum_register_trusted_database_identity(
+  NAME, UUID, BOOLEAN, BOOLEAN) FROM PUBLIC;
 
 CREATE OR REPLACE FUNCTION continuum_operator_pseudonymize_scope(
   authorization_principal_id UUID,
@@ -1227,6 +1298,8 @@ CREATE OR REPLACE FUNCTION continuum_rebind_database_identity_oids(
 DECLARE
   owner_oid OID;
   invoking_oid OID;
+  previous_epoch UUID;
+  restored_epoch UUID := gen_random_uuid();
   identity_record RECORD;
   changed_count INTEGER := 0;
 BEGIN
@@ -1240,8 +1313,13 @@ BEGIN
   END IF;
   LOCK TABLE continuum_trusted_database_identities,
              continuum_retired_sync_database_identities,
-             continuum_unresolved_retired_sync_database_identities
+             continuum_unresolved_retired_sync_database_identities,
+             continuum_database_identity_epoch
     IN ACCESS EXCLUSIVE MODE;
+  SELECT epoch INTO previous_epoch
+    FROM continuum_database_identity_epoch WHERE singleton;
+  UPDATE continuum_database_identity_epoch
+     SET epoch = restored_epoch WHERE singleton;
   CREATE TEMP TABLE continuum_active_identity_rebind_plan ON COMMIT DROP AS
     SELECT bound_identity.database_role,
            bound_identity.database_role_oid AS previous_oid,
@@ -1269,14 +1347,22 @@ BEGIN
 
   -- A retired generation with the same name as an active restored identity is
   -- historical, not the active role. Archive it before resolving retirement.
+  UPDATE continuum_unresolved_retired_sync_database_identities unresolved
+     SET resolution_kind = 'superseded'
+    FROM continuum_active_identity_rebind_plan active
+   WHERE unresolved.database_role = active.database_role
+     AND unresolved.resolution_kind = 'restore_pending';
   INSERT INTO continuum_unresolved_retired_sync_database_identities
-    (database_role, previous_database_role_oid, resolution_kind, marked_at)
-  SELECT history.database_role, history.database_role_oid, 'superseded', history.retired_at
+    (database_role, previous_database_role_oid, resolution_kind, cluster_epoch, marked_at)
+  SELECT history.database_role, history.database_role_oid, 'superseded',
+         previous_epoch, history.retired_at
     FROM continuum_retired_sync_database_identities history
     JOIN continuum_active_identity_rebind_plan active
       ON active.database_role = history.database_role
    WHERE history.database_role_oid <> active.restored_oid
   ON CONFLICT (database_role, previous_database_role_oid) DO UPDATE SET
+    resolution_kind = 'superseded',
+    cluster_epoch = EXCLUDED.cluster_epoch,
     marked_at = LEAST(
       continuum_unresolved_retired_sync_database_identities.marked_at,
       EXCLUDED.marked_at);
@@ -1343,12 +1429,20 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'retired database identity restore mapping is ambiguous';
   END IF;
+  UPDATE continuum_unresolved_retired_sync_database_identities unresolved
+     SET resolution_kind = 'superseded'
+    FROM continuum_retired_identity_rebind_plan plan
+   WHERE unresolved.database_role = plan.database_role
+     AND unresolved.resolution_kind = 'restore_pending'
+     AND plan.restored_oid IS NULL;
   INSERT INTO continuum_unresolved_retired_sync_database_identities
-    (database_role, previous_database_role_oid, resolution_kind)
-  SELECT database_role, previous_oid, 'restore_pending'
+    (database_role, previous_database_role_oid, resolution_kind, cluster_epoch)
+  SELECT database_role, previous_oid, 'restore_pending', previous_epoch
     FROM continuum_retired_identity_rebind_plan
    WHERE restored_oid IS NULL
   ON CONFLICT (database_role, previous_database_role_oid) DO UPDATE SET
+    resolution_kind = 'restore_pending',
+    cluster_epoch = EXCLUDED.cluster_epoch,
     marked_at = now();
   DELETE FROM continuum_retired_sync_database_identities;
   INSERT INTO continuum_retired_sync_database_identities
@@ -1457,6 +1551,7 @@ BEGIN
          'continuum_verify_sync_retirement_authority_configuration',
          'continuum_retire_sync_database_identities',
          'continuum_install_sync_database_identity',
+         'continuum_register_trusted_database_identity',
          'continuum_operator_pseudonymize_scope',
          'continuum_assert_application_role_allowlist',
          'continuum_assert_operator_role_allowlist',

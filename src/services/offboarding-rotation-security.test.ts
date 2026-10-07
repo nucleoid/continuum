@@ -428,8 +428,9 @@ describe('sync database identity rotation security', () => {
       )).rows[0].oid;
       await pool.query(
         `INSERT INTO continuum_unresolved_retired_sync_database_identities
-           (database_role, previous_database_role_oid, resolution_kind)
-         VALUES ($1::name, $2::oid, 'superseded')`,
+           (database_role, previous_database_role_oid, resolution_kind, cluster_epoch)
+         SELECT $1::name, $2::oid, 'superseded', epoch
+           FROM continuum_database_identity_epoch WHERE singleton`,
         [archivedName, oid],
       );
       await pool.query("SELECT continuum_rebind_database_identity_oids('REBIND AFTER LOGICAL RESTORE')");
