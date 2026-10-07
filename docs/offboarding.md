@@ -432,7 +432,10 @@ as members of the `vector` extension. If such routines remain executable by
 `PUBLIC`, application roles inherit that extension-owned contract. If the
 provider revokes `PUBLIC`, the extension owner must pregrant `EXECUTE` to each
 application role. Re-run `grant-application-role.sql` after every vector
-extension update so newly added routines are checked. Continuum-owned
+extension update so newly added routines are checked. If the target is the
+dedicated operator role, immediately re-run `grant-operator-role.sql` as well;
+the application profile intentionally strips operator-only capabilities before
+the operator profile restores them. Continuum-owned
 functions remain closed to `PUBLIC` without exception.
 Continuum also removes the creating role's global default `PUBLIC EXECUTE` for
 future functions; PostgreSQL's built-in function default cannot be removed by
@@ -574,6 +577,7 @@ schema names:
 psql "$CONTINUUM_MIGRATION_OWNER_URL" \
   --set=ON_ERROR_STOP=1 \
   --set=continuum_schema=public \
+  --set=continuum_app_role=continuum_app \
   --set=continuum_sync_role=continuum_sync_next \
   --set=continuum_operator_role=continuum_operator \
   --set=retired_sync_role=continuum_sync_old \
@@ -583,8 +587,13 @@ psql "$CONTINUUM_MIGRATION_OWNER_URL" \
 The script fails unless `PUBLIC` and the migration owner's application-schema
 default ACLs are closed, exactly one OID-bound sync row exists, every registry
 OID still resolves to its recorded name, the sync role matches the exact 0052
-allow-list, the expected operator is approval-only, and the retired role is
-`NOLOGIN` without schema, principal-table, or audit-sequence authority. The
+allow-list, the shared application role matches its exact allow-list, the
+expected operator is approval-only, and a supplied retired role both exists and
+is `NOLOGIN` without schema, principal-table, or audit-sequence authority. Omit
+`--set=retired_sync_role=...` only on an initial install with no retired role;
+after rotation, supply the exact recorded old role name. Parameter ACLs or
+per-role settings on application, operator, or sync identities make validation
+fail because they can change trigger behavior. The
 membership-sync executable repeats the sync-role allow-list gate at every
 startup before Graph I/O; this script remains the cross-role maintenance gate.
 

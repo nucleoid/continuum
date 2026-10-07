@@ -110,6 +110,35 @@ CREATE TABLE IF NOT EXISTS continuum_principal_disable_requests (
 );
 REVOKE ALL ON TABLE continuum_principal_disable_requests FROM PUBLIC;
 
+TRUNCATE continuum_entra_reapproval_requests;
+ALTER TABLE continuum_entra_reapproval_requests
+  ADD COLUMN authorization_principal_id UUID NOT NULL REFERENCES principals(id);
+REVOKE ALL ON TABLE continuum_entra_reapproval_requests,
+  continuum_entra_guarded_mutations FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION continuum_protect_capability_marker_write()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE table_owner OID; invoking_role_oid OID;
+BEGIN
+  SELECT relowner INTO table_owner FROM pg_class WHERE oid = TG_RELID;
+  SELECT oid INTO invoking_role_oid FROM pg_roles WHERE rolname = current_user;
+  IF invoking_role_oid IS DISTINCT FROM table_owner THEN
+    RAISE EXCEPTION 'capability marker writes require the migration owner definer';
+  END IF;
+  RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+END;
+$$;
+REVOKE ALL ON FUNCTION continuum_protect_capability_marker_write() FROM PUBLIC;
+CREATE TRIGGER protect_entra_reapproval_marker_write
+  BEFORE INSERT OR UPDATE OR DELETE ON continuum_entra_reapproval_requests
+  FOR EACH ROW EXECUTE FUNCTION continuum_protect_capability_marker_write();
+CREATE TRIGGER protect_entra_guarded_marker_write
+  BEFORE INSERT OR UPDATE OR DELETE ON continuum_entra_guarded_mutations
+  FOR EACH ROW EXECUTE FUNCTION continuum_protect_capability_marker_write();
+CREATE TRIGGER protect_principal_disable_marker_write
+  BEFORE INSERT OR UPDATE OR DELETE ON continuum_principal_disable_requests
+  FOR EACH ROW EXECUTE FUNCTION continuum_protect_capability_marker_write();
+
 ALTER TABLE continuum_entra_guarded_mutations
   DROP CONSTRAINT IF EXISTS continuum_entra_guarded_mutations_mutation_kind_check;
 ALTER TABLE continuum_entra_guarded_mutations
@@ -257,6 +286,7 @@ DECLARE
   invoking_role_oid OID;
   trusted_sync BOOLEAN := FALSE;
   has_reapproval BOOLEAN := FALSE;
+  reapproval_principal_id UUID;
   has_guarded_deactivation BOOLEAN := FALSE;
   has_guarded_quarantine BOOLEAN := FALSE;
   has_guarded_revocation BOOLEAN := FALSE;
@@ -295,12 +325,18 @@ BEGIN
     END IF;
   END IF;
   IF TG_TABLE_NAME = 'entra_groups' THEN
-    SELECT EXISTS (
-      SELECT 1 FROM continuum_entra_reapproval_requests request
+    SELECT request.authorization_principal_id
+      INTO reapproval_principal_id
+      FROM continuum_entra_reapproval_requests request
        WHERE request.external_id = NEW.external_id
          AND request.backend_pid = pg_backend_pid()
          AND request.transaction_id = txid_current()
-    ) INTO has_reapproval;
+       LIMIT 1;
+    has_reapproval := reapproval_principal_id IS NOT NULL;
+    IF has_reapproval THEN
+      PERFORM continuum_require_trusted_database_identity(
+        reapproval_principal_id, 'approve');
+    END IF;
     IF NEW.approved_by IS NOT NULL AND (
          TG_OP = 'INSERT' OR OLD.approved_by IS DISTINCT FROM NEW.approved_by
          OR OLD.approved_at IS DISTINCT FROM NEW.approved_at
@@ -363,6 +399,39 @@ BEGIN
 END;
 $$;
 REVOKE ALL ON FUNCTION continuum_guard_entra_admin_sources() FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION continuum_upsert_entra_group_binding(
+  authorization_principal_id UUID, group_external_id TEXT, group_display_name TEXT,
+  target_scope_id UUID, target_role TEXT
+) RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE existed BOOLEAN;
+BEGIN
+  PERFORM continuum_require_trusted_database_identity(authorization_principal_id, 'approve');
+  SELECT EXISTS(SELECT 1 FROM entra_groups WHERE external_id = group_external_id) INTO existed;
+  INSERT INTO continuum_entra_reapproval_requests
+    (external_id, backend_pid, transaction_id, authorization_principal_id)
+  VALUES (group_external_id, pg_backend_pid(), txid_current(), authorization_principal_id)
+  ON CONFLICT (external_id) DO UPDATE SET
+    backend_pid = EXCLUDED.backend_pid,
+    transaction_id = EXCLUDED.transaction_id,
+    authorization_principal_id = EXCLUDED.authorization_principal_id;
+  INSERT INTO entra_groups
+    (external_id, display_name, scope_id, role, active, approved_by, approved_at,
+     deactivated_at, last_seen_at)
+  VALUES (group_external_id, group_display_name, target_scope_id, target_role, TRUE,
+          authorization_principal_id, now(), NULL, NULL)
+  ON CONFLICT (external_id) DO UPDATE SET
+    display_name = EXCLUDED.display_name, scope_id = EXCLUDED.scope_id,
+    role = EXCLUDED.role, active = TRUE, approved_by = EXCLUDED.approved_by,
+    approved_at = now(), approval_revoked_by = NULL, approval_revoked_at = NULL,
+    deactivated_at = NULL, quarantined_at = NULL, quarantine_reason = NULL;
+  DELETE FROM continuum_entra_reapproval_requests
+   WHERE external_id = group_external_id;
+  RETURN existed;
+END;
+$$;
+REVOKE ALL ON FUNCTION continuum_upsert_entra_group_binding(
+  UUID, TEXT, TEXT, UUID, TEXT) FROM PUBLIC;
 
 CREATE OR REPLACE FUNCTION continuum_guard_entra_membership_delete()
 RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
@@ -486,6 +555,15 @@ BEGIN
     RAISE EXCEPTION 'sync database identity binding is invalid';
   END IF;
   PERFORM continuum_validate_trusted_database_role(target_database_role, 'sync', TRUE);
+  IF EXISTS (
+    SELECT 1 FROM pg_parameter_acl parameter_acl
+    CROSS JOIN LATERAL aclexplode(parameter_acl.paracl) privilege
+     WHERE privilege.grantee IN (0, target_oid)
+  ) OR EXISTS (
+    SELECT 1 FROM pg_db_role_setting setting WHERE setting.setrole = target_oid
+  ) THEN
+    RAISE EXCEPTION 'sync database identity parameter privilege or role-setting drift';
+  END IF;
   IF has_schema_privilege('public', schema_name, 'USAGE')
      OR has_schema_privilege('public', schema_name, 'CREATE') THEN
     RAISE EXCEPTION 'PUBLIC retains application schema privileges';
@@ -631,6 +709,15 @@ BEGIN
          target_replication, target_bypassrls
     FROM pg_roles WHERE rolname = target_database_role;
   IF target_oid IS NULL THEN RAISE EXCEPTION 'trusted database role does not exist'; END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_parameter_acl parameter_acl
+    CROSS JOIN LATERAL aclexplode(parameter_acl.paracl) privilege
+     WHERE privilege.grantee IN (0, target_oid)
+  ) OR EXISTS (
+    SELECT 1 FROM pg_db_role_setting setting WHERE setting.setrole = target_oid
+  ) THEN
+    RAISE EXCEPTION 'trusted database role has parameter privilege or role-setting drift';
+  END IF;
   SELECT namespace.nspname, namespace.oid, relation.relowner
     INTO schema_name, schema_oid, owner_oid
     FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
@@ -1065,9 +1152,11 @@ BEGIN
      WHERE function.pronamespace = quote_ident(current_schema())::regnamespace
        AND function.proname = ANY(ARRAY[
          'continuum_require_trusted_database_identity',
+         'continuum_protect_capability_marker_write',
          'continuum_protect_last_manual_org_admin_principal',
          'continuum_disable_principal',
          'continuum_guard_entra_admin_sources',
+         'continuum_upsert_entra_group_binding',
          'continuum_guard_entra_membership_delete',
          'continuum_operator_remove_entra_membership',
          'continuum_fail_closed_on_principal_disable',
