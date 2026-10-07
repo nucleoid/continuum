@@ -60,7 +60,7 @@ describe('sync database identity rotation security', () => {
     await addMembership(pool, admin.id, org!.id, 'admin');
     const operatorRole = 'continuum_secure_operator_' + Date.now();
     await pool.query('CREATE ROLE ' + quoteRole(operatorRole) + ' NOLOGIN');
-    await pool.query('GRANT ' + quoteRole(operatorRole) + ' TO CURRENT_USER');
+    await grantOwnerRetirementAuthority(pool, operatorRole);
     await applyGrantScript(pool, 'grant-application-role.sql', { continuum_app_role: operatorRole });
     await applyGrantScript(pool, 'grant-operator-role.sql', {
       continuum_operator_role: operatorRole, continuum_principal_id: admin.id,
@@ -915,7 +915,7 @@ describe('sync database identity rotation security', () => {
     try {
       await expect(pool.query(
         "SELECT continuum_rebind_database_identity_oids('REBIND DATABASE IDENTITIES', 'PRESERVED OID NAMESPACE')",
-      )).rejects.toThrow(/retired.*OID.*renamed|renamed.*retired/i);
+      )).rejects.toThrow(/retired OID.*(?:renamed|substituted).*preserved OID namespace/i);
     } finally {
       await pool.query(
         'DELETE FROM continuum_retired_sync_database_identities WHERE database_role_oid = $1::oid',
@@ -1662,18 +1662,24 @@ describe('sync database identity rotation security', () => {
     const retiredOid = (await pool.query(
       'SELECT oid::text FROM pg_roles WHERE rolname = $1', [retired],
     )).rows[0].oid;
+    await pool.query('GRANT USAGE ON SCHEMA public TO ' + quoteRole(retired));
     await pool.query('GRANT SELECT (body) ON TABLE memories TO ' + quoteRole(retired));
     await pool.query(
       `INSERT INTO continuum_retired_sync_database_identities
          (database_role_oid, database_role) VALUES ($1::oid, $2::name)`,
       [retiredOid, retired],
     );
+    const retiredConnection = await rolePool(pool, retired);
     try {
+      await expect(retiredConnection.query('SELECT body FROM public.memories LIMIT 1'))
+        .resolves.toBeDefined();
       await applyGrantScript(pool, 'retire-sync-role.sql', {
         continuum_schema: 'public', retired_sync_role: retired,
         confirm_retired_sync_role_oid: retiredOid,
         confirm_legacy_unrecorded_sync_role: '',
       });
+      await expect(retiredConnection.query('SELECT body FROM public.memories LIMIT 1'))
+        .rejects.toThrow(/permission denied/i);
       expect((await pool.query(
         `SELECT has_column_privilege($1, 'memories', 'body', 'SELECT') AS column_select`,
         [retired],
@@ -1683,6 +1689,7 @@ describe('sync database identity rotation security', () => {
       );
       expect(verification).toMatch(/pg_attribute[\s\S]*attacl/i);
     } finally {
+      await retiredConnection.end();
       await pool.query(
         'DELETE FROM continuum_retired_sync_database_identities WHERE database_role = $1::name',
         [retired],

@@ -371,6 +371,11 @@ row counts before disabling a role, and gives rotation and rebind one advisory
 lock order. Rebind uses transaction-scoped temporary planning tables, so the
 migration owner must retain the database TEMPORARY privilege; the rebind
 function checks that prerequisite before it reads or rewrites identity state.
+Under migration `0053`, concurrent rotation and rebind operations serialize on
+those advisory locks.
+If a configured `lock_timeout` or `statement_timeout` aborts the waiter, roll
+back and retry the complete rotation or rebind after the conflicting operation
+commits; do not retry an individual statement in the aborted transaction.
 
 The final database verification is exact and executes once: the completion
 event trigger checks every memory and every audit row linked to the run's
