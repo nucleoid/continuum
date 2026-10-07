@@ -38,6 +38,10 @@ const FORWARD_MIGRATION_REQUIREMENTS = new Map([
     '0058_coordination_online_prep.sql'],
   ['0060_coordination_online_finish.sql',
     '0059_coordination_bounded_privacy.sql'],
+  ['0061_coordination_forward_security_repair.sql',
+    '0060_coordination_online_finish.sql'],
+  ['0062_coordination_forward_online_finish.sql',
+    '0061_coordination_forward_security_repair.sql'],
 ]);
 const REVIEW_ENTRA_MIGRATION_RENAMES = [
   ['0005_entra_auth.sql', '0010_entra_auth.sql'],
@@ -111,10 +115,12 @@ async function indexState(
 
 async function runNonTransactionalStatement(
   client: pg.PoolClient, statement: string,
+  deferCoordinationBackfill = false,
 ): Promise<void> {
   if (statement.split(/\r?\n/).some(
     (line) => line.trim() === BACKFILL_COORDINATION_REPAIR,
   )) {
+    if (deferCoordinationBackfill) return;
     await client.query("SET statement_timeout = '5s'");
     try {
       for (;;) {
@@ -255,7 +261,12 @@ export async function runMigrations(
           // migrations use retry-safe statements so a crash before the ledger
           // write can rerun the file.
           for (const statement of nonTransactionalStatements(sql)) {
-            await runNonTransactionalStatement(client, statement);
+            await runNonTransactionalStatement(
+              client,
+              statement,
+              file === '0060_coordination_online_finish.sql'
+                && files.includes('0061_coordination_forward_security_repair.sql'),
+            );
           }
           await client.query(
             'INSERT INTO _continuum_migrations (name) VALUES ($1)',

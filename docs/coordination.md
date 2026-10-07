@@ -243,12 +243,14 @@ V1 hard limits are:
 - 10,000 ever-created, unreclaimed resource keys per scope by default
   (operator-adjustable from 1 through 1,000,000);
 - at most 100 newly created resource keys per principal per rolling hour;
-- 10,000 retained successful-acquire receipts per principal;
-- 1,000 separately counted contended-acquire receipts per principal, each with
-  a 90-second horizon;
-- 10,000 retained release receipts per principal. Release itself remains
-  available at saturation: the oldest retained release receipt is evicted in
-  the same transaction before the new release receipt is inserted;
+- 10,000 retained successful-acquire receipts per principal by default;
+- 1,000 separately counted contended-acquire receipts per principal by default,
+  each with a 90-second horizon. Approval-bound operators may raise either
+  limit through `continuum_operator_set_coordination_principal_quota` for a
+  shared service principal or fleet;
+- release receipts remain available for their full 24-hour replay horizon and
+  do not consume a counter. A later release never evicts retained replay
+  evidence;
 - at most 100 retained renew receipts per lease; renew receipts do not consume
   acquire or release quota, so documented TTL/3 renewal cannot starve lease
   maintenance;
@@ -272,7 +274,11 @@ Terminal leases receive `cleanup_eligible_at` only after release or displacement
 from `coordination_resources.current_lease_id`. Current expired generations are
 therefore not rescanned on every sweep. Global and per-principal cleanup use
 `coordination_leases_cleanup_ready_idx` and
-`coordination_leases_principal_cleanup_idx` respectively.
+`coordination_leases_principal_cleanup_idx` respectively. Upgrade backfill uses
+the durable `last_lease_id` cursor and the
+`coordination_leases_cleanup_pending_idx` partial index. Completion requires a
+final non-`SKIP LOCKED` check, so a locked low key cannot be skipped forever or
+cause false completion.
 
 Operator maintenance is exposed only through the approval-bound database role:
 `continuum_operator_reclaim_coordination_resource` removes at most 1,000
@@ -284,9 +290,11 @@ set transaction-level `lock_timeout` and `statement_timeout` before invoking
 maintenance; PostgreSQL function `SET` clauses do not bound the already-running
 calling statement, so Continuum does not claim a function-local deadline.
 `continuum_operator_set_coordination_scope_quota` adjusts a reviewed scope
-limit. The shared application role cannot execute these operator functions or
-directly update either usage/counter table; owner-owned triggers and narrow
-`SECURITY DEFINER` helpers maintain counters.
+limit, while `continuum_operator_set_coordination_principal_quota` adjusts the
+two acquire limits. The shared application role cannot execute these operator
+functions, directly update usage/counter tables, or update protected lease and
+resource identity columns; owner-owned triggers and narrow `SECURITY DEFINER`
+helpers maintain counters.
 
 Audit metadata is bounded and server-generated. It includes operation, outcome,
 owned request/run/lease IDs where applicable, owned token, resource UTF-8
@@ -296,7 +304,7 @@ vectors. Audit failure rolls back the whole operation.
 
 ## Deployment, mixed versions, and rollback
 
-Apply through migration `0060_coordination_online_finish.sql`, then **re-run
+Apply through migration `0062_coordination_forward_online_finish.sql`, then **re-run
 `scripts/grant-application-role.sql`** for every application and dedicated
 operator role. Re-run `scripts/grant-operator-role.sql` immediately afterward
 for dedicated operators. The exact role verifier deliberately rejects both
@@ -313,20 +321,25 @@ the compatibility trigger until a later published migration explicitly retires
 0056 rollback support.
 
 A binary rollback leaves coordination tables, receipts, quota counters, and
-fencing floors in place. Do not drop or truncate them. Before re-enable, apply
-all forward migrations, re-run the grant scripts and identity verifier, and
-resume with the retained counters. This preserves idempotency and fencing
-across rollback/re-enable cycles.
+fencing floors in place. Do not drop or truncate them. Migration 0061 gates the
+old unversioned pseudonymization entry point: binaries older than the 0061-aware
+release fail closed during offboarding instead of treating one bounded batch as
+complete. Every node must run a binary that calls
+`continuum_operator_pseudonymize_scope_v2` before applying 0061. Before
+re-enable, apply all forward migrations, re-run the grant scripts and identity
+verifier, and resume with the retained counters.
 
 Offboarding first deactivates every owned-scope membership and disables the
 principal in the same transaction. The owned user scope is then erased in
 bounded receipt, lease, and resource phases. Each call processes at most 1,000
 rows per phase and records durable progress; the maximum fencing token is
-preserved in the owner-only scope floor before resource deletion. Team,
-project, and organization resources remain shared state, but retained leases
-and receipts are moved to an installation-wide detached principal and their run
-IDs and payload hashes are independently randomized in bounded batches. Role
-scopes currently retain their stable pseudonymized principal reference.
+preserved in the owner-only scope floor before resource deletion. All non-owned
+scopes, including team, project, organization, role, and another user's scope,
+remain shared state, but retained leases and receipts are moved to an
+installation-wide detached principal and their run IDs and payload hashes are
+independently randomized in bounded batches. The detached identity is disabled.
+Joinable request and lease identifiers are removed from the offboarded
+principal's shared-scope audit metadata.
 Completion is not recorded until owned-scope erasure and shared-scope
 detachment are both complete. Append-only coordination operator events survive
 audit retention and offboarding. Lock audit metadata retains operation evidence
@@ -334,14 +347,16 @@ but removes the resource digest, which could otherwise disclose low-entropy
 resource names by brute force.
 
 Direct scope pseudonymization requires zero active memberships and zero live
-leases. Membership writes serialize on the scope row and cannot reactivate a
-coordination-private scope. An explicit principal reactivation may reopen its
+leases. Direct principal scrubbing additionally requires a disabled or
+offboarded target, its exact mapped owned user scope, and never reassigns a live
+lease. Started, per-batch, and completed evidence is written to immutable
+operator events. Membership writes
+take the privacy advisory lock only while progress exists; no-op active updates
+do not lock. An explicit principal reactivation may reopen its
 mapped owned user scope; it does not restore detached historical identities.
 
-At release-receipt saturation, release still commits. Exact replay is available
-for every receipt still retained, including the new release. A request whose
-oldest release receipt was evicted has crossed its idempotency boundary and may
-return `LEASE_LOST`; reconcile ownership before choosing a new request ID.
+Release always commits when otherwise authorized. Exact replay remains
+available for every release receipt throughout its documented 24-hour horizon.
 
 ## Harness guidance
 

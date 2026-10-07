@@ -914,7 +914,7 @@ async function offboardPrincipalCore(
         actor.id, principalId,
       ]);
       await client.query(
-        'SELECT continuum_operator_pseudonymize_scope($1, $2, $3)',
+        'SELECT continuum_operator_pseudonymize_scope_v2($1, $2, $3)',
         [actor.id, scopeId, scopePseudonym],
       );
       const coordinationPrivacy = await client.query<{

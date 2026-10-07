@@ -678,14 +678,53 @@ describe('coordination storage and service', () => {
       [scope.id, principal.id, planHolder.leaseId],
     );
 
+    await pool.query(
+      `INSERT INTO coordination_resources (scope_id, resource, fencing_token)
+       VALUES ($1, 'plan-history', 100000)`, [scope.id],
+    );
+    const planNoisePrincipal = randomUUID();
+    await pool.query(
+      `INSERT INTO principals (id, external_id, kind, display_name)
+       VALUES ($1, $2, 'service', 'Plan noise')`,
+      [planNoisePrincipal, `service:plan-noise:${planNoisePrincipal}`],
+    );
+    await pool.query(
+      `INSERT INTO coordination_leases (
+         lease_id, scope_id, resource, principal_id, run_id, fencing_token,
+         acquired_at, expires_at, released_at, cleanup_eligible_at
+       )
+       SELECT gen_random_uuid(), $1, 'plan-history', $2, gen_random_uuid(), series,
+              clock_timestamp() - interval '4 days',
+              clock_timestamp() - interval '3 days',
+              clock_timestamp() - interval '3 days',
+              clock_timestamp() - interval '3 days'
+         FROM generate_series(1, 100000) series`,
+      [scope.id, planNoisePrincipal],
+    );
+    await pool.query(
+      `INSERT INTO coordination_operation_receipts (
+         principal_id, operation, request_id, payload_hash, outcome,
+         scope_id, resource, lease_id, run_id, fencing_token,
+         expires_at, server_time, retry_after_seconds, retain_until
+       )
+       SELECT $2, 'release', gen_random_uuid(), decode(repeat('00', 32), 'hex'),
+              'released', $1, lease.resource, lease.lease_id, lease.run_id,
+              lease.fencing_token, NULL, clock_timestamp() - interval '2 days',
+              NULL, CASE WHEN lease.fencing_token % 10 = 0
+                         THEN clock_timestamp() - interval '1 day'
+                         ELSE clock_timestamp() + interval '1 day' END
+         FROM coordination_leases lease
+        WHERE lease.scope_id = $1 AND lease.resource = 'plan-history'
+        ORDER BY lease.fencing_token LIMIT 10000`,
+      [scope.id, planNoisePrincipal],
+    );
+
     const plans = await pool.connect();
     try {
       // Refresh statistics after the bounded seed so EXPLAIN represents the
       // indexed production cleanup paths rather than tiny-table estimates.
       await plans.query('ANALYZE coordination_operation_receipts');
       await plans.query('ANALYZE coordination_leases');
-      await plans.query('SET enable_seqscan = off');
-      await plans.query('SET enable_bitmapscan = off');
       const leasePlan = await plans.query(
         `EXPLAIN (FORMAT JSON)
          SELECT lease_id FROM coordination_leases
@@ -717,9 +756,14 @@ describe('coordination storage and service', () => {
       );
       const globalLeasePlan = await plans.query(
         `EXPLAIN (FORMAT JSON)
-         SELECT lease_id FROM coordination_leases
-          WHERE cleanup_eligible_at <= clock_timestamp()
-          ORDER BY cleanup_eligible_at, lease_id LIMIT 1000`,
+         SELECT lease.lease_id FROM coordination_leases lease
+          WHERE lease.cleanup_eligible_at
+                <= clock_timestamp() - interval '24 hours'
+            AND NOT EXISTS (
+              SELECT 1 FROM coordination_operation_receipts receipt
+               WHERE receipt.lease_id = lease.lease_id)
+          ORDER BY lease.cleanup_eligible_at, lease.lease_id
+          LIMIT 1000 FOR UPDATE OF lease SKIP LOCKED`,
       );
       expect(JSON.stringify(leasePlan.rows)).toContain(
         'coordination_leases_principal_cleanup_idx',
@@ -736,6 +780,9 @@ describe('coordination storage and service', () => {
       expect(JSON.stringify(globalLeasePlan.rows)).toContain(
         'coordination_leases_cleanup_ready_idx',
       );
+      expect(JSON.stringify(globalLeasePlan.rows)).toContain(
+        'coordination_receipts_lease_idx',
+      );
     } finally {
       plans.release();
     }
@@ -749,6 +796,56 @@ describe('coordination storage and service', () => {
         WHERE scope_id = $1 AND resource = 'monotonic-db-guard'`,
       [scope.id],
     )).rejects.toMatchObject({ code: '23514' });
+  });
+
+  it('does not complete cleanup while a skipped row is locked and resumes from its cursor', async () => {
+    await pool.query(
+      `INSERT INTO coordination_resources (scope_id, resource, fencing_token)
+       VALUES ($1, 'cursor-history', 3)`, [scope.id],
+    );
+    await pool.query(
+      `INSERT INTO coordination_leases (
+         lease_id, scope_id, resource, principal_id, run_id, fencing_token,
+         acquired_at, expires_at, released_at, cleanup_eligible_at
+       ) SELECT gen_random_uuid(), $1, 'cursor-history', $2, gen_random_uuid(), series,
+                clock_timestamp() - interval '3 days',
+                clock_timestamp() - interval '2 days',
+                clock_timestamp() - interval '2 days', NULL
+           FROM generate_series(1, 3) series`,
+      [scope.id, principal.id],
+    );
+    const locker = await pool.connect();
+    try {
+      await locker.query('BEGIN');
+      await locker.query(
+        `SELECT lease_id FROM coordination_leases
+          WHERE resource = 'cursor-history' ORDER BY lease_id LIMIT 1 FOR UPDATE`,
+      );
+      for (let batch = 0; batch < 3; batch += 1) {
+        expect((await pool.query(
+          'SELECT continuum_backfill_coordination_cleanup(1) AS complete',
+        )).rows[0]?.complete).toBe(false);
+      }
+      expect((await pool.query(
+        `SELECT completed_at IS NOT NULL AS complete, last_lease_id
+           FROM coordination_migration_progress
+          WHERE name = 'issue7-cleanup-eligibility'`,
+      )).rows).toEqual([{ complete: false, last_lease_id: null }]);
+      await locker.query('COMMIT');
+      expect((await pool.query(
+        'SELECT continuum_backfill_coordination_cleanup(1) AS complete',
+      )).rows[0]?.complete).toBe(false);
+      expect((await pool.query(
+        'SELECT continuum_backfill_coordination_cleanup(1) AS complete',
+      )).rows[0]?.complete).toBe(true);
+      expect((await pool.query(
+        `SELECT count(*)::int AS count FROM coordination_leases
+          WHERE resource = 'cursor-history' AND cleanup_eligible_at IS NULL`,
+      )).rows).toEqual([{ count: 0 }]);
+    } finally {
+      await locker.query('ROLLBACK').catch(() => undefined);
+      locker.release();
+    }
   });
 
   it('separates short-lived contention receipts from acquired receipt quota', async () => {

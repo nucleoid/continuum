@@ -180,6 +180,8 @@ describe('coordination issue 7 exact-head remediation', () => {
     expect(migrator).toMatch(/0058_coordination_online_prep\.sql[\s\S]+0057_coordination_privacy_race_remediation\.sql/);
     expect(migrator).toMatch(/0059_coordination_bounded_privacy\.sql[\s\S]+0058_coordination_online_prep\.sql/);
     expect(migrator).toMatch(/0060_coordination_online_finish\.sql[\s\S]+0059_coordination_bounded_privacy\.sql/);
+    expect(migrator).toMatch(/0061_coordination_forward_security_repair\.sql[\s\S]+0060_coordination_online_finish\.sql/);
+    expect(migrator).toMatch(/0062_coordination_forward_online_finish\.sql[\s\S]+0061_coordination_forward_security_repair\.sql/);
   });
 
   it('keeps immutable operator evidence outside audit retention and offboarding mutation', async () => {

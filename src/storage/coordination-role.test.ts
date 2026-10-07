@@ -274,6 +274,11 @@ describe('coordination database role profiles', () => {
         'SELECT continuum_operator_set_coordination_scope_quota($1, $2, 12000)',
         [operatorPrincipal.id, scope.id],
       )).resolves.toBeDefined();
+      await expect(operator.connection.query(
+        `SELECT continuum_operator_set_coordination_principal_quota(
+           $1, $1, 12000, 2000
+         )`, [operatorPrincipal.id],
+      )).resolves.toBeDefined();
       const second = await acquireLease(operator.connection, operatorPrincipal, {
         scope: 'project:operator-role', resource: 'different-reclaimed-key', runId: randomUUID(),
         requestId: randomUUID(),
@@ -294,6 +299,13 @@ describe('coordination database role profiles', () => {
         'SELECT resource_limit FROM coordination_scope_usage WHERE scope_id = $1',
         [scope.id],
       )).rows[0]?.resource_limit).toBe(12000);
+      expect((await pool.query(
+        `SELECT acquire_receipt_limit, contended_receipt_limit
+           FROM coordination_principal_usage WHERE principal_id = $1`,
+        [operatorPrincipal.id],
+      )).rows[0]).toEqual({
+        acquire_receipt_limit: 12000, contended_receipt_limit: 2000,
+      });
       expect((await pool.query(
         `SELECT metadata->>'operation' AS operation FROM audit_log
           WHERE principal_id = $1 AND scope_id = $2
@@ -360,6 +372,10 @@ describe('coordination database role profiles', () => {
       await expect(operator.connection.query(
         'SELECT continuum_operator_pseudonymize_scope($1, $2, $3)',
         [operatorPrincipal.id, userScope.id, 'offboarded-scope'],
+      )).rejects.toThrow(/privacy v2.*upgrade/i);
+      await expect(operator.connection.query(
+        'SELECT continuum_operator_pseudonymize_scope_v2($1, $2, $3)',
+        [operatorPrincipal.id, userScope.id, 'offboarded-scope'],
       )).rejects.toThrow(/active memberships/i);
       await releaseLease(operator.connection, operatorPrincipal, {
         leaseId: personal.acquired ? personal.leaseId : '',
@@ -367,7 +383,7 @@ describe('coordination database role profiles', () => {
         requestId: randomUUID(),
       });
       await expect(operator.connection.query(
-        'SELECT continuum_operator_pseudonymize_scope($1, $2, $3)',
+        'SELECT continuum_operator_pseudonymize_scope_v2($1, $2, $3)',
         [operatorPrincipal.id, userScope.id, 'offboarded-scope'],
       )).rejects.toThrow(/active memberships/i);
       await pool.query(
@@ -377,7 +393,7 @@ describe('coordination database role profiles', () => {
       );
       for (let phase = 0; phase < 3; phase += 1) {
         await operator.connection.query(
-          'SELECT continuum_operator_pseudonymize_scope($1, $2, $3)',
+          'SELECT continuum_operator_pseudonymize_scope_v2($1, $2, $3)',
           [operatorPrincipal.id, userScope.id, 'offboarded-scope'],
         );
       }
@@ -423,7 +439,7 @@ describe('coordination database role profiles', () => {
         [operatorPrincipal.id, liveScope.id],
       );
       await expect(operator.connection.query(
-        'SELECT continuum_operator_pseudonymize_scope($1, $2, $3)',
+        'SELECT continuum_operator_pseudonymize_scope_v2($1, $2, $3)',
         [operatorPrincipal.id, liveScope.id, 'offboarded-live-scope'],
       )).rejects.toThrow(/live coordination leases/i);
       await pool.query(
@@ -433,11 +449,54 @@ describe('coordination database role profiles', () => {
           WHERE lease_id = $1`, [live.leaseId],
       );
       await expect(operator.connection.query(
-        'SELECT continuum_operator_pseudonymize_scope($1, $2, $3)',
+        'SELECT continuum_operator_pseudonymize_scope_v2($1, $2, $3)',
         [operatorPrincipal.id, liveScope.id, 'offboarded-live-scope'],
       )).resolves.toBeDefined();
     } finally {
       await operator.connection.end();
+    }
+  });
+
+  it('locks membership changes only while privacy progress exists and skips no-op updates', async () => {
+    const principal = await createPrincipal(pool, {
+      externalId: 'service:privacy-lock', kind: 'service', displayName: 'Privacy lock',
+    });
+    const scope = await createScope(pool, { kind: 'project', name: 'privacy-lock' });
+    await addMembership(pool, principal.id, scope.id, 'writer');
+    await pool.query(
+      `UPDATE scope_memberships SET active = FALSE
+        WHERE principal_id = $1 AND scope_id = $2`, [principal.id, scope.id],
+    );
+    await pool.query(
+      `INSERT INTO coordination_scope_privacy_progress (scope_id, pseudonym)
+       VALUES ($1, 'privacy-lock')`, [scope.id],
+    );
+    const locker = await pool.connect();
+    const contender = await pool.connect();
+    try {
+      await locker.query('BEGIN');
+      await locker.query(
+        `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 761))`, [scope.id],
+      );
+      await expect(contender.query(
+        `UPDATE scope_memberships SET active = FALSE
+          WHERE principal_id = $1 AND scope_id = $2`, [principal.id, scope.id],
+      )).resolves.toMatchObject({ rowCount: 1 });
+      await contender.query("SET lock_timeout = '100ms'");
+      await expect(contender.query(
+        `UPDATE scope_memberships SET active = TRUE
+          WHERE principal_id = $1 AND scope_id = $2`, [principal.id, scope.id],
+      )).rejects.toMatchObject({ code: '55P03' });
+      await contender.query('RESET lock_timeout');
+      await locker.query('ROLLBACK');
+      await expect(contender.query(
+        `UPDATE scope_memberships SET active = TRUE
+          WHERE principal_id = $1 AND scope_id = $2`, [principal.id, scope.id],
+      )).rejects.toThrow(/cannot gain active memberships/i);
+    } finally {
+      await locker.query('ROLLBACK').catch(() => undefined);
+      locker.release();
+      contender.release();
     }
   });
 
@@ -502,7 +561,7 @@ describe('coordination database role profiles', () => {
          )`, [operatorPrincipal.id, target.id, owned.id],
       )).rejects.toThrow(/disabled|offboarded/i);
       await pool.query(
-        `UPDATE principals SET disabled_at = clock_timestamp(), offboarded_at = clock_timestamp()
+        `UPDATE principals SET disabled_at = clock_timestamp()
           WHERE id = $1`, [target.id],
       );
 

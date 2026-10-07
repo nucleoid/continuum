@@ -843,7 +843,10 @@ describe('offboarding and erasure', () => {
     expect((await pool.query(
       `SELECT metadata->>'phase' AS phase FROM coordination_operator_events
         WHERE scope_id = $1 ORDER BY id`, [value.personal.id],
-    )).rows).toEqual([{ phase: 'started' }, { phase: 'completed' }]);
+    )).rows).toEqual([
+      { phase: 'started' }, { phase: 'completed' },
+      { phase: 'started' }, { phase: 'batch' }, { phase: 'completed' },
+    ]);
     await pool.query('DELETE FROM audit_log');
     const retry = await offboardPrincipal(pool, value.admin, value.target.id);
     expect(retry.alreadyOffboarded).toBe(true);
@@ -853,7 +856,10 @@ describe('offboarding and erasure', () => {
     expect((await pool.query(
       `SELECT metadata->>'phase' AS phase FROM coordination_operator_events
         WHERE scope_id = $1 ORDER BY id`, [value.personal.id],
-    )).rows).toEqual([{ phase: 'started' }, { phase: 'completed' }]);
+    )).rows).toEqual([
+      { phase: 'started' }, { phase: 'completed' },
+      { phase: 'started' }, { phase: 'batch' }, { phase: 'completed' },
+    ]);
   });
 
   it('orders embedding writes with archive and removes either race winner', async () => {

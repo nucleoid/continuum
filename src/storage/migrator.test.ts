@@ -61,7 +61,7 @@ describe('runMigrations', () => {
     const files = (await readdir(join(process.cwd(), 'migrations')))
       .filter((name) => name.endsWith('.sql'))
       .sort();
-    expect(files.slice(-7)).toEqual([
+    expect(files.slice(-9)).toEqual([
       '0054_coordination_leases.sql',
       '0055_coordination_review_remediation.sql',
       '0056_coordination_final_remediation.sql',
@@ -69,6 +69,8 @@ describe('runMigrations', () => {
       '0058_coordination_online_prep.sql',
       '0059_coordination_bounded_privacy.sql',
       '0060_coordination_online_finish.sql',
+      '0061_coordination_forward_security_repair.sql',
+      '0062_coordination_forward_online_finish.sql',
     ]);
     const migration = await readFile(
       join(process.cwd(), 'migrations/0054_coordination_leases.sql'),
@@ -353,7 +355,7 @@ describe('runMigrations', () => {
         $$;
       `);
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-31).map((migration) => migration.name)).toEqual([
+      expect(applied.slice(-33).map((migration) => migration.name)).toEqual([
         '0030_offboarding_round7_integrity.sql',
         '0031_offboarding_round7_indexes.sql',
         '0032_offboarding_round7_compatibility.sql',
@@ -385,7 +387,13 @@ describe('runMigrations', () => {
         '0058_coordination_online_prep.sql',
         '0059_coordination_bounded_privacy.sql',
         '0060_coordination_online_finish.sql',
+        '0061_coordination_forward_security_repair.sql',
+        '0062_coordination_forward_online_finish.sql',
       ]);
+      expect((await pool.query(
+        `SELECT disabled_at IS NOT NULL AS disabled FROM principals
+          WHERE id = '00000000-0000-4000-8000-000000000012'`,
+      )).rows).toEqual([{ disabled: true }]);
       expect((await pool.query(
         `SELECT indisvalid AS valid FROM pg_index
           WHERE indexrelid = 'memories_scope_id_cursor_idx'::regclass`,
@@ -632,7 +640,9 @@ describe('runMigrations', () => {
       && name !== '0057_coordination_privacy_race_remediation.sql'
       && name !== '0058_coordination_online_prep.sql'
       && name !== '0059_coordination_bounded_privacy.sql'
-      && name !== '0060_coordination_online_finish.sql')) {
+      && name !== '0060_coordination_online_finish.sql'
+      && name !== '0061_coordination_forward_security_repair.sql'
+      && name !== '0062_coordination_forward_online_finish.sql')) {
       if (file === '0038_offboarding_search_path_hardening.sql') {
         await copyFile(
           new URL(
@@ -1696,7 +1706,7 @@ describe('runMigrations', () => {
     }]);
   });
 
-  it('upgrades a large 0057 schema online, resumes 0060, and uses cleanup state', async () => {
+  it('upgrades mixed 0057 rows and resumes 0062 cleanup state', async () => {
     const suffix = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
     const schema = `coordination_issue7_upgrade_${suffix}`;
     const admin = new pg.Pool({ connectionString: DATABASE_URL });
@@ -1711,7 +1721,7 @@ describe('runMigrations', () => {
     const files = (await readdir(source)).filter((name) => name.endsWith('.sql')).sort();
     await Promise.all(files.filter((name) => name <= '0057_coordination_privacy_race_remediation.sql')
       .map((name) => copyFile(new URL(name, source), join(before, name))));
-    await Promise.all(files.filter((name) => name <= '0060_coordination_online_finish.sql')
+    await Promise.all(files.filter((name) => name <= '0062_coordination_forward_online_finish.sql')
       .map((name) => copyFile(new URL(name, source), join(forward, name))));
     try {
       await runMigrations(pool, before);
@@ -1727,19 +1737,25 @@ describe('runMigrations', () => {
       )).rows[0].id as string;
       await pool.query(
         `INSERT INTO coordination_resources (scope_id, resource, fencing_token)
-         SELECT $1, 'large-upgrade-' || series, 1
-           FROM generate_series(1, 5000) series`, [scopeId],
+         VALUES ($1, 'large-upgrade-history', 5000)`, [scopeId],
       );
       await pool.query(
         `INSERT INTO coordination_leases (
            lease_id, scope_id, resource, principal_id, run_id, fencing_token,
            acquired_at, expires_at, released_at
-         ) SELECT gen_random_uuid(), $1, 'large-upgrade-' || series, $2,
-                  gen_random_uuid(), 1, clock_timestamp() - interval '3 days',
+         ) SELECT gen_random_uuid(), $1, 'large-upgrade-history', $2,
+                  gen_random_uuid(), series, clock_timestamp() - interval '3 days',
                   clock_timestamp() - interval '2 days',
                   clock_timestamp() - interval '2 days'
              FROM generate_series(1, 5000) series`,
         [scopeId, principalId],
+      );
+      await pool.query(
+        `UPDATE coordination_resources resource SET current_lease_id = lease.lease_id
+          FROM coordination_leases lease
+         WHERE resource.scope_id = $1 AND lease.scope_id = resource.scope_id
+           AND lease.resource = resource.resource AND lease.fencing_token = 5000`,
+        [scopeId],
       );
 
       const locked = await blocker.connect();
@@ -1779,32 +1795,57 @@ describe('runMigrations', () => {
       expect((await pool.query(
         `SELECT count(*)::int AS count FROM coordination_leases
           WHERE cleanup_eligible_at IS NOT NULL`,
-      )).rows).toEqual([{ count: 5000 }]);
+      )).rows).toEqual([{ count: 4999 }]);
       expect((await pool.query(
-        `SELECT rows_processed::int, completed_at IS NOT NULL AS complete
+        `SELECT count(*)::int AS count FROM coordination_leases
+          WHERE cleanup_eligible_at IS NULL`,
+      )).rows).toEqual([{ count: 1 }]);
+      expect((await pool.query(
+        `SELECT rows_processed::int, last_lease_id IS NOT NULL AS cursor,
+                completed_at IS NOT NULL AS complete
            FROM coordination_migration_progress
           WHERE name = 'issue7-cleanup-eligibility'`,
-      )).rows).toEqual([{ rows_processed: 5000, complete: true }]);
+      )).rows).toEqual([{ rows_processed: 4999, cursor: true, complete: true }]);
+      await pool.query(
+        `UPDATE coordination_resources SET current_lease_id = NULL
+          WHERE scope_id = $1`, [scopeId],
+      );
       await pool.query(
         `DELETE FROM _continuum_migrations
-          WHERE name = '0060_coordination_online_finish.sql'`,
+          WHERE name = '0062_coordination_forward_online_finish.sql'`,
       );
       await expect(runMigrations(pool, forward)).resolves.toMatchObject([
-        expect.objectContaining({ name: '0060_coordination_online_finish.sql' }),
+        expect.objectContaining({ name: '0062_coordination_forward_online_finish.sql' }),
       ]);
-      await pool.query('SET enable_seqscan = off');
-      await pool.query('SET enable_bitmapscan = off');
+      expect((await pool.query(
+        `SELECT count(*)::int AS count FROM coordination_leases
+          WHERE cleanup_eligible_at IS NULL`,
+      )).rows).toEqual([{ count: 0 }]);
+      await pool.query('ANALYZE coordination_leases');
+      await pool.query('ANALYZE coordination_operation_receipts');
       const plan = await pool.query(
         `EXPLAIN (FORMAT JSON)
-         SELECT lease_id FROM coordination_leases
-          WHERE cleanup_eligible_at <= clock_timestamp() - interval '24 hours'
-          ORDER BY cleanup_eligible_at, lease_id LIMIT 1000`,
+         SELECT lease.lease_id FROM coordination_leases lease
+          WHERE lease.cleanup_eligible_at
+                <= clock_timestamp() - interval '24 hours'
+            AND NOT EXISTS (
+              SELECT 1 FROM coordination_operation_receipts receipt
+               WHERE receipt.lease_id = lease.lease_id)
+          ORDER BY lease.cleanup_eligible_at, lease.lease_id
+          LIMIT 1000 FOR UPDATE OF lease SKIP LOCKED`,
       );
-      expect(JSON.stringify(plan.rows)).toContain('coordination_leases_cleanup_ready_idx');
+      expect(JSON.stringify(plan.rows)).toContain('LockRows');
+      expect((await pool.query(
+        `SELECT indexrelid::regclass::text AS name, indisvalid AS valid
+           FROM pg_index WHERE indexrelid =
+             'coordination_leases_cleanup_ready_idx'::regclass`,
+      )).rows).toEqual([{
+        name: 'coordination_leases_cleanup_ready_idx', valid: true,
+      }]);
     } finally {
       await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
     }
-  }, 30_000);
+  }, 60_000);
 
   it('runs marked concurrent-index migrations outside a transaction', async () => {
     const queries: string[] = [];

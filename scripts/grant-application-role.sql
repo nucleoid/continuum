@@ -76,9 +76,13 @@ DECLARE schema_name TEXT := current_setting('continuum.application_grant_schema'
         target_role NAME := current_setting('continuum.application_grant_target')::name;
 BEGIN
   IF to_regclass(format('%I.coordination_resources', schema_name)) IS NOT NULL THEN
-    EXECUTE format('GRANT SELECT, INSERT, UPDATE ON TABLE %I.coordination_resources TO %I',
+    EXECUTE format('GRANT SELECT, INSERT ON TABLE %I.coordination_resources TO %I',
       schema_name, target_role);
-    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.coordination_leases TO %I',
+    EXECUTE format('GRANT UPDATE (fencing_token, current_lease_id, updated_at) ON TABLE %I.coordination_resources TO %I',
+      schema_name, target_role);
+    EXECUTE format('GRANT SELECT, INSERT, DELETE ON TABLE %I.coordination_leases TO %I',
+      schema_name, target_role);
+    EXECUTE format('GRANT UPDATE (expires_at, released_at) ON TABLE %I.coordination_leases TO %I',
       schema_name, target_role);
     EXECUTE format('GRANT SELECT, INSERT, DELETE ON TABLE %I.coordination_operation_receipts TO %I',
       schema_name, target_role);
@@ -92,6 +96,21 @@ BEGIN
       schema_name, schema_name, target_role);
     EXECUTE format('REVOKE ALL ON FUNCTION %I.continuum_operator_reclaim_coordination_resource(UUID, UUID, TEXT), %I.continuum_operator_set_coordination_scope_quota(UUID, UUID, INTEGER), %I.continuum_operator_sweep_coordination_state(UUID, INTEGER) FROM %I',
       schema_name, schema_name, schema_name, target_role);
+    IF to_regprocedure(format(
+      '%I.continuum_operator_pseudonymize_scope_v2(uuid,uuid,text)', schema_name
+    )) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.continuum_operator_pseudonymize_scope_v2(UUID, UUID, TEXT) FROM %I',
+        schema_name, target_role);
+    END IF;
+    IF to_regprocedure(format(
+      '%I.continuum_operator_set_coordination_principal_quota(uuid,uuid,integer,integer)',
+      schema_name
+    )) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.continuum_operator_set_coordination_principal_quota(UUID, UUID, INTEGER, INTEGER) FROM %I',
+        schema_name, target_role);
+    END IF;
   END IF;
 END;
 $coordination_grants$;
