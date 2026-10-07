@@ -3,8 +3,9 @@ SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '30s';
 
 -- Preflight must run before any maintenance-window change. The migration owner
--- must own the application schema and every application object that this repair
--- replaces. ALTER ROLE ... NOLOGIN also requires SUPERUSER, or CREATEROLE plus
+-- must own (or inherit the effective owner role for) the application schema,
+-- and directly own every application object that this repair replaces.
+-- ALTER ROLE ... NOLOGIN also requires SUPERUSER, or CREATEROLE plus
 -- ADMIN OPTION on each bound sync role under supported PostgreSQL 16 semantics.
 DO $preflight$
 DECLARE
@@ -15,15 +16,17 @@ DECLARE
 BEGIN
   SELECT namespace.nspowner INTO owner_oid
     FROM pg_namespace namespace WHERE namespace.oid = schema_oid;
-  IF owner_oid <> current_user::regrole::oid THEN
-    RAISE EXCEPTION 'migration owner must own the application schema before 0051';
+  IF NOT pg_has_role(current_user, owner_oid, 'USAGE') THEN
+    RAISE EXCEPTION 'migration owner must own or inherit the application schema owner role before 0051';
   END IF;
   IF EXISTS (
     SELECT 1 FROM pg_class relation
-     WHERE relation.relnamespace = schema_oid AND relation.relowner <> owner_oid
+     WHERE relation.relnamespace = schema_oid
+       AND relation.relowner <> current_user::regrole::oid
   ) OR EXISTS (
     SELECT 1 FROM pg_proc function
-     WHERE function.pronamespace = schema_oid AND function.proowner <> owner_oid
+     WHERE function.pronamespace = schema_oid
+       AND function.proowner <> current_user::regrole::oid
   ) THEN
     RAISE EXCEPTION 'migration owner must own every application table, sequence, index, and function before 0051';
   END IF;

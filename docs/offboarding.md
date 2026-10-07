@@ -389,14 +389,17 @@ Qualify another major independently before migration; successful SQL parsing
 alone is not a supported rollout.
 
 Migration `0051` performs its privilege preflight before changing any object.
-The connecting migration role must own the application schema and every
-application object. If a sync identity is registered, it must either be
-superuser or have `CREATEROLE` plus `ADMIN OPTION` on that exact OID-bound sync
-role, because retirement uses `ALTER ROLE ... NOLOGIN`. Schema ownership is
-required for the `PUBLIC` schema/default-privilege revocations. Failed preflight
-leaves no partial 0051 changes. The supported least-privilege path is a
-non-superuser schema/object owner with `CREATEROLE` and narrowly scoped
-`ADMIN OPTION` on managed sync roles, not blanket superuser access.
+The connecting migration role must directly own every application object and
+must own, or inherit the effective owner role for, the application schema.
+PostgreSQL 16 database owners satisfy the latter for the default `public`
+schema through `pg_database_owner`. If a sync identity is registered, the
+role must either be superuser or have `CREATEROLE` plus `ADMIN OPTION` on that
+exact OID-bound sync role, because retirement uses `ALTER ROLE ... NOLOGIN`.
+Effective schema ownership is required for the `PUBLIC` schema/default-
+privilege revocations. Failed preflight leaves no partial 0051 changes. The
+supported least-privilege path is a non-superuser schema/object owner with
+`CREATEROLE` and narrowly scoped `ADMIN OPTION` on managed sync roles, not
+blanket superuser access.
 The application role must not own the event ledger, completion-capability
 table, or security-definer functions, and receives no direct privilege on the
 capability table. Direct `completed` inserts then fail at the trigger.

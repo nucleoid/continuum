@@ -254,6 +254,21 @@ describe('0048 trusted database identity upgrade', () => {
     expect(migration.indexOf('preflight')).toBeLessThan(migration.indexOf('CREATE OR REPLACE'));
   });
 
+  it('accepts database-owner inheritance of the PostgreSQL 16 public-schema owner role', async () => {
+    const state = await fixture('0050_offboarding_startup_verification_fix.sql');
+    await state.admin.query(
+      `ALTER SCHEMA ${quoteIdentifier(state.schema)} OWNER TO pg_database_owner`,
+    );
+    await addMigration(state.directory, '0051_offboarding_security_contract.sql');
+    await expect(runMigrations(state.pool, state.directory)).resolves.toEqual([
+      expect.objectContaining({ name: '0051_offboarding_security_contract.sql' }),
+    ]);
+    expect((await state.pool.query(
+      `SELECT pg_has_role(current_user, nspowner, 'USAGE') AS effective_owner
+         FROM pg_namespace WHERE nspname = current_schema()`,
+    )).rows[0].effective_owner).toBe(true);
+  }, 60_000);
+
   it('supports a non-superuser schema owner with scoped CREATEROLE and ADMIN OPTION', async () => {
     const state = await fixture('0050_offboarding_startup_verification_fix.sql');
     const ownerRole = 'upgrade_owner_' + state.suffix;
