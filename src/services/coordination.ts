@@ -75,11 +75,21 @@ function safeCoordinationError(error: unknown): ServiceError {
     );
   }
   const code = (error as { code?: unknown })?.code;
-  if (code === '55P03' || code === '57014') {
+  if (code === '55P03' || code === '57014' || code === '40P01' || code === '40001') {
     return new ServiceError(
       'COORDINATION_TIMEOUT',
       'Coordination request timed out',
       { cause: error },
+    );
+  }
+  if (code === '23514' && [
+    'coordination_scope_resource_quota',
+    'coordination_receipt_quota',
+    'coordination_resource_rate_quota',
+  ].includes(String((error as { constraint?: unknown }).constraint))) {
+    return new ServiceError(
+      'COORDINATION_QUOTA_EXCEEDED',
+      'Coordination storage quota exceeded',
     );
   }
   if (code === '23514') {
@@ -189,6 +199,9 @@ export async function acquireLease(
   options: { signal?: AbortSignal; transport?: 'rest' | 'mcp' } = {},
 ): Promise<AcquireLeaseResult> {
   try {
+    if (typeof input.scope !== 'string') {
+      throw new ServiceError('INVALID_INPUT', 'scope must be a string');
+    }
     const ref = parseScopeString(input.scope);
     const scopeLabel = ref.kind === 'org' ? 'org' : `${ref.kind}:${ref.name}`;
     const resource = validateResourceKey(input.resource);
@@ -203,7 +216,6 @@ export async function acquireLease(
       const scope = await resolveScope(client, ref);
       if (!scope) throw scopeNotFound();
       await requireAuthorization(client, principal.id, scope.id, 'scope');
-      await preparePrincipalReceipts(client, principal.id);
       await lockReceiptRequest(client, principal.id, 'acquire', requestId);
       const prior = await getReceipt(client, principal.id, 'acquire', requestId);
       if (prior) {
@@ -237,6 +249,7 @@ export async function acquireLease(
           retryAfterSeconds,
           serverTime,
         };
+        await preparePrincipalReceipts(client, principal.id);
         await insertReceipt(client, {
           principalId: principal.id,
           operation: 'acquire',
@@ -287,6 +300,7 @@ export async function acquireLease(
         expiresAt: generation.expiresAt,
         serverTime,
       };
+      await preparePrincipalReceipts(client, principal.id);
       await insertReceipt(client, {
         principalId: principal.id,
         operation: 'acquire',
@@ -360,7 +374,6 @@ export async function renewLease(
         client, principal.id, 'renew', leaseId, requestId,
       );
       await requireAuthorization(client, principal.id, target.scopeId, 'lease');
-      await preparePrincipalReceipts(client, principal.id);
       await lockReceiptRequest(client, principal.id, 'renew', requestId);
       const prior = await getReceipt(client, principal.id, 'renew', requestId);
       if (prior) {
@@ -409,6 +422,7 @@ export async function renewLease(
         expiresAt,
         serverTime,
       };
+      await preparePrincipalReceipts(client, principal.id);
       await insertReceipt(client, {
         principalId: principal.id,
         operation: 'renew',
@@ -465,7 +479,6 @@ export async function releaseLease(
         client, principal.id, 'release', leaseId, requestId,
       );
       await requireAuthorization(client, principal.id, target.scopeId, 'lease');
-      await preparePrincipalReceipts(client, principal.id);
       await lockReceiptRequest(client, principal.id, 'release', requestId);
       const prior = await getReceipt(client, principal.id, 'release', requestId);
       if (prior) {
@@ -490,6 +503,7 @@ export async function releaseLease(
       await releaseLeaseGeneration(
         client, target.scopeId, target.resource, leaseId, serverTime,
       );
+      await preparePrincipalReceipts(client, principal.id);
       await insertReceipt(client, {
         principalId: principal.id,
         operation: 'release',
@@ -535,6 +549,9 @@ export async function inspectLease(
   options: { signal?: AbortSignal; transport?: 'rest' | 'mcp' } = {},
 ): Promise<InspectLeaseResult> {
   try {
+    if (typeof input.scope !== 'string') {
+      throw new ServiceError('INVALID_INPUT', 'scope must be a string');
+    }
     const ref = parseScopeString(input.scope);
     const scopeLabel = ref.kind === 'org' ? 'org' : `${ref.kind}:${ref.name}`;
     const resource = validateResourceKey(input.resource);

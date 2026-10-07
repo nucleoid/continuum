@@ -58,4 +58,21 @@ describe('coordination service boundaries', () => {
     )).rejects.toMatchObject({ code: 'COORDINATION_TIMEOUT', status: 503 });
     expect(connect).not.toHaveBeenCalled();
   });
+
+  it.each(['40P01', '40001'])('maps retryable PostgreSQL %s to coordination timeout', async (code) => {
+    const query = vi.fn().mockImplementation(async (sql: string) => {
+      if (sql.startsWith('BEGIN')) {
+        throw Object.assign(new Error('retry transaction'), { code });
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const release = vi.fn();
+    const connect = vi.fn().mockResolvedValue({ query, release });
+    await expect(acquireLease(
+      { connect } as unknown as pg.Pool,
+      principal,
+      valid,
+    )).rejects.toMatchObject({ code: 'COORDINATION_TIMEOUT', status: 503 });
+    expect(release).toHaveBeenCalled();
+  });
 });

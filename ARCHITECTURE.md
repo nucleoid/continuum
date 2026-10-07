@@ -17,19 +17,25 @@ Coordination leases are a dedicated PostgreSQL domain, separate from memories,
 embeddings, capture, recall, and generated AGENTS.md content. The public
 contract is documented in [docs/coordination.md](./docs/coordination.md).
 
-`coordination_resources` preserves one monotonic `BIGINT` fencing history per
-exact scope/resource pair. `coordination_leases` preserves immutable lease
-generations with mutable expiry and release time.
+`coordination_resources` preserves a monotonic `BIGINT` fencing counter for
+each unreclaimed scope/resource pair, with an owner-only scope floor preserving
+monotonicity after reclaim or erasure. `coordination_leases` records lease
+generations whose identity and token are immutable while expiry and release
+time are lifecycle fields.
 `coordination_operation_receipts` stores typed idempotency outcomes, while
 scope and principal usage tables enforce hard resource and retained-receipt
-limits. Resource history is never evicted.
+limits. Bounded operator maintenance may remove terminal lease history and
+reclaim inactive keys after preserving the scope fencing floor.
 
 Only current explicit writer/admin membership on the exact scope grants access.
-A coordination transaction locks the relevant principal, membership, and Entra
-freshness state; then receipt/quota, resource, and lease rows in canonical
-order. It samples `clock_timestamp()` after row waits and revalidates
-authorization and cancellation immediately before commit. Lease mutation,
-receipt, quota, and bounded content-free audit metadata commit together.
+A coordination transaction locks membership and Entra freshness state, then
+the exact receipt/resource/lease rows in canonical order. Principal quota rows
+are touched only near receipt insertion or new-key creation rather than
+serializing the whole transaction. It samples `clock_timestamp()` after row
+waits and revalidates authorization and cancellation immediately before commit.
+Lease mutation, receipt, quota, and bounded metadata commit together. Before
+offboarding, metadata includes a one-way resource digest; offboarding removes
+it.
 
 REST and MCP are thin naming adapters over one service. REST uses camelCase and
 MCP uses snake_case. Contention is success, stale or denied generations are

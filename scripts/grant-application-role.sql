@@ -66,19 +66,28 @@ TO :"continuum_app_role";
 -- grants until the coordination schema is present; the final allow-list call
 -- still rejects missing or broader privileges after 0055.
 SELECT set_config('continuum.application_grant_target', :'continuum_app_role', TRUE);
+SELECT set_config('continuum.application_grant_schema', namespace.nspname, TRUE)
+FROM :"continuum_schema".scopes scope
+JOIN pg_catalog.pg_class relation ON relation.oid = scope.tableoid
+JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+LIMIT 1;
 DO $coordination_grants$
-DECLARE schema_name TEXT := current_schema();
+DECLARE schema_name TEXT := current_setting('continuum.application_grant_schema');
         target_role NAME := current_setting('continuum.application_grant_target')::name;
 BEGIN
   IF to_regclass(format('%I.coordination_resources', schema_name)) IS NOT NULL THEN
-    EXECUTE format('GRANT SELECT, INSERT, UPDATE ON TABLE %I.coordination_resources, %I.coordination_scope_usage, %I.coordination_principal_usage TO %I',
-      schema_name, schema_name, schema_name, target_role);
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE ON TABLE %I.coordination_resources TO %I',
+      schema_name, target_role);
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.coordination_leases, %I.coordination_operation_receipts TO %I',
       schema_name, schema_name, target_role);
-    EXECUTE format('GRANT SELECT ON TABLE %I.coordination_fencing_floors TO %I',
-      schema_name, target_role);
-    EXECUTE format('REVOKE ALL ON FUNCTION %I.continuum_operator_reclaim_coordination_resource(UUID, UUID, TEXT), %I.continuum_operator_set_coordination_scope_quota(UUID, UUID, INTEGER) FROM %I',
+    EXECUTE format('GRANT SELECT ON TABLE %I.coordination_scope_usage, %I.coordination_principal_usage TO %I',
       schema_name, schema_name, target_role);
+    EXECUTE format('REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE %I.coordination_scope_usage, %I.coordination_principal_usage, %I.coordination_scope_fencing_floors FROM %I',
+      schema_name, schema_name, schema_name, target_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_coordination_reserve_resource_creation(UUID), %I.continuum_coordination_scope_fencing_floor(UUID) TO %I',
+      schema_name, schema_name, target_role);
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.continuum_operator_reclaim_coordination_resource(UUID, UUID, TEXT), %I.continuum_operator_set_coordination_scope_quota(UUID, UUID, INTEGER), %I.continuum_operator_sweep_coordination_state(UUID, INTEGER) FROM %I',
+      schema_name, schema_name, schema_name, target_role);
   END IF;
 END;
 $coordination_grants$;

@@ -23,7 +23,8 @@ describe('coordination review remediation contract', () => {
   });
 
   it('ships a forward migration for grants, indexes, operator maintenance, and offboarding', async () => {
-    const migration = await source('migrations/0056_coordination_final_remediation.sql');
+    const migration = await source('migrations/0055_coordination_review_remediation.sql')
+      + await source('migrations/0056_coordination_final_remediation.sql');
     expect(migration).toContain('coordination_resources_current_lease_idx');
     expect(migration).toContain('coordination_leases_principal_terminal_idx');
     expect(migration).toMatch(/continuum_assert_application_role_allowlist[\s\S]+coordination_resources/i);

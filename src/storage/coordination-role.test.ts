@@ -164,7 +164,8 @@ describe('coordination database role profiles', () => {
       });
       await pool.query(
         `UPDATE coordination_operation_receipts
-            SET retain_until = clock_timestamp() - interval '1 second'
+            SET server_time = clock_timestamp() - interval '2 seconds',
+                retain_until = clock_timestamp() - interval '1 second'
           WHERE principal_id = $1`,
         [operatorPrincipal.id],
       );
@@ -177,7 +178,7 @@ describe('coordination database role profiles', () => {
         [operatorPrincipal.id, scope.id],
       )).resolves.toBeDefined();
       const second = await acquireLease(operator.connection, operatorPrincipal, {
-        scope: 'project:operator-role', resource: 'reclaim-me', runId: randomUUID(),
+        scope: 'project:operator-role', resource: 'different-reclaimed-key', runId: randomUUID(),
         requestId: randomUUID(),
       });
       expect(second).toMatchObject({ acquired: true, fencingToken: '2' });
@@ -196,6 +197,54 @@ describe('coordination database role profiles', () => {
         'SELECT resource_limit FROM coordination_scope_usage WHERE scope_id = $1',
         [scope.id],
       )).rows[0]?.resource_limit).toBe(12000);
+      expect((await pool.query(
+        `SELECT metadata->>'operation' AS operation FROM audit_log
+          WHERE principal_id = $1 AND scope_id = $2
+            AND metadata->>'operation' IN (
+              'coordination_resource_reclaimed', 'coordination_scope_quota_changed'
+            ) ORDER BY id`,
+        [operatorPrincipal.id, scope.id],
+      )).rows).toEqual([
+        { operation: 'coordination_resource_reclaimed' },
+        { operation: 'coordination_scope_quota_changed' },
+      ]);
+
+      const inactivePrincipal = await createPrincipal(pool, {
+        externalId: 'service:inactive-coordination', kind: 'service', displayName: 'Inactive',
+      });
+      const inactiveScope = await createScope(pool, {
+        kind: 'project', name: 'inactive-reclaim',
+      });
+      await addMembership(pool, inactivePrincipal.id, inactiveScope.id, 'writer');
+      const inactiveRunId = randomUUID();
+      const inactiveLease = await acquireLease(operator.connection, inactivePrincipal, {
+        scope: 'project:inactive-reclaim', resource: 'abandoned-key',
+        runId: inactiveRunId, requestId: randomUUID(),
+      });
+      if (!inactiveLease.acquired) throw new Error('expected inactive acquisition');
+      await releaseLease(operator.connection, inactivePrincipal, {
+        leaseId: inactiveLease.leaseId, runId: inactiveRunId, requestId: randomUUID(),
+      });
+      await pool.query(
+        `UPDATE coordination_operation_receipts
+            SET server_time = clock_timestamp() - interval '2 seconds',
+                retain_until = clock_timestamp() - interval '1 second'
+          WHERE principal_id = $1`,
+        [inactivePrincipal.id],
+      );
+      await pool.query(
+        'UPDATE principals SET disabled_at = clock_timestamp() WHERE id = $1',
+        [inactivePrincipal.id],
+      );
+      await expect(operator.connection.query(
+        'SELECT continuum_operator_reclaim_coordination_resource($1, $2, $3)',
+        [operatorPrincipal.id, inactiveScope.id, 'abandoned-key'],
+      )).resolves.toBeDefined();
+      expect((await pool.query(
+        `SELECT acquire_receipt_count, mutation_receipt_count
+           FROM coordination_principal_usage WHERE principal_id = $1`,
+        [inactivePrincipal.id],
+      )).rows).toEqual([{ acquire_receipt_count: 0, mutation_receipt_count: 0 }]);
 
       const userScope = await createScope(pool, {
         kind: 'user', name: 'person@example.test',
@@ -235,12 +284,16 @@ describe('coordination database role profiles', () => {
           WHERE resource.scope_id = $1`,
         [userScope.id],
       );
-      expect(scrubbed.rows).toEqual([{
-        resource: expect.stringMatching(/^offboarded:[0-9a-f-]{36}$/),
-        lease_resource: expect.stringMatching(/^offboarded:[0-9a-f-]{36}$/),
-        receipt_resource: expect.stringMatching(/^offboarded:[0-9a-f-]{36}$/),
-        fencing_token: '1',
-      }]);
+      expect(scrubbed.rows).toHaveLength(2);
+      expect(new Set(scrubbed.rows.map((row) => row.resource)).size).toBe(1);
+      for (const row of scrubbed.rows) {
+        expect(row).toEqual({
+          resource: expect.stringMatching(/^offboarded:[0-9a-f-]{36}$/),
+          lease_resource: expect.stringMatching(/^offboarded:[0-9a-f-]{36}$/),
+          receipt_resource: expect.stringMatching(/^offboarded:[0-9a-f-]{36}$/),
+          fencing_token: '1',
+        });
+      }
       expect(JSON.stringify(scrubbed.rows)).not.toContain('person@example.test');
       expect((await pool.query(
         'SELECT fencing_floor::text AS floor FROM coordination_scope_fencing_floors WHERE scope_id = $1',

@@ -61,10 +61,11 @@ describe('runMigrations', () => {
     const files = (await readdir(join(process.cwd(), 'migrations')))
       .filter((name) => name.endsWith('.sql'))
       .sort();
-    expect(files.slice(-3)).toEqual([
+    expect(files.slice(-4)).toEqual([
       '0053_offboarding_restore_contract.sql',
       '0054_coordination_leases.sql',
       '0055_coordination_review_remediation.sql',
+      '0056_coordination_final_remediation.sql',
     ]);
     const migration = await readFile(
       join(process.cwd(), 'migrations/0054_coordination_leases.sql'),
@@ -81,6 +82,47 @@ describe('runMigrations', () => {
     expect(migration).toMatch(/DEFERRABLE INITIALLY DEFERRED/);
     expect(migration).toMatch(/fencing_token\s+BIGINT/);
   });
+
+  it('profiles coordination grants against the configured custom schema', async () => {
+    const suffix = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const schema = `coordination_custom_${suffix}`;
+    const role = `coordination_custom_app_${suffix}`;
+    const quotedRole = `"${role}"`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    await admin.query(`CREATE ROLE ${quotedRole} NOLOGIN`);
+    const pool = schemaPool(schema);
+    try {
+      await runMigrations(pool, join(process.cwd(), 'migrations'));
+      await grantApplicationRole(pool, schema, role);
+      await expect(pool.query(
+        'SELECT continuum_assert_application_role_allowlist($1::name)', [role],
+      )).resolves.toBeDefined();
+      const privileges = await pool.query(
+        `SELECT
+           has_table_privilege($1, format('%I.coordination_scope_usage', $2::text), 'UPDATE')
+             AS scope_update,
+           has_table_privilege($1, format('%I.coordination_principal_usage', $2::text), 'UPDATE')
+             AS principal_update,
+           has_table_privilege($1, format('%I.coordination_scope_fencing_floors', $2::text), 'SELECT')
+             AS floor_select,
+           has_function_privilege($1,
+             format('%I.continuum_coordination_scope_fencing_floor(uuid)', $2::text), 'EXECUTE')
+             AS floor_execute`,
+        [role, schema],
+      );
+      expect(privileges.rows[0]).toEqual({
+        scope_update: false,
+        principal_update: false,
+        floor_select: false,
+        floor_execute: true,
+      });
+    } finally {
+      await admin.query(`DROP OWNED BY ${quotedRole}`);
+      await admin.query(`DROP ROLE ${quotedRole}`);
+    }
+  }, 30_000);
 
   it('pins the published 0052 bytes and rejects a modified ledgered copy', async () => {
     const published = await readFile(
@@ -308,7 +350,7 @@ describe('runMigrations', () => {
         $$;
       `);
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-26).map((migration) => migration.name)).toEqual([
+      expect(applied.slice(-27).map((migration) => migration.name)).toEqual([
         '0030_offboarding_round7_integrity.sql',
         '0031_offboarding_round7_indexes.sql',
         '0032_offboarding_round7_compatibility.sql',
@@ -335,6 +377,7 @@ describe('runMigrations', () => {
         '0053_offboarding_restore_contract.sql',
         '0054_coordination_leases.sql',
         '0055_coordination_review_remediation.sql',
+        '0056_coordination_final_remediation.sql',
       ]);
       expect((await pool.query(
         `SELECT indisvalid AS valid FROM pg_index
@@ -577,7 +620,8 @@ describe('runMigrations', () => {
       && name !== '0052_offboarding_review_repair.sql'
       && name !== '0053_offboarding_restore_contract.sql'
       && name !== '0054_coordination_leases.sql'
-      && name !== '0055_coordination_review_remediation.sql')) {
+      && name !== '0055_coordination_review_remediation.sql'
+      && name !== '0056_coordination_final_remediation.sql')) {
       if (file === '0038_offboarding_search_path_hardening.sql') {
         await copyFile(
           new URL(

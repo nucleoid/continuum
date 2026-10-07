@@ -580,6 +580,51 @@ describe('coordination storage and service', () => {
     })).resolves.toEqual({ released: true });
   });
 
+  it('keeps realistic multi-lease renewal independent of the principal usage lock', async () => {
+    const leases: Array<{ leaseId: string; runId: string }> = [];
+    for (let index = 0; index < 12; index += 1) {
+      const runId = randomUUID();
+      const acquired = await acquire(
+        pool, `steady-renew-${index}`, randomUUID(), runId,
+      );
+      if (!acquired.acquired) throw new Error('expected acquisition');
+      leases.push({ leaseId: acquired.leaseId, runId });
+    }
+    await pool.query(
+      `UPDATE coordination_principal_usage SET mutation_receipt_count = 10000
+        WHERE principal_id = $1`,
+      [principal.id],
+    );
+    const blocker = await otherPool.connect();
+    try {
+      await blocker.query('BEGIN');
+      await blocker.query(
+        'SELECT 1 FROM coordination_principal_usage WHERE principal_id = $1 FOR UPDATE',
+        [principal.id],
+      );
+      const renewed = await Promise.all(leases.map((lease) =>
+        renewLease(pool, principal, {
+          ...lease, requestId: randomUUID(), ttlSeconds: 30,
+        })));
+      expect(renewed).toHaveLength(12);
+    } finally {
+      await blocker.query('ROLLBACK');
+      blocker.release();
+    }
+    const retention = await pool.query<{ maximum: number; mutation_count: number }>(
+      `SELECT max(extract(epoch FROM (receipt.retain_until - receipt.server_time)))::int
+                AS maximum,
+              usage.mutation_receipt_count AS mutation_count
+         FROM coordination_operation_receipts receipt
+         JOIN coordination_principal_usage usage
+           ON usage.principal_id = receipt.principal_id
+        WHERE receipt.principal_id = $1 AND receipt.operation = 'renew'
+        GROUP BY usage.mutation_receipt_count`,
+      [principal.id],
+    );
+    expect(retention.rows).toEqual([{ maximum: 90, mutation_count: 10000 }]);
+  });
+
   it('enforces the new-resource rate limit without blocking existing resources', async () => {
     const held = await acquire(pool, 'rate-existing');
     expect(held.acquired).toBe(true);
@@ -619,11 +664,23 @@ describe('coordination storage and service', () => {
          SELECT 1 FROM coordination_resources WHERE current_lease_id = $1`,
         [randomUUID()],
       );
+      const receiptPlan = await plans.query(
+        `EXPLAIN (FORMAT JSON)
+         SELECT principal_id, operation, request_id
+           FROM coordination_operation_receipts
+          WHERE scope_id = $1 AND resource = $2
+            AND retain_until <= clock_timestamp()
+          ORDER BY retain_until, principal_id, operation, request_id LIMIT 1000`,
+        [scope.id, 'plan-resource'],
+      );
       expect(JSON.stringify(leasePlan.rows)).toContain(
         'coordination_leases_principal_terminal_idx',
       );
       expect(JSON.stringify(resourcePlan.rows)).toContain(
         'coordination_resources_current_lease_idx',
+      );
+      expect(JSON.stringify(receiptPlan.rows)).toContain(
+        'coordination_receipts_resource_idx',
       );
     } finally {
       plans.release();

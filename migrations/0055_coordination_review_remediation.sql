@@ -55,6 +55,9 @@ CREATE INDEX IF NOT EXISTS coordination_resources_current_lease_idx
 CREATE INDEX IF NOT EXISTS coordination_leases_principal_terminal_idx
   ON coordination_leases
     (principal_id, (COALESCE(released_at, expires_at)), lease_id);
+CREATE INDEX IF NOT EXISTS coordination_receipts_resource_idx
+  ON coordination_operation_receipts
+    (scope_id, resource, retain_until, principal_id, operation, request_id);
 
 -- Resource pseudonymization updates every referring row atomically.
 ALTER TABLE coordination_leases

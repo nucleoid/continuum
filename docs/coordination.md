@@ -77,8 +77,9 @@ counter. Tokens are canonical decimal strings end-to-end and are never parsed
 as JavaScript numbers. Resource rows are never automatically deleted by
 application traffic, so fencing history survives release, expiry, receipt
 cleanup, server restart, and binary rollback. An approval-bound operator may
-reclaim an inactive key; its SHA-256-keyed fencing floor seeds any later
-recreation, so the next token remains strictly greater. At
+reclaim an inactive key; the owner-only scope-level fencing floor seeds any
+later recreation, so the next token remains strictly greater without retaining
+a dictionary-attackable resource digest. At
 `9223372036854775807`, later acquisition fails permanently
 with `FENCING_TOKEN_EXHAUSTED`; the counter never wraps or resets.
 
@@ -205,8 +206,9 @@ canonical length-prefixed tuple of normalized semantic input after defaults are
 applied. Reusing a key with different input returns
 `IDEMPOTENCY_CONFLICT` without mutating lease state.
 
-Receipts are retained for at least exactly 24 hours from the operation's
-database server time:
+Acquire and release receipts are retained for 24 hours from the operation's
+database server time. Renew receipts are short-lived: through the renewed
+expiry plus a 60-second retry margin, capped at 24 hours:
 
 - acquire success replays its original response only while that generation is
   still current and unexpired;
@@ -221,8 +223,10 @@ Authorization is revalidated before any receipt result or conflict is exposed.
 Replay adds no duplicate audit row.
 
 Once a receipt expires, bounded cleanup may remove it and its idempotency
-guarantee ends. Do not blindly retry a request ID older than 24 hours. Inspect,
-reconcile local ownership state, and use a new request ID.
+guarantee ends. For renew, do not retry after the renewed expiry plus the
+60-second margin. For acquire or release, do not blindly retry a request ID
+older than 24 hours. Inspect, reconcile local ownership state, and use a new
+request ID.
 
 Server-side `lock_timeout` is one second and `statement_timeout` is five
 seconds. Timeout maps to `COORDINATION_TIMEOUT`. Request cancellation is
@@ -235,24 +239,31 @@ uncertain, retry the exact request within the receipt horizon.
 
 V1 hard limits are:
 
-- 10,000 active resource keys per scope by default (operator-adjustable from
-  1 through 1,000,000);
+- 10,000 ever-created, unreclaimed resource keys per scope by default
+  (operator-adjustable from 1 through 1,000,000);
 - at most 100 newly created resource keys per principal per rolling hour;
 - 10,000 retained acquire receipts per principal;
-- an independent 10,000 retained renew/release receipts per principal, so
-  acquire contention saturation cannot starve lease maintenance;
-- at most 100 expired receipts and 100 eligible terminal lease histories
-  reclaimed by one operation.
+- 10,000 retained release receipts per principal; short-lived renew receipts
+  do not consume either quota, so documented TTL/3 renewal cannot starve lease
+  maintenance;
+- at most 100 expired receipts and terminal lease histories reclaimed by an
+  application operation, and at most 1,000 of each by operator maintenance.
 
 An existing resource remains usable when its scope reaches the key limit.
 Continuum never automatically evicts resource rows or fencing history. Quota, lease state,
 receipt, usage counters, and audit metadata commit atomically.
 
 Operator maintenance is exposed only through the approval-bound database role:
-`continuum_operator_reclaim_coordination_resource` refuses a live lease or any
-retained receipt before preserving the fencing floor and freeing one active-key
-slot. `continuum_operator_set_coordination_scope_quota` adjusts a reviewed
-scope limit. The shared application role cannot execute either function.
+`continuum_operator_reclaim_coordination_resource` removes at most 1,000
+expired receipts and terminal lease generations, refuses a live lease or any
+retained receipt, preserves the scope fencing floor, and frees one key slot.
+`continuum_operator_sweep_coordination_state` performs indexed cleanup in
+batches of at most 1,000 for inactive principals. Quota changes, reclaim, and
+sweeps have a five-second statement timeout and write operator audit events.
+`continuum_operator_set_coordination_scope_quota` adjusts a reviewed scope
+limit. The shared application role cannot execute these operator functions or
+directly update either usage/counter table; owner-owned triggers and narrow
+`SECURITY DEFINER` helpers maintain counters.
 
 Audit metadata is bounded and server-generated. It includes operation, outcome,
 owned request/run/lease IDs where applicable, owned token, resource UTF-8
@@ -262,7 +273,7 @@ vectors. Audit failure rolls back the whole operation.
 
 ## Deployment, mixed versions, and rollback
 
-Apply migration `0055_coordination_review_remediation.sql`, then **re-run
+Apply through migration `0056_coordination_final_remediation.sql`, then **re-run
 `scripts/grant-application-role.sql`** for every application and dedicated
 operator role. Re-run `scripts/grant-operator-role.sql` immediately afterward
 for dedicated operators. The exact role verifier deliberately rejects both
@@ -279,9 +290,11 @@ all forward migrations, re-run the grant scripts and identity verifier, and
 resume with the retained counters. This preserves idempotency and fencing
 across rollback/re-enable cycles.
 
-Offboarding a user scope replaces coordination resource text (and matching
+Offboarding refuses while that scope has a live lease. It preserves the maximum
+scope fencing value, then replaces coordination resource text (and matching
 lease/receipt text through cascading foreign keys) with opaque random labels.
-Lease IDs, request hashes, receipts, and fencing values remain intact. Lock
+Lease IDs, request hashes, receipts, and fencing values remain intact. No
+resource hash or digest remains in a floor table. Lock
 audit metadata retains operation evidence but removes the resource digest,
 which could otherwise disclose low-entropy resource names by brute force.
 

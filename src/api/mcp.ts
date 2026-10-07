@@ -126,6 +126,19 @@ function serviceErrorResult(error: unknown, logger: ServiceLogger): {
   return { ...jsonResult(body), isError: true };
 }
 
+function strictCoordinationInput(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[] = [],
+): Record<string, unknown> {
+  const allowed = new Set([...required, ...optional]);
+  if (required.some((key) => !Object.hasOwn(value, key))
+    || Object.keys(value).some((key) => !allowed.has(key))) {
+    throw new ServiceError('INVALID_INPUT', 'Invalid coordination input');
+  }
+  return value;
+}
+
 export function buildMcpServer(deps: McpDeps): McpServer {
   const { pool, embeddingProvider, principal } = deps;
   const relationThreshold = validateRelationThreshold(
@@ -151,22 +164,25 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     'continuum.lock_acquire',
     {
       description: 'Acquire one exclusive, non-reentrant scoped coordination lease.',
-      inputSchema: {
-        scope: z.string(),
-        resource: z.string(),
-        run_id: z.string(),
-        request_id: z.string(),
-        ttl_seconds: z.unknown().default(300),
-      },
+      inputSchema: z.object({
+        scope: z.unknown().optional(),
+        resource: z.unknown().optional(),
+        run_id: z.unknown().optional(),
+        request_id: z.unknown().optional(),
+        ttl_seconds: z.unknown().optional(),
+      }).passthrough(),
     },
     async (args, extra) => {
       try {
+        const input = strictCoordinationInput(
+          args, ['scope', 'resource', 'run_id', 'request_id'], ['ttl_seconds'],
+        );
         const result = await acquireLease(pool, principal, {
-          scope: args.scope,
-          resource: args.resource,
-          runId: args.run_id,
-          requestId: args.request_id,
-          ttlSeconds: args.ttl_seconds as number,
+          scope: input.scope as string,
+          resource: input.resource as string,
+          runId: input.run_id as string,
+          requestId: input.request_id as string,
+          ttlSeconds: input.ttl_seconds as number | undefined,
         }, { signal: extra.signal, transport: 'mcp' });
         return jsonResult(result.acquired ? {
           acquired: true,
@@ -196,20 +212,23 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     'continuum.lock_renew',
     {
       description: 'Renew the current lease generation owned by this principal and run.',
-      inputSchema: {
-        lease_id: z.string(),
-        run_id: z.string(),
-        request_id: z.string(),
-        ttl_seconds: z.unknown().default(300),
-      },
+      inputSchema: z.object({
+        lease_id: z.unknown().optional(),
+        run_id: z.unknown().optional(),
+        request_id: z.unknown().optional(),
+        ttl_seconds: z.unknown().optional(),
+      }).passthrough(),
     },
     async (args, extra) => {
       try {
+        const input = strictCoordinationInput(
+          args, ['lease_id', 'run_id', 'request_id'], ['ttl_seconds'],
+        );
         const result = await renewLease(pool, principal, {
-          leaseId: args.lease_id,
-          runId: args.run_id,
-          requestId: args.request_id,
-          ttlSeconds: args.ttl_seconds as number,
+          leaseId: input.lease_id as string,
+          runId: input.run_id as string,
+          requestId: input.request_id as string,
+          ttlSeconds: input.ttl_seconds as number | undefined,
         }, { signal: extra.signal, transport: 'mcp' });
         return jsonResult({
           renewed: true,
@@ -229,18 +248,19 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     'continuum.lock_release',
     {
       description: 'Release the current lease generation owned by this principal and run.',
-      inputSchema: {
-        lease_id: z.string(),
-        run_id: z.string(),
-        request_id: z.string(),
-      },
+      inputSchema: z.object({
+        lease_id: z.unknown().optional(),
+        run_id: z.unknown().optional(),
+        request_id: z.unknown().optional(),
+      }).passthrough(),
     },
     async (args, extra) => {
       try {
+        const input = strictCoordinationInput(args, ['lease_id', 'run_id', 'request_id']);
         const result = await releaseLease(pool, principal, {
-          leaseId: args.lease_id,
-          runId: args.run_id,
-          requestId: args.request_id,
+          leaseId: input.lease_id as string,
+          runId: input.run_id as string,
+          requestId: input.request_id as string,
         }, { signal: extra.signal, transport: 'mcp' });
         return jsonResult({
           released: true,
@@ -256,14 +276,18 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     'continuum.lock_inspect',
     {
       description: 'Inspect a scoped resource while masking any other holder identity.',
-      inputSchema: {
-        scope: z.string(),
-        resource: z.string(),
-      },
+      inputSchema: z.object({
+        scope: z.unknown().optional(),
+        resource: z.unknown().optional(),
+      }).passthrough(),
     },
     async (args, extra) => {
       try {
-        const result = await inspectLease(pool, principal, args, {
+        const input = strictCoordinationInput(args, ['scope', 'resource']);
+        const result = await inspectLease(pool, principal, {
+          scope: input.scope as string,
+          resource: input.resource as string,
+        }, {
           signal: extra.signal,
           transport: 'mcp',
         });

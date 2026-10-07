@@ -116,9 +116,11 @@ after offboarding; an in-flight recall that loses this race fails closed instead
 of returning results with an unsanitized late audit row.
 
 Coordination state in the owned user scope is scrubbed in the same guarded
-scope-pseudonymization transaction. Exact resource text is replaced by an
-opaque random label and cascades to lease and receipt rows; lease IDs, request
-hashes, receipt outcomes, and fencing tokens remain unchanged. Preserved
+scope-pseudonymization transaction. Offboarding refuses while the scope has a
+live coordination lease. It first preserves the maximum token in an owner-only
+scope fencing floor, then replaces exact resource text with an opaque random
+label and cascades to lease and receipt rows. No resource digest remains. Lease
+IDs, request hashes, receipt outcomes, and fencing tokens remain unchanged. Preserved
 `lock_*` audit metadata excludes `resource_sha256` because low-entropy resource
 names can be recovered by dictionary attack. The operation, outcome, opaque
 request/run/lease IDs, fencing token, resource byte count, and transport remain
