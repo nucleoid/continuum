@@ -4,6 +4,7 @@ import type { Principal } from '../types.js';
 import { LIFECYCLE_PRINCIPAL_ID } from '../lifecycle/principal.js';
 import { canonicalPrincipalExternalId } from '../storage/principals.js';
 import { requireOrgAdmin } from './access.js';
+import { isOperatorAuthorizationError, rollbackOrDestroy } from './database-authorization-errors.js';
 import { ServiceError } from './errors.js';
 
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
@@ -20,6 +21,7 @@ export async function provisionServicePrincipal(
     throw new ServiceError('INVALID_INPUT', 'service principal ID and display name are required');
   }
   const client = await pool.connect();
+  let destroyClient = false;
   try {
     await client.query('BEGIN');
     await requireOrgAdmin(client, actor.id);
@@ -50,10 +52,10 @@ export async function provisionServicePrincipal(
       displayName: rows[0].display_name, createdAt: rows[0].created_at,
     };
   } catch (error) {
-    await client.query('ROLLBACK');
+    destroyClient = await rollbackOrDestroy(client);
     throw error;
   } finally {
-    client.release();
+    client.release(destroyClient);
   }
 }
 
@@ -66,6 +68,7 @@ export async function disablePrincipal(
     throw new ServiceError('INVALID_INPUT', 'system lifecycle principal cannot be disabled');
   }
   const client = await pool.connect();
+  let destroyClient = false;
   try {
     await client.query('BEGIN');
     await requireOrgAdmin(client, actor.id);
@@ -83,11 +86,8 @@ export async function disablePrincipal(
     );
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK');
-    const databaseError = error as { code?: string; message?: string };
-    if (databaseError.code === '42501'
-      || /(?:DB|role-name\/OID)-bound trusted approve identity|guarded approve path/i
-        .test(databaseError.message ?? '')) {
+    destroyClient = await rollbackOrDestroy(client);
+    if (isOperatorAuthorizationError(error)) {
       throw new ServiceError(
         'FORBIDDEN', 'protected principal disable requires a DB-bound operator session',
         { cause: error },
@@ -95,7 +95,7 @@ export async function disablePrincipal(
     }
     throw error;
   } finally {
-    client.release();
+    client.release(destroyClient);
   }
 }
 
@@ -108,6 +108,7 @@ export async function reactivatePrincipal(
     throw new ServiceError('INVALID_INPUT', 'system lifecycle principal cannot be reactivated');
   }
   const client = await pool.connect();
+  let destroyClient = false;
   try {
     await client.query('BEGIN');
     await requireOrgAdmin(client, actor.id);
@@ -129,11 +130,8 @@ export async function reactivatePrincipal(
     );
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK');
-    const databaseError = error as { code?: string; message?: string };
-    if (databaseError.code === '42501'
-      || /(?:DB|role-name\/OID)-bound trusted approve identity|operator session/i
-        .test(databaseError.message ?? '')) {
+    destroyClient = await rollbackOrDestroy(client);
+    if (isOperatorAuthorizationError(error)) {
       throw new ServiceError(
         'FORBIDDEN', 'principal reactivation requires a DB-bound operator session',
         { cause: error },
@@ -141,6 +139,6 @@ export async function reactivatePrincipal(
     }
     throw error;
   } finally {
-    client.release();
+    client.release(destroyClient);
   }
 }

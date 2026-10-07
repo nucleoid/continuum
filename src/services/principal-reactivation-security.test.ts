@@ -583,7 +583,7 @@ describe('principal reactivation database trust boundary', () => {
           WHERE run_id = $1 AND phase = 'completed'`, [forged.run_id],
       )).rows[0].count).toBe(0);
       await expect(reactivatePrincipal(rolePool, admin, target.id))
-        .rejects.toMatchObject({ code: 'FORBIDDEN', status: 403 });
+        .rejects.toThrow(/incomplete|completion evidence/i);
     } finally {
       await rolePool?.end();
       await pool.query(`DROP OWNED BY ${quotedRole}`);
@@ -776,7 +776,7 @@ describe('principal reactivation database trust boundary', () => {
       const groupId = '87654321-4321-4321-8321-cba987654321';
       await expect(provisionEntraGroupBinding(rolePool, admin, {
         externalId: groupId, scopeId: project.id, role: 'reader',
-      })).rejects.toThrow(/trusted|permission denied|database identity/i);
+      })).rejects.toMatchObject({ code: 'FORBIDDEN', status: 403 });
       await expect(syncEntraMemberships(rolePool, admin, [{
         id: groupId, status: 'present', displayName: 'Runtime Group',
         memberObjectIds: ['aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'],

@@ -8,6 +8,7 @@ import {
 import {
   fetchMembershipSnapshot, GraphSnapshotUnavailableError, MembershipSnapshotTooLargeError,
 } from './graph-membership.js';
+import { isSyncAuthorizationError } from '../services/database-authorization-errors.js';
 import { ServiceError } from '../services/errors.js';
 
 type SnapshotFetcher = (
@@ -38,11 +39,14 @@ export async function runMembershipSync(
   try {
     await pool.query('SELECT continuum_verify_sync_database_identity($1::uuid)', [actor.id]);
   } catch (error) {
-    throw new ServiceError(
-      'FORBIDDEN',
-      'membership sync requires the DB-bound sync service identity',
-      { cause: error },
-    );
+    if (isSyncAuthorizationError(error)) {
+      throw new ServiceError(
+        'FORBIDDEN',
+        'membership sync requires the DB-bound sync service identity',
+        { cause: error },
+      );
+    }
+    throw error;
   }
   await validateMembershipSyncActor(pool, actor);
   try {

@@ -1,6 +1,9 @@
 import type pg from 'pg';
 import type { MembershipRole, Principal } from '../types.js';
 import { requireOrgAdmin } from './access.js';
+import {
+  isOperatorAuthorizationError, isSyncAuthorizationError, rollbackOrDestroy,
+} from './database-authorization-errors.js';
 import { ServiceError } from './errors.js';
 
 export const MAX_SYNC_GROUPS = 500;
@@ -66,11 +69,14 @@ async function requireManualSyncActor(
   try {
     await client.query('SELECT continuum_require_sync_session($1)', [actorId]);
   } catch (error) {
-    throw new ServiceError(
-      'FORBIDDEN',
-      'membership sync requires the DB-bound sync service identity',
-      { cause: error },
-    );
+    if (isSyncAuthorizationError(error)) {
+      throw new ServiceError(
+        'FORBIDDEN',
+        'membership sync requires the DB-bound sync service identity',
+        { cause: error },
+      );
+    }
+    throw error;
   }
 }
 
@@ -93,6 +99,7 @@ export async function provisionEntraGroupBinding(
   role(input.role);
   const displayName = input.displayName?.trim().slice(0, 256) || externalId;
   const client = await pool.connect();
+  let destroyClient = false;
   try {
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [SYNC_LOCK_ID]);
@@ -162,9 +169,15 @@ export async function provisionEntraGroupBinding(
     await client.query('COMMIT');
     return { created, reactivated };
   } catch (error) {
-    await client.query('ROLLBACK');
+    destroyClient = await rollbackOrDestroy(client);
+    if (isOperatorAuthorizationError(error)) {
+      throw new ServiceError(
+        'FORBIDDEN', 'binding provisioning requires the DB-bound operator identity',
+        { cause: error },
+      );
+    }
     throw error;
-  } finally { client.release(); }
+  } finally { client.release(destroyClient); }
 }
 
 /** Revokes a binding and all access sourced from it in one audited transaction. */
@@ -175,6 +188,7 @@ export async function revokeEntraGroupBinding(
 ): Promise<boolean> {
   externalId = canonicalUuid(externalId, 'group id');
   const client = await pool.connect();
+  let destroyClient = false;
   try {
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [SYNC_LOCK_ID]);
@@ -204,16 +218,17 @@ export async function revokeEntraGroupBinding(
     await client.query('COMMIT');
     return true;
   } catch (error) {
-    await client.query('ROLLBACK');
-    if (!(error instanceof ServiceError) && error instanceof Error
-      && /(?:DB|role-name\/OID)-bound trusted approve identity|effective manual org administrator/i
-        .test(error.message)) {
+    destroyClient = await rollbackOrDestroy(client);
+    if (isOperatorAuthorizationError(error)
+      || (!(error instanceof ServiceError) && error instanceof Error
+        && /^binding revocation requires an effective manual org administrator$/i
+          .test(error.message))) {
       throw new ServiceError(
         'FORBIDDEN', 'binding revocation requires the DB-bound operator identity', { cause: error },
       );
     }
     throw error;
-  } finally { client.release(); }
+  } finally { client.release(destroyClient); }
 }
 
 export async function listBoundEntraGroupIds(pool: pg.Pool): Promise<string[]> {
@@ -351,6 +366,7 @@ export async function rejectEntraMembershipSync(
     throw new ServiceError('INVALID_INPUT', 'Entra membership staleness bound is invalid');
   }
   const client = await pool.connect();
+  let destroyClient = false;
   try {
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [SYNC_LOCK_ID]);
@@ -360,10 +376,10 @@ export async function rejectEntraMembershipSync(
     );
     await client.query('COMMIT');
   } catch (recordError) {
-    await client.query('ROLLBACK');
+    destroyClient = await rollbackOrDestroy(client);
     throw recordError;
   } finally {
-    client.release();
+    client.release(destroyClient);
   }
 }
 
@@ -417,6 +433,7 @@ export async function syncEntraMemberships(
   let durableQuarantine = result;
   let lockAcquired = false;
   let primaryError: unknown;
+  let rollbackFailure: unknown;
   try {
     await client.query('SELECT pg_advisory_lock($1::bigint)', [SYNC_LOCK_ID]);
     lockAcquired = true;
@@ -642,9 +659,13 @@ export async function syncEntraMemberships(
   } catch (error) {
     try {
       if (transactionOpen) {
-        await client.query('ROLLBACK');
+        try {
+          await client.query('ROLLBACK');
+        } catch (failure) {
+          rollbackFailure = failure;
+        }
         transactionOpen = false;
-        if (authoritativePhase) {
+        if (rollbackFailure === undefined && authoritativePhase) {
           await auditRejectedSync(client, actor, error, durableQuarantine, maxStalenessHours);
         }
       }
@@ -655,8 +676,8 @@ export async function syncEntraMemberships(
       throw handledError;
     }
   } finally {
-    let cleanupError: unknown;
-    if (lockAcquired) {
+    let cleanupError: unknown = rollbackFailure;
+    if (lockAcquired && rollbackFailure === undefined) {
       try {
         const unlocked = await client.query<{ unlocked: boolean }>(
           'SELECT pg_advisory_unlock($1::bigint) AS unlocked', [SYNC_LOCK_ID],
@@ -669,7 +690,7 @@ export async function syncEntraMemberships(
     const unsafe = cleanupError ?? (!lockAcquired ? primaryError : undefined);
     client.release(unsafe instanceof Error ? unsafe
       : unsafe === undefined ? undefined : new Error('Membership sync connection is unsafe', { cause: unsafe }));
-    if (cleanupError !== undefined) {
+    if (cleanupError !== undefined && rollbackFailure === undefined) {
       if (primaryError !== undefined) {
         throw new AggregateError([primaryError, cleanupError], 'Membership sync failed and lock cleanup failed');
       }
