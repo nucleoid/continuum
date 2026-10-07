@@ -279,7 +279,7 @@ describe('0048 trusted database identity upgrade', () => {
       END
       $drop$;
       ALTER TABLE continuum_entra_guarded_mutations
-        ALTER COLUMN authorization_principal_id DROP NOT NULL;
+        DROP COLUMN authorization_principal_id;
       ALTER TABLE continuum_principal_disable_requests
         ALTER COLUMN authorization_principal_id DROP NOT NULL;
       ALTER TABLE continuum_entra_guarded_mutations

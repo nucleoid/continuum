@@ -281,10 +281,31 @@ describe('post-rejection database authority remediation', () => {
     )).rows[0].allowed).toBe(true);
   });
 
+  it('rejects trigger-bypass parameter grants and per-role settings', async () => {
+    const application = await createRole('application');
+    await pool.query(
+      'GRANT SET ON PARAMETER session_replication_role TO ' + quoteRole(application.role),
+    );
+    await expect(pool.query(
+      'SELECT continuum_assert_application_role_allowlist($1)', [application.role],
+    )).rejects.toThrow(/parameter|setting|replication|privilege|drift/i);
+    await pool.query(
+      'REVOKE SET ON PARAMETER session_replication_role FROM ' + quoteRole(application.role),
+    );
+    await pool.query(
+      'ALTER ROLE ' + quoteRole(application.role) + " SET statement_timeout = '30s'",
+    );
+    await expect(pool.query(
+      'SELECT continuum_assert_application_role_allowlist($1)', [application.role],
+    )).rejects.toThrow(/parameter|setting|role|drift/i);
+    await pool.query('ALTER ROLE ' + quoteRole(application.role) + ' RESET ALL');
+  });
+
   it('revokes marker tables and rejects forged marker authority', async () => {
     const application = await createRole('application');
     for (const table of [
       'continuum_entra_guarded_mutations', 'continuum_principal_disable_requests',
+      'continuum_entra_reapproval_requests',
     ]) {
       expect((await pool.query(
         `SELECT has_table_privilege($1, $2, 'INSERT') AS allowed`,
@@ -303,6 +324,8 @@ describe('post-rejection database authority remediation', () => {
     );
     expect(migration).toMatch(/authorization_principal_id[\s\S]*continuum_require_trusted_database_identity/i);
     expect(migration).toMatch(/continuum_assert_application_role_allowlist/i);
+    expect(migration).toMatch(/continuum_entra_reapproval_requests[\s\S]*authorization_principal_id/i);
+    expect(migration).toMatch(/continuum_protect_capability_marker_write/i);
   });
 
   it('proves retirement authority before installing a sync identity', async () => {

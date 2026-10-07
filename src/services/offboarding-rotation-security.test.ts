@@ -161,8 +161,13 @@ describe('sync database identity rotation security', () => {
     });
     const oldRole = 'continuum_registration_old_' + Date.now();
     const nextRole = 'continuum_registration_next_' + Date.now();
+    const applicationRole = 'continuum_registration_app_' + Date.now();
     await pool.query('CREATE ROLE ' + quoteRole(oldRole) + ' LOGIN');
     await pool.query('CREATE ROLE ' + quoteRole(nextRole) + ' NOLOGIN');
+    await pool.query('CREATE ROLE ' + quoteRole(applicationRole) + ' NOLOGIN');
+    await applyGrantScript(pool, 'grant-application-role.sql', {
+      continuum_app_role: applicationRole,
+    });
     try {
       await pool.query(
         'SELECT continuum_register_trusted_database_identity($1, $2, FALSE, TRUE)',
@@ -191,13 +196,32 @@ describe('sync database identity rotation security', () => {
       })).rejects.toThrow(/active trusted database identity/i);
       await expect(applyGrantScript(pool, 'verify-database-identities.sql', {
         continuum_schema: 'public',
+        continuum_app_role: applicationRole,
         continuum_sync_role: nextRole,
         continuum_operator_role: fixture.operatorRole,
         retired_sync_role: oldRole,
       })).resolves.toBeUndefined();
+      await expect(applyGrantScript(pool, 'verify-database-identities.sql', {
+        continuum_schema: 'public',
+        continuum_app_role: applicationRole,
+        continuum_sync_role: nextRole,
+        continuum_operator_role: fixture.operatorRole,
+        retired_sync_role: oldRole + '_missing',
+      })).rejects.toThrow(/retired sync role.*exist|does not resolve|unknown/i);
+      await pool.query(
+        'GRANT EXECUTE ON FUNCTION continuum_operator_offboard_scope_access(UUID, UUID) TO '
+        + quoteRole(applicationRole),
+      );
+      await expect(applyGrantScript(pool, 'verify-database-identities.sql', {
+        continuum_schema: 'public',
+        continuum_app_role: applicationRole,
+        continuum_sync_role: nextRole,
+        continuum_operator_role: fixture.operatorRole,
+        retired_sync_role: oldRole,
+      })).rejects.toThrow(/application role|function privilege|allow-list|drift/i);
     } finally {
       await fixture.operator.end();
-      await dropRoles(pool, [oldRole, nextRole, fixture.operatorRole]);
+      await dropRoles(pool, [oldRole, nextRole, applicationRole, fixture.operatorRole]);
     }
   });
 
