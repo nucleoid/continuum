@@ -636,6 +636,10 @@ describe('sync database identity rotation security', () => {
       await pool.query('CREATE ROLE ' + quoteRole(role) + ' LOGIN');
       await grantOwnerRetirementAuthority(pool, role);
       await expect(fixture.operator.query(
+        "SELECT continuum_supersede_restore_pending_sync_identity($1, $2::oid, 'SUPERSEDE RESTORE-PENDING SYNC IDENTITY')",
+        [role, oldOid],
+      )).rejects.toThrow(/permission denied/i);
+      await expect(fixture.operator.query(
         'SELECT continuum_rotate_sync_database_identity($1, $2, $3)',
         [fixture.admin.id, role, fixture.service.id],
       )).rejects.toThrow(/restore.pending|rebind.*first|retired identity/i);
@@ -717,7 +721,7 @@ describe('sync database identity rotation security', () => {
         continuum_schema: 'public', continuum_app_role: appRole,
         continuum_sync_role: syncRole, continuum_operator_role: fixture.operatorRole,
         retired_sync_role: '',
-      })).rejects.toThrow(/retired sync role still has LOGIN|retired.*unsafe/i);
+      })).rejects.toThrow(/retired.*login|retired.*authority/i);
     } finally {
       await fixture.operator.end();
       await pool.query(
@@ -760,6 +764,10 @@ describe('sync database identity rotation security', () => {
       await pool.query("SELECT continuum_rebind_database_identity_oids('REBIND AFTER LOGICAL RESTORE')");
       await pool.query('CREATE ROLE ' + quoteRole(reusedRole) + ' LOGIN');
       await grantOwnerRetirementAuthority(pool, reusedRole);
+      await pool.query(
+        "SELECT continuum_supersede_restore_pending_sync_identity($1, $2::oid, 'SUPERSEDE RESTORE-PENDING SYNC IDENTITY')",
+        [reusedRole, firstOid],
+      );
       await applyGrantScript(pool, 'grant-sync-role.sql', {
         continuum_sync_role: reusedRole, continuum_principal_id: fixture.service.id,
       });
@@ -775,13 +783,18 @@ describe('sync database identity rotation security', () => {
       await pool.query("SELECT continuum_rebind_database_identity_oids('REBIND AFTER LOGICAL RESTORE')");
       await pool.query('CREATE ROLE ' + quoteRole(reusedRole) + ' LOGIN');
       await grantOwnerRetirementAuthority(pool, reusedRole);
+      await pool.query(
+        "SELECT continuum_supersede_restore_pending_sync_identity($1, $2::oid, 'SUPERSEDE RESTORE-PENDING SYNC IDENTITY')",
+        [reusedRole, secondOid],
+      );
       await expect(pool.query(
         "SELECT continuum_rebind_database_identity_oids('REBIND AFTER LOGICAL RESTORE')",
       )).resolves.toBeDefined();
       const generations = (await pool.query(
         `SELECT
            (SELECT count(*)::int FROM continuum_unresolved_retired_sync_database_identities
-             WHERE database_role = $1::name AND previous_database_role_oid = $2::oid
+             WHERE database_role = $1::name
+               AND previous_database_role_oid = ANY(ARRAY[$2::oid, $3::oid])
                AND resolution_kind = 'superseded') AS archived,
            (SELECT count(*)::int FROM continuum_retired_sync_database_identities history
              JOIN pg_roles restored ON restored.oid = history.database_role_oid
@@ -790,7 +803,7 @@ describe('sync database identity rotation security', () => {
               AND history.database_role_oid <> $3::oid) AS restored`,
         [reusedRole, firstOid, secondOid],
       )).rows[0];
-      expect(generations).toEqual({ archived: 1, restored: 1 });
+      expect(generations).toEqual({ archived: 2, restored: 0 });
     } finally {
       await fixture.operator.end();
       await pool.query(
@@ -809,7 +822,7 @@ describe('sync database identity rotation security', () => {
     }
   });
 
-  it('ignores an unresolved retired-role OID when that OID belongs to another restored role', async () => {
+  it('fails verification when live retired history points at another restored role OID', async () => {
     const fixture = await operatorFixture('logical-restore-stale-history');
     const syncRole = 'continuum_restored_stale_sync_' + Date.now();
     const appRole = 'continuum_restored_stale_app_' + Date.now();
@@ -834,7 +847,7 @@ describe('sync database identity rotation security', () => {
         continuum_schema: 'public', continuum_app_role: appRole,
         continuum_sync_role: syncRole, continuum_operator_role: fixture.operatorRole,
         retired_sync_role: '',
-      })).resolves.toBeUndefined();
+      })).rejects.toThrow(/retired.*login|retired.*authority/i);
     } finally {
       await pool.query(
         'DELETE FROM continuum_retired_sync_database_identities WHERE database_role = $1::name',

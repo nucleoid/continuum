@@ -180,6 +180,8 @@ BEGIN
        CROSS JOIN %I.continuum_database_identity_epoch epoch
       WHERE history.database_role = $1 AND history.database_role_oid <> $2
         AND epoch.singleton
+        AND NOT EXISTS (
+          SELECT 1 FROM pg_roles role WHERE role.oid = history.database_role_oid)
      ON CONFLICT (database_role, previous_database_role_oid) DO UPDATE SET
        resolution_kind = ''superseded'',
        cluster_epoch = EXCLUDED.cluster_epoch,
@@ -190,7 +192,10 @@ BEGIN
   ) USING retired_sync, retired_oid;
   EXECUTE format(
     'DELETE FROM %I.continuum_retired_sync_database_identities
-      WHERE database_role = $1 AND database_role_oid <> $2',
+      WHERE database_role = $1 AND database_role_oid <> $2
+        AND NOT EXISTS (
+          SELECT 1 FROM pg_roles role
+           WHERE role.oid = continuum_retired_sync_database_identities.database_role_oid)',
     application_schema
   ) USING retired_sync, retired_oid;
   EXECUTE format('REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I FROM %I',

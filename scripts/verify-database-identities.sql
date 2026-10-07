@@ -117,29 +117,27 @@ BEGIN
       WHERE $1 <> '''' AND role.rolname = $1', application_schema
   ) USING retired_sync
   LOOP
-    IF EXISTS (
-      SELECT 1 FROM pg_roles role
-       WHERE role.rolname = retired_identity.database_role
-         AND role.oid <> retired_identity.database_role_oid
-    ) THEN
-      EXECUTE format(
-        'SELECT EXISTS (
-           SELECT 1 FROM %I.continuum_trusted_database_identities active
-           JOIN pg_roles role ON role.oid = active.database_role_oid
-            WHERE active.database_role = $1
-              AND role.rolname = $1
-         )', application_schema
-      ) INTO retired_name_is_active USING retired_identity.database_role;
-      IF retired_name_is_active THEN
-        CONTINUE;
-      END IF;
-      RAISE EXCEPTION 'retired sync role name was reused by a different OID';
-    END IF;
     IF NOT EXISTS (
       SELECT 1 FROM pg_roles role
        WHERE role.oid = retired_identity.database_role_oid
-         AND role.rolname = retired_identity.database_role
     ) THEN
+      IF EXISTS (
+        SELECT 1 FROM pg_roles role
+         WHERE role.rolname = retired_identity.database_role
+           AND role.oid <> retired_identity.database_role_oid
+      ) THEN
+        EXECUTE format(
+          'SELECT EXISTS (
+             SELECT 1 FROM %I.continuum_trusted_database_identities active
+             JOIN pg_roles role ON role.oid = active.database_role_oid
+              WHERE active.database_role = $1
+                AND role.rolname = $1
+           )', application_schema
+        ) INTO retired_name_is_active USING retired_identity.database_role;
+        IF NOT retired_name_is_active THEN
+          RAISE EXCEPTION 'retired sync role name was reused by a different OID';
+        END IF;
+      END IF;
       CONTINUE;
     END IF;
     IF EXISTS (

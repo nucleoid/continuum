@@ -556,7 +556,22 @@ silently stop sync.
 Retirement is terminal for a PostgreSQL role OID: do not rotate back to a
 retired role as rollback. Create a fresh LOGIN role with new credentials and
 rotate forward. Deliberate reuse of a dropped role name is permitted only with
-a new OID; prior generations remain in owner-only history.
+a new OID and an explicit migration-owner decision. If logical-restore rebind
+recorded the name as restore-pending, the migration owner must first confirm
+the exact old OID before any operator can install the replacement:
+
+```sql
+SELECT continuum_supersede_restore_pending_sync_identity(
+  'continuum_sync_reused', '<old-role-oid>'::oid,
+  'SUPERSEDE RESTORE-PENDING SYNC IDENTITY'
+);
+```
+
+Do this only after proving the recreated role is intentionally new rather than
+a later stage of the roles restore. Prior generations remain in owner-only
+history. A retired OID remains terminal if its role is renamed; verification
+checks retired authority by OID, and restore rebind rejects that ambiguous
+rename until the recorded name is restored or the role is retired again.
 
 One operator database role is bound to one manual organization-administrator
 principal. A takeover changes application membership, but does not silently
@@ -670,9 +685,10 @@ generations from restore-pending rows. Rebind rotates an owner-only database
 identity epoch, so old-cluster OID numbers cannot make unrelated restored roles
 look terminal. Re-run the same rebind command if global roles are
 restored in stages: a uniquely resolved retired name is moved back into live
-history. Earlier generations of a deliberately reused active sync-role name
-remain archived by name and old OID; any unbound recreation still fails
-verification.
+history. Do not rotate to a restore-pending name between stages. Earlier
+generations of a deliberately reused active sync-role name remain archived by
+name and old OID only after the migration owner explicitly supersedes the exact
+pending OID; any unbound recreation still fails verification.
 
 This is an application-data boundary. Operators must separately apply their
 documented retention policy to encrypted database backups, database/WAL logs,
