@@ -661,6 +661,174 @@ describe('sync database identity rotation security', () => {
     }
   });
 
+  it('accepts a changed diagnostic cluster identifier when role OIDs were preserved', async () => {
+    const role = 'continuum_upgrade_preserved_' + Date.now();
+    await pool.query('CREATE ROLE ' + quoteRole(role) + ' NOLOGIN');
+    const oid = (await pool.query(
+      'SELECT oid::text FROM pg_roles WHERE rolname = $1', [role],
+    )).rows[0].oid;
+    const identifier = (await pool.query(
+      `SELECT cluster_system_identifier
+         FROM continuum_database_identity_epoch WHERE singleton`,
+    )).rows[0].cluster_system_identifier;
+    await pool.query(
+      `INSERT INTO continuum_retired_sync_database_identities
+         (database_role_oid, database_role) VALUES ($1, $2::name)`,
+      [oid, role],
+    );
+    try {
+      await pool.query(
+        `UPDATE continuum_database_identity_epoch
+            SET cluster_system_identifier = 'changed-by-major-upgrade' WHERE singleton`,
+      );
+      await expect(pool.query(
+        "SELECT continuum_rebind_database_identity_oids('REBIND DATABASE IDENTITIES', 'PRESERVED OID NAMESPACE')",
+      )).resolves.toBeDefined();
+      expect((await pool.query(
+        `SELECT database_role_oid::text AS oid
+           FROM continuum_retired_sync_database_identities
+          WHERE database_role = $1::name`, [role],
+      )).rows[0].oid).toBe(oid);
+    } finally {
+      await pool.query(
+        'UPDATE continuum_database_identity_epoch SET cluster_system_identifier = $1 WHERE singleton',
+        [identifier],
+      );
+      await pool.query(
+        'DELETE FROM continuum_retired_sync_database_identities WHERE database_role = $1::name',
+        [role],
+      );
+      await dropRoles(pool, [role]);
+    }
+  });
+
+  it('keeps renamed retired OIDs terminal when preserved provenance is declared', async () => {
+    const original = 'continuum_upgrade_retired_' + Date.now();
+    const renamed = 'continuum_upgrade_renamed_' + Date.now();
+    await pool.query('CREATE ROLE ' + quoteRole(original) + ' NOLOGIN');
+    const oid = (await pool.query(
+      'SELECT oid::text FROM pg_roles WHERE rolname = $1', [original],
+    )).rows[0].oid;
+    await pool.query(
+      `INSERT INTO continuum_retired_sync_database_identities
+         (database_role_oid, database_role) VALUES ($1, $2::name)`,
+      [oid, original],
+    );
+    await pool.query('ALTER ROLE ' + quoteRole(original) + ' RENAME TO ' + quoteRole(renamed));
+    try {
+      await expect(pool.query(
+        "SELECT continuum_rebind_database_identity_oids('REBIND DATABASE IDENTITIES', 'PRESERVED OID NAMESPACE')",
+      )).rejects.toThrow(/retired.*OID.*renamed|preserved.*namespace/i);
+      expect((await pool.query(
+        `SELECT count(*)::int AS count FROM continuum_retired_sync_database_identities
+          WHERE database_role_oid = $1::oid AND database_role = $2::name`,
+        [oid, original],
+      )).rows[0].count).toBe(1);
+    } finally {
+      await pool.query(
+        'DELETE FROM continuum_retired_sync_database_identities WHERE database_role_oid = $1::oid',
+        [oid],
+      );
+      await dropRoles(pool, [renamed]);
+    }
+  });
+
+  it('treats matching cluster diagnostics as foreign when the operator declares foreign OIDs', async () => {
+    const retiredName = 'continuum_fork_retired_' + Date.now();
+    const overlap = 'continuum_fork_overlap_' + Date.now();
+    await pool.query('CREATE ROLE ' + quoteRole(retiredName) + ' NOLOGIN');
+    await pool.query('CREATE ROLE ' + quoteRole(overlap) + ' NOLOGIN');
+    const overlapOid = (await pool.query(
+      'SELECT oid::text FROM pg_roles WHERE rolname = $1', [overlap],
+    )).rows[0].oid;
+    const restoredOid = (await pool.query(
+      'SELECT oid::text FROM pg_roles WHERE rolname = $1', [retiredName],
+    )).rows[0].oid;
+    await pool.query(
+      `INSERT INTO continuum_retired_sync_database_identities
+         (database_role_oid, database_role) VALUES ($1, $2::name)`,
+      [overlapOid, retiredName],
+    );
+    try {
+      await expect(pool.query(
+        "SELECT continuum_rebind_database_identity_oids('REBIND DATABASE IDENTITIES', 'FOREIGN OID NAMESPACE')",
+      )).resolves.toBeDefined();
+      const state = (await pool.query(
+        `SELECT
+           (SELECT database_role_oid::text
+              FROM continuum_retired_sync_database_identities
+             WHERE database_role = $1::name) AS rebound_oid,
+           EXISTS (SELECT 1 FROM continuum_retired_sync_database_identities
+                    WHERE database_role_oid = $2::oid) AS overlap_retired`,
+        [retiredName, overlapOid],
+      )).rows[0];
+      expect(state).toEqual({ rebound_oid: restoredOid, overlap_retired: false });
+    } finally {
+      await pool.query(
+        'DELETE FROM continuum_retired_sync_database_identities WHERE database_role = $1::name',
+        [retiredName],
+      );
+      await dropRoles(pool, [retiredName, overlap]);
+    }
+  });
+
+  it('archives foreign same-name history before checking active and retired targets', async () => {
+    const fixture = await operatorFixture('foreign-active-history');
+    const active = 'continuum_foreign_active_' + Date.now();
+    const overlap = 'continuum_foreign_active_overlap_' + Date.now();
+    await pool.query('CREATE ROLE ' + quoteRole(active) + ' LOGIN');
+    await pool.query('CREATE ROLE ' + quoteRole(overlap) + ' NOLOGIN');
+    await grantOwnerRetirementAuthority(pool, active);
+    await applyGrantScript(pool, 'grant-sync-role.sql', {
+      continuum_sync_role: active, continuum_principal_id: fixture.service.id,
+    });
+    const activeOid = (await pool.query(
+      'SELECT oid::text FROM pg_roles WHERE rolname = $1', [active],
+    )).rows[0].oid;
+    const overlapOid = (await pool.query(
+      'SELECT oid::text FROM pg_roles WHERE rolname = $1', [overlap],
+    )).rows[0].oid;
+    await pool.query(
+      `INSERT INTO continuum_retired_sync_database_identities
+         (database_role_oid, database_role) VALUES ($1, $2::name)`,
+      [overlapOid, active],
+    );
+    try {
+      await expect(pool.query(
+        "SELECT continuum_rebind_database_identity_oids('REBIND DATABASE IDENTITIES', 'FOREIGN OID NAMESPACE')",
+      )).resolves.toBeDefined();
+      const state = (await pool.query(
+        `SELECT
+           (SELECT database_role_oid::text FROM continuum_trusted_database_identities
+             WHERE database_role = $1::name AND can_sync) AS active_oid,
+           (SELECT resolution_kind FROM continuum_unresolved_retired_sync_database_identities
+             WHERE database_role = $1::name
+               AND previous_database_role_oid = $2::oid) AS archived_kind,
+           EXISTS (SELECT 1 FROM continuum_retired_sync_database_identities
+                    WHERE database_role_oid = $2::oid) AS overlap_retired`,
+        [active, overlapOid],
+      )).rows[0];
+      expect(state).toEqual({
+        active_oid: activeOid, archived_kind: 'superseded', overlap_retired: false,
+      });
+    } finally {
+      await fixture.operator.end();
+      await pool.query(
+        'DELETE FROM continuum_trusted_database_identities WHERE database_role = ANY($1::name[])',
+        [[fixture.operatorRole, active]],
+      );
+      await pool.query(
+        'DELETE FROM continuum_retired_sync_database_identities WHERE database_role = $1::name',
+        [active],
+      );
+      await pool.query(
+        'DELETE FROM continuum_unresolved_retired_sync_database_identities WHERE database_role = $1::name',
+        [active],
+      );
+      await dropRoles(pool, [active, overlap, fixture.operatorRole]);
+    }
+  });
+
   it('refuses to rebind while a live retired OID has been renamed', async () => {
     const original = 'continuum_retired_before_rename_' + Date.now();
     const renamed = 'continuum_retired_after_rename_' + Date.now();
