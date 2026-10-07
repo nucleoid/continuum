@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { readFile, readdir } from 'node:fs/promises';
+import { promisify } from 'node:util';
 import pg, { type PoolConfig } from 'pg';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { addMembership } from '../storage/memberships.js';
@@ -7,10 +9,13 @@ import { createPrincipal } from '../storage/principals.js';
 import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { acquireLease } from './coordination.js';
+import { provisionEntraGroupBinding, syncEntraMemberships } from './membership-sync.js';
 import {
   listCoordinationPrivacyRepairs, mapOwnedUserScope, offboardPrincipal,
   repairCoordinationPrivacy,
 } from './offboarding.js';
+
+const execFileAsync = promisify(execFile);
 
 describe('coordination independent review regressions', () => {
   let pool: pg.Pool;
@@ -47,6 +52,24 @@ describe('coordination independent review regressions', () => {
       });
     }
     expect(result.complete).toBe(true);
+  }
+
+  async function adminCli(
+    operator: Awaited<ReturnType<typeof fixture>>['operator'], args: string[], timeout = 10_000,
+  ): Promise<Record<string, unknown>> {
+    const connectionString = (pool as unknown as { options: PoolConfig }).options.connectionString;
+    const { stdout } = await execFileAsync(process.execPath, [
+      '--import', 'tsx', 'src/identity/admin-cli.ts', ...args,
+    ], {
+      cwd: process.cwd(), timeout,
+      env: {
+        ...process.env,
+        CONTINUUM_DATABASE_URL: connectionString,
+        CONTINUUM_ADMIN_ACTOR: operator.externalId,
+        CONTINUUM_DB_POOL_MAX: '1',
+      },
+    });
+    return JSON.parse(stdout.trim()) as Record<string, unknown>;
   }
 
   it('does not complete a pre-0065 run until owned-scope lock metadata is canonicalized', async () => {
@@ -277,10 +300,16 @@ describe('coordination independent review regressions', () => {
 
   it('pins every ledgered issue-7 migration checksum and chains 0069 forward', async () => {
     const migrator = await readFile('src/storage/migrator.ts', 'utf8');
-    for (let number = 54; number <= 68; number += 1) {
+    for (let number = 54; number <= 69; number += 1) {
       expect(migrator).toMatch(new RegExp(`\\['00${number}_[^']+\\.sql',\\s*'[0-9a-f]{64}'`));
     }
     expect(migrator).toMatch(/0069_coordination_independent_review\.sql[\s\S]+0068_coordination_production_repair\.sql/);
+    expect(migrator).toMatch(/0070_coordination_linkable_audit_index\.sql[\s\S]+0069_coordination_independent_review\.sql/);
+    expect(migrator).toMatch(/0071_coordination_review_completion\.sql[\s\S]+0070_coordination_linkable_audit_index\.sql/);
+    expect(await readdir('migrations')).toEqual(expect.arrayContaining([
+      '0070_coordination_linkable_audit_index.sql',
+      '0071_coordination_review_completion.sql',
+    ]));
   });
 
   it('discovers repair pages by cursor and plans incomplete progress with the partial index', async () => {
@@ -335,4 +364,198 @@ describe('coordination independent review regressions', () => {
     visit(plan);
     expect(indexes).toContain('coordination_principal_privacy_repair_idx');
   });
+
+  it('pages the real repair CLI deterministically beyond its limit', async () => {
+    const values = await Promise.all(Array.from({ length: 5 }, (_, index) =>
+      fixture(`cli-page-${index}`)));
+    for (const value of values) {
+      await pool.query(
+        'UPDATE principals SET disabled_at = clock_timestamp() WHERE id = $1',
+        [value.target.id],
+      );
+      await pool.query(
+        `INSERT INTO coordination_principal_privacy_progress
+           (principal_id, detached_principal_id, privacy_version, completed_at)
+         VALUES ($1, '00000000-0000-4000-8000-000000000012', 2, NULL)`,
+        [value.target.id],
+      );
+    }
+    const expected = values.map((value) => value.target.id).sort();
+    const seen: string[] = [];
+    let after: string | undefined;
+    for (let pageNumber = 0; pageNumber < 4; pageNumber += 1) {
+      const page = await adminCli(values[0].operator, [
+        'list-coordination-privacy-repairs', '--limit', '2',
+        ...(after ? ['--after', after] : []),
+      ]);
+      const repairs = page.repairs as Array<{ principalId: string }>;
+      seen.push(...repairs.map((repair) => repair.principalId));
+      after = page.nextCursor as string | undefined;
+      if (!after) break;
+    }
+    expect(seen).toEqual(expected);
+    expect(new Set(seen).size).toBe(expected.length);
+  }, 30_000);
+
+  it('stops the real offboard CLI when a shared live lease blocks privacy', async () => {
+    const value = await fixture('offboard-cli-live-lease');
+    expect(await acquireLease(pool, value.target, {
+      scope: `project:${value.shared.name}`, resource: 'held', runId: randomUUID(),
+      requestId: randomUUID(), ttlSeconds: 300,
+    })).toMatchObject({ acquired: true });
+
+    const result = await adminCli(value.operator, [
+      'offboard-principal', value.target.id,
+      '--confirm-scope', value.owned.id, '--batch-size', '10',
+    ], 5_000);
+    expect(result).toMatchObject({
+      complete: false, progressed: false, reason: 'live_lease',
+    });
+    expect(new Date(result.blockedUntil as string).getTime()).toBeGreaterThan(Date.now());
+    expect(Number(result.attempts)).toBeLessThanOrEqual(100);
+  }, 15_000);
+
+  it('purges expired detached receipts before quota availability is frozen', async () => {
+    const value = await fixture('detached-quota');
+    const detached = '00000000-0000-4000-8000-000000000012';
+    await pool.query(
+      `INSERT INTO coordination_resources (scope_id, resource)
+       VALUES ($1, 'quota')`, [value.shared.id],
+    );
+    await pool.query(
+      `INSERT INTO coordination_operation_receipts
+         (principal_id, operation, request_id, payload_hash, outcome, scope_id,
+          resource, expires_at, server_time, retry_after_seconds, retain_until)
+       SELECT $1, 'acquire', gen_random_uuid(), sha256(convert_to(g::text, 'UTF8')),
+              'contended', $2, 'quota', clock_timestamp() + interval '1 minute',
+              clock_timestamp(), 1, clock_timestamp() + interval '1 minute'
+         FROM generate_series(1, 100) g`, [detached, value.shared.id],
+    );
+    await pool.query(
+      `UPDATE coordination_principal_usage
+          SET contended_receipt_limit = 100
+        WHERE principal_id = $1`, [detached],
+    );
+    await pool.query(
+      `UPDATE coordination_operation_receipts
+          SET server_time = clock_timestamp() - interval '2 minutes',
+              retain_until = clock_timestamp() - interval '1 minute'
+        WHERE principal_id = $1`, [detached],
+    );
+    await pool.query(
+      `INSERT INTO coordination_operation_receipts
+         (principal_id, operation, request_id, payload_hash, outcome, scope_id,
+          resource, expires_at, server_time, retry_after_seconds, retain_until)
+       VALUES ($1, 'acquire', gen_random_uuid(), sha256(convert_to('target', 'UTF8')),
+               'contended', $2, 'quota', clock_timestamp() + interval '1 minute',
+               clock_timestamp(), 1, clock_timestamp() + interval '1 minute')`,
+      [value.target.id, value.shared.id],
+    );
+    await pool.query(
+      'UPDATE principals SET disabled_at = clock_timestamp() WHERE id = $1',
+      [value.target.id],
+    );
+    await pool.query(
+      `INSERT INTO coordination_principal_privacy_progress
+         (principal_id, detached_principal_id, privacy_version, completed_at)
+       VALUES ($1, $2, 2, NULL)`, [value.target.id, detached],
+    );
+
+    const scrub = (await pool.query(
+      `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 10) AS result`,
+      [value.operator.id, value.target.id, value.owned.id],
+    )).rows[0].result as Record<string, unknown>;
+    expect(scrub).toMatchObject({ progressed: true, reason: null });
+    expect((await pool.query(
+      `SELECT count(*)::int AS count FROM coordination_operation_receipts
+        WHERE principal_id = $1`, [value.target.id],
+    )).rows).toEqual([{ count: 0 }]);
+  });
+
+  it('uses the linkable-key index for completed principals with large lock histories', async () => {
+    const value = await fixture('production-plan');
+    await pool.query(
+      'UPDATE principals SET disabled_at = clock_timestamp() WHERE id = $1',
+      [value.target.id],
+    );
+    await pool.query(
+      `INSERT INTO coordination_principal_privacy_progress
+         (principal_id, detached_principal_id, privacy_version, completed_at)
+       VALUES ($1, '00000000-0000-4000-8000-000000000012', 3, clock_timestamp())`,
+      [value.target.id],
+    );
+    await pool.query(
+      `INSERT INTO audit_log (principal_id, action, scope_id, metadata)
+       SELECT $1, 'write', $2, jsonb_build_object(
+         'operation', 'lock_renew', 'outcome', 'renewed', 'fencing_token', g)
+         FROM generate_series(1, 20000) g`, [value.target.id, value.shared.id],
+    );
+    await pool.query('ANALYZE audit_log');
+    const plan = await pool.query(
+      `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+       SELECT audit.principal_id
+         FROM audit_log audit
+        WHERE audit.principal_id = $1
+          AND audit.metadata->>'operation' IN (
+            'lock_acquire', 'lock_renew', 'lock_release', 'lock_inspect')
+          AND audit.metadata ?| ARRAY[
+            'request_id','run_id','lease_id','resource','resource_sha256']
+        LIMIT 1`, [value.target.id],
+    );
+    const json = JSON.stringify(plan.rows[0]['QUERY PLAN']);
+    expect(json).toContain('audit_log_coordination_privacy_linkable_idx');
+    const production = await pool.query(
+      `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+       SELECT * FROM continuum_operator_list_coordination_privacy_repairs(
+         $1, NULL::uuid, NULL::uuid, 100)`, [value.operator.id],
+    );
+    expect(JSON.stringify(production.rows[0]['QUERY PLAN'])).toContain('Function Scan');
+    expect(await listCoordinationPrivacyRepairs(pool, value.operator, 100)).toEqual([]);
+  }, 30_000);
+
+  it('serializes multi-membership Entra sync with repair and direct scrub', async () => {
+    const value = await fixture('entra-concurrency');
+    const second = await createScope(pool, {
+      kind: 'team', name: `entra-second-${randomUUID()}`,
+    });
+    const groupA = randomUUID();
+    const groupB = randomUUID();
+    await provisionEntraGroupBinding(pool, value.operator, {
+      externalId: groupA, scopeId: value.shared.id, role: 'writer',
+    });
+    await provisionEntraGroupBinding(pool, value.operator, {
+      externalId: groupB, scopeId: second.id, role: 'reader',
+    });
+    await pool.query(
+      'UPDATE principals SET disabled_at = clock_timestamp() WHERE id = $1',
+      [value.target.id],
+    );
+    await pool.query(
+      `INSERT INTO coordination_principal_privacy_progress
+         (principal_id, detached_principal_id, privacy_version, completed_at)
+       VALUES ($1, '00000000-0000-4000-8000-000000000012', 2, NULL)`,
+      [value.target.id],
+    );
+    const targetExternalId = randomUUID();
+    await pool.query('UPDATE principals SET external_id = $2 WHERE id = $1', [
+      value.target.id, targetExternalId,
+    ]);
+    const snapshots = [groupA, groupB].map((id) => ({
+      id, status: 'present' as const, displayName: id,
+      memberObjectIds: [targetExternalId],
+    }));
+    const [sync, repair, scrub] = await Promise.all([
+      syncEntraMemberships(pool, value.operator, snapshots),
+      repairCoordinationPrivacy(pool, value.operator, value.target.id, {
+        confirmationScopeId: value.owned.id, batchSize: 10,
+      }),
+      pool.query(
+        `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 10)`,
+        [value.operator.id, value.target.id, value.owned.id],
+      ),
+    ]);
+    expect(sync.skipCodes).toMatchObject({ DISABLED_PRINCIPAL: 2 });
+    expect(repair.complete || repair.progressed).toBe(true);
+    expect(scrub.rowCount).toBe(1);
+  }, 30_000);
 });

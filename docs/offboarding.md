@@ -157,6 +157,9 @@ offboarding runs, but a previously completed run can require only this upgrade
 re-scrub and therefore is not in that list. After upgrade, use
 `list-coordination-privacy-repairs`; it returns a bounded list classified as
 `offboarded` or `disabled_only` without granting direct progress-table reads.
+Page the list with `--limit <1-1000>` and the returned `nextCursor`. Pass that
+value back with `--after <principal-id>` until `nextCursor` is null. The cursor
+is deterministic by principal UUID and does not repeat a row.
 For `offboarded` rows, rerun the normal `offboard-principal --confirm-scope`
 command. For `disabled_only` rows, run the non-lifecycle
 `repair-coordination-privacy <principal-id> --confirm-scope <scope-id>` command

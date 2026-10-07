@@ -336,7 +336,7 @@ complete. Every node must run a binary that calls
 re-enable, apply all forward migrations, re-run the grant scripts and identity
 verifier, and resume with the retained counters.
 
-Migrations 0068 and 0069 are forward-only. Before applying them, drain offboarding traffic
+Migrations 0068 through 0071 are forward-only. Before applying them, drain offboarding traffic
 from binaries older than the 0067-aware service. After it is applied, an older
 binary may read and write ordinary coordination state, but it must not be used
 as an offboarding worker: the database refuses its completed-run restart when
@@ -354,6 +354,12 @@ lease returns `blockedUntil` and `progressed: false`; the CLI stops that run
 instead of polling, and never writes a batch event for a no-progress attempt.
 The database rejects offboarding run creation or start while a disabled-only
 privacy repair is pending.
+
+Migration 0070 builds the linkable-key audit index concurrently. Migration
+0071 uses separate bounded discovery branches for incomplete progress and
+current-state verification, preserves existing least-privilege repair-list
+grants during upgrade, and purges expired detached receipts before calculating
+quota availability. Apply both migrations before re-enabling offboarding.
 
 Migration 0061 contains the historical installation-wide receipt-counter
 recount and takes coordination table locks. An installation upgrading from

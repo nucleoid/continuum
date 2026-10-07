@@ -32,6 +32,58 @@ afterEach(async () => {
 });
 
 describe('coordination operator ACL upgrade', () => {
+  it('preserves repair-list grants across a custom-schema 0069 upgrade and rerun', async () => {
+    const suffix = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const schema = `coord_acl_0069_${suffix}`;
+    const role = `coord_acl_0069_reader_${suffix}`;
+    const base = await makeTestPool();
+    pools.push(base);
+    const admin = new pg.Pool((base as unknown as { options: PoolConfig }).options);
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${quote(schema)}`);
+    await admin.query(`CREATE ROLE ${quote(role)} NOLOGIN`);
+    const pool = new pg.Pool({
+      ...(base as unknown as { options: PoolConfig }).options,
+      max: 1, options: `-c search_path=${schema},public`,
+    });
+    pools.push(pool);
+    const before = await mkdtemp(join(tmpdir(), 'continuum-through-0069-acl-'));
+    directories.push(before);
+    const source = new URL('../../migrations/', import.meta.url);
+    const files = (await readdir(source)).filter((name) => name.endsWith('.sql')).sort();
+    await Promise.all(files.filter((name) => name <= '0069_coordination_independent_review.sql')
+      .map((name) => copyFile(new URL(name, source), join(before, name))));
+    try {
+      await runMigrations(pool, before);
+      await pool.query(
+        `GRANT EXECUTE ON FUNCTION ${quote(schema)}.
+          continuum_operator_list_coordination_privacy_repairs(UUID, UUID, INTEGER)
+         TO ${quote(role)}`,
+      );
+      expect((await pool.query(
+        `SELECT has_function_privilege($1,
+          format('%I.continuum_operator_list_coordination_privacy_repairs(uuid,uuid,uuid,integer)', $2::text),
+          'EXECUTE') AS upgraded`, [role, schema],
+      )).rows).toEqual([{ upgraded: false }]);
+
+      await runMigrations(pool, join(process.cwd(), 'migrations'));
+      await runMigrations(pool, join(process.cwd(), 'migrations'));
+      expect((await pool.query(
+        `SELECT
+          has_function_privilege($1,
+            format('%I.continuum_operator_list_coordination_privacy_repairs(uuid,uuid,integer)', $2::text),
+            'EXECUTE') AS legacy,
+          has_function_privilege($1,
+            format('%I.continuum_operator_list_coordination_privacy_repairs(uuid,uuid,uuid,integer)', $2::text),
+            'EXECUTE') AS cursor`, [role, schema],
+      )).rows).toEqual([{ legacy: true, cursor: true }]);
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${quote(schema)} CASCADE`);
+      await admin.query(`DROP OWNED BY ${quote(role)}`);
+      await admin.query(`DROP ROLE ${quote(role)}`);
+    }
+  }, 60_000);
+
   it.each([
     ['0054_coordination_leases.sql', false],
     ['0055_coordination_review_remediation.sql', false],
