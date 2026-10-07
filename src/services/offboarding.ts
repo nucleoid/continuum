@@ -115,6 +115,8 @@ export interface CoordinationPrivacyRepairCandidate {
 
 export interface CoordinationPrivacyRepairResult extends CoordinationPrivacyRepairCandidate {
   complete: boolean;
+  progressed: boolean;
+  blockedUntil: Date | null;
 }
 
 export interface CoordinationPrivacyRepairOptions {
@@ -123,19 +125,21 @@ export interface CoordinationPrivacyRepairOptions {
 }
 
 export async function listCoordinationPrivacyRepairs(
-  pool: pg.Pool, actor: Principal, limit = 100,
+  pool: pg.Pool, actor: Principal, limit = 100, afterPrincipalId?: string,
 ): Promise<CoordinationPrivacyRepairCandidate[]> {
   if (!Number.isInteger(limit) || limit < 1 || limit > 1_000) {
     throw new ServiceError('INVALID_INPUT', 'repair list limit must be between 1 and 1000');
   }
+  const cursor = afterPrincipalId === undefined
+    ? null : id(afterPrincipalId, 'repair cursor principal id');
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     await requireOrgAdmin(client, actor.id);
     const result = await client.query(
       `SELECT principal_id::text, scope_id::text, repair_state
-         FROM continuum_operator_list_coordination_privacy_repairs($1, NULL, $2)`,
-      [actor.id, limit],
+         FROM continuum_operator_list_coordination_privacy_repairs($1, $2, NULL, $3)`,
+      [actor.id, cursor, limit],
     );
     await client.query('COMMIT');
     return result.rows.map((row) => ({
@@ -164,6 +168,9 @@ export async function repairCoordinationPrivacy(
     await client.query("SET LOCAL lock_timeout = '5s'");
     await client.query("SET LOCAL statement_timeout = '30s'");
     await requireOrgAdmin(client, actor.id);
+    await client.query(
+      'SELECT pg_advisory_xact_lock(hashtextextended($1::text, 762))', [principalId],
+    );
     const target = await client.query(
       `SELECT principal.id, principal.disabled_at, principal.offboarded_at,
               mapping.scope_id
@@ -192,21 +199,26 @@ export async function repairCoordinationPrivacy(
          FROM continuum_coordination_privacy_state($1, $2)`,
       [principalId, scopeId],
     );
-    const alreadyComplete = privacy.rows[0]?.privacy_version === 2
+    const alreadyComplete = Number(privacy.rows[0]?.privacy_version) >= 3
       && privacy.rows[0]?.principal_complete === true;
     if (!candidate.rowCount) {
       if (!alreadyComplete) {
         throw new ServiceError('CONFLICT', 'principal has no pending coordination privacy repair');
       }
       await client.query('COMMIT');
-      return { principalId, scopeId, state, complete: true };
+      return {
+        principalId, scopeId, state, complete: true,
+        progressed: false, blockedUntil: null,
+      };
     }
     if (candidate.rows[0].repair_state !== 'disabled_only') {
       throw new ServiceError(
         'CONFLICT', 'offboarded principals must resume the confirmed offboarding command',
       );
     }
-    const scrub = await client.query<{ privacy: { complete?: boolean } }>(
+    const scrub = await client.query<{
+      privacy: { complete?: boolean; progressed?: boolean; blocked_until?: string | null };
+    }>(
       `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, $4) AS privacy`,
       [actor.id, principalId, scopeId, Math.min(batchSize, 1_000)],
     );
@@ -214,6 +226,9 @@ export async function repairCoordinationPrivacy(
     return {
       principalId, scopeId, state,
       complete: scrub.rows[0]?.privacy?.complete === true,
+      progressed: scrub.rows[0]?.privacy?.progressed === true,
+      blockedUntil: scrub.rows[0]?.privacy?.blocked_until
+        ? new Date(scrub.rows[0].privacy.blocked_until) : null,
     };
   } catch (error) {
     await client.query('ROLLBACK');
@@ -742,6 +757,9 @@ async function offboardPrincipalCore(
     await client.query("SET LOCAL statement_timeout = '30s'");
     if (!dryRun) {
       await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [SYNC_LOCK_ID]);
+      await client.query(
+        'SELECT pg_advisory_xact_lock(hashtextextended($1::text, 762))', [principalId],
+      );
     }
     await requireOrgAdmin(client, actor.id);
     const selectorBackfill = await client.query(
@@ -961,7 +979,7 @@ async function offboardPrincipalCore(
          FROM continuum_coordination_privacy_state($1, $2)`,
       [principalId, scopeId],
     );
-    let coordinationPrivacyComplete = privacyState.rows[0]?.privacy_version === 2
+    let coordinationPrivacyComplete = Number(privacyState.rows[0]?.privacy_version) >= 3
       && privacyState.rows[0]?.principal_complete === true;
     let coordinationPrivacyMutated = false;
     const wasOffboarded = target.rows[0].offboarded_at !== null;
@@ -990,6 +1008,12 @@ async function offboardPrincipalCore(
       coordinationPrivacyMutated = true;
       coordinationPrivacyComplete = privacyRepair.rows[0]?.privacy?.complete === true;
     }
+    const actualStateErased = runCompleted && wasOffboarded
+      ? (await client.query<{ erased: boolean }>(
+        `SELECT continuum_operator_offboarding_actual_state_is_erased($1, $2) AS erased`,
+        [actor.id, run.rows[0].run_id],
+      )).rows[0]?.erased === true
+      : false;
     const clean = resumedRun
       ? Boolean(run.rows[0].memory_complete) && Boolean(run.rows[0].scope_cleanup_complete)
         && !resumedAuditRemains
@@ -1000,7 +1024,8 @@ async function offboardPrincipalCore(
       && target.rows[0].disabled_at !== null
       && target.rows[0].reactivated_at === null
       && target.rows[0].display_name === pseudonym
-      && scopeName === scopePseudonym && clean && coordinationPrivacyComplete && !audit.truncated;
+      && scopeName === scopePseudonym && clean && coordinationPrivacyComplete
+      && actualStateErased && !audit.truncated;
     const previewProgress: OffboardingProgress = {
       batch: 0, batchSize, memoriesProcessed: 0, auditRowsProcessed: 0,
       memoriesRemaining: dirtyMemories, auditRowsRemaining: dirtyAuditRows,
@@ -1020,14 +1045,10 @@ async function offboardPrincipalCore(
     if (dryRun) { await client.query('ROLLBACK'); return baseResult; }
     if (alreadyOffboarded) { await client.query('COMMIT'); return baseResult; }
     if (runCompleted && wasOffboarded && coordinationPrivacyMutated) {
-      const actualState = await client.query<{ erased: boolean }>(
-        `SELECT continuum_operator_offboarding_actual_state_is_erased($1, $2) AS erased`,
-        [actor.id, run.rows[0].run_id],
-      );
       await client.query('COMMIT');
       return {
         ...baseResult,
-        complete: coordinationPrivacyComplete && actualState.rows[0]?.erased === true,
+        complete: coordinationPrivacyComplete && actualStateErased,
       };
     }
 

@@ -468,7 +468,7 @@ describe('offboarding and erasure', () => {
     )).rows[0].run_id as string;
     const verifierSource = (await pool.query(
       `SELECT prosrc FROM pg_proc
-        WHERE oid = 'continuum_offboarding_actual_state_is_erased(uuid)'::regprocedure`,
+        WHERE oid = 'continuum_offboarding_lifecycle_state_is_erased(uuid)'::regprocedure`,
     )).rows[0].prosrc as string;
     expect(verifierSource.match(/target_run_id/g)).toHaveLength(1);
     const exactVerifierQuery = verifierSource.replace('target_run_id', '$1::uuid');
@@ -845,7 +845,7 @@ describe('offboarding and erasure', () => {
         WHERE scope_id = $1 ORDER BY id`, [value.personal.id],
     )).rows).toEqual([
       { phase: 'started' }, { phase: 'completed' },
-      { phase: 'started' }, { phase: 'batch' }, { phase: 'completed' },
+      { phase: 'started' }, { phase: 'completed' },
     ]);
     await pool.query('DELETE FROM audit_log');
     const retry = await offboardPrincipal(pool, value.admin, value.target.id);
@@ -858,7 +858,7 @@ describe('offboarding and erasure', () => {
         WHERE scope_id = $1 ORDER BY id`, [value.personal.id],
     )).rows).toEqual([
       { phase: 'started' }, { phase: 'completed' },
-      { phase: 'started' }, { phase: 'batch' }, { phase: 'completed' },
+      { phase: 'started' }, { phase: 'completed' },
     ]);
   });
 

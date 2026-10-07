@@ -8,7 +8,8 @@ import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { acquireLease } from './coordination.js';
 import {
-  mapOwnedUserScope, offboardPrincipal, repairCoordinationPrivacy,
+  listCoordinationPrivacyRepairs, mapOwnedUserScope, offboardPrincipal,
+  repairCoordinationPrivacy,
 } from './offboarding.js';
 
 describe('coordination independent review regressions', () => {
@@ -88,13 +89,17 @@ describe('coordination independent review regressions', () => {
     const second = await offboardPrincipal(pool, value.operator, value.target.id, {
       confirmationScopeId: value.owned.id, batchSize: 1,
     });
-    expect(second).toMatchObject({ complete: true, alreadyOffboarded: false });
+    expect(second).toMatchObject({ complete: false, alreadyOffboarded: false });
     expect((await pool.query(
       `SELECT count(*)::int AS dirty FROM audit_log
         WHERE principal_id = $1 AND metadata->>'operation' = 'lock_acquire'
           AND metadata ?| ARRAY['request_id','run_id','lease_id','resource','resource_sha256']`,
       [value.target.id],
     )).rows).toEqual([{ dirty: 0 }]);
+    const exhausted = await offboardPrincipal(pool, value.operator, value.target.id, {
+      confirmationScopeId: value.owned.id, batchSize: 1,
+    });
+    expect(exhausted).toMatchObject({ complete: true, alreadyOffboarded: false });
   });
 
   it('reports a live-lease block without appending no-progress batch evidence', async () => {
@@ -205,11 +210,129 @@ describe('coordination independent review regressions', () => {
     expect(migration).toMatch(/CREATE INDEX[\s\S]+coordination_principal_privacy_progress[\s\S]+WHERE[\s\S]+privacy_version/i);
   });
 
+  it('database-rejects direct offboarding create and start during disabled-only repair', async () => {
+    const createValue = await fixture('direct-create-fence');
+    const createApproval = (await pool.query(
+      `SELECT id, acknowledged_evidence_hash FROM principal_user_scope_approvals
+        WHERE principal_id = $1 AND scope_id = $2 ORDER BY id DESC LIMIT 1`,
+      [createValue.target.id, createValue.owned.id],
+    )).rows[0];
+    await pool.query(
+      'UPDATE principals SET disabled_at = clock_timestamp() WHERE id = $1',
+      [createValue.target.id],
+    );
+    await pool.query(
+      `INSERT INTO coordination_principal_privacy_progress
+         (principal_id, detached_principal_id, privacy_version, completed_at)
+       VALUES ($1, '00000000-0000-4000-8000-000000000012', 2, NULL)`,
+      [createValue.target.id],
+    );
+    await expect(pool.query(
+      `INSERT INTO principal_offboarding_runs
+         (principal_id, scope_id, initiated_by, approval_id,
+          initial_memories, initial_embeddings, initial_memberships,
+          initial_aliases, initial_entra_bindings, initial_audit_rows,
+          initial_audit_queries, approval_evidence_hash)
+       VALUES ($1, $2, $3, $4, 0, 0, 0, 0, 0, 0, 0, $5)`,
+      [createValue.target.id, createValue.owned.id, createValue.operator.id,
+        createApproval.id, createApproval.acknowledged_evidence_hash],
+    )).rejects.toThrow(/pending disabled-only privacy repair.*create\/start/i);
+
+    const startValue = await fixture('direct-start-fence');
+    const startApproval = (await pool.query(
+      `SELECT id, acknowledged_evidence_hash FROM principal_user_scope_approvals
+        WHERE principal_id = $1 AND scope_id = $2 ORDER BY id DESC LIMIT 1`,
+      [startValue.target.id, startValue.owned.id],
+    )).rows[0];
+    const run = (await pool.query(
+      `INSERT INTO principal_offboarding_runs
+         (principal_id, scope_id, initiated_by, approval_id,
+          initial_memories, initial_embeddings, initial_memberships,
+          initial_aliases, initial_entra_bindings, initial_audit_rows,
+          initial_audit_queries, approval_evidence_hash)
+       VALUES ($1, $2, $3, $4, 0, 0, 0, 0, 0, 0, 0, $5)
+       RETURNING run_id`,
+      [startValue.target.id, startValue.owned.id, startValue.operator.id,
+        startApproval.id, startApproval.acknowledged_evidence_hash],
+    )).rows[0];
+    await pool.query(
+      'UPDATE principals SET disabled_at = clock_timestamp() WHERE id = $1',
+      [startValue.target.id],
+    );
+    await pool.query(
+      `INSERT INTO coordination_principal_privacy_progress
+         (principal_id, detached_principal_id, privacy_version, completed_at)
+       VALUES ($1, '00000000-0000-4000-8000-000000000012', 2, NULL)`,
+      [startValue.target.id],
+    );
+    await expect(pool.query(
+      `INSERT INTO principal_offboarding_run_events
+         (run_id, principal_id, scope_id, phase, initiated_by, approval_id,
+          approval_evidence_hash, evidence)
+       VALUES ($1, $2, $3, 'started', $4, $5, $6, '{}'::jsonb)`,
+      [run.run_id, startValue.target.id, startValue.owned.id, startValue.operator.id,
+        startApproval.id, startApproval.acknowledged_evidence_hash],
+    )).rejects.toThrow(/pending disabled-only privacy repair.*create\/start/i);
+  });
+
   it('pins every ledgered issue-7 migration checksum and chains 0069 forward', async () => {
     const migrator = await readFile('src/storage/migrator.ts', 'utf8');
     for (let number = 54; number <= 68; number += 1) {
       expect(migrator).toMatch(new RegExp(`\\['00${number}_[^']+\\.sql',\\s*'[0-9a-f]{64}'`));
     }
     expect(migrator).toMatch(/0069_coordination_independent_review\.sql[\s\S]+0068_coordination_production_repair\.sql/);
+  });
+
+  it('discovers repair pages by cursor and plans incomplete progress with the partial index', async () => {
+    const first = await fixture('cursor-a');
+    const second = await fixture('cursor-b');
+    const ordered = [first, second].sort((left, right) =>
+      left.target.id.localeCompare(right.target.id));
+    for (const value of ordered) {
+      await pool.query(
+        'UPDATE principals SET disabled_at = clock_timestamp() WHERE id = $1',
+        [value.target.id],
+      );
+      await pool.query(
+        `INSERT INTO coordination_principal_privacy_progress
+           (principal_id, detached_principal_id, privacy_version, completed_at)
+         VALUES ($1, '00000000-0000-4000-8000-000000000012', 2, NULL)`,
+        [value.target.id],
+      );
+    }
+    const page = await listCoordinationPrivacyRepairs(pool, first.operator, 1);
+    expect(page).toHaveLength(1);
+    const next = await listCoordinationPrivacyRepairs(
+      pool, first.operator, 10, page[0].principalId,
+    );
+    expect(next.map((candidate) => candidate.principalId))
+      .not.toContain(page[0].principalId);
+
+    await pool.query(
+      `WITH inserted AS (
+         INSERT INTO principals (id, external_id, kind, display_name)
+         SELECT gen_random_uuid(), 'repair-plan-' || n, 'user', 'Repair plan'
+           FROM generate_series(1, 10000) n
+         RETURNING id
+       )
+       INSERT INTO coordination_principal_privacy_progress
+         (principal_id, detached_principal_id, privacy_version, completed_at)
+       SELECT id, '00000000-0000-4000-8000-000000000012', 2, NULL FROM inserted`,
+    );
+    await pool.query('ANALYZE coordination_principal_privacy_progress');
+    const plan = (await pool.query(
+      `EXPLAIN (FORMAT JSON)
+       SELECT principal_id FROM coordination_principal_privacy_progress
+        WHERE (privacy_version < 3 OR completed_at IS NULL)
+          AND principal_id > '00000000-0000-0000-0000-000000000000'::uuid
+        ORDER BY principal_id LIMIT 100`,
+    )).rows[0]['QUERY PLAN'][0].Plan as Record<string, unknown>;
+    const indexes: string[] = [];
+    const visit = (node: Record<string, unknown>) => {
+      if (node['Index Name']) indexes.push(String(node['Index Name']));
+      for (const child of (node.Plans ?? []) as Array<Record<string, unknown>>) visit(child);
+    };
+    visit(plan);
+    expect(indexes).toContain('coordination_principal_privacy_repair_idx');
   });
 });

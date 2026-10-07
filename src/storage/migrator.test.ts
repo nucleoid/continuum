@@ -193,7 +193,7 @@ describe('runMigrations', () => {
           `SELECT completed_at IS NOT NULL AS persisted, privacy_version
              FROM coordination_principal_privacy_progress WHERE principal_id = $1`,
           [target.id],
-        )).rows).toEqual([{ persisted: true, privacy_version: 2 }]);
+        )).rows).toEqual([{ persisted: true, privacy_version: 3 }]);
         expect((await pool.query(
           `SELECT phase, evidence FROM principal_offboarding_run_events
             WHERE principal_id = $1 AND phase <> 'started' AND phase <> 'completed'
@@ -234,7 +234,6 @@ describe('runMigrations', () => {
       .filter((name) => name.endsWith('.sql'))
       .sort();
     expect(files.slice(-15)).toEqual([
-      '0054_coordination_leases.sql',
       '0055_coordination_review_remediation.sql',
       '0056_coordination_final_remediation.sql',
       '0057_coordination_privacy_race_remediation.sql',
@@ -249,6 +248,7 @@ describe('runMigrations', () => {
       '0066_coordination_upgrade_privacy_repair.sql',
       '0067_coordination_rollout_repair.sql',
       '0068_coordination_production_repair.sql',
+      '0069_coordination_independent_review.sql',
     ]);
     const migration = await readFile(
       join(process.cwd(), 'migrations/0054_coordination_leases.sql'),
@@ -551,6 +551,35 @@ describe('runMigrations', () => {
     }
   });
 
+  it('rejects tampering in every ledgered issue-7 migration', async () => {
+    const names = (await readdir(join(process.cwd(), 'migrations')))
+      .filter((name) => /^(?:005[4-9]|006[0-8])_.*\.sql$/.test(name))
+      .sort();
+    expect(names).toHaveLength(15);
+    const schema = `migrator_issue7_checksums_${Date.now()}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    await pool.query(`
+      CREATE TABLE _continuum_migrations (
+        name TEXT PRIMARY KEY,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    for (const name of names) {
+      const directory = await mkdtemp(join(tmpdir(), 'continuum-issue7-checksum-'));
+      directories.push(directory);
+      const published = await readFile(join(process.cwd(), 'migrations', name), 'utf8');
+      await writeFile(join(directory, name), `${published}\n-- tampered\n`);
+      await pool.query('TRUNCATE _continuum_migrations');
+      await pool.query('INSERT INTO _continuum_migrations (name) VALUES ($1)', [name]);
+      await expect(runMigrations(pool, directory)).rejects.toThrow(
+        new RegExp(`${name.slice(0, 4)}.*checksum|published migration.*modified`, 'i'),
+      );
+    }
+  });
+
   it('applies 0053 when the published 0052 is already ledgered', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'continuum-forward-0053-'));
     directories.push(directory);
@@ -697,8 +726,6 @@ describe('runMigrations', () => {
       `);
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
       expect(applied.slice(-38).map((migration) => migration.name)).toEqual([
-        '0030_offboarding_round7_integrity.sql',
-        '0031_offboarding_round7_indexes.sql',
         '0032_offboarding_round7_compatibility.sql',
         '0033_offboarding_bounded_selectors.sql',
         '0034_offboarding_completion_invariants.sql',
@@ -735,6 +762,8 @@ describe('runMigrations', () => {
         '0065_coordination_review_remediation.sql',
         '0066_coordination_upgrade_privacy_repair.sql',
         '0067_coordination_rollout_repair.sql',
+        '0068_coordination_production_repair.sql',
+        '0069_coordination_independent_review.sql',
       ]);
       expect((await pool.query(
         `SELECT disabled_at IS NOT NULL AS disabled FROM principals
@@ -993,7 +1022,9 @@ describe('runMigrations', () => {
       && name !== '0064_coordination_final_online_indexes.sql'
       && name !== '0065_coordination_review_remediation.sql'
       && name !== '0066_coordination_upgrade_privacy_repair.sql'
-      && name !== '0067_coordination_rollout_repair.sql')) {
+      && name !== '0067_coordination_rollout_repair.sql'
+      && name !== '0068_coordination_production_repair.sql'
+      && name !== '0069_coordination_independent_review.sql')) {
       if (file === '0038_offboarding_search_path_hardening.sql') {
         await copyFile(
           new URL(

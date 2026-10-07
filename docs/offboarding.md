@@ -94,6 +94,10 @@ evidence ID, timestamp, and exact cumulative processed counts from the completed
 run. A dirty
 retry resumes or repairs bounded work and records a repair event rather than
 silently reporting success.
+The retry also executes the current full-state predicate. A durable progress
+receipt alone cannot produce `alreadyOffboarded: true`; stale lock audit
+metadata, retained principal coordination rows, or incomplete version-3
+privacy progress forces bounded repair.
 
 Every memory in the mapped user scope has its title and body replaced with the
 fixed `[erased]` tombstone, type normalized to `context`, metadata and tags
@@ -156,7 +160,9 @@ re-scrub and therefore is not in that list. After upgrade, use
 For `offboarded` rows, rerun the normal `offboard-principal --confirm-scope`
 command. For `disabled_only` rows, run the non-lifecycle
 `repair-coordination-privacy <principal-id> --confirm-scope <scope-id>` command
-until it returns `complete: true`. That command only drives bounded
+until it returns `complete: true`. A live shared lease returns its
+`blockedUntil` time and stops the CLI run. The CLI also caps one invocation at
+100 progressing batches with bounded backoff. That command only drives bounded
 coordination metadata scrubbing and never sets `offboarded_at`, pseudonymizes
 the user or scope, erases memories, or deactivates scope access.
 Migrations 0066 and 0067 reopen completed version-2 rows and reset only their

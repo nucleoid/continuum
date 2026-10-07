@@ -157,12 +157,16 @@ async function main(): Promise<void> {
       let result = await repairCoordinationPrivacy(pool, actor, positional[0], {
         confirmationScopeId, batchSize,
       });
-      while (!once && !result.complete) {
+      let attempts = 1;
+      while (!once && !result.complete && !result.blockedUntil && attempts < 100) {
+        if (!result.progressed) break;
+        await new Promise((resolve) => setTimeout(resolve, Math.min(attempts * 25, 250)));
         result = await repairCoordinationPrivacy(pool, actor, positional[0], {
           confirmationScopeId, batchSize,
         });
+        attempts += 1;
       }
-      process.stdout.write(`${JSON.stringify({ operation, ...result })}\n`);
+      process.stdout.write(`${JSON.stringify({ operation, attempts, ...result })}\n`);
     } else throw new Error('unknown admin operation');
   } finally { await pool.end(); }
 }

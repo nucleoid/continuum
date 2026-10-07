@@ -268,6 +268,7 @@ DECLARE schema_name TEXT := current_setting('continuum.application_grant_schema'
 BEGIN
   FOREACH signature IN ARRAY ARRAY[
     'continuum_operator_list_coordination_privacy_repairs(uuid,uuid,integer)',
+    'continuum_operator_list_coordination_privacy_repairs(uuid,uuid,uuid,integer)',
     'continuum_operator_offboarding_actual_state_is_erased(uuid,uuid)'
   ] LOOP
     IF to_regprocedure(format('%I.%s', schema_name, signature)) IS NOT NULL THEN

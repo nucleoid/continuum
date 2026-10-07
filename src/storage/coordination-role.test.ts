@@ -893,7 +893,7 @@ describe('coordination database role profiles', () => {
            FROM coordination_principal_privacy_progress
           WHERE principal_id = $1`, [target.id],
       )).rows).toEqual([{
-        complete: true, privacy_version: 2, audit_rows_scrubbed: 160,
+        complete: true, privacy_version: 3, audit_rows_scrubbed: 160,
         receipts_scrubbed: 10, leases_scrubbed: 5,
       }]);
       expect((await pool.query(

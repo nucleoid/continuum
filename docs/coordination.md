@@ -336,7 +336,7 @@ complete. Every node must run a binary that calls
 re-enable, apply all forward migrations, re-run the grant scripts and identity
 verifier, and resume with the retained counters.
 
-Migration 0068 is forward-only. Before applying it, drain offboarding traffic
+Migrations 0068 and 0069 are forward-only. Before applying them, drain offboarding traffic
 from binaries older than the 0067-aware service. After it is applied, an older
 binary may read and write ordinary coordination state, but it must not be used
 as an offboarding worker: the database refuses its completed-run restart when
@@ -345,6 +345,15 @@ lifecycle completion; it is not a signal to retry the old command. Route the
 principal to a current node and use `repair-coordination-privacy`. A binary
 rollback therefore leaves offboarding traffic disabled until a current binary
 and the exact application/operator grant profiles are restored.
+
+Migration 0069 makes completion depend on current database state as well as
+durable progress. It replays the privacy audit cursor as version 3, including
+owned-scope lock rows left by pre-0065 installations. Discovery is bounded by
+a principal UUID cursor and a partial incomplete/version index. A live shared
+lease returns `blockedUntil` and `progressed: false`; the CLI stops that run
+instead of polling, and never writes a batch event for a no-progress attempt.
+The database rejects offboarding run creation or start while a disabled-only
+privacy repair is pending.
 
 Migration 0061 contains the historical installation-wide receipt-counter
 recount and takes coordination table locks. An installation upgrading from
@@ -385,6 +394,9 @@ offboarded row with the ordinary confirmed offboarding command; resume a
 disabled-only row only with `repair-coordination-privacy`. Runtime roles receive
 only least-privilege discovery and repair functions and no direct
 progress-table privileges.
+Version 3 canonicalizes lock metadata in owned and shared scopes. Completion
+uses one shared lifecycle predicate plus a full coordination-state predicate;
+the non-coordination repair check and full offboarding check cannot drift.
 Completion is not recorded until owned-scope erasure and shared-scope
 detachment are both complete. Append-only coordination operator events survive
 audit retention and offboarding. Lock audit metadata retains operation evidence
