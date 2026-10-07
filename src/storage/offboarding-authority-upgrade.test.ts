@@ -258,6 +258,56 @@ describe('0048 trusted database identity upgrade', () => {
     )).rows[0].count).toBe(0);
   }, 60_000);
 
+  it('forward-repairs drifted 0051 marker shapes and principal/Entra triggers', async () => {
+    const state = await fixture('0051_offboarding_security_contract.sql');
+    await state.pool.query('DROP TRIGGER protect_last_manual_org_admin_principal ON principals');
+    await state.pool.query('DROP TRIGGER guard_entra_binding_approvals ON entra_groups');
+    await state.pool.query(`
+      DO $drop$
+      DECLARE item RECORD;
+      BEGIN
+        FOR item IN
+          SELECT relation.relname, constraint_row.conname
+            FROM pg_constraint constraint_row
+            JOIN pg_class relation ON relation.oid = constraint_row.conrelid
+           WHERE constraint_row.conrelid IN (
+             'continuum_entra_guarded_mutations'::regclass,
+             'continuum_principal_disable_requests'::regclass)
+        LOOP
+          EXECUTE format('ALTER TABLE %I DROP CONSTRAINT %I', item.relname, item.conname);
+        END LOOP;
+      END
+      $drop$;
+      ALTER TABLE continuum_entra_guarded_mutations
+        ALTER COLUMN authorization_principal_id DROP NOT NULL;
+      ALTER TABLE continuum_principal_disable_requests
+        ALTER COLUMN authorization_principal_id DROP NOT NULL;
+    `);
+    await addMigration(state.directory, '0052_offboarding_review_repair.sql');
+    await expect(runMigrations(state.pool, state.directory)).resolves.toEqual([
+      expect.objectContaining({ name: '0052_offboarding_review_repair.sql' }),
+    ]);
+    expect((await state.pool.query(`
+      SELECT count(*)::int AS count FROM pg_trigger
+       WHERE NOT tgisinternal AND (
+         (tgrelid = 'principals'::regclass
+          AND tgname = 'protect_last_manual_org_admin_principal')
+         OR (tgrelid = 'entra_groups'::regclass
+          AND tgname = 'guard_entra_binding_approvals'))
+    `)).rows[0].count).toBe(2);
+    expect((await state.pool.query(`
+      SELECT count(*)::int AS count FROM pg_attribute
+       WHERE attrelid IN ('continuum_entra_guarded_mutations'::regclass,
+                          'continuum_principal_disable_requests'::regclass)
+         AND attname = 'authorization_principal_id' AND attnotnull
+    `)).rows[0].count).toBe(2);
+    expect((await state.pool.query(`
+      SELECT count(*)::int AS count FROM pg_constraint
+       WHERE conrelid IN ('continuum_entra_guarded_mutations'::regclass,
+                          'continuum_principal_disable_requests'::regclass)
+    `)).rows[0].count).toBeGreaterThanOrEqual(6);
+  }, 60_000);
+
   it('documents and checks migration-owner capabilities before 0051 changes', async () => {
     const migration = await readFile(
       new URL('../../migrations/0051_offboarding_security_contract.sql', import.meta.url), 'utf8',
@@ -359,9 +409,16 @@ describe('0048 trusted database identity upgrade', () => {
     expect((await ownerPool.query(
       'SELECT rolsuper, rolcreaterole FROM pg_roles WHERE rolname = current_user',
     )).rows[0]).toEqual({ rolsuper: false, rolcreaterole: true });
+    await addMigration(state.directory, '0052_offboarding_review_repair.sql');
+    await expect(runMigrations(ownerPool, state.directory)).resolves.toEqual([
+      expect.objectContaining({ name: '0052_offboarding_review_repair.sql' }),
+    ]);
     await state.admin.query(
       'REVOKE ' + quoteIdentifier(syncRole) + ' FROM ' + quoteIdentifier(ownerRole),
     );
+    await expect(ownerPool.query(
+      'SELECT continuum_verify_sync_retirement_authority_configuration()',
+    )).rejects.toThrow(/CREATEROLE|ADMIN OPTION|retirement/i);
   }, 60_000);
 
   it('fails owner preflight before creating any 0051 capability object', async () => {

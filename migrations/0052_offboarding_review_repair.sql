@@ -2,6 +2,44 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '30s';
 
+-- Fail before taking repair locks when an already-ledgered 0051 database has
+-- ambiguous organization identity or a migration definer that cannot retire
+-- its registered sync role during emergency rotation.
+DO $preflight$
+DECLARE
+  migration_role_oid OID := current_user::regrole::oid;
+  migration_superuser BOOLEAN;
+  migration_createrole BOOLEAN;
+  organization_count INTEGER;
+BEGIN
+  SELECT count(*)::integer INTO organization_count FROM scopes WHERE kind = 'org';
+  IF organization_count <> 1 OR NOT EXISTS (
+    SELECT 1 FROM scopes WHERE kind = 'org' AND name = ''
+  ) THEN
+    RAISE EXCEPTION '0052 requires exactly one canonical organization scope';
+  END IF;
+  SELECT rolsuper, rolcreaterole
+    INTO migration_superuser, migration_createrole
+    FROM pg_roles WHERE oid = migration_role_oid;
+  IF EXISTS (SELECT 1 FROM continuum_trusted_database_identities WHERE can_sync)
+     AND NOT migration_superuser AND (
+       NOT migration_createrole OR EXISTS (
+         SELECT 1 FROM continuum_trusted_database_identities identity
+          WHERE identity.can_sync AND NOT EXISTS (
+            SELECT 1 FROM pg_auth_members membership
+             WHERE membership.roleid = identity.database_role_oid
+               AND membership.member = migration_role_oid
+               AND membership.admin_option
+          )
+       )
+     ) THEN
+    RAISE EXCEPTION '0052 migration role requires CREATEROLE and ADMIN OPTION on every sync role';
+  END IF;
+END;
+$preflight$;
+
+ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+
 -- The two capability tables are transaction-local markers. Maintenance mode
 -- guarantees no legitimate rows survive, so normalize their complete shape
 -- before rebuilding every dependent trigger and function.
@@ -84,22 +122,34 @@ ON CONFLICT (singleton) DO UPDATE SET scope_id = EXCLUDED.scope_id;
 REVOKE ALL ON TABLE continuum_canonical_org_scope FROM PUBLIC;
 
 CREATE OR REPLACE FUNCTION continuum_org_scope_id()
-RETURNS UUID LANGUAGE sql STABLE SECURITY DEFINER AS $$
-  SELECT COALESCE(
-    (SELECT marker.scope_id
-       FROM continuum_canonical_org_scope marker
-       JOIN scopes scope ON scope.id = marker.scope_id
-      WHERE marker.singleton),
-    (SELECT scope.id FROM scopes scope
-      WHERE scope.kind = 'org' AND scope.name = '')
-  )
+RETURNS UUID LANGUAGE plpgsql STABLE SECURITY DEFINER AS $$
+DECLARE canonical_id UUID;
+BEGIN
+  SELECT marker.scope_id INTO canonical_id
+    FROM continuum_canonical_org_scope marker
+    JOIN scopes scope ON scope.id = marker.scope_id
+   WHERE marker.singleton AND scope.kind = 'org' AND scope.name = '';
+  IF canonical_id IS NULL THEN
+    RAISE EXCEPTION 'canonical organization scope marker is missing or invalid';
+  END IF;
+  RETURN canonical_id;
+END;
 $$;
 REVOKE ALL ON FUNCTION continuum_org_scope_id() FROM PUBLIC;
 
 CREATE OR REPLACE FUNCTION continuum_protect_canonical_org_scope()
 RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
-DECLARE canonical_id UUID := continuum_org_scope_id();
+DECLARE canonical_id UUID;
 BEGIN
+  SELECT scope_id INTO canonical_id
+    FROM continuum_canonical_org_scope WHERE singleton;
+  IF canonical_id IS NULL THEN
+    IF TG_OP = 'INSERT' AND NEW.kind = 'org' AND NEW.name = ''
+       AND NOT EXISTS (SELECT 1 FROM scopes) THEN
+      RETURN NEW;
+    END IF;
+    RAISE EXCEPTION 'canonical organization scope marker is missing';
+  END IF;
   IF TG_OP = 'INSERT' AND NEW.kind = 'org' AND NEW.id <> canonical_id THEN
     RAISE EXCEPTION 'canonical organization scope is a singleton';
   END IF;
@@ -121,6 +171,23 @@ DROP TRIGGER IF EXISTS protect_canonical_org_scope ON scopes;
 CREATE TRIGGER protect_canonical_org_scope
 BEFORE INSERT OR DELETE OR UPDATE OF id, kind, name ON scopes
 FOR EACH ROW EXECUTE FUNCTION continuum_protect_canonical_org_scope();
+
+CREATE OR REPLACE FUNCTION continuum_bind_initial_org_scope()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN
+  IF NEW.kind = 'org' AND NEW.name = '' THEN
+    INSERT INTO continuum_canonical_org_scope (singleton, scope_id)
+    VALUES (TRUE, NEW.id)
+    ON CONFLICT (singleton) DO NOTHING;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+REVOKE ALL ON FUNCTION continuum_bind_initial_org_scope() FROM PUBLIC;
+DROP TRIGGER IF EXISTS bind_initial_org_scope ON scopes;
+CREATE TRIGGER bind_initial_org_scope
+AFTER INSERT ON scopes
+FOR EACH ROW EXECUTE FUNCTION continuum_bind_initial_org_scope();
 
 -- Every privileged runtime call revalidates role isolation. This catches a
 -- later application-to-operator SET ROLE edge, not only rollout-time drift.
@@ -492,22 +559,36 @@ REVOKE ALL ON FUNCTION continuum_verify_sync_database_identity(UUID) FROM PUBLIC
 CREATE OR REPLACE FUNCTION continuum_require_sync_retirement_authority(
   target_database_role_oid OID
 ) RETURNS VOID LANGUAGE plpgsql STABLE SECURITY DEFINER AS $$
-DECLARE owner_oid OID; owner_superuser BOOLEAN; owner_createrole BOOLEAN;
+DECLARE definer_oid OID := current_user::regrole::oid;
+        definer_superuser BOOLEAN; definer_createrole BOOLEAN;
 BEGIN
-  SELECT relowner INTO owner_oid FROM pg_class WHERE oid = 'principals'::regclass;
-  SELECT rolsuper, rolcreaterole INTO owner_superuser, owner_createrole
-    FROM pg_roles WHERE oid = owner_oid;
-  IF NOT owner_superuser AND (
-       NOT owner_createrole OR NOT EXISTS (
+  SELECT rolsuper, rolcreaterole INTO definer_superuser, definer_createrole
+    FROM pg_roles WHERE oid = definer_oid;
+  IF NOT definer_superuser AND (
+       NOT definer_createrole OR NOT EXISTS (
          SELECT 1 FROM pg_auth_members membership
           WHERE membership.roleid = target_database_role_oid
-            AND membership.member = owner_oid AND membership.admin_option)
+            AND membership.member = definer_oid AND membership.admin_option)
      ) THEN
-    RAISE EXCEPTION 'migration owner requires CREATEROLE and ADMIN OPTION on sync role for retirement';
+    RAISE EXCEPTION 'migration definer requires CREATEROLE and ADMIN OPTION on sync role for retirement';
   END IF;
 END;
 $$;
 REVOKE ALL ON FUNCTION continuum_require_sync_retirement_authority(OID) FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION continuum_verify_sync_retirement_authority_configuration()
+RETURNS VOID LANGUAGE plpgsql STABLE SECURITY DEFINER AS $$
+DECLARE identity RECORD;
+BEGIN
+  FOR identity IN
+    SELECT database_role_oid FROM continuum_trusted_database_identities WHERE can_sync
+  LOOP
+    PERFORM continuum_require_sync_retirement_authority(identity.database_role_oid);
+  END LOOP;
+END;
+$$;
+REVOKE ALL ON FUNCTION continuum_verify_sync_retirement_authority_configuration() FROM PUBLIC;
+SELECT continuum_verify_sync_retirement_authority_configuration();
 
 CREATE OR REPLACE FUNCTION continuum_retire_sync_database_identities(
   retained_role_oid OID
@@ -662,7 +743,14 @@ BEGIN
     SELECT 1 FROM pg_auth_members membership
      WHERE membership.member = target_oid
         OR (membership.roleid = target_oid AND membership.member <> owner_oid)
-  ) OR has_schema_privilege(target_database_role, current_schema(), 'CREATE') THEN
+  ) OR NOT has_schema_privilege(target_database_role, schema_oid, 'USAGE')
+    OR has_schema_privilege(target_database_role, schema_oid, 'CREATE')
+    OR EXISTS (
+      SELECT 1 FROM pg_namespace namespace
+      CROSS JOIN LATERAL aclexplode(COALESCE(
+        namespace.nspacl, acldefault('n', namespace.nspowner))) privilege
+       WHERE namespace.oid = schema_oid AND privilege.grantee = 0
+    ) THEN
     RAISE EXCEPTION 'application role has privileged attributes or membership-edge drift';
   END IF;
   IF EXISTS (
@@ -755,9 +843,107 @@ BEGIN
     (SELECT * FROM actual EXCEPT SELECT * FROM expected)
     UNION ALL (SELECT * FROM expected EXCEPT SELECT * FROM actual)
   ) THEN RAISE EXCEPTION 'application role function privilege drift from exact allow-list'; END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_class relation
+    CROSS JOIN LATERAL aclexplode(COALESCE(
+      relation.relacl,
+      acldefault(CASE WHEN relation.relkind = 'S' THEN 's'::"char" ELSE 'r'::"char" END,
+                 relation.relowner))) privilege
+     WHERE relation.relnamespace = schema_oid AND privilege.grantee = 0
+  ) OR EXISTS (
+    WITH column_acls AS MATERIALIZED (
+      SELECT attribute.attrelid, attribute.attacl
+        FROM pg_attribute attribute
+       WHERE attribute.attnum > 0 AND NOT attribute.attisdropped
+         AND cardinality(attribute.attacl) > 0
+    )
+    SELECT 1 FROM column_acls attribute
+    JOIN pg_class relation ON relation.oid = attribute.attrelid
+    CROSS JOIN LATERAL aclexplode(attribute.attacl) privilege
+     WHERE relation.relnamespace = schema_oid AND privilege.grantee = 0
+  ) OR EXISTS (
+    SELECT 1 FROM pg_proc function
+    CROSS JOIN LATERAL aclexplode(COALESCE(
+      function.proacl, acldefault('f', function.proowner))) privilege
+     WHERE function.pronamespace = schema_oid AND privilege.grantee = 0
+       AND NOT EXISTS (
+         SELECT 1 FROM pg_depend dependency
+          WHERE dependency.classid = 'pg_proc'::regclass
+            AND dependency.objid = function.oid
+            AND dependency.refclassid = 'pg_extension'::regclass
+            AND dependency.deptype = 'e')
+  ) OR EXISTS (
+    SELECT 1 FROM pg_default_acl defaults
+    CROSS JOIN LATERAL aclexplode(defaults.defaclacl) privilege
+     WHERE defaults.defaclrole = owner_oid
+       AND defaults.defaclnamespace IN (0, schema_oid)
+       AND privilege.grantee = 0
+  ) THEN
+    RAISE EXCEPTION 'PUBLIC or default application-schema privilege drift';
+  END IF;
 END;
 $$;
 REVOKE ALL ON FUNCTION continuum_assert_application_role_allowlist(NAME) FROM PUBLIC;
+
+-- Reinstall the extension grant refresher for databases that already ledgered
+-- an older 0051. Resolve application roles from the memories relation OID, not
+-- current_schema(), because hardened definers deliberately put pg_catalog first.
+CREATE OR REPLACE FUNCTION continuum_grant_application_vector_functions()
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE
+  schema_oid OID;
+  owner_oid OID;
+  invoking_role_oid OID;
+  target_role RECORD;
+  vector_function RECORD;
+BEGIN
+  SELECT relation.relnamespace, relation.relowner
+    INTO schema_oid, owner_oid
+    FROM pg_class relation WHERE relation.oid = 'memories'::regclass;
+  SELECT oid INTO invoking_role_oid
+    FROM pg_roles WHERE rolname = continuum_invoking_database_role();
+  IF invoking_role_oid <> owner_oid THEN
+    RAISE EXCEPTION 'only the migration owner may refresh application extension grants';
+  END IF;
+  FOR target_role IN
+    SELECT DISTINCT role.rolname
+      FROM pg_class relation
+      CROSS JOIN LATERAL aclexplode(COALESCE(
+        relation.relacl, acldefault('r', relation.relowner))) privilege
+      JOIN pg_roles role ON role.oid = privilege.grantee
+     WHERE relation.oid = 'memories'::regclass
+       AND upper(privilege.privilege_type) = 'SELECT'
+       AND role.oid <> owner_oid
+  LOOP
+    FOR vector_function IN
+      SELECT format('%I.%I(%s)', namespace.nspname, function.proname,
+                    pg_get_function_identity_arguments(function.oid)) AS signature,
+             function.proowner
+        FROM pg_proc function
+        JOIN pg_namespace namespace ON namespace.oid = function.pronamespace
+        JOIN pg_depend dependency
+          ON dependency.classid = 'pg_proc'::regclass
+         AND dependency.objid = function.oid
+         AND dependency.refclassid = 'pg_extension'::regclass
+         AND dependency.deptype = 'e'
+        JOIN pg_extension extension ON extension.oid = dependency.refobjid
+       WHERE function.pronamespace = schema_oid AND extension.extname = 'vector'
+    LOOP
+      IF NOT has_function_privilege(target_role.rolname,
+                                    vector_function.signature, 'EXECUTE') THEN
+        IF vector_function.proowner = current_user::regrole::oid THEN
+          EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I',
+            vector_function.signature, target_role.rolname);
+        ELSE
+          RAISE EXCEPTION 'extension owner must grant EXECUTE on % to application role %',
+            vector_function.signature, target_role.rolname;
+        END IF;
+      END IF;
+    END LOOP;
+  END LOOP;
+END;
+$$;
+REVOKE ALL ON FUNCTION continuum_grant_application_vector_functions() FROM PUBLIC;
 
 -- Extension updates may add provider-owned pgvector routines. Refresh direct
 -- grants where Continuum owns them, accept extension-owner PUBLIC execution,
@@ -774,14 +960,17 @@ BEGIN
      WHERE function.pronamespace = quote_ident(current_schema())::regnamespace
        AND function.proname = ANY(ARRAY[
          'continuum_org_scope_id', 'continuum_protect_canonical_org_scope',
+         'continuum_bind_initial_org_scope',
          'continuum_require_trusted_database_identity',
          'continuum_validate_entra_guard_markers', 'continuum_guard_entra_admin_sources',
          'continuum_assert_sync_role_allowlist', 'continuum_verify_sync_database_identity',
          'continuum_require_sync_retirement_authority',
+         'continuum_verify_sync_retirement_authority_configuration',
          'continuum_retire_sync_database_identities',
          'continuum_install_sync_database_identity',
          'continuum_operator_pseudonymize_scope',
-         'continuum_assert_application_role_allowlist'
+         'continuum_assert_application_role_allowlist',
+         'continuum_grant_application_vector_functions'
        ])
   LOOP
     EXECUTE format('ALTER FUNCTION %I.%I(%s) SET search_path = pg_catalog, %I, pg_temp',

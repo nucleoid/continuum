@@ -66,4 +66,5 @@ REVOKE ALL ON FUNCTION
   :"continuum_schema".continuum_upsert_entra_group_binding(UUID, TEXT, TEXT, UUID, TEXT)
 FROM :"continuum_sync_role";
 SELECT :"continuum_schema".continuum_verify_database_identity_configuration();
+SELECT :"continuum_schema".continuum_verify_sync_retirement_authority_configuration();
 COMMIT;

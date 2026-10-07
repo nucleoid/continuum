@@ -19,6 +19,7 @@
 \endif
 
 SELECT :"continuum_schema".continuum_verify_database_identity_configuration();
+SELECT :"continuum_schema".continuum_verify_sync_retirement_authority_configuration();
 
 BEGIN;
 CREATE TEMP TABLE continuum_identity_verification_input (

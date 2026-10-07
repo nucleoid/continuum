@@ -240,10 +240,20 @@ describe('fresh independent review remediation', () => {
         LANGUAGE sql AS 'SELECT 1'
       `);
       try {
+        expect((await pool.query(
+          `SELECT has_function_privilege('public',
+                    'public.round4_public_drift()', 'EXECUTE') AS allowed`,
+        )).rows[0].allowed).toBe(false);
+        await pool.query(
+          'GRANT EXECUTE ON FUNCTION public.round4_public_drift() TO PUBLIC',
+        );
         await expect(sync.connection.query(
           'SELECT continuum_verify_sync_database_identity($1)', [service.id],
         )).rejects.toThrow(/PUBLIC|default|privilege|drift/i);
       } finally {
+        await pool.query(
+          'REVOKE EXECUTE ON FUNCTION public.round4_public_drift() FROM PUBLIC',
+        );
         await pool.query('DROP FUNCTION public.round4_public_drift()');
       }
       await pool.query(

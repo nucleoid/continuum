@@ -90,9 +90,11 @@ BEGIN
   EXECUTE format(
     'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I REVOKE ALL ON SEQUENCES FROM PUBLIC',
     current_user, schema_name);
+  -- Function EXECUTE defaults are global per creating role. IN SCHEMA cannot
+  -- remove PostgreSQL's built-in PUBLIC default; close it globally instead.
   EXECUTE format(
-    'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC',
-    current_user, schema_name);
+    'ALTER DEFAULT PRIVILEGES FOR ROLE %I REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC',
+    current_user);
 END;
 $public_acl$;
 
@@ -996,10 +998,11 @@ BEGIN
 
   FOR target_role IN
     SELECT DISTINCT role.rolname
-      FROM information_schema.table_privileges privilege
-      JOIN pg_roles role ON role.rolname = privilege.grantee
-     WHERE privilege.table_schema = current_schema()
-       AND privilege.table_name = 'memories'
+      FROM pg_class relation
+      CROSS JOIN LATERAL aclexplode(COALESCE(
+        relation.relacl, acldefault('r', relation.relowner))) privilege
+      JOIN pg_roles role ON role.oid = privilege.grantee
+     WHERE relation.oid = 'memories'::regclass
        AND upper(privilege.privilege_type) = 'SELECT'
        AND role.oid <> owner_oid
   LOOP

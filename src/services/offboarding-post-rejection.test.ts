@@ -202,6 +202,13 @@ describe('post-rejection database authority remediation', () => {
         [application.role, table],
       )).rows[0].allowed).toBe(false);
     }
+    await expect(application.connection.query(`
+      INSERT INTO continuum_entra_guarded_mutations
+        (external_id, mutation_kind, backend_pid, transaction_id,
+         authorization_principal_id)
+      VALUES ('forged', 'delete', pg_backend_pid(), txid_current(),
+              gen_random_uuid())
+    `)).rejects.toThrow(/permission denied/i);
     const migration = await readFile(
       join(process.cwd(), 'migrations/0052_offboarding_review_repair.sql'), 'utf8',
     );
@@ -242,6 +249,31 @@ describe('post-rejection database authority remediation', () => {
         'SELECT has_function_privilege($1, $2, $3) AS allowed',
         [application.role, vectorFunction.signature, 'EXECUTE'],
       )).rows[0].allowed).toBe(true);
+    } finally {
+      await pool.query('ROLLBACK');
+    }
+
+    const managedOwner = `continuum_vector_provider_${Date.now()}`;
+    await pool.query('BEGIN');
+    try {
+      await pool.query('CREATE ROLE ' + quoteRole(managedOwner) + ' NOLOGIN');
+      await pool.query(`
+        CREATE FUNCTION continuum_managed_vector_probe(integer)
+        RETURNS integer LANGUAGE sql IMMUTABLE AS 'SELECT $1'
+      `);
+      await pool.query(
+        'ALTER FUNCTION continuum_managed_vector_probe(integer) OWNER TO '
+        + quoteRole(managedOwner),
+      );
+      await pool.query(
+        'ALTER EXTENSION vector ADD FUNCTION continuum_managed_vector_probe(integer)',
+      );
+      await pool.query(
+        'REVOKE EXECUTE ON FUNCTION continuum_managed_vector_probe(integer) FROM PUBLIC, '
+        + quoteRole(application.role),
+      );
+      await expect(pool.query('SELECT continuum_grant_application_vector_functions()'))
+        .rejects.toThrow(/extension owner must grant EXECUTE/i);
     } finally {
       await pool.query('ROLLBACK');
     }

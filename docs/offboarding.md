@@ -350,12 +350,16 @@ Graph request. Extra `UPDATE`, `DELETE`, `TRIGGER`, ownership, membership,
 function execution, or `PUBLIC`/default privilege fails startup closed.
 Migration `0052` is the forward repair for databases that may already have
 recorded an edited `0051`. It binds the canonical organization scope to an
-owner-controlled UUID, restores all principal, Entra-group, and membership
+owner-controlled UUID and fails closed if that marker is absent or ambiguous.
+The only empty-database bootstrap accepted is the single canonical `org/''`
+row, which immediately rebinds the marker. It restores all principal,
+Entra-group, and membership
 triggers, normalizes both transient capability-table shapes, and checks column
 ACLs as well as table ACLs. Sync startup rejects owner and superuser sessions
 and rechecks operator and sync membership edges at each privileged call. The
 application grant script revokes both marker tables and validates its exact
-direct allow-list before returning success. The application role has no scope
+direct allow-list—including schema and ambient `PUBLIC` privileges—before
+returning success. The application role has no scope
 row update authority; the operator-only pseudonymization function owns the one
 supported user-scope name mutation, while `id`, `kind`, and the canonical
 organization identity remain immutable.
@@ -411,11 +415,12 @@ privilege revocations. Failed preflight leaves no partial 0051 changes. The
 supported least-privilege path is a non-superuser schema/object owner with
 `CREATEROLE` and narrowly scoped `ADMIN OPTION` on managed sync roles, not
 blanket superuser access.
-Migration `0052` additionally proves retirement authority when a sync identity
-is installed or rotated, before that identity is accepted. A non-superuser
-owner therefore needs `CREATEROLE` and `ADMIN OPTION` on both the current and
-candidate sync roles. This makes a later emergency rotation fail during
-installation rather than after the credential has become active.
+Migration `0052` additionally proves retirement authority during its preflight,
+when a sync identity is installed or rotated, and whenever the identity
+verification script runs. A non-superuser migration definer therefore needs
+`CREATEROLE` and `ADMIN OPTION` on both the current and candidate sync roles.
+Revoking that edge later makes verification fail before an emergency rotation
+is needed.
 
 Pgvector extension members are governed separately from Continuum-owned
 functions. Managed PostgreSQL may own those routines with a provider role, so
@@ -426,6 +431,9 @@ provider revokes `PUBLIC`, the extension owner must pregrant `EXECUTE` to each
 application role. Re-run `grant-application-role.sql` after every vector
 extension update so newly added routines are checked. Continuum-owned
 functions remain closed to `PUBLIC` without exception.
+Continuum also removes the creating role's global default `PUBLIC EXECUTE` for
+future functions; PostgreSQL's built-in function default cannot be removed by
+an `IN SCHEMA` default-privilege command.
 The application role must not own the event ledger, completion-capability
 table, or security-definer functions, and receives no direct privilege on the
 capability table. Direct `completed` inserts then fail at the trigger.
