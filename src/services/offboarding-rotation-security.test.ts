@@ -751,6 +751,86 @@ describe('sync database identity rotation security', () => {
     }
   });
 
+  it('rebinds foreign-cluster retired OIDs without touching unrelated colliding roles', async () => {
+    const retiredName = 'continuum_foreign_retired_' + Date.now();
+    const unrelated = 'continuum_foreign_collision_' + Date.now();
+    await pool.query('CREATE ROLE ' + quoteRole(retiredName) + ' NOLOGIN');
+    await pool.query('CREATE ROLE ' + quoteRole(unrelated) + ' NOLOGIN');
+    const unrelatedOid = (await pool.query(
+      'SELECT oid::text FROM pg_roles WHERE rolname = $1', [unrelated],
+    )).rows[0].oid;
+    const restoredOid = (await pool.query(
+      'SELECT oid::text FROM pg_roles WHERE rolname = $1', [retiredName],
+    )).rows[0].oid;
+    await pool.query(
+      `INSERT INTO continuum_retired_sync_database_identities
+         (database_role_oid, database_role) VALUES ($1, $2::name)`,
+      [unrelatedOid, retiredName],
+    );
+    try {
+      await pool.query(
+        `UPDATE continuum_database_identity_epoch
+            SET cluster_system_identifier = '-1' WHERE singleton`,
+      );
+      await expect(pool.query(
+        "SELECT continuum_rebind_database_identity_oids('REBIND AFTER LOGICAL RESTORE')",
+      )).resolves.toBeDefined();
+      const state = (await pool.query(
+        `SELECT
+           (SELECT database_role_oid::text
+              FROM continuum_retired_sync_database_identities
+             WHERE database_role = $1::name) AS rebound_oid,
+           (SELECT rolcanlogin FROM pg_roles WHERE oid = $2::oid) AS unrelated_login,
+           EXISTS (
+             SELECT 1 FROM continuum_retired_sync_database_identities
+              WHERE database_role_oid = $2::oid) AS unrelated_retired`,
+        [retiredName, unrelatedOid],
+      )).rows[0];
+      expect(state).toEqual({
+        rebound_oid: restoredOid, unrelated_login: false, unrelated_retired: false,
+      });
+    } finally {
+      await pool.query(
+        'DELETE FROM continuum_retired_sync_database_identities WHERE database_role = $1::name',
+        [retiredName],
+      );
+      await dropRoles(pool, [retiredName, unrelated]);
+    }
+  });
+
+  it('rejects an incomplete same-cluster retired-role permutation', async () => {
+    const first = 'continuum_incomplete_first_' + Date.now();
+    const second = 'continuum_incomplete_second_' + Date.now();
+    await pool.query('CREATE ROLE ' + quoteRole(first) + ' NOLOGIN');
+    await pool.query('CREATE ROLE ' + quoteRole(second) + ' NOLOGIN');
+    const firstOid = (await pool.query(
+      'SELECT oid::text FROM pg_roles WHERE rolname = $1', [first],
+    )).rows[0].oid;
+    const secondOid = (await pool.query(
+      'SELECT oid::text FROM pg_roles WHERE rolname = $1', [second],
+    )).rows[0].oid;
+    await pool.query(
+      `INSERT INTO continuum_retired_sync_database_identities
+         (database_role_oid, database_role) VALUES
+         ($1, $2::name), ($3, $4::name)`,
+      [firstOid, first, secondOid, second],
+    );
+    await pool.query('DROP ROLE ' + quoteRole(second));
+    await pool.query('ALTER ROLE ' + quoteRole(first) + ' RENAME TO ' + quoteRole(second));
+    await pool.query('CREATE ROLE ' + quoteRole(first) + ' NOLOGIN');
+    try {
+      await expect(pool.query(
+        "SELECT continuum_rebind_database_identity_oids('REBIND AFTER LOGICAL RESTORE')",
+      )).rejects.toThrow(/complete retired.role restore mapping|ambiguous/i);
+    } finally {
+      await pool.query(
+        'DELETE FROM continuum_retired_sync_database_identities WHERE database_role = ANY($1::name[])',
+        [[first, second]],
+      );
+      await dropRoles(pool, [first, second]);
+    }
+  });
+
   it('verifies retired role safety by OID after the role is renamed', async () => {
     const fixture = await operatorFixture('renamed-retired-verification');
     const syncRole = 'continuum_rename_verify_sync_' + Date.now();
