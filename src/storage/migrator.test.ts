@@ -470,7 +470,7 @@ describe('runMigrations', () => {
         $$;
       `);
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-35).map((migration) => migration.name)).toEqual([
+      expect(applied.slice(-36).map((migration) => migration.name)).toEqual([
         '0030_offboarding_round7_integrity.sql',
         '0031_offboarding_round7_indexes.sql',
         '0032_offboarding_round7_compatibility.sql',
@@ -506,6 +506,7 @@ describe('runMigrations', () => {
         '0062_coordination_forward_online_finish.sql',
         '0063_coordination_final_privacy_repair.sql',
         '0064_coordination_final_online_indexes.sql',
+        '0065_coordination_review_remediation.sql',
       ]);
       expect((await pool.query(
         `SELECT disabled_at IS NOT NULL AS disabled FROM principals
@@ -761,7 +762,8 @@ describe('runMigrations', () => {
       && name !== '0061_coordination_forward_security_repair.sql'
       && name !== '0062_coordination_forward_online_finish.sql'
       && name !== '0063_coordination_final_privacy_repair.sql'
-      && name !== '0064_coordination_final_online_indexes.sql')) {
+      && name !== '0064_coordination_final_online_indexes.sql'
+      && name !== '0065_coordination_review_remediation.sql')) {
       if (file === '0038_offboarding_search_path_hardening.sql') {
         await copyFile(
           new URL(

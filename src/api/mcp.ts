@@ -126,17 +126,47 @@ function serviceErrorResult(error: unknown, logger: ServiceLogger): {
   return { ...jsonResult(body), isError: true };
 }
 
+const rawCoordinationInputSchema = z.preprocess(
+  (value) => {
+    if (typeof value === 'object' && value !== null
+        && Object.hasOwn(value, '__proto__')) {
+      return { __continuum_invalid_prototype_key__: true };
+    }
+    return value;
+  },
+  z.custom<Record<string, unknown>>(
+    (value) => typeof value === 'object' && value !== null && !Array.isArray(value),
+  ),
+);
+const acquireCoordinationInputSchema = z.object({
+  scope: z.string(), resource: z.string(), run_id: z.string(), request_id: z.string(),
+  ttl_seconds: z.number().int().optional(),
+}).strict();
+const mutationCoordinationInputSchema = z.object({
+  lease_id: z.string(), run_id: z.string(), request_id: z.string(),
+  ttl_seconds: z.number().int().optional(),
+}).strict();
+const releaseCoordinationInputSchema = mutationCoordinationInputSchema.omit({
+  ttl_seconds: true,
+});
+const inspectCoordinationInputSchema = z.object({
+  scope: z.string(), resource: z.string(),
+}).strict();
+
 function strictCoordinationInput(
-  value: Record<string, unknown>,
-  required: readonly string[],
-  optional: readonly string[] = [],
+  value: unknown, schema: z.ZodTypeAny,
 ): Record<string, unknown> {
-  const allowed = new Set([...required, ...optional]);
-  if (required.some((key) => !Object.hasOwn(value, key))
-    || Object.keys(value).some((key) => !allowed.has(key))) {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)
+    || Object.hasOwn(value, '__proto__')
+    || (Object.getPrototypeOf(value) !== Object.prototype
+        && Object.getPrototypeOf(value) !== null)) {
     throw new ServiceError('INVALID_INPUT', 'Invalid coordination input');
   }
-  return value;
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) {
+    throw new ServiceError('INVALID_INPUT', 'Invalid coordination input');
+  }
+  return parsed.data as Record<string, unknown>;
 }
 
 export function buildMcpServer(deps: McpDeps): McpServer {
@@ -164,19 +194,11 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     'continuum.lock_acquire',
     {
       description: 'Acquire one exclusive, non-reentrant scoped coordination lease.',
-      inputSchema: z.object({
-        scope: z.unknown().optional(),
-        resource: z.unknown().optional(),
-        run_id: z.unknown().optional(),
-        request_id: z.unknown().optional(),
-        ttl_seconds: z.unknown().optional(),
-      }).passthrough(),
+      inputSchema: rawCoordinationInputSchema,
     },
     async (args, extra) => {
       try {
-        const input = strictCoordinationInput(
-          args, ['scope', 'resource', 'run_id', 'request_id'], ['ttl_seconds'],
-        );
+        const input = strictCoordinationInput(args, acquireCoordinationInputSchema);
         const result = await acquireLease(pool, principal, {
           scope: input.scope as string,
           resource: input.resource as string,
@@ -212,18 +234,11 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     'continuum.lock_renew',
     {
       description: 'Renew the current lease generation owned by this principal and run.',
-      inputSchema: z.object({
-        lease_id: z.unknown().optional(),
-        run_id: z.unknown().optional(),
-        request_id: z.unknown().optional(),
-        ttl_seconds: z.unknown().optional(),
-      }).passthrough(),
+      inputSchema: rawCoordinationInputSchema,
     },
     async (args, extra) => {
       try {
-        const input = strictCoordinationInput(
-          args, ['lease_id', 'run_id', 'request_id'], ['ttl_seconds'],
-        );
+        const input = strictCoordinationInput(args, mutationCoordinationInputSchema);
         const result = await renewLease(pool, principal, {
           leaseId: input.lease_id as string,
           runId: input.run_id as string,
@@ -248,15 +263,11 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     'continuum.lock_release',
     {
       description: 'Release the current lease generation owned by this principal and run.',
-      inputSchema: z.object({
-        lease_id: z.unknown().optional(),
-        run_id: z.unknown().optional(),
-        request_id: z.unknown().optional(),
-      }).passthrough(),
+      inputSchema: rawCoordinationInputSchema,
     },
     async (args, extra) => {
       try {
-        const input = strictCoordinationInput(args, ['lease_id', 'run_id', 'request_id']);
+        const input = strictCoordinationInput(args, releaseCoordinationInputSchema);
         const result = await releaseLease(pool, principal, {
           leaseId: input.lease_id as string,
           runId: input.run_id as string,
@@ -276,14 +287,11 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     'continuum.lock_inspect',
     {
       description: 'Inspect a scoped resource while masking any other holder identity.',
-      inputSchema: z.object({
-        scope: z.unknown().optional(),
-        resource: z.unknown().optional(),
-      }).passthrough(),
+      inputSchema: rawCoordinationInputSchema,
     },
     async (args, extra) => {
       try {
-        const input = strictCoordinationInput(args, ['scope', 'resource']);
+        const input = strictCoordinationInput(args, inspectCoordinationInputSchema);
         const result = await inspectLease(pool, principal, {
           scope: input.scope as string,
           resource: input.resource as string,
@@ -790,6 +798,34 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       }
     },
   );
+
+  // The SDK validates tools/call with z.record() before it invokes a tool.
+  // Zod reconstructs that record and silently loses an own "__proto__" key,
+  // so preserve the malformed-input signal at the transport boundary. The
+  // sentinel is then rejected by each coordination tool's strict schema.
+  const sdkConnect = server.connect.bind(server);
+  server.connect = async (transport) => {
+    const priorOnMessage = transport.onmessage;
+    transport.onmessage = (message, extra) => {
+      const request = message as {
+        method?: unknown;
+        params?: { name?: unknown; arguments?: unknown };
+      };
+      const args = request.params?.arguments;
+      if (request.method === 'tools/call'
+          && typeof request.params?.name === 'string'
+          && request.params.name.startsWith('continuum.lock_')
+          && typeof args === 'object' && args !== null && !Array.isArray(args)
+          && Object.hasOwn(args, '__proto__')) {
+        Reflect.deleteProperty(args, '__proto__');
+        Object.defineProperty(args, '__continuum_invalid_prototype_key__', {
+          value: true, enumerable: true, configurable: true,
+        });
+      }
+      priorOnMessage?.(message, extra);
+    };
+    await sdkConnect(transport);
+  };
 
   return server;
 }

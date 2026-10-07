@@ -99,10 +99,10 @@ BEGIN
       schema_name, schema_name, target_role);
     EXECUTE format('REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE %I.coordination_scope_usage, %I.coordination_principal_usage, %I.coordination_scope_fencing_floors FROM %I',
       schema_name, schema_name, schema_name, target_role);
-    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_coordination_reserve_resource_creation(UUID), %I.continuum_coordination_scope_fencing_floor(UUID) TO %I',
-      schema_name, schema_name, target_role);
-    EXECUTE format('REVOKE ALL ON FUNCTION %I.continuum_operator_reclaim_coordination_resource(UUID, UUID, TEXT), %I.continuum_operator_set_coordination_scope_quota(UUID, UUID, INTEGER), %I.continuum_operator_sweep_coordination_state(UUID, INTEGER) FROM %I',
-      schema_name, schema_name, schema_name, target_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_coordination_reserve_resource_creation(UUID), %I.continuum_coordination_scope_fencing_floor(UUID), %I.continuum_coordination_privacy_state(UUID, UUID), %I.continuum_coordination_lock_entra_freshness() TO %I',
+      schema_name, schema_name, schema_name, schema_name, target_role);
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.continuum_operator_reclaim_coordination_resource(UUID, UUID, TEXT), %I.continuum_operator_set_coordination_scope_quota(UUID, UUID, INTEGER), %I.continuum_operator_sweep_coordination_state(UUID, INTEGER), %I.continuum_operator_scrub_coordination_principal(UUID, UUID, UUID, INTEGER) FROM %I',
+      schema_name, schema_name, schema_name, schema_name, target_role);
     IF to_regprocedure(format(
       '%I.continuum_operator_pseudonymize_scope_v2_legacy(uuid,uuid,text)', schema_name
     )) IS NOT NULL THEN

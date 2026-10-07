@@ -315,6 +315,21 @@ describe('coordination database role profiles', () => {
       continuum_operator_role: operator.role,
       continuum_principal_id: operatorPrincipal.id,
     })).resolves.toBeUndefined();
+    expect((await pool.query(
+      `SELECT has_table_privilege(
+                $1, 'coordination_principal_privacy_progress', 'SELECT') AS principal_read,
+              has_table_privilege(
+                $1, 'coordination_scope_privacy_progress', 'SELECT') AS scope_read,
+              has_function_privilege(
+                $1, 'continuum_coordination_privacy_state(uuid,uuid)', 'EXECUTE') AS api_execute`,
+      [operator.role],
+    )).rows).toEqual([{
+      principal_read: false, scope_read: false, api_execute: true,
+    }]);
+    await expect(operator.connection.query(
+      'SELECT * FROM continuum_coordination_privacy_state($1, $2)',
+      [operatorPrincipal.id, scope.id],
+    )).resolves.toBeDefined();
     try {
       const lowRunId = randomUUID();
       const low = await acquireLease(operator.connection, operatorPrincipal, {
@@ -638,7 +653,7 @@ describe('coordination database role profiles', () => {
       await expect(contender.query(
         `INSERT INTO scope_memberships (principal_id, scope_id, role)
          VALUES ($1, $2, 'writer')`, [newcomer.id, shared.id],
-      )).rejects.toMatchObject({ code: '55P03' });
+      )).resolves.toMatchObject({ rowCount: 1 });
       await expect(contender.query(
         `UPDATE principals SET disabled_at = NULL WHERE id = $1`, [target.id],
       )).rejects.toMatchObject({ code: '55P03' });

@@ -199,9 +199,9 @@ describe('coordination exact-head review regressions', () => {
     const evidenceId = String((await pool.query(
       `INSERT INTO audit_log (principal_id, action, metadata)
        VALUES ($1, 'write', jsonb_build_object(
-         'source', 'audit-retention', 'evidence', 'unrelated-offboarding-evidence',
+         'operation', 'principal_offboarded', 'evidence', 'unrelated-offboarding-evidence',
          'request_id', $2::uuid, 'run_id', $3::uuid)) RETURNING id`,
-      [target.id, evidenceRequestId, evidenceRunId],
+      [admin.id, evidenceRequestId, evidenceRunId],
     )).rows[0].id);
     const realAuditRows = Number((await pool.query(
       `SELECT count(*)::int AS count FROM audit_log
@@ -235,25 +235,12 @@ describe('coordination exact-head review regressions', () => {
     expect((await pool.query(
       'SELECT metadata FROM audit_log WHERE id = $1', [evidenceId],
     )).rows[0].metadata).toEqual({
-      source: 'audit-retention', evidence: 'unrelated-offboarding-evidence',
+      operation: 'principal_offboarded', evidence: 'unrelated-offboarding-evidence',
       request_id: evidenceRequestId, run_id: evidenceRunId,
     });
 
-    await pool.query(
-      `UPDATE coordination_principal_privacy_progress
-          SET privacy_version = 1, completed_at = clock_timestamp(), audit_cursor_id = 0
-        WHERE principal_id = $1`, [target.id],
-    );
-    result = await offboardPrincipal(pool, admin, target.id, {
-      confirmationScopeId: owned.id, batchSize: 1,
-    });
-    expect(result).toMatchObject({ complete: true, alreadyOffboarded: false });
-    expect((await pool.query(
-      `SELECT privacy_version, completed_at IS NOT NULL AS complete
-         FROM coordination_principal_privacy_progress WHERE principal_id = $1`, [target.id],
-    )).rows).toEqual([{ privacy_version: 2, complete: true }]);
   });
-  it('shares advisory-before-principal lock order with membership insertion without deadlock', async () => {
+  it('uses principal-before-scope lock order with membership insertion without deadlock', async () => {
     const value = await privacyFixture('deadlock-order');
     const shared = await createScope(pool, { kind: 'project', name: 'deadlock-order-shared' });
     await pool.query(

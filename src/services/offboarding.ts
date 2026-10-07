@@ -823,12 +823,13 @@ async function offboardPrincipalCore(
     const pseudonym = erasedPrincipalPseudonym(principalId);
     const scopePseudonym = erasedScopePseudonym(scopeId);
     const privacyState = await client.query(
-      `SELECT privacy_version, completed_at IS NOT NULL AS complete
-         FROM coordination_principal_privacy_progress WHERE principal_id = $1`,
-      [principalId],
+      `SELECT privacy_version, principal_complete, scope_complete
+         FROM continuum_coordination_privacy_state($1, $2)`,
+      [principalId, scopeId],
     );
     let coordinationPrivacyComplete = privacyState.rows[0]?.privacy_version === 2
-      && privacyState.rows[0]?.complete === true;
+      && privacyState.rows[0]?.principal_complete === true;
+    let coordinationPrivacyMutated = false;
     const wasOffboarded = target.rows[0].offboarded_at !== null;
     if (!dryRun && wasOffboarded && !coordinationPrivacyComplete) {
       const privacyRepair = await client.query<{ privacy: { complete?: boolean } }>(
@@ -837,6 +838,7 @@ async function offboardPrincipalCore(
          ) AS privacy`,
         [actor.id, principalId, scopeId, Math.min(batchSize, 1_000)],
       );
+      coordinationPrivacyMutated = true;
       coordinationPrivacyComplete = privacyRepair.rows[0]?.privacy?.complete === true;
     }
     const clean = resumedRun
@@ -845,6 +847,7 @@ async function offboardPrincipalCore(
       : dirtyMemories === 0 && embeddings === 0 && memberships === 0
         && aliases === 0 && entraBindings === 0 && auditRows === 0;
     const alreadyOffboarded = !resumedRun && wasOffboarded
+      && !coordinationPrivacyMutated
       && target.rows[0].disabled_at !== null
       && target.rows[0].reactivated_at === null
       && target.rows[0].display_name === pseudonym
@@ -941,13 +944,16 @@ async function offboardPrincipalCore(
          ) AS privacy`,
         [actor.id, principalId, scopeId, Math.min(batchSize, 1_000)],
       );
-      const ownedCoordinationComplete = Boolean((await client.query(
-        `SELECT completed_at IS NOT NULL AS complete
-           FROM coordination_scope_privacy_progress WHERE scope_id = $1`,
-        [scopeId],
-      )).rows[0]?.complete);
+      const currentPrivacyState = await client.query(
+        `SELECT principal_complete, scope_complete
+           FROM continuum_coordination_privacy_state($1, $2)`,
+        [principalId, scopeId],
+      );
+      const ownedCoordinationComplete =
+        currentPrivacyState.rows[0]?.scope_complete === true;
       coordinationPrivacyComplete =
-        coordinationPrivacy.rows[0]?.privacy?.complete === true;
+        coordinationPrivacy.rows[0]?.privacy?.complete === true
+        && currentPrivacyState.rows[0]?.principal_complete === true;
       aliasCount = aliasDelete.rowCount ?? 0;
       if (ownedCoordinationComplete && coordinationPrivacyComplete) {
         await writeOffboardingRun(client, principalId, actor.id, 'scope_complete');

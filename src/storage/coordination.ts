@@ -149,9 +149,10 @@ export async function lockCoordinationAuthorization(
   );
   if (!candidates.rowCount) return false;
   if (candidates.rows.some((row) => row.source_kind === 'entra')) {
-    await client.query(
-      'SELECT singleton FROM entra_sync_state WHERE singleton FOR SHARE',
+    const freshness = await client.query<{ fresh: boolean }>(
+      'SELECT continuum_coordination_lock_entra_freshness() AS fresh',
     );
+    if (freshness.rows[0]?.fresh !== true) return false;
   }
   return coordinationAuthorizationIsCurrent(client, principalId, scopeId);
 }
