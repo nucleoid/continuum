@@ -47,7 +47,7 @@ describe('PR 13 exact-head trust-boundary review', () => {
     expect(docs).toMatch(/0047_offboarding_role_boundary\.sql/);
     expect(docs).toMatch(/0048_offboarding_independent_review\.sql/);
     expect(docs).toMatch(/stop[\s\S]*migrate[\s\S]*regrant[\s\S]*start/i);
-    expect(docs).toMatch(/rollback is forward-only[\s\S]*0052-aware binary/i);
+    expect(docs).toMatch(/rollback is forward-only[\s\S]*0053-aware binary/i);
     expect(docs).not.toMatch(/old application tolerates/i);
   });
 });
