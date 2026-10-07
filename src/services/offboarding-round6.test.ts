@@ -30,11 +30,12 @@ describe('offboarding round-six safety contract', () => {
     const startedEvent = service.indexOf('await startOffboardingRunEvent(');
     expect(startedEvent).toBeGreaterThan(-1);
     expect(startedEvent).toBeLessThan(
-      service.indexOf('continuum_operator_pseudonymize_scope'),
-    );
-    expect(startedEvent).toBeLessThan(
       service.indexOf('continuum_operator_offboard_scope_access'),
     );
+    expect(service.indexOf('continuum_operator_offboard_scope_access'))
+      .toBeLessThan(service.indexOf('continuum_operator_pseudonymize_scope'));
+    expect(service.indexOf('continuum_disable_principal'))
+      .toBeLessThan(service.indexOf('continuum_operator_pseudonymize_scope'));
     expect(startedEvent).toBeLessThan(service.indexOf("'set_fence'"));
     expect(service).toMatch(/phase[^\n]+started/i);
     expect(service).toMatch(/phase[^\n]+completed/i);

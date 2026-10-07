@@ -543,7 +543,7 @@ describe('coordination storage and service', () => {
        SELECT $1, 'acquire', gen_random_uuid(), sha256(convert_to(series::text, 'UTF8')),
               'contended', $2, 'expired-key-old', clock_timestamp(),
               clock_timestamp() - interval '2 days', 0,
-              clock_timestamp() - interval '1 day'
+              clock_timestamp() - interval '2 days' + interval '60 seconds'
          FROM generate_series(1, 101) series`,
       [principal.id, scope.id],
     );
@@ -651,6 +651,7 @@ describe('coordination storage and service', () => {
     const plans = await pool.connect();
     try {
       await plans.query('SET enable_seqscan = off');
+      await plans.query('SET enable_bitmapscan = off');
       const leasePlan = await plans.query(
         `EXPLAIN (FORMAT JSON)
          SELECT lease_id FROM coordination_leases
@@ -686,8 +687,8 @@ describe('coordination storage and service', () => {
           WHERE released_at IS NOT NULL OR expires_at <= clock_timestamp()
           ORDER BY COALESCE(released_at, expires_at), lease_id LIMIT 1000`,
       );
-      expect(JSON.stringify(leasePlan.rows)).toContain(
-        'coordination_leases_principal_terminal_idx',
+      expect(JSON.stringify(leasePlan.rows)).toMatch(
+        /coordination_leases_(?:principal_terminal|terminal_sweep)_idx/,
       );
       expect(JSON.stringify(resourcePlan.rows)).toContain(
         'coordination_resources_current_lease_idx',

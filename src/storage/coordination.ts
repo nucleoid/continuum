@@ -197,7 +197,6 @@ export async function preparePrincipalReceipts(
         WHERE principal_id = $1 AND retain_until <= clock_timestamp()
         ORDER BY retain_until, operation, request_id
         LIMIT $2
-        FOR UPDATE SKIP LOCKED
      ), removed AS (
        DELETE FROM coordination_operation_receipts r
        USING doomed d
@@ -235,7 +234,7 @@ export async function preparePrincipalReceipts(
     [principalId, RECEIPT_CLEANUP_BATCH],
   );
   const usage = await client.query<{ receipt_count: number }>(
-    `SELECT (acquire_receipt_count + mutation_receipt_count)::int AS receipt_count
+    `SELECT (acquire_receipt_count + contended_receipt_count + mutation_receipt_count)::int AS receipt_count
        FROM coordination_principal_usage WHERE principal_id = $1`,
     [principalId],
   );
@@ -302,8 +301,7 @@ export async function getReceipt(
     `SELECT ${RECEIPT_COLUMNS}
        FROM coordination_operation_receipts
       WHERE principal_id = $1 AND operation = $2 AND request_id = $3
-        AND retain_until > clock_timestamp()
-      FOR UPDATE`,
+        AND retain_until > clock_timestamp()`,
     [principalId, operation, requestId],
   );
   return result.rows[0] ? receiptFromRow(result.rows[0]) : null;
@@ -360,11 +358,13 @@ export async function insertReceipt(
        $1, $2, $3, decode($4, 'hex'), $5,
        $6, $7, $8, $9, $10::bigint,
        $11::timestamptz, $12::timestamptz, $13,
-       CASE WHEN $2 = 'renew'
-         THEN LEAST(
+       CASE
+         WHEN $2 = 'renew' THEN LEAST(
            $12::timestamptz + interval '24 hours',
            $12::timestamptz + make_interval(secs => $14) + interval '60 seconds'
          )
+         WHEN $5 = 'contended'
+           THEN $12::timestamptz + interval '90 seconds'
          ELSE $12::timestamptz + interval '24 hours'
        END
      )`,

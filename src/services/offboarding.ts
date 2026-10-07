@@ -897,10 +897,6 @@ async function offboardPrincipalCore(
     let entraCount = 0;
     let aliasCount = 0;
     if (!run.rows[0].scope_cleanup_complete) {
-      await client.query(
-        'SELECT continuum_operator_pseudonymize_scope($1, $2, $3)',
-        [actor.id, scopeId, scopePseudonym],
-      );
       const accessUpdate = await client.query<{
         memberships_deactivated: number;
         bindings_quarantined: number;
@@ -914,12 +910,20 @@ async function offboardPrincipalCore(
       );
       membershipCount = accessUpdate.rows[0]?.memberships_deactivated ?? 0;
       entraCount = accessUpdate.rows[0]?.bindings_quarantined ?? 0;
+      await client.query('SELECT continuum_disable_principal($1::uuid, $2::uuid)', [
+        actor.id, principalId,
+      ]);
+      await client.query(
+        'SELECT continuum_operator_pseudonymize_scope($1, $2, $3)',
+        [actor.id, scopeId, scopePseudonym],
+      );
       aliasCount = aliasDelete.rowCount ?? 0;
       await writeOffboardingRun(client, principalId, actor.id, 'scope_complete');
+    } else {
+      await client.query('SELECT continuum_disable_principal($1::uuid, $2::uuid)', [
+        actor.id, principalId,
+      ]);
     }
-    await client.query('SELECT continuum_disable_principal($1::uuid, $2::uuid)', [
-      actor.id, principalId,
-    ]);
     await client.query(
       `UPDATE principals SET display_name = $2,
               offboarded_at = COALESCE(offboarded_at, now()), reactivated_at = NULL

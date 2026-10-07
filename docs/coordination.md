@@ -38,7 +38,7 @@ A resource is an opaque, case-sensitive Unicode string:
 
 - well-formed Unicode only;
 - 1 through 512 UTF-8 bytes;
-- no Unicode control characters;
+- no C0 or C1 control code points (the Unicode Cc ranges U+0000-U+001F and U+007F-U+009F);
 - no leading or trailing ECMAScript whitespace.
 
 Continuum does not trim, case-fold, normalize Unicode, resolve paths, infer
@@ -224,8 +224,9 @@ Replay adds no duplicate audit row.
 
 Once a receipt expires, bounded cleanup may remove it and its idempotency
 guarantee ends. For renew, do not retry after the renewed expiry plus the
-60-second margin. For acquire or release, do not blindly retry a request ID
-older than 24 hours. Inspect, reconcile local ownership state, and use a new
+60-second margin. A contended acquire receipt is retained for 90 seconds; a successful acquire or
+release receipt is retained for 24 hours. Do not blindly retry beyond the
+applicable horizon. Inspect, reconcile local ownership state, and use a new
 request ID.
 
 Server-side `lock_timeout` is one second and `statement_timeout` is five
@@ -242,9 +243,12 @@ V1 hard limits are:
 - 10,000 ever-created, unreclaimed resource keys per scope by default
   (operator-adjustable from 1 through 1,000,000);
 - at most 100 newly created resource keys per principal per rolling hour;
-- 10,000 retained acquire receipts per principal;
-- 10,000 retained release receipts per principal; short-lived renew receipts
-  do not consume either quota, so documented TTL/3 renewal cannot starve lease
+- 10,000 retained successful-acquire receipts per principal;
+- 1,000 separately counted contended-acquire receipts per principal, each with
+  a 90-second horizon;
+- 10,000 retained release receipts per principal;
+- at most 100 retained renew receipts per lease; renew receipts do not consume
+  acquire or release quota, so documented TTL/3 renewal cannot starve lease
   maintenance;
 - at most 100 expired receipts and terminal lease histories reclaimed by an
   application operation, and at most 1,000 of each by operator maintenance.
@@ -253,13 +257,28 @@ An existing resource remains usable when its scope reaches the key limit.
 Continuum never automatically evicts resource rows or fencing history. Quota, lease state,
 receipt, usage counters, and audit metadata commit atomically.
 
+Coordination operations lock authorization first, then the exact receipt and
+resource state. Offboarding locks active memberships in deterministic principal
+and source order before it reads any coordination state. A PostgreSQL deadlock
+or lock timeout maps to `COORDINATION_TIMEOUT`; retry the complete idempotent
+operation, never a statement inside the aborted transaction. Principal usage
+remains a residual hot row only when a successful acquire, contention, release,
+or new-resource rate reservation changes its counter. Renewals do not touch it.
+
+Global receipt sweeping uses
+`coordination_receipts_global_sweep_idx`; terminal lease sweeping uses
+`coordination_leases_terminal_sweep_idx`. Per-principal cleanup retains its
+principal-leading indexes.
+
 Operator maintenance is exposed only through the approval-bound database role:
 `continuum_operator_reclaim_coordination_resource` removes at most 1,000
 expired receipts and terminal lease generations, refuses a live lease or any
 retained receipt, preserves the scope fencing floor, and frees one key slot.
 `continuum_operator_sweep_coordination_state` performs indexed cleanup in
-batches of at most 1,000 for inactive principals. Quota changes, reclaim, and
-sweeps have a five-second statement timeout and write operator audit events.
+batches of at most 1,000 for inactive principals. Quota changes, reclaim, and sweeps write operator audit events. Operators must
+set transaction-level `lock_timeout` and `statement_timeout` before invoking
+maintenance; PostgreSQL function `SET` clauses do not bound the already-running
+calling statement, so Continuum does not claim a function-local deadline.
 `continuum_operator_set_coordination_scope_quota` adjusts a reviewed scope
 limit. The shared application role cannot execute these operator functions or
 directly update either usage/counter table; owner-owned triggers and narrow
@@ -273,7 +292,7 @@ vectors. Audit failure rolls back the whole operation.
 
 ## Deployment, mixed versions, and rollback
 
-Apply through migration `0056_coordination_final_remediation.sql`, then **re-run
+Apply through migration `0057_coordination_privacy_race_remediation.sql`, then **re-run
 `scripts/grant-application-role.sql`** for every application and dedicated
 operator role. Re-run `scripts/grant-operator-role.sql` immediately afterward
 for dedicated operators. The exact role verifier deliberately rejects both
@@ -290,10 +309,15 @@ all forward migrations, re-run the grant scripts and identity verifier, and
 resume with the retained counters. This preserves idempotency and fencing
 across rollback/re-enable cycles.
 
-Offboarding refuses while that scope has a live lease. It preserves the maximum
-scope fencing value, then replaces coordination resource text (and matching
-lease/receipt text through cascading foreign keys) with opaque random labels.
-Lease IDs, request hashes, receipts, and fencing values remain intact. No
+Offboarding first deactivates every owned-scope membership and disables the
+principal in the same transaction. Deterministically ordered membership locks
+drain operations that already hold the coordination authorization lock; later
+renewals fail authorization. It then preserves the maximum scope fencing value
+and replaces coordination resource text (and matching lease/receipt text
+through cascading foreign keys) with opaque random labels, even if a now
+non-renewable lease has not reached its old expiry. Lease IDs, receipt outcomes,
+and fencing values remain intact; every retained payload hash is overwritten
+with independent cryptographically random bytes. No
 resource hash or digest remains in a floor table. Lock
 audit metadata retains operation evidence but removes the resource digest,
 which could otherwise disclose low-entropy resource names by brute force.

@@ -21,10 +21,14 @@ const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
     'c69b96b7e8f64ce9d64da71b5026a2e8896cdcf6efb7a52107ca6ab062e7619a'],
   ['0055_coordination_review_remediation.sql',
     '478d40c2367f3fa900984767e18110fe5aa377aadcda1387225dc5dea87176fd'],
+  ['0056_coordination_final_remediation.sql',
+    '034df4cf096603fc895247f05246ca442b604d0df7dc05596e4c7b43af683c27'],
 ]);
 const FORWARD_MIGRATION_REQUIREMENTS = new Map([
   ['0053_offboarding_restore_contract.sql', '0052_offboarding_review_repair.sql'],
   ['0056_coordination_final_remediation.sql', '0055_coordination_review_remediation.sql'],
+  ['0057_coordination_privacy_race_remediation.sql',
+    '0056_coordination_final_remediation.sql'],
 ]);
 const REVIEW_ENTRA_MIGRATION_RENAMES = [
   ['0005_entra_auth.sql', '0010_entra_auth.sql'],

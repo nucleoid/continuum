@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import pg, { type PoolConfig } from 'pg';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { acquireLease, releaseLease } from '../services/coordination.js';
@@ -18,10 +18,13 @@ async function applyGrantScript(
   variables: Record<string, string>,
 ): Promise<void> {
   const source = await readFile(join(process.cwd(), 'scripts', filename), 'utf8');
+  const schema = String((await pool.query(
+    'SELECT current_schema() AS schema',
+  )).rows[0].schema);
   let sql = source.split(/\r?\n/)
     .filter((line) => !line.trimStart().startsWith('\\'))
     .join('\n')
-    .replaceAll(':"continuum_schema"', '"public"');
+    .replaceAll(':"continuum_schema"', quoteRole(schema));
   for (const [name, value] of Object.entries(variables)) {
     sql = sql.replaceAll(':"' + name + '"', quoteRole(value));
     sql = sql.replaceAll(":'" + name + "'", "'" + value.replaceAll("'", "''") + "'");
@@ -52,10 +55,13 @@ describe('coordination database role profiles', () => {
       'GRANT ' + quoteRole(role)
       + ' TO CURRENT_USER WITH ADMIN OPTION, SET FALSE, INHERIT FALSE',
     );
+    const schema = String((await pool.query(
+      'SELECT current_schema() AS schema',
+    )).rows[0].schema);
     return new pg.Pool({
       ...(pool as unknown as { options: PoolConfig }).options,
       max: 2,
-      options: '-c role=' + role,
+      options: `-c search_path=${schema},public -c role=${role}`,
     });
   }
 
@@ -77,6 +83,20 @@ describe('coordination database role profiles', () => {
     await addMembership(pool, principal.id, scope.id, 'writer');
     const app = await createApplicationRole();
     try {
+      const profile = await app.connection.query<{
+        schema: string; relation: string | null; select_allowed: boolean;
+      }>(
+        `SELECT current_schema() AS schema,
+                to_regclass('coordination_operation_receipts')::text AS relation,
+                has_table_privilege(
+                  current_user, 'coordination_operation_receipts', 'SELECT'
+                ) AS select_allowed`,
+      );
+      expect(profile.rows).toEqual([{
+        schema: String((await pool.query('SELECT current_schema() AS schema')).rows[0].schema),
+        relation: 'coordination_operation_receipts',
+        select_allowed: true,
+      }]);
       const redacted = await pool.query<{ metadata: Record<string, unknown> }>(
         `SELECT continuum_offboarding_expected_audit_metadata($1::jsonb) AS metadata`,
         [JSON.stringify({
@@ -120,7 +140,7 @@ describe('coordination database role profiles', () => {
       )).rows[0]?.allowed).toBe(false);
       await expect(app.connection.query(
         `UPDATE coordination_operation_receipts
-            SET payload_hash = gen_random_bytes(32)
+            SET payload_hash = payload_hash
           WHERE principal_id = $1`,
         [principal.id],
       )).rejects.toMatchObject({ code: '42501' });
@@ -423,7 +443,7 @@ describe('coordination database role profiles', () => {
         /^offboarded:[0-9a-f-]{36}$/.test(row.resource))).toBe(true);
       expect(racedState.rows.every((row) => row.floor === '9')).toBe(true);
       expect(racedState.rows.find((row) => row.payload_hash)?.payload_hash)
-        .not.toBe(canonicalOperationHash('acquire', ['known-race-input']));
+        .not.toBe(createHash('sha256').update('known-race-input').digest('hex'));
     } finally {
       await operator.connection.end();
     }

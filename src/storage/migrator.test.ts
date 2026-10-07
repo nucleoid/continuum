@@ -350,7 +350,7 @@ describe('runMigrations', () => {
         $$;
       `);
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-27).map((migration) => migration.name)).toEqual([
+      expect(applied.slice(-28).map((migration) => migration.name)).toEqual([
         '0030_offboarding_round7_integrity.sql',
         '0031_offboarding_round7_indexes.sql',
         '0032_offboarding_round7_compatibility.sql',
@@ -378,6 +378,7 @@ describe('runMigrations', () => {
         '0054_coordination_leases.sql',
         '0055_coordination_review_remediation.sql',
         '0056_coordination_final_remediation.sql',
+        '0057_coordination_privacy_race_remediation.sql',
       ]);
       expect((await pool.query(
         `SELECT indisvalid AS valid FROM pg_index
@@ -621,7 +622,8 @@ describe('runMigrations', () => {
       && name !== '0053_offboarding_restore_contract.sql'
       && name !== '0054_coordination_leases.sql'
       && name !== '0055_coordination_review_remediation.sql'
-      && name !== '0056_coordination_final_remediation.sql')) {
+      && name !== '0056_coordination_final_remediation.sql'
+      && name !== '0057_coordination_privacy_race_remediation.sql')) {
       if (file === '0038_offboarding_search_path_hardening.sql') {
         await copyFile(
           new URL(
@@ -1643,6 +1645,46 @@ describe('runMigrations', () => {
     } finally {
       await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
     }
+  });
+
+  it('recounts zero-receipt principals during the 0057 forward repair', async () => {
+    const suffix = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const schema = `coordination_0057_recount_${suffix}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-before-0057-'));
+    directories.push(directory);
+    const source = new URL('../../migrations/', import.meta.url);
+    const files = (await readdir(source))
+      .filter((name) => name.endsWith('.sql')
+        && name !== '0057_coordination_privacy_race_remediation.sql')
+      .sort();
+    await Promise.all(files.map((name) => copyFile(
+      new URL(name, source), join(directory, name),
+    )));
+    await runMigrations(pool, directory);
+    const principalId = '00000000-0000-4000-8000-000000005057';
+    await pool.query(
+      `INSERT INTO principals (id, external_id, kind, display_name)
+       VALUES ($1, 'service:0057-zero-recount', 'service', '0057 recount')`,
+      [principalId],
+    );
+    await pool.query(
+      `INSERT INTO coordination_principal_usage (
+         principal_id, acquire_receipt_count, mutation_receipt_count
+       ) VALUES ($1, 9, 8)`,
+      [principalId],
+    );
+    await runMigrations(pool, join(process.cwd(), 'migrations'));
+    expect((await pool.query(
+      `SELECT acquire_receipt_count, contended_receipt_count, mutation_receipt_count
+         FROM coordination_principal_usage WHERE principal_id = $1`,
+      [principalId],
+    )).rows).toEqual([{
+      acquire_receipt_count: 0, contended_receipt_count: 0, mutation_receipt_count: 0,
+    }]);
   });
 
   it('runs marked concurrent-index migrations outside a transaction', async () => {

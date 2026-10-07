@@ -78,8 +78,12 @@ BEGIN
   IF to_regclass(format('%I.coordination_resources', schema_name)) IS NOT NULL THEN
     EXECUTE format('GRANT SELECT, INSERT, UPDATE ON TABLE %I.coordination_resources TO %I',
       schema_name, target_role);
-    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.coordination_leases, %I.coordination_operation_receipts TO %I',
-      schema_name, schema_name, target_role);
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.coordination_leases TO %I',
+      schema_name, target_role);
+    EXECUTE format('GRANT SELECT, INSERT, DELETE ON TABLE %I.coordination_operation_receipts TO %I',
+      schema_name, target_role);
+    EXECUTE format('REVOKE UPDATE, TRUNCATE ON TABLE %I.coordination_operation_receipts FROM %I',
+      schema_name, target_role);
     EXECUTE format('GRANT SELECT ON TABLE %I.coordination_scope_usage, %I.coordination_principal_usage TO %I',
       schema_name, schema_name, target_role);
     EXECUTE format('REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE %I.coordination_scope_usage, %I.coordination_principal_usage, %I.coordination_scope_fencing_floors FROM %I',

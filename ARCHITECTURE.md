@@ -33,9 +33,9 @@ the exact receipt/resource/lease rows in canonical order. Principal quota rows
 are touched only near receipt insertion or new-key creation rather than
 serializing the whole transaction. It samples `clock_timestamp()` after row
 waits and revalidates authorization and cancellation immediately before commit.
-Lease mutation, receipt, quota, and bounded metadata commit together. Before
-offboarding, metadata includes a one-way resource digest; offboarding removes
-it.
+Lease mutation, receipt, quota, and bounded metadata commit together. Before offboarding, audit metadata includes a one-way resource digest;
+offboarding removes it and replaces retained receipt payload hashes with random
+bytes.
 
 REST and MCP are thin naming adapters over one service. REST uses camelCase and
 MCP uses snake_case. Contention is success, stale or denied generations are

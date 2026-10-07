@@ -12,7 +12,8 @@ async function source(path: string): Promise<string> {
 describe('coordination review remediation contract', () => {
   it('grants the application role exactly the coordination table privileges it needs', async () => {
     const grants = await source('scripts/grant-application-role.sql');
-    expect(grants).toMatch(/SELECT, INSERT, UPDATE, DELETE[\s\S]+coordination_operation_receipts/i);
+    expect(grants).toMatch(/SELECT, INSERT, DELETE[\s\S]+coordination_operation_receipts/i);
+    expect(grants).toMatch(/REVOKE UPDATE, TRUNCATE[\s\S]+coordination_operation_receipts/i);
     expect(grants).toMatch(/SELECT, INSERT, UPDATE[\s\S]+coordination_resources/i);
     expect(grants).toMatch(/SELECT, INSERT, UPDATE[\s\S]+coordination_leases/i);
     expect(grants).not.toMatch(/GRANT[\s\S]{0,80}UPDATE[\s\S]{0,160}coordination_scope_usage/i);
@@ -24,7 +25,8 @@ describe('coordination review remediation contract', () => {
 
   it('ships a forward migration for grants, indexes, operator maintenance, and offboarding', async () => {
     const migration = await source('migrations/0055_coordination_review_remediation.sql')
-      + await source('migrations/0056_coordination_final_remediation.sql');
+      + await source('migrations/0056_coordination_final_remediation.sql')
+      + await source('migrations/0057_coordination_privacy_race_remediation.sql');
     expect(migration).toContain('coordination_resources_current_lease_idx');
     expect(migration).toContain('coordination_leases_principal_terminal_idx');
     expect(migration).toMatch(/continuum_assert_application_role_allowlist[\s\S]+coordination_resources/i);
@@ -39,7 +41,8 @@ describe('coordination review remediation contract', () => {
   });
 
   it('excludes short-lived renew receipts from the release quota', async () => {
-    const migration = await source('migrations/0056_coordination_final_remediation.sql');
+    const migration = await source('migrations/0056_coordination_final_remediation.sql')
+      + await source('migrations/0057_coordination_privacy_race_remediation.sql');
     const storage = await source('src/storage/coordination.ts');
     expect(migration).toMatch(/operation = 'release'/i);
     expect(storage).toMatch(/input\.operation === 'renew'[\s\S]+make_interval/i);
@@ -83,7 +86,7 @@ describe('coordination review remediation contract', () => {
     expect(docs).toMatch(/mixed[- ]version/is);
     expect(docs).toMatch(/reclaim/is);
     expect(docs).toMatch(/rollback[\s\S]+re-enable/is);
-    expect(docs).toMatch(/renew receipts.+short-lived/is);
+    expect(docs).toMatch(/renew receipts[\s\S]+100 retained/is);
     expect(docs).toMatch(/ever-created.+reclaim/is);
   });
 
@@ -92,5 +95,6 @@ describe('coordination review remediation contract', () => {
     expect(migrator).toMatch(/0054_coordination_leases\.sql[\s\S]+[0-9a-f]{64}/);
     expect(migrator).toMatch(/0055_coordination_review_remediation\.sql[\s\S]+[0-9a-f]{64}/);
     expect(migrator).toMatch(/0056_coordination_final_remediation\.sql['"],\s*['"]0055_coordination_review_remediation\.sql/);
+    expect(migrator).toMatch(/0057_coordination_privacy_race_remediation\.sql[\s\S]+0056_coordination_final_remediation\.sql/);
   });
 });
