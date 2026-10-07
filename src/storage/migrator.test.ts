@@ -91,6 +91,45 @@ describe('runMigrations', () => {
     );
   });
 
+  it('accepts Git CRLF conversion of ledgered 0052 without accepting substantive changes', async () => {
+    const published = await readFile(
+      join(process.cwd(), 'migrations/0052_offboarding_review_repair.sql'), 'utf8',
+    );
+    const windowsCheckout = published.replaceAll('\n', '\r\n');
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-published-migration-crlf-'));
+    directories.push(directory);
+    await writeFile(join(directory, '0052_offboarding_review_repair.sql'), windowsCheckout);
+    await writeFile(
+      join(directory, '0053_offboarding_restore_contract.sql'),
+      'CREATE TABLE continuum_crlf_checksum_probe (applied boolean NOT NULL);\r\n',
+    );
+    const schema = `migrator_published_checksum_crlf_${Date.now()}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    await pool.query(`
+      CREATE TABLE _continuum_migrations (
+        name TEXT PRIMARY KEY,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      INSERT INTO _continuum_migrations (name)
+      VALUES ('0052_offboarding_review_repair.sql');
+    `);
+
+    await expect(runMigrations(pool, directory)).resolves.toEqual([
+      expect.objectContaining({ name: '0053_offboarding_restore_contract.sql' }),
+    ]);
+
+    await writeFile(
+      join(directory, '0052_offboarding_review_repair.sql'),
+      windowsCheckout + '-- substantive change\r\n',
+    );
+    await expect(runMigrations(pool, directory)).rejects.toThrow(
+      /0052.*checksum|published migration.*modified/i,
+    );
+  });
+
   it('applies 0053 when the published 0052 is already ledgered', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'continuum-forward-0053-'));
     directories.push(directory);
