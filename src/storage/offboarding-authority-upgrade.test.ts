@@ -357,6 +357,36 @@ describe('0048 trusted database identity upgrade', () => {
     )).rows[0].rolcanlogin).toBe(false);
   }, 60_000);
 
+  it('rejects 0052 when an inheriting role is not the direct object owner', async () => {
+    const state = await fixture('0051_offboarding_security_contract.sql');
+    const inheritedRunner = 'upgrade_inherited_runner_' + state.suffix;
+    roles.push(inheritedRunner);
+    const ownerName = (await state.pool.query('SELECT current_user AS name')).rows[0].name;
+    await state.admin.query(
+      'CREATE ROLE ' + quoteIdentifier(inheritedRunner)
+      + " LOGIN PASSWORD 'continuum-test-password'",
+    );
+    await state.admin.query(
+      'GRANT ' + quoteIdentifier(ownerName) + ' TO ' + quoteIdentifier(inheritedRunner),
+    );
+    const inheritedUrl = new URL(DATABASE_URL);
+    inheritedUrl.username = inheritedRunner;
+    inheritedUrl.password = 'continuum-test-password';
+    const inheritedPool = new pg.Pool({
+      connectionString: inheritedUrl.toString(), max: 1,
+      options: `-c search_path=${state.schema},public`,
+    });
+    pools.push(inheritedPool);
+    await addMigration(state.directory, '0052_offboarding_review_repair.sql');
+    await expect(runMigrations(inheritedPool, state.directory))
+      .rejects.toThrow(/0052 migration role must directly own every application object/i);
+    expect((await state.pool.query(
+      `SELECT tableowner FROM pg_tables
+        WHERE schemaname = current_schema()
+          AND tablename = 'continuum_entra_guarded_mutations'`,
+    )).rows[0].tableowner).toBe(ownerName);
+  }, 60_000);
+
   it('does not let an inherited schema-owner role false-pass migration authority', async () => {
     const migration = await readFile(
       new URL('../../migrations/0051_offboarding_security_contract.sql', import.meta.url), 'utf8',

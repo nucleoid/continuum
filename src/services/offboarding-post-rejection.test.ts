@@ -175,6 +175,11 @@ describe('post-rejection database authority remediation', () => {
       '--file=' + join(process.cwd(), 'scripts/grant-application-role.sql'),
     ], { encoding: 'utf8' });
     expect(result.status).not.toBe(0);
+    const retireResult = spawnSync('psql', [
+      databaseUrl,
+      '--file=' + join(process.cwd(), 'scripts/retire-sync-role.sql'),
+    ], { encoding: 'utf8' });
+    expect(retireResult.status).not.toBe(0);
   });
 
   it('does not exempt non-vector extension functions from PUBLIC drift checks', async () => {
@@ -326,6 +331,22 @@ describe('post-rejection database authority remediation', () => {
     expect(migration).toMatch(/continuum_assert_application_role_allowlist/i);
     expect(migration).toMatch(/continuum_entra_reapproval_requests[\s\S]*authorization_principal_id/i);
     expect(migration).toMatch(/continuum_protect_capability_marker_write/i);
+  });
+
+  it('rejects operator column, trigger, and extra-function drift exactly', async () => {
+    const admin = await createPrincipal(pool, {
+      externalId: 'post-rejection-exact-operator', kind: 'user', displayName: 'Operator',
+    });
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await addMembership(pool, admin.id, org.id, 'admin');
+    const operator = await createRole('operator', admin.id);
+    await expect(pool.query(
+      'SELECT continuum_assert_operator_role_allowlist($1)', [operator.role],
+    )).resolves.toBeDefined();
+    await pool.query('GRANT UPDATE (display_name) ON principals TO ' + quoteRole(operator.role));
+    await expect(pool.query(
+      'SELECT continuum_assert_operator_role_allowlist($1)', [operator.role],
+    )).rejects.toThrow(/operator|column|privilege|drift|allow-list/i);
   });
 
   it('proves retirement authority before installing a sync identity', async () => {
