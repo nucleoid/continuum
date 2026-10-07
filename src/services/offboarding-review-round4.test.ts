@@ -212,14 +212,64 @@ describe('fresh independent review remediation', () => {
     const sync = await createRole('sync', service.id);
     const fetchSnapshot = vi.fn(async () => []);
     try {
-      await pool.query('GRANT UPDATE, DELETE, TRIGGER ON TABLE principals TO ' + quoteRole(sync.role));
+      const driftCases = [
+        ['GRANT UPDATE ON TABLE principals TO ', 'REVOKE UPDATE ON TABLE principals FROM '],
+        ['GRANT DELETE ON TABLE principals TO ', 'REVOKE DELETE ON TABLE principals FROM '],
+        ['GRANT TRIGGER ON TABLE principals TO ', 'REVOKE TRIGGER ON TABLE principals FROM '],
+        ['GRANT CREATE ON SCHEMA public TO ', 'REVOKE CREATE ON SCHEMA public FROM '],
+        [
+          'GRANT EXECUTE ON FUNCTION continuum_disable_principal(uuid,uuid) TO ',
+          'REVOKE EXECUTE ON FUNCTION continuum_disable_principal(uuid,uuid) FROM ',
+        ],
+      ];
+      for (const [grant, revoke] of driftCases) {
+        await pool.query(grant + quoteRole(sync.role));
+        await expect(sync.connection.query(
+          'SELECT continuum_verify_sync_database_identity($1)', [service.id],
+        )).rejects.toThrow(/identity|privilege|drift|allow-list|isolated/i);
+        await pool.query(revoke + quoteRole(sync.role));
+      }
+      await pool.query('GRANT USAGE ON SCHEMA public TO PUBLIC');
+      await expect(sync.connection.query(
+        'SELECT continuum_verify_sync_database_identity($1)', [service.id],
+      )).rejects.toThrow(/PUBLIC|privilege|drift/i);
+      await pool.query('REVOKE USAGE ON SCHEMA public FROM PUBLIC');
+      await pool.query('DROP FUNCTION IF EXISTS public.round4_public_drift()');
+      await pool.query(`
+        CREATE FUNCTION public.round4_public_drift() RETURNS integer
+        LANGUAGE sql AS 'SELECT 1'
+      `);
+      try {
+        await expect(sync.connection.query(
+          'SELECT continuum_verify_sync_database_identity($1)', [service.id],
+        )).rejects.toThrow(/PUBLIC|default|privilege|drift/i);
+      } finally {
+        await pool.query('DROP FUNCTION public.round4_public_drift()');
+      }
+      await pool.query(
+        'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO PUBLIC',
+      );
+      await expect(sync.connection.query(
+        'SELECT continuum_verify_sync_database_identity($1)', [service.id],
+      )).rejects.toThrow(/PUBLIC|default|privilege|drift/i);
+      await pool.query(
+        'ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE SELECT ON TABLES FROM PUBLIC',
+      );
+
+      await pool.query('GRANT UPDATE ON TABLE principals TO ' + quoteRole(sync.role));
       await expect(runMembershipSync(sync.connection, {
         CONTINUUM_ENTRA_MEMBERSHIP_SYNC: 'true',
         CONTINUUM_GRAPH_ACCESS_TOKEN: 'x'.repeat(32),
         CONTINUUM_MEMBERSHIP_SYNC_ACTOR: service.externalId!,
       }, fetchSnapshot)).rejects.toThrow(/identity|privilege|drift|allow-list/i);
       expect(fetchSnapshot).not.toHaveBeenCalled();
-    } finally { await sync.connection.end(); }
+    } finally {
+      await pool.query('REVOKE USAGE ON SCHEMA public FROM PUBLIC');
+      await pool.query(
+        'ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE SELECT ON TABLES FROM PUBLIC',
+      );
+      await sync.connection.end();
+    }
   });
 
   it('detects PUBLIC schema drift and both directions of Entra source rewriting', async () => {

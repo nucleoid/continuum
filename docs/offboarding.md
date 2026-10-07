@@ -325,7 +325,7 @@ operation: raw operator `UPDATE` on `entra_groups` is revoked, and revocation,
 quarantine, and deactivation triggers accept only transaction-local guarded
 mutation markers.
 
-Apply migrations through `0050_offboarding_startup_verification_fix.sql`.
+Apply migrations through `0051_offboarding_security_contract.sql`.
 Migration `0049_offboarding_review_remediation.sql` makes principal disablement
 create bounded transaction-local guards for its existing membership cascade,
 binds owned-scope access cleanup to a started incomplete run and its mapped
@@ -340,6 +340,14 @@ security-definer boundary. All other membership edges fail closed.
 Migration `0050` repairs the startup identity verifier for installations that
 already recorded `0049`; fresh installations receive the corrected verifier
 from `0049` and then record the same forward repair.
+Migration `0051` is the forward-only security contract for fresh databases and
+databases that already ledgered an older 0048/0049 variant. It reasserts the
+OID-bound identity, rotation, retirement, scope-cleanup, disable-cascade,
+one-sync-index, trigger, `search_path`, and privilege contracts. It also adds
+guarded, audited Entra-membership deletion and makes membership-sync verify its
+exact table, sequence, function, schema, and default-ACL allow-list before any
+Graph request. Extra `UPDATE`, `DELETE`, `TRIGGER`, ownership, membership,
+function execution, or `PUBLIC`/default privilege fails startup closed.
 
 The final database verification is exact and executes once: the completion
 event trigger checks every memory and every audit row linked to the run's
@@ -370,15 +378,25 @@ operator, and dedicated sync login roles. The operator and sync roles must not
 be granted to the shared application role. Rollout is an explicit maintenance
 window: **stop** every API, MCP, admin, retention, and membership-sync process;
 take and verify a **backup**; **migrate** through
-`0049_offboarding_review_remediation.sql` as the owner; **regrant** the shared app,
+`0051_offboarding_security_contract.sql` as the owner; **regrant** the shared app,
 operator, and sync profiles; **verify** the identities; then **start** only the
-`0049`-aware binaries. Mixed pre-`0049`/`0049` binaries or grants are
+`0051`-aware binaries. Mixed pre-`0051`/`0051` binaries or grants are
 unsupported. Do not run migration
 and old binaries concurrently, because old sync code writes freshness directly
 and old application code expects shared-role offboarding authority.
 The supported and CI-tested database major is PostgreSQL 16 with pgvector.
 Qualify another major independently before migration; successful SQL parsing
 alone is not a supported rollout.
+
+Migration `0051` performs its privilege preflight before changing any object.
+The connecting migration role must own the application schema and every
+application object. If a sync identity is registered, it must either be
+superuser or have `CREATEROLE` plus `ADMIN OPTION` on that exact OID-bound sync
+role, because retirement uses `ALTER ROLE ... NOLOGIN`. Schema ownership is
+required for the `PUBLIC` schema/default-privilege revocations. Failed preflight
+leaves no partial 0051 changes. The supported least-privilege path is a
+non-superuser schema/object owner with `CREATEROLE` and narrowly scoped
+`ADMIN OPTION` on managed sync roles, not blanket superuser access.
 The application role must not own the event ledger, completion-capability
 table, or security-definer functions, and receives no direct privilege on the
 capability table. Direct `completed` inserts then fail at the trigger.
@@ -396,7 +414,7 @@ operator binding with `grant-operator-role.sql` after 0049.
 Fresh 0048 execution changes its removed legacy sync role to `NOLOGIN`. If an
 installation already recorded the earlier 0048 revision, run the checked
 `scripts/retire-sync-role.sql` as the migration owner for that exact old role
-before starting 0050-aware processes. The script refuses an active trusted
+before starting 0051-aware processes. The script refuses an active trusted
 identity, membership edges, and application-object ownership before revoking
 the role's application authority and login.
 
@@ -488,10 +506,10 @@ retryable.
 
 Rollback is forward-only and requires the verified pre-migration backup for any
 data that bounded legacy cleanup has removed. Application rollback is supported
-only to a 0050-aware binary and its matching grant profile. Stop all processes
+only to a 0051-aware binary and its matching grant profile. Stop all processes
 and confirm there are zero incomplete runs with `list-incomplete-offboarding`;
-then deploy the selected `0050`-aware binary, reapply all three grant profiles,
-run identity verification, and restart. Pre-`0050` binaries are incompatible with the new
+then deploy the selected `0051`-aware binary, reapply all three grant profiles,
+run identity verification, and restart. Pre-`0051` binaries are incompatible with the new
 approval and sync boundary and are not a supported application-first rollback.
 Database rollback requires a separate forward migration; do not drop guards or
 regrant the shared role ad hoc. Completed offboarding erasure is irreversible
@@ -509,12 +527,13 @@ psql "$CONTINUUM_MIGRATION_OWNER_URL" \
   --file=scripts/verify-database-identities.sql
 ```
 
-The script fails unless `PUBLIC` lacks application-schema `USAGE`, exactly one
-OID-bound sync row exists, every registry OID still resolves to its recorded
-name, the expected operator is approval-only, and the retired role is
-`NOLOGIN` without schema, principal-table, or audit-sequence authority. It does
-not claim that PostgreSQL's default `PUBLIC` function ACL is absent; without
-schema `USAGE` and a login, that ambient ACL is not a usable retired credential.
+The script fails unless `PUBLIC` and the migration owner's application-schema
+default ACLs are closed, exactly one OID-bound sync row exists, every registry
+OID still resolves to its recorded name, the sync role matches the exact 0051
+allow-list, the expected operator is approval-only, and the retired role is
+`NOLOGIN` without schema, principal-table, or audit-sequence authority. The
+membership-sync executable repeats the sync-role allow-list gate at every
+startup before Graph I/O; this script remains the cross-role maintenance gate.
 
 Because 0048 and 0049 deliberately delete legacy registry rows, revoke grants,
 and disable the retired login, restoring pre-0049 behavior requires the verified pre-migration

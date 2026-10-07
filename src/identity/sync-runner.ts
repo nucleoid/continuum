@@ -34,6 +34,7 @@ export async function runMembershipSync(
   }
   const actor = await getPrincipalByExternalId(pool, actorExternalId);
   if (!actor) throw new Error('membership sync actor is unknown');
+  await pool.query('SELECT continuum_verify_sync_database_identity($1::uuid)', [actor.id]);
   await validateMembershipSyncActor(pool, actor);
   try {
     const boundGroupIds = await listBoundEntraGroupIds(pool);

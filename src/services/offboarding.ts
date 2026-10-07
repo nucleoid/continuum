@@ -952,8 +952,11 @@ async function offboardPrincipalCore(
       aliasCount = aliasDelete.rowCount ?? 0;
       await writeOffboardingRun(client, principalId, actor.id, 'scope_complete');
     }
+    await client.query('SELECT continuum_disable_principal($1::uuid, $2::uuid)', [
+      actor.id, principalId,
+    ]);
     await client.query(
-      `UPDATE principals SET display_name = $2, disabled_at = COALESCE(disabled_at, now()),
+      `UPDATE principals SET display_name = $2,
               offboarded_at = COALESCE(offboarded_at, now()), reactivated_at = NULL
         WHERE id = $1`, [principalId, pseudonym],
     );

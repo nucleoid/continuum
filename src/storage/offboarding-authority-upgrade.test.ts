@@ -213,6 +213,10 @@ describe('0048 trusted database identity upgrade', () => {
       CREATE OR REPLACE FUNCTION continuum_fail_closed_on_principal_disable()
       RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$
     `);
+    await state.pool.query(`
+      CREATE OR REPLACE FUNCTION continuum_guard_entra_admin_sources()
+      RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$
+    `);
     await state.pool.query('DROP INDEX continuum_trusted_database_identities_one_sync');
     await addMigration(state.directory, '0051_offboarding_security_contract.sql');
 
@@ -234,6 +238,10 @@ describe('0048 trusted database identity upgrade', () => {
          'continuum_fail_closed_on_principal_disable()'::regprocedure
        ) AS definition`,
     )).rows[0].definition).toMatch(/scope_memberships|guarded_mutations/i);
+    expect((await state.pool.query(
+      `SELECT pg_get_functiondef('continuum_guard_entra_admin_sources()'::regprocedure)
+         AS definition`,
+    )).rows[0].definition).toMatch(/source identity are immutable|trusted sync/i);
   }, 60_000);
 
   it('documents and checks migration-owner capabilities before 0051 changes', async () => {
@@ -245,4 +253,97 @@ describe('0048 trusted database identity upgrade', () => {
     expect(migration).toMatch(/CREATEROLE|admin_option|ALTER ROLE/i);
     expect(migration.indexOf('preflight')).toBeLessThan(migration.indexOf('CREATE OR REPLACE'));
   });
+
+  it('supports a non-superuser schema owner with scoped CREATEROLE and ADMIN OPTION', async () => {
+    const state = await fixture('0050_offboarding_startup_verification_fix.sql');
+    const ownerRole = 'upgrade_owner_' + state.suffix;
+    const syncRole = 'upgrade_owner_sync_' + state.suffix;
+    await createRole(state.admin, syncRole);
+    await createRole(state.admin, ownerRole);
+    await state.admin.query('ALTER ROLE ' + quoteIdentifier(ownerRole) + ' CREATEROLE');
+    await state.pool.query(
+      'SELECT continuum_register_trusted_database_identity($1, $2, FALSE, TRUE)',
+      [syncRole, state.service.id],
+    );
+    await state.admin.query(
+      'GRANT ' + quoteIdentifier(syncRole) + ' TO ' + quoteIdentifier(ownerRole)
+      + ' WITH ADMIN OPTION',
+    );
+    await state.admin.query('GRANT ' + quoteIdentifier(ownerRole) + ' TO CURRENT_USER');
+
+    const relations = (await state.admin.query<{ name: string; kind: string }>(
+      `SELECT relation.relname AS name, relation.relkind AS kind
+         FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = $1
+          AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')`,
+      [state.schema],
+    )).rows;
+    for (const relation of relations) {
+      const objectType = relation.kind === 'v' ? 'VIEW'
+          : relation.kind === 'm' ? 'MATERIALIZED VIEW' : 'TABLE';
+      await state.admin.query(
+        `ALTER ${objectType} ${quoteIdentifier(state.schema)}.${quoteIdentifier(relation.name)} OWNER TO ${quoteIdentifier(ownerRole)}`,
+      );
+    }
+    const functions = (await state.admin.query<{ name: string; arguments: string }>(
+      `SELECT function.proname AS name,
+              pg_get_function_identity_arguments(function.oid) AS arguments
+         FROM pg_proc function JOIN pg_namespace namespace ON namespace.oid = function.pronamespace
+        WHERE namespace.nspname = $1`, [state.schema],
+    )).rows;
+    for (const fn of functions) {
+      await state.admin.query(
+        `ALTER FUNCTION ${quoteIdentifier(state.schema)}.${quoteIdentifier(fn.name)}(${fn.arguments}) OWNER TO ${quoteIdentifier(ownerRole)}`,
+      );
+    }
+    await state.admin.query(
+      `ALTER SCHEMA ${quoteIdentifier(state.schema)} OWNER TO ${quoteIdentifier(ownerRole)}`,
+    );
+    const ownerPool = new pg.Pool({
+      connectionString: DATABASE_URL,
+      max: 1,
+      options: `-c role=${ownerRole} -c search_path=${state.schema},public`,
+    });
+    pools.push(ownerPool);
+    await addMigration(state.directory, '0051_offboarding_security_contract.sql');
+    await expect(runMigrations(ownerPool, state.directory)).resolves.toEqual([
+      expect.objectContaining({ name: '0051_offboarding_security_contract.sql' }),
+    ]);
+    expect((await ownerPool.query(
+      'SELECT rolsuper, rolcreaterole FROM pg_roles WHERE rolname = current_user',
+    )).rows[0]).toEqual({ rolsuper: false, rolcreaterole: true });
+    await state.admin.query(
+      'REVOKE ' + quoteIdentifier(syncRole) + ' FROM ' + quoteIdentifier(ownerRole),
+    );
+  }, 60_000);
+
+  it('fails owner preflight before creating any 0051 capability object', async () => {
+    const state = await fixture('0050_offboarding_startup_verification_fix.sql');
+    const foreignOwner = 'upgrade_foreign_owner_' + state.suffix;
+    await createRole(state.admin, foreignOwner);
+    await state.admin.query(
+      `ALTER TABLE ${quoteIdentifier(state.schema)}.audit_log OWNER TO ${quoteIdentifier(foreignOwner)}`,
+    );
+    try {
+      await addMigration(state.directory, '0051_offboarding_security_contract.sql');
+      await expect(runMigrations(state.pool, state.directory))
+        .rejects.toThrow(/migration owner must own every application/i);
+      expect((await state.pool.query(
+        `SELECT to_regclass(format('%I.continuum_principal_disable_requests', current_schema()))
+                  IS NULL AS absent,
+                to_regprocedure(format(
+                  '%I.continuum_disable_principal(uuid,uuid)', current_schema()
+                )) IS NULL
+                  AS function_absent`,
+      )).rows[0]).toEqual({ absent: true, function_absent: true });
+      expect((await state.pool.query(
+        `SELECT count(*)::int AS count FROM _continuum_migrations
+          WHERE name = '0051_offboarding_security_contract.sql'`,
+      )).rows[0].count).toBe(0);
+    } finally {
+      await state.admin.query(
+        `ALTER TABLE ${quoteIdentifier(state.schema)}.audit_log OWNER TO CURRENT_USER`,
+      );
+    }
+  }, 60_000);
 });

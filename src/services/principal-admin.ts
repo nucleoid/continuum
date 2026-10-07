@@ -69,11 +69,11 @@ export async function disablePrincipal(
   try {
     await client.query('BEGIN');
     await requireOrgAdmin(client, actor.id);
-    const disabled = await client.query(
-      `UPDATE principals SET disabled_at = now()
-        WHERE id = $1 AND disabled_at IS NULL RETURNING id`, [principalId],
+    const disabled = await client.query<{ disabled: boolean }>(
+      `SELECT continuum_disable_principal($1::uuid, $2::uuid) AS disabled`,
+      [actor.id, principalId],
     );
-    if (!disabled.rowCount) {
+    if (disabled.rows[0]?.disabled !== true) {
       throw new ServiceError('INVALID_INPUT', 'active principal not found');
     }
     await client.query(
@@ -84,6 +84,14 @@ export async function disablePrincipal(
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK');
+    const databaseError = error as { code?: string; message?: string };
+    if (databaseError.code === '42501'
+      || /DB-bound trusted approve identity|guarded approve path/i.test(databaseError.message ?? '')) {
+      throw new ServiceError(
+        'FORBIDDEN', 'protected principal disable requires a DB-bound operator session',
+        { cause: error },
+      );
+    }
     throw error;
   } finally {
     client.release();

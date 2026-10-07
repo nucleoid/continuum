@@ -51,7 +51,8 @@ GRANT EXECUTE ON FUNCTION
   :"continuum_schema".continuum_sync_observe_entra_group(UUID, TEXT, TEXT),
   :"continuum_schema".continuum_sync_deactivate_entra_memberships(UUID, TEXT[], UUID[]),
   :"continuum_schema".continuum_sync_deactivate_entra_groups(UUID, TEXT[]),
-  :"continuum_schema".continuum_sync_quarantine_entra_group(UUID, TEXT, TEXT)
+  :"continuum_schema".continuum_sync_quarantine_entra_group(UUID, TEXT, TEXT),
+  :"continuum_schema".continuum_verify_sync_database_identity(UUID)
 TO :"continuum_sync_role";
 REVOKE ALL ON TABLE :"continuum_schema".continuum_trusted_database_identities
 FROM :"continuum_sync_role";

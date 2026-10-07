@@ -39,6 +39,7 @@ GRANT EXECUTE ON FUNCTION
   :"continuum_schema".continuum_operator_record_offboarding_event(UUID),
   :"continuum_schema".continuum_operator_apply_audit_retention(UUID, TIMESTAMPTZ, INTEGER, UUID, INTEGER, JSONB, TEXT, TEXT),
   :"continuum_schema".continuum_operator_reactivate_principal(UUID, UUID),
+  :"continuum_schema".continuum_operator_remove_entra_membership(UUID, UUID, UUID, TEXT),
   :"continuum_schema".continuum_rotate_sync_database_identity(UUID, NAME, UUID),
   :"continuum_schema".continuum_cleanup_legacy_offboarding_audit_requests(INTEGER)
 TO :"continuum_operator_role";

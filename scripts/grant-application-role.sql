@@ -65,8 +65,15 @@ TO :"continuum_app_role";
 
 GRANT EXECUTE ON FUNCTION
   :"continuum_schema".continuum_audit_retention_minimum_days(),
-  :"continuum_schema".continuum_offboarding_expected_audit_metadata(JSONB)
+  :"continuum_schema".continuum_offboarding_expected_audit_metadata(JSONB),
+  :"continuum_schema".continuum_membership_is_effective(BOOLEAN, TEXT),
+  :"continuum_schema".continuum_disable_principal(UUID, UUID)
 TO :"continuum_app_role";
+
+-- PUBLIC function execution is closed across the application schema. Restore
+-- only pgvector extension routines directly to roles with the application
+-- profile; the owner-only helper discovers this role from its memories grant.
+SELECT :"continuum_schema".continuum_grant_application_vector_functions();
 
 REVOKE ALL ON FUNCTION
   :"continuum_schema".continuum_create_user_scope_approval(UUID, UUID, UUID, UUID[], TEXT),
