@@ -511,6 +511,31 @@ describe('coordination independent review regressions', () => {
     );
     expect(JSON.stringify(production.rows[0]['QUERY PLAN'])).toContain('Function Scan');
     expect(await listCoordinationPrivacyRepairs(pool, value.operator, 100)).toEqual([]);
+    expect((await pool.query(
+      `SELECT continuum_coordination_privacy_actual_state_is_erased($1, $2) AS erased`,
+      [value.target.id, value.owned.id],
+    )).rows).toEqual([{ erased: true }]);
+
+    const approval = (await pool.query(
+      `SELECT id, acknowledged_evidence_hash FROM principal_user_scope_approvals
+        WHERE principal_id = $1 AND scope_id = $2 ORDER BY id DESC LIMIT 1`,
+      [value.target.id, value.owned.id],
+    )).rows[0];
+    const run = (await pool.query(
+      `INSERT INTO principal_offboarding_runs
+         (principal_id, scope_id, initiated_by, approval_id,
+          initial_memories, initial_embeddings, initial_memberships,
+          initial_aliases, initial_entra_bindings, initial_audit_rows,
+          initial_audit_queries, approval_evidence_hash)
+       VALUES ($1, $2, $3, $4, 0, 0, 0, 0, 0, 0, 0, $5)
+       RETURNING run_id`,
+      [value.target.id, value.owned.id, value.operator.id,
+        approval.id, approval.acknowledged_evidence_hash],
+    )).rows[0];
+    expect(typeof (await pool.query(
+      `SELECT continuum_operator_offboarding_actual_state_is_erased($1, $2) AS erased`,
+      [value.operator.id, run.run_id],
+    )).rows[0].erased).toBe('boolean');
   }, 30_000);
 
   it('serializes multi-membership Entra sync with repair and direct scrub', async () => {

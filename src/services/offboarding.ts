@@ -89,6 +89,9 @@ export interface OffboardingResult {
   countEvidence: OffboardingCountEvidence;
   evidence: OffboardingEvidence;
   originalOffboarding: OriginalOffboardingEvidence | null;
+  progressed: boolean;
+  blockedUntil: Date | null;
+  reason: CoordinationPrivacyBlockReason;
 }
 
 export interface OffboardingOptions {
@@ -117,7 +120,11 @@ export interface CoordinationPrivacyRepairResult extends CoordinationPrivacyRepa
   complete: boolean;
   progressed: boolean;
   blockedUntil: Date | null;
+  reason: CoordinationPrivacyBlockReason;
 }
+
+export type CoordinationPrivacyBlockReason =
+  'live_lease' | 'detached_quota' | 'no_progress' | null;
 
 export interface CoordinationPrivacyRepairOptions {
   confirmationScopeId: string;
@@ -135,6 +142,7 @@ export async function listCoordinationPrivacyRepairs(
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await client.query("SET LOCAL statement_timeout = '30s'");
     await requireOrgAdmin(client, actor.id);
     const result = await client.query(
       `SELECT principal_id::text, scope_id::text, repair_state
@@ -208,7 +216,7 @@ export async function repairCoordinationPrivacy(
       await client.query('COMMIT');
       return {
         principalId, scopeId, state, complete: true,
-        progressed: false, blockedUntil: null,
+        progressed: false, blockedUntil: null, reason: null,
       };
     }
     if (candidate.rows[0].repair_state !== 'disabled_only') {
@@ -217,7 +225,10 @@ export async function repairCoordinationPrivacy(
       );
     }
     const scrub = await client.query<{
-      privacy: { complete?: boolean; progressed?: boolean; blocked_until?: string | null };
+      privacy: {
+        complete?: boolean; progressed?: boolean; blocked_until?: string | null;
+        reason?: CoordinationPrivacyBlockReason;
+      };
     }>(
       `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, $4) AS privacy`,
       [actor.id, principalId, scopeId, Math.min(batchSize, 1_000)],
@@ -229,6 +240,7 @@ export async function repairCoordinationPrivacy(
       progressed: scrub.rows[0]?.privacy?.progressed === true,
       blockedUntil: scrub.rows[0]?.privacy?.blocked_until
         ? new Date(scrub.rows[0].privacy.blocked_until) : null,
+      reason: scrub.rows[0]?.privacy?.reason ?? null,
     };
   } catch (error) {
     await client.query('ROLLBACK');
@@ -982,6 +994,9 @@ async function offboardPrincipalCore(
     let coordinationPrivacyComplete = Number(privacyState.rows[0]?.privacy_version) >= 3
       && privacyState.rows[0]?.principal_complete === true;
     let coordinationPrivacyMutated = false;
+    let coordinationPrivacyProgressed = false;
+    let coordinationPrivacyBlockedUntil: Date | null = null;
+    let coordinationPrivacyReason: CoordinationPrivacyBlockReason = null;
     const wasOffboarded = target.rows[0].offboarded_at !== null;
     if (!dryRun && !wasOffboarded && target.rows[0].disabled_at !== null
         && !coordinationPrivacyComplete) {
@@ -999,7 +1014,10 @@ async function offboardPrincipalCore(
       }
     }
     if (!dryRun && wasOffboarded && !coordinationPrivacyComplete) {
-      const privacyRepair = await client.query<{ privacy: { complete?: boolean } }>(
+      const privacyRepair = await client.query<{ privacy: {
+        complete?: boolean; progressed?: boolean; blocked_until?: string | null;
+        reason?: CoordinationPrivacyBlockReason;
+      } }>(
         `SELECT continuum_operator_scrub_coordination_principal(
            $1, $2, $3, $4
          ) AS privacy`,
@@ -1007,6 +1025,10 @@ async function offboardPrincipalCore(
       );
       coordinationPrivacyMutated = true;
       coordinationPrivacyComplete = privacyRepair.rows[0]?.privacy?.complete === true;
+      coordinationPrivacyProgressed = privacyRepair.rows[0]?.privacy?.progressed === true;
+      coordinationPrivacyBlockedUntil = privacyRepair.rows[0]?.privacy?.blocked_until
+        ? new Date(privacyRepair.rows[0].privacy.blocked_until!) : null;
+      coordinationPrivacyReason = privacyRepair.rows[0]?.privacy?.reason ?? null;
     }
     const actualStateErased = runCompleted && wasOffboarded
       ? (await client.query<{ erased: boolean }>(
@@ -1040,7 +1062,8 @@ async function offboardPrincipalCore(
       entraBindings, affectedRows, auditQueries, auditRows, dirtyAuditRows, dirtyMemories,
       dryRun, alreadyOffboarded, complete: alreadyOffboarded, pseudonym, scopePseudonym,
       evidence, auditSelection: audit.selection, progress: previewProgress, countEvidence,
-      originalOffboarding,
+      originalOffboarding, progressed: coordinationPrivacyProgressed,
+      blockedUntil: coordinationPrivacyBlockedUntil, reason: coordinationPrivacyReason,
     } satisfies OffboardingResult;
     if (dryRun) { await client.query('ROLLBACK'); return baseResult; }
     if (alreadyOffboarded) { await client.query('COMMIT'); return baseResult; }
@@ -1118,7 +1141,10 @@ async function offboardPrincipalCore(
         [actor.id, scopeId, scopePseudonym],
       );
       const coordinationPrivacy = await client.query<{
-        privacy: { complete?: boolean };
+        privacy: {
+          complete?: boolean; progressed?: boolean; blocked_until?: string | null;
+          reason?: CoordinationPrivacyBlockReason;
+        };
       }>(
         `SELECT continuum_operator_scrub_coordination_principal(
            $1, $2, $3, $4
@@ -1135,6 +1161,11 @@ async function offboardPrincipalCore(
       coordinationPrivacyComplete =
         coordinationPrivacy.rows[0]?.privacy?.complete === true
         && currentPrivacyState.rows[0]?.principal_complete === true;
+      coordinationPrivacyProgressed =
+        coordinationPrivacy.rows[0]?.privacy?.progressed === true;
+      coordinationPrivacyBlockedUntil = coordinationPrivacy.rows[0]?.privacy?.blocked_until
+        ? new Date(coordinationPrivacy.rows[0].privacy.blocked_until!) : null;
+      coordinationPrivacyReason = coordinationPrivacy.rows[0]?.privacy?.reason ?? null;
       aliasCount = aliasDelete.rowCount ?? 0;
       if (ownedCoordinationComplete && coordinationPrivacyComplete) {
         await writeOffboardingRun(client, principalId, actor.id, 'scope_complete');
@@ -1380,6 +1411,10 @@ async function offboardPrincipalCore(
         ? progressRow.audit_queries_processed : progressRow.initial_audit_queries),
       countEvidence: finalCountEvidence,
       dryRun: false, alreadyOffboarded: false, complete: completionReady, progress,
+      progressed: coordinationPrivacyProgressed || memoryCandidates > 0 || auditedRows > 0
+        || membershipCount > 0 || aliasCount > 0 || entraCount > 0,
+      blockedUntil: coordinationPrivacyBlockedUntil,
+      reason: coordinationPrivacyReason,
     };
   } catch (error) {
     try { await client.query('ROLLBACK'); } catch { destroyClient = true; }

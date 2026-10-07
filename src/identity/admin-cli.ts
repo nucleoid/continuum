@@ -110,13 +110,17 @@ async function main(): Promise<void> {
       let result = await offboardPrincipal(pool, actor, positional[0], {
         dryRun, confirmationScopeId, batchSize, verificationTimeoutMs,
       });
-      while (!dryRun && !once && !result.complete) {
+      let attempts = 1;
+      while (!dryRun && !once && !result.complete && !result.blockedUntil && attempts < 100) {
+        if (!result.progressed) break;
+        await new Promise((resolve) => setTimeout(resolve, Math.min(attempts * 25, 250)));
         result = await offboardPrincipal(pool, actor, positional[0], {
           dryRun: false, confirmationScopeId, batchSize, verificationTimeoutMs,
         });
+        attempts += 1;
       }
       process.stdout.write(`${JSON.stringify({
-        operation,
+        operation, attempts,
         ...result,
       })}\n`);
     } else if (operation === 'list-incomplete-offboarding') {
@@ -128,13 +132,22 @@ async function main(): Promise<void> {
       const limitIndex = args.indexOf('--limit');
       const limitText = limitIndex >= 0 ? args[limitIndex + 1] : undefined;
       const limit = limitText === undefined ? undefined : Number(limitText);
-      if ((limitIndex < 0 && args.length)
-        || (limitIndex >= 0 && (args.length !== 2 || !Number.isInteger(limit)
-          || (limit ?? 0) < 1 || (limit ?? 0) > 1_000))) {
-        throw new Error('usage: list-coordination-privacy-repairs [--limit <1-1000>]');
+      const afterIndex = args.indexOf('--after');
+      const after = afterIndex >= 0 ? args[afterIndex + 1] : undefined;
+      const consumed = new Set<number>();
+      if (limitIndex >= 0) { consumed.add(limitIndex); consumed.add(limitIndex + 1); }
+      if (afterIndex >= 0) { consumed.add(afterIndex); consumed.add(afterIndex + 1); }
+      if (args.some((_value, index) => !consumed.has(index))
+        || (limitIndex >= 0 && (!Number.isInteger(limit)
+          || (limit ?? 0) < 1 || (limit ?? 0) > 1_000))
+        || (afterIndex >= 0 && !after)) {
+        throw new Error('usage: list-coordination-privacy-repairs [--limit <1-1000>] [--after <principal-id>]');
       }
+      const repairs = await listCoordinationPrivacyRepairs(pool, actor, limit, after);
+      const effectiveLimit = limit ?? 100;
       process.stdout.write(`${JSON.stringify({
-        operation, repairs: await listCoordinationPrivacyRepairs(pool, actor, limit),
+        operation, repairs,
+        nextCursor: repairs.length === effectiveLimit ? repairs.at(-1)!.principalId : null,
       })}\n`);
     } else if (operation === 'repair-coordination-privacy') {
       const once = args.includes('--once');

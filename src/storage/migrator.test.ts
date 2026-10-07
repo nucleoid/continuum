@@ -233,7 +233,7 @@ describe('runMigrations', () => {
     const files = (await readdir(join(process.cwd(), 'migrations')))
       .filter((name) => name.endsWith('.sql'))
       .sort();
-    expect(files.slice(-15)).toEqual([
+    expect(files.slice(-17)).toEqual([
       '0055_coordination_review_remediation.sql',
       '0056_coordination_final_remediation.sql',
       '0057_coordination_privacy_race_remediation.sql',
@@ -249,6 +249,8 @@ describe('runMigrations', () => {
       '0067_coordination_rollout_repair.sql',
       '0068_coordination_production_repair.sql',
       '0069_coordination_independent_review.sql',
+      '0070_coordination_linkable_audit_index.sql',
+      '0071_coordination_review_completion.sql',
     ]);
     const migration = await readFile(
       join(process.cwd(), 'migrations/0054_coordination_leases.sql'),
@@ -725,7 +727,7 @@ describe('runMigrations', () => {
         $$;
       `);
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-38).map((migration) => migration.name)).toEqual([
+      expect(applied.slice(-40).map((migration) => migration.name)).toEqual([
         '0032_offboarding_round7_compatibility.sql',
         '0033_offboarding_bounded_selectors.sql',
         '0034_offboarding_completion_invariants.sql',
@@ -764,6 +766,8 @@ describe('runMigrations', () => {
         '0067_coordination_rollout_repair.sql',
         '0068_coordination_production_repair.sql',
         '0069_coordination_independent_review.sql',
+        '0070_coordination_linkable_audit_index.sql',
+        '0071_coordination_review_completion.sql',
       ]);
       expect((await pool.query(
         `SELECT disabled_at IS NOT NULL AS disabled FROM principals
@@ -1024,7 +1028,9 @@ describe('runMigrations', () => {
       && name !== '0066_coordination_upgrade_privacy_repair.sql'
       && name !== '0067_coordination_rollout_repair.sql'
       && name !== '0068_coordination_production_repair.sql'
-      && name !== '0069_coordination_independent_review.sql')) {
+      && name !== '0069_coordination_independent_review.sql'
+      && name !== '0070_coordination_linkable_audit_index.sql'
+      && name !== '0071_coordination_review_completion.sql')) {
       if (file === '0038_offboarding_search_path_hardening.sql') {
         await copyFile(
           new URL(

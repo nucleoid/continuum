@@ -48,6 +48,8 @@ const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
     '8f868cbe1bbe19684c0857ef8b110fb55d2565059b3862f1f1585ba893d53fe3'],
   ['0068_coordination_production_repair.sql',
     'b9488db55b8392f9a2d7eb4061dd190e69f3fba9ae230ca8ecee9696706ce390'],
+  ['0069_coordination_independent_review.sql',
+    '77847f54221ddc24ca5dc2d1ba43efce19e0c2beb4c599147a23621cb54de9bf'],
 ]);
 const FORWARD_MIGRATION_REQUIREMENTS = new Map([
   ['0053_offboarding_restore_contract.sql', '0052_offboarding_review_repair.sql'],
@@ -78,6 +80,10 @@ const FORWARD_MIGRATION_REQUIREMENTS = new Map([
     '0067_coordination_rollout_repair.sql'],
   ['0069_coordination_independent_review.sql',
     '0068_coordination_production_repair.sql'],
+  ['0070_coordination_linkable_audit_index.sql',
+    '0069_coordination_independent_review.sql'],
+  ['0071_coordination_review_completion.sql',
+    '0070_coordination_linkable_audit_index.sql'],
 ]);
 const REVIEW_ENTRA_MIGRATION_RENAMES = [
   ['0005_entra_auth.sql', '0010_entra_auth.sql'],
