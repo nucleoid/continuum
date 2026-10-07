@@ -175,11 +175,9 @@ BEGIN
     'INSERT INTO %I.continuum_unresolved_retired_sync_database_identities
        (database_role, previous_database_role_oid, resolution_kind, cluster_epoch, marked_at)
      SELECT history.database_role, history.database_role_oid,
-            ''superseded'', epoch.epoch, history.retired_at
+            ''superseded'', history.cluster_epoch, history.retired_at
        FROM %I.continuum_retired_sync_database_identities history
-       CROSS JOIN %I.continuum_database_identity_epoch epoch
       WHERE history.database_role = $1 AND history.database_role_oid <> $2
-        AND epoch.singleton
         AND NOT EXISTS (
           SELECT 1 FROM pg_roles role WHERE role.oid = history.database_role_oid)
      ON CONFLICT (database_role, previous_database_role_oid) DO UPDATE SET
@@ -188,7 +186,7 @@ BEGIN
        marked_at = LEAST(
          continuum_unresolved_retired_sync_database_identities.marked_at,
          EXCLUDED.marked_at)',
-    application_schema, application_schema, application_schema
+    application_schema, application_schema
   ) USING retired_sync, retired_oid;
   EXECUTE format(
     'DELETE FROM %I.continuum_retired_sync_database_identities
@@ -209,11 +207,14 @@ BEGIN
   EXECUTE format('ALTER ROLE %I NOLOGIN PASSWORD NULL', retired_sync);
   EXECUTE format(
     'INSERT INTO %I.continuum_retired_sync_database_identities
-       (database_role_oid, database_role)
-     VALUES ($1, $2)
+       (database_role_oid, database_role, cluster_epoch)
+     SELECT $1, $2, epoch FROM %I.continuum_database_identity_epoch
+      WHERE singleton
      ON CONFLICT (database_role_oid) DO UPDATE SET
-       database_role = EXCLUDED.database_role, retired_at = now()',
-    application_schema
+       database_role = EXCLUDED.database_role,
+       cluster_epoch = EXCLUDED.cluster_epoch,
+       retired_at = now()',
+    application_schema, application_schema
   ) USING retired_oid, retired_sync;
 END;
 $retire$;

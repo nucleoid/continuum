@@ -433,7 +433,7 @@ describe('sync database identity rotation security', () => {
            FROM continuum_database_identity_epoch WHERE singleton`,
         [archivedName, oid],
       );
-      await pool.query("SELECT continuum_rebind_database_identity_oids('REBIND AFTER LOGICAL RESTORE')");
+      await pool.query("SELECT continuum_rebind_database_identity_oids('REBIND DATABASE IDENTITIES', 'FOREIGN OID NAMESPACE')");
       await expect(applyGrantScript(pool, 'grant-sync-role.sql', {
         continuum_sync_role: role, continuum_principal_id: service.id,
       })).resolves.toBeUndefined();
@@ -480,7 +480,7 @@ describe('sync database identity rotation security', () => {
         [oids[syncRole], fixture.operatorRole],
       );
       await expect(pool.query(
-        "SELECT continuum_rebind_database_identity_oids('REBIND AFTER LOGICAL RESTORE')",
+        "SELECT continuum_rebind_database_identity_oids('REBIND DATABASE IDENTITIES', 'FOREIGN OID NAMESPACE')",
       )).resolves.toBeDefined();
       const rebound = await pool.query(
         `SELECT identity.database_role::text AS role_name,
@@ -553,7 +553,7 @@ describe('sync database identity rotation security', () => {
         [oids[second], first, oids[first], second],
       );
       await expect(pool.query(
-        "SELECT continuum_rebind_database_identity_oids('REBIND AFTER LOGICAL RESTORE')",
+        "SELECT continuum_rebind_database_identity_oids('REBIND DATABASE IDENTITIES', 'FOREIGN OID NAMESPACE')",
       )).resolves.toBeDefined();
       const rebound = await pool.query(
         `SELECT history.database_role::text AS role_name,
@@ -588,10 +588,10 @@ describe('sync database identity rotation security', () => {
     );
     await pool.query('DROP ROLE ' + quoteRole(role));
     try {
-      await pool.query("SELECT continuum_rebind_database_identity_oids('REBIND AFTER LOGICAL RESTORE')");
+      await pool.query("SELECT continuum_rebind_database_identity_oids('REBIND DATABASE IDENTITIES', 'FOREIGN OID NAMESPACE')");
       await pool.query('CREATE ROLE ' + quoteRole(role) + ' NOLOGIN');
       await expect(pool.query(
-        "SELECT continuum_rebind_database_identity_oids('REBIND AFTER LOGICAL RESTORE')",
+        "SELECT continuum_rebind_database_identity_oids('REBIND DATABASE IDENTITIES', 'FOREIGN OID NAMESPACE')",
       )).resolves.toBeDefined();
       const state = (await pool.query(
         `SELECT
@@ -632,7 +632,7 @@ describe('sync database identity rotation security', () => {
     );
     await pool.query('DROP ROLE ' + quoteRole(role));
     try {
-      await pool.query("SELECT continuum_rebind_database_identity_oids('REBIND AFTER LOGICAL RESTORE')");
+      await pool.query("SELECT continuum_rebind_database_identity_oids('REBIND DATABASE IDENTITIES', 'FOREIGN OID NAMESPACE')");
       await pool.query('CREATE ROLE ' + quoteRole(role) + ' LOGIN');
       await grantOwnerRetirementAuthority(pool, role);
       await expect(fixture.operator.query(
@@ -914,7 +914,7 @@ describe('sync database identity rotation security', () => {
     await pool.query('ALTER ROLE ' + quoteRole(original) + ' RENAME TO ' + quoteRole(renamed));
     try {
       await expect(pool.query(
-        "SELECT continuum_rebind_database_identity_oids('REBIND AFTER LOGICAL RESTORE')",
+        "SELECT continuum_rebind_database_identity_oids('REBIND DATABASE IDENTITIES', 'PRESERVED OID NAMESPACE')",
       )).rejects.toThrow(/retired.*OID.*renamed|renamed.*retired/i);
     } finally {
       await pool.query(
@@ -957,7 +957,7 @@ describe('sync database identity rotation security', () => {
     )).rows[0].oid;
     try {
       await expect(pool.query(
-        "SELECT continuum_rebind_database_identity_oids('REBIND AFTER LOGICAL RESTORE')",
+        "SELECT continuum_rebind_database_identity_oids('REBIND DATABASE IDENTITIES', 'PRESERVED OID NAMESPACE')",
       )).rejects.toThrow(/retired.*OID.*renamed|active.*retired|ambiguous/i);
       const state = (await pool.query(
         `SELECT
@@ -1011,7 +1011,7 @@ describe('sync database identity rotation security', () => {
             SET cluster_system_identifier = '-1' WHERE singleton`,
       );
       await expect(pool.query(
-        "SELECT continuum_rebind_database_identity_oids('REBIND AFTER LOGICAL RESTORE')",
+        "SELECT continuum_rebind_database_identity_oids('REBIND DATABASE IDENTITIES', 'FOREIGN OID NAMESPACE')",
       )).resolves.toBeDefined();
       const state = (await pool.query(
         `SELECT
@@ -1058,8 +1058,8 @@ describe('sync database identity rotation security', () => {
     await pool.query('CREATE ROLE ' + quoteRole(first) + ' NOLOGIN');
     try {
       await expect(pool.query(
-        "SELECT continuum_rebind_database_identity_oids('REBIND AFTER LOGICAL RESTORE')",
-      )).rejects.toThrow(/complete retired.role restore mapping|ambiguous/i);
+        "SELECT continuum_rebind_database_identity_oids('REBIND DATABASE IDENTITIES', 'PRESERVED OID NAMESPACE')",
+      )).rejects.toThrow(/retired.*OID.*renamed|preserved.*OID.*namespace|ambiguous/i);
     } finally {
       await pool.query(
         'DELETE FROM continuum_retired_sync_database_identities WHERE database_role = ANY($1::name[])',
@@ -1139,7 +1139,7 @@ describe('sync database identity rotation security', () => {
       )).rows[0].oid;
       await pool.query('REVOKE ' + quoteRole(reusedRole) + ' FROM CURRENT_USER');
       await pool.query('DROP ROLE ' + quoteRole(reusedRole));
-      await pool.query("SELECT continuum_rebind_database_identity_oids('REBIND AFTER LOGICAL RESTORE')");
+      await pool.query("SELECT continuum_rebind_database_identity_oids('REBIND DATABASE IDENTITIES', 'FOREIGN OID NAMESPACE')");
       await pool.query('CREATE ROLE ' + quoteRole(reusedRole) + ' LOGIN');
       await grantOwnerRetirementAuthority(pool, reusedRole);
       await pool.query(
@@ -1158,7 +1158,7 @@ describe('sync database identity rotation security', () => {
       )).rows[0].oid;
       await pool.query('REVOKE ' + quoteRole(reusedRole) + ' FROM CURRENT_USER');
       await pool.query('DROP ROLE ' + quoteRole(reusedRole));
-      await pool.query("SELECT continuum_rebind_database_identity_oids('REBIND AFTER LOGICAL RESTORE')");
+      await pool.query("SELECT continuum_rebind_database_identity_oids('REBIND DATABASE IDENTITIES', 'FOREIGN OID NAMESPACE')");
       await pool.query('CREATE ROLE ' + quoteRole(reusedRole) + ' LOGIN');
       await grantOwnerRetirementAuthority(pool, reusedRole);
       await pool.query(
@@ -1166,7 +1166,7 @@ describe('sync database identity rotation security', () => {
         [reusedRole, secondOid],
       );
       await expect(pool.query(
-        "SELECT continuum_rebind_database_identity_oids('REBIND AFTER LOGICAL RESTORE')",
+        "SELECT continuum_rebind_database_identity_oids('REBIND DATABASE IDENTITIES', 'FOREIGN OID NAMESPACE')",
       )).resolves.toBeDefined();
       const generations = (await pool.query(
         `SELECT

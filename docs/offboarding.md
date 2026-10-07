@@ -663,17 +663,51 @@ Because 0048 and 0049 deliberately delete legacy registry rows, revoke grants,
 and disable the retired login, restoring pre-0049 behavior requires the verified pre-migration
 backup and matching old binaries. Regranting the retired credential by hand is
 not a rollback.
-Logical restore tools can assign new PostgreSQL role OIDs. After a logical
-restore, keep processes stopped, recreate the named roles without privileges,
-then explicitly rebind the owner-only registries before reapplying profiles:
+Database identity repair never infers role-OID provenance from PostgreSQL's
+`system_identifier`. That value can change while role OIDs are preserved by
+`pg_upgrade` or a managed-provider major-version upgrade, and it can remain the
+same while OIDs diverge between physical forks such as snapshot clones, PITR
+copies, or blue/green environments. The migration does not call
+`pg_control_system()`, which is unavailable or restricted on some managed
+providers. The optional control-system value retained in the epoch table is
+diagnostic only and is not an authorization or restore boundary.
+
+Keep every Continuum process stopped and choose the provenance from the actual
+restore/upgrade procedure. For `pg_upgrade` or a provider upgrade that
+explicitly preserves `pg_authid` role OIDs, require the existing OIDs and names
+to match exactly:
 
 ```sh
 psql "$CONTINUUM_MIGRATION_OWNER_URL" \
   --set=ON_ERROR_STOP=1 \
   --set=continuum_schema=public \
-  --set=confirm_rebind='REBIND AFTER LOGICAL RESTORE' \
+  --set=confirm_rebind='REBIND DATABASE IDENTITIES' \
+  --set=oid_provenance='PRESERVED OID NAMESPACE' \
   --file=scripts/rebind-database-identities.sql
 ```
+
+For a logical restore, physical fork, snapshot clone, PITR copy, or any case in
+which role-OID provenance is not affirmatively preserved, recreate the named
+roles without privileges and declare the old OIDs foreign:
+
+```sh
+psql "$CONTINUUM_MIGRATION_OWNER_URL" \
+  --set=ON_ERROR_STOP=1 \
+  --set=continuum_schema=public \
+  --set=confirm_rebind='REBIND DATABASE IDENTITIES' \
+  --set=oid_provenance='FOREIGN OID NAMESPACE' \
+  --file=scripts/rebind-database-identities.sql
+```
+
+Do not select preserved provenance merely because two environments report the
+same `system_identifier`. If OID provenance cannot be established, use foreign
+provenance. Both modes are owner-only, require exact confirmation text, take
+the identity advisory locks and registry locks, and fail transactionally.
+Preserved mode compares every active and retired history OID to its recorded
+role name and refuses missing, renamed, or substituted roles. Foreign mode
+never interprets a historical OID through current `pg_roles`; it archives
+same-name active history first, resolves old history by exact name, and checks
+active/retired ambiguity only after that name remapping.
 
 Then reapply the application, operator, and sync profiles and run verification
 before restart. The rebind operation is owner-only, locks both registries,
@@ -685,11 +719,10 @@ owner-only unresolved-history ledger instead of retaining an OID that may now
 belong to another role. The ledger distinguishes terminal superseded
 generations from restore-pending rows. Rebind rotates an owner-only database
 identity epoch, so old-cluster OID numbers cannot make unrelated restored roles
-look terminal. The epoch record also carries PostgreSQL's control-system
-identifier: OID-based rename/permutation checks run only when the registry was
-created in the current cluster, while a genuine cross-cluster restore resolves
-retired roles by exact name and still rejects active/retired target collisions.
-Re-run the same rebind command if global roles are
+look terminal. Every live retired-history row is stamped with the epoch in
+which its OID is meaningful; foreign rebind archives that source epoch and
+stamps remapped OIDs with the new epoch. Preserved rebind does not rotate the
+epoch. Re-run the foreign-provenance command if global roles are
 restored in stages: a uniquely resolved retired name is moved back into live
 history. Do not rotate to a restore-pending name between stages. Earlier
 generations of a deliberately reused active sync-role name remain archived by
