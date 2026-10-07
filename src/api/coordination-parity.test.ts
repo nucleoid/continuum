@@ -239,6 +239,8 @@ describe('coordination REST/MCP parity', () => {
     { field: 'requestId', restValue: 'bad', mcpField: 'request_id', mcpValue: 'bad' },
     { field: 'ttlSeconds', restValue: 29, mcpField: 'ttl_seconds', mcpValue: 29 },
     { field: 'ttlSeconds', restValue: '300', mcpField: 'ttl_seconds', mcpValue: '300' },
+    { field: 'scope', restValue: 7, mcpField: 'scope', mcpValue: 7 },
+    { field: 'resource', restValue: null, mcpField: 'resource', mcpValue: null },
   ])('returns the stable INVALID_INPUT envelope for malformed $field', async (sample) => {
     const baseRest: Record<string, unknown> = {
       scope: 'project:parity', resource: 'malformed',
@@ -263,5 +265,24 @@ describe('coordination REST/MCP parity', () => {
     expect(rest.body.code).toBe('INVALID_INPUT');
     expect(mcp.isError).toBe(true);
     expect(toolJson(mcp)).toMatchObject({ error: { code: 'INVALID_INPUT' } });
+  });
+
+  it.each([
+    { name: 'missing field', remove: 'request_id' },
+    { name: 'extra field', extra: true },
+  ])('returns the service INVALID_INPUT envelope for MCP $name', async (sample) => {
+    const args: Record<string, unknown> = {
+      scope: 'project:parity', resource: 'malformed-shape',
+      run_id: randomUUID(), request_id: randomUUID(), ttl_seconds: 300,
+    };
+    if (sample.remove) delete args[sample.remove];
+    if (sample.extra) args.extra = true;
+    const result = await client.callTool({
+      name: 'continuum.lock_acquire', arguments: args,
+    }) as ToolResult;
+    expect(result.isError).toBe(true);
+    expect(toolJson(result)).toEqual({
+      error: { code: 'INVALID_INPUT', message: 'Invalid coordination input' },
+    });
   });
 });

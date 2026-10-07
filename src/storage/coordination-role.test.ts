@@ -163,12 +163,8 @@ describe('coordination database role profiles', () => {
         leaseId: first.leaseId, runId, requestId: randomUUID(),
       });
       await pool.query(
-        `DELETE FROM coordination_operation_receipts WHERE principal_id = $1`,
-        [operatorPrincipal.id],
-      );
-      await pool.query(
-        `UPDATE coordination_principal_usage
-            SET acquire_receipt_count = 0, mutation_receipt_count = 0
+        `UPDATE coordination_operation_receipts
+            SET retain_until = clock_timestamp() - interval '1 second'
           WHERE principal_id = $1`,
         [operatorPrincipal.id],
       );
@@ -185,6 +181,17 @@ describe('coordination database role profiles', () => {
         requestId: randomUUID(),
       });
       expect(second).toMatchObject({ acquired: true, fencingToken: '2' });
+      await expect(operator.connection.query(
+        'UPDATE coordination_scope_usage SET resource_limit = 999999 WHERE scope_id = $1',
+        [scope.id],
+      )).rejects.toMatchObject({ code: '42501' });
+      await expect(operator.connection.query(
+        'UPDATE coordination_principal_usage SET acquire_receipt_count = 0 WHERE principal_id = $1',
+        [operatorPrincipal.id],
+      )).rejects.toMatchObject({ code: '42501' });
+      await expect(operator.connection.query(
+        'SELECT * FROM coordination_fencing_floors',
+      )).rejects.toMatchObject({ code: expect.stringMatching(/42P01|42501/) });
       expect((await pool.query(
         'SELECT resource_limit FROM coordination_scope_usage WHERE scope_id = $1',
         [scope.id],
@@ -199,6 +206,15 @@ describe('coordination database role profiles', () => {
         runId: randomUUID(), requestId: randomUUID(),
       });
       expect(personal).toMatchObject({ acquired: true, fencingToken: '1' });
+      await expect(operator.connection.query(
+        'SELECT continuum_operator_pseudonymize_scope($1, $2, $3)',
+        [operatorPrincipal.id, userScope.id, 'offboarded-scope'],
+      )).rejects.toThrow(/live coordination leases/i);
+      await releaseLease(operator.connection, operatorPrincipal, {
+        leaseId: personal.acquired ? personal.leaseId : '',
+        runId: personal.acquired ? personal.runId : '',
+        requestId: randomUUID(),
+      });
       await operator.connection.query(
         'SELECT continuum_operator_pseudonymize_scope($1, $2, $3)',
         [operatorPrincipal.id, userScope.id, 'offboarded-scope'],
@@ -226,6 +242,10 @@ describe('coordination database role profiles', () => {
         fencing_token: '1',
       }]);
       expect(JSON.stringify(scrubbed.rows)).not.toContain('person@example.test');
+      expect((await pool.query(
+        'SELECT fencing_floor::text AS floor FROM coordination_scope_fencing_floors WHERE scope_id = $1',
+        [userScope.id],
+      )).rows).toEqual([{ floor: '1' }]);
     } finally {
       await operator.connection.end();
     }

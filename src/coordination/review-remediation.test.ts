@@ -15,28 +15,34 @@ describe('coordination review remediation contract', () => {
     expect(grants).toMatch(/SELECT, INSERT, UPDATE, DELETE[\s\S]+coordination_operation_receipts/i);
     expect(grants).toMatch(/SELECT, INSERT, UPDATE[\s\S]+coordination_resources/i);
     expect(grants).toMatch(/SELECT, INSERT, UPDATE[\s\S]+coordination_leases/i);
-    expect(grants).toMatch(/SELECT, INSERT, UPDATE[\s\S]+coordination_scope_usage/i);
-    expect(grants).toMatch(/SELECT, INSERT, UPDATE[\s\S]+coordination_principal_usage/i);
+    expect(grants).not.toMatch(/GRANT[\s\S]{0,80}UPDATE[\s\S]{0,160}coordination_scope_usage/i);
+    expect(grants).not.toMatch(/GRANT[\s\S]{0,80}UPDATE[\s\S]{0,160}coordination_principal_usage/i);
+    expect(grants).toMatch(/REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE[\s\S]+coordination_scope_usage[\s\S]+coordination_principal_usage/i);
+    expect(grants).toMatch(/continuum\.application_grant_schema/);
+    expect(grants).not.toMatch(/schema_name TEXT := current_schema\(\)/);
   });
 
   it('ships a forward migration for grants, indexes, operator maintenance, and offboarding', async () => {
-    const migration = await source('migrations/0055_coordination_review_remediation.sql');
+    const migration = await source('migrations/0056_coordination_final_remediation.sql');
     expect(migration).toContain('coordination_resources_current_lease_idx');
     expect(migration).toContain('coordination_leases_principal_terminal_idx');
     expect(migration).toMatch(/continuum_assert_application_role_allowlist[\s\S]+coordination_resources/i);
     expect(migration).toMatch(/continuum_operator_reclaim_coordination_resource/i);
     expect(migration).toMatch(/continuum_operator_set_coordination_scope_quota/i);
-    expect(migration).toMatch(/continuum_offboarding_expected_audit_metadata[\s\S]+lock_acquire/i);
+    expect(migration).toContain('coordination_receipts_resource_idx');
+    expect(migration).toContain('coordination_scope_fencing_floors');
+    expect(migration).toMatch(/DROP TABLE coordination_fencing_floors/i);
+    expect(migration).toMatch(/continuum_operator_sweep_coordination_state/i);
+    expect(migration).toMatch(/statement_timeout/);
     expect(migration).toMatch(/continuum_operator_pseudonymize_scope[\s\S]+coordination_operation_receipts/i);
   });
 
-  it('keeps mutation receipts in a quota class independent from acquire saturation', async () => {
-    const migration = await source('migrations/0054_coordination_leases.sql');
+  it('excludes short-lived renew receipts from the release quota', async () => {
+    const migration = await source('migrations/0056_coordination_final_remediation.sql');
     const storage = await source('src/storage/coordination.ts');
-    expect(migration).toMatch(/acquire_receipt_count/i);
-    expect(migration).toMatch(/mutation_receipt_count/i);
-    expect(storage).toMatch(/operation === 'acquire'[\s\S]+acquire_receipt_count/i);
-    expect(storage).toMatch(/mutation_receipt_count/i);
+    expect(migration).toMatch(/operation = 'release'/i);
+    expect(storage).toMatch(/input\.operation === 'renew'[\s\S]+make_interval/i);
+    expect(storage).not.toMatch(/operation <> 'acquire'/i);
   });
 
   it('serializes idempotency keys and removes an exact expired receipt before reuse', async () => {
@@ -51,8 +57,9 @@ describe('coordination review remediation contract', () => {
       mcp.indexOf("'continuum.lock_acquire'"),
       mcp.indexOf("'continuum.list_scopes'"),
     );
-    expect(coordination).not.toMatch(/z\.string\(\)\.uuid\(\)/);
-    expect(coordination).not.toMatch(/z\.number\(\)\.int\(\)\.min\(30\)\.max\(900\)/);
+    expect(coordination).not.toMatch(/z\.string\(\)/);
+    expect(coordination).toMatch(/z\.unknown\(\)/);
+    expect(coordination).toMatch(/strictCoordinationInput/);
   });
 
   it('uses a locale-independent database control-character contract', async () => {
@@ -75,6 +82,14 @@ describe('coordination review remediation contract', () => {
     expect(docs).toMatch(/mixed[- ]version/is);
     expect(docs).toMatch(/reclaim/is);
     expect(docs).toMatch(/rollback[\s\S]+re-enable/is);
-    expect(docs).toMatch(/independent 10,000 retained renew\/release receipts/is);
+    expect(docs).toMatch(/renew receipts.+short-lived/is);
+    expect(docs).toMatch(/ever-created.+reclaim/is);
+  });
+
+  it('pins coordination migration bytes and requires the forward remediation', async () => {
+    const migrator = await source('src/storage/migrator.ts');
+    expect(migrator).toMatch(/0054_coordination_leases\.sql[\s\S]+[0-9a-f]{64}/);
+    expect(migrator).toMatch(/0055_coordination_review_remediation\.sql[\s\S]+[0-9a-f]{64}/);
+    expect(migrator).toMatch(/0056_coordination_final_remediation\.sql['"],\s*['"]0055_coordination_review_remediation\.sql/);
   });
 });
