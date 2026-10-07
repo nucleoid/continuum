@@ -352,7 +352,7 @@ describe('sync database identity rotation security', () => {
     await pool.query('CREATE ROLE ' + quoteRole(role) + ' LOGIN');
     try {
       await expect(pool.query(
-        "SELECT continuum_rebind_database_identity_oids('REBIND AFTER LOGICAL RESTORE')",
+        "SELECT continuum_rebind_database_identity_oids('REBIND DATABASE IDENTITIES', 'FOREIGN OID NAMESPACE')",
       )).resolves.toBeDefined();
       const rebound = (await pool.query(
         `SELECT identity.database_role_oid::text AS oid, role.oid::text AS current_oid
@@ -699,6 +699,76 @@ describe('sync database identity rotation security', () => {
         [role],
       );
       await dropRoles(pool, [role]);
+    }
+  });
+
+  it('requires the operator to declare an exact role-OID provenance', async () => {
+    await expect(pool.query(
+      "SELECT continuum_rebind_database_identity_oids('REBIND AFTER LOGICAL RESTORE')",
+    )).rejects.toThrow(/OID.*provenance|exact.*confirmation|function.*does not exist/i);
+    await expect(pool.query(
+      "SELECT continuum_rebind_database_identity_oids('REBIND DATABASE IDENTITIES', 'INFER FROM CLUSTER')",
+    )).rejects.toThrow(/OID.*provenance|exact.*confirmation|invalid/i);
+  });
+
+  it('epoch-stamps every retired OID written by the runtime retirement path', async () => {
+    const fixture = await operatorFixture('retired-epoch-stamp');
+    const replacement = await createPrincipal(pool, {
+      externalId: 'retired-epoch-stamp-next', kind: 'service', displayName: 'Next',
+    });
+    const first = 'continuum_epoch_first_' + Date.now();
+    const next = 'continuum_epoch_next_' + Date.now();
+    for (const role of [first, next]) {
+      await pool.query('CREATE ROLE ' + quoteRole(role) + ' LOGIN');
+      await grantOwnerRetirementAuthority(pool, role);
+    }
+    try {
+      await applyGrantScript(pool, 'grant-sync-role.sql', {
+        continuum_sync_role: first, continuum_principal_id: fixture.service.id,
+      });
+      await fixture.operator.query(
+        'SELECT continuum_rotate_sync_database_identity($1, $2, $3)',
+        [fixture.admin.id, next, replacement.id],
+      );
+      const stamp = (await pool.query(
+        `SELECT history.cluster_epoch::text AS history_epoch,
+                epoch.epoch::text AS current_epoch
+           FROM continuum_retired_sync_database_identities history
+           CROSS JOIN continuum_database_identity_epoch epoch
+          WHERE epoch.singleton AND history.database_role = $1::name`,
+        [first],
+      )).rows[0];
+      expect(stamp).toBeDefined();
+      expect(stamp.history_epoch).toBe(stamp.current_epoch);
+    } finally {
+      await fixture.operator.end();
+      await pool.query(
+        'DELETE FROM continuum_trusted_database_identities WHERE database_role = ANY($1::name[])',
+        [[fixture.operatorRole, first, next]],
+      );
+      await pool.query(
+        'DELETE FROM continuum_retired_sync_database_identities WHERE database_role = ANY($1::name[])',
+        [[first, next]],
+      );
+      await dropRoles(pool, [first, next, fixture.operatorRole]);
+    }
+  });
+
+  it('does not require provider control-system functions and documents both provenance modes', async () => {
+    const migration = await readFile(
+      join(process.cwd(), 'migrations/0052_offboarding_review_repair.sql'), 'utf8',
+    );
+    const docs = await readFile(join(process.cwd(), 'docs/offboarding.md'), 'utf8');
+    const rebindScript = await readFile(
+      join(process.cwd(), 'scripts/rebind-database-identities.sql'), 'utf8',
+    );
+    expect(migration).not.toMatch(/\bpg_control_system\s*\(/i);
+    expect(migration).toMatch(/cluster_epoch\s+UUID\s+NOT NULL/i);
+    expect(docs).toMatch(/pg_upgrade/i);
+    expect(docs).toMatch(/physical fork|PITR|blue.?green/i);
+    for (const provenance of ['PRESERVED OID NAMESPACE', 'FOREIGN OID NAMESPACE']) {
+      expect(docs).toContain(provenance);
+      expect(rebindScript).toContain(provenance);
     }
   });
 
