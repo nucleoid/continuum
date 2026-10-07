@@ -53,11 +53,6 @@ describe('post-rejection database authority remediation', () => {
   beforeEach(async () => {
     pool ??= await makeTestPool();
     await resetData(pool);
-    await pool.query(`
-      INSERT INTO continuum_canonical_org_scope (singleton, scope_id)
-      SELECT TRUE, id FROM scopes WHERE kind = 'org' AND name = ''
-      ON CONFLICT (singleton) DO UPDATE SET scope_id = EXCLUDED.scope_id
-    `);
   }, 30_000);
 
   afterAll(async () => {
@@ -93,6 +88,9 @@ describe('post-rejection database authority remediation', () => {
   }
 
   it('binds the canonical org identity and excludes kind/name from application updates', async () => {
+    expect((await pool.query(
+      'SELECT count(*)::int AS count FROM continuum_canonical_org_scope WHERE singleton',
+    )).rows[0].count).toBe(1);
     const application = await createRole('application');
     await application.connection.query('BEGIN');
     try {
@@ -110,6 +108,47 @@ describe('post-rejection database authority remediation', () => {
       /GRANT SELECT, INSERT ON TABLE\s+:"continuum_schema"\.scopes/i,
     );
     expect(grants).toMatch(/REVOKE UPDATE, DELETE, TRUNCATE ON TABLE[\s\S]*scopes/i);
+
+    await pool.query('BEGIN');
+    try {
+      const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+      await expect(pool.query(
+        "UPDATE scopes SET name = 'owner-renamed' WHERE id = $1", [org.id],
+      )).rejects.toThrow(/canonical org|immutable/i);
+    } finally {
+      await pool.query('ROLLBACK');
+    }
+
+    await pool.query('BEGIN');
+    try {
+      await pool.query('TRUNCATE continuum_canonical_org_scope');
+      await expect(pool.query('SELECT continuum_org_scope_id()'))
+        .rejects.toThrow(/canonical|organization|marker|identity/i);
+    } finally {
+      await pool.query('ROLLBACK');
+    }
+  });
+
+  it('rejects schema and PUBLIC privilege drift in the exact application profile', async () => {
+    const application = await createRole('application');
+    await pool.query('GRANT CREATE ON SCHEMA public TO ' + quoteRole(application.role));
+    await expect(pool.query(
+      'SELECT continuum_assert_application_role_allowlist($1)', [application.role],
+    )).rejects.toThrow(/schema|privilege|drift|allow-list/i);
+    await pool.query('REVOKE CREATE ON SCHEMA public FROM ' + quoteRole(application.role));
+
+    await pool.query(
+      'GRANT EXECUTE ON FUNCTION continuum_operator_authorize_audit_retention(UUID) TO PUBLIC',
+    );
+    try {
+      await expect(pool.query(
+        'SELECT continuum_assert_application_role_allowlist($1)', [application.role],
+      )).rejects.toThrow(/PUBLIC|function|privilege|drift|allow-list/i);
+    } finally {
+      await pool.query(
+        'REVOKE EXECUTE ON FUNCTION continuum_operator_authorize_audit_retention(UUID) FROM PUBLIC',
+      );
+    }
   });
 
   it('rejects owner sync verification and direct or PUBLIC column read drift', async () => {
@@ -179,7 +218,34 @@ describe('post-rejection database authority remediation', () => {
     expect(migration).toMatch(/continuum_install_sync_database_identity[\s\S]*continuum_require_sync_retirement_authority/i);
   });
 
-  it('handles extension-owned pgvector routines without weakening application routines', async () => {
+  it('discovers and refreshes pgvector grants after function hardening', async () => {
+    const application = await createRole('application');
+    const vectorFunction = (await pool.query<{ signature: string }>(`
+      SELECT function.oid::regprocedure::text AS signature
+        FROM pg_proc function
+        JOIN pg_depend dependency ON dependency.classid = 'pg_proc'::regclass
+         AND dependency.objid = function.oid
+         AND dependency.refclassid = 'pg_extension'::regclass
+         AND dependency.deptype = 'e'
+        JOIN pg_extension extension ON extension.oid = dependency.refobjid
+       WHERE extension.extname = 'vector' AND function.pronamespace = 'public'::regnamespace
+       ORDER BY function.oid LIMIT 1
+    `)).rows[0];
+    expect(vectorFunction).toBeDefined();
+    await pool.query('BEGIN');
+    try {
+      await pool.query(
+        `REVOKE EXECUTE ON FUNCTION ${vectorFunction.signature} FROM PUBLIC, ${quoteRole(application.role)}`,
+      );
+      await pool.query('SELECT continuum_grant_application_vector_functions()');
+      expect((await pool.query(
+        'SELECT has_function_privilege($1, $2, $3) AS allowed',
+        [application.role, vectorFunction.signature, 'EXECUTE'],
+      )).rows[0].allowed).toBe(true);
+    } finally {
+      await pool.query('ROLLBACK');
+    }
+
     const migration51 = await readFile(
       join(process.cwd(), 'migrations/0051_offboarding_security_contract.sql'), 'utf8',
     );

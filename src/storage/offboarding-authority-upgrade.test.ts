@@ -244,6 +244,20 @@ describe('0048 trusted database identity upgrade', () => {
     )).rows[0].definition).toMatch(/source identity are immutable|trusted sync/i);
   }, 60_000);
 
+  it('rejects an ambiguous organization identity while applying the 0052 forward repair', async () => {
+    const state = await fixture('0051_offboarding_security_contract.sql');
+    await state.pool.query(
+      "INSERT INTO scopes (id, kind, name) VALUES (gen_random_uuid(), 'org', 'forged')",
+    );
+    await addMigration(state.directory, '0052_offboarding_review_repair.sql');
+    await expect(runMigrations(state.pool, state.directory))
+      .rejects.toThrow(/canonical|organization|singleton|exactly one/i);
+    expect((await state.pool.query(
+      `SELECT count(*)::int AS count FROM _continuum_migrations
+        WHERE name = '0052_offboarding_review_repair.sql'`,
+    )).rows[0].count).toBe(0);
+  }, 60_000);
+
   it('documents and checks migration-owner capabilities before 0051 changes', async () => {
     const migration = await readFile(
       new URL('../../migrations/0051_offboarding_security_contract.sql', import.meta.url), 'utf8',
