@@ -34,6 +34,7 @@ DECLARE
   schema_oid OID;
   owner_oid OID;
   active_identity BOOLEAN;
+  recorded_sync_history BOOLEAN;
 BEGIN
   SELECT input.retired_sync, input.confirmed_oid, input.application_schema
     INTO retired_sync, confirmed_oid, application_schema
@@ -57,6 +58,16 @@ BEGIN
   ) INTO active_identity USING retired_oid;
   IF active_identity THEN
     RAISE EXCEPTION 'refusing to retire an active trusted database identity';
+  END IF;
+  EXECUTE format(
+    'SELECT EXISTS (
+       SELECT 1 FROM %I.continuum_retired_sync_database_identities history
+        WHERE history.database_role_oid = $1
+          AND history.database_role = $2
+     )', application_schema
+  ) INTO recorded_sync_history USING retired_oid, retired_sync;
+  IF NOT recorded_sync_history THEN
+    RAISE EXCEPTION 'refusing to retire a role without recorded sync history';
   END IF;
   IF EXISTS (
     SELECT 1 FROM pg_auth_members membership

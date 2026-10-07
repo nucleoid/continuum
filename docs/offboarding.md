@@ -639,7 +639,11 @@ psql "$CONTINUUM_MIGRATION_OWNER_URL" \
 Then reapply the application, operator, and sync profiles and run verification
 before restart. The rebind operation is owner-only, locks both registries,
 resolves roles by exact name, rejects missing or conflicting active identities,
-and revalidates isolation before committing.
+and revalidates isolation before committing. Active and retired identities are
+planned and rewritten as complete sets, so swapped or cyclic OID assignments do
+not collide. Retired names that were intentionally dropped are moved to an
+owner-only unresolved-history ledger instead of retaining an OID that may now
+belong to another role; verification fails if one of those names is recreated.
 
 This is an application-data boundary. Operators must separately apply their
 documented retention policy to encrypted database backups, database/WAL logs,

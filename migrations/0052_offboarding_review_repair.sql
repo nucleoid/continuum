@@ -64,10 +64,16 @@ ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 
 CREATE TABLE IF NOT EXISTS continuum_retired_sync_database_identities (
   database_role_oid OID PRIMARY KEY,
-  database_role NAME NOT NULL,
+  database_role NAME NOT NULL UNIQUE,
   retired_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 REVOKE ALL ON TABLE continuum_retired_sync_database_identities FROM PUBLIC;
+CREATE TABLE IF NOT EXISTS continuum_unresolved_retired_sync_database_identities (
+  database_role NAME PRIMARY KEY,
+  previous_database_role_oid OID NOT NULL,
+  marked_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+REVOKE ALL ON TABLE continuum_unresolved_retired_sync_database_identities FROM PUBLIC;
 
 -- Capability tables are transaction-local markers. Maintenance mode guarantees
 -- no legitimate rows survive, so recreate them instead of attempting a partial
@@ -1174,9 +1180,7 @@ CREATE OR REPLACE FUNCTION continuum_rebind_database_identity_oids(
 DECLARE
   owner_oid OID;
   invoking_oid OID;
-  target_oid OID;
-  identity RECORD;
-  history RECORD;
+  identity_record RECORD;
   changed_count INTEGER := 0;
 BEGIN
   IF confirmation <> 'REBIND AFTER LOGICAL RESTORE' THEN
@@ -1188,50 +1192,75 @@ BEGIN
     RAISE EXCEPTION 'only the migration owner may rebind database identity OIDs';
   END IF;
   LOCK TABLE continuum_trusted_database_identities,
-             continuum_retired_sync_database_identities IN ACCESS EXCLUSIVE MODE;
-  FOR identity IN
-    SELECT database_role, database_role_oid, can_sync
-      FROM continuum_trusted_database_identities FOR UPDATE
+             continuum_retired_sync_database_identities,
+             continuum_unresolved_retired_sync_database_identities
+    IN ACCESS EXCLUSIVE MODE;
+  CREATE TEMP TABLE continuum_active_identity_rebind_plan ON COMMIT DROP AS
+    SELECT bound_identity.database_role,
+           bound_identity.database_role_oid AS previous_oid,
+           role.oid AS restored_oid, bound_identity.principal_id,
+           bound_identity.can_approve, bound_identity.can_sync,
+           bound_identity.created_at
+      FROM continuum_trusted_database_identities bound_identity
+      LEFT JOIN pg_roles role ON role.rolname = bound_identity.database_role;
+  IF EXISTS (SELECT 1 FROM continuum_active_identity_rebind_plan WHERE restored_oid IS NULL) THEN
+    RAISE EXCEPTION 'one or more trusted database roles do not exist after restore';
+  END IF;
+  IF EXISTS (
+    SELECT restored_oid FROM continuum_active_identity_rebind_plan
+     GROUP BY restored_oid HAVING count(*) <> 1
+  ) THEN
+    RAISE EXCEPTION 'restored database role OIDs are not unique';
+  END IF;
+  SELECT count(*) INTO changed_count
+    FROM continuum_active_identity_rebind_plan WHERE restored_oid <> previous_oid;
+  DELETE FROM continuum_trusted_database_identities;
+  INSERT INTO continuum_trusted_database_identities
+    (database_role, database_role_oid, principal_id, can_approve, can_sync, created_at)
+  SELECT database_role, restored_oid, principal_id, can_approve, can_sync, created_at
+    FROM continuum_active_identity_rebind_plan;
+
+  CREATE TEMP TABLE continuum_retired_identity_rebind_plan ON COMMIT DROP AS
+    SELECT history.database_role, history.database_role_oid AS previous_oid,
+           role.oid AS restored_oid, history.retired_at
+      FROM continuum_retired_sync_database_identities history
+      LEFT JOIN pg_roles role ON role.rolname = history.database_role;
+  IF EXISTS (
+    SELECT database_role FROM continuum_retired_identity_rebind_plan
+     GROUP BY database_role HAVING count(*) <> 1
+  ) OR EXISTS (
+    SELECT restored_oid FROM continuum_retired_identity_rebind_plan
+     WHERE restored_oid IS NOT NULL GROUP BY restored_oid HAVING count(*) <> 1
+  ) THEN
+    RAISE EXCEPTION 'retired database identity restore mapping is ambiguous';
+  END IF;
+  INSERT INTO continuum_unresolved_retired_sync_database_identities
+    (database_role, previous_database_role_oid)
+  SELECT database_role, previous_oid FROM continuum_retired_identity_rebind_plan
+   WHERE restored_oid IS NULL
+  ON CONFLICT (database_role) DO UPDATE SET
+    previous_database_role_oid = EXCLUDED.previous_database_role_oid,
+    marked_at = now();
+  DELETE FROM continuum_retired_sync_database_identities;
+  INSERT INTO continuum_retired_sync_database_identities
+    (database_role_oid, database_role, retired_at)
+  SELECT restored_oid, database_role, retired_at
+    FROM continuum_retired_identity_rebind_plan WHERE restored_oid IS NOT NULL;
+  DELETE FROM continuum_unresolved_retired_sync_database_identities unresolved
+   USING continuum_retired_identity_rebind_plan plan
+   WHERE unresolved.database_role = plan.database_role
+     AND plan.restored_oid IS NOT NULL;
+  SELECT changed_count + count(*) INTO changed_count
+    FROM continuum_retired_identity_rebind_plan
+   WHERE restored_oid IS DISTINCT FROM previous_oid;
+
+  FOR identity_record IN
+    SELECT database_role, can_sync FROM continuum_trusted_database_identities
   LOOP
-    SELECT oid INTO target_oid FROM pg_roles WHERE rolname = identity.database_role;
-    IF target_oid IS NULL THEN
-      RAISE EXCEPTION 'trusted database role % does not exist after restore',
-        identity.database_role;
-    END IF;
-    IF target_oid <> identity.database_role_oid THEN
-      IF EXISTS (
-        SELECT 1 FROM continuum_trusted_database_identities existing
-         WHERE existing.database_role_oid = target_oid
-           AND existing.database_role <> identity.database_role
-      ) THEN
-        RAISE EXCEPTION 'restored database role OID is already bound to another identity';
-      END IF;
-      UPDATE continuum_trusted_database_identities
-         SET database_role_oid = target_oid
-       WHERE database_role = identity.database_role;
-      changed_count := changed_count + 1;
-    END IF;
     PERFORM continuum_validate_trusted_database_role(
-      identity.database_role,
-      CASE WHEN identity.can_sync THEN 'sync' ELSE 'approve' END,
-      identity.can_sync);
-  END LOOP;
-  FOR history IN
-    SELECT database_role_oid, database_role
-      FROM continuum_retired_sync_database_identities FOR UPDATE
-  LOOP
-    SELECT oid INTO target_oid FROM pg_roles WHERE rolname = history.database_role;
-    IF target_oid IS NOT NULL AND target_oid <> history.database_role_oid THEN
-      DELETE FROM continuum_retired_sync_database_identities
-       WHERE database_role_oid = history.database_role_oid;
-      INSERT INTO continuum_retired_sync_database_identities
-        (database_role_oid, database_role)
-      VALUES (target_oid, history.database_role)
-      ON CONFLICT (database_role_oid) DO UPDATE SET
-        database_role = EXCLUDED.database_role,
-        retired_at = now();
-      changed_count := changed_count + 1;
-    END IF;
+      identity_record.database_role,
+      CASE WHEN identity_record.can_sync THEN 'sync' ELSE 'approve' END,
+      identity_record.can_sync);
   END LOOP;
   RETURN changed_count;
 END;

@@ -45,6 +45,7 @@ DECLARE
   owner_oid OID;
   active_sync_valid BOOLEAN;
   operator_valid BOOLEAN;
+  unresolved_retired_name_reused BOOLEAN;
   retired_identity RECORD;
 BEGIN
   SELECT input.application_role, input.active_sync, input.expected_operator, input.retired_sync,
@@ -89,9 +90,21 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'retired sync role does not exist';
   END IF;
+  EXECUTE format(
+    'SELECT EXISTS (
+       SELECT 1 FROM %I.continuum_unresolved_retired_sync_database_identities unresolved
+       JOIN pg_roles role ON role.rolname = unresolved.database_role
+     )', application_schema
+  ) INTO unresolved_retired_name_reused;
+  IF unresolved_retired_name_reused THEN
+    RAISE EXCEPTION 'an unresolved retired sync role name was recreated after logical restore';
+  END IF;
   FOR retired_identity IN EXECUTE format(
     'SELECT history.database_role_oid, history.database_role
        FROM %I.continuum_retired_sync_database_identities history
+       JOIN pg_roles bound_role
+         ON bound_role.oid = history.database_role_oid
+        AND bound_role.rolname = history.database_role
      UNION
      SELECT role.oid, role.rolname FROM pg_roles role
       WHERE $1 <> '''' AND role.rolname = $1', application_schema
