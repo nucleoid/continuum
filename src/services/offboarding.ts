@@ -499,6 +499,21 @@ interface RunAuditState extends Record<string, unknown> {
   scope_cleanup_complete: boolean;
 }
 
+const DURABLE_PROGRESS_FIELDS = [
+  'audit_fence_id', 'memory_cursor', 'memory_complete', 'scope_cleanup_complete',
+  'audit_principal_cursor', 'audit_scope_cursor', 'audit_scope_ids_cursor',
+  'audit_memory_key_cursor', 'audit_memory_item_cursor', 'audit_memory_complete',
+  'audit_linked_request_cursor', 'audit_linked_request_item_cursor',
+  'audit_linked_request_exhausted', 'audit_linked_complete',
+] as const;
+
+function durableOffboardingProgressed(
+  before: Record<string, unknown>, after: Record<string, unknown>,
+): boolean {
+  return DURABLE_PROGRESS_FIELDS.some((field) =>
+    String(before[field] ?? '') !== String(after[field] ?? ''));
+}
+
 async function writeOffboardingRun(
   client: pg.PoolClient,
   principalId: string,
@@ -1116,6 +1131,7 @@ async function offboardPrincipalCore(
         },
       );
     }
+    const durableProgressBefore = { ...run.rows[0] } as Record<string, unknown>;
     let membershipCount = 0;
     let entraCount = 0;
     let aliasCount = 0;
@@ -1315,6 +1331,9 @@ async function offboardPrincipalCore(
     );
     const completionReady = memoryComplete && scopeCleanupComplete
       && !remainingAudit && coordinationPrivacyComplete;
+    const durableProgress = durableOffboardingProgressed(
+      durableProgressBefore, currentRun.rows[0] as Record<string, unknown>,
+    );
     const progressUpdate = await writeOffboardingRun(
       client, principalId, actor.id, 'add_progress', {
         memories: memoryBatch, audit_rows: auditedRows,
@@ -1411,7 +1430,8 @@ async function offboardPrincipalCore(
         ? progressRow.audit_queries_processed : progressRow.initial_audit_queries),
       countEvidence: finalCountEvidence,
       dryRun: false, alreadyOffboarded: false, complete: completionReady, progress,
-      progressed: coordinationPrivacyProgressed || memoryCandidates > 0 || auditedRows > 0
+      progressed: durableProgress || coordinationPrivacyProgressed
+        || memoryCandidates > 0 || auditedRows > 0
         || membershipCount > 0 || aliasCount > 0 || entraCount > 0,
       blockedUntil: coordinationPrivacyBlockedUntil,
       reason: coordinationPrivacyReason,

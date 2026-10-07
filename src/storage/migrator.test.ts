@@ -233,7 +233,7 @@ describe('runMigrations', () => {
     const files = (await readdir(join(process.cwd(), 'migrations')))
       .filter((name) => name.endsWith('.sql'))
       .sort();
-    expect(files.slice(-17)).toEqual([
+    expect(files.slice(-18)).toEqual([
       '0055_coordination_review_remediation.sql',
       '0056_coordination_final_remediation.sql',
       '0057_coordination_privacy_race_remediation.sql',
@@ -251,6 +251,7 @@ describe('runMigrations', () => {
       '0069_coordination_independent_review.sql',
       '0070_coordination_linkable_audit_index.sql',
       '0071_coordination_review_completion.sql',
+      '0072_coordination_final_review_remediation.sql',
     ]);
     const migration = await readFile(
       join(process.cwd(), 'migrations/0054_coordination_leases.sql'),
@@ -727,7 +728,7 @@ describe('runMigrations', () => {
         $$;
       `);
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-40).map((migration) => migration.name)).toEqual([
+      expect(applied.slice(-41).map((migration) => migration.name)).toEqual([
         '0032_offboarding_round7_compatibility.sql',
         '0033_offboarding_bounded_selectors.sql',
         '0034_offboarding_completion_invariants.sql',
@@ -768,6 +769,7 @@ describe('runMigrations', () => {
         '0069_coordination_independent_review.sql',
         '0070_coordination_linkable_audit_index.sql',
         '0071_coordination_review_completion.sql',
+        '0072_coordination_final_review_remediation.sql',
       ]);
       expect((await pool.query(
         `SELECT disabled_at IS NOT NULL AS disabled FROM principals
@@ -1030,7 +1032,8 @@ describe('runMigrations', () => {
       && name !== '0068_coordination_production_repair.sql'
       && name !== '0069_coordination_independent_review.sql'
       && name !== '0070_coordination_linkable_audit_index.sql'
-      && name !== '0071_coordination_review_completion.sql')) {
+      && name !== '0071_coordination_review_completion.sql'
+      && name !== '0072_coordination_final_review_remediation.sql')) {
       if (file === '0038_offboarding_search_path_hardening.sql') {
         await copyFile(
           new URL(
@@ -1453,11 +1456,25 @@ describe('runMigrations', () => {
           WHERE pronamespace = quote_ident(current_schema())::regnamespace
             AND (proname LIKE 'continuum\\_%' ESCAPE '\\'
                  OR proname = 'reject_lifecycle_principal_membership')
+            AND proname <> 'continuum_coordination_privacy_repair_candidates'
             AND proowner = current_user::regrole
             AND NOT COALESCE(proconfig @> ARRAY[$1], FALSE)`,
         [expected],
       );
       expect(unsafe.rows).toEqual([]);
+      expect((await pool.query(
+        `SELECT function.proconfig,
+                EXISTS (
+                  SELECT 1
+                    FROM aclexplode(COALESCE(
+                      function.proacl, acldefault('f', function.proowner))) privilege
+                   WHERE privilege.grantee = 0
+                     AND upper(privilege.privilege_type) = 'EXECUTE'
+                ) AS public_execute
+           FROM pg_proc function
+          WHERE function.oid =
+            'continuum_coordination_privacy_repair_candidates(uuid,uuid,integer)'::regprocedure`,
+      )).rows).toEqual([{ proconfig: null, public_execute: false }]);
     } finally {
       await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
     }

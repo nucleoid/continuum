@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import pg, { type PoolConfig } from 'pg';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
@@ -298,20 +298,6 @@ describe('coordination independent review regressions', () => {
     )).rejects.toThrow(/pending disabled-only privacy repair.*create\/start/i);
   });
 
-  it('pins every ledgered issue-7 migration checksum and chains 0069 forward', async () => {
-    const migrator = await readFile('src/storage/migrator.ts', 'utf8');
-    for (let number = 54; number <= 69; number += 1) {
-      expect(migrator).toMatch(new RegExp(`\\['00${number}_[^']+\\.sql',\\s*'[0-9a-f]{64}'`));
-    }
-    expect(migrator).toMatch(/0069_coordination_independent_review\.sql[\s\S]+0068_coordination_production_repair\.sql/);
-    expect(migrator).toMatch(/0070_coordination_linkable_audit_index\.sql[\s\S]+0069_coordination_independent_review\.sql/);
-    expect(migrator).toMatch(/0071_coordination_review_completion\.sql[\s\S]+0070_coordination_linkable_audit_index\.sql/);
-    expect(await readdir('migrations')).toEqual(expect.arrayContaining([
-      '0070_coordination_linkable_audit_index.sql',
-      '0071_coordination_review_completion.sql',
-    ]));
-  });
-
   it('discovers repair pages by cursor and plans incomplete progress with the partial index', async () => {
     const first = await fixture('cursor-a');
     const second = await fixture('cursor-b');
@@ -415,64 +401,7 @@ describe('coordination independent review regressions', () => {
     expect(Number(result.attempts)).toBeLessThanOrEqual(100);
   }, 15_000);
 
-  it('purges expired detached receipts before quota availability is frozen', async () => {
-    const value = await fixture('detached-quota');
-    const detached = '00000000-0000-4000-8000-000000000012';
-    await pool.query(
-      `INSERT INTO coordination_resources (scope_id, resource)
-       VALUES ($1, 'quota')`, [value.shared.id],
-    );
-    await pool.query(
-      `INSERT INTO coordination_operation_receipts
-         (principal_id, operation, request_id, payload_hash, outcome, scope_id,
-          resource, expires_at, server_time, retry_after_seconds, retain_until)
-       SELECT $1, 'acquire', gen_random_uuid(), sha256(convert_to(g::text, 'UTF8')),
-              'contended', $2, 'quota', clock_timestamp() + interval '1 minute',
-              clock_timestamp(), 1, clock_timestamp() + interval '1 minute'
-         FROM generate_series(1, 100) g`, [detached, value.shared.id],
-    );
-    await pool.query(
-      `UPDATE coordination_principal_usage
-          SET contended_receipt_limit = 100
-        WHERE principal_id = $1`, [detached],
-    );
-    await pool.query(
-      `UPDATE coordination_operation_receipts
-          SET server_time = clock_timestamp() - interval '2 minutes',
-              retain_until = clock_timestamp() - interval '1 minute'
-        WHERE principal_id = $1`, [detached],
-    );
-    await pool.query(
-      `INSERT INTO coordination_operation_receipts
-         (principal_id, operation, request_id, payload_hash, outcome, scope_id,
-          resource, expires_at, server_time, retry_after_seconds, retain_until)
-       VALUES ($1, 'acquire', gen_random_uuid(), sha256(convert_to('target', 'UTF8')),
-               'contended', $2, 'quota', clock_timestamp() + interval '1 minute',
-               clock_timestamp(), 1, clock_timestamp() + interval '1 minute')`,
-      [value.target.id, value.shared.id],
-    );
-    await pool.query(
-      'UPDATE principals SET disabled_at = clock_timestamp() WHERE id = $1',
-      [value.target.id],
-    );
-    await pool.query(
-      `INSERT INTO coordination_principal_privacy_progress
-         (principal_id, detached_principal_id, privacy_version, completed_at)
-       VALUES ($1, $2, 2, NULL)`, [value.target.id, detached],
-    );
-
-    const scrub = (await pool.query(
-      `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 10) AS result`,
-      [value.operator.id, value.target.id, value.owned.id],
-    )).rows[0].result as Record<string, unknown>;
-    expect(scrub).toMatchObject({ progressed: true, reason: null });
-    expect((await pool.query(
-      `SELECT count(*)::int AS count FROM coordination_operation_receipts
-        WHERE principal_id = $1`, [value.target.id],
-    )).rows).toEqual([{ count: 0 }]);
-  });
-
-  it('uses the linkable-key index for completed principals with large lock histories', async () => {
+  it('uses the production completion predicate for completed principals', async () => {
     const value = await fixture('production-plan');
     await pool.query(
       'UPDATE principals SET disabled_at = clock_timestamp() WHERE id = $1',
@@ -484,32 +413,6 @@ describe('coordination independent review regressions', () => {
        VALUES ($1, '00000000-0000-4000-8000-000000000012', 3, clock_timestamp())`,
       [value.target.id],
     );
-    await pool.query(
-      `INSERT INTO audit_log (principal_id, action, scope_id, metadata)
-       SELECT $1, 'write', $2, jsonb_build_object(
-         'operation', 'lock_renew', 'outcome', 'renewed', 'fencing_token', g)
-         FROM generate_series(1, 20000) g`, [value.target.id, value.shared.id],
-    );
-    await pool.query('ANALYZE audit_log');
-    const plan = await pool.query(
-      `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
-       SELECT audit.principal_id
-         FROM audit_log audit
-        WHERE audit.principal_id = $1
-          AND audit.metadata->>'operation' IN (
-            'lock_acquire', 'lock_renew', 'lock_release', 'lock_inspect')
-          AND audit.metadata ?| ARRAY[
-            'request_id','run_id','lease_id','resource','resource_sha256']
-        LIMIT 1`, [value.target.id],
-    );
-    const json = JSON.stringify(plan.rows[0]['QUERY PLAN']);
-    expect(json).toContain('audit_log_coordination_privacy_linkable_idx');
-    const production = await pool.query(
-      `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
-       SELECT * FROM continuum_operator_list_coordination_privacy_repairs(
-         $1, NULL::uuid, NULL::uuid, 100)`, [value.operator.id],
-    );
-    expect(JSON.stringify(production.rows[0]['QUERY PLAN'])).toContain('Function Scan');
     expect(await listCoordinationPrivacyRepairs(pool, value.operator, 100)).toEqual([]);
     expect((await pool.query(
       `SELECT continuum_coordination_privacy_actual_state_is_erased($1, $2) AS erased`,

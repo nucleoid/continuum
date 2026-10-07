@@ -111,18 +111,25 @@ describe('coordination final review remediation', () => {
     );
     await pool.query(
       `INSERT INTO principals (id, external_id, kind, display_name, disabled_at)
-       VALUES ($1, $2, 'user', 'Concurrent page target', clock_timestamp());
-       INSERT INTO scopes (id, kind, name) VALUES ($3, 'user', $4);
-       INSERT INTO principal_user_scopes
+       VALUES ($1, $2, 'user', 'Concurrent page target', clock_timestamp())`,
+      [principalId(2000), `page-concurrent:${label}`],
+    );
+    await pool.query(
+      `INSERT INTO scopes (id, kind, name) VALUES ($1, 'user', $2)`,
+      ['20000000-0000-4000-8000-0000000007d0', `page-concurrent-scope:${label}`],
+    );
+    await pool.query(
+      `INSERT INTO principal_user_scopes
          (principal_id, scope_id, mapped_by, acknowledged_principal_ids,
           acknowledged_evidence_hash)
-       VALUES ($1, $3, $5, ARRAY[$1::uuid], repeat('b', 64));
-       INSERT INTO coordination_principal_privacy_progress
+       VALUES ($1, $2, $3, ARRAY[$1::uuid], repeat('b', 64))`,
+      [principalId(2000), '20000000-0000-4000-8000-0000000007d0', value.operator.id],
+    );
+    await pool.query(
+      `INSERT INTO coordination_principal_privacy_progress
          (principal_id, detached_principal_id, privacy_version, completed_at)
-       VALUES ($1, $6, 2, NULL)`,
-      [principalId(2000), `page-concurrent:${label}`,
-        '20000000-0000-4000-8000-0000000007d0', `page-concurrent-scope:${label}`,
-        value.operator.id, detachedPrincipalId],
+       VALUES ($1, $2, 2, NULL)`,
+      [principalId(2000), detachedPrincipalId],
     );
 
     const seen = first.map((candidate) => candidate.principalId);

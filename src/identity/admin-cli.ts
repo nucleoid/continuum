@@ -111,18 +111,24 @@ async function main(): Promise<void> {
         dryRun, confirmationScopeId, batchSize, verificationTimeoutMs,
       });
       let attempts = 1;
+      let incompleteReason: 'no_progress' | 'attempt_limit' | null = null;
       while (!dryRun && !once && !result.complete && !result.blockedUntil && attempts < 100) {
-        if (!result.progressed) break;
+        if (!result.progressed) { incompleteReason = 'no_progress'; break; }
         await new Promise((resolve) => setTimeout(resolve, Math.min(attempts * 25, 250)));
         result = await offboardPrincipal(pool, actor, positional[0], {
           dryRun: false, confirmationScopeId, batchSize, verificationTimeoutMs,
         });
         attempts += 1;
       }
+      if (!dryRun && !once && !result.complete && !result.blockedUntil
+        && incompleteReason === null && attempts >= 100) {
+        incompleteReason = 'attempt_limit';
+      }
       process.stdout.write(`${JSON.stringify({
-        operation, attempts,
+        operation, attempts, incompleteReason,
         ...result,
       })}\n`);
+      if (incompleteReason !== null) process.exitCode = 2;
     } else if (operation === 'list-incomplete-offboarding') {
       if (args.length) throw new Error('usage: list-incomplete-offboarding');
       process.stdout.write(`${JSON.stringify({
@@ -171,15 +177,23 @@ async function main(): Promise<void> {
         confirmationScopeId, batchSize,
       });
       let attempts = 1;
+      let incompleteReason: 'no_progress' | 'attempt_limit' | null = null;
       while (!once && !result.complete && !result.blockedUntil && attempts < 100) {
-        if (!result.progressed) break;
+        if (!result.progressed) { incompleteReason = 'no_progress'; break; }
         await new Promise((resolve) => setTimeout(resolve, Math.min(attempts * 25, 250)));
         result = await repairCoordinationPrivacy(pool, actor, positional[0], {
           confirmationScopeId, batchSize,
         });
         attempts += 1;
       }
-      process.stdout.write(`${JSON.stringify({ operation, attempts, ...result })}\n`);
+      if (!once && !result.complete && !result.blockedUntil
+        && incompleteReason === null && attempts >= 100) {
+        incompleteReason = 'attempt_limit';
+      }
+      process.stdout.write(`${JSON.stringify({
+        operation, attempts, incompleteReason, ...result,
+      })}\n`);
+      if (incompleteReason !== null) process.exitCode = 2;
     } else throw new Error('unknown admin operation');
   } finally { await pool.end(); }
 }
