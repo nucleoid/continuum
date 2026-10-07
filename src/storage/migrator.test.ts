@@ -1,4 +1,5 @@
 import { copyFile, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pg from 'pg';
@@ -56,6 +57,75 @@ afterEach(async () => {
 });
 
 describe('runMigrations', () => {
+  it('pins the published 0052 bytes and rejects a modified ledgered copy', async () => {
+    const published = await readFile(
+      join(process.cwd(), 'migrations/0052_offboarding_review_repair.sql'), 'utf8',
+    );
+    expect(createHash('sha256').update(published).digest('hex')).toBe(
+      '136cbd834277ca4fbfb48162644738ba2f96f7a5705290cc0c585e3ce7c82079',
+    );
+
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-published-migration-'));
+    directories.push(directory);
+    await writeFile(
+      join(directory, '0052_offboarding_review_repair.sql'),
+      published + '\n-- modified after publication\n',
+    );
+    await writeFile(join(directory, '0053_offboarding_restore_contract.sql'), 'SELECT 1;\n');
+    const schema = `migrator_published_checksum_${Date.now()}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    await pool.query(`
+      CREATE TABLE _continuum_migrations (
+        name TEXT PRIMARY KEY,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      INSERT INTO _continuum_migrations (name)
+      VALUES ('0052_offboarding_review_repair.sql');
+    `);
+
+    await expect(runMigrations(pool, directory)).rejects.toThrow(
+      /0052.*checksum|published migration.*modified/i,
+    );
+  });
+
+  it('applies 0053 when the published 0052 is already ledgered', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-forward-0053-'));
+    directories.push(directory);
+    await copyFile(
+      join(process.cwd(), 'migrations/0052_offboarding_review_repair.sql'),
+      join(directory, '0052_offboarding_review_repair.sql'),
+    );
+    await writeFile(
+      join(directory, '0053_offboarding_restore_contract.sql'),
+      `CREATE TABLE continuum_0053_forward_probe (applied boolean NOT NULL);\n`,
+    );
+    const schema = `migrator_forward_0053_${Date.now()}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    await pool.query(`
+      CREATE TABLE _continuum_migrations (
+        name TEXT PRIMARY KEY,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      INSERT INTO _continuum_migrations (name)
+      VALUES ('0052_offboarding_review_repair.sql');
+    `);
+
+    await expect(runMigrations(pool, directory)).resolves.toEqual([
+      expect.objectContaining({ name: '0053_offboarding_restore_contract.sql' }),
+    ]);
+    expect((await pool.query(
+      `SELECT namespace.nspname AS schema
+         FROM pg_class relation
+         JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+        WHERE relation.oid = format('%I.continuum_0053_forward_probe', current_schema())::regclass`,
+    )).rows[0]).toEqual({ schema });
+  });
   it('keeps the principal alter short and builds offboarding audit indexes concurrently', async () => {
     const migrations = join(process.cwd(), 'migrations');
     const principal = await readFile(

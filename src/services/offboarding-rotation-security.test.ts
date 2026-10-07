@@ -1418,4 +1418,329 @@ describe('sync database identity rotation security', () => {
       await dropRoles(pool, [fixture.operatorRole]);
     }
   });
+
+  it('ships the forward-only 0053 provenance contract without system-identifier inference', async () => {
+    const migration = await readFile(
+      join(process.cwd(), 'migrations/0053_offboarding_restore_contract.sql'), 'utf8',
+    );
+    expect(migration).toMatch(/continuum_database_identity_provenance/i);
+    expect(migration).toMatch(/continuum_require_database_identity_provenance/i);
+    expect(migration).not.toMatch(/system_identifier|pg_control_system/i);
+    expect(migration).toMatch(/restore_pending/i);
+    expect(migration).toMatch(/attacl/i);
+  });
+
+  it('does not transfer stale sync authority to an OID-colliding application role', async () => {
+    const service = await createPrincipal(pool, {
+      externalId: '0053-unrebound-sync', kind: 'service', displayName: 'Old sync',
+    });
+    const member = await createPrincipal(pool, {
+      externalId: '0053-unrebound-member', kind: 'user', displayName: 'Member',
+    });
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    const staleSync = 'continuum_0053_stale_sync_' + Date.now();
+    const application = 'continuum_0053_collision_app_' + Date.now();
+    await pool.query('CREATE ROLE ' + quoteRole(staleSync) + ' LOGIN');
+    await pool.query('CREATE ROLE ' + quoteRole(application) + ' NOLOGIN');
+    await grantOwnerRetirementAuthority(pool, staleSync);
+    await applyGrantScript(pool, 'grant-sync-role.sql', {
+      continuum_sync_role: staleSync, continuum_principal_id: service.id,
+    });
+    await applyGrantScript(pool, 'grant-application-role.sql', {
+      continuum_app_role: application,
+    });
+    const applicationOid = (await pool.query(
+      'SELECT oid::text FROM pg_roles WHERE rolname = $1', [application],
+    )).rows[0].oid;
+    await pool.query(
+      `UPDATE continuum_trusted_database_identities
+          SET database_role_oid = $1::oid
+        WHERE database_role = $2::name AND can_sync`,
+      [applicationOid, staleSync],
+    );
+    const applicationConnection = await rolePool(pool, application);
+    try {
+      await expect(applicationConnection.query(
+        `INSERT INTO scope_memberships
+           (principal_id, scope_id, role, source_kind, source_id, active)
+         VALUES ($1, $2, 'admin', 'entra', $3, TRUE)`,
+        [member.id, org!.id, '0053-unrebound-group'],
+      )).rejects.toThrow(/trusted sync|activation requires|permission denied/i);
+      expect((await pool.query(
+        `SELECT count(*)::int AS count FROM scope_memberships
+          WHERE principal_id = $1 AND scope_id = $2 AND active`,
+        [member.id, org!.id],
+      )).rows[0].count).toBe(0);
+    } finally {
+      await applicationConnection.end();
+      await pool.query(
+        'DELETE FROM continuum_trusted_database_identities WHERE database_role = $1::name',
+        [staleSync],
+      );
+      await dropRoles(pool, [staleSync, application]);
+    }
+  });
+
+  it('acquires rotation locks before authorization reads and enforces the TEMP preflight', async () => {
+    const migration = await readFile(
+      join(process.cwd(), 'migrations/0053_offboarding_restore_contract.sql'), 'utf8',
+    );
+    expect(migration).toMatch(
+      /continuum_rotate_sync_database_identity[\s\S]*pg_advisory_xact_lock\(834641726154302119[\s\S]*continuum_require_trusted_database_identity/i,
+    );
+    expect(migration).toMatch(
+      /continuum_require_database_identity_provenance[\s\S]*has_database_privilege[\s\S]*TEMP/i,
+    );
+    const runbook = await readFile(join(process.cwd(), 'docs/offboarding.md'), 'utf8');
+    expect(runbook).toMatch(/0053[\s\S]*TEMP(?:ORARY)? privilege/i);
+  });
+
+  it('does not transfer sync authority when foreign restore rebind is skipped', async () => {
+    const service = await createPrincipal(pool, {
+      externalId: '0053-skipped-rebind-service', kind: 'service', displayName: 'Skipped rebind',
+    });
+    const liveRole = 'continuum_0053_oid_collision_' + Date.now();
+    const recordedRole = 'continuum_0053_foreign_sync_' + Date.now();
+    await pool.query('CREATE ROLE ' + quoteRole(liveRole) + ' LOGIN');
+    await grantOwnerRetirementAuthority(pool, liveRole);
+    await applyGrantScript(pool, 'grant-sync-role.sql', {
+      continuum_sync_role: liveRole, continuum_principal_id: service.id,
+    });
+    await pool.query(
+      `UPDATE continuum_trusted_database_identities
+          SET database_role = $1::name
+        WHERE database_role = $2::name`,
+      [recordedRole, liveRole],
+    );
+    const collidingRole = await rolePool(pool, liveRole);
+    try {
+      await expect(collidingRole.query(
+        "SELECT continuum_require_trusted_database_identity($1, 'sync')",
+        [service.id],
+      )).rejects.toThrow(/DB-bound|name.*OID|rebind|trusted.*identity/i);
+    } finally {
+      await collidingRole.end();
+      await pool.query(
+        'DELETE FROM continuum_trusted_database_identities WHERE database_role = $1::name',
+        [recordedRole],
+      );
+      await dropRoles(pool, [liveRole]);
+    }
+  });
+
+  it('blocks approval registration on a restore-pending role name', async () => {
+    const admin = await createPrincipal(pool, {
+      externalId: '0053-pending-approval', kind: 'user', displayName: 'Admin',
+    });
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    await addMembership(pool, admin.id, org!.id, 'admin');
+    const target = 'continuum_0053_pending_approve_' + Date.now();
+    const old = 'continuum_0053_pending_old_' + Date.now();
+    await pool.query('CREATE ROLE ' + quoteRole(target) + ' NOLOGIN');
+    await pool.query('CREATE ROLE ' + quoteRole(old) + ' NOLOGIN');
+    const oldOid = (await pool.query(
+      'SELECT oid::text FROM pg_roles WHERE rolname = $1', [old],
+    )).rows[0].oid;
+    await pool.query(
+      `INSERT INTO continuum_unresolved_retired_sync_database_identities
+         (database_role, previous_database_role_oid, resolution_kind, cluster_epoch)
+       SELECT $1::name, $2::oid, 'restore_pending', epoch
+         FROM continuum_database_identity_epoch WHERE singleton`,
+      [target, oldOid],
+    );
+    try {
+      await expect(pool.query(
+        'SELECT continuum_register_trusted_database_identity($1, $2, TRUE, FALSE)',
+        [target, admin.id],
+      )).rejects.toThrow(/restore.pending|rebind|supersed/i);
+      expect((await pool.query(
+        `SELECT count(*)::int AS count FROM continuum_trusted_database_identities
+          WHERE database_role = $1::name`, [target],
+      )).rows[0].count).toBe(0);
+    } finally {
+      await pool.query(
+        'DELETE FROM continuum_trusted_database_identities WHERE database_role = $1::name',
+        [target],
+      );
+      await pool.query(
+        'DELETE FROM continuum_unresolved_retired_sync_database_identities WHERE database_role = $1::name',
+        [target],
+      );
+      await dropRoles(pool, [target, old]);
+    }
+  });
+
+  it('does not silently supersede a restore-pending generation during rebind', async () => {
+    const admin = await createPrincipal(pool, {
+      externalId: '0053-pending-rebind', kind: 'user', displayName: 'Admin',
+    });
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    await addMembership(pool, admin.id, org!.id, 'admin');
+    const target = 'continuum_0053_pending_rebind_' + Date.now();
+    const old = 'continuum_0053_pending_rebind_old_' + Date.now();
+    await pool.query('CREATE ROLE ' + quoteRole(target) + ' NOLOGIN');
+    await pool.query('CREATE ROLE ' + quoteRole(old) + ' NOLOGIN');
+    await pool.query(
+      'SELECT continuum_register_trusted_database_identity($1, $2, TRUE, FALSE)',
+      [target, admin.id],
+    );
+    const oldOid = (await pool.query(
+      'SELECT oid::text FROM pg_roles WHERE rolname = $1', [old],
+    )).rows[0].oid;
+    await pool.query(
+      `INSERT INTO continuum_unresolved_retired_sync_database_identities
+         (database_role, previous_database_role_oid, resolution_kind, cluster_epoch)
+       SELECT $1::name, $2::oid, 'restore_pending', epoch
+         FROM continuum_database_identity_epoch WHERE singleton`,
+      [target, oldOid],
+    );
+    try {
+      await expect(pool.query(
+        "SELECT continuum_rebind_database_identity_oids('REBIND DATABASE IDENTITIES', 'FOREIGN OID NAMESPACE')",
+      )).rejects.toThrow(/restore.pending|supersed/i);
+      expect((await pool.query(
+        `SELECT resolution_kind
+           FROM continuum_unresolved_retired_sync_database_identities
+          WHERE database_role = $1::name AND previous_database_role_oid = $2::oid`,
+        [target, oldOid],
+      )).rows[0]).toEqual({ resolution_kind: 'restore_pending' });
+    } finally {
+      await pool.query(
+        'DELETE FROM continuum_trusted_database_identities WHERE database_role = $1::name',
+        [target],
+      );
+      await pool.query(
+        'DELETE FROM continuum_unresolved_retired_sync_database_identities WHERE database_role = $1::name',
+        [target],
+      );
+      await dropRoles(pool, [target, old]);
+    }
+  });
+
+  it('preserved recovery archives a legitimately retired and dropped role', async () => {
+    const retired = 'continuum_0053_dropped_' + Date.now();
+    await pool.query('CREATE ROLE ' + quoteRole(retired) + ' NOLOGIN');
+    const retiredOid = (await pool.query(
+      'SELECT oid::text FROM pg_roles WHERE rolname = $1', [retired],
+    )).rows[0].oid;
+    await pool.query(
+      `INSERT INTO continuum_retired_sync_database_identities
+         (database_role_oid, database_role) VALUES ($1::oid, $2::name)`,
+      [retiredOid, retired],
+    );
+    await pool.query('DROP ROLE ' + quoteRole(retired));
+    try {
+      await expect(pool.query(
+        "SELECT continuum_rebind_database_identity_oids('REBIND DATABASE IDENTITIES', 'PRESERVED OID NAMESPACE')",
+      )).resolves.toBeDefined();
+      expect((await pool.query(
+        `SELECT
+           EXISTS (SELECT 1 FROM continuum_retired_sync_database_identities
+                    WHERE database_role = $1::name) AS live_history,
+           (SELECT resolution_kind
+              FROM continuum_unresolved_retired_sync_database_identities
+             WHERE database_role = $1::name
+               AND previous_database_role_oid = $2::oid) AS resolution_kind`,
+        [retired, retiredOid],
+      )).rows[0]).toEqual({ live_history: false, resolution_kind: 'superseded' });
+    } finally {
+      await pool.query(
+        'DELETE FROM continuum_retired_sync_database_identities WHERE database_role = $1::name',
+        [retired],
+      );
+      await pool.query(
+        'DELETE FROM continuum_unresolved_retired_sync_database_identities WHERE database_role = $1::name',
+        [retired],
+      );
+    }
+  });
+
+  it('retirement removes column ACLs as well as table, function, and schema grants', async () => {
+    const retired = 'continuum_0053_column_acl_' + Date.now();
+    await pool.query('CREATE ROLE ' + quoteRole(retired) + ' LOGIN');
+    await grantOwnerRetirementAuthority(pool, retired);
+    const retiredOid = (await pool.query(
+      'SELECT oid::text FROM pg_roles WHERE rolname = $1', [retired],
+    )).rows[0].oid;
+    await pool.query('GRANT SELECT (body) ON TABLE memories TO ' + quoteRole(retired));
+    await pool.query(
+      `INSERT INTO continuum_retired_sync_database_identities
+         (database_role_oid, database_role) VALUES ($1::oid, $2::name)`,
+      [retiredOid, retired],
+    );
+    try {
+      await applyGrantScript(pool, 'retire-sync-role.sql', {
+        continuum_schema: 'public', retired_sync_role: retired,
+        confirm_retired_sync_role_oid: retiredOid,
+        confirm_legacy_unrecorded_sync_role: '',
+      });
+      expect((await pool.query(
+        `SELECT has_column_privilege($1, 'memories', 'body', 'SELECT') AS column_select`,
+        [retired],
+      )).rows[0]).toEqual({ column_select: false });
+      const verification = await readFile(
+        join(process.cwd(), 'scripts/verify-database-identities.sql'), 'utf8',
+      );
+      expect(verification).toMatch(/pg_attribute[\s\S]*attacl/i);
+    } finally {
+      await pool.query(
+        'DELETE FROM continuum_retired_sync_database_identities WHERE database_role = $1::name',
+        [retired],
+      );
+      await dropRoles(pool, [retired]);
+    }
+  });
+
+  it('does not disable a sync role when terminal-history recording affects zero rows', async () => {
+    const firstService = await createPrincipal(pool, {
+      externalId: '0053-zero-history-first', kind: 'service', displayName: 'First',
+    });
+    const nextService = await createPrincipal(pool, {
+      externalId: '0053-zero-history-next', kind: 'service', displayName: 'Next',
+    });
+    const first = 'continuum_0053_zero_first_' + Date.now();
+    const next = 'continuum_0053_zero_next_' + Date.now();
+    for (const role of [first, next]) {
+      await pool.query('CREATE ROLE ' + quoteRole(role) + ' LOGIN');
+      await grantOwnerRetirementAuthority(pool, role);
+    }
+    await pool.query(
+      'SELECT continuum_register_trusted_database_identity($1, $2, FALSE, TRUE)',
+      [first, firstService.id],
+    );
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION continuum_test_suppress_retired_history()
+      RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END; $$;
+      CREATE TRIGGER a_continuum_test_suppress_retired_history
+      BEFORE INSERT OR UPDATE ON continuum_retired_sync_database_identities
+      FOR EACH ROW EXECUTE FUNCTION continuum_test_suppress_retired_history();
+    `);
+    try {
+      await expect(pool.query(
+        'SELECT continuum_register_trusted_database_identity($1, $2, FALSE, TRUE)',
+        [next, nextService.id],
+      )).rejects.toThrow(/history|terminal|record/i);
+      expect((await pool.query(
+        'SELECT rolcanlogin FROM pg_roles WHERE rolname = $1', [first],
+      )).rows[0]).toEqual({ rolcanlogin: true });
+      expect((await pool.query(
+        `SELECT database_role::text FROM continuum_trusted_database_identities
+          WHERE can_sync`,
+      )).rows).toEqual([{ database_role: first }]);
+    } finally {
+      await pool.query(
+        'DROP TRIGGER IF EXISTS a_continuum_test_suppress_retired_history ON continuum_retired_sync_database_identities',
+      );
+      await pool.query('DROP FUNCTION IF EXISTS continuum_test_suppress_retired_history()');
+      await pool.query(
+        'DELETE FROM continuum_trusted_database_identities WHERE database_role = ANY($1::name[])',
+        [[first, next]],
+      );
+      await pool.query(
+        'DELETE FROM continuum_retired_sync_database_identities WHERE database_role = ANY($1::name[])',
+        [[first, next]],
+      );
+      await dropRoles(pool, [first, next]);
+    }
+  });
 });
