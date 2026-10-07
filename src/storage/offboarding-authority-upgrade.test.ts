@@ -1,4 +1,4 @@
-import { copyFile, mkdtemp, readdir, rm } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -205,4 +205,44 @@ describe('0048 trusted database identity upgrade', () => {
       oid: expect.any(Number),
     }]);
   }, 60_000);
+
+  it('applies the forward remediation to an already-ledgered 0050 database', async () => {
+    const state = await fixture('0050_offboarding_startup_verification_fix.sql');
+    await state.pool.query('DROP TRIGGER guard_entra_org_admin_memberships ON scope_memberships');
+    await state.pool.query(`
+      CREATE OR REPLACE FUNCTION continuum_fail_closed_on_principal_disable()
+      RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$
+    `);
+    await state.pool.query('DROP INDEX continuum_trusted_database_identities_one_sync');
+    await addMigration(state.directory, '0051_offboarding_security_contract.sql');
+
+    await expect(runMigrations(state.pool, state.directory)).resolves.toEqual([
+      expect.objectContaining({ name: '0051_offboarding_security_contract.sql' }),
+    ]);
+    expect((await state.pool.query(
+      `SELECT count(*)::int AS count FROM pg_trigger
+        WHERE tgrelid = 'scope_memberships'::regclass
+          AND tgname = 'guard_entra_org_admin_memberships' AND NOT tgisinternal`,
+    )).rows[0].count).toBe(1);
+    expect((await state.pool.query(
+      `SELECT count(*)::int AS count FROM pg_indexes
+        WHERE schemaname = current_schema()
+          AND indexname = 'continuum_trusted_database_identities_one_sync'`,
+    )).rows[0].count).toBe(1);
+    expect((await state.pool.query(
+      `SELECT pg_get_functiondef(
+         'continuum_fail_closed_on_principal_disable()'::regprocedure
+       ) AS definition`,
+    )).rows[0].definition).toMatch(/scope_memberships|guarded_mutations/i);
+  }, 60_000);
+
+  it('documents and checks migration-owner capabilities before 0051 changes', async () => {
+    const migration = await readFile(
+      new URL('../../migrations/0051_offboarding_security_contract.sql', import.meta.url), 'utf8',
+    );
+    expect(migration).toMatch(/preflight/i);
+    expect(migration).toMatch(/schema.*owner|owns.*schema/i);
+    expect(migration).toMatch(/CREATEROLE|admin_option|ALTER ROLE/i);
+    expect(migration.indexOf('preflight')).toBeLessThan(migration.indexOf('CREATE OR REPLACE'));
+  });
 });
