@@ -282,6 +282,10 @@ describe('0048 trusted database identity upgrade', () => {
         ALTER COLUMN authorization_principal_id DROP NOT NULL;
       ALTER TABLE continuum_principal_disable_requests
         ALTER COLUMN authorization_principal_id DROP NOT NULL;
+      ALTER TABLE continuum_entra_guarded_mutations
+        ADD COLUMN edited_0051_extra TEXT NOT NULL DEFAULT 'legacy';
+      ALTER TABLE continuum_principal_disable_requests
+        ADD COLUMN edited_0051_extra TEXT NOT NULL DEFAULT 'legacy';
     `);
     await addMigration(state.directory, '0052_offboarding_review_repair.sql');
     await expect(runMigrations(state.pool, state.directory)).resolves.toEqual([
@@ -306,6 +310,12 @@ describe('0048 trusted database identity upgrade', () => {
        WHERE conrelid IN ('continuum_entra_guarded_mutations'::regclass,
                           'continuum_principal_disable_requests'::regclass)
     `)).rows[0].count).toBeGreaterThanOrEqual(6);
+    expect((await state.pool.query(`
+      SELECT count(*)::int AS count FROM pg_attribute
+       WHERE attrelid IN ('continuum_entra_guarded_mutations'::regclass,
+                          'continuum_principal_disable_requests'::regclass)
+         AND attname = 'edited_0051_extra' AND NOT attisdropped
+    `)).rows[0].count).toBe(0);
   }, 60_000);
 
   it('documents and checks migration-owner capabilities before 0051 changes', async () => {

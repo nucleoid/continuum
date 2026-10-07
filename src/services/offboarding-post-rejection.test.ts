@@ -68,7 +68,10 @@ describe('post-rejection database authority remediation', () => {
   async function createRole(profile: 'application' | 'operator' | 'sync', principalId?: string) {
     const role = `continuum_post_rejection_${profile}_${Date.now()}_${roles.length}`;
     roles.push(role);
-    await pool.query('CREATE ROLE ' + quoteRole(role) + ' NOLOGIN');
+    await pool.query(
+      'CREATE ROLE ' + quoteRole(role)
+      + (profile === 'sync' ? " LOGIN PASSWORD 'continuum-test-password'" : ' NOLOGIN'),
+    );
     if (profile !== 'sync') {
       await applyGrantScript(pool, 'grant-application-role.sql', { continuum_app_role: role });
     }
@@ -82,7 +85,13 @@ describe('post-rejection database authority remediation', () => {
         continuum_sync_role: role, continuum_principal_id: principalId!,
       });
     }
-    const connection = await rolePool(pool, role);
+    const connection = profile === 'sync' ? new pg.Pool({
+      ...(pool as unknown as { options: PoolConfig }).options,
+      max: 1,
+      user: role,
+      password: 'continuum-test-password',
+      options: undefined,
+    }) : await rolePool(pool, role);
     rolePools.push(connection);
     return { role, connection };
   }
@@ -160,6 +169,11 @@ describe('post-rejection database authority remediation', () => {
     )).rejects.toThrow(/owner|superuser|sync database identity/i);
 
     const sync = await createRole('sync', service.id);
+    const ownerSetRole = await rolePool(pool, sync.role);
+    rolePools.push(ownerSetRole);
+    await expect(ownerSetRole.query(
+      'SELECT continuum_verify_sync_database_identity($1)', [service.id],
+    )).rejects.toThrow(/owner|superuser|session|sync database identity/i);
     await pool.query('GRANT SELECT (body) ON memories TO ' + quoteRole(sync.role));
     await expect(sync.connection.query(
       'SELECT continuum_verify_sync_database_identity($1)', [service.id],
@@ -190,6 +204,27 @@ describe('post-rejection database authority remediation', () => {
     await expect(application.connection.query(
       'SELECT continuum_operator_authorize_audit_retention($1)', [admin.id],
     )).rejects.toThrow(/membership|role edge|isolated|configuration drift/i);
+  });
+
+  it('atomically reapplies application then operator grants to an existing operator', async () => {
+    const admin = await createPrincipal(pool, {
+      externalId: 'post-rejection-regrant-operator', kind: 'user', displayName: 'Operator',
+    });
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await addMembership(pool, admin.id, org.id, 'admin');
+    const operator = await createRole('operator', admin.id);
+    await expect(applyGrantScript(pool, 'grant-application-role.sql', {
+      continuum_app_role: operator.role,
+    })).resolves.toBeUndefined();
+    await expect(applyGrantScript(pool, 'grant-operator-role.sql', {
+      continuum_operator_role: operator.role,
+      continuum_principal_id: admin.id,
+    })).resolves.toBeUndefined();
+    expect((await pool.query(
+      `SELECT has_function_privilege($1,
+                'continuum_operator_offboard_scope_access(uuid,uuid)', 'EXECUTE') AS allowed`,
+      [operator.role],
+    )).rows[0].allowed).toBe(true);
   });
 
   it('revokes marker tables and rejects forged marker authority', async () => {

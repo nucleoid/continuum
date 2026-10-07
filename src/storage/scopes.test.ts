@@ -74,6 +74,12 @@ describe('scopes repository', () => {
     expect(b.scope.id).toBe(a.scope.id);
   });
 
+  it('idempotently returns the canonical organization scope', async () => {
+    const existing = await getScopeByRef(pool, { kind: 'org', name: '' });
+    const ensured = await ensureScopeRow(pool, { kind: 'org', name: '' });
+    expect(ensured).toEqual({ scope: existing, created: false });
+  });
+
   it('ensureScopeRow handles concurrent creation without duplicate rows', async () => {
     const results = await Promise.all(
       Array.from({ length: 8 }, () =>
