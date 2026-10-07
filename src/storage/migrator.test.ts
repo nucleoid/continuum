@@ -554,11 +554,41 @@ describe('runMigrations', () => {
     }
   });
 
+  it('applies the complete migration chain from a CRLF checkout', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-full-chain-crlf-'));
+    directories.push(directory);
+    const source = join(process.cwd(), 'migrations');
+    const files = (await readdir(source)).filter((name) => name.endsWith('.sql')).sort();
+    for (const name of files) {
+      const sql = await readFile(join(source, name), 'utf8');
+      await writeFile(join(directory, name), sql.replaceAll(/(?<!\r)\n/g, '\r\n'));
+    }
+    const schema = `migrator_full_chain_crlf_${Date.now()}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    try {
+      const applied = await runMigrations(pool, directory);
+      expect(applied.map(({ name }) => name)).toContain(
+        '0072_coordination_final_review_remediation.sql',
+      );
+      expect((await pool.query(
+        `SELECT position(chr(13) IN pg_get_functiondef(
+           'continuum_operator_scrub_coordination_principal_v3(uuid,uuid,uuid,integer)'::regprocedure
+         )) AS carriage_return_position`,
+      )).rows).toEqual([{ carriage_return_position: 0 }]);
+      await expect(runMigrations(pool, directory)).resolves.toEqual([]);
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  }, 120_000);
+
   it('rejects tampering in every ledgered issue-7 migration', async () => {
     const names = (await readdir(join(process.cwd(), 'migrations')))
-      .filter((name) => /^(?:005[4-9]|006\d|007[01])_.*\.sql$/.test(name))
+      .filter((name) => /^(?:005[4-9]|006\d|007[0-2])_.*\.sql$/.test(name))
       .sort();
-    expect(names).toHaveLength(18);
+    expect(names).toHaveLength(19);
     const schema = `migrator_issue7_checksums_${Date.now()}`;
     const admin = new pg.Pool({ connectionString: DATABASE_URL });
     pools.push(admin);
