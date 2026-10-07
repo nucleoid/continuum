@@ -123,7 +123,6 @@ describe('independent exact-head review remediation', () => {
     const oldConnection = await createRolePool(pool, oldRole, 'sync', oldService.id);
     const newRole = 'continuum_sync_new_' + Date.now();
     await pool.query('CREATE ROLE ' + quoteRole(newRole) + ' NOLOGIN');
-    await pool.query('GRANT ' + quoteRole(newRole) + ' TO CURRENT_USER');
     const operatorRole = 'continuum_rotation_operator_' + Date.now();
     const operator = await createRolePool(pool, operatorRole, 'operator', admin.id);
     let newConnection: pg.Pool | undefined;
@@ -132,6 +131,7 @@ describe('independent exact-head review remediation', () => {
         'SELECT continuum_rotate_sync_database_identity($1, $2, $3)',
         [admin.id, newRole, newService.id],
       );
+      await pool.query('GRANT ' + quoteRole(newRole) + ' TO CURRENT_USER');
       newConnection = new pg.Pool({
         ...(pool as unknown as { options: PoolConfig }).options,
         max: 1, options: '-c role=' + newRole,
@@ -173,7 +173,7 @@ describe('independent exact-head review remediation', () => {
         await expect(operator.query(
           'SELECT continuum_rotate_sync_database_identity($1, $2, $3)',
           [admin.id, target, service.id],
-        )).rejects.toThrow(/owner|application|operator|approve|least-privilege/i);
+        )).rejects.toThrow(/owner|application|operator|approve|least-privilege|membership|SET ROLE|isolated/i);
       }
       await expect(operator.query(
         'SELECT continuum_operator_authorize_audit_retention($1)', [admin.id],
@@ -188,7 +188,7 @@ describe('independent exact-head review remediation', () => {
     }
   });
 
-  it('keeps an approved Entra external ID immutable even for a real operator role', async () => {
+  it('removes raw Entra UPDATE so an operator cannot rewrite an external ID', async () => {
     const { admin } = await adminFixture('immutable-group');
     const project = await createScope(pool, { kind: 'project', name: 'immutable-group-project' });
     const role = 'continuum_immutable_operator_' + Date.now();
@@ -199,10 +199,13 @@ describe('independent exact-head review remediation', () => {
         `SELECT continuum_upsert_entra_group_binding($1, $2, 'immutable', $3, 'reader')`,
         [admin.id, externalId, project.id],
       );
+      expect((await operator.query(
+        `SELECT has_table_privilege(current_user, 'entra_groups', 'UPDATE') AS allowed`,
+      )).rows[0].allowed).toBe(false);
       await expect(operator.query(
         `UPDATE entra_groups SET external_id = $2 WHERE external_id = $1`,
         [externalId, '35000000-0000-4000-8000-000000000002'],
-      )).rejects.toThrow(/external_id is immutable/i);
+      )).rejects.toThrow(/permission denied/i);
       expect((await pool.query(
         'SELECT external_id FROM entra_groups WHERE external_id = $1', [externalId],
       )).rows).toEqual([{ external_id: externalId }]);
@@ -237,10 +240,18 @@ describe('independent exact-head review remediation', () => {
       join(process.cwd(), 'migrations/0048_offboarding_independent_review.sql'), 'utf8',
     );
     const syncGrants = await readFile(join(process.cwd(), 'scripts/grant-sync-role.sql'), 'utf8');
+    const operatorGrants = await readFile(join(process.cwd(), 'scripts/grant-operator-role.sql'), 'utf8');
+    const docs = await readFile(join(process.cwd(), 'docs/offboarding.md'), 'utf8');
     expect(migration).toMatch(/continuum_sync_deactivate_entra_memberships/i);
     expect(migration).toMatch(/external_id[\s\S]*immutable/i);
+    expect(migration).toMatch(/database_role_oid/i);
+    expect(migration).toMatch(/separate_capabilities/i);
     expect(migration).toMatch(/format\([^)]*%I/i);
     expect(syncGrants).not.toMatch(/GRANT UPDATE ON TABLE[\s\S]*scope_memberships/i);
     expect(syncGrants).not.toMatch(/GRANT UPDATE ON TABLE[\s\S]*entra_groups/i);
+    expect(syncGrants).not.toMatch(/GRANT SELECT ON TABLE[\s\S]*memories/i);
+    expect(operatorGrants).not.toMatch(/GRANT UPDATE ON TABLE[\s\S]*entra_groups/i);
+    expect(docs).toMatch(/PostgreSQL 16[\s\S]*post-migration grants/i);
+    expect(docs).toMatch(/rollback[\s\S]*pre-migration backup/i);
   });
 });

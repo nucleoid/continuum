@@ -100,7 +100,7 @@ export async function provisionEntraGroupBinding(
     const scope = await client.query('SELECT id FROM scopes WHERE id = $1 FOR SHARE', [scopeId]);
     if (!scope.rowCount) throw new ServiceError('INVALID_INPUT', 'scope not found');
     const prior = await client.query(
-      `SELECT scope_id, role, active FROM entra_groups WHERE external_id = $1 FOR UPDATE`,
+      `SELECT scope_id, role, active FROM entra_groups WHERE external_id = $1`,
       [externalId],
     );
     const alreadyApproved = await client.query(
@@ -176,52 +176,38 @@ export async function revokeEntraGroupBinding(
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [SYNC_LOCK_ID]);
     await requireOrgAdmin(client, actor.id);
-    const binding = await client.query(
-      `SELECT scope_id, role FROM entra_groups
-        WHERE external_id = $1 AND approved_by IS NOT NULL
-          AND approval_revoked_at IS NULL
-        FOR UPDATE`,
-      [externalId],
+    const binding = await client.query<{
+      scope_id: string;
+      binding_role: MembershipRole;
+      memberships_deactivated: number;
+    }>(
+      `SELECT scope_id, binding_role, memberships_deactivated
+         FROM continuum_operator_revoke_entra_group_binding($1, $2)`,
+      [actor.id, externalId],
     );
     if (!binding.rowCount) {
       await client.query('ROLLBACK');
       return false;
     }
-    const memberships = await client.query(
-      `UPDATE scope_memberships
-          SET active = FALSE, deactivated_at = COALESCE(deactivated_at, now()), synced_at = now()
-        WHERE source_kind = 'entra' AND source_id = $1 AND active
-        RETURNING principal_id`,
-      [externalId],
-    );
-    await requireOrgAdmin(client, actor.id);
-    const admins = await client.query(
-      `SELECT count(DISTINCT m.principal_id)::int AS count
-         FROM scope_memberships m JOIN scopes s ON s.id = m.scope_id
-        WHERE s.kind = 'org' AND s.name = '' AND m.active AND m.role = 'admin'`,
-    );
-    if ((admins.rows[0]?.count ?? 0) < 1) {
-      throw new ServiceError('CONFLICT', 'binding revocation cannot remove the last org administrator');
-    }
-    await client.query(
-      `UPDATE entra_groups
-          SET active = FALSE, deactivated_at = COALESCE(deactivated_at, now()),
-              approval_revoked_by = $2, approval_revoked_at = now()
-        WHERE external_id = $1`,
-      [externalId, actor.id],
-    );
     await client.query(
       `INSERT INTO audit_log (principal_id, action, scope_id, metadata)
        VALUES ($1, 'write', $2, $3::jsonb)`,
       [actor.id, binding.rows[0].scope_id, JSON.stringify({
         operation: 'entra_group_binding_revoked', group_id: externalId,
-        role: binding.rows[0].role, memberships_deactivated: memberships.rowCount ?? 0,
+        role: binding.rows[0].binding_role,
+        memberships_deactivated: binding.rows[0].memberships_deactivated,
       })],
     );
     await client.query('COMMIT');
     return true;
   } catch (error) {
     await client.query('ROLLBACK');
+    if (!(error instanceof ServiceError) && error instanceof Error
+      && /DB-bound trusted approve identity|effective manual org administrator/i.test(error.message)) {
+      throw new ServiceError(
+        'FORBIDDEN', 'binding revocation requires the DB-bound operator identity', { cause: error },
+      );
+    }
     throw error;
   } finally { client.release(); }
 }

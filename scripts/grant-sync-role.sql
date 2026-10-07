@@ -17,16 +17,20 @@
 SELECT :"continuum_schema".continuum_register_trusted_database_identity(
   :'continuum_sync_role'::name, :'continuum_principal_id'::uuid, FALSE, TRUE
 );
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA :"continuum_schema"
+FROM :"continuum_sync_role";
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA :"continuum_schema"
+FROM :"continuum_sync_role";
+REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA :"continuum_schema"
+FROM :"continuum_sync_role";
+REVOKE ALL PRIVILEGES ON SCHEMA :"continuum_schema" FROM :"continuum_sync_role";
 GRANT USAGE ON SCHEMA :"continuum_schema" TO :"continuum_sync_role";
 GRANT SELECT ON TABLE
   :"continuum_schema".scopes,
   :"continuum_schema".principals,
   :"continuum_schema".entra_groups,
   :"continuum_schema".scope_memberships,
-  :"continuum_schema".entra_sync_state,
-  :"continuum_schema".principal_user_scopes,
-  :"continuum_schema".memories,
-  :"continuum_schema".audit_log_offboarding_scopes
+  :"continuum_schema".entra_sync_state
 TO :"continuum_sync_role";
 GRANT INSERT ON TABLE :"continuum_schema".principals, :"continuum_schema".audit_log
 TO :"continuum_sync_role";
@@ -51,6 +55,8 @@ TO :"continuum_sync_role";
 REVOKE ALL ON TABLE :"continuum_schema".continuum_trusted_database_identities
 FROM :"continuum_sync_role";
 REVOKE ALL ON TABLE :"continuum_schema".continuum_entra_reapproval_requests
+FROM :"continuum_sync_role";
+REVOKE ALL ON TABLE :"continuum_schema".continuum_entra_guarded_mutations
 FROM :"continuum_sync_role";
 REVOKE ALL ON FUNCTION
   :"continuum_schema".continuum_register_trusted_database_identity(NAME, UUID, BOOLEAN, BOOLEAN),

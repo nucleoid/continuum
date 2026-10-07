@@ -67,6 +67,7 @@ describe('sync database identity rotation security', () => {
     const bridge = 'continuum_chain_bridge_' + Date.now();
     await pool.query('CREATE ROLE ' + quoteRole(target) + ' NOLOGIN NOINHERIT');
     await pool.query('CREATE ROLE ' + quoteRole(bridge) + ' NOLOGIN NOINHERIT');
+    await applyGrantScript(pool, 'grant-application-role.sql', { continuum_app_role: bridge });
     await pool.query('GRANT ' + quoteRole(target) + ' TO ' + quoteRole(bridge));
     try {
       await expect(fixture.operator.query(
@@ -137,7 +138,7 @@ describe('sync database identity rotation security', () => {
       )).rows[0];
       expect(Number(binding.oid)).toBe(Number(oldOid));
       await expect(replacement.query('SELECT continuum_require_sync_session($1)', [service.id]))
-        .rejects.toThrow(/DB-bound trusted sync identity/i);
+        .rejects.toThrow(/permission denied|DB-bound trusted sync identity/i);
     } finally {
       await replacement.end();
       await pool.query('DROP OWNED BY ' + quoteRole(role));
@@ -158,13 +159,14 @@ describe('sync database identity rotation security', () => {
     });
     const oldConnection = await rolePool(pool, oldRole);
     await pool.query('CREATE ROLE ' + quoteRole(newRole) + ' NOLOGIN');
-    await pool.query('GRANT ' + quoteRole(newRole) + ' TO CURRENT_USER');
     try {
-      await expect(oldConnection.query('SELECT body FROM memories LIMIT 1')).resolves.toBeDefined();
+      await expect(oldConnection.query('SELECT body FROM memories LIMIT 1'))
+        .rejects.toThrow(/permission denied/i);
       await fixture.operator.query(
         'SELECT continuum_rotate_sync_database_identity($1, $2, $3)',
         [fixture.admin.id, newRole, fixture.service.id],
       );
+      await pool.query('GRANT ' + quoteRole(newRole) + ' TO CURRENT_USER');
       const newConnection = await rolePool(pool, newRole);
       try {
         for (const connection of [oldConnection, newConnection]) {
@@ -190,12 +192,27 @@ describe('sync database identity rotation security', () => {
     await provisionEntraGroupBinding(fixture.operator, fixture.admin, {
       externalId: groupId, scopeId: project.id, role: 'reader',
     });
+    const member = await createPrincipal(pool, {
+      externalId: 'guarded-revoke-member', kind: 'user', displayName: 'Member',
+    });
+    await pool.query(
+      "INSERT INTO scope_memberships (principal_id, scope_id, role, source_kind, source_id, active) VALUES ($1, $2, 'reader', 'entra', $3, TRUE)",
+      [member.id, project.id, groupId],
+    );
     try {
       await expect(fixture.operator.query(
         'UPDATE entra_groups SET active = FALSE, deactivated_at = now(), approval_revoked_by = $2, approval_revoked_at = now() WHERE external_id = $1',
         [groupId, fixture.admin.id],
       )).rejects.toThrow(/permission denied|guarded/i);
+      await expect(fixture.operator.query(
+        "UPDATE scope_memberships SET active = FALSE, deactivated_at = now() WHERE principal_id = $1 AND source_kind = 'entra' AND source_id = $2",
+        [member.id, groupId],
+      )).rejects.toThrow(/guarded function/i);
       const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+      const remaining = await createPrincipal(pool, {
+        externalId: 'guarded-revoke-remaining', kind: 'user', displayName: 'Remaining admin',
+      });
+      await addMembership(pool, remaining.id, org!.id, 'admin');
       await pool.query(
         "UPDATE scope_memberships SET role = 'writer' WHERE principal_id = $1 AND scope_id = $2 AND source_kind = 'manual'",
         [fixture.admin.id, org!.id],

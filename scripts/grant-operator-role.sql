@@ -18,10 +18,12 @@
 SELECT :"continuum_schema".continuum_register_trusted_database_identity(
   :'continuum_operator_role'::name, :'continuum_principal_id'::uuid, TRUE, FALSE
 );
-GRANT UPDATE ON TABLE :"continuum_schema".entra_groups TO :"continuum_operator_role";
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE :"continuum_schema".entra_groups
+FROM :"continuum_operator_role";
 GRANT EXECUTE ON FUNCTION
   :"continuum_schema".continuum_create_user_scope_approval(UUID, UUID, UUID, UUID[], TEXT),
   :"continuum_schema".continuum_upsert_entra_group_binding(UUID, TEXT, TEXT, UUID, TEXT),
+  :"continuum_schema".continuum_operator_revoke_entra_group_binding(UUID, TEXT),
   :"continuum_schema".continuum_change_manual_org_admin(UUID, UUID, TEXT, BOOLEAN),
   :"continuum_schema".continuum_takeover_manual_org_admin(UUID, UUID, UUID),
   :"continuum_schema".continuum_operator_complete_offboarding_run(UUID, UUID, JSONB),
@@ -41,6 +43,8 @@ TO :"continuum_operator_role";
 REVOKE ALL ON TABLE :"continuum_schema".continuum_trusted_database_identities
 FROM :"continuum_operator_role";
 REVOKE ALL ON TABLE :"continuum_schema".continuum_entra_reapproval_requests
+FROM :"continuum_operator_role";
+REVOKE ALL ON TABLE :"continuum_schema".continuum_entra_guarded_mutations
 FROM :"continuum_operator_role";
 REVOKE ALL ON FUNCTION
   :"continuum_schema".continuum_register_trusted_database_identity(NAME, UUID, BOOLEAN, BOOLEAN),
