@@ -477,7 +477,9 @@ describe('principal reactivation database trust boundary', () => {
         [forged.run_id, target.id, JSON.stringify({
           ...evidence, finalized_by: target.id, memories_processed: 999,
         })],
-      )).rejects.toThrow(/DB-bound trusted approve identity|current effective org administrator/i);
+      )).rejects.toThrow(
+        /DB-bound trusted approve identity|role-name\/OID-bound trusted approve identity|current effective org administrator/i,
+      );
 
       await pool.query(
         'ALTER TABLE principals DISABLE TRIGGER protect_offboarded_principal_identity',
