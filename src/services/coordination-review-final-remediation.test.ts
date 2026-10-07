@@ -162,6 +162,85 @@ describe('coordination final review remediation', () => {
     expect(new Set(seen).size).toBe(seen.length);
   }, 60_000);
 
+  it('keeps completed-dirty cursors stable across reactivation and later dirty mutations', async () => {
+    const value = await fixture('dirty-cursor-mutations');
+    const label = randomUUID();
+    await pool.query(
+      `INSERT INTO principals (id, external_id, kind, display_name, disabled_at)
+       SELECT ('11000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid,
+              $1 || ':' || n, 'user', 'Dirty cursor target', clock_timestamp()
+         FROM generate_series(1, 4) n`,
+      [`dirty-cursor:${label}`],
+    );
+    await pool.query(
+      `INSERT INTO scopes (id, kind, name)
+       SELECT ('21000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid,
+              'user', $1 || ':' || n
+         FROM generate_series(1, 4) n`,
+      [`dirty-cursor-scope:${label}`],
+    );
+    await pool.query(
+      `INSERT INTO principal_user_scopes
+         (principal_id, scope_id, mapped_by, acknowledged_principal_ids,
+          acknowledged_evidence_hash)
+       SELECT ('11000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid,
+              ('21000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid,
+              $1,
+              ARRAY[('11000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid],
+              repeat('d', 64)
+         FROM generate_series(1, 4) n`,
+      [value.operator.id],
+    );
+    await pool.query(
+      `INSERT INTO coordination_principal_privacy_progress
+         (principal_id, detached_principal_id, privacy_version, completed_at)
+       SELECT ('11000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid,
+              $1, 3, clock_timestamp()
+         FROM generate_series(1, 4) n`,
+      [detachedPrincipalId],
+    );
+    const dirtyId = (ordinal: number) =>
+      `11000000-0000-4000-8000-${ordinal.toString(16).padStart(12, '0')}`;
+    const dirtyScopeId = (ordinal: number) =>
+      `21000000-0000-4000-8000-${ordinal.toString(16).padStart(12, '0')}`;
+    for (const ordinal of [1, 2, 3]) {
+      await pool.query(
+        `INSERT INTO audit_log (principal_id, action, scope_id, metadata)
+         VALUES ($1, 'write', $2, jsonb_build_object(
+           'operation', 'lock_inspect', 'request_id', gen_random_uuid()))`,
+        [dirtyId(ordinal), dirtyScopeId(ordinal)],
+      );
+    }
+
+    const first = await listCoordinationPrivacyRepairs(pool, value.operator, 2);
+    expect(first.map(({ principalId }) => principalId)).toEqual([dirtyId(1), dirtyId(2)]);
+    await pool.query(
+      `UPDATE principals SET disabled_at = NULL, reactivated_at = clock_timestamp()
+        WHERE id = $1`, [dirtyId(3)],
+    );
+    await pool.query(
+      `INSERT INTO audit_log (principal_id, action, scope_id, metadata)
+       VALUES ($1, 'write', $2, jsonb_build_object(
+         'operation', 'lock_inspect', 'request_id', gen_random_uuid()))`,
+      [dirtyId(4), dirtyScopeId(4)],
+    );
+    expect((await listCoordinationPrivacyRepairs(
+      pool, value.operator, 2, dirtyId(2),
+    )).map(({ principalId }) => principalId)).toEqual([dirtyId(4)]);
+
+    await pool.query(
+      'UPDATE principals SET disabled_at = clock_timestamp() WHERE id = $1', [dirtyId(3)],
+    );
+    expect((await listCoordinationPrivacyRepairs(
+      pool, value.operator, 2, dirtyId(2),
+    )).map(({ principalId }) => principalId)).toEqual([dirtyId(3), dirtyId(4)]);
+    expect((await listCoordinationPrivacyRepairs(
+      pool, value.operator, 10,
+    )).map(({ principalId }) => principalId)).toEqual([
+      dirtyId(1), dirtyId(2), dirtyId(3), dirtyId(4),
+    ]);
+  }, 30_000);
+
   it('plans the generic production function from dirty indexes with 50000 clean rows', async () => {
     const dirty = await fixture('disabled-dirty-candidate');
     await pool.query(
@@ -221,6 +300,13 @@ describe('coordination final review remediation', () => {
     await pool.query('ANALYZE audit_log');
     await pool.query('ANALYZE coordination_principal_privacy_progress');
 
+    await pool.query('SELECT pg_stat_force_next_flush()');
+    const scansBefore = BigInt((await pool.query(
+      `SELECT COALESCE(idx_scan, 0)::text AS scans
+         FROM pg_stat_user_indexes
+        WHERE schemaname = current_schema()
+          AND indexrelname = 'coordination_principal_privacy_repair_idx'`,
+    )).rows[0]?.scans ?? '0');
     await pool.query('SET plan_cache_mode = force_generic_plan');
     await pool.query(
       `PREPARE production_privacy_repairs(uuid, uuid, uuid, integer) AS
@@ -236,24 +322,14 @@ describe('coordination final review remediation', () => {
       + Number(root['Shared Read Blocks'] ?? 0);
     expect(root['Actual Rows']).toBe(1);
     expect(buffers).toBeLessThan(2_000);
-
-    await pool.query(
-      `PREPARE candidate_privacy_repairs(uuid, uuid, integer) AS
-       SELECT * FROM continuum_coordination_privacy_repair_candidates($1, $2, $3)`,
-    );
-    const candidatePlan = await pool.query(
-      `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
-       EXECUTE candidate_privacy_repairs(NULL::uuid, NULL::uuid, 100)`,
-    );
-    const candidateRoot = candidatePlan.rows[0]['QUERY PLAN'][0].Plan as Record<string, unknown>;
-    const indexes: string[] = [];
-    const visit = (node: Record<string, unknown>) => {
-      if (node['Index Name']) indexes.push(String(node['Index Name']));
-      for (const child of (node.Plans ?? []) as Array<Record<string, unknown>>) visit(child);
-    };
-    visit(candidateRoot);
-    expect(indexes).toContain('coordination_privacy_dirty_principals_pkey');
-    expect(indexes).toContain('coordination_principal_privacy_repair_idx');
+    await pool.query('SELECT pg_stat_force_next_flush()');
+    const scansAfter = BigInt((await pool.query(
+      `SELECT COALESCE(idx_scan, 0)::text AS scans
+         FROM pg_stat_user_indexes
+        WHERE schemaname = current_schema()
+          AND indexrelname = 'coordination_principal_privacy_repair_idx'`,
+    )).rows[0]?.scans ?? '0');
+    expect(scansAfter).toBeGreaterThan(scansBefore);
     expect(await listCoordinationPrivacyRepairs(pool, dirty.operator, 100)).toEqual([{
       principalId: dirty.target.id, scopeId: dirty.owned.id, state: 'disabled_only',
     }]);

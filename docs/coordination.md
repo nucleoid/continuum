@@ -304,8 +304,8 @@ vectors. Audit failure rolls back the whole operation.
 
 ## Deployment, mixed versions, and rollback
 
-Apply through migration `0068_coordination_production_repair.sql` (0064 remains
-the concurrent-index step), then **re-run
+Apply through migration `0073_coordination_bounded_discovery_and_locking.sql`
+(0064 and 0070 remain concurrent-index steps), then **re-run
 `scripts/grant-application-role.sql`** for every application and dedicated
 operator role. Re-run `scripts/grant-operator-role.sql` immediately afterward
 for dedicated operators. The exact role verifier deliberately rejects both
@@ -336,7 +336,7 @@ complete. Every node must run a binary that calls
 re-enable, apply all forward migrations, re-run the grant scripts and identity
 verifier, and resume with the retained counters.
 
-Migrations 0068 through 0071 are forward-only. Before applying them, drain offboarding traffic
+Migrations 0068 through 0073 are forward-only. Before applying them, drain offboarding traffic
 from binaries older than the 0067-aware service. After it is applied, an older
 binary may read and write ordinary coordination state, but it must not be used
 as an offboarding worker: the database refuses its completed-run restart when
@@ -355,18 +355,33 @@ instead of polling, and never writes a batch event for a no-progress attempt.
 The database rejects offboarding run creation or start while a disabled-only
 privacy repair is pending.
 
-Migration 0070 builds the linkable-key audit index concurrently. Migration
-0071 uses separate bounded discovery branches for incomplete progress and
-current-state verification, preserves existing least-privilege repair-list
-grants during upgrade, and purges expired detached receipts before calculating
-quota availability. Apply both migrations before re-enabling offboarding.
+Migration 0070 builds the linkable-key audit index concurrently. Migrations
+0071 and 0072 preserve cursor-compatible repair discovery and least-privilege
+grants while closing completion and quota gaps. Migration 0073 replaces the
+completed-principal scan with a trigger-maintained dirty-principal table. Its
+one-time backfill starts from the linkable-audit, receipt, and lease indexes and
+applies disabled/mapped/completed eligibility before insertion. Production
+pages merge that dirty index with the partial incomplete-progress index, so
+50,000 clean completed principals do not add page work. Reactivation removes a
+marker; later eligible dirty mutations restore it; UUID cursor semantics remain
+exclusive and stable between statement snapshots.
 
-The forward repair after 0071 drives discovery from mapped, disabled
-principals in UUID order before applying the page limit. Completed version-3
-rows use per-principal `EXISTS` probes against the linkable-audit, receipt, and
-lease indexes; active and reactivated histories are never scanned as a global
-dirty set. Detached-receipt purge skips rows locked by another scrub and relies
-on the caller's transaction-local timeout rather than a function `SET` clause.
+Migration 0073 also removes detached purge from the pre-scrub position. Every
+scrub follows principal, sorted shared scope, then sorted usage-row order.
+Advisory contention uses try-locks and usage rows use `NOWAIT`; the supported
+wrapper converts SQLSTATE 55P03 into `reason: lock_busy` instead of waiting for
+a caller timeout. Expired detached receipts are purged only after the scrub has
+finished taking scope locks, with `SKIP LOCKED` on receipt rows and the detached
+usage row already held. This behavior applies to direct SQL, current service
+calls, and older compatible binaries that call the stable wrapper signature.
+0073 preserves existing grants on the replaced operator entry points and adds
+no new runtime-role grant requirement.
+
+The migrator executes SQL using canonical LF line endings while published
+migration verification continues hashing original bytes with only Git CRLF
+materialization canonicalized. `.gitattributes` also pins `*.sql` to LF. A
+fresh CRLF checkout therefore completes the full chain, while lone CR bytes,
+extra CR bytes, and substantive published migration changes still fail closed.
 
 Migration 0061 contains the historical installation-wide receipt-counter
 recount and takes coordination table locks. An installation upgrading from

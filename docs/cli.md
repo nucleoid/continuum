@@ -10,7 +10,13 @@ database proof defaults to 30 seconds; use
 `--verification-timeout-ms <1-300000>` only from measured operator evidence.
 The admin command loops until `complete: true` by default. Use `--once` for an
 external one-batch orchestrator, and `list-incomplete-offboarding` to enumerate
-durable unfinished runs before or after maintenance.
+durable unfinished runs before or after maintenance. Every non-dry-run
+`offboard-principal` or `repair-coordination-privacy` response with
+`complete: false` exits nonzero: status 2 means a resumable single batch,
+no-progress stop, or attempt cap; status 3 means a typed blocking condition
+such as `live_lease`, `detached_quota`, or `lock_busy`. Fatal command failures
+remain status 1. Automation must inspect both the status and the structured
+`incompleteReason`, `reason`, and `blockedUntil` fields.
 Mapping a legitimately shared personal scope requires the explicit
 `map-user-scope ... --allow-other-active-members` acknowledgement.
 

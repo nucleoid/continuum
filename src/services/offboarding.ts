@@ -124,7 +124,7 @@ export interface CoordinationPrivacyRepairResult extends CoordinationPrivacyRepa
 }
 
 export type CoordinationPrivacyBlockReason =
-  'live_lease' | 'detached_quota' | 'no_progress' | null;
+  'live_lease' | 'detached_quota' | 'lock_busy' | 'no_progress' | null;
 
 export interface CoordinationPrivacyRepairOptions {
   confirmationScopeId: string;

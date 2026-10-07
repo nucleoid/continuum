@@ -170,8 +170,10 @@ For `offboarded` rows, rerun the normal `offboard-principal --confirm-scope`
 command. For `disabled_only` rows, run the non-lifecycle
 `repair-coordination-privacy <principal-id> --confirm-scope <scope-id>` command
 until it returns `complete: true`. A live shared lease returns its
-`blockedUntil` time and stops the CLI run. The CLI also caps one invocation at
-100 progressing batches with bounded backoff. That command only drives bounded
+`blockedUntil` time and stops the CLI run with exit status 3. Detached quota or
+concurrent privacy-lock contention is also a typed status-3 block. The CLI caps
+one invocation at 100 progressing batches with bounded backoff. `--once`
+returns status 2 whenever its committed batch remains incomplete. That command only drives bounded
 coordination metadata scrubbing and never sets `offboarded_at`, pseudonymizes
 the user or scope, erases memories, or deactivates scope access.
 Migrations 0066 and 0067 reopen completed version-2 rows and reset only their
@@ -187,9 +189,10 @@ database-verified lifecycle state are both clean.
 
 The ordinary `offboard-principal` loop treats durable cursor movement and phase
 completion as progress even when a page contains only already-canonical or
-preserved rows. It stops automatically only for truthful completion or a typed
-blocking state such as `live_lease`. Reaching the bounded attempt cap or an
-untyped no-progress state is incomplete and returns a nonzero CLI status.
+preserved rows. It exits 0 only for truthful completion (or a requested dry
+run), exits 3 for a typed blocking state, and exits 2 for an incomplete
+single-batch run, bounded attempt cap, or untyped no-progress state. The
+`repair-coordination-privacy` command uses the same status contract.
 
 Offboarding is not globally atomic across all batches. Until `complete: true`,
 audit rows beyond the current keyset cursors can still contain raw query text and

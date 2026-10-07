@@ -64,11 +64,13 @@ try {
     'migrations/0007_decision_supersession_constraints.sql',
     'migrations/0008_decision_supersession_validation.sql',
     'migrations/0009_decision_supersession_unique_index.sql',
+    'migrations/0073_coordination_bounded_discovery_and_locking.sql',
     'bin/continuum-migrate.mjs',
     'scripts/ensure-scope.mjs',
     'scripts/create-scope-operator.sql',
     'scripts/retire-scope-operator.sql',
     'docs/audit-retention.md',
+    'docs/coordination.md',
     'docs/memory-api.md',
   ]) {
     if (!existsSync(join(installedRoot, required))) {

@@ -54,6 +54,8 @@ const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
     'f234e2e1a564a7216fb4ae79e042f7c6d41540cccc2a9304267fc8cfd022cf97'],
   ['0071_coordination_review_completion.sql',
     '16b4784899e6467c57032b332cc56660c4cfd3c3492296f640f2f232b7de1670'],
+  ['0072_coordination_final_review_remediation.sql',
+    '9e763a73e16e16ed8b37c9d7c6654f56f62ae96ef62eb9b004ad2b325cd1d4a9'],
 ]);
 const FORWARD_MIGRATION_REQUIREMENTS = new Map([
   ['0053_offboarding_restore_contract.sql', '0052_offboarding_review_repair.sql'],
@@ -90,6 +92,8 @@ const FORWARD_MIGRATION_REQUIREMENTS = new Map([
     '0070_coordination_linkable_audit_index.sql'],
   ['0072_coordination_final_review_remediation.sql',
     '0071_coordination_review_completion.sql'],
+  ['0073_coordination_bounded_discovery_and_locking.sql',
+    '0072_coordination_final_review_remediation.sql'],
 ]);
 const REVIEW_ENTRA_MIGRATION_RENAMES = [
   ['0005_entra_auth.sql', '0010_entra_auth.sql'],
@@ -302,7 +306,13 @@ export async function runMigrations(
         }
       }
 
-      const sql = await readFile(join(migrationsDir, file), 'utf8');
+      // PostgreSQL preserves line endings inside dollar-quoted function bodies.
+      // Execute one canonical LF form so pg_get_functiondef-based forward
+      // repairs behave identically from Git LF and Windows CRLF checkouts.
+      // Published-byte verification remains separate and rejects every change
+      // other than Git's CRLF materialization.
+      const sql = (await readFile(join(migrationsDir, file), 'utf8'))
+        .replaceAll('\r\n', '\n');
       try {
         if (sql.trimStart().startsWith(NO_TRANSACTION_MARKER)) {
           // CREATE INDEX CONCURRENTLY cannot run in a transaction block. Such

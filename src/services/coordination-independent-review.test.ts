@@ -56,11 +56,9 @@ describe('coordination independent review regressions', () => {
 
   async function adminCli(
     operator: Awaited<ReturnType<typeof fixture>>['operator'], args: string[], timeout = 10_000,
-  ): Promise<Record<string, unknown>> {
+  ): Promise<{ exitCode: number; payload: Record<string, unknown> }> {
     const connectionString = (pool as unknown as { options: PoolConfig }).options.connectionString;
-    const { stdout } = await execFileAsync(process.execPath, [
-      '--import', 'tsx', 'src/identity/admin-cli.ts', ...args,
-    ], {
+    const options = {
       cwd: process.cwd(), timeout,
       env: {
         ...process.env,
@@ -68,8 +66,20 @@ describe('coordination independent review regressions', () => {
         CONTINUUM_ADMIN_ACTOR: operator.externalId,
         CONTINUUM_DB_POOL_MAX: '1',
       },
-    });
-    return JSON.parse(stdout.trim()) as Record<string, unknown>;
+    };
+    try {
+      const { stdout } = await execFileAsync(process.execPath, [
+        'dist/identity/admin-cli.js', ...args,
+      ], options);
+      return { exitCode: 0, payload: JSON.parse(stdout.trim()) as Record<string, unknown> };
+    } catch (error) {
+      const failed = error as Error & { code?: number; stdout?: string };
+      if (typeof failed.code !== 'number' || !failed.stdout?.trim()) throw error;
+      return {
+        exitCode: failed.code,
+        payload: JSON.parse(failed.stdout.trim()) as Record<string, unknown>,
+      };
+    }
   }
 
   it('does not complete a pre-0065 run until owned-scope lock metadata is canonicalized', async () => {
@@ -374,9 +384,10 @@ describe('coordination independent review regressions', () => {
         'list-coordination-privacy-repairs', '--limit', '2',
         ...(after ? ['--after', after] : []),
       ]);
-      const repairs = page.repairs as Array<{ principalId: string }>;
+      expect(page.exitCode).toBe(0);
+      const repairs = page.payload.repairs as Array<{ principalId: string }>;
       seen.push(...repairs.map((repair) => repair.principalId));
-      after = page.nextCursor as string | undefined;
+      after = page.payload.nextCursor as string | undefined;
       if (!after) break;
     }
     expect(seen).toEqual(expected);
@@ -395,10 +406,14 @@ describe('coordination independent review regressions', () => {
       '--confirm-scope', value.owned.id, '--batch-size', '10',
     ], 5_000);
     expect(result).toMatchObject({
-      complete: false, progressed: false, reason: 'live_lease',
+      exitCode: 3,
+      payload: {
+        complete: false, progressed: false, reason: 'live_lease',
+        incompleteReason: 'blocked',
+      },
     });
-    expect(new Date(result.blockedUntil as string).getTime()).toBeGreaterThan(Date.now());
-    expect(Number(result.attempts)).toBeLessThanOrEqual(100);
+    expect(new Date(result.payload.blockedUntil as string).getTime()).toBeGreaterThan(Date.now());
+    expect(Number(result.payload.attempts)).toBeLessThanOrEqual(100);
   }, 15_000);
 
   it('uses the production completion predicate for completed principals', async () => {

@@ -158,7 +158,11 @@ describe('coordination exact-head review regressions', () => {
       await expect(operator.query(
         'SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 1)',
         [value.operator.id, value.target.id, value.owned.id],
-      )).rejects.toMatchObject({ code: '55P03' });
+      )).resolves.toMatchObject({ rows: [{
+        continuum_operator_scrub_coordination_principal: {
+          complete: false, progressed: false, reason: 'lock_busy',
+        },
+      }] });
     } finally {
       await blocker.query('ROLLBACK').catch(() => undefined);
       blocker.release();

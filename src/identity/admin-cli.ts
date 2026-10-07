@@ -111,8 +111,10 @@ async function main(): Promise<void> {
         dryRun, confirmationScopeId, batchSize, verificationTimeoutMs,
       });
       let attempts = 1;
-      let incompleteReason: 'no_progress' | 'attempt_limit' | null = null;
-      while (!dryRun && !once && !result.complete && !result.blockedUntil && attempts < 100) {
+      let incompleteReason: 'blocked' | 'single_batch' | 'no_progress'
+        | 'attempt_limit' | null = null;
+      while (!dryRun && !once && !result.complete && !result.blockedUntil
+        && result.reason === null && attempts < 100) {
         if (!result.progressed) { incompleteReason = 'no_progress'; break; }
         await new Promise((resolve) => setTimeout(resolve, Math.min(attempts * 25, 250)));
         result = await offboardPrincipal(pool, actor, positional[0], {
@@ -120,7 +122,11 @@ async function main(): Promise<void> {
         });
         attempts += 1;
       }
-      if (!dryRun && !once && !result.complete && !result.blockedUntil
+      if (!dryRun && !result.complete && (result.blockedUntil || result.reason !== null)) {
+        incompleteReason = 'blocked';
+      } else if (!dryRun && once && !result.complete) {
+        incompleteReason = 'single_batch';
+      } else if (!dryRun && !once && !result.complete && !result.blockedUntil
         && incompleteReason === null && attempts >= 100) {
         incompleteReason = 'attempt_limit';
       }
@@ -128,7 +134,9 @@ async function main(): Promise<void> {
         operation, attempts, incompleteReason,
         ...result,
       })}\n`);
-      if (incompleteReason !== null) process.exitCode = 2;
+      if (incompleteReason !== null) {
+        process.exitCode = incompleteReason === 'blocked' ? 3 : 2;
+      }
     } else if (operation === 'list-incomplete-offboarding') {
       if (args.length) throw new Error('usage: list-incomplete-offboarding');
       process.stdout.write(`${JSON.stringify({
@@ -177,8 +185,10 @@ async function main(): Promise<void> {
         confirmationScopeId, batchSize,
       });
       let attempts = 1;
-      let incompleteReason: 'no_progress' | 'attempt_limit' | null = null;
-      while (!once && !result.complete && !result.blockedUntil && attempts < 100) {
+      let incompleteReason: 'blocked' | 'single_batch' | 'no_progress'
+        | 'attempt_limit' | null = null;
+      while (!once && !result.complete && !result.blockedUntil
+        && result.reason === null && attempts < 100) {
         if (!result.progressed) { incompleteReason = 'no_progress'; break; }
         await new Promise((resolve) => setTimeout(resolve, Math.min(attempts * 25, 250)));
         result = await repairCoordinationPrivacy(pool, actor, positional[0], {
@@ -186,14 +196,20 @@ async function main(): Promise<void> {
         });
         attempts += 1;
       }
-      if (!once && !result.complete && !result.blockedUntil
+      if (!result.complete && (result.blockedUntil || result.reason !== null)) {
+        incompleteReason = 'blocked';
+      } else if (once && !result.complete) {
+        incompleteReason = 'single_batch';
+      } else if (!once && !result.complete && !result.blockedUntil
         && incompleteReason === null && attempts >= 100) {
         incompleteReason = 'attempt_limit';
       }
       process.stdout.write(`${JSON.stringify({
         operation, attempts, incompleteReason, ...result,
       })}\n`);
-      if (incompleteReason !== null) process.exitCode = 2;
+      if (incompleteReason !== null) {
+        process.exitCode = incompleteReason === 'blocked' ? 3 : 2;
+      }
     } else throw new Error('unknown admin operation');
   } finally { await pool.end(); }
 }
