@@ -383,6 +383,7 @@ describe('sync database identity rotation security', () => {
       await pool.query('CREATE ROLE ' + quoteRole(role) + ' LOGIN');
       await grantOwnerRetirementAuthority(pool, role);
     }
+    await pool.query('ALTER ROLE ' + quoteRole(firstRole) + " PASSWORD 'retired-test-secret'");
     try {
       await applyGrantScript(pool, 'grant-sync-role.sql', {
         continuum_sync_role: firstRole, continuum_principal_id: fixture.service.id,
@@ -391,6 +392,10 @@ describe('sync database identity rotation security', () => {
         'SELECT continuum_rotate_sync_database_identity($1, $2, $3)',
         [fixture.admin.id, nextRole, nextService.id],
       );
+      expect((await pool.query(
+        'SELECT rolpassword IS NULL AS cleared FROM pg_authid WHERE rolname = $1',
+        [firstRole],
+      )).rows[0].cleared).toBe(true);
       await expect(fixture.operator.query(
         'SELECT continuum_rotate_sync_database_identity($1, $2, $3)',
         [fixture.admin.id, firstRole, fixture.service.id],
@@ -406,6 +411,41 @@ describe('sync database identity rotation security', () => {
         [[firstRole, nextRole]],
       );
       await dropRoles(pool, [firstRole, nextRole, fixture.operatorRole]);
+    }
+  });
+
+  it('does not treat an old-cluster archived OID collision as current retirement', async () => {
+    const service = await createPrincipal(pool, {
+      externalId: 'archive-oid-collision-service', kind: 'service', displayName: 'Collision',
+    });
+    const role = 'continuum_archive_collision_' + Date.now();
+    const archivedName = 'continuum_old_cluster_' + Date.now();
+    await pool.query('CREATE ROLE ' + quoteRole(role) + ' LOGIN');
+    await grantOwnerRetirementAuthority(pool, role);
+    try {
+      const oid = (await pool.query(
+        'SELECT oid::text FROM pg_roles WHERE rolname = $1', [role],
+      )).rows[0].oid;
+      await pool.query(
+        `INSERT INTO continuum_unresolved_retired_sync_database_identities
+           (database_role, previous_database_role_oid, resolution_kind)
+         VALUES ($1::name, $2::oid, 'superseded')`,
+        [archivedName, oid],
+      );
+      await pool.query("SELECT continuum_rebind_database_identity_oids('REBIND AFTER LOGICAL RESTORE')");
+      await expect(applyGrantScript(pool, 'grant-sync-role.sql', {
+        continuum_sync_role: role, continuum_principal_id: service.id,
+      })).resolves.toBeUndefined();
+    } finally {
+      await pool.query(
+        'DELETE FROM continuum_trusted_database_identities WHERE database_role = $1::name',
+        [role],
+      );
+      await pool.query(
+        'DELETE FROM continuum_unresolved_retired_sync_database_identities WHERE database_role = $1::name',
+        [archivedName],
+      );
+      await dropRoles(pool, [role]);
     }
   });
 
@@ -459,6 +499,38 @@ describe('sync database identity rotation security', () => {
         [[fixture.operatorRole, syncRole]],
       );
       await dropRoles(pool, [syncRole, spareRole, fixture.operatorRole]);
+    }
+  });
+
+  it('rejects binding a retired sync-role OID as approval authority', async () => {
+    const fixture = await operatorFixture('retired-approval');
+    const role = 'continuum_retired_approval_' + Date.now();
+    await pool.query('CREATE ROLE ' + quoteRole(role) + ' NOLOGIN');
+    await grantOwnerRetirementAuthority(pool, role);
+    try {
+      const oid = (await pool.query(
+        'SELECT oid::text FROM pg_roles WHERE rolname = $1', [role],
+      )).rows[0].oid;
+      await pool.query(
+        `INSERT INTO continuum_retired_sync_database_identities
+           (database_role_oid, database_role) VALUES ($1::oid, $2::name)`,
+        [oid, role],
+      );
+      await expect(pool.query(
+        'SELECT continuum_register_trusted_database_identity($1, $2, TRUE, FALSE)',
+        [role, fixture.admin.id],
+      )).rejects.toThrow(/retired.*terminal|previously retired/i);
+    } finally {
+      await fixture.operator.end();
+      await pool.query(
+        'DELETE FROM continuum_trusted_database_identities WHERE database_role = ANY($1::name[])',
+        [[fixture.operatorRole, role]],
+      );
+      await pool.query(
+        'DELETE FROM continuum_retired_sync_database_identities WHERE database_role = $1::name',
+        [role],
+      );
+      await dropRoles(pool, [role, fixture.operatorRole]);
     }
   });
 
@@ -570,6 +642,7 @@ describe('sync database identity rotation security', () => {
       )).rows[0].oid;
       await pool.query('REVOKE ' + quoteRole(reusedRole) + ' FROM CURRENT_USER');
       await pool.query('DROP ROLE ' + quoteRole(reusedRole));
+      await pool.query("SELECT continuum_rebind_database_identity_oids('REBIND AFTER LOGICAL RESTORE')");
       await pool.query('CREATE ROLE ' + quoteRole(reusedRole) + ' LOGIN');
       await grantOwnerRetirementAuthority(pool, reusedRole);
       await applyGrantScript(pool, 'grant-sync-role.sql', {
@@ -751,6 +824,9 @@ describe('sync database identity rotation security', () => {
       expect(source).toContain('LOCK TABLE');
       expect(source).toContain('NOT membership.set_option');
       expect(source).toContain('NOT membership.inherit_option');
+      expect(source).toContain('PASSWORD NULL');
+      const docs = await readFile(join(process.cwd(), 'docs', 'offboarding.md'), 'utf8');
+      expect(docs).toContain('pg_terminate_backend');
     } finally {
       await pool.query('REVOKE ' + quoteRole(legacyRole) + ' FROM CURRENT_USER');
       await dropRoles(pool, [legacyRole]);
