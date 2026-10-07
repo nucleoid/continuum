@@ -641,15 +641,49 @@ describe('coordination storage and service', () => {
   });
 
   it('uses locale-independent checks and indexed bounded cleanup plans', async () => {
-    await expect(acquire(pool, 'line\u2028paragraph\u2029separators'))
-      .resolves.toMatchObject({ acquired: true });
+    const planHolder = await acquire(pool, 'line\u2028paragraph\u2029separators');
+    expect(planHolder).toMatchObject({ acquired: true });
+    if (!planHolder.acquired) throw new Error('expected plan fixture acquisition');
     await expect(pool.query(
       `INSERT INTO coordination_resources (scope_id, resource) VALUES ($1, $2)`,
       [scope.id, 'bad\u0085key'],
     )).rejects.toMatchObject({ code: '23514' });
 
+    // Give the planner a bounded but representative distribution: one receipt
+    // for the selected resource among many globally expired receipts.
+    await pool.query(
+      `WITH fixture AS (
+         SELECT value,
+                CASE WHEN value = 1 THEN 'plan-resource'
+                     ELSE 'plan-noise-' || value::text END AS resource
+           FROM generate_series(1, 512) AS value
+       ), inserted_resources AS (
+         INSERT INTO coordination_resources (scope_id, resource)
+         SELECT $1, resource FROM fixture
+         RETURNING resource
+       )
+       INSERT INTO coordination_operation_receipts (
+         principal_id, operation, request_id, payload_hash, outcome,
+         scope_id, resource, lease_id, run_id, fencing_token,
+         expires_at, server_time, retry_after_seconds, retain_until
+       )
+       SELECT $2, 'release',
+              ('00000000-0000-4000-8000-' || lpad(to_hex(f.value), 12, '0'))::uuid,
+              decode(repeat('00', 32), 'hex'), 'released',
+              $1, f.resource, $3, '00000000-0000-4000-8000-000000000001', 1,
+              NULL, clock_timestamp() - interval '2 days', NULL,
+              clock_timestamp() - interval '1 day'
+         FROM fixture f
+         JOIN inserted_resources r USING (resource)`,
+      [scope.id, principal.id, planHolder.leaseId],
+    );
+
     const plans = await pool.connect();
     try {
+      // Refresh statistics after the bounded seed so EXPLAIN represents the
+      // indexed production cleanup paths rather than tiny-table estimates.
+      await plans.query('ANALYZE coordination_operation_receipts');
+      await plans.query('ANALYZE coordination_leases');
       await plans.query('SET enable_seqscan = off');
       await plans.query('SET enable_bitmapscan = off');
       const leasePlan = await plans.query(
