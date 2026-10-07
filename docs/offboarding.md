@@ -314,14 +314,28 @@ old sync binding and grants in the same transaction. During upgrade it fails on
 mixed approve+sync rows or multiple legacy sync authorities. For one
 unambiguous sync-only row it revokes every privilege on the application schema,
 its tables, sequences, and functions, then deletes only that sync-only row;
-approve-only operator rows are preserved. A dropped operator role fails the
-migration for explicit review. Remaining and newly registered identities are
-bound to immutable PostgreSQL role OIDs, so dropping and recreating a role with
-the same name does not recover stale authority. The migration also forbids mixed
-capability rows. Operator binding revocation is a DB-bound security-definer
+legacy approve-only rows have no OID provenance and must be removed under
+change control before migration, then explicitly re-registered afterward. This
+prevents a dropped and recreated same-name operator role from inheriting stale
+authority. Newly registered identities are bound to immutable PostgreSQL role
+OIDs, so dropping and recreating a role with the same name does not recover
+authority. The migration also forbids mixed capability rows. Operator binding
+revocation is a DB-bound security-definer
 operation: raw operator `UPDATE` on `entra_groups` is revoked, and revocation,
 quarantine, and deactivation triggers accept only transaction-local guarded
 mutation markers.
+
+Migration `0049_offboarding_review_remediation.sql` makes principal disablement
+create bounded transaction-local guards for its existing membership cascade,
+binds owned-scope access cleanup to a started incomplete run and its mapped
+user scope, takes the membership-sync lock, and writes an operation audit. It
+routes both sync registration and rotation through the same isolated-role
+validation and least-privilege installer, enforces one sync binding, makes the
+retired role `NOLOGIN`, and revokes ambient `PUBLIC` schema usage. Approval
+registration also rejects privileged roles, ownership, raw Entra authority,
+and non-owner membership edges. The database owner may retain a test or
+maintenance `SET ROLE` edge because that role already owns the trusted
+security-definer boundary. All other membership edges fail closed.
 
 The final database verification is exact and executes once: the completion
 event trigger checks every memory and every audit row linked to the run's
@@ -352,9 +366,10 @@ operator, and dedicated sync login roles. The operator and sync roles must not
 be granted to the shared application role. Rollout is an explicit maintenance
 window: **stop** every API, MCP, admin, retention, and membership-sync process;
 take and verify a **backup**; **migrate** through
-`0048_offboarding_independent_review.sql` as the owner; **regrant** the shared app,
-operator, and sync profiles; then **start** only the `0048`-aware binaries.
-Mixed pre-`0048`/`0048` binaries or grants are unsupported. Do not run migration
+`0049_offboarding_review_remediation.sql` as the owner; **regrant** the shared app,
+operator, and sync profiles; **verify** the identities; then **start** only the
+`0049`-aware binaries. Mixed pre-`0049`/`0049` binaries or grants are
+unsupported. Do not run migration
 and old binaries concurrently, because old sync code writes freshness directly
 and old application code expects shared-role offboarding authority.
 The supported and CI-tested database major is PostgreSQL 16 with pgvector.
@@ -363,8 +378,23 @@ alone is not a supported rollout.
 The application role must not own the event ledger, completion-capability
 table, or security-definer functions, and receives no direct privilege on the
 capability table. Direct `completed` inserts then fail at the trigger.
-Apply the repository's exact offboarding grants after migration (the role must
+Apply the repository's exact post-migration grants (the role must
 already exist and must not own the schema or functions):
+
+Before applying 0048 or upgrading an installation that already recorded 0048,
+export the approve-only rows with their expected human
+principal and live PostgreSQL role OID. Because the legacy registry stored only
+names, remove those rows under reviewed migration-owner change control. Do not
+guess provenance from the currently resolved name. Migrations 0048 and 0049
+both refuse to continue while an unproven legacy approval row remains. Reapply each reviewed
+operator binding with `grant-operator-role.sql` after 0049.
+
+Fresh 0048 execution changes its removed legacy sync role to `NOLOGIN`. If an
+installation already recorded the earlier 0048 revision, run the checked
+`scripts/retire-sync-role.sql` as the migration owner for that exact old role
+before starting 0049-aware processes. The script refuses an active trusted
+identity, membership edges, and application-object ownership before revoking
+the role's application authority and login.
 
 ```sh
 psql "$CONTINUUM_MIGRATION_OWNER_URL" \
@@ -397,21 +427,23 @@ SELECT continuum_rotate_sync_database_identity(
 );
 ```
 
-The rotation function requires a fresh role with no membership or `SET ROLE`
-edge in either direction. It rejects superuser, `CREATEROLE`, `BYPASSRLS`,
+Both the provisioning script and rotation function require a fresh role with no
+membership or `SET ROLE` edge in either direction, apart from an existing
+database-owner edge. They reject superuser, `CREATEDB`, `CREATEROLE`,
+`REPLICATION`, `BYPASSRLS`,
 schema-`CREATE`, application-object ownership, an existing operator/sync
-binding, application DML, and operator execution authority. It installs the
+binding, application DML, and operator execution authority. They install the
 least-privilege sync profile, binds the new service principal by role OID, and
 revokes **all** application-schema table, sequence, function, and schema
-authority plus the old sync-only registry row in one transaction. The sync role
+authority plus the old sync-only registry row in one transaction. The retired
+role is also changed to `NOLOGIN`. The sync role
 can read only `scopes`, `principals`, `entra_groups`, `scope_memberships`, and
 `entra_sync_state`; it cannot read `memories`, including titles or bodies.
 Rotation fails rather than claiming cleanup if the retired role inherits from
 another role or owns an application-schema object; remove that authority in a
-separately reviewed maintenance change and retry. Run
-one sync and verify
-`entra_sync_state.last_success_at` before disabling or dropping the old service
-principal and database role. Human offboarding or demotion therefore cannot
+separately reviewed maintenance change and retry. Run one sync and verify
+`entra_sync_state.last_success_at` before dropping the old service principal
+and retired database role. Human offboarding or demotion therefore cannot
 silently stop sync.
 
 One operator database role is bound to one manual organization-administrator
@@ -452,41 +484,36 @@ retryable.
 
 Rollback is forward-only and requires the verified pre-migration backup for any
 data that bounded legacy cleanup has removed. Application rollback is supported
-only to an 0048-aware binary and its matching grant profile. Stop all processes
+only to an 0049-aware binary and its matching grant profile. Stop all processes
 and confirm there are zero incomplete runs with `list-incomplete-offboarding`;
-then deploy the selected `0048`-aware binary, reapply all three grant profiles,
-and restart. Pre-`0048` binaries are incompatible with the new
+then deploy the selected `0049`-aware binary, reapply all three grant profiles,
+run identity verification, and restart. Pre-`0049` binaries are incompatible with the new
 approval and sync boundary and are not a supported application-first rollback.
 Database rollback requires a separate forward migration; do not drop guards or
 regrant the shared role ad hoc. Completed offboarding erasure is irreversible
 and is never undone by binary or schema rollback.
 
-Before restart, verify the post-migration grants using the actual role and
-schema names. Every expression below must be `false`:
+Before restart, run the checked verification script using the actual role and
+schema names:
 
-```sql
-SELECT
-  has_schema_privilege('continuum_sync_old', 'public', 'USAGE') AS old_schema_usage,
-  has_table_privilege('continuum_sync_old', 'public.principals', 'SELECT') AS old_read,
-  has_sequence_privilege('continuum_sync_old', 'public.audit_log_id_seq', 'USAGE') AS old_sequence,
-  has_function_privilege('continuum_sync_old',
-    'public.continuum_require_sync_session(uuid)', 'EXECUTE') AS old_execute,
-  has_table_privilege('continuum_sync_next', 'public.memories', 'SELECT') AS new_memory_read,
-  has_table_privilege('continuum_operator', 'public.entra_groups', 'UPDATE') AS operator_raw_update;
+```sh
+psql "$CONTINUUM_MIGRATION_OWNER_URL" \
+  --set=continuum_schema=public \
+  --set=continuum_sync_role=continuum_sync_next \
+  --set=continuum_operator_role=continuum_operator \
+  --set=retired_sync_role=continuum_sync_old \
+  --file=scripts/verify-database-identities.sql
 ```
 
-Then verify exactly one OID-bound sync row, no mixed capability, the expected
-operator rows, and that each bound OID still resolves to the recorded role:
+The script fails unless `PUBLIC` lacks application-schema `USAGE`, exactly one
+OID-bound sync row exists, every registry OID still resolves to its recorded
+name, the expected operator is approval-only, and the retired role is
+`NOLOGIN` without schema, principal-table, or audit-sequence authority. It does
+not claim that PostgreSQL's default `PUBLIC` function ACL is absent; without
+schema `USAGE` and a login, that ambient ACL is not a usable retired credential.
 
-```sql
-SELECT database_role, database_role_oid, principal_id, can_approve, can_sync,
-       (SELECT rolname FROM pg_roles WHERE oid = database_role_oid) AS live_role
-  FROM continuum_trusted_database_identities
- ORDER BY database_role;
-```
-
-Because 0048 deliberately deletes a legacy sync-only registry row and revokes
-its grants, restoring pre-0048 behavior requires the verified pre-migration
+Because 0048 and 0049 deliberately delete legacy registry rows, revoke grants,
+and disable the retired login, restoring pre-0049 behavior requires the verified pre-migration
 backup and matching old binaries. Regranting the retired credential by hand is
 not a rollback.
 

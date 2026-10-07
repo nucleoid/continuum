@@ -81,12 +81,13 @@ afterEach(async () => {
 });
 
 describe('0048 trusted database identity upgrade', () => {
-  it('preserves operators while deleting and fully revoking the single legacy sync-only identity', async () => {
+  it('requires explicit operator re-registration while revoking legacy sync authority', async () => {
     const state = await fixture('0047_offboarding_role_boundary.sql');
     const operatorRole = 'upgrade_operator_' + state.suffix;
     const syncRole = 'upgrade_sync_' + state.suffix;
     await createRole(state.admin, operatorRole);
     await createRole(state.admin, syncRole);
+    await state.admin.query('ALTER ROLE ' + quoteIdentifier(syncRole) + ' LOGIN');
     await state.pool.query('SELECT continuum_register_trusted_database_identity($1, $2, TRUE, FALSE)',
       [operatorRole, state.operatorPrincipal.id]);
     await state.pool.query('SELECT continuum_register_trusted_database_identity($1, $2, FALSE, TRUE)',
@@ -99,14 +100,20 @@ describe('0048 trusted database identity upgrade', () => {
       + ' TO ' + quoteIdentifier(syncRole));
 
     await addMigration(state.directory, '0048_offboarding_independent_review.sql');
+    await expect(runMigrations(state.pool, state.directory))
+      .rejects.toThrow(/operator.*provenance|re-register/i);
+    expect((await state.pool.query(
+      'SELECT count(*)::int AS count FROM continuum_trusted_database_identities',
+    )).rows[0].count).toBe(2);
+    await state.pool.query(
+      'DELETE FROM continuum_trusted_database_identities WHERE can_approve AND NOT can_sync',
+    );
     await expect(runMigrations(state.pool, state.directory)).resolves.toEqual([
       expect.objectContaining({ name: '0048_offboarding_independent_review.sql' }),
     ]);
     expect((await state.pool.query(
       'SELECT database_role::text, can_approve, can_sync, database_role_oid IS NOT NULL AS oid_bound FROM continuum_trusted_database_identities ORDER BY database_role',
-    )).rows).toEqual([{
-      database_role: operatorRole, can_approve: true, can_sync: false, oid_bound: true,
-    }]);
+    )).rows).toEqual([]);
     expect((await state.pool.query(
       `SELECT has_schema_privilege($1, current_schema(), 'USAGE') AS schema_usage,
               has_schema_privilege($1, current_schema(), 'CREATE') AS schema_create,
@@ -118,6 +125,9 @@ describe('0048 trusted database identity upgrade', () => {
       schema_usage: false, schema_create: false, memory_read: false,
       group_update: false, sequence_usage: false,
     });
+    expect((await state.admin.query(
+      'SELECT rolcanlogin FROM pg_roles WHERE rolname = $1', [syncRole],
+    )).rows[0].rolcanlogin).toBe(false);
   }, 60_000);
 
   it('fails rather than silently rewriting mixed or multiple legacy sync authorities', async () => {
@@ -162,5 +172,37 @@ describe('0048 trusted database identity upgrade', () => {
     await addMigration(state.directory, '0048_offboarding_independent_review.sql');
     await expect(runMigrations(state.pool, state.directory))
       .rejects.toThrow(/operator.*re-register|provenance|role OID/i);
+  }, 60_000);
+
+  it('requires explicit post-0049 registration for an already-recorded 0048 operator', async () => {
+    const state = await fixture('0047_offboarding_role_boundary.sql');
+    await addMigration(state.directory, '0048_offboarding_independent_review.sql');
+    await runMigrations(state.pool, state.directory);
+    const operatorRole = 'upgrade_existing_0048_operator_' + state.suffix;
+    await createRole(state.admin, operatorRole);
+    await state.pool.query(
+      'SELECT continuum_register_trusted_database_identity($1, $2, TRUE, FALSE)',
+      [operatorRole, state.operatorPrincipal.id],
+    );
+    await addMigration(state.directory, '0049_offboarding_review_remediation.sql');
+    await expect(runMigrations(state.pool, state.directory))
+      .rejects.toThrow(/0049.*operator.*provenance|re-register/i);
+    await state.pool.query(
+      'DELETE FROM continuum_trusted_database_identities WHERE can_approve AND NOT can_sync',
+    );
+    await expect(runMigrations(state.pool, state.directory)).resolves.toEqual([
+      expect.objectContaining({ name: '0049_offboarding_review_remediation.sql' }),
+    ]);
+    await state.pool.query(
+      'SELECT continuum_register_trusted_database_identity($1, $2, TRUE, FALSE)',
+      [operatorRole, state.operatorPrincipal.id],
+    );
+    expect((await state.pool.query(
+      `SELECT database_role::text, database_role_oid::oid AS oid
+         FROM continuum_trusted_database_identities WHERE can_approve`,
+    )).rows).toEqual([{
+      database_role: operatorRole,
+      oid: expect.any(Number),
+    }]);
   }, 60_000);
 });

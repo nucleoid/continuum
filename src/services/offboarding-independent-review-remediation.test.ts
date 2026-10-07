@@ -140,7 +140,7 @@ describe('independent exact-head review remediation', () => {
         'SELECT continuum_require_sync_session($1)', [newService.id],
       )).resolves.toBeDefined();
       await expect(oldConnection.query(
-        'SELECT continuum_require_sync_session($1)', [oldService.id],
+        'SELECT public.continuum_require_sync_session($1)', [oldService.id],
       )).rejects.toThrow(/permission denied|trusted sync/i);
       expect((await pool.query(
         `SELECT database_role::text, principal_id::text FROM continuum_trusted_database_identities
@@ -173,7 +173,7 @@ describe('independent exact-head review remediation', () => {
         await expect(operator.query(
           'SELECT continuum_rotate_sync_database_identity($1, $2, $3)',
           [admin.id, target, service.id],
-        )).rejects.toThrow(/owner|application|operator|approve|least-privilege|membership|SET ROLE|isolated/i);
+        )).rejects.toThrow(/owner|application|operator|approve|approval|least-privilege|membership|SET ROLE|isolated/i);
       }
       await expect(operator.query(
         'SELECT continuum_operator_authorize_audit_retention($1)', [admin.id],

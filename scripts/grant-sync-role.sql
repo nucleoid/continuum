@@ -14,6 +14,7 @@
 \endif
 
 -- Run as the migration owner. Never grant this role to the shared app role.
+BEGIN;
 SELECT :"continuum_schema".continuum_register_trusted_database_identity(
   :'continuum_sync_role'::name, :'continuum_principal_id'::uuid, FALSE, TRUE
 );
@@ -63,3 +64,5 @@ REVOKE ALL ON FUNCTION
   :"continuum_schema".continuum_create_user_scope_approval(UUID, UUID, UUID, UUID[], TEXT),
   :"continuum_schema".continuum_upsert_entra_group_binding(UUID, TEXT, TEXT, UUID, TEXT)
 FROM :"continuum_sync_role";
+SELECT :"continuum_schema".continuum_verify_database_identity_configuration();
+COMMIT;

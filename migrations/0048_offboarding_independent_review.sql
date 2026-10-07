@@ -55,6 +55,7 @@ BEGIN
         schema_name, sync_identity.database_role);
       EXECUTE format('REVOKE ALL PRIVILEGES ON SCHEMA %I FROM %I',
         schema_name, sync_identity.database_role);
+      EXECUTE format('ALTER ROLE %I NOLOGIN', sync_identity.database_role);
     END IF;
     DELETE FROM continuum_trusted_database_identities
      WHERE database_role = sync_identity.database_role
@@ -62,10 +63,9 @@ BEGIN
   END LOOP;
   IF EXISTS (
     SELECT 1 FROM continuum_trusted_database_identities identity
-    LEFT JOIN pg_roles role ON role.rolname = identity.database_role
-     WHERE identity.can_approve AND role.oid IS NULL
+     WHERE identity.can_approve
   ) THEN
-    RAISE EXCEPTION 'dropped operator database role requires explicit reviewed cleanup';
+    RAISE EXCEPTION 'legacy operator role has no verifiable role OID provenance; remove it and explicitly re-register after migration';
   END IF;
 END;
 $upgrade$;

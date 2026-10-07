@@ -152,6 +152,7 @@ describe('sync database identity rotation security', () => {
   });
 
   it('registration safely retires the previous sync identity and enforces one active binding', async () => {
+    const fixture = await operatorFixture('registration-verification');
     const first = await createPrincipal(pool, {
       externalId: 'registration-first-service', kind: 'service', displayName: 'First',
     });
@@ -179,12 +180,25 @@ describe('sync database identity rotation security', () => {
         'SELECT rolcanlogin FROM pg_roles WHERE rolname = $1', [oldRole],
       )).rows[0].rolcanlogin).toBe(false);
       expect((await pool.query(
-        `SELECT has_schema_privilege($1, 'public', 'USAGE') AS schema_usage,
-                has_function_privilege($1,
-                  'public.continuum_require_sync_session(uuid)', 'EXECUTE') AS public_execute`,
+        `SELECT has_schema_privilege($1, 'public', 'USAGE') AS schema_usage`,
         [oldRole],
-      )).rows[0]).toEqual({ schema_usage: false, public_execute: false });
-    } finally { await dropRoles(pool, [oldRole, nextRole]); }
+      )).rows[0]).toEqual({ schema_usage: false });
+      await expect(applyGrantScript(pool, 'retire-sync-role.sql', {
+        continuum_schema: 'public', retired_sync_role: oldRole,
+      })).resolves.toBeUndefined();
+      await expect(applyGrantScript(pool, 'retire-sync-role.sql', {
+        continuum_schema: 'public', retired_sync_role: nextRole,
+      })).rejects.toThrow(/active trusted database identity/i);
+      await expect(applyGrantScript(pool, 'verify-database-identities.sql', {
+        continuum_schema: 'public',
+        continuum_sync_role: nextRole,
+        continuum_operator_role: fixture.operatorRole,
+        retired_sync_role: oldRole,
+      })).resolves.toBeUndefined();
+    } finally {
+      await fixture.operator.end();
+      await dropRoles(pool, [oldRole, nextRole, fixture.operatorRole]);
+    }
   });
 
   it('rejects membership edges and privileged approval registration targets', async () => {
@@ -235,7 +249,9 @@ describe('sync database identity rotation security', () => {
         [role],
       )).rows[0];
       expect(Number(binding.oid)).toBe(Number(oldOid));
-      await expect(replacement.query('SELECT continuum_require_sync_session($1)', [service.id]))
+      await expect(replacement.query(
+        'SELECT public.continuum_require_sync_session($1)', [service.id],
+      ))
         .rejects.toThrow(/permission denied|DB-bound trusted sync identity/i);
     } finally {
       await replacement.end();
@@ -268,12 +284,12 @@ describe('sync database identity rotation security', () => {
       const newConnection = await rolePool(pool, newRole);
       try {
         for (const connection of [oldConnection, newConnection]) {
-          await expect(connection.query('SELECT body FROM memories LIMIT 1'))
+          await expect(connection.query('SELECT body FROM public.memories LIMIT 1'))
             .rejects.toThrow(/permission denied/i);
         }
-        await expect(oldConnection.query('SELECT external_id FROM principals LIMIT 1'))
+        await expect(oldConnection.query('SELECT external_id FROM public.principals LIMIT 1'))
           .rejects.toThrow(/permission denied/i);
-        await expect(newConnection.query('SELECT external_id FROM entra_groups LIMIT 1'))
+        await expect(newConnection.query('SELECT external_id FROM public.entra_groups LIMIT 1'))
           .resolves.toBeDefined();
       } finally { await newConnection.end(); }
     } finally {

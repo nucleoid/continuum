@@ -15,6 +15,7 @@
 
 -- First apply grant-application-role.sql to this dedicated operator role, then
 -- run this script as the migration owner. Never grant it to the shared app role.
+BEGIN;
 SELECT :"continuum_schema".continuum_register_trusted_database_identity(
   :'continuum_operator_role'::name, :'continuum_principal_id'::uuid, TRUE, FALSE
 );
@@ -65,3 +66,4 @@ FROM :"continuum_operator_role";
 REVOKE ALL ON FUNCTION
   :"continuum_schema".continuum_get_offboarding_run(UUID, UUID)
 FROM :"continuum_operator_role";
+COMMIT;
