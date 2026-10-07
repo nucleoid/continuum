@@ -23,7 +23,9 @@ async function applyApplicationRoleGrants(pool: pg.Pool, role: string): Promise<
 
 async function rolePool(pool: pg.Pool, role: string): Promise<pg.Pool> {
   await pool.query(`CREATE ROLE "${role}" NOLOGIN`);
-  await pool.query(`GRANT "${role}" TO CURRENT_USER`);
+  await pool.query(
+    `GRANT "${role}" TO CURRENT_USER WITH ADMIN OPTION, SET FALSE, INHERIT FALSE`,
+  );
   await applyApplicationRoleGrants(pool, role);
   return new pg.Pool({
     ...(pool as unknown as { options: PoolConfig }).options,
@@ -58,7 +60,7 @@ async function syncRolePool(
 async function dropRole(pool: pg.Pool, connection: pg.Pool, role: string): Promise<void> {
   await connection.end();
   await pool.query(`DROP OWNED BY "${role}"`);
-  await pool.query(`REVOKE "${role}" FROM CURRENT_USER`);
+  await pool.query(`REVOKE "${role}" FROM CURRENT_USER CASCADE`);
   await pool.query(`DROP ROLE "${role}"`);
 }
 
@@ -181,7 +183,9 @@ describe('rejected-head offboarding remediation', () => {
     });
     const role = `continuum_operator_${Date.now()}`;
     await pool.query(`CREATE ROLE "${role}" NOLOGIN`);
-    await pool.query(`GRANT "${role}" TO CURRENT_USER`);
+    await pool.query(
+      `GRANT "${role}" TO CURRENT_USER WITH ADMIN OPTION, SET FALSE, INHERIT FALSE`,
+    );
     await pool.query(
       `SELECT continuum_register_trusted_database_identity($1, $2, TRUE, FALSE)`,
       [role, first.admin.id],
@@ -314,7 +318,7 @@ describe('rejected-head offboarding remediation', () => {
   it('documents the bounded rollout and rollback contract without old-binary compatibility claims', async () => {
     const docs = await readFile(join(process.cwd(), 'docs/offboarding.md'), 'utf8');
     expect(docs).toMatch(/stop[\s\S]*migrate[\s\S]*regrant[\s\S]*start/i);
-    expect(docs).toMatch(/rollback[\s\S]*0052-aware/i);
+    expect(docs).toMatch(/rollback[\s\S]*0053-aware/i);
     expect(docs).not.toMatch(/old application tolerates/i);
     expect(docs).toMatch(/takeover[\s\S]*current effective org administrator/i);
   });

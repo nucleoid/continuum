@@ -205,7 +205,9 @@ describe('audit retention', () => {
     await pool.query(`CREATE ROLE ${quotedRole} NOLOGIN`);
     let rolePool: pg.Pool | undefined;
     try {
-      await pool.query(`GRANT ${quotedRole} TO CURRENT_USER`);
+      await pool.query(
+        `GRANT ${quotedRole} TO CURRENT_USER WITH ADMIN OPTION, SET FALSE, INHERIT FALSE`,
+      );
       await applyApplicationRoleGrants(role);
       await applyOperatorRoleGrants(role, admin.id);
       rolePool = new pg.Pool({
@@ -250,7 +252,7 @@ describe('audit retention', () => {
     } finally {
       await rolePool?.end();
       await pool.query(`DROP OWNED BY ${quotedRole}`);
-      await pool.query(`REVOKE ${quotedRole} FROM CURRENT_USER`);
+      await pool.query(`REVOKE ${quotedRole} FROM CURRENT_USER CASCADE`);
       await pool.query(`DROP ROLE ${quotedRole}`);
     }
   });

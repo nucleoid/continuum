@@ -629,10 +629,10 @@ retryable.
 
 Rollback is forward-only and requires the verified pre-migration backup for any
 data that bounded legacy cleanup has removed. Application rollback is supported
-only to a 0052-aware binary and its matching grant profile. Stop all processes
+only to a 0053-aware binary and its matching grant profile. Stop all processes
 and confirm there are zero incomplete runs with `list-incomplete-offboarding`;
-then deploy the selected `0052`-aware binary, reapply all three grant profiles,
-run identity verification, and restart. Pre-`0052` binaries are incompatible with the new
+then deploy the selected `0053`-aware binary, reapply all three grant profiles,
+run identity verification, and restart. Pre-`0053` binaries are incompatible with the new
 approval and sync boundary and are not a supported application-first rollback.
 Database rollback requires a separate forward migration; do not drop guards or
 regrant the shared role ad hoc. Completed offboarding erasure is irreversible
@@ -654,7 +654,7 @@ psql "$CONTINUUM_MIGRATION_OWNER_URL" \
 
 The script fails unless `PUBLIC` and the migration owner's application-schema
 default ACLs are closed, exactly one OID-bound sync row exists, every registry
-OID still resolves to its recorded name, the sync role matches the exact 0052
+OID still resolves to its recorded name, the sync role matches the exact 0053
 allow-list, the shared application role matches its exact allow-list, the
 expected operator matches its exact application-plus-operator profile with no
 column or trigger privilege drift, and a supplied retired role both exists and

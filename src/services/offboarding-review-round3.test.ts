@@ -35,7 +35,10 @@ async function createRolePool(
       continuum_operator_role: role, continuum_principal_id: principalId!,
     });
   }
-  await pool.query('GRANT ' + quoteRole(role) + ' TO CURRENT_USER');
+  await pool.query(
+    'GRANT ' + quoteRole(role)
+    + ' TO CURRENT_USER WITH ADMIN OPTION, SET FALSE, INHERIT FALSE',
+  );
   return new pg.Pool({
     ...(pool as unknown as { options: PoolConfig }).options,
     max: 1,
@@ -46,7 +49,7 @@ async function createRolePool(
 async function dropRole(pool: pg.Pool, connection: pg.Pool, role: string): Promise<void> {
   await connection.end();
   await pool.query('DROP OWNED BY ' + quoteRole(role));
-  await pool.query('REVOKE ' + quoteRole(role) + ' FROM CURRENT_USER');
+  await pool.query('REVOKE ' + quoteRole(role) + ' FROM CURRENT_USER CASCADE');
   await pool.query('DROP ROLE ' + quoteRole(role));
 }
 

@@ -38,9 +38,12 @@ describe('offboarding round-six safety contract', () => {
   it('starts immutable authorization evidence before fences and completes it append-only', async () => {
     const service = await text('src/services/offboarding.ts');
     const migration = await text('migrations/0026_offboarding_round6_hardening.sql');
-    expect(service.indexOf('principal_offboarding_run_events')).toBeGreaterThan(-1);
-    expect(service.indexOf('principal_offboarding_run_events'))
-      .toBeLessThan(service.indexOf('UPDATE scopes SET name'));
+    const startedEvent = service.indexOf('await startOffboardingRunEvent(');
+    expect(startedEvent).toBeGreaterThan(-1);
+    expect(startedEvent).toBeLessThan(
+      service.indexOf('continuum_operator_offboard_scope_access'),
+    );
+    expect(startedEvent).toBeLessThan(service.indexOf("'set_fence'"));
     expect(service).toMatch(/phase[^\n]+started/i);
     expect(service).toMatch(/phase[^\n]+completed/i);
     expect(service).toMatch(/initiated_by[\s\S]+finalized_by/i);

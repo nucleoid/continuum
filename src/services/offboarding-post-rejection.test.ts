@@ -38,7 +38,10 @@ async function applyGrantScript(
 }
 
 async function rolePool(pool: pg.Pool, role: string): Promise<pg.Pool> {
-  await pool.query('GRANT ' + quoteRole(role) + ' TO CURRENT_USER');
+  await pool.query(
+    'GRANT ' + quoteRole(role)
+    + ' TO CURRENT_USER WITH ADMIN OPTION, SET FALSE, INHERIT FALSE',
+  );
   return new pg.Pool({
     ...(pool as unknown as { options: PoolConfig }).options,
     max: 1,
@@ -60,7 +63,7 @@ describe('post-rejection database authority remediation', () => {
     await Promise.all(rolePools.splice(0).map((connection) => connection.end()));
     for (const role of roles.reverse()) {
       await pool.query('DROP OWNED BY ' + quoteRole(role));
-      await pool.query('REVOKE ' + quoteRole(role) + ' FROM CURRENT_USER');
+      await pool.query('REVOKE ' + quoteRole(role) + ' FROM CURRENT_USER CASCADE');
       await pool.query('DROP ROLE ' + quoteRole(role));
     }
     await pool?.end();
@@ -422,7 +425,7 @@ describe('post-rejection database authority remediation', () => {
     expect(migration52).toMatch(/pg_depend[\s\S]*deptype\s*=\s*'e'/i);
   });
 
-  it('forward-repairs edited migration shapes and documents migration 0052', async () => {
+  it('forward-repairs edited migration shapes and documents migration 0053', async () => {
     const migration = await readFile(
       join(process.cwd(), 'migrations/0052_offboarding_review_repair.sql'), 'utf8',
     );
@@ -432,7 +435,7 @@ describe('post-rejection database authority remediation', () => {
     expect(migration).toMatch(/DROP TRIGGER IF EXISTS[\s\S]*ON entra_groups/i);
     expect(migration).toMatch(/VALIDATE CONSTRAINT/i);
     const docs = await readFile(join(process.cwd(), 'docs/offboarding.md'), 'utf8');
-    expect(docs).toMatch(/0052_offboarding_review_repair\.sql/);
-    expect(docs).toMatch(/52 migrations|migration count[^\n]*52/i);
+    expect(docs).toMatch(/0053_offboarding_restore_contract\.sql/);
+    expect(docs).toMatch(/53 migrations|migration count[^\n]*53/i);
   });
 });

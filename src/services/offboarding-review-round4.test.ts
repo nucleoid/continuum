@@ -26,7 +26,10 @@ async function applyGrantScript(
 }
 
 async function rolePool(pool: pg.Pool, role: string): Promise<pg.Pool> {
-  await pool.query('GRANT ' + quoteRole(role) + ' TO CURRENT_USER');
+  await pool.query(
+    'GRANT ' + quoteRole(role)
+    + ' TO CURRENT_USER WITH ADMIN OPTION, SET FALSE, INHERIT FALSE',
+  );
   return new pg.Pool({
     ...(pool as unknown as { options: PoolConfig }).options,
     max: 1,
@@ -46,7 +49,7 @@ describe('fresh independent review remediation', () => {
   afterAll(async () => {
     for (const role of roles.reverse()) {
       await pool.query('DROP OWNED BY ' + quoteRole(role));
-      await pool.query('REVOKE ' + quoteRole(role) + ' FROM CURRENT_USER');
+      await pool.query('REVOKE ' + quoteRole(role) + ' FROM CURRENT_USER CASCADE');
       await pool.query('DROP ROLE ' + quoteRole(role));
     }
     await pool?.end();

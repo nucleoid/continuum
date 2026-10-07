@@ -30,8 +30,8 @@ async function createRolePool(
 ): Promise<pg.Pool> {
   await pool.query('CREATE ROLE ' + quoteRole(role) + (profile === 'sync' ? ' LOGIN' : ' NOLOGIN'));
   await pool.query(
-    'GRANT ' + quoteRole(role) + ' TO CURRENT_USER'
-    + (profile === 'sync' ? ' WITH ADMIN OPTION, SET FALSE, INHERIT FALSE' : ''),
+    'GRANT ' + quoteRole(role)
+    + ' TO CURRENT_USER WITH ADMIN OPTION, SET FALSE, INHERIT FALSE',
   );
   if (profile !== 'sync') {
     await applyGrantScript(pool, 'grant-application-role.sql', { continuum_app_role: role });
@@ -53,7 +53,7 @@ async function createRolePool(
 async function dropRole(pool: pg.Pool, connection: pg.Pool, role: string): Promise<void> {
   await connection.end();
   await pool.query('DROP OWNED BY ' + quoteRole(role));
-  await pool.query('REVOKE ' + quoteRole(role) + ' FROM CURRENT_USER');
+  await pool.query('REVOKE ' + quoteRole(role) + ' FROM CURRENT_USER CASCADE');
   await pool.query('DROP ROLE ' + quoteRole(role));
 }
 
@@ -151,7 +151,9 @@ describe('offboarding database-role remediation', () => {
                   'continuum_operator_write_offboarding_run(uuid,uuid,text,jsonb)', 'EXECUTE') AS guarded`,
       )).rows[0]).toEqual({ raw: false, guarded: true });
       for (const [sql, parameters] of attacks) {
-        await expect(connection.query(sql, parameters)).rejects.toThrow(/DB-bound trusted approve identity/i);
+        await expect(connection.query(sql, parameters)).rejects.toThrow(
+          /DB-bound trusted approve identity|role-name\/OID-bound trusted approve identity/i,
+        );
       }
     } finally { await dropRole(pool, connection, role); }
   });
