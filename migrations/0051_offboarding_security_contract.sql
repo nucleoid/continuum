@@ -11,7 +11,7 @@ DO $preflight$
 DECLARE
   schema_oid OID := quote_ident(current_schema())::regnamespace;
   owner_oid OID;
-  migration_role_oid OID := current_user::regrole::oid;
+  migration_role_oid OID := (SELECT oid FROM pg_roles WHERE rolname = current_user);
   owner_superuser BOOLEAN;
   owner_createrole BOOLEAN;
 BEGIN
@@ -23,19 +23,20 @@ BEGIN
   IF EXISTS (
     SELECT 1 FROM pg_class relation
      WHERE relation.relnamespace = schema_oid
-       AND relation.relowner <> current_user::regrole::oid
+       AND relation.relowner <> migration_role_oid
   ) OR EXISTS (
     SELECT 1 FROM pg_proc function
      WHERE function.pronamespace = schema_oid
-       AND function.proowner <> current_user::regrole::oid
+       AND function.proowner <> migration_role_oid
        -- Extension-owned routines are controlled by their extension owner on
        -- managed PostgreSQL. Continuum handles them explicitly below.
        AND NOT EXISTS (
          SELECT 1 FROM pg_depend dependency
+         JOIN pg_extension extension ON extension.oid = dependency.refobjid
           WHERE dependency.classid = 'pg_proc'::regclass
             AND dependency.objid = function.oid
             AND dependency.refclassid = 'pg_extension'::regclass
-            AND dependency.deptype = 'e'
+            AND dependency.deptype = 'e' AND extension.extname = 'vector'
        )
   ) THEN
     RAISE EXCEPTION 'migration owner must own every application table, sequence, index, and function before 0051';
@@ -77,10 +78,11 @@ BEGIN
      WHERE namespace.nspname = current_schema()
        AND NOT EXISTS (
          SELECT 1 FROM pg_depend dependency
+         JOIN pg_extension extension ON extension.oid = dependency.refobjid
           WHERE dependency.classid = 'pg_proc'::regclass
             AND dependency.objid = function.oid
             AND dependency.refclassid = 'pg_extension'::regclass
-            AND dependency.deptype = 'e'
+            AND dependency.deptype = 'e' AND extension.extname = 'vector'
        )
   LOOP
     EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', function_signature);
@@ -175,7 +177,8 @@ BEGIN
     SELECT 1 FROM continuum_trusted_database_identities identity
      WHERE identity.principal_id = OLD.id AND identity.can_approve
   ) INTO protected_principal;
-  IF protected_principal AND continuum_invoking_database_role()::regrole::oid <> owner_oid THEN
+  IF protected_principal AND (SELECT oid FROM pg_roles
+       WHERE rolname = continuum_invoking_database_role()) <> owner_oid THEN
     SELECT request.authorization_principal_id INTO authorization_principal
       FROM continuum_principal_disable_requests request
      WHERE request.target_principal_id = OLD.id
@@ -367,7 +370,8 @@ DECLARE owner_oid OID; authorization_principal UUID;
 BEGIN
   IF OLD.source_kind <> 'entra' THEN RETURN OLD; END IF;
   SELECT relowner INTO owner_oid FROM pg_class WHERE oid = TG_RELID;
-  IF continuum_invoking_database_role()::regrole::oid = owner_oid THEN RETURN OLD; END IF;
+  IF (SELECT oid FROM pg_roles WHERE rolname = continuum_invoking_database_role()) = owner_oid
+  THEN RETURN OLD; END IF;
   SELECT mutation.authorization_principal_id INTO authorization_principal
     FROM continuum_entra_guarded_mutations mutation
    WHERE mutation.external_id = OLD.source_id
@@ -594,7 +598,7 @@ DECLARE
   invoking_role NAME := continuum_invoking_database_role();
   invoking_role_oid OID;
   owner_oid OID;
-  session_role_oid OID := session_user::regrole::oid;
+  session_role_oid OID := (SELECT oid FROM pg_roles WHERE rolname = session_user);
   session_superuser BOOLEAN;
 BEGIN
   SELECT oid INTO invoking_role_oid FROM pg_roles WHERE rolname = invoking_role;
@@ -1035,7 +1039,7 @@ BEGIN
       -- must pregrant EXECUTE to the application role before this refresh.
       IF NOT has_function_privilege(target_role.rolname,
                                     vector_function.signature, 'EXECUTE') THEN
-        IF vector_function.proowner = current_user::regrole::oid THEN
+        IF vector_function.proowner = (SELECT oid FROM pg_roles WHERE rolname = current_user) THEN
           EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I',
             vector_function.signature, target_role.rolname);
         ELSE

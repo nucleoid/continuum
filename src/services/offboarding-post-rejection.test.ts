@@ -182,6 +182,29 @@ describe('post-rejection database authority remediation', () => {
     await pool.query('BEGIN');
     try {
       await pool.query('CREATE EXTENSION IF NOT EXISTS hstore WITH SCHEMA public');
+      await pool.query(`DO $grant_public_extension_function$
+        DECLARE function_signature TEXT;
+        BEGIN
+          SELECT format('%I.%I(%s)', namespace.nspname, function.proname,
+                        pg_get_function_identity_arguments(function.oid))
+            INTO function_signature
+            FROM pg_proc function
+            JOIN pg_namespace namespace ON namespace.oid = function.pronamespace
+            JOIN pg_depend dependency
+              ON dependency.classid = 'pg_proc'::regclass
+             AND dependency.objid = function.oid
+             AND dependency.refclassid = 'pg_extension'::regclass
+             AND dependency.deptype = 'e'
+            JOIN pg_extension extension ON extension.oid = dependency.refobjid
+           WHERE extension.extname = 'hstore'
+             AND function.pronamespace = quote_ident(current_schema())::regnamespace
+           ORDER BY function.oid LIMIT 1;
+          IF function_signature IS NULL THEN
+            RAISE EXCEPTION 'hstore test function not found in application schema';
+          END IF;
+          EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO PUBLIC', function_signature);
+        END;
+      $grant_public_extension_function$`);
       await expect(pool.query(
         'SELECT continuum_assert_application_role_allowlist($1)', [application.role],
       )).rejects.toThrow(/PUBLIC|extension|function|privilege|drift/i);

@@ -1,12 +1,11 @@
+\set ON_ERROR_STOP on
 \if :{?continuum_operator_role}
 \else
   \echo 'continuum_operator_role must name a dedicated existing non-owner login role'
-  \quit
 \endif
 \if :{?continuum_principal_id}
 \else
   \echo 'continuum_principal_id must be the bound manual org-admin UUID'
-  \quit
 \endif
 \if :{?continuum_schema}
 \else

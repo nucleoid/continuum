@@ -7,7 +7,7 @@ SET LOCAL statement_timeout = '30s';
 -- its registered sync role during emergency rotation.
 DO $preflight$
 DECLARE
-  migration_role_oid OID := current_user::regrole::oid;
+  migration_role_oid OID := (SELECT oid FROM pg_roles WHERE rolname = current_user);
   migration_superuser BOOLEAN;
   migration_createrole BOOLEAN;
   organization_count INTEGER;
@@ -47,6 +47,63 @@ ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 LOCK TABLE continuum_entra_guarded_mutations,
            continuum_principal_disable_requests IN ACCESS EXCLUSIVE MODE;
 TRUNCATE continuum_entra_guarded_mutations, continuum_principal_disable_requests;
+
+DO $drop_marker_auxiliary_objects$
+DECLARE item RECORD;
+BEGIN
+  FOR item IN
+    SELECT index_namespace.nspname, index_relation.relname
+      FROM pg_index catalog_index
+      JOIN pg_class table_relation ON table_relation.oid = catalog_index.indrelid
+      JOIN pg_class index_relation ON index_relation.oid = catalog_index.indexrelid
+      JOIN pg_namespace index_namespace ON index_namespace.oid = index_relation.relnamespace
+     WHERE table_relation.oid IN (
+       'continuum_entra_guarded_mutations'::regclass,
+       'continuum_principal_disable_requests'::regclass)
+       AND NOT EXISTS (
+         SELECT 1 FROM pg_constraint constraint_row
+          WHERE constraint_row.conindid = catalog_index.indexrelid)
+  LOOP
+    EXECUTE format('DROP INDEX %I.%I', item.nspname, item.relname);
+  END LOOP;
+  FOR item IN
+    SELECT relation.relname, trigger_row.tgname
+      FROM pg_trigger trigger_row
+      JOIN pg_class relation ON relation.oid = trigger_row.tgrelid
+     WHERE relation.oid IN (
+       'continuum_entra_guarded_mutations'::regclass,
+       'continuum_principal_disable_requests'::regclass)
+       AND NOT trigger_row.tgisinternal
+  LOOP
+    EXECUTE format('DROP TRIGGER %I ON %I', item.tgname, item.relname);
+  END LOOP;
+  FOR item IN
+    SELECT schemaname, tablename, policyname FROM pg_policies
+     WHERE schemaname = current_schema()
+       AND tablename IN ('continuum_entra_guarded_mutations',
+                         'continuum_principal_disable_requests')
+  LOOP
+    EXECUTE format('DROP POLICY %I ON %I.%I',
+      item.policyname, item.schemaname, item.tablename);
+  END LOOP;
+END;
+$drop_marker_auxiliary_objects$;
+
+ALTER TABLE continuum_entra_guarded_mutations
+  DISABLE ROW LEVEL SECURITY,
+  NO FORCE ROW LEVEL SECURITY,
+  ALTER COLUMN external_id DROP DEFAULT,
+  ALTER COLUMN mutation_kind DROP DEFAULT,
+  ALTER COLUMN backend_pid DROP DEFAULT,
+  ALTER COLUMN transaction_id DROP DEFAULT,
+  ALTER COLUMN authorization_principal_id DROP DEFAULT;
+ALTER TABLE continuum_principal_disable_requests
+  DISABLE ROW LEVEL SECURITY,
+  NO FORCE ROW LEVEL SECURITY,
+  ALTER COLUMN target_principal_id DROP DEFAULT,
+  ALTER COLUMN authorization_principal_id DROP DEFAULT,
+  ALTER COLUMN backend_pid DROP DEFAULT,
+  ALTER COLUMN transaction_id DROP DEFAULT;
 
 DO $drop_marker_constraints$
 DECLARE constraint_row RECORD;
@@ -278,7 +335,8 @@ BEGIN
     SELECT CASE WHEN identity.can_sync THEN 'sync' ELSE 'approve' END
       INTO capability
       FROM continuum_trusted_database_identities identity
-     WHERE identity.database_role_oid = continuum_invoking_database_role()::regrole::oid
+     WHERE identity.database_role_oid = (SELECT oid FROM pg_roles
+       WHERE rolname = continuum_invoking_database_role())
        AND identity.principal_id = marker.authorization_principal_id
        AND ((marker.mutation_kind IN ('deactivate', 'quarantine') AND
              (identity.can_sync OR identity.can_approve))
@@ -550,10 +608,11 @@ BEGIN
      WHERE function.pronamespace = schema_oid AND privilege.grantee = 0
        AND NOT EXISTS (
          SELECT 1 FROM pg_depend dependency
+         JOIN pg_extension extension ON extension.oid = dependency.refobjid
           WHERE dependency.classid = 'pg_proc'::regclass
             AND dependency.objid = function.oid
             AND dependency.refclassid = 'pg_extension'::regclass
-            AND dependency.deptype = 'e')
+            AND dependency.deptype = 'e' AND extension.extname = 'vector')
   ) OR EXISTS (
     SELECT 1 FROM pg_default_acl defaults
     CROSS JOIN LATERAL aclexplode(defaults.defaclacl) privilege
@@ -570,7 +629,7 @@ CREATE OR REPLACE FUNCTION continuum_verify_sync_database_identity(
 DECLARE
   invoking_role NAME := continuum_invoking_database_role();
   invoking_role_oid OID; owner_oid OID; invoking_superuser BOOLEAN;
-  session_role_oid OID := session_user::regrole::oid;
+  session_role_oid OID := (SELECT oid FROM pg_roles WHERE rolname = session_user);
   session_superuser BOOLEAN;
 BEGIN
   SELECT oid, rolsuper INTO invoking_role_oid, invoking_superuser
@@ -591,7 +650,7 @@ REVOKE ALL ON FUNCTION continuum_verify_sync_database_identity(UUID) FROM PUBLIC
 CREATE OR REPLACE FUNCTION continuum_require_sync_retirement_authority(
   target_database_role_oid OID
 ) RETURNS VOID LANGUAGE plpgsql STABLE SECURITY DEFINER AS $$
-DECLARE definer_oid OID := current_user::regrole::oid;
+DECLARE definer_oid OID := (SELECT oid FROM pg_roles WHERE rolname = current_user);
         definer_superuser BOOLEAN; definer_createrole BOOLEAN;
 BEGIN
   SELECT rolsuper, rolcreaterole INTO definer_superuser, definer_createrole
@@ -763,7 +822,7 @@ DECLARE schema_oid OID; owner_oid OID; target_oid OID;
 BEGIN
   SELECT relation.relnamespace, relation.relowner INTO schema_oid, owner_oid
     FROM pg_class relation WHERE relation.oid = 'principals'::regclass;
-  IF continuum_invoking_database_role()::regrole::oid <> owner_oid THEN
+  IF (SELECT oid FROM pg_roles WHERE rolname = continuum_invoking_database_role()) <> owner_oid THEN
     RAISE EXCEPTION 'only the migration owner may validate an application role';
   END IF;
   SELECT oid INTO target_oid FROM pg_roles WHERE rolname = target_database_role;
@@ -868,10 +927,11 @@ BEGIN
          AND upper(privilege.privilege_type) = 'EXECUTE'
          AND NOT EXISTS (
            SELECT 1 FROM pg_depend dependency
+           JOIN pg_extension extension ON extension.oid = dependency.refobjid
             WHERE dependency.classid = 'pg_proc'::regclass
               AND dependency.objid = function.oid
               AND dependency.refclassid = 'pg_extension'::regclass
-              AND dependency.deptype = 'e')
+              AND dependency.deptype = 'e' AND extension.extname = 'vector')
     )
     (SELECT * FROM actual EXCEPT SELECT * FROM expected)
     UNION ALL (SELECT * FROM expected EXCEPT SELECT * FROM actual)
@@ -901,10 +961,11 @@ BEGIN
      WHERE function.pronamespace = schema_oid AND privilege.grantee = 0
        AND NOT EXISTS (
          SELECT 1 FROM pg_depend dependency
+         JOIN pg_extension extension ON extension.oid = dependency.refobjid
           WHERE dependency.classid = 'pg_proc'::regclass
             AND dependency.objid = function.oid
             AND dependency.refclassid = 'pg_extension'::regclass
-            AND dependency.deptype = 'e')
+            AND dependency.deptype = 'e' AND extension.extname = 'vector')
   ) OR EXISTS (
     SELECT 1 FROM pg_default_acl defaults
     CROSS JOIN LATERAL aclexplode(defaults.defaclacl) privilege
@@ -964,7 +1025,7 @@ BEGIN
     LOOP
       IF NOT has_function_privilege(target_role.rolname,
                                     vector_function.signature, 'EXECUTE') THEN
-        IF vector_function.proowner = current_user::regrole::oid THEN
+        IF vector_function.proowner = (SELECT oid FROM pg_roles WHERE rolname = current_user) THEN
           EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I',
             vector_function.signature, target_role.rolname);
         ELSE

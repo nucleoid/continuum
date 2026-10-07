@@ -1,17 +1,15 @@
+\set ON_ERROR_STOP on
 \if :{?continuum_sync_role}
 \else
   \echo 'continuum_sync_role must name the expected active sync role'
-  \quit
 \endif
 \if :{?continuum_operator_role}
 \else
   \echo 'continuum_operator_role must name the expected operator role'
-  \quit
 \endif
 \if :{?retired_sync_role}
 \else
   \echo 'retired_sync_role must name the retired sync role'
-  \quit
 \endif
 \if :{?continuum_schema}
 \else

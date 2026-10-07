@@ -1,7 +1,7 @@
+\set ON_ERROR_STOP on
 \if :{?continuum_app_role}
 \else
   \echo 'continuum_app_role must name an existing non-owner role'
-  \quit
 \endif
 \if :{?continuum_schema}
 \else

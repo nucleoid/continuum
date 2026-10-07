@@ -361,7 +361,10 @@ describe('0048 trusted database identity upgrade', () => {
     const migration = await readFile(
       new URL('../../migrations/0051_offboarding_security_contract.sql', import.meta.url), 'utf8',
     );
-    expect(migration).toMatch(/current_user::regrole::oid[\s\S]*rolsuper[\s\S]*rolcreaterole/i);
+    expect(migration).toMatch(
+      /migration_role_oid OID := \(SELECT oid FROM pg_roles WHERE rolname = current_user\)[\s\S]*rolsuper[\s\S]*rolcreaterole/i,
+    );
+    expect(migration).not.toMatch(/current_user::regrole|continuum_invoking_database_role\(\)::regrole/i);
     expect(migration).toMatch(/membership\.member\s*=\s*migration_role_oid/i);
     expect(migration).not.toMatch(/SELECT rolsuper, rolcreaterole INTO[\s\S]{0,100}WHERE oid = owner_oid/i);
   });

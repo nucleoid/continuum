@@ -460,22 +460,26 @@ the role's application authority and login.
 
 ```sh
 psql "$CONTINUUM_MIGRATION_OWNER_URL" \
+  --set=ON_ERROR_STOP=1 \
   --set=continuum_schema=public \
   --set=continuum_app_role=continuum_app \
   --file=scripts/grant-application-role.sql
 
 psql "$CONTINUUM_MIGRATION_OWNER_URL" \
+  --set=ON_ERROR_STOP=1 \
   --set=continuum_schema=public \
   --set=continuum_app_role=continuum_operator \
   --file=scripts/grant-application-role.sql
 
 psql "$CONTINUUM_MIGRATION_OWNER_URL" \
+  --set=ON_ERROR_STOP=1 \
   --set=continuum_schema=public \
   --set=continuum_operator_role=continuum_operator \
   --set=continuum_principal_id='<manual-admin-uuid>' \
   --file=scripts/grant-operator-role.sql
 
 psql "$CONTINUUM_MIGRATION_OWNER_URL" \
+  --set=ON_ERROR_STOP=1 \
   --set=continuum_schema=public \
   --set=continuum_sync_role=continuum_sync \
   --set=continuum_principal_id='<dedicated-service-principal-uuid>' \
@@ -568,6 +572,7 @@ schema names:
 
 ```sh
 psql "$CONTINUUM_MIGRATION_OWNER_URL" \
+  --set=ON_ERROR_STOP=1 \
   --set=continuum_schema=public \
   --set=continuum_sync_role=continuum_sync_next \
   --set=continuum_operator_role=continuum_operator \
