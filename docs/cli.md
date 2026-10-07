@@ -16,7 +16,11 @@ durable unfinished runs before or after maintenance. Every non-dry-run
 no-progress stop, or attempt cap; status 3 means a typed blocking condition
 such as `live_lease`, `detached_quota`, or `lock_busy`. Fatal command failures
 remain status 1. Automation must inspect both the status and the structured
-`incompleteReason`, `reason`, and `blockedUntil` fields.
+`incompleteReason`, `reason`, `blockedUntil`, `resumeRecommended`, and
+`resumeAfter` fields. `no_progress` is a resumable status 2 stop.
+`detached_quota`, `lock_busy`, and `live_lease` are typed status 3 blocks.
+`resumeAfter` is populated only when the database supplied a `blockedUntil`
+timestamp. A false `resumeRecommended` means the command is complete.
 Mapping a legitimately shared personal scope requires the explicit
 `map-user-scope ... --allow-other-active-members` acknowledgement.
 

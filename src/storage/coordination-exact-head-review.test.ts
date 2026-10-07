@@ -158,6 +158,11 @@ describe('coordination exact-head review regressions', () => {
       await expect(operator.query(
         'SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 1)',
         [value.operator.id, value.target.id, value.owned.id],
+      )).rejects.toMatchObject({ code: '0A000' });
+      await operator.query("SET continuum.client_coordination_privacy_version = '4'");
+      await expect(operator.query(
+        'SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 1)',
+        [value.operator.id, value.target.id, value.owned.id],
       )).resolves.toMatchObject({ rows: [{
         continuum_operator_scrub_coordination_principal: {
           complete: false, progressed: false, reason: 'lock_busy',
@@ -427,11 +432,13 @@ describe('coordination exact-head review regressions', () => {
         confirmationScopeId: value.owned.id, batchSize: 100,
       }).finally(() => { offboardingSettled = true; });
       await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(offboardingSettled).toBe(false);
+      expect(offboardingSettled).toBe(true);
       await blocker.query('COMMIT');
       const acquired = await acquire;
       expect(acquired).toMatchObject({ acquired: true });
-      await expect(offboarding).rejects.toThrow(/live coordination leases/i);
+      await expect(offboarding).resolves.toMatchObject({
+        complete: false, progressed: false, reason: 'lock_busy',
+      });
       if (!acquired.acquired) throw new Error('expected acquire-first lease');
       await releaseLease(application, value.target, {
         leaseId: acquired.leaseId, runId: acquireRunId, requestId: randomUUID(),

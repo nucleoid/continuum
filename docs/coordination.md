@@ -304,7 +304,7 @@ vectors. Audit failure rolls back the whole operation.
 
 ## Deployment, mixed versions, and rollback
 
-Apply through migration `0073_coordination_bounded_discovery_and_locking.sql`
+Apply through migration `0075_coordination_online_repair_finish.sql`
 (0064 and 0070 remain concurrent-index steps), then **re-run
 `scripts/grant-application-role.sql`** for every application and dedicated
 operator role. Re-run `scripts/grant-operator-role.sql` immediately afterward
@@ -376,6 +376,24 @@ usage row already held. This behavior applies to direct SQL, current service
 calls, and older compatible binaries that call the stable wrapper signature.
 0073 preserves existing grants on the replaced operator entry points and adds
 no new runtime-role grant requirement.
+
+Migrations 0074 and 0075 are the forward-only repair for existing 0073
+installations. Drain every pre-0074 offboarding and privacy-repair worker before
+applying them. The stable database wrapper refuses an unversioned pre-0074
+client if lock contention occurs, so an old client cannot interpret
+`lock_busy` as successful completion. Keep those workers drained through the
+0075 concurrent index and resumable 1,000-row backfill, then re-run the exact
+grant profiles before restart. Binary rollback to a pre-0074 worker is refused
+for offboarding and privacy repair. Rollback is forward-only: restore a current
+binary or ship another migration, never remove the negotiation guard or mark a
+partial repair complete.
+
+The packaged migrator verifies every pinned published checksum before any
+fresh or upgrade SQL executes. It defers 0073's historical in-transaction
+backfill and performs that work after the 0074 trigger and lifecycle repair
+through 0075's concurrent index and restartable batches. Use the packaged
+migrator for fresh installs and upgrades. Applying 0073 directly with `psql`
+retains its published historical blocking behavior and is unsupported.
 
 The migrator executes SQL using canonical LF line endings while published
 migration verification continues hashing original bytes with only Git CRLF

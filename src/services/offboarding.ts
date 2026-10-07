@@ -20,6 +20,7 @@ function operatorBoundaryError(error: unknown): ServiceError | null {
 
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const SYNC_LOCK_ID = '834641726154302119';
+const COORDINATION_PRIVACY_CLIENT_VERSION = '4';
 export const MAX_OFFBOARD_EVIDENCE_IDS = 100;
 export const DEFAULT_OFFBOARD_BATCH_SIZE = 1_000;
 export const MAX_OFFBOARD_BATCH_SIZE = 5_000;
@@ -131,6 +132,31 @@ export interface CoordinationPrivacyRepairOptions {
   batchSize?: number;
 }
 
+class CoordinationPrivacyLockBusyError extends Error {
+  constructor() {
+    super('coordination privacy lock is busy');
+    this.name = 'CoordinationPrivacyLockBusyError';
+  }
+}
+
+function isCoordinationPrivacyLockBusy(error: unknown): boolean {
+  return error instanceof CoordinationPrivacyLockBusyError
+    || (error as { code?: string }).code === '55P03';
+}
+
+async function setCoordinationPrivacyClientVersion(client: pg.PoolClient): Promise<void> {
+  await client.query(
+    `SET LOCAL continuum.client_coordination_privacy_version = '${COORDINATION_PRIVACY_CLIENT_VERSION}'`,
+  );
+}
+
+async function tryAdvisoryXactLock(
+  client: pg.PoolClient, sql: string, values: unknown[],
+): Promise<void> {
+  const result = await client.query<{ locked: boolean }>(sql, values);
+  if (result.rows[0]?.locked !== true) throw new CoordinationPrivacyLockBusyError();
+}
+
 export async function listCoordinationPrivacyRepairs(
   pool: pg.Pool, actor: Principal, limit = 100, afterPrincipalId?: string,
 ): Promise<CoordinationPrivacyRepairCandidate[]> {
@@ -175,9 +201,12 @@ export async function repairCoordinationPrivacy(
     await client.query('BEGIN');
     await client.query("SET LOCAL lock_timeout = '5s'");
     await client.query("SET LOCAL statement_timeout = '30s'");
+    await setCoordinationPrivacyClientVersion(client);
     await requireOrgAdmin(client, actor.id);
-    await client.query(
-      'SELECT pg_advisory_xact_lock(hashtextextended($1::text, 762))', [principalId],
+    await tryAdvisoryXactLock(
+      client,
+      'SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 762)) AS locked',
+      [principalId],
     );
     const target = await client.query(
       `SELECT principal.id, principal.disabled_at, principal.offboarded_at,
@@ -185,7 +214,7 @@ export async function repairCoordinationPrivacy(
          FROM principals principal
          JOIN principal_user_scopes mapping ON mapping.principal_id = principal.id
         WHERE principal.id = $1 AND principal.kind = 'user'
-        FOR UPDATE OF principal`,
+        FOR UPDATE OF principal NOWAIT`,
       [principalId],
     );
     if (!target.rowCount || target.rows[0].disabled_at === null) {
@@ -244,6 +273,23 @@ export async function repairCoordinationPrivacy(
     };
   } catch (error) {
     await client.query('ROLLBACK');
+    if (isCoordinationPrivacyLockBusy(error)) {
+      const snapshot = await client.query(
+        `SELECT principal.offboarded_at, mapping.scope_id
+           FROM principals principal
+           JOIN principal_user_scopes mapping ON mapping.principal_id = principal.id
+          WHERE principal.id = $1 AND principal.kind = 'user'
+            AND principal.disabled_at IS NOT NULL`,
+        [principalId],
+      );
+      if (snapshot.rowCount && snapshot.rows[0].scope_id === confirmationScopeId) {
+        return {
+          principalId, scopeId: confirmationScopeId,
+          state: snapshot.rows[0].offboarded_at === null ? 'disabled_only' : 'offboarded',
+          complete: false, progressed: false, blockedUntil: null, reason: 'lock_busy',
+        };
+      }
+    }
     throw operatorBoundaryError(error) ?? error;
   } finally {
     client.release();
@@ -755,7 +801,16 @@ export async function offboardPrincipal(
     ? { dryRun: dryRunOrOptions } : dryRunOrOptions;
   const dryRun = options.dryRun ?? false;
   if (dryRun) return previewOffboarding(pool, actor, principalId, options);
-  return offboardPrincipalCore(pool, actor, principalId, options);
+  try {
+    return await offboardPrincipalCore(pool, actor, principalId, options);
+  } catch (error) {
+    if (!isCoordinationPrivacyLockBusy(error)) throw error;
+    const preview = await previewOffboarding(pool, actor, principalId, options);
+    return {
+      ...preview, dryRun: false, complete: false, alreadyOffboarded: false,
+      progressed: false, blockedUntil: null, reason: 'lock_busy',
+    };
+  }
 }
 
 async function previewOffboarding(
@@ -782,10 +837,15 @@ async function offboardPrincipalCore(
     await client.query('BEGIN');
     await client.query("SET LOCAL lock_timeout = '5s'");
     await client.query("SET LOCAL statement_timeout = '30s'");
+    await setCoordinationPrivacyClientVersion(client);
     if (!dryRun) {
-      await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [SYNC_LOCK_ID]);
-      await client.query(
-        'SELECT pg_advisory_xact_lock(hashtextextended($1::text, 762))', [principalId],
+      await tryAdvisoryXactLock(
+        client, 'SELECT pg_try_advisory_xact_lock($1::bigint) AS locked', [SYNC_LOCK_ID],
+      );
+      await tryAdvisoryXactLock(
+        client,
+        'SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 762)) AS locked',
+        [principalId],
       );
     }
     await requireOrgAdmin(client, actor.id);
@@ -811,13 +871,13 @@ async function offboardPrincipalCore(
                 WHERE mapping.principal_id = $1
              )
           ORDER BY principal.id
-          FOR UPDATE`,
+          FOR UPDATE NOWAIT`,
         [principalId],
       );
     }
     const target = await client.query(
       `SELECT id, display_name, disabled_at, offboarded_at, reactivated_at
-         FROM principals WHERE id = $1 AND kind = 'user'${dryRun ? '' : ' FOR UPDATE'}`, [principalId],
+         FROM principals WHERE id = $1 AND kind = 'user'${dryRun ? '' : ' FOR UPDATE NOWAIT'}`, [principalId],
     );
     if (!target.rowCount) throw new ServiceError('INVALID_INPUT', 'user principal not found');
     const mapping = await client.query(
@@ -830,7 +890,7 @@ async function offboardPrincipalCore(
             WHERE principal_id = pus.principal_id AND scope_id = pus.scope_id
             ORDER BY id DESC LIMIT 1
          ) approval ON TRUE
-        WHERE pus.principal_id = $1${dryRun ? '' : ' FOR UPDATE OF pus'}`, [principalId],
+        WHERE pus.principal_id = $1${dryRun ? '' : ' FOR UPDATE OF pus NOWAIT'}`, [principalId],
     );
     if (!mapping.rowCount) {
       throw new ServiceError('CONFLICT', 'principal has no explicit owned user scope mapping');

@@ -15,6 +15,7 @@ const REPAIR_INVALID_INDEX = '-- continuum:repair-invalid-index ';
 const REQUIRE_VALID_INDEX = '-- continuum:require-valid-index ';
 const BACKFILL_OFFBOARDING_SELECTORS = '-- continuum:backfill-offboarding-selectors';
 const BACKFILL_COORDINATION_REPAIR = '-- continuum:backfill-coordination-repair';
+const BACKFILL_COORDINATION_V4 = '-- continuum:backfill-coordination-v4';
 const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
   ['0052_offboarding_review_repair.sql',
     '136cbd834277ca4fbfb48162644738ba2f96f7a5705290cc0c585e3ce7c82079'],
@@ -56,6 +57,12 @@ const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
     '16b4784899e6467c57032b332cc56660c4cfd3c3492296f640f2f232b7de1670'],
   ['0072_coordination_final_review_remediation.sql',
     '9e763a73e16e16ed8b37c9d7c6654f56f62ae96ef62eb9b004ad2b325cd1d4a9'],
+  ['0073_coordination_bounded_discovery_and_locking.sql',
+    'b2f96e35511e563cc9890d871d3910d70a3d99856e233f4da9b151405ef72e7b'],
+  ['0074_coordination_compatibility_and_upgrade_repair.sql',
+    'e3b743394f640ef2db5daeb8596793066a6c4f5c1a6222c50d1b9daff95fbd66'],
+  ['0075_coordination_online_repair_finish.sql',
+    'd1d69f661803f7546ca23234a6babb96a104ad098d4c48e3388ab30bf7d5d9cf'],
 ]);
 const FORWARD_MIGRATION_REQUIREMENTS = new Map([
   ['0053_offboarding_restore_contract.sql', '0052_offboarding_review_repair.sql'],
@@ -94,6 +101,10 @@ const FORWARD_MIGRATION_REQUIREMENTS = new Map([
     '0071_coordination_review_completion.sql'],
   ['0073_coordination_bounded_discovery_and_locking.sql',
     '0072_coordination_final_review_remediation.sql'],
+  ['0074_coordination_compatibility_and_upgrade_repair.sql',
+    '0073_coordination_bounded_discovery_and_locking.sql'],
+  ['0075_coordination_online_repair_finish.sql',
+    '0074_coordination_compatibility_and_upgrade_repair.sql'],
 ]);
 const REVIEW_ENTRA_MIGRATION_RENAMES = [
   ['0005_entra_auth.sql', '0010_entra_auth.sql'],
@@ -123,6 +134,54 @@ function publishedMigrationChecksum(bytes: Buffer): string {
     }
   }
   return checksum.update(bytes.subarray(chunkStart)).digest('hex');
+}
+
+async function verifyPublishedMigration(
+  migrationsDir: string, file: string,
+): Promise<void> {
+  const publishedChecksum = PUBLISHED_MIGRATION_CHECKSUMS.get(file);
+  if (!publishedChecksum) return;
+  const actualChecksum = publishedMigrationChecksum(await readFile(join(migrationsDir, file)));
+  if (actualChecksum !== publishedChecksum) {
+    throw new Error(
+      `Published migration ${file} was modified after publication: `
+      + `expected checksum ${publishedChecksum}, received ${actualChecksum}`,
+    );
+  }
+}
+
+function deferLegacy0073Backfill(sql: string): string {
+  const startMarker = '-- One-time backfill starts from the three dirty indexes';
+  const endMarker = 'CREATE OR REPLACE FUNCTION continuum_coordination_privacy_repair_candidates';
+  const start = sql.indexOf(startMarker);
+  const end = sql.indexOf(endMarker, start);
+  if (start < 0 || end < 0) {
+    throw new Error('published 0073 online-backfill boundary was not found');
+  }
+  return `${sql.slice(0, start)}-- Backfill deferred to online migration 0075.\n\n${sql.slice(end)}`;
+}
+
+async function repairStoredCrLfFunctions(client: pg.PoolClient): Promise<void> {
+  const functions = await client.query<{ definition: string }>(
+    `SELECT pg_get_functiondef(function.oid) AS definition
+       FROM pg_proc function
+      WHERE function.pronamespace = quote_ident(current_schema())::regnamespace
+        AND position(chr(13) IN function.prosrc) > 0
+      ORDER BY function.oid`,
+  );
+  for (const row of functions.rows) {
+    const normalized = row.definition.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+    await client.query(normalized);
+  }
+  const remaining = await client.query<{ count: number }>(
+    `SELECT count(*)::int AS count
+       FROM pg_proc function
+      WHERE function.pronamespace = quote_ident(current_schema())::regnamespace
+        AND position(chr(13) IN function.prosrc) > 0`,
+  );
+  if (remaining.rows[0]?.count !== 0) {
+    throw new Error('stored CRLF function-body repair did not converge');
+  }
 }
 
 function nonTransactionalStatements(sql: string): string[] {
@@ -169,6 +228,21 @@ async function runNonTransactionalStatement(
   client: pg.PoolClient, statement: string,
   deferCoordinationBackfill = false,
 ): Promise<void> {
+  if (statement.split(/\r?\n/).some(
+    (line) => line.trim() === BACKFILL_COORDINATION_V4,
+  )) {
+    await client.query("SET statement_timeout = '5s'");
+    try {
+      for (;;) {
+        const result = await client.query<{ completed: boolean }>(
+          `SELECT continuum_backfill_coordination_v4(1000) AS completed`,
+        );
+        if (result.rows[0]?.completed === true) return;
+      }
+    } finally {
+      await client.query('RESET statement_timeout');
+    }
+  }
   if (statement.split(/\r?\n/).some(
     (line) => line.trim() === BACKFILL_COORDINATION_REPAIR,
   )) {
@@ -263,6 +337,25 @@ export async function runMigrations(
       .filter((f) => f.endsWith('.sql'))
       .sort();
 
+    // Verify every pinned file before consulting the ledger. A modified
+    // pending migration must never get an opportunity to execute.
+    for (const file of files) await verifyPublishedMigration(migrationsDir, file);
+
+    if (files.includes('0074_coordination_compatibility_and_upgrade_repair.sql')) {
+      const compatibility = await client.query<{ before0065: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM _continuum_migrations
+            WHERE name = '0064_coordination_final_online_indexes.sql'
+         ) AND NOT EXISTS (
+           SELECT 1 FROM _continuum_migrations
+            WHERE name = '0065_coordination_review_remediation.sql'
+         ) AS "before0065"`,
+      );
+      if (compatibility.rows[0]?.before0065 === true) {
+        await repairStoredCrLfFunctions(client);
+      }
+    }
+
     for (const file of files) {
     for (const [reviewName, publicName] of REVIEW_ENTRA_MIGRATION_RENAMES) {
       if (!files.includes(publicName)) continue;
@@ -279,17 +372,6 @@ export async function runMigrations(
         [file],
       );
       if (rowCount && rowCount > 0) {
-        const publishedChecksum = PUBLISHED_MIGRATION_CHECKSUMS.get(file);
-        if (publishedChecksum) {
-          const publishedBytes = await readFile(join(migrationsDir, file));
-          const actualChecksum = publishedMigrationChecksum(publishedBytes);
-          if (actualChecksum !== publishedChecksum) {
-            throw new Error(
-              `Published migration ${file} was modified after it was ledgered: `
-              + `expected checksum ${publishedChecksum}, received ${actualChecksum}`,
-            );
-          }
-        }
         continue;
       }
 
@@ -311,8 +393,10 @@ export async function runMigrations(
       // repairs behave identically from Git LF and Windows CRLF checkouts.
       // Published-byte verification remains separate and rejects every change
       // other than Git's CRLF materialization.
-      const sql = (await readFile(join(migrationsDir, file), 'utf8'))
+      const canonicalSql = (await readFile(join(migrationsDir, file), 'utf8'))
         .replaceAll('\r\n', '\n');
+      const sql = file === '0073_coordination_bounded_discovery_and_locking.sql'
+        ? deferLegacy0073Backfill(canonicalSql) : canonicalSql;
       try {
         if (sql.trimStart().startsWith(NO_TRANSACTION_MARKER)) {
           // CREATE INDEX CONCURRENTLY cannot run in a transaction block. Such

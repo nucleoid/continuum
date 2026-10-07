@@ -196,9 +196,6 @@ describe('coordination independent review regressions', () => {
       ...(pool as unknown as { options: PoolConfig }).options, max: 1,
     });
     try {
-      const repairPid = Number((await repairPool.query(
-        'SELECT pg_backend_pid() AS pid',
-      )).rows[0].pid);
       await blocker.query('BEGIN');
       await blocker.query(
         'SELECT pg_advisory_xact_lock(hashtextextended($1::text, 762))', [value.target.id],
@@ -209,22 +206,15 @@ describe('coordination independent review regressions', () => {
         (result) => ({ ok: true as const, result }),
         (error: unknown) => ({ ok: false as const, error }),
       );
-      let waiting = false;
-      for (let attempt = 0; attempt < 100 && !waiting; attempt += 1) {
-        waiting = Boolean((await pool.query(
-          `SELECT wait_event_type = 'Lock' AS waiting
-             FROM pg_stat_activity WHERE pid = $1`, [repairPid],
-        )).rows[0]?.waiting);
-        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-      expect(waiting).toBe(true);
+      await expect(repair).resolves.toMatchObject({
+        ok: true, result: { complete: false, progressed: false, reason: 'lock_busy' },
+      });
       await probe.query('BEGIN');
       await expect(probe.query(
         'SELECT 1 FROM principals WHERE id = $1 FOR UPDATE NOWAIT', [value.target.id],
       )).resolves.toBeDefined();
       await probe.query('ROLLBACK');
       await blocker.query('COMMIT');
-      expect((await repair).ok).toBe(true);
     } finally {
       await probe.query('ROLLBACK').catch(() => undefined);
       await blocker.query('ROLLBACK').catch(() => undefined);
@@ -408,7 +398,7 @@ describe('coordination independent review regressions', () => {
     expect(result).toMatchObject({
       exitCode: 3,
       payload: {
-        complete: false, progressed: false, reason: 'live_lease',
+        complete: false, progressed: true, reason: 'live_lease',
         incompleteReason: 'blocked',
       },
     });
@@ -487,18 +477,20 @@ describe('coordination independent review regressions', () => {
       id, status: 'present' as const, displayName: id,
       memberObjectIds: [targetExternalId],
     }));
+    const scrubber = await pool.connect();
+    await scrubber.query("SET continuum.client_coordination_privacy_version = '4'");
     const [sync, repair, scrub] = await Promise.all([
       syncEntraMemberships(pool, value.operator, snapshots),
       repairCoordinationPrivacy(pool, value.operator, value.target.id, {
         confirmationScopeId: value.owned.id, batchSize: 10,
       }),
-      pool.query(
+      scrubber.query(
         `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 10)`,
         [value.operator.id, value.target.id, value.owned.id],
-      ),
+      ).finally(() => scrubber.release()),
     ]);
     expect(sync.skipCodes).toMatchObject({ DISABLED_PRINCIPAL: 2 });
-    expect(repair.complete || repair.progressed).toBe(true);
+    expect(repair.complete || repair.progressed || repair.reason === 'lock_busy').toBe(true);
     expect(scrub.rowCount).toBe(1);
   }, 30_000);
 });

@@ -241,16 +241,19 @@ describe('coordination final review remediation', () => {
     ]);
   }, 30_000);
 
-  it('plans the generic production function from dirty indexes with 50000 clean rows', async () => {
+  it('plans the generic production function with 50000 clean and reactivated rows', async () => {
     const dirty = await fixture('disabled-dirty-candidate');
     await pool.query(
       'UPDATE principals SET disabled_at = clock_timestamp() WHERE id = $1',
       [dirty.target.id],
     );
     await pool.query(
-      `INSERT INTO principals (id, external_id, kind, display_name, disabled_at)
+      `INSERT INTO principals
+         (id, external_id, kind, display_name, disabled_at, reactivated_at)
        SELECT ('30000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid,
-              $1 || ':' || n, 'user', 'Clean completed target', clock_timestamp()
+              $1 || ':' || n, 'user', 'Clean or reactivated target',
+              CASE WHEN n <= 25000 THEN clock_timestamp() ELSE NULL END,
+              CASE WHEN n > 25000 THEN clock_timestamp() ELSE NULL END
          FROM generate_series(1, 50000) n`,
       [`clean-completed:${randomUUID()}`],
     );
@@ -284,7 +287,7 @@ describe('coordination final review remediation', () => {
     await pool.query(
       `INSERT INTO coordination_principal_privacy_progress
          (principal_id, detached_principal_id, privacy_version, completed_at)
-       VALUES ($1, $2, 3, clock_timestamp())`,
+       VALUES ($1, $2, 2, NULL)`,
       [dirty.target.id, detachedPrincipalId],
     );
     await pool.query(
@@ -305,7 +308,7 @@ describe('coordination final review remediation', () => {
       `SELECT COALESCE(idx_scan, 0)::text AS scans
          FROM pg_stat_user_indexes
         WHERE schemaname = current_schema()
-          AND indexrelname = 'coordination_principal_privacy_repair_idx'`,
+          AND indexrelname = 'coordination_privacy_repair_eligible_idx'`,
     )).rows[0]?.scans ?? '0');
     await pool.query('SET plan_cache_mode = force_generic_plan');
     await pool.query(
@@ -327,7 +330,7 @@ describe('coordination final review remediation', () => {
       `SELECT COALESCE(idx_scan, 0)::text AS scans
          FROM pg_stat_user_indexes
         WHERE schemaname = current_schema()
-          AND indexrelname = 'coordination_principal_privacy_repair_idx'`,
+          AND indexrelname = 'coordination_privacy_repair_eligible_idx'`,
     )).rows[0]?.scans ?? '0');
     expect(scansAfter).toBeGreaterThan(scansBefore);
     expect(await listCoordinationPrivacyRepairs(pool, dirty.operator, 100)).toEqual([{
@@ -413,6 +416,7 @@ describe('coordination final review remediation', () => {
         [detachedPrincipalId],
       );
       await caller.query('BEGIN');
+      await caller.query("SET LOCAL continuum.client_coordination_privacy_version = '4'");
       pending = caller.query(
         `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 10) AS result`,
         [value.operator.id, value.target.id, value.owned.id],
@@ -486,6 +490,7 @@ describe('coordination final review remediation', () => {
     let pending: Promise<pg.QueryResult> | undefined;
     try {
       await firstCaller.query('BEGIN');
+      await firstCaller.query("SET LOCAL continuum.client_coordination_privacy_version = '4'");
       const firstResult = await firstCaller.query(
         `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 10) AS result`,
         [first.operator.id, first.target.id, first.owned.id],
@@ -493,6 +498,7 @@ describe('coordination final review remediation', () => {
       expect(firstResult.rows[0].result.progressed).toBe(true);
 
       await secondCaller.query('BEGIN');
+      await secondCaller.query("SET LOCAL continuum.client_coordination_privacy_version = '4'");
       pending = secondCaller.query(
         `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 10) AS result`,
         [first.operator.id, second.id, secondOwned.id],

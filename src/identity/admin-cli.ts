@@ -123,7 +123,7 @@ async function main(): Promise<void> {
         attempts += 1;
       }
       if (!dryRun && !result.complete && (result.blockedUntil || result.reason !== null)) {
-        incompleteReason = 'blocked';
+        incompleteReason = result.reason === 'no_progress' ? 'no_progress' : 'blocked';
       } else if (!dryRun && once && !result.complete) {
         incompleteReason = 'single_batch';
       } else if (!dryRun && !once && !result.complete && !result.blockedUntil
@@ -132,6 +132,8 @@ async function main(): Promise<void> {
       }
       process.stdout.write(`${JSON.stringify({
         operation, attempts, incompleteReason,
+        resumeRecommended: incompleteReason !== null,
+        resumeAfter: result.blockedUntil?.toISOString() ?? null,
         ...result,
       })}\n`);
       if (incompleteReason !== null) {
@@ -197,7 +199,7 @@ async function main(): Promise<void> {
         attempts += 1;
       }
       if (!result.complete && (result.blockedUntil || result.reason !== null)) {
-        incompleteReason = 'blocked';
+        incompleteReason = result.reason === 'no_progress' ? 'no_progress' : 'blocked';
       } else if (once && !result.complete) {
         incompleteReason = 'single_batch';
       } else if (!once && !result.complete && !result.blockedUntil
@@ -205,7 +207,10 @@ async function main(): Promise<void> {
         incompleteReason = 'attempt_limit';
       }
       process.stdout.write(`${JSON.stringify({
-        operation, attempts, incompleteReason, ...result,
+        operation, attempts, incompleteReason,
+        resumeRecommended: incompleteReason !== null,
+        resumeAfter: result.blockedUntil?.toISOString() ?? null,
+        ...result,
       })}\n`);
       if (incompleteReason !== null) {
         process.exitCode = incompleteReason === 'blocked' ? 3 : 2;

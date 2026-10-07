@@ -233,7 +233,7 @@ describe('runMigrations', () => {
     const files = (await readdir(join(process.cwd(), 'migrations')))
       .filter((name) => name.endsWith('.sql'))
       .sort();
-    expect(files.slice(-20)).toEqual([
+    expect(files.slice(-22)).toEqual([
       '0054_coordination_leases.sql',
       '0055_coordination_review_remediation.sql',
       '0056_coordination_final_remediation.sql',
@@ -254,6 +254,8 @@ describe('runMigrations', () => {
       '0071_coordination_review_completion.sql',
       '0072_coordination_final_review_remediation.sql',
       '0073_coordination_bounded_discovery_and_locking.sql',
+      '0074_coordination_compatibility_and_upgrade_repair.sql',
+      '0075_coordination_online_repair_finish.sql',
     ]);
     const migration = await readFile(
       join(process.cwd(), 'migrations/0054_coordination_leases.sql'),
@@ -588,9 +590,9 @@ describe('runMigrations', () => {
 
   it('rejects tampering in every ledgered issue-7 migration', async () => {
     const names = (await readdir(join(process.cwd(), 'migrations')))
-      .filter((name) => /^(?:005[4-9]|006\d|007[0-2])_.*\.sql$/.test(name))
+      .filter((name) => /^(?:005[4-9]|006\d|007[0-5])_.*\.sql$/.test(name))
       .sort();
-    expect(names).toHaveLength(19);
+    expect(names).toHaveLength(22);
     const schema = `migrator_issue7_checksums_${Date.now()}`;
     const admin = new pg.Pool({ connectionString: DATABASE_URL });
     pools.push(admin);
@@ -760,7 +762,7 @@ describe('runMigrations', () => {
         $$;
       `);
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-42).map((migration) => migration.name)).toEqual([
+      expect(applied.slice(-44).map((migration) => migration.name)).toEqual([
         '0032_offboarding_round7_compatibility.sql',
         '0033_offboarding_bounded_selectors.sql',
         '0034_offboarding_completion_invariants.sql',
@@ -803,6 +805,8 @@ describe('runMigrations', () => {
         '0071_coordination_review_completion.sql',
         '0072_coordination_final_review_remediation.sql',
         '0073_coordination_bounded_discovery_and_locking.sql',
+        '0074_coordination_compatibility_and_upgrade_repair.sql',
+        '0075_coordination_online_repair_finish.sql',
       ]);
       expect((await pool.query(
         `SELECT disabled_at IS NOT NULL AS disabled FROM principals
@@ -1067,7 +1071,9 @@ describe('runMigrations', () => {
       && name !== '0070_coordination_linkable_audit_index.sql'
       && name !== '0071_coordination_review_completion.sql'
       && name !== '0072_coordination_final_review_remediation.sql'
-      && name !== '0073_coordination_bounded_discovery_and_locking.sql')) {
+      && name !== '0073_coordination_bounded_discovery_and_locking.sql'
+      && name !== '0074_coordination_compatibility_and_upgrade_repair.sql'
+      && name !== '0075_coordination_online_repair_finish.sql')) {
       if (file === '0038_offboarding_search_path_hardening.sql') {
         await copyFile(
           new URL(
@@ -1508,7 +1514,7 @@ describe('runMigrations', () => {
            FROM pg_proc function
           WHERE function.oid =
             'continuum_coordination_privacy_repair_candidates(uuid,uuid,integer)'::regprocedure`,
-      )).rows).toEqual([{ proconfig: null, public_execute: false }]);
+      )).rows).toEqual([{ proconfig: [expected], public_execute: false }]);
     } finally {
       await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
     }

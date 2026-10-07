@@ -1,7 +1,10 @@
 import { createHash } from 'node:crypto';
-import { readFile, readdir } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import pg from 'pg';
+import { runMigrations } from './migrator.js';
 
 const root = process.cwd();
 const preserved = new Map([
@@ -63,6 +66,40 @@ describe('issue 7 second independent review remediation', () => {
     expect(service).toMatch(/55P03[\s\S]*lock_busy|lock_busy[\s\S]*55P03/i);
   });
 
+  it('rejects a tampered pinned migration before fresh execution', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-pending-pin-'));
+    await writeFile(
+      join(directory, '0073_coordination_bounded_discovery_and_locking.sql'),
+      Buffer.concat([
+        await readFile(join(root, 'migrations/0073_coordination_bounded_discovery_and_locking.sql')),
+        Buffer.from('\n-- pending tamper\n'),
+      ]),
+    );
+    const admin = new pg.Pool({
+      connectionString: process.env.CONTINUUM_TEST_DATABASE_URL
+        ?? 'postgres://continuum:continuum@localhost:5433/continuum',
+    });
+    const schema = `pending_pin_${Date.now()}`;
+    await admin.query(`CREATE SCHEMA "${schema}"`);
+    const pool = new pg.Pool({
+      ...(admin as unknown as { options: pg.PoolConfig }).options,
+      options: `-c search_path=${schema},public`, max: 1,
+    });
+    try {
+      await expect(runMigrations(pool, directory)).rejects.toThrow(
+        /0073.*modified|0073.*checksum|published migration/i,
+      );
+      expect((await pool.query(
+        `SELECT to_regclass(format('%I.coordination_privacy_dirty_principals',
+          current_schema())) AS relation`,
+      )).rows).toEqual([{ relation: null }]);
+    } finally {
+      await pool.end();
+      await admin.query(`DROP SCHEMA "${schema}" CASCADE`);
+      await admin.end();
+    }
+  });
+
   it('documents drain, rollback refusal, exact status reasons, and truthful resume fields', async () => {
     const coordination = await readFile(join(root, 'docs/coordination.md'), 'utf8');
     const offboarding = await readFile(join(root, 'docs/offboarding.md'), 'utf8');
@@ -75,4 +112,96 @@ describe('issue 7 second independent review remediation', () => {
     expect(cli).toMatch(/detached_quota[\s\S]*lock_busy[\s\S]*status 3|status 3[\s\S]*detached_quota[\s\S]*lock_busy/i);
     expect(cli).toMatch(/resumeRecommended/i);
   });
+
+  it('repairs function bodies stored as CRLF by a real 0064 database', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-pre0065-crlf-'));
+    const migrations = join(root, 'migrations');
+    for (const name of (await readdir(migrations)).filter((name) => name.endsWith('.sql'))) {
+      await writeFile(join(directory, name), await readFile(join(migrations, name)));
+    }
+    const admin = new pg.Pool({
+      connectionString: process.env.CONTINUUM_TEST_DATABASE_URL
+        ?? 'postgres://continuum:continuum@localhost:5433/continuum',
+    });
+    const schema = `pre0065_crlf_${Date.now()}`;
+    await admin.query(`CREATE SCHEMA "${schema}"`);
+    const pool = new pg.Pool({
+      ...(admin as unknown as { options: pg.PoolConfig }).options,
+      options: `-c search_path=${schema},public`, max: 1,
+    });
+    try {
+      const through0064 = await mkdtemp(join(tmpdir(), 'continuum-through0064-'));
+      for (const name of (await readdir(migrations))
+        .filter((name) => name.endsWith('.sql')
+          && name <= '0064_coordination_final_online_indexes.sql')) {
+        await writeFile(join(through0064, name), await readFile(join(migrations, name)));
+      }
+      await runMigrations(pool, through0064);
+      const definition = String((await pool.query(
+        `SELECT pg_get_functiondef(
+          'continuum_operator_scrub_coordination_principal(uuid,uuid,uuid,integer)'::regprocedure
+        ) AS definition`,
+      )).rows[0].definition).replaceAll(/(?<!\r)\n/g, '\r\n');
+      await pool.query(definition);
+      expect((await pool.query(
+        `SELECT position(chr(13) IN prosrc) > 0 AS stored_crlf
+           FROM pg_proc
+          WHERE oid = 'continuum_operator_scrub_coordination_principal(uuid,uuid,uuid,integer)'::regprocedure`,
+      )).rows).toEqual([{ stored_crlf: true }]);
+      await runMigrations(pool, directory);
+      expect((await pool.query(
+        `SELECT count(*)::int AS remaining
+           FROM pg_proc
+          WHERE pronamespace = quote_ident(current_schema())::regnamespace
+            AND position(chr(13) IN prosrc) > 0`,
+      )).rows).toEqual([{ remaining: 0 }]);
+      await pool.query(
+        `INSERT INTO principals (id, external_id, kind, display_name, disabled_at)
+         SELECT ('51000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid,
+                'restart:' || n, 'user', 'Restart candidate', clock_timestamp()
+           FROM generate_series(1, 2001) n`,
+      );
+      await pool.query(
+        `INSERT INTO coordination_principal_privacy_progress
+           (principal_id, detached_principal_id, privacy_version, completed_at)
+         SELECT ('51000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid,
+                '00000000-0000-4000-8000-000000000012', 2, NULL
+           FROM generate_series(1, 2001) n`,
+      );
+      await pool.query(
+        `UPDATE coordination_principal_privacy_progress
+            SET repair_eligible = NULL
+          WHERE principal_id::text LIKE '51000000-%';
+         UPDATE coordination_v4_backfill_state
+            SET last_principal_id = NULL, completed = FALSE`,
+      );
+      expect((await pool.query(
+        `SELECT continuum_backfill_coordination_v4(1000) AS completed`,
+      )).rows).toEqual([{ completed: false }]);
+      const resumed = new pg.Pool({
+        ...(admin as unknown as { options: pg.PoolConfig }).options,
+        options: `-c search_path=${schema},public`, max: 1,
+      });
+      try {
+        expect((await resumed.query(
+          `SELECT continuum_backfill_coordination_v4(1000) AS completed`,
+        )).rows).toEqual([{ completed: false }]);
+        expect((await resumed.query(
+          `SELECT continuum_backfill_coordination_v4(1000) AS completed`,
+        )).rows).toEqual([{ completed: true }]);
+      } finally {
+        await resumed.end();
+      }
+      expect((await pool.query(
+        `SELECT count(*)::int AS remaining
+           FROM coordination_principal_privacy_progress
+          WHERE principal_id::text LIKE '51000000-%'
+            AND repair_eligible IS NULL`,
+      )).rows).toEqual([{ remaining: 0 }]);
+    } finally {
+      await pool.end();
+      await admin.query(`DROP SCHEMA "${schema}" CASCADE`);
+      await admin.end();
+    }
+  }, 120_000);
 });

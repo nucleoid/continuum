@@ -65,6 +65,8 @@ try {
     'migrations/0008_decision_supersession_validation.sql',
     'migrations/0009_decision_supersession_unique_index.sql',
     'migrations/0073_coordination_bounded_discovery_and_locking.sql',
+    'migrations/0074_coordination_compatibility_and_upgrade_repair.sql',
+    'migrations/0075_coordination_online_repair_finish.sql',
     'bin/continuum-migrate.mjs',
     'scripts/ensure-scope.mjs',
     'scripts/create-scope-operator.sql',

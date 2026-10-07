@@ -118,3 +118,30 @@ Windows runner or independent reviewer was invoked. The CRLF contract is
 covered by converting the complete migration chain in the test fixture and
 executing that chain, not by source-text proxy. Final commit/tree, protected
 file parity, and clean status are reported after commit.
+
+## Second-review addendum
+
+The fresh review of input HEAD `03c50646b106d29fea671d5bac109b436d73ff9f`
+produced tests/docs RED `d72e15ae4df0b80d0ffe459fdf30b882df729bd9`
+(tree `dff66697c0f0a558bf681755974878d738f9f45e`). Forward migrations
+0074 and 0075 add explicit mixed-version contention refusal, lifecycle-indexed
+repair discovery, stored-CRLF repair, and a concurrent-index/restartable
+backfill. The migrator verifies pinned bytes before pending SQL and defers the
+published 0073 bulk backfill to 0075 without changing 0054 through 0073.
+
+Accepted second-review receipts include: focused RED 1 control/3 failures;
+focused remediation and real 0064-CRLF/reconnected backfill 6/6; exact-head
+two-session contention and mixed-version refusal 6/6; migrator fresh, upgrade,
+CRLF, checksum, custom-schema, and grant coverage 44/44; independent
+contention 10/10; REST/MCP/offboarding/CLI adjacency 128 passed/1 intentional
+skip; production `force_generic_plan` with 50,000 clean/reactivated rows 1/1;
+TypeScript build; packed CLI install/runtime smoke; and npm pack dry-run.
+
+Excluded second-review receipts are the expected RED run, implementation
+iterations that exposed and corrected `max(uuid)`, stale version constraints,
+and old direct-SQL test negotiation, plus a whole-suite run invalidated by
+shared test-database bloat and two unrelated sync-role retirement failures.
+Those two failures reproduce in their isolated rotation-security file and no
+rotation, identity, workflow, lockfile, or grant-script production source was
+changed by this remediation. They are residual repository/test-environment
+risks, not acceptance evidence for issue 7.
