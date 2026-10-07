@@ -156,7 +156,9 @@ describe('principal reactivation database trust boundary', () => {
     const quotedRole = `"${role}"`;
     await pool.query(`CREATE ROLE ${quotedRole} NOLOGIN`);
     try {
-      await pool.query(`GRANT ${quotedRole} TO CURRENT_USER`);
+      await pool.query(
+        `GRANT ${quotedRole} TO CURRENT_USER WITH ADMIN OPTION, SET FALSE, INHERIT FALSE`,
+      );
       await applyApplicationRoleGrants(pool, role);
       await applyOperatorRoleGrants(pool, role, admin.id);
 
@@ -313,7 +315,9 @@ describe('principal reactivation database trust boundary', () => {
     await pool.query(`CREATE ROLE ${quotedRole} NOLOGIN`);
     let rolePool: pg.Pool | undefined;
     try {
-      await pool.query(`GRANT ${quotedRole} TO CURRENT_USER`);
+      await pool.query(
+        `GRANT ${quotedRole} TO CURRENT_USER WITH ADMIN OPTION, SET FALSE, INHERIT FALSE`,
+      );
       await applyApplicationRoleGrants(pool, role);
       await applyOperatorRoleGrants(pool, role, admin.id);
       rolePool = new pg.Pool({
@@ -607,7 +611,9 @@ describe('principal reactivation database trust boundary', () => {
     await pool.query(`CREATE ROLE ${quotedRole} NOLOGIN`);
     let rolePool: pg.Pool | undefined;
     try {
-      await pool.query(`GRANT ${quotedRole} TO CURRENT_USER`);
+      await pool.query(
+        `GRANT ${quotedRole} TO CURRENT_USER WITH ADMIN OPTION, SET FALSE, INHERIT FALSE`,
+      );
       await applyApplicationRoleGrants(pool, role);
       await applyOperatorRoleGrants(pool, role, admin.id);
       rolePool = new pg.Pool({
