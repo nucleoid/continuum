@@ -1,8 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import pg, { type PoolConfig } from 'pg';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { offboardPrincipal, mapOwnedUserScope } from '../services/offboarding.js';
+import { acquireLease, releaseLease, renewLease } from '../services/coordination.js';
 import { addMembership } from './memberships.js';
 import { createPrincipal } from './principals.js';
 import { createScope, getScopeByRef } from './scopes.js';
@@ -78,18 +80,31 @@ describe('coordination exact-head review regressions', () => {
   it('preserves audit-retention and offboarding evidence while scrubbing coordination metadata', async () => {
     const value = await privacyFixture('audit-selector');
     const shared = await createScope(pool, { kind: 'project', name: 'audit-selector-shared' });
+    const lockRequestId = randomUUID();
+    const lockRunId = randomUUID();
+    const retentionRequestId = randomUUID();
+    const retentionRunId = randomUUID();
+    const offboardingRequestId = randomUUID();
+    const offboardingRunId = randomUUID();
     const ids = (await pool.query(
       `INSERT INTO audit_log (principal_id, action, scope_id, metadata) VALUES
        ($1, 'write', $2, jsonb_build_object('operation', 'lock_acquire',
-         'request_id', gen_random_uuid(), 'run_id', gen_random_uuid(),
+         'request_id', $3::uuid, 'run_id', $4::uuid,
          'resource_sha256', repeat('c', 64))),
        ($1, 'write', NULL, jsonb_build_object('source', 'audit-retention',
-         'run_id', gen_random_uuid(), 'request_id', gen_random_uuid(), 'evidence', 'retain-me')),
+         'run_id', $5::uuid, 'request_id', $6::uuid, 'evidence', 'retain-me')),
        ($1, 'write', NULL, jsonb_build_object('operation', 'offboarding_scope_access_closed',
-         'run_id', gen_random_uuid(), 'request_id', gen_random_uuid(), 'evidence', 'offboarding-intact'))
-       RETURNING id::text`, [value.target.id, shared.id],
+         'run_id', $7::uuid, 'request_id', $8::uuid, 'evidence', 'offboarding-intact'))
+       RETURNING id::text`, [
+        value.target.id, shared.id, lockRequestId, lockRunId,
+        retentionRunId, retentionRequestId, offboardingRunId, offboardingRequestId,
+      ],
     )).rows.map((row) => row.id as string);
-    await pool.query('UPDATE principals SET disabled_at = clock_timestamp() WHERE id = $1', [value.target.id]);
+    await pool.query(
+      `UPDATE principals SET disabled_at = clock_timestamp(),
+              offboarded_at = clock_timestamp()
+        WHERE id = $1`, [value.target.id],
+    );
     const operator = await createOperator(value.operator.id);
     try {
       await expect(operator.query(
@@ -99,10 +114,14 @@ describe('coordination exact-head review regressions', () => {
       const rows = (await pool.query(
         'SELECT id::text, metadata FROM audit_log WHERE id = ANY($1::bigint[]) ORDER BY id', [ids],
       )).rows;
-      expect(rows[0].metadata).not.toHaveProperty('run_id');
-      expect(rows[1].metadata).toMatchObject({ source: 'audit-retention', evidence: 'retain-me' });
-      expect(rows[2].metadata).toMatchObject({
+      expect(rows[0].metadata).toEqual({ operation: 'lock_acquire' });
+      expect(rows[1].metadata).toEqual({
+        source: 'audit-retention', evidence: 'retain-me',
+        request_id: retentionRequestId, run_id: retentionRunId,
+      });
+      expect(rows[2].metadata).toEqual({
         operation: 'offboarding_scope_access_closed', evidence: 'offboarding-intact',
+        request_id: offboardingRequestId, run_id: offboardingRunId,
       });
     } finally { await operator.end(); }
   });
@@ -147,7 +166,7 @@ describe('coordination exact-head review regressions', () => {
     }
   });
 
-  it('re-scrubs completed-v1 coordination privacy before reporting complete', async () => {
+  it('offboards real lock audit rows across batches and reports repair work honestly', async () => {
     const admin = await createPrincipal(pool, {
       externalId: 'operator:completed-v1', kind: 'user', displayName: 'Operator',
     });
@@ -161,29 +180,65 @@ describe('coordination exact-head review regressions', () => {
     await addMembership(pool, target.id, owned.id, 'writer');
     await addMembership(pool, target.id, shared.id, 'writer');
     await mapOwnedUserScope(pool, admin, target.id, owned.id);
-    let result = await offboardPrincipal(pool, admin, target.id, { confirmationScopeId: owned.id });
-    while (!result.complete) {
-      result = await offboardPrincipal(pool, admin, target.id, { confirmationScopeId: owned.id });
+    for (const resource of ['completed-v1-a', 'completed-v1-b']) {
+      const runId = randomUUID();
+      const acquired = await acquireLease(pool, target, {
+        scope: 'project:completed-v1-shared', resource, runId,
+        requestId: randomUUID(), ttlSeconds: 300,
+      });
+      if (!acquired.acquired) throw new Error('expected real coordination acquisition');
+      await renewLease(pool, target, {
+        leaseId: acquired.leaseId, runId, requestId: randomUUID(), ttlSeconds: 300,
+      });
+      await releaseLease(pool, target, {
+        leaseId: acquired.leaseId, runId, requestId: randomUUID(),
+      });
     }
-    await pool.query('ALTER TABLE coordination_resources DISABLE TRIGGER USER');
-    await pool.query('ALTER TABLE coordination_leases DISABLE TRIGGER USER');
-    try {
-      await pool.query(
-        `INSERT INTO coordination_resources (scope_id, resource, fencing_token)
-         VALUES ($1, 'completed-v1-stale', 7)`, [shared.id],
-      );
-      await pool.query(
-        `INSERT INTO coordination_leases
-           (lease_id, scope_id, resource, principal_id, run_id, fencing_token,
-            acquired_at, expires_at, released_at, cleanup_eligible_at)
-         VALUES (gen_random_uuid(), $1, 'completed-v1-stale', $2, gen_random_uuid(), 7,
-                 '2000-01-01', '2000-01-01', '2000-01-01', '2000-01-01')`,
-        [shared.id, target.id],
-      );
-    } finally {
-      await pool.query('ALTER TABLE coordination_leases ENABLE TRIGGER USER');
-      await pool.query('ALTER TABLE coordination_resources ENABLE TRIGGER USER');
+    const evidenceRequestId = randomUUID();
+    const evidenceRunId = randomUUID();
+    const evidenceId = String((await pool.query(
+      `INSERT INTO audit_log (principal_id, action, metadata)
+       VALUES ($1, 'write', jsonb_build_object(
+         'source', 'audit-retention', 'evidence', 'unrelated-offboarding-evidence',
+         'request_id', $2::uuid, 'run_id', $3::uuid)) RETURNING id`,
+      [target.id, evidenceRequestId, evidenceRunId],
+    )).rows[0].id);
+    const realAuditRows = Number((await pool.query(
+      `SELECT count(*)::int AS count FROM audit_log
+        WHERE principal_id = $1 AND metadata->>'operation' LIKE 'lock_%'`,
+      [target.id],
+    )).rows[0].count);
+    expect(realAuditRows).toBeGreaterThan(1);
+
+    let result = await offboardPrincipal(pool, admin, target.id, {
+      confirmationScopeId: owned.id, batchSize: 1,
+    });
+    expect(result.alreadyOffboarded).toBe(false);
+    let calls = 1;
+    while (!result.complete && calls < 100) {
+      result = await offboardPrincipal(pool, admin, target.id, {
+        confirmationScopeId: owned.id, batchSize: 1,
+      });
+      calls += 1;
     }
+    expect(result.complete).toBe(true);
+    expect(result.alreadyOffboarded).toBe(false);
+    expect(calls).toBeGreaterThan(1);
+    expect((await pool.query(
+      `SELECT bool_and(NOT metadata ?| ARRAY[
+         'request_id','run_id','lease_id','resource','resource_sha256'
+       ]) AS scrubbed
+         FROM audit_log
+        WHERE principal_id = $1 AND metadata->>'operation' LIKE 'lock_%'`,
+      [target.id],
+    )).rows).toEqual([{ scrubbed: true }]);
+    expect((await pool.query(
+      'SELECT metadata FROM audit_log WHERE id = $1', [evidenceId],
+    )).rows[0].metadata).toEqual({
+      source: 'audit-retention', evidence: 'unrelated-offboarding-evidence',
+      request_id: evidenceRequestId, run_id: evidenceRunId,
+    });
+
     await pool.query(
       `UPDATE coordination_principal_privacy_progress
           SET privacy_version = 1, completed_at = clock_timestamp(), audit_cursor_id = 0
@@ -192,15 +247,7 @@ describe('coordination exact-head review regressions', () => {
     result = await offboardPrincipal(pool, admin, target.id, {
       confirmationScopeId: owned.id, batchSize: 1,
     });
-    while (!result.complete) {
-      result = await offboardPrincipal(pool, admin, target.id, {
-        confirmationScopeId: owned.id, batchSize: 1,
-      });
-    }
-    expect((await pool.query(
-      'SELECT count(*)::int AS count FROM coordination_leases WHERE principal_id = $1',
-      [target.id],
-    )).rows).toEqual([{ count: 0 }]);
+    expect(result).toMatchObject({ complete: true, alreadyOffboarded: false });
     expect((await pool.query(
       `SELECT privacy_version, completed_at IS NOT NULL AS complete
          FROM coordination_principal_privacy_progress WHERE principal_id = $1`, [target.id],
@@ -228,9 +275,9 @@ describe('coordination exact-head review regressions', () => {
     try {
       const scrubberPid = Number((await scrubber.query('SELECT pg_backend_pid() AS pid')).rows[0].pid);
       await membershipWriter.query('BEGIN');
-      await membershipWriter.query(
-        'SELECT pg_advisory_xact_lock(hashtextextended($1::text, 761))', [shared.id],
-      );
+      await membershipWriter.query('SELECT 1 FROM principals WHERE id = $1 FOR UPDATE', [
+        value.target.id,
+      ]);
       const scrubResult = scrubber.query(
         'SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 1)',
         [value.operator.id, value.target.id, value.owned.id],

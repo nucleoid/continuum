@@ -304,11 +304,17 @@ vectors. Audit failure rolls back the whole operation.
 
 ## Deployment, mixed versions, and rollback
 
-Apply through migration `0064_coordination_final_online_indexes.sql`, then **re-run
+Apply through migration `0065_coordination_review_remediation.sql` (0064 remains
+the concurrent-index step), then **re-run
 `scripts/grant-application-role.sql`** for every application and dedicated
 operator role. Re-run `scripts/grant-operator-role.sql` immediately afterward
 for dedicated operators. The exact role verifier deliberately rejects both
 missing coordination grants and broader manual grants.
+
+Do not run the current offboarding binary against a database below 0063: it
+requires the versioned coordination privacy state introduced there. During a
+rolling application upgrade, finish database migration and exact grant-profile
+convergence before enabling offboarding on any current node.
 
 The schema supports 0056 and current writers concurrently. A database
 `BEFORE INSERT` guard clamps a 0056-style contended acquire receipt from its
@@ -345,14 +351,24 @@ scopes, including team, project, organization, role, and another user's scope,
 remain shared state, but retained leases and receipts are moved to an
 installation-wide detached principal and their run IDs and payload hashes are
 independently randomized in bounded batches. The detached identity is disabled.
-Joinable request and lease identifiers are removed from the offboarded
-principal's shared-scope audit metadata.
+Shared-scope handling is independent of scope kind: team, project, role,
+organization, and another user's scope are all retained while the departing
+principal's lease/receipt identity is detached. Lock audit metadata is reduced
+to `operation`, `outcome`, `fencing_token`, `resource_bytes`, `transport`, and
+`own_lease`; request, run, lease, resource, resource digest, and unknown keys
+are removed. Unrelated immutable retention/offboarding evidence is untouched.
 Privacy version 2 reopens progress previously completed by 0059 or 0060 and
 re-scrubs every shared kind, including role and another user's scope. Audit
 metadata advances on a durable `(principal_id,id)` cursor and completion is
 recorded only after an empty page proves exhaustion. Operators may restart the
 same offboarding command after timeout or interruption; counters and cursors
 resume without rescanning completed pages.
+`list-incomplete-offboarding` does not discover a completed historical run that
+0063 reopened only for privacy v2. The migration owner must additionally list
+`coordination_principal_privacy_progress` rows with `privacy_version < 2 OR
+completed_at IS NULL`, then rerun the ordinary confirmed offboarding command
+for each mapped principal until complete. Runtime roles receive only a
+least-privilege state function and no direct progress-table privileges.
 Completion is not recorded until owned-scope erasure and shared-scope
 detachment are both complete. Append-only coordination operator events survive
 audit retention and offboarding. Lock audit metadata retains operation evidence
@@ -363,9 +379,14 @@ Direct scope pseudonymization requires zero active memberships and zero live
 leases. Direct principal scrubbing additionally requires a disabled or
 offboarded target, its exact mapped owned user scope, and never reassigns a live
 lease. Started, per-batch, and completed evidence is written to immutable
-operator events. Membership insertion, activation, deactivation, and scope
-movement share the same per-scope advisory lock as pseudonymization and shared
-history scrubbing; no-op active updates do not lock. An explicit principal reactivation may reopen its
+operator events. Principal lifecycle serialization precedes scope serialization.
+Membership insertion, activation, deactivation, disablement, offboarding,
+reactivation, pseudonymization, and shared-history scrubbing all follow
+principal-before-scope order. Membership writes take the per-scope advisory lock
+only when principal or scope privacy progress exists; an ordered scope-row gate
+closes the progress creation race without consuming one transaction advisory
+lock per ordinary membership write. No-op active updates do not lock. An
+explicit principal reactivation may reopen its
 mapped owned user scope; it does not restore detached historical identities.
 
 Release always commits when otherwise authorized. Exact replay remains

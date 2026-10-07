@@ -1,5 +1,5 @@
 import { copyFile, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pg from 'pg';
@@ -61,7 +61,7 @@ describe('runMigrations', () => {
     const files = (await readdir(join(process.cwd(), 'migrations')))
       .filter((name) => name.endsWith('.sql'))
       .sort();
-    expect(files.slice(-11)).toEqual([
+    expect(files.slice(-12)).toEqual([
       '0054_coordination_leases.sql',
       '0055_coordination_review_remediation.sql',
       '0056_coordination_final_remediation.sql',
@@ -73,6 +73,7 @@ describe('runMigrations', () => {
       '0062_coordination_forward_online_finish.sql',
       '0063_coordination_final_privacy_repair.sql',
       '0064_coordination_final_online_indexes.sql',
+      '0065_coordination_review_remediation.sql',
     ]);
     const migration = await readFile(
       join(process.cwd(), 'migrations/0054_coordination_leases.sql'),
@@ -89,6 +90,118 @@ describe('runMigrations', () => {
     expect(migration).toMatch(/DEFERRABLE INITIALLY DEFERRED/);
     expect(migration).toMatch(/fencing_token\s+BIGINT/);
   });
+
+  it('upgrades a reachable completed-v1 principal and re-scrubs offboarded lock audit', async () => {
+    const suffix = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const schema = `coordination_v1_rescrub_${suffix}`;
+    const role = `coordination_v1_operator_${suffix}`;
+    const quotedRole = `"${role}"`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    await admin.query(`CREATE ROLE ${quotedRole} NOLOGIN`);
+    const pool = schemaPool(schema);
+    const before = await mkdtemp(join(tmpdir(), 'continuum-before-0063-'));
+    directories.push(before);
+    const source = new URL('../../migrations/', import.meta.url);
+    const files = (await readdir(source)).filter((name) => name.endsWith('.sql')).sort();
+    await Promise.all(files
+      .filter((name) => name <= '0062_coordination_forward_online_finish.sql')
+      .map((name) => copyFile(new URL(name, source), join(before, name))));
+    try {
+      await runMigrations(pool, before);
+      const operatorId = randomUUID();
+      const targetId = randomUUID();
+      const ownedId = randomUUID();
+      const sharedId = randomUUID();
+      const auditRequestId = randomUUID();
+      const auditRunId = randomUUID();
+      await pool.query(
+        `INSERT INTO principals (id, external_id, kind, display_name) VALUES
+         ($1, $2, 'user', 'Upgrade operator'),
+         ($3, $4, 'user', 'Upgrade target')`,
+        [operatorId, `operator:${suffix}`, targetId, `target:${suffix}`],
+      );
+      await pool.query(
+        `INSERT INTO scopes (id, kind, name) VALUES
+         ($1, 'user', $2), ($3, 'project', $4)`,
+        [ownedId, `owned-${suffix}`, sharedId, `shared-${suffix}`],
+      );
+      await pool.query(
+        `INSERT INTO scope_memberships (principal_id, scope_id, role, active) VALUES
+         ($1, continuum_org_scope_id(), 'admin', TRUE),
+         ($2, $3, 'writer', FALSE), ($2, $4, 'writer', FALSE)`,
+        [operatorId, targetId, ownedId, sharedId],
+      );
+      await pool.query(
+        `INSERT INTO principal_user_scopes
+           (principal_id, scope_id, mapped_by, acknowledged_principal_ids,
+            acknowledged_evidence_hash)
+         VALUES ($1, $2, $3, '{}'::uuid[], repeat('a', 64))`,
+        [targetId, ownedId, operatorId],
+      );
+      await pool.query(
+        `INSERT INTO coordination_principal_privacy_progress
+           (principal_id, detached_principal_id, completed_at)
+         VALUES ($1, '00000000-0000-4000-8000-000000000012', clock_timestamp())`,
+        [targetId],
+      );
+      const auditId = String((await pool.query(
+        `INSERT INTO audit_log (principal_id, action, scope_id, metadata)
+         VALUES ($1, 'write', $2, jsonb_build_object(
+           'operation', 'lock_acquire', 'outcome', 'acquired',
+           'request_id', $3::uuid, 'run_id', $4::uuid,
+           'lease_id', gen_random_uuid(), 'fencing_token', '8',
+           'resource_bytes', 12, 'transport', 'rest', 'own_lease', TRUE,
+           'resource_sha256', repeat('c', 64))) RETURNING id`,
+        [targetId, sharedId, auditRequestId, auditRunId],
+      )).rows[0].id);
+      await pool.query(
+        `UPDATE principals SET disabled_at = clock_timestamp(),
+                offboarded_at = clock_timestamp() WHERE id = $1`, [targetId],
+      );
+      await pool.query(
+        'SELECT continuum_register_trusted_database_identity($1::name, $2, TRUE, FALSE)',
+        [role, operatorId],
+      );
+      await pool.query(`GRANT USAGE ON SCHEMA ${schema} TO ${quotedRole}`);
+      await pool.query(
+        `GRANT EXECUTE ON FUNCTION continuum_operator_scrub_coordination_principal(
+           UUID, UUID, UUID, INTEGER
+         ) TO ${quotedRole}`,
+      );
+      await admin.query(
+        `GRANT ${quotedRole} TO CURRENT_USER WITH ADMIN OPTION, SET FALSE, INHERIT FALSE`,
+      );
+
+      await runMigrations(pool, join(process.cwd(), 'migrations'));
+      expect((await pool.query(
+        `SELECT privacy_version, completed_at IS NULL AS reopened
+           FROM coordination_principal_privacy_progress WHERE principal_id = $1`,
+        [targetId],
+      )).rows).toEqual([{ privacy_version: 1, reopened: true }]);
+      const rolePool = new pg.Pool({
+        connectionString: DATABASE_URL,
+        max: 1,
+        options: `-c search_path=${schema},public -c role=${role}`,
+      });
+      pools.push(rolePool);
+      await expect(rolePool.query(
+        `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 1)`,
+        [operatorId, targetId, ownedId],
+      )).resolves.toBeDefined();
+      expect((await pool.query(
+        'SELECT metadata FROM audit_log WHERE id = $1', [auditId],
+      )).rows).toEqual([{ metadata: {
+        operation: 'lock_acquire', outcome: 'acquired', fencing_token: '8',
+        resource_bytes: 12, transport: 'rest', own_lease: true,
+      } }]);
+    } finally {
+      await admin.query(`REVOKE ${quotedRole} FROM CURRENT_USER`).catch(() => undefined);
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined);
+      await admin.query(`DROP ROLE IF EXISTS ${quotedRole}`).catch(() => undefined);
+    }
+  }, 60_000);
 
   it('profiles coordination grants against the configured custom schema', async () => {
     const suffix = `${Date.now()}_${Math.random().toString(16).slice(2)}`;

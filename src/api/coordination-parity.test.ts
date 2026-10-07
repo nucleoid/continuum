@@ -268,6 +268,67 @@ describe('coordination REST/MCP parity', () => {
   });
 
   it.each([
+    {
+      name: 'invalid scope plus wrong resource type',
+      rest: { scope: 'nonsense', resource: 7 },
+      mcp: { scope: 'nonsense', resource: 7 },
+    },
+    {
+      name: 'unknown key',
+      rest: { scope: 'project:parity', resource: 'unknown-key', unexpected: true },
+      mcp: { scope: 'project:parity', resource: 'unknown-key', unexpected: true },
+    },
+  ])('keeps malformed-input precedence identical for $name', async (sample) => {
+    const rest = await request(createApp(pool))
+      .post('/api/v0/locks/acquire')
+      .set('Authorization', 'Bearer service:coordination-parity')
+      .send({
+        ...sample.rest, runId: randomUUID(), requestId: randomUUID(), ttlSeconds: 300,
+      });
+    const mcp = await client.callTool({
+      name: 'continuum.lock_acquire',
+      arguments: {
+        ...sample.mcp, run_id: randomUUID(), request_id: randomUUID(), ttl_seconds: 300,
+      },
+    }) as ToolResult;
+    expect(rest.status).toBe(400);
+    expect(rest.body).toMatchObject({ code: 'INVALID_INPUT', error: 'Invalid coordination input' });
+    expect(mcp.isError).toBe(true);
+    expect(toolJson(mcp)).toEqual({
+      error: { code: 'INVALID_INPUT', message: 'Invalid coordination input' },
+    });
+  });
+
+  it('rejects an own __proto__ key through both transports', async () => {
+    const restBody = JSON.parse(JSON.stringify({
+      scope: 'project:parity', resource: 'rest-proto',
+      runId: randomUUID(), requestId: randomUUID(), ttlSeconds: 300,
+      ['__proto__']: { polluted: true },
+    })) as Record<string, unknown>;
+    const mcpBody = JSON.parse(JSON.stringify({
+      scope: 'project:parity', resource: 'mcp-proto',
+      run_id: randomUUID(), request_id: randomUUID(), ttl_seconds: 300,
+      ['__proto__']: { polluted: true },
+    })) as Record<string, unknown>;
+    expect(Object.hasOwn(restBody, '__proto__')).toBe(true);
+    expect(Object.hasOwn(mcpBody, '__proto__')).toBe(true);
+    const rest = await request(createApp(pool))
+      .post('/api/v0/locks/acquire')
+      .set('Authorization', 'Bearer service:coordination-parity')
+      .set('Content-Type', 'application/json')
+      .send(JSON.stringify(restBody));
+    const mcp = await client.callTool({
+      name: 'continuum.lock_acquire', arguments: mcpBody,
+    }) as ToolResult;
+    expect(rest.status).toBe(400);
+    expect(rest.body).toMatchObject({ code: 'INVALID_INPUT', error: 'Invalid coordination input' });
+    expect(mcp.isError).toBe(true);
+    expect(toolJson(mcp)).toEqual({
+      error: { code: 'INVALID_INPUT', message: 'Invalid coordination input' },
+    });
+  });
+
+  it.each([
     { name: 'missing field', remove: 'request_id' },
     { name: 'extra field', extra: true },
   ])('returns the service INVALID_INPUT envelope for MCP $name', async (sample) => {

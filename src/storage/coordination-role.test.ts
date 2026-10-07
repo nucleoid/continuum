@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import pg, { type PoolConfig } from 'pg';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import { acquireLease, releaseLease } from '../services/coordination.js';
+import { acquireLease, releaseLease, renewLease } from '../services/coordination.js';
 import { canonicalOperationHash } from '../coordination/model.js';
 import { addMembership } from './memberships.js';
 import { createPrincipal } from './principals.js';
@@ -181,6 +181,55 @@ describe('coordination database role profiles', () => {
     }
   });
 
+  it('runs acquire, renew, and release for fresh Entra authorization as the app role', async () => {
+    const principal = await createPrincipal(pool, {
+      externalId: 'service:app-role-entra-coordination', kind: 'service',
+      displayName: 'Entra app',
+    });
+    const scope = await createScope(pool, { kind: 'project', name: 'app-role-entra' });
+    await addMembership(pool, principal.id, scope.id, 'writer');
+    const groupId = randomUUID();
+    await pool.query(
+      `INSERT INTO entra_groups
+         (external_id, display_name, scope_id, role, approved_by, approved_at)
+       VALUES ($1, 'App role coordination group', $2, 'writer', $3, clock_timestamp())`,
+      [groupId, scope.id, principal.id],
+    );
+    await pool.query(
+      `UPDATE scope_memberships
+          SET source_kind = 'entra', source_id = $3, synced_at = clock_timestamp()
+        WHERE principal_id = $1 AND scope_id = $2`,
+      [principal.id, scope.id, groupId],
+    );
+    await pool.query(
+      `UPDATE entra_sync_state SET last_success_at = clock_timestamp(),
+              last_attempt_at = clock_timestamp(), last_failure_at = NULL,
+              last_failure_code = NULL WHERE singleton`,
+    );
+    const app = await createApplicationRole();
+    try {
+      expect((await pool.query(
+        `SELECT has_table_privilege($1, 'entra_sync_state', 'UPDATE') AS allowed`,
+        [app.role],
+      )).rows).toEqual([{ allowed: false }]);
+      const runId = randomUUID();
+      const acquired = await acquireLease(app.connection, principal, {
+        scope: 'project:app-role-entra', resource: 'entra-resource', runId,
+        requestId: randomUUID(), ttlSeconds: 300,
+      });
+      expect(acquired).toMatchObject({ acquired: true });
+      if (!acquired.acquired) throw new Error('expected Entra-backed acquisition');
+      await expect(renewLease(app.connection, principal, {
+        leaseId: acquired.leaseId, runId, requestId: randomUUID(), ttlSeconds: 300,
+      })).resolves.toMatchObject({ renewed: true });
+      await expect(releaseLease(app.connection, principal, {
+        leaseId: acquired.leaseId, runId, requestId: randomUUID(),
+      })).resolves.toEqual({ released: true });
+    } finally {
+      await app.connection.end();
+    }
+  });
+
   it('preserves every retained release replay when later releases reach quota', async () => {
     const principal = await createPrincipal(pool, {
       externalId: 'service:release-replay-quota', kind: 'service', displayName: 'Replay',
@@ -254,6 +303,18 @@ describe('coordination database role profiles', () => {
       continuum_operator_role: operator.role,
       continuum_principal_id: operatorPrincipal.id,
     });
+    await expect(applyGrantScript(pool, 'grant-application-role.sql', {
+      continuum_app_role: operator.role,
+    })).resolves.toBeUndefined();
+    expect((await pool.query(
+      `SELECT has_function_privilege(
+         $1, 'continuum_operator_scrub_coordination_principal(uuid,uuid,uuid,integer)',
+         'EXECUTE') AS allowed`, [operator.role],
+    )).rows).toEqual([{ allowed: false }]);
+    await expect(applyGrantScript(pool, 'grant-operator-role.sql', {
+      continuum_operator_role: operator.role,
+      continuum_principal_id: operatorPrincipal.id,
+    })).resolves.toBeUndefined();
     try {
       const lowRunId = randomUUID();
       const low = await acquireLease(operator.connection, operatorPrincipal, {
@@ -487,14 +548,6 @@ describe('coordination database role profiles', () => {
     });
     const scope = await createScope(pool, { kind: 'project', name: 'privacy-lock' });
     await addMembership(pool, principal.id, scope.id, 'writer');
-    await pool.query(
-      `UPDATE scope_memberships SET active = FALSE
-        WHERE principal_id = $1 AND scope_id = $2`, [principal.id, scope.id],
-    );
-    await pool.query(
-      `INSERT INTO coordination_scope_privacy_progress (scope_id, pseudonym)
-       VALUES ($1, 'privacy-lock')`, [scope.id],
-    );
     const locker = await pool.connect();
     const contender = await pool.connect();
     try {
@@ -502,11 +555,20 @@ describe('coordination database role profiles', () => {
       await locker.query(
         `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 761))`, [scope.id],
       );
+      await contender.query("SET lock_timeout = '100ms'");
       await expect(contender.query(
         `UPDATE scope_memberships SET active = FALSE
           WHERE principal_id = $1 AND scope_id = $2`, [principal.id, scope.id],
       )).resolves.toMatchObject({ rowCount: 1 });
-      await contender.query("SET lock_timeout = '100ms'");
+      await locker.query('ROLLBACK');
+      await pool.query(
+        `INSERT INTO coordination_scope_privacy_progress (scope_id, pseudonym)
+         VALUES ($1, 'privacy-lock')`, [scope.id],
+      );
+      await locker.query('BEGIN');
+      await locker.query(
+        `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 761))`, [scope.id],
+      );
       await expect(contender.query(
         `UPDATE scope_memberships SET active = TRUE
           WHERE principal_id = $1 AND scope_id = $2`, [principal.id, scope.id],

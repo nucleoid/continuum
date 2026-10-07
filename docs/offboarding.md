@@ -123,17 +123,33 @@ before each resource batch is deleted. Durable scope progress prevents a retry
 from rescanning completed phases. A live lease stops the operation; expiry or
 explicit release is required before resource deletion.
 
-Team, project, and organization resources remain intact. Their historical
+Team, project, role, organization, and other users' resources remain intact. Their historical
 leases and receipts are detached from the departing principal in batches of at
 most 1,000, moved to a noninteractive installation identity, and assigned fresh
 random run IDs and payload hashes. This preserves fencing and shared resource
 availability without retaining the principal beside plaintext coordination
-identifiers. Role scopes are outside this shared-scope detachment policy.
+identifiers. Every non-owned scope kind follows this shared-scope detachment
+policy; scope kind does not exempt retained coordination history.
 `scope_cleanup_complete` is written only after both owned-scope erasure and
 shared-scope detachment report durable completion. Preserved `lock_*` audit
-metadata excludes `resource_sha256`; immutable coordination operator events
+metadata retains only `operation`, `outcome`, `fencing_token`,
+`resource_bytes`, `transport`, and `own_lease`. It removes request, run, lease,
+resource, resource-digest, and unknown metadata keys. This canonical shape is
+also the only update accepted by the immutable offboarded-audit tombstone
+guard. Unrelated audit-retention and offboarding evidence keeps its own
+allowlisted request/run identifiers. Immutable coordination operator events
 record direct pseudonymization start and completion outside ordinary audit
 retention and offboarding mutation.
+
+Migration 0063 reopens every version-1 coordination privacy row by clearing its
+completion timestamp. `list-incomplete-offboarding` reports unfinished durable
+offboarding runs, but a previously completed run can require only this upgrade
+re-scrub and therefore is not in that list. After upgrade, operators must also
+query `coordination_principal_privacy_progress` as the migration owner for rows
+where `privacy_version < 2 OR completed_at IS NULL`, map each principal to its
+owned user scope, and rerun the normal `offboard-principal --confirm-scope`
+command until it returns `complete: true`. Application and operator roles get
+only the narrow privacy-state function used by that command, not table reads.
 
 Offboarding is not globally atomic across all batches. Until `complete: true`,
 audit rows beyond the current keyset cursors can still contain raw query text and
