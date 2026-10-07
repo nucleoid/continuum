@@ -64,15 +64,22 @@ ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 
 CREATE TABLE IF NOT EXISTS continuum_retired_sync_database_identities (
   database_role_oid OID PRIMARY KEY,
-  database_role NAME NOT NULL UNIQUE,
+  database_role NAME NOT NULL,
   retired_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE continuum_retired_sync_database_identities
+  DROP CONSTRAINT IF EXISTS continuum_retired_sync_database_identities_database_role_key;
 REVOKE ALL ON TABLE continuum_retired_sync_database_identities FROM PUBLIC;
 CREATE TABLE IF NOT EXISTS continuum_unresolved_retired_sync_database_identities (
-  database_role NAME PRIMARY KEY,
+  database_role NAME NOT NULL,
   previous_database_role_oid OID NOT NULL,
-  marked_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  marked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (database_role, previous_database_role_oid)
 );
+ALTER TABLE continuum_unresolved_retired_sync_database_identities
+  DROP CONSTRAINT IF EXISTS continuum_unresolved_retired_sync_database_identities_pkey,
+  ADD CONSTRAINT continuum_unresolved_retired_sync_database_identities_pkey
+    PRIMARY KEY (database_role, previous_database_role_oid);
 REVOKE ALL ON TABLE continuum_unresolved_retired_sync_database_identities FROM PUBLIC;
 
 -- Capability tables are transaction-local markers. Maintenance mode guarantees
@@ -895,6 +902,21 @@ BEGIN
   SELECT namespace.nspname INTO schema_name
     FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
    WHERE relation.oid = 'principals'::regclass;
+  -- A role name can be deliberately reused only as a new OID-bound identity.
+  -- Preserve prior generations outside the live retired-role registry before
+  -- the new generation can later be retired under the same name.
+  INSERT INTO continuum_unresolved_retired_sync_database_identities
+    (database_role, previous_database_role_oid, marked_at)
+  SELECT history.database_role, history.database_role_oid, history.retired_at
+    FROM continuum_retired_sync_database_identities history
+   WHERE history.database_role = target_database_role
+     AND history.database_role_oid <> target_oid
+  ON CONFLICT (database_role, previous_database_role_oid) DO UPDATE SET
+    marked_at = LEAST(
+      continuum_unresolved_retired_sync_database_identities.marked_at,
+      EXCLUDED.marked_at);
+  DELETE FROM continuum_retired_sync_database_identities
+   WHERE database_role = target_database_role AND database_role_oid <> target_oid;
   PERFORM continuum_retire_sync_database_identities(target_oid);
   EXECUTE format('REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I FROM %I',
     schema_name, target_database_role);
@@ -1220,6 +1242,67 @@ BEGIN
   SELECT database_role, restored_oid, principal_id, can_approve, can_sync, created_at
     FROM continuum_active_identity_rebind_plan;
 
+  -- A retired generation with the same name as an active restored identity is
+  -- historical, not the active role. Archive it before resolving retirement.
+  INSERT INTO continuum_unresolved_retired_sync_database_identities
+    (database_role, previous_database_role_oid, marked_at)
+  SELECT history.database_role, history.database_role_oid, history.retired_at
+    FROM continuum_retired_sync_database_identities history
+    JOIN continuum_active_identity_rebind_plan active
+      ON active.database_role = history.database_role
+   WHERE history.database_role_oid <> active.restored_oid
+  ON CONFLICT (database_role, previous_database_role_oid) DO UPDATE SET
+    marked_at = LEAST(
+      continuum_unresolved_retired_sync_database_identities.marked_at,
+      EXCLUDED.marked_at);
+  DELETE FROM continuum_retired_sync_database_identities history
+   USING continuum_active_identity_rebind_plan active
+   WHERE history.database_role = active.database_role
+     AND history.database_role_oid <> active.restored_oid;
+
+  -- A later restore stage may recreate a previously unresolved retired role.
+  -- Resolve exactly one archived generation when the name is not active.
+  CREATE TEMP TABLE continuum_unresolved_identity_rebind_plan ON COMMIT DROP AS
+    SELECT unresolved.database_role, unresolved.previous_database_role_oid,
+           unresolved.marked_at, role.oid AS restored_oid
+      FROM continuum_unresolved_retired_sync_database_identities unresolved
+      JOIN pg_roles role ON role.rolname = unresolved.database_role
+      LEFT JOIN continuum_active_identity_rebind_plan active
+        ON active.database_role = unresolved.database_role
+      LEFT JOIN continuum_retired_sync_database_identities current_history
+        ON current_history.database_role = unresolved.database_role
+     WHERE active.database_role IS NULL
+       AND current_history.database_role IS NULL;
+  IF EXISTS (
+    SELECT database_role FROM continuum_unresolved_identity_rebind_plan
+     GROUP BY database_role HAVING count(*) <> 1
+  ) OR EXISTS (
+    SELECT restored_oid FROM continuum_unresolved_identity_rebind_plan
+     GROUP BY restored_oid HAVING count(*) <> 1
+  ) OR EXISTS (
+    SELECT 1 FROM continuum_unresolved_identity_rebind_plan plan
+    JOIN continuum_retired_sync_database_identities history
+      ON history.database_role_oid = plan.restored_oid
+     AND history.database_role <> plan.database_role
+  ) THEN
+    RAISE EXCEPTION 'unresolved retired database identity restore mapping is ambiguous';
+  END IF;
+  INSERT INTO continuum_retired_sync_database_identities
+    (database_role_oid, database_role, retired_at)
+  SELECT restored_oid, database_role, marked_at
+    FROM continuum_unresolved_identity_rebind_plan
+  ON CONFLICT (database_role_oid) DO UPDATE SET
+    database_role = EXCLUDED.database_role,
+    retired_at = LEAST(
+      continuum_retired_sync_database_identities.retired_at,
+      EXCLUDED.retired_at);
+  DELETE FROM continuum_unresolved_retired_sync_database_identities unresolved
+   USING continuum_unresolved_identity_rebind_plan plan
+   WHERE unresolved.database_role = plan.database_role
+     AND unresolved.previous_database_role_oid = plan.previous_database_role_oid;
+  SELECT changed_count + count(*) INTO changed_count
+    FROM continuum_unresolved_identity_rebind_plan;
+
   CREATE TEMP TABLE continuum_retired_identity_rebind_plan ON COMMIT DROP AS
     SELECT history.database_role, history.database_role_oid AS previous_oid,
            role.oid AS restored_oid, history.retired_at
@@ -1238,18 +1321,13 @@ BEGIN
     (database_role, previous_database_role_oid)
   SELECT database_role, previous_oid FROM continuum_retired_identity_rebind_plan
    WHERE restored_oid IS NULL
-  ON CONFLICT (database_role) DO UPDATE SET
-    previous_database_role_oid = EXCLUDED.previous_database_role_oid,
+  ON CONFLICT (database_role, previous_database_role_oid) DO UPDATE SET
     marked_at = now();
   DELETE FROM continuum_retired_sync_database_identities;
   INSERT INTO continuum_retired_sync_database_identities
     (database_role_oid, database_role, retired_at)
   SELECT restored_oid, database_role, retired_at
     FROM continuum_retired_identity_rebind_plan WHERE restored_oid IS NOT NULL;
-  DELETE FROM continuum_unresolved_retired_sync_database_identities unresolved
-   USING continuum_retired_identity_rebind_plan plan
-   WHERE unresolved.database_role = plan.database_role
-     AND plan.restored_oid IS NOT NULL;
   SELECT changed_count + count(*) INTO changed_count
     FROM continuum_retired_identity_rebind_plan
    WHERE restored_oid IS DISTINCT FROM previous_oid;

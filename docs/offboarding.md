@@ -467,7 +467,9 @@ installation already recorded the earlier 0048 revision, run the checked
 `scripts/retire-sync-role.sql` as the migration owner for that exact old role
 before starting 0051-aware processes. The script refuses an active trusted
 identity, membership edges, and application-object ownership before revoking
-the role's application authority and login.
+the role's application authority and login. The additional legacy phrase is
+required only for the pre-history 0048 case; it is a second operator
+confirmation that the reviewed name and OID are the removed legacy sync role.
 
 ```sh
 psql "$CONTINUUM_MIGRATION_OWNER_URL" \
@@ -475,6 +477,7 @@ psql "$CONTINUUM_MIGRATION_OWNER_URL" \
   --set=continuum_schema=public \
   --set=retired_sync_role=continuum_sync_old \
   --set=confirm_retired_sync_role_oid='<reviewed-pg_roles-oid>' \
+  --set=confirm_legacy_unrecorded_sync_role='RETIRE UNRECORDED LEGACY SYNC ROLE' \
   --file=scripts/retire-sync-role.sql
 ```
 
@@ -609,7 +612,8 @@ expected operator matches its exact application-plus-operator profile with no
 column or trigger privilege drift, and a supplied retired role both exists and
 is `NOLOGIN` without membership, schema, relation, sequence, or function
 authority. Retired sync identities are recorded by immutable role OID in an
-owner-only history table and every recorded identity is checked automatically;
+owner-only history table and every recorded identity is checked automatically,
+including detection when a dropped name is recreated with another OID;
 `--set=retired_sync_role=...` remains available for legacy roles that predate
 that history and should be omitted after that legacy role is dropped. The exact
 least-privilege owner ADMIN edge (`ADMIN OPTION, SET FALSE, INHERIT FALSE`) is
@@ -643,7 +647,11 @@ and revalidates isolation before committing. Active and retired identities are
 planned and rewritten as complete sets, so swapped or cyclic OID assignments do
 not collide. Retired names that were intentionally dropped are moved to an
 owner-only unresolved-history ledger instead of retaining an OID that may now
-belong to another role; verification fails if one of those names is recreated.
+belong to another role. Re-run the same rebind command if global roles are
+restored in stages: a uniquely resolved retired name is moved back into live
+history. Earlier generations of a deliberately reused active sync-role name
+remain archived by name and old OID; any unbound recreation still fails
+verification.
 
 This is an application-data boundary. Operators must separately apply their
 documented retention policy to encrypted database backups, database/WAL logs,

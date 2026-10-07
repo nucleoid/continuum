@@ -7,6 +7,10 @@
 \else
   \echo 'confirm_retired_sync_role_oid must equal the reviewed PostgreSQL role OID'
 \endif
+\if :{?confirm_legacy_unrecorded_sync_role}
+\else
+  \set confirm_legacy_unrecorded_sync_role ''
+\endif
 \if :{?continuum_schema}
 \else
   \set continuum_schema public
@@ -19,25 +23,28 @@ BEGIN;
 CREATE TEMP TABLE continuum_retired_sync_input (
   retired_sync NAME NOT NULL,
   confirmed_oid OID NOT NULL,
-  application_schema NAME NOT NULL
+  application_schema NAME NOT NULL,
+  legacy_confirmation TEXT NOT NULL
 ) ON COMMIT DROP;
 INSERT INTO continuum_retired_sync_input
 VALUES (:'retired_sync_role', :'confirm_retired_sync_role_oid'::oid,
-        :'continuum_schema');
+        :'continuum_schema', :'confirm_legacy_unrecorded_sync_role');
 
 DO $retire$
 DECLARE
   retired_sync NAME;
   confirmed_oid OID;
   application_schema NAME;
+  legacy_confirmation TEXT;
   retired_oid OID;
   schema_oid OID;
   owner_oid OID;
   active_identity BOOLEAN;
   recorded_sync_history BOOLEAN;
 BEGIN
-  SELECT input.retired_sync, input.confirmed_oid, input.application_schema
-    INTO retired_sync, confirmed_oid, application_schema
+  SELECT input.retired_sync, input.confirmed_oid, input.application_schema,
+         input.legacy_confirmation
+    INTO retired_sync, confirmed_oid, application_schema, legacy_confirmation
     FROM continuum_retired_sync_input input;
   SELECT role.oid INTO retired_oid FROM pg_roles role WHERE role.rolname = retired_sync;
   IF retired_oid IS NULL THEN
@@ -66,8 +73,9 @@ BEGIN
           AND history.database_role = $2
      )', application_schema
   ) INTO recorded_sync_history USING retired_oid, retired_sync;
-  IF NOT recorded_sync_history THEN
-    RAISE EXCEPTION 'refusing to retire a role without recorded sync history';
+  IF NOT recorded_sync_history
+     AND legacy_confirmation <> 'RETIRE UNRECORDED LEGACY SYNC ROLE' THEN
+    RAISE EXCEPTION 'unrecorded legacy sync role requires exact legacy confirmation';
   END IF;
   IF EXISTS (
     SELECT 1 FROM pg_auth_members membership

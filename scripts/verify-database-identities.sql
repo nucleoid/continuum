@@ -46,6 +46,7 @@ DECLARE
   active_sync_valid BOOLEAN;
   operator_valid BOOLEAN;
   unresolved_retired_name_reused BOOLEAN;
+  retired_name_is_active BOOLEAN;
   retired_identity RECORD;
 BEGIN
   SELECT input.application_role, input.active_sync, input.expected_operator, input.retired_sync,
@@ -94,7 +95,16 @@ BEGIN
     'SELECT EXISTS (
        SELECT 1 FROM %I.continuum_unresolved_retired_sync_database_identities unresolved
        JOIN pg_roles role ON role.rolname = unresolved.database_role
-     )', application_schema
+       WHERE NOT EXISTS (
+         SELECT 1 FROM %I.continuum_trusted_database_identities active
+          WHERE active.database_role = unresolved.database_role
+            AND active.database_role_oid = role.oid
+       ) AND NOT EXISTS (
+         SELECT 1 FROM %I.continuum_retired_sync_database_identities history
+          WHERE history.database_role = unresolved.database_role
+            AND history.database_role_oid = role.oid
+       )
+     )', application_schema, application_schema, application_schema
   ) INTO unresolved_retired_name_reused;
   IF unresolved_retired_name_reused THEN
     RAISE EXCEPTION 'an unresolved retired sync role name was recreated after logical restore';
@@ -102,9 +112,6 @@ BEGIN
   FOR retired_identity IN EXECUTE format(
     'SELECT history.database_role_oid, history.database_role
        FROM %I.continuum_retired_sync_database_identities history
-       JOIN pg_roles bound_role
-         ON bound_role.oid = history.database_role_oid
-        AND bound_role.rolname = history.database_role
      UNION
      SELECT role.oid, role.rolname FROM pg_roles role
       WHERE $1 <> '''' AND role.rolname = $1', application_schema
@@ -115,10 +122,23 @@ BEGIN
        WHERE role.rolname = retired_identity.database_role
          AND role.oid <> retired_identity.database_role_oid
     ) THEN
+      EXECUTE format(
+        'SELECT EXISTS (
+           SELECT 1 FROM %I.continuum_trusted_database_identities active
+           JOIN pg_roles role ON role.oid = active.database_role_oid
+            WHERE active.database_role = $1
+              AND role.rolname = $1
+         )', application_schema
+      ) INTO retired_name_is_active USING retired_identity.database_role;
+      IF retired_name_is_active THEN
+        CONTINUE;
+      END IF;
       RAISE EXCEPTION 'retired sync role name was reused by a different OID';
     END IF;
     IF NOT EXISTS (
-      SELECT 1 FROM pg_roles role WHERE role.oid = retired_identity.database_role_oid
+      SELECT 1 FROM pg_roles role
+       WHERE role.oid = retired_identity.database_role_oid
+         AND role.rolname = retired_identity.database_role
     ) THEN
       CONTINUE;
     END IF;

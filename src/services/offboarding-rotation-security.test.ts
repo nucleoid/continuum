@@ -194,16 +194,19 @@ describe('sync database identity rotation security', () => {
       await expect(applyGrantScript(pool, 'retire-sync-role.sql', {
         continuum_schema: 'public', retired_sync_role: oldRole,
         confirm_retired_sync_role_oid: '0',
+        confirm_legacy_unrecorded_sync_role: '',
       })).rejects.toThrow(/confirmation|OID/i);
       await expect(applyGrantScript(pool, 'retire-sync-role.sql', {
         continuum_schema: 'public', retired_sync_role: oldRole,
         confirm_retired_sync_role_oid: oldRoleOid,
+        confirm_legacy_unrecorded_sync_role: '',
       })).resolves.toBeUndefined();
       await expect(applyGrantScript(pool, 'retire-sync-role.sql', {
         continuum_schema: 'public', retired_sync_role: nextRole,
         confirm_retired_sync_role_oid: (await pool.query(
           'SELECT oid::text FROM pg_roles WHERE rolname = $1', [nextRole],
         )).rows[0].oid,
+        confirm_legacy_unrecorded_sync_role: '',
       })).rejects.toThrow(/active trusted database identity/i);
       await pool.query(
         'GRANT ' + quoteRole(oldRole)
@@ -614,7 +617,8 @@ describe('sync database identity rotation security', () => {
       await expect(applyGrantScript(pool, 'retire-sync-role.sql', {
         continuum_schema: 'public', retired_sync_role: appRole,
         confirm_retired_sync_role_oid: appOid,
-      })).rejects.toThrow(/recorded sync history|previously bound sync role/i);
+        confirm_legacy_unrecorded_sync_role: '',
+      })).rejects.toThrow(/recorded sync history|previously bound sync role|legacy.*confirmation/i);
     } finally {
       await pool.query('REVOKE ' + quoteRole(appRole) + ' FROM CURRENT_USER');
       await dropRoles(pool, [appRole]);
