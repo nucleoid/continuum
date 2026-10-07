@@ -304,7 +304,7 @@ vectors. Audit failure rolls back the whole operation.
 
 ## Deployment, mixed versions, and rollback
 
-Apply through migration `0062_coordination_forward_online_finish.sql`, then **re-run
+Apply through migration `0064_coordination_final_online_indexes.sql`, then **re-run
 `scripts/grant-application-role.sql`** for every application and dedicated
 operator role. Re-run `scripts/grant-operator-role.sql` immediately afterward
 for dedicated operators. The exact role verifier deliberately rejects both
@@ -329,6 +329,13 @@ complete. Every node must run a binary that calls
 re-enable, apply all forward migrations, re-run the grant scripts and identity
 verifier, and resume with the retained counters.
 
+Migration 0061 contains the historical installation-wide receipt-counter
+recount and takes coordination table locks. An installation upgrading from
+0060 or earlier must apply 0061 in a maintenance window with coordination
+traffic stopped; later migrations cannot make already executed DDL online.
+Migrations 0063 and 0064 perform no installation-wide recount. Their privacy
+work is restartable, keyset-bounded, and backed by concurrently built indexes.
+
 Offboarding first deactivates every owned-scope membership and disables the
 principal in the same transaction. The owned user scope is then erased in
 bounded receipt, lease, and resource phases. Each call processes at most 1,000
@@ -340,6 +347,12 @@ installation-wide detached principal and their run IDs and payload hashes are
 independently randomized in bounded batches. The detached identity is disabled.
 Joinable request and lease identifiers are removed from the offboarded
 principal's shared-scope audit metadata.
+Privacy version 2 reopens progress previously completed by 0059 or 0060 and
+re-scrubs every shared kind, including role and another user's scope. Audit
+metadata advances on a durable `(principal_id,id)` cursor and completion is
+recorded only after an empty page proves exhaustion. Operators may restart the
+same offboarding command after timeout or interruption; counters and cursors
+resume without rescanning completed pages.
 Completion is not recorded until owned-scope erasure and shared-scope
 detachment are both complete. Append-only coordination operator events survive
 audit retention and offboarding. Lock audit metadata retains operation evidence
@@ -350,9 +363,9 @@ Direct scope pseudonymization requires zero active memberships and zero live
 leases. Direct principal scrubbing additionally requires a disabled or
 offboarded target, its exact mapped owned user scope, and never reassigns a live
 lease. Started, per-batch, and completed evidence is written to immutable
-operator events. Membership writes
-take the privacy advisory lock only while progress exists; no-op active updates
-do not lock. An explicit principal reactivation may reopen its
+operator events. Membership insertion, activation, deactivation, and scope
+movement share the same per-scope advisory lock as pseudonymization and shared
+history scrubbing; no-op active updates do not lock. An explicit principal reactivation may reopen its
 mapped owned user scope; it does not restore detached historical identities.
 
 Release always commits when otherwise authorized. Exact replay remains

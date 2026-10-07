@@ -76,6 +76,13 @@ DECLARE schema_name TEXT := current_setting('continuum.application_grant_schema'
         target_role NAME := current_setting('continuum.application_grant_target')::name;
 BEGIN
   IF to_regclass(format('%I.coordination_resources', schema_name)) IS NOT NULL THEN
+    -- A 0060-era profile granted table-wide UPDATE. PostgreSQL table grants
+    -- subsume column grants, so remove the old capability before regranting
+    -- the exact lifecycle columns.
+    EXECUTE format('REVOKE UPDATE ON TABLE %I.coordination_resources FROM %I',
+      schema_name, target_role);
+    EXECUTE format('REVOKE UPDATE ON TABLE %I.coordination_leases FROM %I',
+      schema_name, target_role);
     EXECUTE format('GRANT SELECT, INSERT ON TABLE %I.coordination_resources TO %I',
       schema_name, target_role);
     EXECUTE format('GRANT UPDATE (fencing_token, current_lease_id, updated_at) ON TABLE %I.coordination_resources TO %I',

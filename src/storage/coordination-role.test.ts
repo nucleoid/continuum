@@ -568,10 +568,17 @@ describe('coordination database role profiles', () => {
         `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 10)`,
         [operatorPrincipal.id, target.id, owned.id],
       );
+      await scrubber.query(
+        `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 10)`,
+        [operatorPrincipal.id, target.id, owned.id],
+      );
       await contender.query("SET lock_timeout = '100ms'");
       await expect(contender.query(
         `INSERT INTO scope_memberships (principal_id, scope_id, role)
          VALUES ($1, $2, 'writer')`, [newcomer.id, shared.id],
+      )).rejects.toMatchObject({ code: '55P03' });
+      await expect(contender.query(
+        `UPDATE principals SET disabled_at = NULL WHERE id = $1`, [target.id],
       )).rejects.toMatchObject({ code: '55P03' });
     } finally {
       await scrubber.query('ROLLBACK').catch(() => undefined);
@@ -636,6 +643,30 @@ describe('coordination database role profiles', () => {
           leaseId: held.leaseId, runId, requestId: randomUUID(),
         });
       }
+      const originalRequests = (await pool.query<{ request_id: string }>(
+        `SELECT request_id::text FROM coordination_operation_receipts
+          WHERE principal_id = $1 ORDER BY request_id`, [target.id],
+      )).rows.map((row) => row.request_id);
+      await pool.query(
+        `INSERT INTO coordination_operation_receipts
+           (principal_id, operation, request_id, payload_hash, outcome, scope_id,
+            resource, expires_at, server_time, retry_after_seconds, retain_until)
+         SELECT '00000000-0000-4000-8000-000000000012', operation, request_id,
+                sha256(convert_to('collision', 'UTF8')), 'contended', scope_id,
+                resource, clock_timestamp() + interval '1 minute',
+                clock_timestamp(), 1, clock_timestamp() + interval '1 minute'
+           FROM coordination_operation_receipts
+          WHERE principal_id = $1 AND operation = 'acquire'
+          ORDER BY request_id LIMIT 1`, [target.id],
+      );
+      await pool.query(
+        `INSERT INTO audit_log (principal_id, action, scope_id, metadata)
+         SELECT $1, 'write', $2,
+                jsonb_build_object('operation', 'lock_acquire',
+                  'request_id', gen_random_uuid(), 'run_id', gen_random_uuid(),
+                  'resource_sha256', repeat('a', 64))
+           FROM generate_series(1, 150)`, [target.id, team.id],
+      );
 
       await expect(operator.connection.query(
         `SELECT continuum_operator_scrub_coordination_principal(
@@ -648,7 +679,7 @@ describe('coordination database role profiles', () => {
       );
 
       let complete = false;
-      for (let batch = 0; batch < 40 && !complete; batch += 1) {
+      for (let batch = 0; batch < 220 && !complete; batch += 1) {
         const result = await operator.connection.query<{
           result: { complete: boolean };
         }>(
@@ -676,6 +707,19 @@ describe('coordination database role profiles', () => {
       expect(detached.rows).toHaveLength(5);
       expect(detached.rows.every((row) => !originalRuns.includes(row.run_id))).toBe(true);
       expect((await pool.query(
+        `SELECT count(*)::int AS count FROM coordination_operation_receipts
+          WHERE principal_id = '00000000-0000-4000-8000-000000000012'
+            AND request_id <> ALL($1::uuid[])`, [originalRequests],
+      )).rows).toEqual([{ count: 0 }]);
+      expect((await pool.query(
+        `SELECT bool_and(
+                  acquired_at = '2000-01-01 00:00:00+00'::timestamptz
+                  AND expires_at = '2000-01-01 00:00:00+00'::timestamptz
+                ) AS normalized
+           FROM coordination_leases
+          WHERE principal_id = '00000000-0000-4000-8000-000000000012'`,
+      )).rows).toEqual([{ normalized: true }]);
+      expect((await pool.query(
         `SELECT count(*)::int AS count FROM coordination_resources
           WHERE scope_id = ANY($1::uuid[])`,
         [shared.map((selected) => selected.id)],
@@ -702,12 +746,13 @@ describe('coordination database role profiles', () => {
         acquire_receipt_count: 0, contended_receipt_count: 0, mutation_receipt_count: 0,
       }]);
       expect((await pool.query(
-        `SELECT completed_at IS NOT NULL AS complete,
-                receipts_scrubbed::int, leases_scrubbed::int
+        `SELECT completed_at IS NOT NULL AS complete, privacy_version,
+                audit_rows_scrubbed::int, receipts_scrubbed::int, leases_scrubbed::int
            FROM coordination_principal_privacy_progress
           WHERE principal_id = $1`, [target.id],
       )).rows).toEqual([{
-        complete: true, receipts_scrubbed: 10, leases_scrubbed: 5,
+        complete: true, privacy_version: 2, audit_rows_scrubbed: 160,
+        receipts_scrubbed: 10, leases_scrubbed: 5,
       }]);
       expect((await pool.query(
         `SELECT metadata->>'phase' AS phase FROM coordination_operator_events
