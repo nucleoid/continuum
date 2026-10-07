@@ -126,6 +126,28 @@ describe('runMigrations', () => {
         WHERE relation.oid = format('%I.continuum_0053_forward_probe', current_schema())::regclass`,
     )).rows[0]).toEqual({ schema });
   });
+
+  it('refuses to apply 0053 before 0052 is ledgered', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-forward-0053-prerequisite-'));
+    directories.push(directory);
+    await writeFile(
+      join(directory, '0053_offboarding_restore_contract.sql'),
+      'SELECT 1;\n',
+    );
+    const schema = `migrator_forward_0053_prerequisite_${Date.now()}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+
+    await expect(runMigrations(pool, directory)).rejects.toThrow(
+      /0053.*requires.*0052|0052.*prerequisite/i,
+    );
+    expect((await pool.query(
+      `SELECT count(*)::int AS count FROM _continuum_migrations`,
+    )).rows[0]).toEqual({ count: 0 });
+  });
+
   it('keeps the principal alter short and builds offboarding audit indexes concurrently', async () => {
     const migrations = join(process.cwd(), 'migrations');
     const principal = await readFile(
@@ -197,7 +219,7 @@ describe('runMigrations', () => {
     expect(completionTrigger.match(/continuum_offboarding_actual_state_is_erased\s*\(/gi))
       .toHaveLength(1);
     const docs = await readFile(join(process.cwd(), 'docs/offboarding.md'), 'utf8');
-    expect(docs).toMatch(/through[\s\S]*`0052_offboarding_review_repair\.sql`/i);
+    expect(docs).toMatch(/through[\s\S]*`0053_offboarding_restore_contract\.sql`/i);
     expect(docs).not.toMatch(/all nineteen offboarding migrations/i);
   });
   it('applies round-seven integrity and online cursor-index migrations from a fresh schema', async () => {
@@ -214,7 +236,7 @@ describe('runMigrations', () => {
         $$;
       `);
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-23).map((migration) => migration.name)).toEqual([
+      expect(applied.slice(-24).map((migration) => migration.name)).toEqual([
         '0030_offboarding_round7_integrity.sql',
         '0031_offboarding_round7_indexes.sql',
         '0032_offboarding_round7_compatibility.sql',
@@ -238,6 +260,7 @@ describe('runMigrations', () => {
         '0050_offboarding_startup_verification_fix.sql',
         '0051_offboarding_security_contract.sql',
         '0052_offboarding_review_repair.sql',
+        '0053_offboarding_restore_contract.sql',
       ]);
       expect((await pool.query(
         `SELECT indisvalid AS valid FROM pg_index
@@ -477,7 +500,8 @@ describe('runMigrations', () => {
       && name !== '0049_offboarding_review_remediation.sql'
       && name !== '0050_offboarding_startup_verification_fix.sql'
       && name !== '0051_offboarding_security_contract.sql'
-      && name !== '0052_offboarding_review_repair.sql')) {
+      && name !== '0052_offboarding_review_repair.sql'
+      && name !== '0053_offboarding_restore_contract.sql')) {
       if (file === '0038_offboarding_search_path_hardening.sql') {
         await copyFile(
           new URL(

@@ -168,6 +168,15 @@ BEGIN
        WHERE namespace.nspname = application_schema
          AND privilege.grantee = retired_identity.database_role_oid
     ) OR EXISTS (
+      SELECT 1 FROM pg_attribute attribute
+      JOIN pg_class relation ON relation.oid = attribute.attrelid
+      JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+      CROSS JOIN LATERAL aclexplode(attribute.attacl) privilege
+       WHERE namespace.nspname = application_schema
+         AND attribute.attnum > 0 AND NOT attribute.attisdropped
+         AND attribute.attacl IS NOT NULL
+         AND privilege.grantee = retired_identity.database_role_oid
+    ) OR EXISTS (
       SELECT 1 FROM pg_proc function
       JOIN pg_namespace namespace ON namespace.oid = function.pronamespace
       CROSS JOIN LATERAL aclexplode(COALESCE(

@@ -325,7 +325,7 @@ operation: raw operator `UPDATE` on `entra_groups` is revoked, and revocation,
 quarantine, and deactivation triggers accept only transaction-local guarded
 mutation markers.
 
-Apply all 52 migrations through `0052_offboarding_review_repair.sql`.
+Apply all 53 migrations through `0053_offboarding_restore_contract.sql`.
 Migration `0049_offboarding_review_remediation.sql` makes principal disablement
 create bounded transaction-local guards for its existing membership cascade,
 binds owned-scope access cleanup to a started incomplete run and its mapped
@@ -363,6 +363,14 @@ returning success. The application role has no scope
 row update authority; the operator-only pseudonymization function owns the one
 supported user-scope name mutation, while `id`, `kind`, and the canonical
 organization identity remain immutable.
+Migration `0053` is the forward-only restore contract. It requires every
+authorization-bearing registry lookup to match both the recorded PostgreSQL
+role name and OID, fences restore-pending names, preserves safely dropped
+retirement history, removes and verifies column ACLs, checks terminal-history
+row counts before disabling a role, and gives rotation and rebind one advisory
+lock order. Rebind uses transaction-scoped temporary planning tables, so the
+migration owner must retain the database TEMPORARY privilege; the rebind
+function checks that prerequisite before it reads or rewrites identity state.
 
 The final database verification is exact and executes once: the completion
 event trigger checks every memory and every audit row linked to the run's
@@ -393,9 +401,9 @@ operator, and dedicated sync login roles. The operator and sync roles must not
 be granted to the shared application role. Rollout is an explicit maintenance
 window: **stop** every API, MCP, admin, retention, and membership-sync process;
 take and verify a **backup**; **migrate** through
-`0052_offboarding_review_repair.sql` as the owner; **regrant** the shared app,
+`0053_offboarding_restore_contract.sql` as the owner; **regrant** the shared app,
 operator, and sync profiles; **verify** the identities; then **start** only the
-`0052`-aware binaries. Mixed pre-`0052`/`0052` binaries or grants are
+`0053`-aware binaries. Mixed pre-`0053`/`0053` binaries or grants are
 unsupported. Do not run migration
 and old binaries concurrently, because old sync code writes freshness directly
 and old application code expects shared-role offboarding authority.
@@ -703,11 +711,20 @@ Do not select preserved provenance merely because two environments report the
 same `system_identifier`. If OID provenance cannot be established, use foreign
 provenance. Both modes are owner-only, require exact confirmation text, take
 the identity advisory locks and registry locks, and fail transactionally.
-Preserved mode compares every active and retired history OID to its recorded
-role name and refuses missing, renamed, or substituted roles. Foreign mode
+Preserved mode compares every active and live retired-history OID to its
+recorded role name, archives a legitimately dropped retired generation, and
+refuses renamed or substituted live roles. Foreign mode
 never interprets a historical OID through current `pg_roles`; it archives
 same-name active history first, resolves old history by exact name, and checks
 active/retired ambiguity only after that name remapping.
+
+Rebind holds `ACCESS EXCLUSIVE` locks only on the four small Continuum identity
+registry tables for the transaction. PostgreSQL does not expose a supported
+transactional lock for the complete role catalog, so rebind snapshots
+`pg_roles` and compares it again before commit. Any concurrent role create,
+alter, rename, or drop makes the whole transaction fail without partial
+changes. Quiesce role administration, then retry the complete rebind command;
+do not retry individual statements from the aborted transaction.
 
 Then reapply the application, operator, and sync profiles and run verification
 before restart. The rebind operation is owner-only, locks both registries,

@@ -42,6 +42,8 @@ DECLARE
   active_identity BOOLEAN;
   recorded_sync_history BOOLEAN;
   legacy_unsafe_privileges BOOLEAN;
+  column_privilege RECORD;
+  history_row_count INTEGER;
 BEGIN
   SELECT input.retired_sync, input.confirmed_oid, input.application_schema,
          input.legacy_confirmation
@@ -196,15 +198,6 @@ BEGIN
            WHERE role.oid = continuum_retired_sync_database_identities.database_role_oid)',
     application_schema
   ) USING retired_sync, retired_oid;
-  EXECUTE format('REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I FROM %I',
-    application_schema, retired_sync);
-  EXECUTE format('REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA %I FROM %I',
-    application_schema, retired_sync);
-  EXECUTE format('REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA %I FROM %I',
-    application_schema, retired_sync);
-  EXECUTE format('REVOKE ALL PRIVILEGES ON SCHEMA %I FROM %I',
-    application_schema, retired_sync);
-  EXECUTE format('ALTER ROLE %I NOLOGIN PASSWORD NULL', retired_sync);
   EXECUTE format(
     'INSERT INTO %I.continuum_retired_sync_database_identities
        (database_role_oid, database_role, cluster_epoch)
@@ -216,6 +209,34 @@ BEGIN
        retired_at = now()',
     application_schema, application_schema
   ) USING retired_oid, retired_sync;
+  GET DIAGNOSTICS history_row_count = ROW_COUNT;
+  IF history_row_count <> 1 THEN
+    RAISE EXCEPTION 'terminal retirement history was not recorded';
+  END IF;
+  FOR column_privilege IN
+    SELECT namespace.nspname, relation.relname, attribute.attname
+      FROM pg_attribute attribute
+      JOIN pg_class relation ON relation.oid = attribute.attrelid
+      JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+      CROSS JOIN LATERAL aclexplode(attribute.attacl) privilege
+     WHERE namespace.nspname = application_schema
+       AND attribute.attnum > 0 AND NOT attribute.attisdropped
+       AND attribute.attacl IS NOT NULL
+       AND privilege.grantee = retired_oid
+  LOOP
+    EXECUTE format('REVOKE ALL PRIVILEGES (%I) ON TABLE %I.%I FROM %I',
+      column_privilege.attname, column_privilege.nspname,
+      column_privilege.relname, retired_sync);
+  END LOOP;
+  EXECUTE format('REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I FROM %I',
+    application_schema, retired_sync);
+  EXECUTE format('REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA %I FROM %I',
+    application_schema, retired_sync);
+  EXECUTE format('REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA %I FROM %I',
+    application_schema, retired_sync);
+  EXECUTE format('REVOKE ALL PRIVILEGES ON SCHEMA %I FROM %I',
+    application_schema, retired_sync);
+  EXECUTE format('ALTER ROLE %I NOLOGIN PASSWORD NULL', retired_sync);
 END;
 $retire$;
 COMMIT;

@@ -1,4 +1,5 @@
 import { readdir, readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type pg from 'pg';
@@ -13,6 +14,13 @@ const NO_TRANSACTION_MARKER = '-- continuum:no-transaction';
 const REPAIR_INVALID_INDEX = '-- continuum:repair-invalid-index ';
 const REQUIRE_VALID_INDEX = '-- continuum:require-valid-index ';
 const BACKFILL_OFFBOARDING_SELECTORS = '-- continuum:backfill-offboarding-selectors';
+const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
+  ['0052_offboarding_review_repair.sql',
+    '136cbd834277ca4fbfb48162644738ba2f96f7a5705290cc0c585e3ce7c82079'],
+]);
+const FORWARD_MIGRATION_REQUIREMENTS = new Map([
+  ['0053_offboarding_restore_contract.sql', '0052_offboarding_review_repair.sql'],
+]);
 const REVIEW_ENTRA_MIGRATION_RENAMES = [
   ['0005_entra_auth.sql', '0010_entra_auth.sql'],
   ['0006_entra_binding_approval.sql', '0011_entra_binding_approval.sql'],
@@ -163,7 +171,33 @@ export async function runMigrations(
         'SELECT 1 FROM _continuum_migrations WHERE name = $1',
         [file],
       );
-      if (rowCount && rowCount > 0) continue;
+      if (rowCount && rowCount > 0) {
+        const publishedChecksum = PUBLISHED_MIGRATION_CHECKSUMS.get(file);
+        if (publishedChecksum) {
+          const publishedBytes = await readFile(join(migrationsDir, file));
+          const actualChecksum = createHash('sha256').update(publishedBytes).digest('hex');
+          if (actualChecksum !== publishedChecksum) {
+            throw new Error(
+              `Published migration ${file} was modified after it was ledgered: `
+              + `expected checksum ${publishedChecksum}, received ${actualChecksum}`,
+            );
+          }
+        }
+        continue;
+      }
+
+      const requiredMigration = FORWARD_MIGRATION_REQUIREMENTS.get(file);
+      if (requiredMigration) {
+        const prerequisite = await client.query(
+          'SELECT 1 FROM _continuum_migrations WHERE name = $1',
+          [requiredMigration],
+        );
+        if (!prerequisite.rowCount) {
+          throw new Error(
+            `Migration ${file} requires ledgered prerequisite ${requiredMigration}`,
+          );
+        }
+      }
 
       const sql = await readFile(join(migrationsDir, file), 'utf8');
       try {
