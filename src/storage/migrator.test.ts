@@ -121,13 +121,21 @@ describe('runMigrations', () => {
       expect.objectContaining({ name: '0053_offboarding_restore_contract.sql' }),
     ]);
 
-    await writeFile(
-      join(directory, '0052_offboarding_review_repair.sql'),
+    const invalidCheckouts = [
+      windowsCheckout.replace('\r\n', '\r'),
+      windowsCheckout.replace('\r\n', '\r\r\n'),
+      windowsCheckout.replace('Forward-only', 'Forward\r-only'),
       windowsCheckout + '-- substantive change\r\n',
-    );
-    await expect(runMigrations(pool, directory)).rejects.toThrow(
-      /0052.*checksum|published migration.*modified/i,
-    );
+    ];
+    for (const invalidCheckout of invalidCheckouts) {
+      await writeFile(
+        join(directory, '0052_offboarding_review_repair.sql'),
+        invalidCheckout,
+      );
+      await expect(runMigrations(pool, directory)).rejects.toThrow(
+        /0052.*checksum|published migration.*modified/i,
+      );
+    }
   });
 
   it('applies 0053 when the published 0052 is already ledgered', async () => {

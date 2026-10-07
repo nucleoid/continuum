@@ -41,6 +41,9 @@ describe('offboarding round-six safety contract', () => {
     const startedEvent = service.indexOf('await startOffboardingRunEvent(');
     expect(startedEvent).toBeGreaterThan(-1);
     expect(startedEvent).toBeLessThan(
+      service.indexOf('continuum_operator_pseudonymize_scope'),
+    );
+    expect(startedEvent).toBeLessThan(
       service.indexOf('continuum_operator_offboard_scope_access'),
     );
     expect(startedEvent).toBeLessThan(service.indexOf("'set_fence'"));

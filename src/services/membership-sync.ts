@@ -206,7 +206,8 @@ export async function revokeEntraGroupBinding(
   } catch (error) {
     await client.query('ROLLBACK');
     if (!(error instanceof ServiceError) && error instanceof Error
-      && /DB-bound trusted approve identity|effective manual org administrator/i.test(error.message)) {
+      && /(?:DB|role-name\/OID)-bound trusted approve identity|effective manual org administrator/i
+        .test(error.message)) {
       throw new ServiceError(
         'FORBIDDEN', 'binding revocation requires the DB-bound operator identity', { cause: error },
       );

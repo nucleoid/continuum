@@ -7,7 +7,8 @@ import { ServiceError } from './errors.js';
 function operatorBoundaryError(error: unknown): ServiceError | null {
   const databaseError = error as { code?: string; message?: string };
   if (databaseError.code === '42501'
-      || /DB-bound trusted approve identity|operator path/i.test(databaseError.message ?? '')) {
+      || /(?:DB|role-name\/OID)-bound trusted approve identity|operator path/i
+        .test(databaseError.message ?? '')) {
     return new ServiceError(
       'FORBIDDEN',
       'offboarding administration requires a DB-bound operator session',

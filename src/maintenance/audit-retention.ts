@@ -450,7 +450,8 @@ export async function runAuditRetention(
     primaryError = error;
     const databaseError = error as { code?: string; message?: string };
     if (databaseError.code === '42501'
-      || /DB-bound trusted approve identity|operator session/i.test(databaseError.message ?? '')) {
+      || /(?:DB|role-name\/OID)-bound trusted approve identity|operator session/i
+        .test(databaseError.message ?? '')) {
       throw new ServiceError(
         'FORBIDDEN', 'audit retention requires a DB-bound operator session',
         { cause: error },
