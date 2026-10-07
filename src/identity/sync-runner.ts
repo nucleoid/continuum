@@ -8,6 +8,7 @@ import {
 import {
   fetchMembershipSnapshot, GraphSnapshotUnavailableError, MembershipSnapshotTooLargeError,
 } from './graph-membership.js';
+import { ServiceError } from '../services/errors.js';
 
 type SnapshotFetcher = (
   groupIds: readonly string[],
@@ -34,7 +35,15 @@ export async function runMembershipSync(
   }
   const actor = await getPrincipalByExternalId(pool, actorExternalId);
   if (!actor) throw new Error('membership sync actor is unknown');
-  await pool.query('SELECT continuum_verify_sync_database_identity($1::uuid)', [actor.id]);
+  try {
+    await pool.query('SELECT continuum_verify_sync_database_identity($1::uuid)', [actor.id]);
+  } catch (error) {
+    throw new ServiceError(
+      'FORBIDDEN',
+      'membership sync requires the DB-bound sync service identity',
+      { cause: error },
+    );
+  }
   await validateMembershipSyncActor(pool, actor);
   try {
     const boundGroupIds = await listBoundEntraGroupIds(pool);

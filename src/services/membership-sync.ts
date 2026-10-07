@@ -97,7 +97,10 @@ export async function provisionEntraGroupBinding(
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [SYNC_LOCK_ID]);
     await requireOrgAdmin(client, actor.id);
-    const scope = await client.query('SELECT id FROM scopes WHERE id = $1 FOR SHARE', [scopeId]);
+    // Scope IDs are immutable and the sync role cannot update or delete scopes,
+    // so a table-level UPDATE privilege solely for FOR SHARE would widen its
+    // authority without protecting any supported concurrent mutation.
+    const scope = await client.query('SELECT id FROM scopes WHERE id = $1', [scopeId]);
     if (!scope.rowCount) throw new ServiceError('INVALID_INPUT', 'scope not found');
     const prior = await client.query(
       `SELECT scope_id, role, active FROM entra_groups WHERE external_id = $1`,

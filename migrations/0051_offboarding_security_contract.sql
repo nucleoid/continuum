@@ -11,6 +11,7 @@ DO $preflight$
 DECLARE
   schema_oid OID := quote_ident(current_schema())::regnamespace;
   owner_oid OID;
+  migration_role_oid OID := current_user::regrole::oid;
   owner_superuser BOOLEAN;
   owner_createrole BOOLEAN;
 BEGIN
@@ -27,11 +28,20 @@ BEGIN
     SELECT 1 FROM pg_proc function
      WHERE function.pronamespace = schema_oid
        AND function.proowner <> current_user::regrole::oid
+       -- Extension-owned routines are controlled by their extension owner on
+       -- managed PostgreSQL. Continuum handles them explicitly below.
+       AND NOT EXISTS (
+         SELECT 1 FROM pg_depend dependency
+          WHERE dependency.classid = 'pg_proc'::regclass
+            AND dependency.objid = function.oid
+            AND dependency.refclassid = 'pg_extension'::regclass
+            AND dependency.deptype = 'e'
+       )
   ) THEN
     RAISE EXCEPTION 'migration owner must own every application table, sequence, index, and function before 0051';
   END IF;
   SELECT rolsuper, rolcreaterole INTO owner_superuser, owner_createrole
-    FROM pg_roles WHERE oid = owner_oid;
+    FROM pg_roles WHERE oid = migration_role_oid;
   IF EXISTS (SELECT 1 FROM continuum_trusted_database_identities WHERE can_sync)
      AND NOT owner_superuser AND (
        NOT owner_createrole OR EXISTS (
@@ -39,7 +49,7 @@ BEGIN
           WHERE identity.can_sync AND NOT EXISTS (
             SELECT 1 FROM pg_auth_members membership
              WHERE membership.roleid = identity.database_role_oid
-               AND membership.member = owner_oid AND membership.admin_option
+               AND membership.member = migration_role_oid AND membership.admin_option
           )
        )
      ) THEN
@@ -64,6 +74,13 @@ BEGIN
       FROM pg_proc function
       JOIN pg_namespace namespace ON namespace.oid = function.pronamespace
      WHERE namespace.nspname = current_schema()
+       AND NOT EXISTS (
+         SELECT 1 FROM pg_depend dependency
+          WHERE dependency.classid = 'pg_proc'::regclass
+            AND dependency.objid = function.oid
+            AND dependency.refclassid = 'pg_extension'::regclass
+            AND dependency.deptype = 'e'
+       )
   LOOP
     EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', function_signature);
   END LOOP;
@@ -979,18 +996,17 @@ BEGIN
 
   FOR target_role IN
     SELECT DISTINCT role.rolname
-      FROM pg_class relation
-      CROSS JOIN LATERAL aclexplode(COALESCE(
-        relation.relacl, acldefault('r', relation.relowner)
-      )) privilege
-      JOIN pg_roles role ON role.oid = privilege.grantee
-     WHERE relation.oid = 'memories'::regclass
+      FROM information_schema.table_privileges privilege
+      JOIN pg_roles role ON role.rolname = privilege.grantee
+     WHERE privilege.table_schema = current_schema()
+       AND privilege.table_name = 'memories'
        AND upper(privilege.privilege_type) = 'SELECT'
-       AND privilege.grantee <> owner_oid
+       AND role.oid <> owner_oid
   LOOP
     FOR vector_function IN
       SELECT format('%I.%I(%s)', namespace.nspname, function.proname,
-                    pg_get_function_identity_arguments(function.oid)) AS signature
+                    pg_get_function_identity_arguments(function.oid)) AS signature,
+             function.proowner
         FROM pg_proc function
         JOIN pg_namespace namespace ON namespace.oid = function.pronamespace
         JOIN pg_depend dependency
@@ -1001,8 +1017,20 @@ BEGIN
         JOIN pg_extension extension ON extension.oid = dependency.refobjid
        WHERE function.pronamespace = schema_oid AND extension.extname = 'vector'
     LOOP
-      EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I',
-        vector_function.signature, target_role.rolname);
+      -- Managed services may own pgvector with a provider role. Keep PUBLIC
+      -- extension execution when supplied by that owner; grant directly only
+      -- when this migration role owns the routine. A non-PUBLIC managed layout
+      -- must pregrant EXECUTE to the application role before this refresh.
+      IF NOT has_function_privilege(target_role.rolname,
+                                    vector_function.signature, 'EXECUTE') THEN
+        IF vector_function.proowner = current_user::regrole::oid THEN
+          EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I',
+            vector_function.signature, target_role.rolname);
+        ELSE
+          RAISE EXCEPTION 'extension owner must grant EXECUTE on % to application role %',
+            vector_function.signature, target_role.rolname;
+        END IF;
+      END IF;
     END LOOP;
   END LOOP;
 END;

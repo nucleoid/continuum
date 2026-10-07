@@ -14,9 +14,12 @@ GRANT USAGE ON SCHEMA :"continuum_schema" TO :"continuum_app_role";
 
 GRANT SELECT, INSERT, UPDATE ON TABLE
   :"continuum_schema".principals,
-  :"continuum_schema".scopes,
   :"continuum_schema".memories
 TO :"continuum_app_role";
+GRANT SELECT, INSERT ON TABLE :"continuum_schema".scopes
+TO :"continuum_app_role";
+REVOKE UPDATE, DELETE, TRUNCATE ON TABLE :"continuum_schema".scopes
+FROM :"continuum_app_role";
 GRANT SELECT ON TABLE :"continuum_schema".entra_groups TO :"continuum_app_role";
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE :"continuum_schema".entra_groups
 FROM :"continuum_app_role";
@@ -64,6 +67,7 @@ GRANT USAGE, SELECT ON SEQUENCE
 TO :"continuum_app_role";
 
 GRANT EXECUTE ON FUNCTION
+  :"continuum_schema".continuum_org_scope_id(),
   :"continuum_schema".continuum_audit_retention_minimum_days(),
   :"continuum_schema".continuum_offboarding_expected_audit_metadata(JSONB),
   :"continuum_schema".continuum_membership_is_effective(BOOLEAN, TEXT),
@@ -111,6 +115,7 @@ REVOKE ALL ON FUNCTION
   :"continuum_schema".continuum_operator_record_offboarding_event(UUID),
   :"continuum_schema".continuum_operator_apply_audit_retention(UUID, TIMESTAMPTZ, INTEGER, UUID, INTEGER, JSONB, TEXT, TEXT),
   :"continuum_schema".continuum_operator_reactivate_principal(UUID, UUID),
+  :"continuum_schema".continuum_operator_pseudonymize_scope(UUID, UUID, TEXT),
   :"continuum_schema".continuum_register_trusted_database_identity(NAME, UUID, BOOLEAN, BOOLEAN)
 FROM :"continuum_app_role";
 
@@ -132,6 +137,11 @@ REVOKE ALL ON TABLE :"continuum_schema".continuum_offboarding_completion_request
 FROM :"continuum_app_role";
 REVOKE ALL ON TABLE :"continuum_schema".continuum_principal_reactivation_requests
 FROM :"continuum_app_role";
+REVOKE ALL ON TABLE
+  :"continuum_schema".continuum_entra_guarded_mutations,
+  :"continuum_schema".continuum_principal_disable_requests,
+  :"continuum_schema".continuum_canonical_org_scope
+FROM :"continuum_app_role";
 REVOKE EXECUTE ON FUNCTION
   :"continuum_schema".continuum_backfill_audit_offboarding_scopes(INTEGER)
 FROM :"continuum_app_role";
@@ -146,3 +156,7 @@ REVOKE ALL ON TABLE
   :"continuum_schema".principal_offboarding_audit_requests,
   :"continuum_schema".continuum_offboarding_restart_requests
 FROM :"continuum_app_role";
+
+SELECT :"continuum_schema".continuum_assert_application_role_allowlist(
+  :'continuum_app_role'::name
+);

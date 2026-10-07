@@ -218,7 +218,7 @@ export async function mapOwnedUserScope(
     );
     if (!principal.rowCount) throw new ServiceError('INVALID_INPUT', 'active user principal not found');
     const scope = await client.query(
-      `SELECT id FROM scopes WHERE id = $1 AND kind = 'user' FOR UPDATE`, [scopeId],
+      `SELECT id FROM scopes WHERE id = $1 AND kind = 'user'`, [scopeId],
     );
     if (!scope.rowCount) throw new ServiceError('INVALID_SCOPE', 'user scope not found');
     const history = await client.query(
@@ -689,7 +689,7 @@ async function offboardPrincipalCore(
             WHERE principal_id = pus.principal_id AND scope_id = pus.scope_id
             ORDER BY id DESC LIMIT 1
          ) approval ON TRUE
-        WHERE pus.principal_id = $1${dryRun ? '' : ' FOR UPDATE OF pus, s'}`, [principalId],
+        WHERE pus.principal_id = $1${dryRun ? '' : ' FOR UPDATE OF pus'}`, [principalId],
     );
     if (!mapping.rowCount) {
       throw new ServiceError('CONFLICT', 'principal has no explicit owned user scope mapping');
@@ -935,7 +935,10 @@ async function offboardPrincipalCore(
     let entraCount = 0;
     let aliasCount = 0;
     if (!run.rows[0].scope_cleanup_complete) {
-      await client.query('UPDATE scopes SET name = $2 WHERE id = $1', [scopeId, scopePseudonym]);
+      await client.query(
+        'SELECT continuum_operator_pseudonymize_scope($1, $2, $3)',
+        [actor.id, scopeId, scopePseudonym],
+      );
       const accessUpdate = await client.query<{
         memberships_deactivated: number;
         bindings_quarantined: number;

@@ -211,6 +211,11 @@ describe('offboarding database-role remediation', () => {
     const connection = await createRolePool(pool, role, 'operator', admin.id);
     const groupId = '33000000-0000-4000-8000-000000000001';
     try {
+      expect((await pool.query(
+        "SELECT has_table_privilege($1, 'scopes', 'SELECT') AS allowed", [role],
+      )).rows[0].allowed).toBe(true);
+      await expect(connection.query('SELECT id FROM scopes WHERE id = $1', [project.id]))
+        .resolves.toBeDefined();
       await expect(provisionEntraGroupBinding(connection, admin, { externalId: groupId, scopeId: project.id, role: 'reader' }))
         .resolves.toMatchObject({ created: true });
       await pool.query(

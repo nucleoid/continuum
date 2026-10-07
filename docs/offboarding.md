@@ -325,7 +325,7 @@ operation: raw operator `UPDATE` on `entra_groups` is revoked, and revocation,
 quarantine, and deactivation triggers accept only transaction-local guarded
 mutation markers.
 
-Apply migrations through `0051_offboarding_security_contract.sql`.
+Apply all 52 migrations through `0052_offboarding_review_repair.sql`.
 Migration `0049_offboarding_review_remediation.sql` makes principal disablement
 create bounded transaction-local guards for its existing membership cascade,
 binds owned-scope access cleanup to a started incomplete run and its mapped
@@ -348,6 +348,17 @@ guarded, audited Entra-membership deletion and makes membership-sync verify its
 exact table, sequence, function, schema, and default-ACL allow-list before any
 Graph request. Extra `UPDATE`, `DELETE`, `TRIGGER`, ownership, membership,
 function execution, or `PUBLIC`/default privilege fails startup closed.
+Migration `0052` is the forward repair for databases that may already have
+recorded an edited `0051`. It binds the canonical organization scope to an
+owner-controlled UUID, restores all principal, Entra-group, and membership
+triggers, normalizes both transient capability-table shapes, and checks column
+ACLs as well as table ACLs. Sync startup rejects owner and superuser sessions
+and rechecks operator and sync membership edges at each privileged call. The
+application grant script revokes both marker tables and validates its exact
+direct allow-list before returning success. The application role has no scope
+row update authority; the operator-only pseudonymization function owns the one
+supported user-scope name mutation, while `id`, `kind`, and the canonical
+organization identity remain immutable.
 
 The final database verification is exact and executes once: the completion
 event trigger checks every memory and every audit row linked to the run's
@@ -378,9 +389,9 @@ operator, and dedicated sync login roles. The operator and sync roles must not
 be granted to the shared application role. Rollout is an explicit maintenance
 window: **stop** every API, MCP, admin, retention, and membership-sync process;
 take and verify a **backup**; **migrate** through
-`0051_offboarding_security_contract.sql` as the owner; **regrant** the shared app,
+`0052_offboarding_review_repair.sql` as the owner; **regrant** the shared app,
 operator, and sync profiles; **verify** the identities; then **start** only the
-`0051`-aware binaries. Mixed pre-`0051`/`0051` binaries or grants are
+`0052`-aware binaries. Mixed pre-`0052`/`0052` binaries or grants are
 unsupported. Do not run migration
 and old binaries concurrently, because old sync code writes freshness directly
 and old application code expects shared-role offboarding authority.
@@ -400,6 +411,21 @@ privilege revocations. Failed preflight leaves no partial 0051 changes. The
 supported least-privilege path is a non-superuser schema/object owner with
 `CREATEROLE` and narrowly scoped `ADMIN OPTION` on managed sync roles, not
 blanket superuser access.
+Migration `0052` additionally proves retirement authority when a sync identity
+is installed or rotated, before that identity is accepted. A non-superuser
+owner therefore needs `CREATEROLE` and `ADMIN OPTION` on both the current and
+candidate sync roles. This makes a later emergency rotation fail during
+installation rather than after the credential has become active.
+
+Pgvector extension members are governed separately from Continuum-owned
+functions. Managed PostgreSQL may own those routines with a provider role, so
+the ownership preflight and `PUBLIC` drift check exclude only objects recorded
+as members of the `vector` extension. If such routines remain executable by
+`PUBLIC`, application roles inherit that extension-owned contract. If the
+provider revokes `PUBLIC`, the extension owner must pregrant `EXECUTE` to each
+application role. Re-run `grant-application-role.sql` after every vector
+extension update so newly added routines are checked. Continuum-owned
+functions remain closed to `PUBLIC` without exception.
 The application role must not own the event ledger, completion-capability
 table, or security-definer functions, and receives no direct privilege on the
 capability table. Direct `completed` inserts then fail at the trigger.
@@ -509,10 +535,10 @@ retryable.
 
 Rollback is forward-only and requires the verified pre-migration backup for any
 data that bounded legacy cleanup has removed. Application rollback is supported
-only to a 0051-aware binary and its matching grant profile. Stop all processes
+only to a 0052-aware binary and its matching grant profile. Stop all processes
 and confirm there are zero incomplete runs with `list-incomplete-offboarding`;
-then deploy the selected `0051`-aware binary, reapply all three grant profiles,
-run identity verification, and restart. Pre-`0051` binaries are incompatible with the new
+then deploy the selected `0052`-aware binary, reapply all three grant profiles,
+run identity verification, and restart. Pre-`0052` binaries are incompatible with the new
 approval and sync boundary and are not a supported application-first rollback.
 Database rollback requires a separate forward migration; do not drop guards or
 regrant the shared role ad hoc. Completed offboarding erasure is irreversible
@@ -532,7 +558,7 @@ psql "$CONTINUUM_MIGRATION_OWNER_URL" \
 
 The script fails unless `PUBLIC` and the migration owner's application-schema
 default ACLs are closed, exactly one OID-bound sync row exists, every registry
-OID still resolves to its recorded name, the sync role matches the exact 0051
+OID still resolves to its recorded name, the sync role matches the exact 0052
 allow-list, the expected operator is approval-only, and the retired role is
 `NOLOGIN` without schema, principal-table, or audit-sequence authority. The
 membership-sync executable repeats the sync-role allow-list gate at every

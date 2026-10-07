@@ -19,7 +19,21 @@ async function applyGrantScript(
     sql = sql.replaceAll(':"' + name + '"', quoteRole(value));
     sql = sql.replaceAll(":'" + name + "'", "'" + value.replaceAll("'", "''") + "'");
   }
-  await pool.query(sql);
+  const assertion = sql.lastIndexOf('\nSELECT "public".continuum_assert_application_role_allowlist');
+  if (assertion < 0) {
+    await pool.query(sql);
+    return;
+  }
+  try {
+    await pool.query(sql.slice(0, assertion));
+  } catch (error) {
+    throw new Error('application profile grants failed', { cause: error });
+  }
+  try {
+    await pool.query(sql.slice(assertion));
+  } catch (error) {
+    throw new Error('application profile allow-list assertion failed', { cause: error });
+  }
 }
 
 async function rolePool(pool: pg.Pool, role: string): Promise<pg.Pool> {
@@ -39,6 +53,11 @@ describe('post-rejection database authority remediation', () => {
   beforeEach(async () => {
     pool ??= await makeTestPool();
     await resetData(pool);
+    await pool.query(`
+      INSERT INTO continuum_canonical_org_scope (singleton, scope_id)
+      SELECT TRUE, id FROM scopes WHERE kind = 'org' AND name = ''
+      ON CONFLICT (singleton) DO UPDATE SET scope_id = EXCLUDED.scope_id
+    `);
   }, 30_000);
 
   afterAll(async () => {
@@ -87,8 +106,10 @@ describe('post-rejection database authority remediation', () => {
       await application.connection.query('ROLLBACK');
     }
     const grants = await readFile(join(process.cwd(), 'scripts/grant-application-role.sql'), 'utf8');
-    expect(grants).toMatch(/UPDATE\s*\([^)]*created_at|UPDATE\s*\([^)]*\)\s*ON TABLE[\s\S]*scopes/i);
-    expect(grants).not.toMatch(/SELECT, INSERT, UPDATE ON TABLE[\s\S]{0,120}scopes/i);
+    expect(grants).toMatch(
+      /GRANT SELECT, INSERT ON TABLE\s+:"continuum_schema"\.scopes/i,
+    );
+    expect(grants).toMatch(/REVOKE UPDATE, DELETE, TRUNCATE ON TABLE[\s\S]*scopes/i);
   });
 
   it('rejects owner sync verification and direct or PUBLIC column read drift', async () => {
@@ -123,6 +144,8 @@ describe('post-rejection database authority remediation', () => {
     await addMembership(pool, admin.id, org.id, 'admin');
     const application = await createRole('application');
     const operator = await createRole('operator', admin.id);
+    await expect(operator.connection.query('SELECT id FROM scopes LIMIT 1'))
+      .resolves.toBeDefined();
     await pool.query('GRANT ' + quoteRole(operator.role) + ' TO ' + quoteRole(application.role));
     await application.connection.query('SET ROLE ' + quoteRole(operator.role));
     await expect(application.connection.query(

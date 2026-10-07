@@ -238,10 +238,10 @@ async function authorizedPrincipalId(client: pg.PoolClient, externalId: string):
        JOIN scope_memberships sm ON sm.principal_id = p.id
         AND sm.role = 'admin' AND sm.active
         AND continuum_membership_is_effective(sm.active, sm.source_kind)
-       JOIN scopes s ON s.id = sm.scope_id AND s.kind = 'org' AND s.name = ''
+        AND sm.scope_id = continuum_org_scope_id()
       WHERE p.external_id = $1
         AND p.disabled_at IS NULL
-      FOR KEY SHARE OF p, s
+      FOR KEY SHARE OF p
       FOR SHARE OF sm`,
     [externalId],
   );

@@ -283,7 +283,7 @@ describe('0048 trusted database identity upgrade', () => {
       new URL('../../migrations/0051_offboarding_security_contract.sql', import.meta.url), 'utf8',
     );
     expect(migration).toMatch(/current_user::regrole::oid[\s\S]*rolsuper[\s\S]*rolcreaterole/i);
-    expect(migration).toMatch(/membership\.member\s*=\s*current_user::regrole::oid/i);
+    expect(migration).toMatch(/membership\.member\s*=\s*migration_role_oid/i);
     expect(migration).not.toMatch(/SELECT rolsuper, rolcreaterole INTO[\s\S]{0,100}WHERE oid = owner_oid/i);
   });
 

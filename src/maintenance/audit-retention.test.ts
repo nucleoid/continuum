@@ -63,7 +63,8 @@ describe('audit retention', () => {
       .filter((line) => !line.trimStart().startsWith('\\'))
       .join('\n')
       .replaceAll(':"continuum_schema"', '"public"')
-      .replaceAll(':"continuum_app_role"', `"${role}"`);
+      .replaceAll(':"continuum_app_role"', `"${role}"`)
+      .replaceAll(":'continuum_app_role'", `'${role}'`);
     await pool.query(sql);
   }
 

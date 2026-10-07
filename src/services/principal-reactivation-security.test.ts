@@ -23,7 +23,8 @@ async function applyApplicationRoleGrants(pool: pg.Pool, role: string): Promise<
     .filter((line) => !line.trimStart().startsWith('\\'))
     .join('\n')
     .replaceAll(':"continuum_schema"', '"public"')
-    .replaceAll(':"continuum_app_role"', `"${role}"`);
+    .replaceAll(':"continuum_app_role"', `"${role}"`)
+    .replaceAll(":'continuum_app_role'", `'${role}'`);
   await pool.query(sql);
 }
 
@@ -666,7 +667,7 @@ describe('principal reactivation database trust boundary', () => {
       await expect(rolePool.query(
         `UPDATE scopes SET name = 'restored owned identity' WHERE id = $1`,
         [scope.id],
-      )).rejects.toThrow(/offboarded owned-scope identity is immutable/i);
+      )).rejects.toThrow(/offboarded owned-scope identity is immutable|permission denied/i);
       const redactedAuditId = (await rolePool.query(
         `SELECT audit.id::text AS id
            FROM audit_log audit

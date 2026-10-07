@@ -1,5 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import type pg from 'pg';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import pg, { type PoolConfig } from 'pg';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { createPrincipal } from '../storage/principals.js';
 import { createScope, getScopeByRef } from '../storage/scopes.js';
@@ -10,13 +12,44 @@ import { runMembershipSync } from './sync-runner.js';
 
 describe('membership sync CLI runner', () => {
   let pool: pg.Pool;
+  const roles: string[] = [];
+  const rolePools: pg.Pool[] = [];
 
   beforeEach(async () => {
     pool ??= await makeTestPool();
     await resetData(pool);
   });
 
-  afterAll(async () => { await pool?.end(); });
+  afterAll(async () => {
+    await Promise.all(rolePools.splice(0).map((connection) => connection.end()));
+    for (const role of roles.reverse()) {
+      await pool.query(`DROP OWNED BY "${role}"`);
+      await pool.query(`REVOKE "${role}" FROM CURRENT_USER`);
+      await pool.query(`DROP ROLE "${role}"`);
+    }
+    await pool?.end();
+  });
+
+  async function syncRolePool(principalId: string): Promise<pg.Pool> {
+    const role = `continuum_sync_runner_${Date.now()}_${roles.length}`;
+    roles.push(role);
+    await pool.query(`CREATE ROLE "${role}" NOLOGIN`);
+    let sql = await readFile(join(process.cwd(), 'scripts/grant-sync-role.sql'), 'utf8');
+    sql = sql.split(/\r?\n/).filter((line) => !line.trimStart().startsWith('\\')).join('\n')
+      .replaceAll(':"continuum_schema"', '"public"')
+      .replaceAll(':"continuum_sync_role"', `"${role}"`)
+      .replaceAll(":'continuum_sync_role'", `'${role}'`)
+      .replaceAll(":'continuum_principal_id'", `'${principalId}'`);
+    await pool.query(sql);
+    await pool.query(`GRANT "${role}" TO CURRENT_USER`);
+    const connection = new pg.Pool({
+      ...(pool as unknown as { options: PoolConfig }).options,
+      max: 1,
+      options: `-c role=${role}`,
+    });
+    rolePools.push(connection);
+    return connection;
+  }
 
   it('audits a production Graph overflow and fail-closes stale access before surfacing its code', async () => {
     const admin = await createPrincipal(pool, {
@@ -39,11 +72,15 @@ describe('membership sync CLI runner', () => {
     await pool.query(
       `UPDATE entra_sync_state SET last_success_at = now() - interval '25 hours'`,
     );
+    const syncService = await createPrincipal(pool, {
+      externalId: 'sync-overflow-service', kind: 'service', displayName: 'Sync service',
+    });
+    const syncPool = await syncRolePool(syncService.id);
 
-    await expect(runMembershipSync(pool, {
+    await expect(runMembershipSync(syncPool, {
       CONTINUUM_ENTRA_MEMBERSHIP_SYNC: 'true',
       CONTINUUM_GRAPH_ACCESS_TOKEN: 'x'.repeat(32),
-      CONTINUUM_MEMBERSHIP_SYNC_ACTOR: admin.externalId,
+      CONTINUUM_MEMBERSHIP_SYNC_ACTOR: syncService.externalId!,
       CONTINUUM_ENTRA_MAX_STALENESS_HOURS: '24',
     }, async () => { throw new MembershipSnapshotTooLargeError(); }))
       .rejects.toMatchObject({
