@@ -685,7 +685,11 @@ owner-only unresolved-history ledger instead of retaining an OID that may now
 belong to another role. The ledger distinguishes terminal superseded
 generations from restore-pending rows. Rebind rotates an owner-only database
 identity epoch, so old-cluster OID numbers cannot make unrelated restored roles
-look terminal. Re-run the same rebind command if global roles are
+look terminal. The epoch record also carries PostgreSQL's control-system
+identifier: OID-based rename/permutation checks run only when the registry was
+created in the current cluster, while a genuine cross-cluster restore resolves
+retired roles by exact name and still rejects active/retired target collisions.
+Re-run the same rebind command if global roles are
 restored in stages: a uniquely resolved retired name is moved back into live
 history. Do not rotate to a restore-pending name between stages. Earlier
 generations of a deliberately reused active sync-role name remain archived by

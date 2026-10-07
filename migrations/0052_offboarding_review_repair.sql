@@ -72,10 +72,22 @@ ALTER TABLE continuum_retired_sync_database_identities
 REVOKE ALL ON TABLE continuum_retired_sync_database_identities FROM PUBLIC;
 CREATE TABLE IF NOT EXISTS continuum_database_identity_epoch (
   singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
-  epoch UUID NOT NULL
+  epoch UUID NOT NULL,
+  cluster_system_identifier TEXT
 );
-INSERT INTO continuum_database_identity_epoch (singleton, epoch)
-VALUES (TRUE, gen_random_uuid()) ON CONFLICT (singleton) DO NOTHING;
+ALTER TABLE continuum_database_identity_epoch
+  ADD COLUMN IF NOT EXISTS cluster_system_identifier TEXT;
+INSERT INTO continuum_database_identity_epoch
+  (singleton, epoch, cluster_system_identifier)
+VALUES (TRUE, gen_random_uuid(),
+  (SELECT system_identifier::text FROM pg_control_system()))
+ON CONFLICT (singleton) DO NOTHING;
+UPDATE continuum_database_identity_epoch
+   SET cluster_system_identifier =
+     (SELECT system_identifier::text FROM pg_control_system())
+ WHERE cluster_system_identifier IS NULL;
+ALTER TABLE continuum_database_identity_epoch
+  ALTER COLUMN cluster_system_identifier SET NOT NULL;
 REVOKE ALL ON TABLE continuum_database_identity_epoch FROM PUBLIC;
 CREATE TABLE IF NOT EXISTS continuum_unresolved_retired_sync_database_identities (
   database_role NAME NOT NULL,
@@ -1343,6 +1355,9 @@ DECLARE
   invoking_oid OID;
   previous_epoch UUID;
   restored_epoch UUID := gen_random_uuid();
+  previous_system_identifier TEXT;
+  current_system_identifier TEXT :=
+    (SELECT system_identifier::text FROM pg_control_system());
   identity_record RECORD;
   changed_count INTEGER := 0;
 BEGIN
@@ -1359,9 +1374,10 @@ BEGIN
              continuum_unresolved_retired_sync_database_identities,
              continuum_database_identity_epoch
     IN ACCESS EXCLUSIVE MODE;
-  SELECT epoch INTO previous_epoch
+  SELECT epoch, cluster_system_identifier
+    INTO previous_epoch, previous_system_identifier
     FROM continuum_database_identity_epoch WHERE singleton;
-  IF EXISTS (
+  IF current_system_identifier = previous_system_identifier AND EXISTS (
     SELECT 1
       FROM continuum_retired_sync_database_identities history
       JOIN pg_roles live_role ON live_role.oid = history.database_role_oid
@@ -1369,6 +1385,8 @@ BEGIN
        AND NOT (
          EXISTS (
            SELECT 1 FROM pg_roles restored_role
+           JOIN continuum_retired_sync_database_identities target_history
+             ON target_history.database_role_oid = restored_role.oid
             WHERE restored_role.rolname = history.database_role)
          AND EXISTS (
            SELECT 1 FROM continuum_retired_sync_database_identities peer_history
@@ -1378,7 +1396,9 @@ BEGIN
     RAISE EXCEPTION 'a live retired role OID was renamed outside a complete retired-role restore mapping';
   END IF;
   UPDATE continuum_database_identity_epoch
-     SET epoch = restored_epoch WHERE singleton;
+     SET epoch = restored_epoch,
+         cluster_system_identifier = current_system_identifier
+   WHERE singleton;
   CREATE TEMP TABLE continuum_active_identity_rebind_plan ON COMMIT DROP AS
     SELECT bound_identity.database_role,
            bound_identity.database_role_oid AS previous_oid,
