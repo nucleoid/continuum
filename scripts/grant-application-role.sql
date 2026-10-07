@@ -15,9 +15,11 @@ GRANT USAGE ON SCHEMA :"continuum_schema" TO :"continuum_app_role";
 GRANT SELECT, INSERT, UPDATE ON TABLE
   :"continuum_schema".principals,
   :"continuum_schema".scopes,
-  :"continuum_schema".entra_groups,
   :"continuum_schema".memories
 TO :"continuum_app_role";
+GRANT SELECT ON TABLE :"continuum_schema".entra_groups TO :"continuum_app_role";
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE :"continuum_schema".entra_groups
+FROM :"continuum_app_role";
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
   :"continuum_schema".scope_memberships,
@@ -26,9 +28,11 @@ TO :"continuum_app_role";
 
 GRANT SELECT, INSERT, UPDATE ON TABLE
   :"continuum_schema".service_api_keys,
-  :"continuum_schema".ingest_deliveries,
-  :"continuum_schema".entra_sync_state
+  :"continuum_schema".ingest_deliveries
 TO :"continuum_app_role";
+GRANT SELECT ON TABLE :"continuum_schema".entra_sync_state TO :"continuum_app_role";
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE :"continuum_schema".entra_sync_state
+FROM :"continuum_app_role";
 
 GRANT SELECT, INSERT, UPDATE ON TABLE
   :"continuum_schema".principal_user_scopes
@@ -45,8 +49,7 @@ GRANT SELECT ON TABLE
   :"continuum_schema".audit_log_offboarding_backfill_state
 TO :"continuum_app_role";
 GRANT SELECT ON TABLE
-  :"continuum_schema".principal_user_scope_approvals,
-  :"continuum_schema".principal_offboarding_audit_requests
+  :"continuum_schema".principal_user_scope_approvals
 TO :"continuum_app_role";
 GRANT SELECT ON TABLE
   :"continuum_schema".principal_offboarding_events,
@@ -61,18 +64,9 @@ GRANT USAGE, SELECT ON SEQUENCE
 TO :"continuum_app_role";
 
 GRANT EXECUTE ON FUNCTION
-  :"continuum_schema".continuum_complete_offboarding_run(UUID, UUID, JSONB),
-  :"continuum_schema".continuum_resume_offboarding_run(UUID, UUID),
-  :"continuum_schema".continuum_restart_offboarding_run(UUID, UUID, JSONB),
-  :"continuum_schema".continuum_write_offboarding_run(UUID, UUID, TEXT, JSONB),
   :"continuum_schema".continuum_get_offboarding_run(UUID, UUID),
-  :"continuum_schema".continuum_start_offboarding_run(UUID, UUID, JSONB),
-  :"continuum_schema".continuum_redact_offboarding_audit(UUID, UUID, BIGINT[]),
-  :"continuum_schema".continuum_record_offboarding_event(UUID),
-  :"continuum_schema".continuum_apply_audit_retention(UUID, TIMESTAMPTZ, INTEGER, UUID, INTEGER, JSONB, TEXT, TEXT),
   :"continuum_schema".continuum_audit_retention_minimum_days(),
-  :"continuum_schema".continuum_offboarding_expected_audit_metadata(JSONB),
-  :"continuum_schema".continuum_reactivate_principal(UUID, UUID)
+  :"continuum_schema".continuum_offboarding_expected_audit_metadata(JSONB)
 TO :"continuum_app_role";
 
 REVOKE ALL ON FUNCTION
@@ -81,6 +75,29 @@ REVOKE ALL ON FUNCTION
   :"continuum_schema".continuum_activate_entra_memberships(UUID, TEXT, UUID[]),
   :"continuum_schema".continuum_change_manual_org_admin(UUID, UUID, TEXT, BOOLEAN),
   :"continuum_schema".continuum_takeover_manual_org_admin(UUID, UUID, UUID),
+  :"continuum_schema".continuum_complete_offboarding_run(UUID, UUID, JSONB),
+  :"continuum_schema".continuum_resume_offboarding_run(UUID, UUID),
+  :"continuum_schema".continuum_restart_offboarding_run(UUID, UUID, JSONB),
+  :"continuum_schema".continuum_write_offboarding_run(UUID, UUID, TEXT, JSONB),
+  :"continuum_schema".continuum_start_offboarding_run(UUID, UUID, JSONB),
+  :"continuum_schema".continuum_redact_offboarding_audit(UUID, UUID, BIGINT[]),
+  :"continuum_schema".continuum_record_offboarding_event(UUID),
+  :"continuum_schema".continuum_apply_audit_retention(UUID, TIMESTAMPTZ, INTEGER, UUID, INTEGER, JSONB, TEXT, TEXT),
+  :"continuum_schema".continuum_reactivate_principal(UUID, UUID),
+  :"continuum_schema".continuum_rotate_sync_database_identity(UUID, NAME, UUID),
+  :"continuum_schema".continuum_record_entra_sync_success(UUID, INTEGER),
+  :"continuum_schema".continuum_record_entra_sync_failure(UUID, TEXT, INTEGER),
+  :"continuum_schema".continuum_require_sync_session(UUID),
+  :"continuum_schema".continuum_cleanup_legacy_offboarding_audit_requests(INTEGER),
+  :"continuum_schema".continuum_operator_complete_offboarding_run(UUID, UUID, JSONB),
+  :"continuum_schema".continuum_operator_resume_offboarding_run(UUID, UUID),
+  :"continuum_schema".continuum_operator_restart_offboarding_run(UUID, UUID, JSONB),
+  :"continuum_schema".continuum_operator_write_offboarding_run(UUID, UUID, TEXT, JSONB),
+  :"continuum_schema".continuum_operator_start_offboarding_run(UUID, UUID, JSONB),
+  :"continuum_schema".continuum_operator_redact_offboarding_audit(UUID, UUID, BIGINT[]),
+  :"continuum_schema".continuum_operator_record_offboarding_event(UUID),
+  :"continuum_schema".continuum_operator_apply_audit_retention(UUID, TIMESTAMPTZ, INTEGER, UUID, INTEGER, JSONB, TEXT, TEXT),
+  :"continuum_schema".continuum_operator_reactivate_principal(UUID, UUID),
   :"continuum_schema".continuum_register_trusted_database_identity(NAME, UUID, BOOLEAN, BOOLEAN)
 FROM :"continuum_app_role";
 
@@ -112,6 +129,7 @@ FROM :"continuum_app_role";
 REVOKE ALL ON TABLE
   :"continuum_schema".continuum_audit_retention_policy,
   :"continuum_schema".continuum_trusted_database_identities,
+  :"continuum_schema".continuum_entra_reapproval_requests,
   :"continuum_schema".principal_offboarding_audit_requests,
   :"continuum_schema".continuum_offboarding_restart_requests
 FROM :"continuum_app_role";

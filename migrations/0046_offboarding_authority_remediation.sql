@@ -317,8 +317,9 @@ END;
 $$;
 REVOKE ALL ON FUNCTION continuum_takeover_manual_org_admin(UUID, UUID, UUID) FROM PUBLIC;
 
--- Legacy request mappings are no longer authority or erasure selectors.
-DELETE FROM principal_offboarding_audit_requests;
+-- Legacy request mappings are no longer authority or erasure selectors. They
+-- are retained for the bounded, operator-controlled cleanup added by 0047 so
+-- this catalog migration does not perform an unbounded data rewrite.
 REVOKE ALL ON TABLE principal_offboarding_audit_requests FROM PUBLIC;
 
 CREATE OR REPLACE FUNCTION continuum_redact_offboarding_audit(

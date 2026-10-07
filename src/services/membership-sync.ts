@@ -63,22 +63,13 @@ async function requireManualSyncActor(
   client: pg.PoolClient | pg.Pool,
   actorId: string,
 ): Promise<void> {
-  const manualAdmin = await client.query(
-    `SELECT m.principal_id
-       FROM scope_memberships m
-       JOIN scopes s ON s.id = m.scope_id
-       JOIN principals p ON p.id = m.principal_id AND p.disabled_at IS NULL
-      WHERE s.kind = 'org' AND s.name = ''
-        AND m.principal_id = $1
-        AND m.source_kind = 'manual' AND m.active AND m.role = 'admin'
-      LIMIT 1
-      FOR SHARE OF m`,
-    [actorId],
-  );
-  if (!manualAdmin.rowCount) {
+  try {
+    await client.query('SELECT continuum_require_sync_session($1)', [actorId]);
+  } catch (error) {
     throw new ServiceError(
       'FORBIDDEN',
-      'membership sync actor must be an active manually managed org administrator',
+      'membership sync requires the DB-bound sync service identity',
+      { cause: error },
     );
   }
 }
@@ -335,13 +326,12 @@ async function recordRejectedAttempt(
   quarantine: Pick<MembershipSyncResult, 'groupsDeactivated' | 'membershipsDeactivated' | 'skipCodes'>,
 ): Promise<void> {
   await requireManualSyncActor(client, actor.id);
+  await client.query('SELECT continuum_record_entra_sync_failure($1, $2, $3)', [
+    actor.id, rejectionReason(error), maxStalenessHours,
+  ]);
   const state = await client.query<{ last_success_at: Date; stale: boolean }>(
-    `UPDATE entra_sync_state
-        SET last_attempt_at = now(), last_failure_at = now(), last_failure_code = $1,
-            max_staleness = make_interval(hours => $2)
-      WHERE singleton
-      RETURNING last_success_at, now() >= last_success_at + max_staleness AS stale`,
-    [rejectionReason(error), maxStalenessHours],
+    `SELECT last_success_at, now() >= last_success_at + max_staleness AS stale
+       FROM entra_sync_state WHERE singleton`,
   );
   if (!state.rows[0]) throw new Error('Entra sync freshness state is missing');
   const staleDeactivated = state.rows[0].stale ? await client.query(
@@ -664,15 +654,9 @@ export async function syncEntraMemberships(
     if ((admins.rows[0]?.count ?? 0) < 1) {
       throw new ServiceError('CONFLICT', 'membership sync cannot remove the last org administrator');
     }
-    const freshness = await client.query(
-      `UPDATE entra_sync_state
-          SET last_success_at = now(), last_attempt_at = now(),
-              last_failure_at = NULL, last_failure_code = NULL,
-              max_staleness = make_interval(hours => $1)
-        WHERE singleton`,
-      [maxStalenessHours],
-    );
-    if (!freshness.rowCount) throw new Error('Entra sync freshness state is missing');
+    await client.query('SELECT continuum_record_entra_sync_success($1, $2)', [
+      actor.id, maxStalenessHours,
+    ]);
     await client.query(
       `INSERT INTO audit_log (principal_id, action, metadata)
        VALUES ($1, 'write', $2::jsonb)`,

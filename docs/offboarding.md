@@ -24,6 +24,14 @@ locked mapping. API-key credentials are rejected for these operator routes.
 Normal authentication still applies and the service checks active org-admin
 authority inside the transaction.
 
+These mutation routes are operator-only database operations. The API process
+serving them must use a dedicated DB-bound operator session; the shared
+application role receives `403 FORBIDDEN` from `owned-user-scope` and all
+irreversible offboarding calls. A normal public API deployment should not mount
+these routes on its shared application pool. Dry-run remains readable through
+the ordinary authenticated service, but mapping, execution, restart,
+reactivation, redaction, takeover, and audit retention use the operator role.
+
 Mapping requires the target principal to have current or historical `writer` or
 `admin` membership on the scope; reader access alone is not ownership proof. A
 scope with any membership history or authorship from another principal is
@@ -126,8 +134,9 @@ ownership acknowledgement is written to the immutable
 UUIDs, and evidence hash. UUID-only mapping and erasure receipt audit operations
 are excluded from redaction. The cumulative processed-count and bounded-ID
 operational receipt is also written to `principal_offboarding_events`. Those
-counts and the presented actor UUID are application-reported telemetry, not
-independently measured database facts. Both evidence ledgers reject update,
+counts are application-reported telemetry, not independently measured database
+facts. The actor UUID is accepted only when it matches the DB-bound operator
+session and remains an effective manual org administrator. Both evidence ledgers reject update,
 delete, and truncate operations. The compact privacy-safe event ledger is outside
 ordinary `audit_log` retention and is the authoritative retry evidence after
 audit rows have been pruned. It contains UUIDs, counts, timestamps, and
@@ -289,6 +298,14 @@ Migration `0046_offboarding_authority_remediation.sql` binds approvals and sync
 to separately provisioned database roles, restores manual-admin DML protection,
 removes legacy request-ID authority, aligns retention cutoff evidence, and
 restores early immutable-start validation.
+Migration `0047_offboarding_role_boundary.sql` removes caller-UUID authority
+from the shared role, makes Entra membership principal/source identity
+immutable, protects revocation, quarantine, and freshness writes, and adds
+guarded binding reapproval and sync-identity rotation. The legacy
+`principal_offboarding_audit_requests` rows are deliberately not deleted by a
+catalog migration. After taking a database backup, an operator may call
+`continuum_cleanup_legacy_offboarding_audit_requests(batch_size)` repeatedly
+with a bounded batch size from 1 through 5,000 until it returns zero.
 
 The final database verification is exact and executes once: the completion
 event trigger checks every memory and every audit row linked to the run's
@@ -318,9 +335,12 @@ Production must use separate migration-owner, shared application, dedicated
 operator, and dedicated sync login roles. The operator and sync roles must not
 be granted to the shared application role. Rollout is an explicit maintenance
 window: **stop** every API, MCP, admin, retention, and membership-sync process;
-**migrate** through `0046_offboarding_authority_remediation.sql` as the owner;
-**regrant** the shared app, operator, and sync profiles; then **start** only the
-`0046`-aware binaries. Mixed pre-`0046`/`0046` binaries or grants are unsupported.
+take and verify a **backup**; **migrate** through
+`0047_offboarding_role_boundary.sql` as the owner; **regrant** the shared app,
+operator, and sync profiles; then **start** only the `0047`-aware binaries.
+Mixed pre-`0047`/`0047` binaries or grants are unsupported. Do not run migration
+and old binaries concurrently, because old sync code writes freshness directly
+and old application code expects shared-role offboarding authority.
 The application role must not own the event ledger, completion-capability
 table, or security-definer functions, and receives no direct privilege on the
 capability table. Direct `completed` inserts then fail at the trigger.
@@ -342,13 +362,29 @@ psql "$CONTINUUM_MIGRATION_OWNER_URL" \
 psql "$CONTINUUM_MIGRATION_OWNER_URL" \
   --set=continuum_schema=public \
   --set=continuum_sync_role=continuum_sync \
-  --set=continuum_principal_id='<manual-admin-uuid>' \
+  --set=continuum_principal_id='<dedicated-service-principal-uuid>' \
   --file=scripts/grant-sync-role.sql
 ```
 
+The sync identity is a dedicated service principal with `kind = 'service'` and
+an enabled lifecycle state, never a
+named human administrator. Before disabling or replacing that service identity,
+an operator rotates the existing sync database role atomically:
+
+```sql
+SELECT continuum_rotate_sync_database_identity(
+  '<operator-admin-uuid>', 'continuum_sync', '<new-service-principal-uuid>'
+);
+```
+
+Apply `grant-sync-role.sql` for the same service principal, run one sync, and
+verify `entra_sync_state.last_success_at` before disabling the old service
+principal. Human offboarding or demotion therefore cannot silently stop sync.
+
 The shared-role script enumerates ordinary capture, embedding, identity,
-service-key, webhook, lifecycle, retention, and offboarding traffic. Approval,
-binding provisioning, manual-admin changes, and Entra activation are excluded.
+service-key, webhook, lifecycle, and read-only retention/offboarding previews.
+Approval, irreversible retention/offboarding, binding provisioning,
+manual-admin changes, and Entra activation are excluded.
 Run `grant-application-role.sql` for the dedicated operator role before adding
 its DB-bound approval grants. The dedicated sync role receives only the reads,
 writes, and activation function needed by authoritative sync. The scripts revoke
@@ -371,10 +407,12 @@ requires the exact index to exist and be valid before the migration ledger can
 record success. A timeout or failed build leaves the file unapplied and safely
 retryable.
 
-Rollback is supported only to an 0046-aware binary and its matching grant
-profile. Stop all processes and confirm there are zero incomplete runs with
-`list-incomplete-offboarding`; then deploy the selected `0046`-aware binary, reapply all three
-grant profiles, and restart. Pre-`0046` binaries are incompatible with the new
+Rollback is forward-only and requires the verified pre-migration backup for any
+data that bounded legacy cleanup has removed. Application rollback is supported
+only to an 0047-aware binary and its matching grant profile. Stop all processes
+and confirm there are zero incomplete runs with `list-incomplete-offboarding`;
+then deploy the selected `0047`-aware binary, reapply all three grant profiles,
+and restart. Pre-`0047` binaries are incompatible with the new
 approval and sync boundary and are not a supported application-first rollback.
 Database rollback requires a separate forward migration; do not drop guards or
 regrant the shared role ad hoc. Completed offboarding erasure is irreversible

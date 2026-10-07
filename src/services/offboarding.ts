@@ -4,6 +4,19 @@ import type { Principal } from '../types.js';
 import { requireOrgAdmin } from './access.js';
 import { ServiceError } from './errors.js';
 
+function operatorBoundaryError(error: unknown): ServiceError | null {
+  const databaseError = error as { code?: string; message?: string };
+  if (databaseError.code === '42501'
+      || /DB-bound trusted approve identity|operator path/i.test(databaseError.message ?? '')) {
+    return new ServiceError(
+      'FORBIDDEN',
+      'offboarding administration requires a DB-bound operator session',
+      { cause: error },
+    );
+  }
+  return null;
+}
+
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const SYNC_LOCK_ID = '834641726154302119';
 export const MAX_OFFBOARD_EVIDENCE_IDS = 100;
@@ -302,7 +315,7 @@ export async function mapOwnedUserScope(
     };
   } catch (error) {
     await client.query('ROLLBACK');
-    throw error;
+    throw operatorBoundaryError(error) ?? error;
   } finally { client.release(); }
 }
 
@@ -389,7 +402,7 @@ async function writeOffboardingRun(
   details: Record<string, unknown> = {},
 ): Promise<pg.QueryResult> {
   return client.query(
-    `SELECT * FROM continuum_write_offboarding_run($1, $2, $3, $4::jsonb)`,
+    `SELECT * FROM continuum_operator_write_offboarding_run($1, $2, $3, $4::jsonb)`,
     [principalId, actorId, command, JSON.stringify(details)],
   );
 }
@@ -594,7 +607,7 @@ async function startOffboardingRunEvent(
 ): Promise<void> {
   // phase started: immutable authorization exists before the first fence/write.
   await client.query(
-    `SELECT continuum_start_offboarding_run($1, $2, $3::jsonb)`,
+    `SELECT continuum_operator_start_offboarding_run($1, $2, $3::jsonb)`,
     [run.run_id, initiatedBy, JSON.stringify(evidence)],
   );
 }
@@ -606,7 +619,7 @@ async function finalizeOffboardingRun(
   completionEvidence: Record<string, unknown>,
 ): Promise<void> {
   const completed = await client.query(
-    `SELECT continuum_complete_offboarding_run($1, $2, $3::jsonb) AS completed`,
+    `SELECT continuum_operator_complete_offboarding_run($1, $2, $3::jsonb) AS completed`,
     [run.run_id, finalizedBy, JSON.stringify(completionEvidence)],
   );
   if (!completed.rows[0]?.completed) {
@@ -883,7 +896,7 @@ async function offboardPrincipalCore(
         [`${verificationTimeoutMs}ms`],
       );
       run = await client.query(
-        `SELECT * FROM continuum_restart_offboarding_run($1, $2, $3::jsonb)`,
+        `SELECT * FROM continuum_operator_restart_offboarding_run($1, $2, $3::jsonb)`,
         [principalId, actor.id, JSON.stringify({
           approval_id: approvalId, approval_evidence_hash: acknowledgedEvidenceHash,
           initial_memories: memories, initial_embeddings: embeddings,
@@ -906,7 +919,7 @@ async function offboardPrincipalCore(
     }
 
     if (resumedRun) {
-      await client.query('SELECT continuum_resume_offboarding_run($1, $2)', [
+      await client.query('SELECT continuum_operator_resume_offboarding_run($1, $2)', [
         run.rows[0].run_id, actor.id,
       ]);
     } else {
@@ -1059,7 +1072,7 @@ async function offboardPrincipalCore(
       direct.audit_linked_complete = true;
     }
     const redaction = await client.query(
-      `SELECT * FROM continuum_redact_offboarding_audit(
+      `SELECT * FROM continuum_operator_redact_offboarding_audit(
          $1, $2,
          ARRAY(SELECT id FROM offboarding_audit_targets ORDER BY id)::bigint[]
        )`,
@@ -1121,7 +1134,7 @@ async function offboardPrincipalCore(
         audit_queries_processed: Number(progressRow.audit_queries_processed),
         batches: Number(progressRow.batches),
       });
-      await client.query('SELECT continuum_record_offboarding_event($1)', [progressRow.run_id]);
+      await client.query('SELECT continuum_operator_record_offboarding_event($1)', [progressRow.run_id]);
       await client.query(
         `INSERT INTO audit_log (principal_id, action, scope_id, metadata)
          VALUES ($1, 'archive', $2, $3::jsonb)`,
@@ -1188,6 +1201,6 @@ async function offboardPrincipalCore(
         'CONFLICT', 'cannot remove the last effective manual org administrator', { cause: error },
       );
     }
-    throw error;
+    throw operatorBoundaryError(error) ?? error;
   } finally { client.release(destroyClient); }
 }

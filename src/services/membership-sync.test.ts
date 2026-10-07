@@ -739,6 +739,9 @@ describe('Entra membership sync', () => {
     const client = {
       query: vi.fn(async (query: string) => {
         if (query.includes('pg_advisory_unlock')) throw new Error('unlock failed');
+        if (query.includes('continuum_require_sync_session')) {
+          throw new ServiceError('FORBIDDEN', 'sync authority removed');
+        }
         return { rowCount: 0, rows: [] };
       }),
       release,
@@ -773,7 +776,7 @@ describe('Entra membership sync', () => {
       id: groupId, status: 'present', displayName: 'org-admin', memberObjectIds: [],
     }])).rejects.toMatchObject({
       code: 'FORBIDDEN',
-      publicMessage: 'membership sync actor must be an active manually managed org administrator',
+      publicMessage: 'membership sync requires the DB-bound sync service identity',
     });
     expect(await hasRole(pool, admin.id, org!.id, 'admin')).toBe(true);
   });
@@ -807,7 +810,7 @@ describe('Entra membership sync', () => {
       id: groupId, status: 'invalid', errorCode: 'MALFORMED_GROUP',
     }])).rejects.toMatchObject({
       code: 'FORBIDDEN',
-      publicMessage: 'membership sync actor must be an active manually managed org administrator',
+      publicMessage: 'membership sync requires the DB-bound sync service identity',
     });
     expect((await pool.query(
       'SELECT active, quarantined_at FROM entra_groups WHERE external_id = $1', [groupId],

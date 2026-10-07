@@ -5,7 +5,7 @@
 \endif
 \if :{?continuum_principal_id}
 \else
-  \echo 'continuum_principal_id must be the bound manual org-admin UUID'
+  \echo 'continuum_principal_id must be a dedicated enabled service-principal UUID'
   \quit
 \endif
 \if :{?continuum_schema}
@@ -32,15 +32,21 @@ GRANT INSERT ON TABLE :"continuum_schema".principals, :"continuum_schema".audit_
 TO :"continuum_sync_role";
 GRANT UPDATE ON TABLE
   :"continuum_schema".entra_groups,
-  :"continuum_schema".scope_memberships,
-  :"continuum_schema".entra_sync_state
+  :"continuum_schema".scope_memberships
 TO :"continuum_sync_role";
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE :"continuum_schema".entra_sync_state
+FROM :"continuum_sync_role";
 GRANT USAGE, SELECT ON SEQUENCE :"continuum_schema".audit_log_id_seq
 TO :"continuum_sync_role";
 GRANT EXECUTE ON FUNCTION
-  :"continuum_schema".continuum_activate_entra_memberships(UUID, TEXT, UUID[])
+  :"continuum_schema".continuum_activate_entra_memberships(UUID, TEXT, UUID[]),
+  :"continuum_schema".continuum_require_sync_session(UUID),
+  :"continuum_schema".continuum_record_entra_sync_success(UUID, INTEGER),
+  :"continuum_schema".continuum_record_entra_sync_failure(UUID, TEXT, INTEGER)
 TO :"continuum_sync_role";
 REVOKE ALL ON TABLE :"continuum_schema".continuum_trusted_database_identities
+FROM :"continuum_sync_role";
+REVOKE ALL ON TABLE :"continuum_schema".continuum_entra_reapproval_requests
 FROM :"continuum_sync_role";
 REVOKE ALL ON FUNCTION
   :"continuum_schema".continuum_register_trusted_database_identity(NAME, UUID, BOOLEAN, BOOLEAN),

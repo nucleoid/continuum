@@ -286,7 +286,7 @@ async function deleteBatch(
     const principalId = await authorizedPrincipalId(client, principalExternalId);
     await afterExport?.(batchNumber);
     const deletion = await client.query<{ deleted_count: number }>(
-      `SELECT continuum_apply_audit_retention(
+      `SELECT continuum_operator_apply_audit_retention(
          $1::uuid, $2::timestamptz, $3::integer, $4::uuid, $5::integer,
          $6::jsonb, $7::text, $8::text
        ) AS deleted_count`,

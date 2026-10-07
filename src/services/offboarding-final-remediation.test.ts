@@ -152,7 +152,7 @@ describe('final offboarding authorization and evidence boundary', () => {
              "initial_audit_queries":0,"initial_audit_selection":{},
              "initial_count_truncated":[]}'::jsonb)`,
         [value.target.id, value.takeover.id],
-      )).rejects.toThrow(/fresh offboarding|unsupported offboarding progress command/i);
+      )).rejects.toThrow(/permission denied|fresh offboarding|unsupported offboarding progress command/i);
       await expect(rolePool.query(
         `UPDATE principal_offboarding_run_events SET finalized_by = $2
           WHERE principal_id = $1`,

@@ -67,6 +67,20 @@ describe('audit retention', () => {
     await pool.query(sql);
   }
 
+  async function applyOperatorRoleGrants(role: string, principalId: string): Promise<void> {
+    const source = await readFile(
+      path.join(process.cwd(), 'scripts/grant-operator-role.sql'), 'utf8',
+    );
+    const sql = source.split(/\r?\n/)
+      .filter((line) => !line.trimStart().startsWith('\\'))
+      .join('\n')
+      .replaceAll(':"continuum_schema"', '"public"')
+      .replaceAll(':"continuum_operator_role"', `"${role}"`)
+      .replaceAll(":'continuum_operator_role'", `'${role}'`)
+      .replaceAll(":'continuum_principal_id'", `'${principalId}'`);
+    await pool.query(sql);
+  }
+
   async function insertAudit(
     principalId: string,
     at: Date,
@@ -177,8 +191,12 @@ describe('audit retention', () => {
     expect(empty).toMatchObject({ status: 'completed', batches: 0, deleted: 0, exhausted: true });
   });
 
-  it('deletes and summarizes retention as the documented non-owner application role', async () => {
-    const admin = await seedPrincipal('svc:retention', 'admin');
+  it('deletes and summarizes retention as the documented non-owner operator role', async () => {
+    const admin = await createPrincipal(pool, {
+      externalId: 'svc:retention', kind: 'user', displayName: 'Retention operator',
+    });
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    await addMembership(pool, admin.id, org!.id, 'admin');
     const oldId = await insertAudit(admin.id, new Date('2026-01-01T00:00:00Z'));
     const recentId = await insertAudit(admin.id, new Date(cutoff.getTime() + 60_000));
     const role = `continuum_retention_${Date.now()}`;
@@ -188,6 +206,7 @@ describe('audit retention', () => {
     try {
       await pool.query(`GRANT ${quotedRole} TO CURRENT_USER`);
       await applyApplicationRoleGrants(role);
+      await applyOperatorRoleGrants(role, admin.id);
       rolePool = new pg.Pool({
         ...(pool as unknown as { options: PoolConfig }).options,
         max: 1,
@@ -203,7 +222,7 @@ describe('audit retention', () => {
         [oldId],
       )).rejects.toThrow(/permission denied/i);
       await expect(rolePool.query(
-        `SELECT continuum_apply_audit_retention(
+        `SELECT continuum_operator_apply_audit_retention(
            $1, 'infinity'::timestamptz, 30, gen_random_uuid(), 1,
            '[]'::jsonb, 'none', NULL
          )`,

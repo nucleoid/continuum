@@ -103,7 +103,7 @@ export async function reactivatePrincipal(
     await client.query('BEGIN');
     await requireOrgAdmin(client, actor.id);
     const reactivated = await client.query(
-      `SELECT continuum_reactivate_principal($1::uuid, $2::uuid) AS previously_offboarded`,
+      `SELECT continuum_operator_reactivate_principal($1::uuid, $2::uuid) AS previously_offboarded`,
       [principalId, actor.id],
     );
     if (reactivated.rows[0]?.previously_offboarded === null) {

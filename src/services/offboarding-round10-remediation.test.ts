@@ -75,6 +75,9 @@ describe('rejected-head offboarding remediation', () => {
 
   it('reactivates a missing then returning binding through the documented non-owner sync role', async () => {
     const { admin } = await adminFixture('returning');
+    const syncService = await createPrincipal(pool, {
+      externalId: 'returning-sync-service', kind: 'service', displayName: 'Sync service',
+    });
     const project = await createScope(pool, { kind: 'project', name: 'returning-project' });
     const groupId = '10000000-0000-4000-8000-000000000001';
     const memberId = '10000000-0000-4000-8000-000000000002';
@@ -86,12 +89,12 @@ describe('rejected-head offboarding remediation', () => {
     }], { allowMassDeactivation: true });
 
     const role = `continuum_sync_return_${Date.now()}`;
-    const connection = await syncRolePool(pool, role, admin.id);
+    const connection = await syncRolePool(pool, role, syncService.id);
     try {
-      await syncEntraMemberships(connection, admin, [{ id: groupId, status: 'missing' }], {
+      await syncEntraMemberships(connection, syncService, [{ id: groupId, status: 'missing' }], {
         allowMassDeactivation: true,
       });
-      await expect(syncEntraMemberships(connection, admin, [{
+      await expect(syncEntraMemberships(connection, syncService, [{
         id: groupId, status: 'present', displayName: 'Returning again', memberObjectIds: [memberId],
       }], { allowMassDeactivation: true })).resolves.toMatchObject({ groupsReactivated: 1 });
       expect((await pool.query(
@@ -308,7 +311,7 @@ describe('rejected-head offboarding remediation', () => {
   it('documents the bounded rollout and rollback contract without old-binary compatibility claims', async () => {
     const docs = await readFile(join(process.cwd(), 'docs/offboarding.md'), 'utf8');
     expect(docs).toMatch(/stop[\s\S]*migrate[\s\S]*regrant[\s\S]*start/i);
-    expect(docs).toMatch(/rollback[\s\S]*(0045|0046)-aware/i);
+    expect(docs).toMatch(/rollback[\s\S]*0047-aware/i);
     expect(docs).not.toMatch(/old application tolerates/i);
     expect(docs).toMatch(/takeover[\s\S]*current effective org administrator/i);
   });

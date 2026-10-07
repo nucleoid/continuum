@@ -27,6 +27,22 @@ async function applyApplicationRoleGrants(pool: pg.Pool, role: string): Promise<
   await pool.query(sql);
 }
 
+async function applyOperatorRoleGrants(
+  pool: pg.Pool, role: string, principalId: string,
+): Promise<void> {
+  const source = await readFile(
+    join(process.cwd(), 'scripts/grant-operator-role.sql'), 'utf8',
+  );
+  const sql = source.split(/\r?\n/)
+    .filter((line) => !line.trimStart().startsWith('\\'))
+    .join('\n')
+    .replaceAll(':"continuum_schema"', '"public"')
+    .replaceAll(':"continuum_operator_role"', `"${role}"`)
+    .replaceAll(":'continuum_operator_role'", `'${role}'`)
+    .replaceAll(":'continuum_principal_id'", `'${principalId}'`);
+  await pool.query(sql);
+}
+
 async function fixture(pool: pg.Pool, complete = true) {
   const admin = await createPrincipal(pool, {
     externalId: 'reactivation-security-admin', kind: 'user', displayName: 'Admin',
@@ -133,7 +149,7 @@ describe('principal reactivation database trust boundary', () => {
     expect(grants).toMatch(/continuum_record_offboarding_event\(UUID\)/i);
   });
 
-  it('supports lifecycle functions as a separately granted non-owner role', async () => {
+  it('supports lifecycle functions as a separately granted non-owner operator role', async () => {
     const { admin, target } = await fixture(pool);
     const role = `continuum_app_test_${Date.now()}`;
     const quotedRole = `"${role}"`;
@@ -141,6 +157,7 @@ describe('principal reactivation database trust boundary', () => {
     try {
       await pool.query(`GRANT ${quotedRole} TO CURRENT_USER`);
       await applyApplicationRoleGrants(pool, role);
+      await applyOperatorRoleGrants(pool, role, admin.id);
 
       const client = await pool.connect();
       try {
@@ -153,10 +170,10 @@ describe('principal reactivation database trust boundary', () => {
         )).rows[0].non_owner).toBe(true);
         expect((await client.query(
           `SELECT has_function_privilege(current_user,
-                    'continuum_complete_offboarding_run(uuid,uuid,jsonb)', 'EXECUTE')
+                    'continuum_operator_complete_offboarding_run(uuid,uuid,jsonb)', 'EXECUTE')
                     AS complete_execute,
                   has_function_privilege(current_user,
-                    'continuum_reactivate_principal(uuid,uuid)', 'EXECUTE')
+                    'continuum_operator_reactivate_principal(uuid,uuid)', 'EXECUTE')
                     AS reactivate_execute,
                   has_table_privilege(current_user,
                     'continuum_offboarding_completion_requests', 'INSERT')
@@ -178,7 +195,7 @@ describe('principal reactivation database trust boundary', () => {
         await client.query('BEGIN');
         await client.query(`SET LOCAL ROLE ${quotedRole}`);
         await expect(client.query(
-          `SELECT continuum_reactivate_principal($1::uuid, $2::uuid)`,
+          `SELECT continuum_operator_reactivate_principal($1::uuid, $2::uuid)`,
           [target.id, admin.id],
         )).resolves.toBeDefined();
         await client.query('ROLLBACK');
@@ -261,7 +278,7 @@ describe('principal reactivation database trust boundary', () => {
              "memberships":999,"aliases":999,"entra_bindings":999,
              "audit_queries":999}'::jsonb)`,
         [target.id, admin.id],
-      )).rejects.toThrow(/completed offboarding run is immutable/i);
+      )).rejects.toThrow(/permission denied|completed offboarding run is immutable/i);
       await expect(rolePool.query(
         `SELECT * FROM continuum_write_offboarding_run(
            $1, $2, 'restart',
@@ -272,7 +289,7 @@ describe('principal reactivation database trust boundary', () => {
              "initial_audit_queries":999,"initial_audit_selection":{},
              "initial_count_truncated":[]}'::jsonb)`,
         [target.id, admin.id],
-      )).rejects.toThrow(/fresh offboarding restart requires the guarded restart function/i);
+      )).rejects.toThrow(/permission denied|fresh offboarding restart requires the guarded restart function/i);
 
       expect((await rolePool.query(
         `SELECT run_id::text, initiated_by::text, completed_at,
@@ -288,7 +305,7 @@ describe('principal reactivation database trust boundary', () => {
     }
   });
 
-  it('does not let the application role forge completion from caller-controlled progress', async () => {
+  it('does not let the operator forge completion from caller-controlled progress', async () => {
     const { admin, target, scope } = await fixture(pool, false);
     const role = `continuum_forgery_${Date.now()}`;
     const quotedRole = `"${role}"`;
@@ -297,6 +314,7 @@ describe('principal reactivation database trust boundary', () => {
     try {
       await pool.query(`GRANT ${quotedRole} TO CURRENT_USER`);
       await applyApplicationRoleGrants(pool, role);
+      await applyOperatorRoleGrants(pool, role, admin.id);
       rolePool = new pg.Pool({
         ...(pool as unknown as { options: PoolConfig }).options,
         max: 2,
@@ -329,7 +347,7 @@ describe('principal reactivation database trust boundary', () => {
 
       for (const command of ['scope_complete', 'set_fence', 'memory_complete']) {
         await rolePool.query(
-          `SELECT * FROM continuum_write_offboarding_run($1, $2, $3, '{}'::jsonb)`,
+          `SELECT * FROM continuum_operator_write_offboarding_run($1, $2, $3, '{}'::jsonb)`,
           [target.id, admin.id, command],
         );
       }
@@ -341,13 +359,13 @@ describe('principal reactivation database trust boundary', () => {
         'audit_principal_cursor', 'audit_scope_cursor', 'audit_scope_ids_cursor',
       ]) {
         await rolePool.query(
-          `SELECT * FROM continuum_write_offboarding_run($1, $2, 'audit_cursor', $3::jsonb)`,
+          `SELECT * FROM continuum_operator_write_offboarding_run($1, $2, 'audit_cursor', $3::jsonb)`,
           [target.id, admin.id, JSON.stringify({ column, cursor: fence })],
         );
       }
       for (const command of ['audit_memory_complete', 'linked_complete']) {
         await rolePool.query(
-          `SELECT * FROM continuum_write_offboarding_run($1, $2, $3, '{}'::jsonb)`,
+          `SELECT * FROM continuum_operator_write_offboarding_run($1, $2, $3, '{}'::jsonb)`,
           [target.id, admin.id, command],
         );
       }
@@ -420,7 +438,7 @@ describe('principal reactivation database trust boundary', () => {
         batches: Number(forged.batches),
       };
       const completion = () => rolePool!.query(
-        `SELECT continuum_complete_offboarding_run($1::uuid, $2::uuid, $3::jsonb)`,
+        `SELECT continuum_operator_complete_offboarding_run($1::uuid, $2::uuid, $3::jsonb)`,
         [forged.run_id, admin.id, JSON.stringify(evidence)],
       );
       const actualStateIsErased = async () => (await pool.query(
@@ -454,11 +472,11 @@ describe('principal reactivation database trust boundary', () => {
       expect(BigInt(postFenceAuditId)).toBeGreaterThan(BigInt(fence));
       expect(await actualStateIsErased()).toBe(true);
       await expect(rolePool.query(
-        `SELECT continuum_complete_offboarding_run($1::uuid, $2::uuid, $3::jsonb)`,
+        `SELECT continuum_operator_complete_offboarding_run($1::uuid, $2::uuid, $3::jsonb)`,
         [forged.run_id, target.id, JSON.stringify({
           ...evidence, finalized_by: target.id, memories_processed: 999,
         })],
-      )).rejects.toThrow(/current effective org administrator/i);
+      )).rejects.toThrow(/DB-bound trusted approve identity|current effective org administrator/i);
 
       await pool.query(
         'ALTER TABLE principals DISABLE TRIGGER protect_offboarded_principal_identity',
@@ -567,7 +585,7 @@ describe('principal reactivation database trust boundary', () => {
     }
   });
 
-  it('runs multi-batch erasure, reads, audit, and reactivation as the app role', async () => {
+  it('runs multi-batch erasure, reads, audit, and reactivation as the operator role', async () => {
     const admin = await createPrincipal(pool, {
       externalId: 'app-role-offboarding-admin', kind: 'user', displayName: 'Admin',
     });
@@ -588,6 +606,7 @@ describe('principal reactivation database trust boundary', () => {
     try {
       await pool.query(`GRANT ${quotedRole} TO CURRENT_USER`);
       await applyApplicationRoleGrants(pool, role);
+      await applyOperatorRoleGrants(pool, role, admin.id);
       rolePool = new pg.Pool({
         ...(pool as unknown as { options: PoolConfig }).options,
         max: 2,
@@ -719,7 +738,7 @@ describe('principal reactivation database trust boundary', () => {
          VALUES ('99999999-9999-4999-8999-999999999999', 'forged-admin',
                  $1, 'admin', TRUE, $2, now())`,
         [org!.id, admin.id],
-      )).rejects.toThrow(/guarded database function/i);
+      )).rejects.toThrow(/permission denied|guarded database function/i);
       await expect(rolePool.query(
         `INSERT INTO principal_user_scope_approvals
            (principal_id, scope_id, approved_by, acknowledged_principal_ids,
@@ -752,10 +771,7 @@ describe('principal reactivation database trust boundary', () => {
       await expect(syncEntraMemberships(rolePool, admin, [{
         id: groupId, status: 'present', displayName: 'Runtime Group',
         memberObjectIds: ['aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'],
-      }], { allowMassDeactivation: true })).resolves.toMatchObject({
-        groupsSeen: 0, groupsSkipped: 1, membershipsActive: 0,
-        skipCodes: { UNBOUND_GROUP: 1 },
-      });
+      }], { allowMassDeactivation: true })).rejects.toMatchObject({ code: 'FORBIDDEN' });
     } finally {
       await rolePool?.end();
       await pool.query(`DROP OWNED BY ${quotedRole}`);
