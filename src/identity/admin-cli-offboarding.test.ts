@@ -15,4 +15,12 @@ describe('admin CLI offboarding orchestration', () => {
     expect(source).toContain("operation === 'list-incomplete-offboarding'");
     expect(source).toContain('await listIncompleteOffboardingRuns(pool, actor)');
   });
+
+  it('separates bounded coordination privacy repair from destructive offboarding', async () => {
+    const source = await readFile(new URL('./admin-cli.ts', import.meta.url), 'utf8');
+    expect(source).toContain("operation === 'list-coordination-privacy-repairs'");
+    expect(source).toContain("operation === 'repair-coordination-privacy'");
+    expect(source).toContain('await listCoordinationPrivacyRepairs(pool, actor');
+    expect(source).toContain('await repairCoordinationPrivacy(pool, actor');
+  });
 });

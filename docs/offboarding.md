@@ -150,19 +150,25 @@ retention and offboarding mutation.
 Migration 0063 reopens every version-1 coordination privacy row by clearing its
 completion timestamp. `list-incomplete-offboarding` reports unfinished durable
 offboarding runs, but a previously completed run can require only this upgrade
-re-scrub and therefore is not in that list. After upgrade, operators must also
-query `coordination_principal_privacy_progress` as the migration owner for rows
-where `privacy_version < 2 OR completed_at IS NULL`, map each principal to its
-owned user scope, and rerun the normal `offboard-principal --confirm-scope`
-command until it returns `complete: true`. Application and operator roles get
-only the narrow privacy-state function used by that command, not table reads.
+re-scrub and therefore is not in that list. After upgrade, use
+`list-coordination-privacy-repairs`; it returns a bounded list classified as
+`offboarded` or `disabled_only` without granting direct progress-table reads.
+For `offboarded` rows, rerun the normal `offboard-principal --confirm-scope`
+command. For `disabled_only` rows, run the non-lifecycle
+`repair-coordination-privacy <principal-id> --confirm-scope <scope-id>` command
+until it returns `complete: true`. That command only drives bounded
+coordination metadata scrubbing and never sets `offboarded_at`, pseudonymizes
+the user or scope, erases memories, or deactivates scope access.
 Migrations 0066 and 0067 reopen completed version-2 rows and reset only their
 audit cursor so the same bounded command can apply the narrower 0065 lock-audit
 classifier without changing unrelated immutable evidence. Migration 0067 also
-includes disabled principals completed through direct scrubbing. For a
-previously completed offboarding, each repair call commits its bounded privacy
-page without reopening the immutable lifecycle run; repeat until the command
-returns `complete: true`.
+includes disabled principals completed through direct scrubbing. The destructive
+offboarding command refuses those pending disabled-only repairs and directs the
+operator to the dedicated repair command. For a previously completed
+offboarding, each repair call commits its bounded privacy page without reopening
+the immutable lifecycle run; repeat until the command returns `complete: true`.
+A response is complete only when coordination privacy and the full
+database-verified lifecycle state are both clean.
 
 Offboarding is not globally atomic across all batches. Until `complete: true`,
 audit rows beyond the current keyset cursors can still contain raw query text and

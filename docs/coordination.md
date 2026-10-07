@@ -304,7 +304,7 @@ vectors. Audit failure rolls back the whole operation.
 
 ## Deployment, mixed versions, and rollback
 
-Apply through migration `0067_coordination_rollout_repair.sql` (0064 remains
+Apply through migration `0068_coordination_production_repair.sql` (0064 remains
 the concurrent-index step), then **re-run
 `scripts/grant-application-role.sql`** for every application and dedicated
 operator role. Re-run `scripts/grant-operator-role.sql` immediately afterward
@@ -335,6 +335,16 @@ complete. Every node must run a binary that calls
 `continuum_operator_pseudonymize_scope_v2` before applying 0061. Before
 re-enable, apply all forward migrations, re-run the grant scripts and identity
 verifier, and resume with the retained counters.
+
+Migration 0068 is forward-only. Before applying it, drain offboarding traffic
+from binaries older than the 0067-aware service. After it is applied, an older
+binary may read and write ordinary coordination state, but it must not be used
+as an offboarding worker: the database refuses its completed-run restart when
+coordination privacy is the only dirty state. This refusal preserves immutable
+lifecycle completion; it is not a signal to retry the old command. Route the
+principal to a current node and use `repair-coordination-privacy`. A binary
+rollback therefore leaves offboarding traffic disabled until a current binary
+and the exact application/operator grant profiles are restored.
 
 Migration 0061 contains the historical installation-wide receipt-counter
 recount and takes coordination table locks. An installation upgrading from
@@ -368,11 +378,13 @@ recorded only after an empty page proves exhaustion. Operators may restart the
 same offboarding command after timeout or interruption; counters and cursors
 resume without rescanning completed pages.
 `list-incomplete-offboarding` does not discover a completed historical run that
-0063 reopened only for privacy v2. The migration owner must additionally list
-`coordination_principal_privacy_progress` rows with `privacy_version < 2 OR
-completed_at IS NULL`, then rerun the ordinary confirmed offboarding command
-for each mapped principal until complete. Runtime roles receive only a
-least-privilege state function and no direct progress-table privileges.
+0063 reopened only for privacy v2. Use the bounded
+`list-coordination-privacy-repairs` operator command instead. It distinguishes
+completed offboarding from disabled-only direct scrub state. Resume an
+offboarded row with the ordinary confirmed offboarding command; resume a
+disabled-only row only with `repair-coordination-privacy`. Runtime roles receive
+only least-privilege discovery and repair functions and no direct
+progress-table privileges.
 Completion is not recorded until owned-scope erasure and shared-scope
 detachment are both complete. Append-only coordination operator events survive
 audit retention and offboarding. Lock audit metadata retains operation evidence
