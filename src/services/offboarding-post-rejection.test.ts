@@ -20,7 +20,7 @@ async function applyGrantScript(
     sql = sql.replaceAll(":'" + name + "'", "'" + value.replaceAll("'", "''") + "'");
   }
   const assertion = sql.lastIndexOf('\nSELECT "public".continuum_assert_application_role_allowlist');
-  if (assertion < 0) {
+  if (assertion < 0 || /^\s*BEGIN;/im.test(sql)) {
     await pool.query(sql);
     return;
   }
@@ -84,13 +84,18 @@ describe('post-rejection database authority remediation', () => {
       await applyGrantScript(pool, 'grant-sync-role.sql', {
         continuum_sync_role: role, continuum_principal_id: principalId!,
       });
+      await pool.query(
+        'ALTER ROLE ' + quoteRole(role) + " LOGIN PASSWORD 'continuum-test-password'",
+      );
     }
+    const base = (pool as unknown as { options: PoolConfig }).options;
+    const directUrl = new URL(base.connectionString!);
+    directUrl.username = role;
+    directUrl.password = 'continuum-test-password';
     const connection = profile === 'sync' ? new pg.Pool({
-      ...(pool as unknown as { options: PoolConfig }).options,
+      connectionString: directUrl.toString(),
+      ssl: base.ssl,
       max: 1,
-      user: role,
-      password: 'continuum-test-password',
-      options: undefined,
     }) : await rolePool(pool, role);
     rolePools.push(connection);
     return { role, connection };
@@ -170,10 +175,11 @@ describe('post-rejection database authority remediation', () => {
 
     const sync = await createRole('sync', service.id);
     const ownerSetRole = await rolePool(pool, sync.role);
-    rolePools.push(ownerSetRole);
     await expect(ownerSetRole.query(
       'SELECT continuum_verify_sync_database_identity($1)', [service.id],
     )).rejects.toThrow(/owner|superuser|session|sync database identity/i);
+    await ownerSetRole.end();
+    await pool.query('REVOKE ' + quoteRole(sync.role) + ' FROM CURRENT_USER');
     await pool.query('GRANT SELECT (body) ON memories TO ' + quoteRole(sync.role));
     await expect(sync.connection.query(
       'SELECT continuum_verify_sync_database_identity($1)', [service.id],

@@ -41,11 +41,16 @@ describe('membership sync CLI runner', () => {
       .replaceAll(":'continuum_sync_role'", `'${role}'`)
       .replaceAll(":'continuum_principal_id'", `'${principalId}'`);
     await pool.query(sql);
-    await pool.query(`GRANT "${role}" TO CURRENT_USER`);
+    await pool.query(
+      `ALTER ROLE "${role}" LOGIN PASSWORD 'continuum-test-password'`,
+    );
+    const base = (pool as unknown as { options: PoolConfig }).options;
+    const directUrl = new URL(base.connectionString!);
+    directUrl.username = role;
+    directUrl.password = 'continuum-test-password';
     const connection = new pg.Pool({
-      ...(pool as unknown as { options: PoolConfig }).options,
+      connectionString: directUrl.toString(),
       max: 1,
-      options: `-c role=${role}`,
     });
     rolePools.push(connection);
     return connection;

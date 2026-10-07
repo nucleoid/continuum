@@ -50,6 +50,7 @@ BEGIN
             SELECT 1 FROM pg_auth_members membership
              WHERE membership.roleid = identity.database_role_oid
                AND membership.member = migration_role_oid AND membership.admin_option
+               AND NOT membership.set_option AND NOT membership.inherit_option
           )
        )
      ) THEN
@@ -593,10 +594,16 @@ DECLARE
   invoking_role NAME := continuum_invoking_database_role();
   invoking_role_oid OID;
   owner_oid OID;
+  session_role_oid OID := session_user::regrole::oid;
+  session_superuser BOOLEAN;
 BEGIN
   SELECT oid INTO invoking_role_oid FROM pg_roles WHERE rolname = invoking_role;
   SELECT relowner INTO owner_oid FROM pg_class WHERE oid = 'principals'::regclass;
-  IF invoking_role_oid = owner_oid THEN RETURN; END IF;
+  SELECT rolsuper INTO session_superuser FROM pg_roles WHERE oid = session_role_oid;
+  IF session_role_oid = owner_oid OR session_superuser
+     OR session_role_oid <> invoking_role_oid THEN
+    RAISE EXCEPTION 'sync verification rejects owner, superuser, or SET ROLE sessions';
+  END IF;
   PERFORM continuum_require_trusted_database_identity(expected_service_principal_id, 'sync');
   PERFORM continuum_assert_sync_role_allowlist(invoking_role, expected_service_principal_id);
 END;
@@ -639,7 +646,9 @@ BEGIN
   IF EXISTS (
     SELECT 1 FROM pg_auth_members membership
      WHERE target_oid IN (membership.roleid, membership.member)
-       AND NOT (membership.roleid = target_oid AND membership.member = owner_oid)
+       AND NOT (membership.roleid = target_oid AND membership.member = owner_oid
+                AND membership.admin_option
+                AND NOT membership.set_option AND NOT membership.inherit_option)
   ) THEN
     RAISE EXCEPTION 'trusted database role must be isolated from every membership and SET ROLE edge';
   END IF;

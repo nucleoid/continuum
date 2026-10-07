@@ -414,7 +414,10 @@ Effective schema ownership is required for the `PUBLIC` schema/default-
 privilege revocations. Failed preflight leaves no partial 0051 changes. The
 supported least-privilege path is a non-superuser schema/object owner with
 `CREATEROLE` and narrowly scoped `ADMIN OPTION` on managed sync roles, not
-blanket superuser access.
+blanket superuser access. On PostgreSQL 16, grant that administration edge as
+`GRANT sync_role TO migration_owner WITH ADMIN OPTION, SET FALSE, INHERIT FALSE`;
+the owner must be able to retire the role but must not inherit or `SET ROLE`
+into the runtime identity.
 Migration `0052` additionally proves retirement authority during its preflight,
 when a sync identity is installed or rotated, and whenever the identity
 verification script runs. A non-superuser migration definer therefore needs
@@ -459,6 +462,11 @@ the role's application authority and login.
 psql "$CONTINUUM_MIGRATION_OWNER_URL" \
   --set=continuum_schema=public \
   --set=continuum_app_role=continuum_app \
+  --file=scripts/grant-application-role.sql
+
+psql "$CONTINUUM_MIGRATION_OWNER_URL" \
+  --set=continuum_schema=public \
+  --set=continuum_app_role=continuum_operator \
   --file=scripts/grant-application-role.sql
 
 psql "$CONTINUUM_MIGRATION_OWNER_URL" \
@@ -520,7 +528,10 @@ service-key, webhook, lifecycle, and read-only retention/offboarding previews.
 Approval, irreversible retention/offboarding, binding provisioning,
 manual-admin changes, and Entra activation are excluded.
 Run `grant-application-role.sql` for the dedicated operator role before adding
-its DB-bound approval grants. The dedicated sync role receives only the reads,
+its DB-bound approval grants, including when regranting an existing operator
+during upgrade. The application script is transactional: an exact allow-list
+failure rolls back every revoke instead of leaving the operator partially
+stripped. The dedicated sync role receives only the reads,
 writes, and activation function needed by authoritative sync. The scripts revoke
 the identity registry and registration function from every non-owner role. The
 application script also explicitly revokes both

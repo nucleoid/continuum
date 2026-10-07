@@ -68,6 +68,17 @@ describe('fresh independent review remediation', () => {
       await applyGrantScript(pool, 'grant-sync-role.sql', {
         continuum_sync_role: role, continuum_principal_id: principalId!,
       });
+      await pool.query(
+        'ALTER ROLE ' + quoteRole(role) + " LOGIN PASSWORD 'continuum-test-password'",
+      );
+      const base = (pool as unknown as { options: PoolConfig }).options;
+      const directUrl = new URL(base.connectionString!);
+      directUrl.username = role;
+      directUrl.password = 'continuum-test-password';
+      return {
+        role,
+        connection: new pg.Pool({ connectionString: directUrl.toString(), max: 1 }),
+      };
     }
     return { role, connection: await rolePool(pool, role) };
   }

@@ -30,6 +30,7 @@ BEGIN
              WHERE membership.roleid = identity.database_role_oid
                AND membership.member = migration_role_oid
                AND membership.admin_option
+               AND NOT membership.set_option AND NOT membership.inherit_option
           )
        )
      ) THEN
@@ -64,6 +65,32 @@ BEGIN
   END LOOP;
 END;
 $drop_marker_constraints$;
+
+DO $drop_marker_extra_columns$
+DECLARE column_row RECORD;
+BEGIN
+  FOR column_row IN
+    SELECT relation.relname, attribute.attname
+      FROM pg_attribute attribute
+      JOIN pg_class relation ON relation.oid = attribute.attrelid
+     WHERE attribute.attnum > 0 AND NOT attribute.attisdropped
+       AND (
+         (relation.oid = 'continuum_entra_guarded_mutations'::regclass
+          AND attribute.attname <> ALL (ARRAY[
+            'external_id', 'mutation_kind', 'backend_pid', 'transaction_id',
+            'authorization_principal_id']))
+         OR
+         (relation.oid = 'continuum_principal_disable_requests'::regclass
+          AND attribute.attname <> ALL (ARRAY[
+            'target_principal_id', 'authorization_principal_id',
+            'backend_pid', 'transaction_id']))
+       )
+  LOOP
+    EXECUTE format('ALTER TABLE %I DROP COLUMN %I',
+      column_row.relname, column_row.attname);
+  END LOOP;
+END;
+$drop_marker_extra_columns$;
 
 ALTER TABLE continuum_entra_guarded_mutations
   ALTER COLUMN external_id TYPE TEXT USING external_id::text,
@@ -543,12 +570,17 @@ CREATE OR REPLACE FUNCTION continuum_verify_sync_database_identity(
 DECLARE
   invoking_role NAME := continuum_invoking_database_role();
   invoking_role_oid OID; owner_oid OID; invoking_superuser BOOLEAN;
+  session_role_oid OID := session_user::regrole::oid;
+  session_superuser BOOLEAN;
 BEGIN
   SELECT oid, rolsuper INTO invoking_role_oid, invoking_superuser
     FROM pg_roles WHERE rolname = invoking_role;
   SELECT relowner INTO owner_oid FROM pg_class WHERE oid = 'principals'::regclass;
-  IF invoking_role_oid = owner_oid OR invoking_superuser THEN
-    RAISE EXCEPTION 'sync verification rejects owner or superuser sessions';
+  SELECT rolsuper INTO session_superuser FROM pg_roles WHERE oid = session_role_oid;
+  IF invoking_role_oid = owner_oid OR invoking_superuser
+     OR session_role_oid = owner_oid OR session_superuser
+     OR session_role_oid <> invoking_role_oid THEN
+    RAISE EXCEPTION 'sync verification rejects owner, superuser, or SET ROLE sessions';
   END IF;
   PERFORM continuum_require_trusted_database_identity(expected_service_principal_id, 'sync');
   PERFORM continuum_assert_sync_role_allowlist(invoking_role, expected_service_principal_id);
@@ -568,7 +600,8 @@ BEGIN
        NOT definer_createrole OR NOT EXISTS (
          SELECT 1 FROM pg_auth_members membership
           WHERE membership.roleid = target_database_role_oid
-            AND membership.member = definer_oid AND membership.admin_option)
+            AND membership.member = definer_oid AND membership.admin_option
+            AND NOT membership.set_option AND NOT membership.inherit_option)
      ) THEN
     RAISE EXCEPTION 'migration definer requires CREATEROLE and ADMIN OPTION on sync role for retirement';
   END IF;

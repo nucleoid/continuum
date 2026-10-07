@@ -374,7 +374,7 @@ describe('0048 trusted database identity upgrade', () => {
     );
     await state.admin.query(
       'GRANT ' + quoteIdentifier(syncRole) + ' TO ' + quoteIdentifier(ownerRole)
-      + ' WITH ADMIN OPTION',
+      + ' WITH ADMIN OPTION, SET FALSE, INHERIT FALSE',
     );
     await state.admin.query('GRANT ' + quoteIdentifier(ownerRole) + ' TO CURRENT_USER');
 

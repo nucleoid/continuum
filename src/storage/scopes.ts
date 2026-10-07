@@ -84,6 +84,11 @@ export async function ensureScopeRow(
   if (ref.kind !== 'org' && ref.name === '') {
     throw new Error(`Scope ${ref.kind} requires a name`);
   }
+  if (ref.kind === 'org') {
+    const existing = await getScopeByRef(pool, ref);
+    if (!existing) throw new Error('canonical organization scope not found');
+    return { scope: existing, created: false };
+  }
 
   const id = randomUUID();
   const { rows } = await pool.query(

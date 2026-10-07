@@ -10,6 +10,8 @@
 
 -- Run as the migration owner after continuum-migrate. The role is deliberately
 -- not granted CREATE on the schema or any privilege on capability tables.
+-- The transaction makes re-profiling an existing operator fail atomically.
+BEGIN;
 GRANT USAGE ON SCHEMA :"continuum_schema" TO :"continuum_app_role";
 
 GRANT SELECT, INSERT, UPDATE ON TABLE
@@ -116,6 +118,9 @@ REVOKE ALL ON FUNCTION
   :"continuum_schema".continuum_operator_apply_audit_retention(UUID, TIMESTAMPTZ, INTEGER, UUID, INTEGER, JSONB, TEXT, TEXT),
   :"continuum_schema".continuum_operator_reactivate_principal(UUID, UUID),
   :"continuum_schema".continuum_operator_pseudonymize_scope(UUID, UUID, TEXT),
+  :"continuum_schema".continuum_operator_revoke_entra_group_binding(UUID, TEXT),
+  :"continuum_schema".continuum_operator_offboard_scope_access(UUID, UUID),
+  :"continuum_schema".continuum_operator_remove_entra_membership(UUID, UUID, UUID, TEXT),
   :"continuum_schema".continuum_register_trusted_database_identity(NAME, UUID, BOOLEAN, BOOLEAN)
 FROM :"continuum_app_role";
 
@@ -160,3 +165,4 @@ FROM :"continuum_app_role";
 SELECT :"continuum_schema".continuum_assert_application_role_allowlist(
   :'continuum_app_role'::name
 );
+COMMIT;
