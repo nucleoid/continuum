@@ -936,25 +936,19 @@ async function offboardPrincipalCore(
     let aliasCount = 0;
     if (!run.rows[0].scope_cleanup_complete) {
       await client.query('UPDATE scopes SET name = $2 WHERE id = $1', [scopeId, scopePseudonym]);
-      const membershipUpdate = await client.query(
-        `UPDATE scope_memberships
-            SET active = FALSE, deactivated_at = COALESCE(deactivated_at, now())
-          WHERE scope_id = $1 AND active`, [scopeId],
-      );
-      const entraUpdate = await client.query(
-        `UPDATE entra_groups
-            SET active = FALSE, deactivated_at = COALESCE(deactivated_at, now()),
-                approval_revoked_by = COALESCE(approval_revoked_by, $2),
-                approval_revoked_at = COALESCE(approval_revoked_at, now()),
-                quarantined_at = COALESCE(quarantined_at, now()),
-                quarantine_reason = 'OWNED_SCOPE_OFFBOARDED'
-          WHERE scope_id = $1 AND (active OR approval_revoked_at IS NULL)`, [scopeId, actor.id],
+      const accessUpdate = await client.query<{
+        memberships_deactivated: number;
+        bindings_quarantined: number;
+      }>(
+        `SELECT memberships_deactivated, bindings_quarantined
+           FROM continuum_operator_offboard_scope_access($1, $2)`,
+        [actor.id, scopeId],
       );
       const aliasDelete = await client.query(
         'DELETE FROM principal_aliases WHERE principal_id = $1', [principalId],
       );
-      membershipCount = membershipUpdate.rowCount ?? 0;
-      entraCount = entraUpdate.rowCount ?? 0;
+      membershipCount = accessUpdate.rows[0]?.memberships_deactivated ?? 0;
+      entraCount = accessUpdate.rows[0]?.bindings_quarantined ?? 0;
       aliasCount = aliasDelete.rowCount ?? 0;
       await writeOffboardingRun(client, principalId, actor.id, 'scope_complete');
     }

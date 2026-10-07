@@ -481,6 +481,53 @@ END;
 $$;
 REVOKE ALL ON FUNCTION continuum_operator_revoke_entra_group_binding(UUID, TEXT) FROM PUBLIC;
 
+CREATE FUNCTION continuum_operator_offboard_scope_access(
+  authorization_principal_id UUID, target_scope_id UUID
+) RETURNS TABLE(memberships_deactivated INTEGER, bindings_quarantined INTEGER)
+LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE
+  changed_memberships INTEGER;
+  changed_bindings INTEGER;
+BEGIN
+  PERFORM continuum_require_trusted_database_identity(authorization_principal_id, 'approve');
+  INSERT INTO continuum_entra_guarded_mutations
+    (external_id, mutation_kind, backend_pid, transaction_id, authorization_principal_id)
+  SELECT DISTINCT membership.source_id, 'deactivate', pg_backend_pid(), txid_current(),
+         authorization_principal_id
+    FROM scope_memberships membership
+   WHERE membership.scope_id = target_scope_id
+     AND membership.source_kind = 'entra' AND membership.active
+  ON CONFLICT DO NOTHING;
+  INSERT INTO continuum_entra_guarded_mutations
+    (external_id, mutation_kind, backend_pid, transaction_id, authorization_principal_id)
+  SELECT binding.external_id, mutation_kind, pg_backend_pid(), txid_current(),
+         authorization_principal_id
+    FROM entra_groups binding
+    CROSS JOIN (VALUES ('revoke'), ('quarantine')) mutation(mutation_kind)
+   WHERE binding.scope_id = target_scope_id
+     AND (binding.active OR binding.approval_revoked_at IS NULL)
+  ON CONFLICT DO NOTHING;
+  UPDATE scope_memberships SET active = FALSE,
+         deactivated_at = COALESCE(deactivated_at, now())
+   WHERE scope_id = target_scope_id AND active;
+  GET DIAGNOSTICS changed_memberships = ROW_COUNT;
+  UPDATE entra_groups SET active = FALSE,
+         deactivated_at = COALESCE(deactivated_at, now()),
+         approval_revoked_by = COALESCE(approval_revoked_by, authorization_principal_id),
+         approval_revoked_at = COALESCE(approval_revoked_at, now()),
+         quarantined_at = COALESCE(quarantined_at, now()),
+         quarantine_reason = 'OWNED_SCOPE_OFFBOARDED'
+   WHERE scope_id = target_scope_id AND (active OR approval_revoked_at IS NULL);
+  GET DIAGNOSTICS changed_bindings = ROW_COUNT;
+  DELETE FROM continuum_entra_guarded_mutations mutation
+   WHERE mutation.backend_pid = pg_backend_pid()
+     AND mutation.transaction_id = txid_current()
+     AND mutation.authorization_principal_id = $1;
+  RETURN QUERY SELECT changed_memberships, changed_bindings;
+END;
+$$;
+REVOKE ALL ON FUNCTION continuum_operator_offboard_scope_access(UUID, UUID) FROM PUBLIC;
+
 -- The raw caller-UUID lock API is retired. Only a DB-bound operator wrapper
 -- may lock mutable run state; shared application sessions retain dry-run reads.
 CREATE FUNCTION continuum_operator_get_offboarding_run(
@@ -682,6 +729,7 @@ BEGIN
         'continuum_sync_deactivate_entra_groups',
         'continuum_sync_quarantine_entra_group',
         'continuum_operator_revoke_entra_group_binding',
+        'continuum_operator_offboard_scope_access',
         'continuum_operator_get_offboarding_run',
         'continuum_operator_authorize_audit_retention',
         'continuum_rotate_sync_database_identity'
