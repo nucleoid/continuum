@@ -104,6 +104,13 @@ BEGIN
     EXECUTE format('REVOKE ALL ON FUNCTION %I.continuum_operator_reclaim_coordination_resource(UUID, UUID, TEXT), %I.continuum_operator_set_coordination_scope_quota(UUID, UUID, INTEGER), %I.continuum_operator_sweep_coordination_state(UUID, INTEGER) FROM %I',
       schema_name, schema_name, schema_name, target_role);
     IF to_regprocedure(format(
+      '%I.continuum_operator_pseudonymize_scope_v2_legacy(uuid,uuid,text)', schema_name
+    )) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.continuum_operator_pseudonymize_scope_v2_legacy(UUID, UUID, TEXT) FROM %I',
+        schema_name, target_role);
+    END IF;
+    IF to_regprocedure(format(
       '%I.continuum_operator_pseudonymize_scope_v2(uuid,uuid,text)', schema_name
     )) IS NOT NULL THEN
       EXECUTE format(

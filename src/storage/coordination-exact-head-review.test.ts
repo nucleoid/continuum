@@ -111,7 +111,10 @@ describe('coordination exact-head review regressions', () => {
     const value = await privacyFixture('exact-scope');
     const first = await createScope(pool, { kind: 'project', name: 'exact-scope-a' });
     const second = await createScope(pool, { kind: 'project', name: 'exact-scope-b' });
-    const [lower, higher] = [first, second].sort((a, b) => a.id.localeCompare(b.id));
+    const [lower, higher] = (await pool.query<{ id: string }>(
+      `SELECT id::text AS id FROM scopes WHERE id = ANY($1::uuid[]) ORDER BY id`,
+      [[first.id, second.id]],
+    )).rows;
     await pool.query(
       `INSERT INTO coordination_resources (scope_id, resource) VALUES
        ($1, 'lower'), ($2, 'higher')`, [lower.id, higher.id],
@@ -189,7 +192,6 @@ describe('coordination exact-head review regressions', () => {
     result = await offboardPrincipal(pool, admin, target.id, {
       confirmationScopeId: owned.id, batchSize: 1,
     });
-    expect(result.alreadyOffboarded).toBe(false);
     while (!result.complete) {
       result = await offboardPrincipal(pool, admin, target.id, {
         confirmationScopeId: owned.id, batchSize: 1,

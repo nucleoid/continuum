@@ -192,21 +192,15 @@ DECLARE started BOOLEAN := FALSE; cursor_id BIGINT := 0; scanned_to BIGINT;
 DECLARE locked_scope UUID; progress_version INTEGER;
 DECLARE detached_acquire_available INTEGER := 0;
 DECLARE detached_contended_available INTEGER := 0;
+DECLARE planned_receipts BOOLEAN := FALSE;
+DECLARE candidate_receipt_operations TEXT[] := ARRAY[]::text[];
+DECLARE candidate_receipt_request_ids UUID[] := ARRAY[]::uuid[];
+DECLARE candidate_lease_ids UUID[] := ARRAY[]::uuid[];
 BEGIN
   PERFORM continuum_require_trusted_database_identity(
     authorization_principal_id, 'approve');
   IF batch_limit NOT BETWEEN 1 AND 1000 THEN
     RAISE EXCEPTION 'coordination privacy batch must be between 1 and 1000';
-  END IF;
-
-  -- This row lock is the reactivation fence. It is intentionally acquired
-  -- before usage, receipt, resource, and lease state.
-  PERFORM 1 FROM principals
-   WHERE id = target_principal_id
-     AND (disabled_at IS NOT NULL OR offboarded_at IS NOT NULL)
-   FOR UPDATE;
-  IF NOT FOUND THEN
-    RAISE EXCEPTION 'coordination scrub target must be disabled or offboarded';
   END IF;
   IF NOT EXISTS (
     SELECT 1 FROM principal_user_scopes mapping
@@ -216,11 +210,110 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'owned scope does not belong to coordination scrub target';
   END IF;
+
+  -- Serialize privacy work for one principal without taking the principal row
+  -- ahead of scope locks used by membership insertion and activation.
   PERFORM pg_advisory_xact_lock(hashtextextended(target_principal_id::text, 762));
   INSERT INTO coordination_principal_privacy_progress
     (principal_id, detached_principal_id)
   VALUES (target_principal_id, detached_id)
   ON CONFLICT (principal_id) DO NOTHING RETURNING TRUE INTO started;
+  SELECT audit_cursor_id, privacy_version INTO cursor_id, progress_version
+    FROM coordination_principal_privacy_progress
+   WHERE principal_id = target_principal_id;
+
+  -- If the audit phase is exhausted, freeze the exact next candidate page and
+  -- lock only its scope IDs in UUID order. The same page shape is rechecked
+  -- after all locks before any mutation.
+  IF NOT EXISTS (
+    SELECT 1 FROM audit_log audit
+     WHERE audit.principal_id = target_principal_id
+       AND audit.id > cursor_id
+       AND audit.scope_id IS DISTINCT FROM owned_scope_id
+       AND audit.metadata->>'operation' IN (
+         'lock_acquire', 'lock_renew', 'lock_release', 'lock_inspect')
+  ) THEN
+    SELECT COALESCE((
+             SELECT acquire_receipt_limit - acquire_receipt_count
+               FROM coordination_principal_usage WHERE principal_id = detached_id
+           ), 10000),
+           COALESCE((
+             SELECT contended_receipt_limit - contended_receipt_count
+               FROM coordination_principal_usage WHERE principal_id = detached_id
+           ), 1000)
+      INTO detached_acquire_available, detached_contended_available;
+    WITH ranked AS MATERIALIZED (
+      SELECT receipt.operation, receipt.request_id, receipt.outcome,
+             row_number() OVER (
+               PARTITION BY receipt.outcome
+               ORDER BY receipt.operation, receipt.request_id
+             ) AS outcome_ordinal
+        FROM coordination_operation_receipts receipt
+       WHERE receipt.principal_id = target_principal_id
+         AND receipt.scope_id <> owned_scope_id
+    ), candidates AS MATERIALIZED (
+      SELECT operation, request_id FROM ranked
+       WHERE operation <> 'acquire'
+          OR (outcome = 'acquired'
+              AND outcome_ordinal <= detached_acquire_available)
+          OR (outcome = 'contended'
+              AND outcome_ordinal <= detached_contended_available)
+       ORDER BY operation, request_id LIMIT batch_limit
+    )
+    SELECT COALESCE(array_agg(operation ORDER BY operation, request_id), ARRAY[]::text[]),
+           COALESCE(array_agg(request_id ORDER BY operation, request_id), ARRAY[]::uuid[])
+      INTO candidate_receipt_operations, candidate_receipt_request_ids
+      FROM candidates;
+    planned_receipts := cardinality(candidate_receipt_request_ids) > 0;
+
+    FOR locked_scope IN
+      SELECT DISTINCT receipt.scope_id
+        FROM coordination_operation_receipts receipt
+        JOIN unnest(candidate_receipt_operations, candidate_receipt_request_ids)
+          AS frozen(operation, request_id)
+          ON frozen.operation = receipt.operation
+         AND frozen.request_id = receipt.request_id
+       WHERE receipt.principal_id = target_principal_id
+         AND receipt.scope_id <> owned_scope_id
+       ORDER BY receipt.scope_id
+    LOOP
+      PERFORM pg_advisory_xact_lock(hashtextextended(locked_scope::text, 761));
+    END LOOP;
+
+    IF NOT planned_receipts THEN
+      SELECT COALESCE(array_agg(lease_id ORDER BY lease_id), ARRAY[]::uuid[])
+        INTO candidate_lease_ids
+        FROM (
+          SELECT lease.lease_id
+            FROM coordination_leases lease
+           WHERE lease.principal_id = target_principal_id
+             AND lease.scope_id <> owned_scope_id
+             AND (lease.released_at IS NOT NULL
+                  OR lease.expires_at <= clock_timestamp())
+           ORDER BY lease.lease_id LIMIT batch_limit
+        ) candidates;
+      FOR locked_scope IN
+        SELECT DISTINCT lease.scope_id
+          FROM coordination_leases lease
+         WHERE lease.lease_id = ANY(candidate_lease_ids)
+           AND lease.principal_id = target_principal_id
+           AND lease.scope_id <> owned_scope_id
+         ORDER BY lease.scope_id
+      LOOP
+        PERFORM pg_advisory_xact_lock(hashtextextended(locked_scope::text, 761));
+      END LOOP;
+    END IF;
+  END IF;
+
+  -- Reactivation and candidate eligibility are rechecked only after the exact
+  -- advisory scope set has been acquired.
+  PERFORM 1 FROM principals
+   WHERE id = target_principal_id
+     AND (disabled_at IS NOT NULL OR offboarded_at IS NOT NULL)
+   FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'coordination scrub target must be disabled or offboarded';
+  END IF;
   SELECT audit_cursor_id, privacy_version INTO cursor_id, progress_version
     FROM coordination_principal_privacy_progress
    WHERE principal_id = target_principal_id FOR UPDATE;
@@ -231,16 +324,13 @@ BEGIN
       'coordination_principal_scrub', jsonb_build_object('phase', 'started'));
   END IF;
 
-  -- Use the real (principal_id,id) keyset index. Completion is established
-  -- only by an empty bounded page, never by changed < batch_limit.
   WITH candidates AS MATERIALIZED (
     SELECT audit.id FROM audit_log audit
      WHERE audit.principal_id = target_principal_id
        AND audit.id > cursor_id
        AND audit.scope_id IS DISTINCT FROM owned_scope_id
-       AND audit.metadata ?| ARRAY[
-         'lease_id', 'request_id', 'run_id', 'resource', 'resource_sha256'
-       ]
+       AND audit.metadata->>'operation' IN (
+         'lock_acquire', 'lock_renew', 'lock_release', 'lock_inspect')
      ORDER BY audit.id LIMIT batch_limit FOR UPDATE
   ), scrubbed AS (
     UPDATE audit_log audit SET metadata = audit.metadata
@@ -258,8 +348,6 @@ BEGIN
   END IF;
 
   IF audit_complete THEN
-    -- Reclaim expired detached receipts automatically and in a bounded page
-    -- before moving more history into the detached quota.
     WITH expired AS MATERIALIZED (
       SELECT principal_id, operation, request_id
         FROM coordination_operation_receipts
@@ -277,21 +365,18 @@ BEGIN
     PERFORM 1 FROM coordination_principal_usage
      WHERE principal_id IN (target_principal_id, detached_id)
      ORDER BY principal_id FOR UPDATE;
-    SELECT acquire_receipt_limit - acquire_receipt_count,
-           contended_receipt_limit - contended_receipt_count
+    SELECT LEAST(detached_acquire_available,
+                 acquire_receipt_limit - acquire_receipt_count),
+           LEAST(detached_contended_available,
+                 contended_receipt_limit - contended_receipt_count)
       INTO detached_acquire_available, detached_contended_available
       FROM coordination_principal_usage WHERE principal_id = detached_id;
 
-    FOR locked_scope IN
-      SELECT DISTINCT receipt.scope_id
-        FROM coordination_operation_receipts receipt
-       WHERE receipt.principal_id = target_principal_id
-         AND receipt.scope_id <> owned_scope_id
-       ORDER BY receipt.scope_id LIMIT batch_limit
-    LOOP
-      PERFORM pg_advisory_xact_lock(hashtextextended(locked_scope::text, 761));
-    END LOOP;
-    WITH ranked AS MATERIALIZED (
+    WITH frozen AS MATERIALIZED (
+      SELECT *
+        FROM unnest(candidate_receipt_operations, candidate_receipt_request_ids)
+          AS selected(operation, request_id)
+    ), ranked AS MATERIALIZED (
       SELECT receipt.principal_id, receipt.operation, receipt.request_id,
              receipt.outcome,
              row_number() OVER (
@@ -299,6 +384,8 @@ BEGIN
                ORDER BY receipt.operation, receipt.request_id
              ) AS outcome_ordinal
         FROM coordination_operation_receipts receipt
+        JOIN frozen ON frozen.operation = receipt.operation
+         AND frozen.request_id = receipt.request_id
        WHERE receipt.principal_id = target_principal_id
          AND receipt.scope_id <> owned_scope_id
     ), candidates AS MATERIALIZED (
@@ -312,7 +399,7 @@ BEGIN
               AND ranked.outcome_ordinal <= detached_acquire_available)
           OR (ranked.outcome = 'contended'
               AND ranked.outcome_ordinal <= detached_contended_available)
-       ORDER BY receipt.operation, receipt.request_id LIMIT batch_limit
+       ORDER BY receipt.operation, receipt.request_id
        FOR UPDATE OF receipt
     ), scrubbed AS (
       UPDATE coordination_operation_receipts receipt SET
@@ -333,24 +420,15 @@ BEGIN
       RETURNING 1
     ) SELECT count(*)::int INTO receipt_count FROM scrubbed;
 
-    IF receipt_count = 0 THEN
-      FOR locked_scope IN
-        SELECT DISTINCT lease.scope_id FROM coordination_leases lease
-         WHERE lease.principal_id = target_principal_id
-           AND lease.scope_id <> owned_scope_id
-           AND (lease.released_at IS NOT NULL
-                OR lease.expires_at <= clock_timestamp())
-         ORDER BY lease.scope_id LIMIT batch_limit
-      LOOP
-        PERFORM pg_advisory_xact_lock(hashtextextended(locked_scope::text, 761));
-      END LOOP;
+    IF NOT planned_receipts AND receipt_count = 0 THEN
       WITH candidates AS MATERIALIZED (
         SELECT lease.lease_id FROM coordination_leases lease
-         WHERE lease.principal_id = target_principal_id
+         WHERE lease.lease_id = ANY(candidate_lease_ids)
+           AND lease.principal_id = target_principal_id
            AND lease.scope_id <> owned_scope_id
            AND (lease.released_at IS NOT NULL
                 OR lease.expires_at <= clock_timestamp())
-         ORDER BY lease.lease_id LIMIT batch_limit FOR UPDATE
+         ORDER BY lease.lease_id FOR UPDATE
       ), scrubbed AS (
         UPDATE coordination_leases lease SET
           principal_id = detached_id, run_id = gen_random_uuid(),
@@ -483,6 +561,42 @@ REVOKE ALL ON FUNCTION continuum_operator_pseudonymize_scope_v2(UUID, UUID, TEXT
   FROM PUBLIC;
 REVOKE ALL ON FUNCTION continuum_operator_pseudonymize_scope_v2_legacy(UUID, UUID, TEXT)
   FROM PUBLIC;
+
+-- Function ACLs follow PostgreSQL renames. Move only a currently bound
+-- approval operator to the supported wrapper, and strip every non-owner grant
+-- from the lock-bypassing legacy implementation.
+DO $upgrade_acl$
+DECLARE legacy_function OID :=
+  'continuum_operator_pseudonymize_scope_v2_legacy(uuid,uuid,text)'::regprocedure;
+DECLARE function_owner OID := (SELECT proowner FROM pg_proc WHERE oid = legacy_function);
+DECLARE grant_record RECORD;
+BEGIN
+  FOR grant_record IN
+    SELECT DISTINCT role.rolname, privilege.grantee
+      FROM pg_proc function
+      CROSS JOIN LATERAL aclexplode(COALESCE(
+        function.proacl, acldefault('f', function.proowner))) privilege
+      JOIN pg_roles role ON role.oid = privilege.grantee
+     WHERE function.oid = legacy_function
+       AND privilege.grantee NOT IN (0, function_owner)
+       AND upper(privilege.privilege_type) = 'EXECUTE'
+  LOOP
+    EXECUTE format(
+      'REVOKE ALL ON FUNCTION %I.continuum_operator_pseudonymize_scope_v2_legacy(UUID, UUID, TEXT) FROM %I',
+      current_schema(), grant_record.rolname);
+    IF EXISTS (
+      SELECT 1 FROM continuum_trusted_database_identities identity
+       WHERE identity.database_role = grant_record.rolname::name
+         AND identity.database_role_oid = grant_record.grantee
+         AND identity.can_approve AND NOT identity.can_sync
+    ) THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.continuum_operator_pseudonymize_scope_v2(UUID, UUID, TEXT) TO %I',
+        current_schema(), grant_record.rolname);
+    END IF;
+  END LOOP;
+END;
+$upgrade_acl$;
 
 DO $harden$
 DECLARE schema_name TEXT := current_schema(); function_record RECORD;

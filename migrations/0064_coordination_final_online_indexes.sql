@@ -3,9 +3,9 @@
 -- continuum:repair-invalid-index audit_log_coordination_privacy_idx;
 CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_log_coordination_privacy_idx
   ON audit_log (principal_id, id)
-  WHERE metadata ?| ARRAY[
-    'lease_id', 'request_id', 'run_id', 'resource', 'resource_sha256'
-  ];
+  WHERE metadata->>'operation' IN (
+    'lock_acquire', 'lock_renew', 'lock_release', 'lock_inspect'
+  );
 -- continuum:require-valid-index audit_log_coordination_privacy_idx;
 
 -- continuum:repair-invalid-index coordination_receipts_acquire_expiry_idx;

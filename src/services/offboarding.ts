@@ -822,17 +822,33 @@ async function offboardPrincipalCore(
     } : null;
     const pseudonym = erasedPrincipalPseudonym(principalId);
     const scopePseudonym = erasedScopePseudonym(scopeId);
+    const privacyState = await client.query(
+      `SELECT privacy_version, completed_at IS NOT NULL AS complete
+         FROM coordination_principal_privacy_progress WHERE principal_id = $1`,
+      [principalId],
+    );
+    let coordinationPrivacyComplete = privacyState.rows[0]?.privacy_version === 2
+      && privacyState.rows[0]?.complete === true;
+    const wasOffboarded = target.rows[0].offboarded_at !== null;
+    if (!dryRun && wasOffboarded && !coordinationPrivacyComplete) {
+      const privacyRepair = await client.query<{ privacy: { complete?: boolean } }>(
+        `SELECT continuum_operator_scrub_coordination_principal(
+           $1, $2, $3, $4
+         ) AS privacy`,
+        [actor.id, principalId, scopeId, Math.min(batchSize, 1_000)],
+      );
+      coordinationPrivacyComplete = privacyRepair.rows[0]?.privacy?.complete === true;
+    }
     const clean = resumedRun
       ? Boolean(run.rows[0].memory_complete) && Boolean(run.rows[0].scope_cleanup_complete)
         && !resumedAuditRemains
       : dirtyMemories === 0 && embeddings === 0 && memberships === 0
         && aliases === 0 && entraBindings === 0 && auditRows === 0;
-    const wasOffboarded = target.rows[0].offboarded_at !== null;
     const alreadyOffboarded = !resumedRun && wasOffboarded
       && target.rows[0].disabled_at !== null
       && target.rows[0].reactivated_at === null
       && target.rows[0].display_name === pseudonym
-      && scopeName === scopePseudonym && clean && !audit.truncated;
+      && scopeName === scopePseudonym && clean && coordinationPrivacyComplete && !audit.truncated;
     const previewProgress: OffboardingProgress = {
       batch: 0, batchSize, memoriesProcessed: 0, auditRowsProcessed: 0,
       memoriesRemaining: dirtyMemories, auditRowsRemaining: dirtyAuditRows,
@@ -930,10 +946,10 @@ async function offboardPrincipalCore(
            FROM coordination_scope_privacy_progress WHERE scope_id = $1`,
         [scopeId],
       )).rows[0]?.complete);
-      const sharedCoordinationComplete =
+      coordinationPrivacyComplete =
         coordinationPrivacy.rows[0]?.privacy?.complete === true;
       aliasCount = aliasDelete.rowCount ?? 0;
-      if (ownedCoordinationComplete && sharedCoordinationComplete) {
+      if (ownedCoordinationComplete && coordinationPrivacyComplete) {
         await writeOffboardingRun(client, principalId, actor.id, 'scope_complete');
       }
     } else {
@@ -1079,7 +1095,8 @@ async function offboardPrincipalCore(
     const remainingAudit = !auditCursorsExhausted(
       currentRun.rows[0] as RunAuditState,
     );
-    const completionReady = memoryComplete && scopeCleanupComplete && !remainingAudit;
+    const completionReady = memoryComplete && scopeCleanupComplete
+      && !remainingAudit && coordinationPrivacyComplete;
     const progressUpdate = await writeOffboardingRun(
       client, principalId, actor.id, 'add_progress', {
         memories: memoryBatch, audit_rows: auditedRows,

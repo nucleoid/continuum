@@ -20,6 +20,9 @@ SELECT :"continuum_schema".continuum_register_trusted_database_identity(
 );
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE :"continuum_schema".entra_groups
 FROM :"continuum_operator_role";
+REVOKE ALL ON FUNCTION
+  :"continuum_schema".continuum_operator_pseudonymize_scope_v2_legacy(UUID, UUID, TEXT)
+FROM :"continuum_operator_role";
 GRANT EXECUTE ON FUNCTION
   :"continuum_schema".continuum_create_user_scope_approval(UUID, UUID, UUID, UUID[], TEXT),
   :"continuum_schema".continuum_upsert_entra_group_binding(UUID, TEXT, TEXT, UUID, TEXT),
