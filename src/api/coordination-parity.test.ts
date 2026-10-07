@@ -285,4 +285,54 @@ describe('coordination REST/MCP parity', () => {
       error: { code: 'INVALID_INPUT', message: 'Invalid coordination input' },
     });
   });
+
+  it.each(['control\u0000key', 'control\u001fkey', 'control\u007fkey'])(
+    'rejects control-character resource %j identically for acquire and inspect',
+    async (resource) => {
+      const restAcquire = await request(createApp(pool))
+        .post('/api/v0/locks/acquire')
+        .set('Authorization', 'Bearer service:coordination-parity')
+        .send({
+          scope: 'project:parity', resource,
+          runId: randomUUID(), requestId: randomUUID(),
+        });
+      const mcpAcquire = await client.callTool({
+        name: 'continuum.lock_acquire', arguments: {
+          scope: 'project:parity', resource,
+          run_id: randomUUID(), request_id: randomUUID(),
+        },
+      }) as ToolResult;
+      const restInspect = await request(createApp(pool))
+        .get('/api/v0/locks')
+        .set('Authorization', 'Bearer service:coordination-parity')
+        .query({ scope: 'project:parity', resource });
+      const mcpInspect = await client.callTool({
+        name: 'continuum.lock_inspect',
+        arguments: { scope: 'project:parity', resource },
+      }) as ToolResult;
+      expect(restAcquire.status).toBe(400);
+      expect(restInspect.status).toBe(400);
+      expect(restAcquire.body.code).toBe('INVALID_INPUT');
+      expect(restInspect.body.code).toBe('INVALID_INPUT');
+      expect(toolJson(mcpAcquire)).toMatchObject({ error: { code: 'INVALID_INPUT' } });
+      expect(toolJson(mcpInspect)).toMatchObject({ error: { code: 'INVALID_INPUT' } });
+    },
+  );
+
+  it.each([
+    { path: 'renew', tool: 'continuum.lock_renew' },
+    { path: 'release', tool: 'continuum.lock_release' },
+  ])('rejects malformed $path identifiers identically', async ({ path, tool }) => {
+    const rest = await request(createApp(pool))
+      .post(`/api/v0/locks/${path}`)
+      .set('Authorization', 'Bearer service:coordination-parity')
+      .send({ leaseId: 'bad', runId: 'bad', requestId: 'bad' });
+    const mcp = await client.callTool({
+      name: tool,
+      arguments: { lease_id: 'bad', run_id: 'bad', request_id: 'bad' },
+    }) as ToolResult;
+    expect(rest.status).toBe(400);
+    expect(rest.body.code).toBe('INVALID_INPUT');
+    expect(toolJson(mcp)).toMatchObject({ error: { code: 'INVALID_INPUT' } });
+  });
 });
