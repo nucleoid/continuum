@@ -217,18 +217,13 @@ export async function preparePrincipalReceipts(
         SELECT candidate.lease_id
           FROM coordination_leases candidate
          WHERE candidate.principal_id = $1
-           AND (candidate.released_at IS NOT NULL OR candidate.expires_at <= clock_timestamp())
-           AND COALESCE(candidate.released_at, candidate.expires_at)
+           AND candidate.cleanup_eligible_at
                <= clock_timestamp() - interval '24 hours'
-           AND NOT EXISTS (
-             SELECT 1 FROM coordination_resources r
-              WHERE r.current_lease_id = candidate.lease_id
-           )
            AND NOT EXISTS (
              SELECT 1 FROM coordination_operation_receipts receipt
               WHERE receipt.lease_id = candidate.lease_id
            )
-         ORDER BY COALESCE(candidate.released_at, candidate.expires_at), candidate.lease_id
+         ORDER BY candidate.cleanup_eligible_at, candidate.lease_id
          LIMIT $2
       )`,
     [principalId, RECEIPT_CLEANUP_BATCH],

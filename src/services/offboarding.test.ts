@@ -840,12 +840,20 @@ describe('offboarding and erasure', () => {
     )).rows[0];
     expect(durable).toMatchObject({ memories: 1, embeddings: 1, memberships: 1 });
     expect(durable.evidence).toMatchObject({ memberPrincipalIds: [] });
+    expect((await pool.query(
+      `SELECT metadata->>'phase' AS phase FROM coordination_operator_events
+        WHERE scope_id = $1 ORDER BY id`, [value.personal.id],
+    )).rows).toEqual([{ phase: 'started' }, { phase: 'completed' }]);
     await pool.query('DELETE FROM audit_log');
     const retry = await offboardPrincipal(pool, value.admin, value.target.id);
     expect(retry.alreadyOffboarded).toBe(true);
     expect(retry.originalOffboarding).toMatchObject({
       memories: 1, embeddings: 1, memberships: 1,
     });
+    expect((await pool.query(
+      `SELECT metadata->>'phase' AS phase FROM coordination_operator_events
+        WHERE scope_id = $1 ORDER BY id`, [value.personal.id],
+    )).rows).toEqual([{ phase: 'started' }, { phase: 'completed' }]);
   });
 
   it('orders embedding writes with archive and removes either race winner', async () => {

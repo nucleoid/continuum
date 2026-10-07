@@ -100,14 +100,32 @@ describe('coordination issue 7 exact-head remediation', () => {
       [held.leaseId],
     );
     expect(active.rows).toEqual([{ cleanup_eligible_at: null }]);
-    await releaseLease(pool, principal, {
-      leaseId: held.leaseId, runId, requestId: randomUUID(),
-    });
-    const released = await pool.query(
-      `SELECT cleanup_eligible_at IS NOT NULL AS eligible
-         FROM coordination_leases WHERE lease_id = $1`, [held.leaseId],
+    await pool.query(
+      `UPDATE coordination_leases
+          SET acquired_at = clock_timestamp() - interval '2 seconds',
+              expires_at = clock_timestamp() - interval '1 second'
+        WHERE lease_id = $1`, [held.leaseId],
     );
-    expect(released.rows).toEqual([{ eligible: true }]);
+    expect((await pool.query(
+      `SELECT cleanup_eligible_at FROM coordination_leases WHERE lease_id = $1`,
+      [held.leaseId],
+    )).rows).toEqual([{ cleanup_eligible_at: null }]);
+    const successor = await acquireLease(pool, principal, {
+      scope: `project:${scope.name}`, resource: 'cleanup-state',
+      runId: randomUUID(), requestId: randomUUID(), ttlSeconds: 300,
+    });
+    expect(successor).toMatchObject({ acquired: true, fencingToken: '2' });
+    const released = await pool.query(
+      `SELECT lease_id = $1 AS displaced,
+              cleanup_eligible_at IS NOT NULL AS eligible
+         FROM coordination_leases WHERE lease_id IN ($1, $2)
+         ORDER BY displaced DESC`,
+      [held.leaseId, successor.acquired ? successor.leaseId : null],
+    );
+    expect(released.rows).toEqual([
+      { displaced: true, eligible: true },
+      { displaced: false, eligible: false },
+    ]);
   });
 
   it('ships bounded shared-scope detachment for team, project, and org state', async () => {

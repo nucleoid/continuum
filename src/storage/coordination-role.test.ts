@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import pg, { type PoolConfig } from 'pg';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { acquireLease, releaseLease } from '../services/coordination.js';
@@ -295,155 +295,177 @@ describe('coordination database role profiles', () => {
       await expect(operator.connection.query(
         'SELECT continuum_operator_pseudonymize_scope($1, $2, $3)',
         [operatorPrincipal.id, userScope.id, 'offboarded-scope'],
-      )).rejects.toThrow(/live coordination leases/i);
+      )).rejects.toThrow(/active memberships/i);
       await releaseLease(operator.connection, operatorPrincipal, {
         leaseId: personal.acquired ? personal.leaseId : '',
         runId: personal.acquired ? personal.runId : '',
         requestId: randomUUID(),
       });
-      await operator.connection.query(
+      await expect(operator.connection.query(
         'SELECT continuum_operator_pseudonymize_scope($1, $2, $3)',
         [operatorPrincipal.id, userScope.id, 'offboarded-scope'],
+      )).rejects.toThrow(/active memberships/i);
+      await pool.query(
+        `UPDATE scope_memberships SET active = FALSE
+          WHERE principal_id = $1 AND scope_id = $2`,
+        [operatorPrincipal.id, userScope.id],
       );
-      const scrubbed = await pool.query<{
-        resource: string;
-        lease_resource: string;
-        receipt_resource: string;
-        fencing_token: string;
-      }>(
-        `SELECT resource.resource,
-                lease.resource AS lease_resource,
-                receipt.resource AS receipt_resource,
-                resource.fencing_token::text AS fencing_token
-           FROM coordination_resources resource
-           JOIN coordination_leases lease USING (scope_id, resource)
-           JOIN coordination_operation_receipts receipt USING (scope_id, resource)
-          WHERE resource.scope_id = $1`,
-        [userScope.id],
-      );
-      expect(scrubbed.rows).toHaveLength(2);
-      expect(new Set(scrubbed.rows.map((row) => row.resource)).size).toBe(1);
-      for (const row of scrubbed.rows) {
-        expect(row).toEqual({
-          resource: expect.stringMatching(/^offboarded:[0-9a-f-]{36}$/),
-          lease_resource: expect.stringMatching(/^offboarded:[0-9a-f-]{36}$/),
-          receipt_resource: expect.stringMatching(/^offboarded:[0-9a-f-]{36}$/),
-          fencing_token: '1',
-        });
+      for (let phase = 0; phase < 3; phase += 1) {
+        await operator.connection.query(
+          'SELECT continuum_operator_pseudonymize_scope($1, $2, $3)',
+          [operatorPrincipal.id, userScope.id, 'offboarded-scope'],
+        );
       }
-      expect(JSON.stringify(scrubbed.rows)).not.toContain('person@example.test');
-      const scrubbedHashes = await pool.query<{ payload_hash: string }>(
-        `SELECT encode(payload_hash, 'hex') AS payload_hash
-           FROM coordination_operation_receipts WHERE scope_id = $1`,
-        [userScope.id],
-      );
-      expect(scrubbedHashes.rows).not.toHaveLength(0);
-      for (const row of scrubbedHashes.rows) {
-        expect(row.payload_hash).toMatch(/^[0-9a-f]{64}$/);
-        expect(row.payload_hash).not.toBe(originalPayloadHash);
-      }
+      expect((await pool.query(
+        `SELECT count(*)::int AS count FROM coordination_resources
+          WHERE scope_id = $1`, [userScope.id],
+      )).rows).toEqual([{ count: 0 }]);
+      expect((await pool.query(
+        `SELECT count(*)::int AS count FROM coordination_leases
+          WHERE scope_id = $1`, [userScope.id],
+      )).rows).toEqual([{ count: 0 }]);
+      expect((await pool.query(
+        `SELECT count(*)::int AS count FROM coordination_operation_receipts
+          WHERE scope_id = $1`, [userScope.id],
+      )).rows).toEqual([{ count: 0 }]);
+      expect(originalPayloadHash).toMatch(/^[0-9a-f]{64}$/);
       expect((await pool.query(
         'SELECT fencing_floor::text AS floor FROM coordination_scope_fencing_floors WHERE scope_id = $1',
         [userScope.id],
       )).rows).toEqual([{ floor: '1' }]);
+      const events = await pool.query(
+        `SELECT metadata->>'phase' AS phase FROM coordination_operator_events
+          WHERE scope_id = $1 ORDER BY id`, [userScope.id],
+      );
+      expect(events.rows).toEqual([{ phase: 'started' }, { phase: 'completed' }]);
+      await expect(pool.query(
+        `UPDATE coordination_operator_events SET metadata = '{}'::jsonb
+          WHERE scope_id = $1`, [userScope.id],
+      )).rejects.toThrow(/immutable/i);
 
-      const raceScope = await createScope(pool, {
-        kind: 'user', name: 'race-person@example.test',
+      const liveScope = await createScope(pool, {
+        kind: 'user', name: 'live-person@example.test',
       });
-      await addMembership(pool, operatorPrincipal.id, raceScope.id, 'writer');
+      await addMembership(pool, operatorPrincipal.id, liveScope.id, 'writer');
+      const live = await acquireLease(operator.connection, operatorPrincipal, {
+        scope: 'user:live-person@example.test', resource: 'live-resource',
+        runId: randomUUID(), requestId: randomUUID(), ttlSeconds: 300,
+      });
+      if (!live.acquired) throw new Error('expected live acquisition');
       await pool.query(
-        `INSERT INTO coordination_resources (scope_id, resource, fencing_token)
-         VALUES ($1, 'existing-race-resource', 5)`,
-        [raceScope.id],
+        `UPDATE scope_memberships SET active = FALSE
+          WHERE principal_id = $1 AND scope_id = $2`,
+        [operatorPrincipal.id, liveScope.id],
       );
-      const racedLeaseId = randomUUID();
-      const racedRequestId = randomUUID();
-      const raceWriter = await operator.connection.connect();
-      const pseudonymizer = await operator.connection.connect();
-      try {
-        await raceWriter.query('BEGIN');
-        await raceWriter.query(
-          `SELECT 1 FROM scope_memberships
-            WHERE scope_id = $1 AND active ORDER BY principal_id, source_kind, source_id
-            FOR SHARE`,
-          [raceScope.id],
-        );
-        await raceWriter.query(
-          `UPDATE coordination_resources SET fencing_token = 6
-            WHERE scope_id = $1 AND resource = 'existing-race-resource'`,
-          [raceScope.id],
-        );
-        await raceWriter.query(
-          `INSERT INTO coordination_resources (scope_id, resource, fencing_token)
-           VALUES ($1, 'new-race-resource', 9)`,
-          [raceScope.id],
-        );
-        await raceWriter.query(
-          `INSERT INTO coordination_leases (
-             lease_id, scope_id, resource, principal_id, run_id, fencing_token,
-             acquired_at, expires_at, released_at
-           ) VALUES ($1, $2, 'new-race-resource', $3, $4, 9,
-             clock_timestamp() - interval '2 minutes',
-             clock_timestamp() - interval '1 minute',
-             clock_timestamp() - interval '30 seconds')`,
-          [racedLeaseId, raceScope.id, operatorPrincipal.id, randomUUID()],
-        );
-        await raceWriter.query(
-          `INSERT INTO coordination_operation_receipts (
-             principal_id, operation, request_id, payload_hash, outcome, scope_id,
-             resource, lease_id, run_id, fencing_token, expires_at, server_time, retain_until
-           ) VALUES ($1, 'acquire', $2, sha256(convert_to('known-race-input', 'UTF8')),
-             'acquired', $3, 'new-race-resource', $4, $5, 9,
-             clock_timestamp() - interval '1 minute',
-             clock_timestamp() - interval '2 minutes',
-             clock_timestamp() + interval '22 hours')`,
-          [operatorPrincipal.id, racedRequestId, raceScope.id, racedLeaseId, randomUUID()],
-        );
+      await expect(operator.connection.query(
+        'SELECT continuum_operator_pseudonymize_scope($1, $2, $3)',
+        [operatorPrincipal.id, liveScope.id, 'offboarded-live-scope'],
+      )).rejects.toThrow(/live coordination leases/i);
+      await pool.query(
+        `UPDATE coordination_leases
+            SET acquired_at = clock_timestamp() - interval '2 seconds',
+                expires_at = clock_timestamp() - interval '1 second'
+          WHERE lease_id = $1`, [live.leaseId],
+      );
+      await expect(operator.connection.query(
+        'SELECT continuum_operator_pseudonymize_scope($1, $2, $3)',
+        [operatorPrincipal.id, liveScope.id, 'offboarded-live-scope'],
+      )).resolves.toBeDefined();
+    } finally {
+      await operator.connection.end();
+    }
+  });
 
-        const pseudonymizerPid = Number((await pseudonymizer.query(
-          'SELECT pg_backend_pid() AS pid',
-        )).rows[0].pid);
-        const pseudonymize = pseudonymizer.query(
-          'SELECT continuum_operator_pseudonymize_scope($1, $2, $3)',
-          [operatorPrincipal.id, raceScope.id, 'offboarded-race-scope'],
-        );
-        let observedLockWait = false;
-        for (let attempt = 0; attempt < 40; attempt += 1) {
-          const activity = await pool.query<{ wait_event_type: string | null }>(
-            'SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1',
-            [pseudonymizerPid],
-          );
-          if (activity.rows[0]?.wait_event_type === 'Lock') {
-            observedLockWait = true;
-            break;
-          }
-          await new Promise((resolve) => setTimeout(resolve, 25));
-        }
-        expect(observedLockWait).toBe(true);
-        await raceWriter.query('COMMIT');
-        await pseudonymize;
-      } finally {
-        await raceWriter.query('ROLLBACK').catch(() => undefined);
-        raceWriter.release();
-        pseudonymizer.release();
+  it('detaches offboarded principals from team, project, and org coordination history', async () => {
+    const operatorPrincipal = await createPrincipal(pool, {
+      externalId: 'operator:shared-coordination-privacy',
+      kind: 'user', displayName: 'Shared privacy operator',
+    });
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await addMembership(pool, operatorPrincipal.id, org.id, 'admin');
+    const operator = await createApplicationRole();
+    await applyGrantScript(pool, 'grant-operator-role.sql', {
+      continuum_operator_role: operator.role,
+      continuum_principal_id: operatorPrincipal.id,
+    });
+    try {
+      const target = await createPrincipal(pool, {
+        externalId: 'service:shared-coordination-subject',
+        kind: 'service', displayName: 'Shared coordination subject',
+      });
+      const owned = await createScope(pool, {
+        kind: 'user', name: 'shared-subject@example.test',
+      });
+      const team = await createScope(pool, { kind: 'team', name: 'privacy-team' });
+      const project = await createScope(pool, { kind: 'project', name: 'privacy-project' });
+      for (const selected of [owned, team, project, org]) {
+        await addMembership(pool, target.id, selected.id, 'writer');
       }
-      const racedState = await pool.query<{
-        resource: string; floor: string; payload_hash: string | null;
-      }>(
-        `SELECT resource.resource, floor.fencing_floor::text AS floor,
-                encode(receipt.payload_hash, 'hex') AS payload_hash
-           FROM coordination_resources resource
-           JOIN coordination_scope_fencing_floors floor USING (scope_id)
-           LEFT JOIN coordination_operation_receipts receipt USING (scope_id, resource)
-          WHERE resource.scope_id = $1 ORDER BY resource.fencing_token`,
-        [raceScope.id],
+      const shared = [
+        { scope: 'team:privacy-team', id: team.id },
+        { scope: 'project:privacy-project', id: project.id },
+        { scope: 'org', id: org.id },
+      ];
+      const originalRuns: string[] = [];
+      for (const [index, selected] of shared.entries()) {
+        const runId = randomUUID();
+        originalRuns.push(runId);
+        const held = await acquireLease(operator.connection, target, {
+          scope: selected.scope, resource: `shared-resource-${index}`,
+          runId, requestId: randomUUID(), ttlSeconds: 300,
+        });
+        if (!held.acquired) throw new Error('expected shared acquisition');
+        await releaseLease(operator.connection, target, {
+          leaseId: held.leaseId, runId, requestId: randomUUID(),
+        });
+      }
+
+      let complete = false;
+      for (let batch = 0; batch < 20 && !complete; batch += 1) {
+        const result = await operator.connection.query<{
+          result: { complete: boolean };
+        }>(
+          `SELECT continuum_operator_scrub_coordination_principal(
+             $1, $2, $3, 1
+           ) AS result`,
+          [operatorPrincipal.id, target.id, owned.id],
+        );
+        complete = result.rows[0]?.result.complete === true;
+      }
+      expect(complete).toBe(true);
+      expect((await pool.query(
+        `SELECT count(*)::int AS count FROM coordination_leases
+          WHERE principal_id = $1`, [target.id],
+      )).rows).toEqual([{ count: 0 }]);
+      expect((await pool.query(
+        `SELECT count(*)::int AS count FROM coordination_operation_receipts
+          WHERE principal_id = $1`, [target.id],
+      )).rows).toEqual([{ count: 0 }]);
+      const detached = await pool.query<{ run_id: string }>(
+        `SELECT run_id::text FROM coordination_leases
+          WHERE principal_id = '00000000-0000-4000-8000-000000000012'
+          ORDER BY scope_id`,
       );
-      expect(racedState.rows).toHaveLength(2);
-      expect(racedState.rows.every((row) =>
-        /^offboarded:[0-9a-f-]{36}$/.test(row.resource))).toBe(true);
-      expect(racedState.rows.every((row) => row.floor === '9')).toBe(true);
-      expect(racedState.rows.find((row) => row.payload_hash)?.payload_hash)
-        .not.toBe(createHash('sha256').update('known-race-input').digest('hex'));
+      expect(detached.rows).toHaveLength(3);
+      expect(detached.rows.every((row) => !originalRuns.includes(row.run_id))).toBe(true);
+      expect((await pool.query(
+        `SELECT count(*)::int AS count FROM coordination_resources
+          WHERE scope_id = ANY($1::uuid[])`,
+        [shared.map((selected) => selected.id)],
+      )).rows).toEqual([{ count: 3 }]);
+      expect((await pool.query(
+        `SELECT count(*)::int AS count FROM coordination_scope_fencing_floors
+          WHERE scope_id = ANY($1::uuid[]) AND fencing_floor = 1`,
+        [shared.map((selected) => selected.id)],
+      )).rows).toEqual([{ count: 3 }]);
+      expect((await pool.query(
+        `SELECT completed_at IS NOT NULL AS complete,
+                receipts_scrubbed::int, leases_scrubbed::int
+           FROM coordination_principal_privacy_progress
+          WHERE principal_id = $1`, [target.id],
+      )).rows).toEqual([{
+        complete: true, receipts_scrubbed: 6, leases_scrubbed: 3,
+      }]);
     } finally {
       await operator.connection.end();
     }

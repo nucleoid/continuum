@@ -917,8 +917,25 @@ async function offboardPrincipalCore(
         'SELECT continuum_operator_pseudonymize_scope($1, $2, $3)',
         [actor.id, scopeId, scopePseudonym],
       );
+      const coordinationPrivacy = await client.query<{
+        privacy: { complete?: boolean };
+      }>(
+        `SELECT continuum_operator_scrub_coordination_principal(
+           $1, $2, $3, $4
+         ) AS privacy`,
+        [actor.id, principalId, scopeId, Math.min(batchSize, 1_000)],
+      );
+      const ownedCoordinationComplete = Boolean((await client.query(
+        `SELECT completed_at IS NOT NULL AS complete
+           FROM coordination_scope_privacy_progress WHERE scope_id = $1`,
+        [scopeId],
+      )).rows[0]?.complete);
+      const sharedCoordinationComplete =
+        coordinationPrivacy.rows[0]?.privacy?.complete === true;
       aliasCount = aliasDelete.rowCount ?? 0;
-      await writeOffboardingRun(client, principalId, actor.id, 'scope_complete');
+      if (ownedCoordinationComplete && sharedCoordinationComplete) {
+        await writeOffboardingRun(client, principalId, actor.id, 'scope_complete');
+      }
     } else {
       await client.query('SELECT continuum_disable_principal($1::uuid, $2::uuid)', [
         actor.id, principalId,

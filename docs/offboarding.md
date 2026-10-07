@@ -115,22 +115,25 @@ knowledge-gap output. Audit inserts lock the principal row and are rejected
 after offboarding; an in-flight recall that loses this race fails closed instead
 of returning results with an unsanitized late audit row.
 
-Coordination state in the owned user scope is scrubbed in the same guarded
-scope-pseudonymization transaction. The transaction first deactivates all scope
-memberships and disables the principal, then takes deterministic membership
-locks that conflict with every coordination authorization lock. Operations that
-already passed authorization finish before the fencing floor is computed; later
-operations and renewals fail closed. The function preserves the maximum token
-in an owner-only scope fencing floor, replaces exact resource text with opaque
-random labels through cascading foreign keys, and overwrites each retained
-receipt payload hash with independent cryptographically random bytes. It is
-therefore safe to scrub a lease that was live before revocation: the holder can
-no longer renew it. No resource digest or input-derived receipt hash remains.
-Lease IDs, receipt outcomes, and fencing tokens remain unchanged. Preserved
-`lock_*` audit metadata excludes `resource_sha256` because low-entropy resource
-names can be recovered by dictionary attack. The operation, outcome, opaque
-request/run/lease IDs, fencing token, resource byte count, and transport remain
-available for audit integrity.
+Coordination privacy work is bounded and resumable. After owned-scope
+memberships are deactivated and the principal is disabled, each invocation
+deletes at most 1,000 retained receipts, leases, and resources from the owned
+user scope. The maximum token is copied to the owner-only scope fencing floor
+before each resource batch is deleted. Durable scope progress prevents a retry
+from rescanning completed phases. A live lease stops the operation; expiry or
+explicit release is required before resource deletion.
+
+Team, project, and organization resources remain intact. Their historical
+leases and receipts are detached from the departing principal in batches of at
+most 1,000, moved to a noninteractive installation identity, and assigned fresh
+random run IDs and payload hashes. This preserves fencing and shared resource
+availability without retaining the principal beside plaintext coordination
+identifiers. Role scopes are outside this shared-scope detachment policy.
+`scope_cleanup_complete` is written only after both owned-scope erasure and
+shared-scope detachment report durable completion. Preserved `lock_*` audit
+metadata excludes `resource_sha256`; immutable coordination operator events
+record direct pseudonymization start and completion outside ordinary audit
+retention and offboarding mutation.
 
 Offboarding is not globally atomic across all batches. Until `complete: true`,
 audit rows beyond the current keyset cursors can still contain raw query text and

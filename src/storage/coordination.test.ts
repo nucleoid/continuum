@@ -656,8 +656,8 @@ describe('coordination storage and service', () => {
         `EXPLAIN (FORMAT JSON)
          SELECT lease_id FROM coordination_leases
           WHERE principal_id = $1
-            AND COALESCE(released_at, expires_at) <= clock_timestamp()
-          ORDER BY COALESCE(released_at, expires_at), lease_id LIMIT 100`,
+            AND cleanup_eligible_at <= clock_timestamp()
+          ORDER BY cleanup_eligible_at, lease_id LIMIT 100`,
         [principal.id],
       );
       const resourcePlan = await plans.query(
@@ -684,11 +684,11 @@ describe('coordination storage and service', () => {
       const globalLeasePlan = await plans.query(
         `EXPLAIN (FORMAT JSON)
          SELECT lease_id FROM coordination_leases
-          WHERE released_at IS NOT NULL OR expires_at <= clock_timestamp()
-          ORDER BY COALESCE(released_at, expires_at), lease_id LIMIT 1000`,
+          WHERE cleanup_eligible_at <= clock_timestamp()
+          ORDER BY cleanup_eligible_at, lease_id LIMIT 1000`,
       );
-      expect(JSON.stringify(leasePlan.rows)).toMatch(
-        /coordination_leases_(?:principal_terminal|terminal_sweep)_idx/,
+      expect(JSON.stringify(leasePlan.rows)).toContain(
+        'coordination_leases_principal_cleanup_idx',
       );
       expect(JSON.stringify(resourcePlan.rows)).toContain(
         'coordination_resources_current_lease_idx',
@@ -700,7 +700,7 @@ describe('coordination storage and service', () => {
         'coordination_receipts_global_sweep_idx',
       );
       expect(JSON.stringify(globalLeasePlan.rows)).toContain(
-        'coordination_leases_terminal_sweep_idx',
+        'coordination_leases_cleanup_ready_idx',
       );
     } finally {
       plans.release();

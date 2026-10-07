@@ -14,6 +14,7 @@ const NO_TRANSACTION_MARKER = '-- continuum:no-transaction';
 const REPAIR_INVALID_INDEX = '-- continuum:repair-invalid-index ';
 const REQUIRE_VALID_INDEX = '-- continuum:require-valid-index ';
 const BACKFILL_OFFBOARDING_SELECTORS = '-- continuum:backfill-offboarding-selectors';
+const BACKFILL_COORDINATION_REPAIR = '-- continuum:backfill-coordination-repair';
 const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
   ['0052_offboarding_review_repair.sql',
     '136cbd834277ca4fbfb48162644738ba2f96f7a5705290cc0c585e3ce7c82079'],
@@ -23,12 +24,20 @@ const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
     '478d40c2367f3fa900984767e18110fe5aa377aadcda1387225dc5dea87176fd'],
   ['0056_coordination_final_remediation.sql',
     '034df4cf096603fc895247f05246ca442b604d0df7dc05596e4c7b43af683c27'],
+  ['0057_coordination_privacy_race_remediation.sql',
+    '7e8d0bbc1f733d76a55c5d9835280880f4254d951d7db41351b4b4ed01d8b3e3'],
 ]);
 const FORWARD_MIGRATION_REQUIREMENTS = new Map([
   ['0053_offboarding_restore_contract.sql', '0052_offboarding_review_repair.sql'],
   ['0056_coordination_final_remediation.sql', '0055_coordination_review_remediation.sql'],
   ['0057_coordination_privacy_race_remediation.sql',
     '0056_coordination_final_remediation.sql'],
+  ['0058_coordination_online_prep.sql',
+    '0057_coordination_privacy_race_remediation.sql'],
+  ['0059_coordination_bounded_privacy.sql',
+    '0058_coordination_online_prep.sql'],
+  ['0060_coordination_online_finish.sql',
+    '0059_coordination_bounded_privacy.sql'],
 ]);
 const REVIEW_ENTRA_MIGRATION_RENAMES = [
   ['0005_entra_auth.sql', '0010_entra_auth.sql'],
@@ -103,6 +112,21 @@ async function indexState(
 async function runNonTransactionalStatement(
   client: pg.PoolClient, statement: string,
 ): Promise<void> {
+  if (statement.split(/\r?\n/).some(
+    (line) => line.trim() === BACKFILL_COORDINATION_REPAIR,
+  )) {
+    await client.query("SET statement_timeout = '5s'");
+    try {
+      for (;;) {
+        const result = await client.query<{ completed: boolean }>(
+          `SELECT continuum_backfill_coordination_cleanup(1000) AS completed`,
+        );
+        if (result.rows[0]?.completed === true) return;
+      }
+    } finally {
+      await client.query('RESET statement_timeout');
+    }
+  }
   if (statement.split(/\r?\n/).some(
     (line) => line.trim() === BACKFILL_OFFBOARDING_SELECTORS,
   )) {

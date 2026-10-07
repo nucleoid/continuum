@@ -24,8 +24,10 @@ generations whose identity and token are immutable while expiry and release
 time are lifecycle fields.
 `coordination_operation_receipts` stores typed idempotency outcomes, while
 scope and principal usage tables enforce hard resource and retained-receipt
-limits. Bounded operator maintenance may remove terminal lease history and
-reclaim inactive keys after preserving the scope fencing floor.
+limits. Release evicts the oldest release receipt at saturation so relinquishing
+a lease cannot be blocked by observability quota. Bounded operator maintenance
+uses durable cleanup eligibility rather than rescanning current expired leases,
+and may reclaim inactive keys after preserving the scope fencing floor.
 
 Only current explicit writer/admin membership on the exact scope grants access.
 A coordination transaction locks membership and Entra freshness state, then
@@ -34,8 +36,10 @@ are touched only near receipt insertion or new-key creation rather than
 serializing the whole transaction. It samples `clock_timestamp()` after row
 waits and revalidates authorization and cancellation immediately before commit.
 Lease mutation, receipt, quota, and bounded metadata commit together. Before offboarding, audit metadata includes a one-way resource digest;
-offboarding removes it and replaces retained receipt payload hashes with random
-bytes.
+offboarding removes it. Owned user-scope coordination rows are erased in
+bounded resumable phases after preserving the scope fencing floor. Team,
+project, and organization history is detached to a noninteractive principal
+with fresh run identifiers and random payload hashes.
 
 REST and MCP are thin naming adapters over one service. REST uses camelCase and
 MCP uses snake_case. Contention is success, stale or denied generations are

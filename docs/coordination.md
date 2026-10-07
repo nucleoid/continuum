@@ -246,7 +246,9 @@ V1 hard limits are:
 - 10,000 retained successful-acquire receipts per principal;
 - 1,000 separately counted contended-acquire receipts per principal, each with
   a 90-second horizon;
-- 10,000 retained release receipts per principal;
+- 10,000 retained release receipts per principal. Release itself remains
+  available at saturation: the oldest retained release receipt is evicted in
+  the same transaction before the new release receipt is inserted;
 - at most 100 retained renew receipts per lease; renew receipts do not consume
   acquire or release quota, so documented TTL/3 renewal cannot starve lease
   maintenance;
@@ -265,10 +267,12 @@ operation, never a statement inside the aborted transaction. Principal usage
 remains a residual hot row only when a successful acquire, contention, release,
 or new-resource rate reservation changes its counter. Renewals do not touch it.
 
-Global receipt sweeping uses
-`coordination_receipts_global_sweep_idx`; terminal lease sweeping uses
-`coordination_leases_terminal_sweep_idx`. Per-principal cleanup retains its
-principal-leading indexes.
+Global receipt sweeping uses `coordination_receipts_global_sweep_idx`.
+Terminal leases receive `cleanup_eligible_at` only after release or displacement
+from `coordination_resources.current_lease_id`. Current expired generations are
+therefore not rescanned on every sweep. Global and per-principal cleanup use
+`coordination_leases_cleanup_ready_idx` and
+`coordination_leases_principal_cleanup_idx` respectively.
 
 Operator maintenance is exposed only through the approval-bound database role:
 `continuum_operator_reclaim_coordination_resource` removes at most 1,000
@@ -292,16 +296,21 @@ vectors. Audit failure rolls back the whole operation.
 
 ## Deployment, mixed versions, and rollback
 
-Apply through migration `0057_coordination_privacy_race_remediation.sql`, then **re-run
+Apply through migration `0060_coordination_online_finish.sql`, then **re-run
 `scripts/grant-application-role.sql`** for every application and dedicated
 operator role. Re-run `scripts/grant-operator-role.sql` immediately afterward
 for dedicated operators. The exact role verifier deliberately rejects both
 missing coordination grants and broader manual grants.
 
-During a mixed-version rollout, older nodes return the generic API `NOT_FOUND`
-for lock routes while upgraded nodes return coordination codes. Harnesses must
-branch on the response `code`, never HTTP 404 alone, and must fail closed until
-all target nodes advertise the coordination surface.
+The schema supports 0056 and current writers concurrently. A database
+`BEFORE INSERT` guard clamps a 0056-style contended acquire receipt from its
+legacy 24-hour retention to 90 seconds before the 0057 CHECK is evaluated.
+Current writers already emit 90 seconds. Older nodes still return the generic
+API `NOT_FOUND` for lock routes while upgraded nodes return coordination codes.
+Harnesses must branch on the response `code`, never HTTP 404 alone, and must
+fail closed until all target nodes advertise the coordination surface. Keep
+the compatibility trigger until a later published migration explicitly retires
+0056 rollback support.
 
 A binary rollback leaves coordination tables, receipts, quota counters, and
 fencing floors in place. Do not drop or truncate them. Before re-enable, apply
@@ -310,17 +319,29 @@ resume with the retained counters. This preserves idempotency and fencing
 across rollback/re-enable cycles.
 
 Offboarding first deactivates every owned-scope membership and disables the
-principal in the same transaction. Deterministically ordered membership locks
-drain operations that already hold the coordination authorization lock; later
-renewals fail authorization. It then preserves the maximum scope fencing value
-and replaces coordination resource text (and matching lease/receipt text
-through cascading foreign keys) with opaque random labels, even if a now
-non-renewable lease has not reached its old expiry. Lease IDs, receipt outcomes,
-and fencing values remain intact; every retained payload hash is overwritten
-with independent cryptographically random bytes. No
-resource hash or digest remains in a floor table. Lock
-audit metadata retains operation evidence but removes the resource digest,
-which could otherwise disclose low-entropy resource names by brute force.
+principal in the same transaction. The owned user scope is then erased in
+bounded receipt, lease, and resource phases. Each call processes at most 1,000
+rows per phase and records durable progress; the maximum fencing token is
+preserved in the owner-only scope floor before resource deletion. Team,
+project, and organization resources remain shared state, but retained leases
+and receipts are moved to an installation-wide detached principal and their run
+IDs and payload hashes are independently randomized in bounded batches. Role
+scopes currently retain their stable pseudonymized principal reference.
+Completion is not recorded until owned-scope erasure and shared-scope
+detachment are both complete. Append-only coordination operator events survive
+audit retention and offboarding. Lock audit metadata retains operation evidence
+but removes the resource digest, which could otherwise disclose low-entropy
+resource names by brute force.
+
+Direct scope pseudonymization requires zero active memberships and zero live
+leases. Membership writes serialize on the scope row and cannot reactivate a
+coordination-private scope. An explicit principal reactivation may reopen its
+mapped owned user scope; it does not restore detached historical identities.
+
+At release-receipt saturation, release still commits. Exact replay is available
+for every receipt still retained, including the new release. A request whose
+oldest release receipt was evicted has crossed its idempotency boundary and may
+return `LEASE_LOST`; reconcile ownership before choosing a new request ID.
 
 ## Harness guidance
 
