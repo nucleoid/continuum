@@ -35,6 +35,22 @@ const REVIEW_ENTRA_MIGRATION_RENAMES = [
   ['0015_entra_review_hardening.sql', '0020_entra_review_hardening.sql'],
 ] as const;
 
+function publishedMigrationChecksum(bytes: Buffer): string {
+  const checksum = createHash('sha256');
+  let chunkStart = 0;
+
+  // Git may materialize tracked text as CRLF on Windows. Canonicalize only
+  // that byte pair so the published LF checksum remains authoritative while
+  // lone CR bytes and every substantive byte continue to be tamper-evident.
+  for (let index = 0; index < bytes.length - 1; index += 1) {
+    if (bytes[index] === 0x0d && bytes[index + 1] === 0x0a) {
+      checksum.update(bytes.subarray(chunkStart, index));
+      chunkStart = index + 1;
+    }
+  }
+  return checksum.update(bytes.subarray(chunkStart)).digest('hex');
+}
+
 function nonTransactionalStatements(sql: string): string[] {
   const body = sql.trimStart().slice(NO_TRANSACTION_MARKER.length).trim();
   const statements = body
@@ -175,7 +191,7 @@ export async function runMigrations(
         const publishedChecksum = PUBLISHED_MIGRATION_CHECKSUMS.get(file);
         if (publishedChecksum) {
           const publishedBytes = await readFile(join(migrationsDir, file));
-          const actualChecksum = createHash('sha256').update(publishedBytes).digest('hex');
+          const actualChecksum = publishedMigrationChecksum(publishedBytes);
           if (actualChecksum !== publishedChecksum) {
             throw new Error(
               `Published migration ${file} was modified after it was ledgered: `
