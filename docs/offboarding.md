@@ -123,6 +123,12 @@ before each resource batch is deleted. Durable scope progress prevents a retry
 from rescanning completed phases. A live lease stops the operation; expiry or
 explicit release is required before resource deletion.
 
+During rollout, complete every forward migration and exact application/operator
+grant-profile convergence before enabling Entra-sourced coordination or
+offboarding traffic. The grant scripts are safe to rehearse and rerun on schema
+versions 0054 through current; functions introduced by later migrations are
+granted only after they exist.
+
 Team, project, role, organization, and other users' resources remain intact. Their historical
 leases and receipts are detached from the departing principal in batches of at
 most 1,000, moved to a noninteractive installation identity, and assigned fresh

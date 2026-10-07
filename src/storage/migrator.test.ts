@@ -91,7 +91,7 @@ describe('runMigrations', () => {
     expect(migration).toMatch(/fencing_token\s+BIGINT/);
   });
 
-  it('upgrades a reachable completed-v1 principal and re-scrubs offboarded lock audit', async () => {
+  it('reopens a 0064-complete offboarding and re-scrubs lock audit under the narrowed rule', async () => {
     const suffix = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
     const schema = `coordination_v1_rescrub_${suffix}`;
     const role = `coordination_v1_operator_${suffix}`;
@@ -101,12 +101,12 @@ describe('runMigrations', () => {
     await admin.query(`CREATE SCHEMA ${schema}`);
     await admin.query(`CREATE ROLE ${quotedRole} NOLOGIN`);
     const pool = schemaPool(schema);
-    const before = await mkdtemp(join(tmpdir(), 'continuum-before-0063-'));
+    const before = await mkdtemp(join(tmpdir(), 'continuum-before-0065-'));
     directories.push(before);
     const source = new URL('../../migrations/', import.meta.url);
     const files = (await readdir(source)).filter((name) => name.endsWith('.sql')).sort();
     await Promise.all(files
-      .filter((name) => name <= '0062_coordination_forward_online_finish.sql')
+      .filter((name) => name <= '0064_coordination_final_online_indexes.sql')
       .map((name) => copyFile(new URL(name, source), join(before, name))));
     try {
       await runMigrations(pool, before);
@@ -140,12 +140,6 @@ describe('runMigrations', () => {
          VALUES ($1, $2, $3, '{}'::uuid[], repeat('a', 64))`,
         [targetId, ownedId, operatorId],
       );
-      await pool.query(
-        `INSERT INTO coordination_principal_privacy_progress
-           (principal_id, detached_principal_id, completed_at)
-         VALUES ($1, '00000000-0000-4000-8000-000000000012', clock_timestamp())`,
-        [targetId],
-      );
       const auditId = String((await pool.query(
         `INSERT INTO audit_log (principal_id, action, scope_id, metadata)
          VALUES ($1, 'write', $2, jsonb_build_object(
@@ -157,9 +151,52 @@ describe('runMigrations', () => {
         [targetId, sharedId, auditRequestId, auditRunId],
       )).rows[0].id);
       await pool.query(
-        `UPDATE principals SET disabled_at = clock_timestamp(),
-                offboarded_at = clock_timestamp() WHERE id = $1`, [targetId],
+        `UPDATE audit_log
+            SET metadata = continuum_offboarding_expected_audit_metadata(metadata)
+          WHERE id = $1`, [auditId],
       );
+      await pool.query(
+        `UPDATE principals SET disabled_at = clock_timestamp(),
+                offboarded_at = clock_timestamp(),
+                display_name = 'erased-' || left(replace(id::text, '-', ''), 12)
+          WHERE id = $1`, [targetId],
+      );
+      await pool.query(
+        `UPDATE scopes SET name = 'erased-user-' || id::text WHERE id = $1`, [ownedId],
+      );
+      const approvalId = String((await pool.query(
+        `INSERT INTO principal_user_scope_approvals
+           (principal_id, scope_id, approved_by, acknowledged_principal_ids,
+            acknowledged_evidence_hash)
+         VALUES ($1, $2, $3, '{}'::uuid[], repeat('a', 64)) RETURNING id`,
+        [targetId, ownedId, operatorId],
+      )).rows[0].id);
+      const completedRunId = String((await pool.query(
+        `INSERT INTO principal_offboarding_runs
+           (principal_id, scope_id, initiated_by, approval_id,
+            initial_memories, initial_embeddings, initial_memberships,
+            initial_aliases, initial_entra_bindings, initial_audit_rows,
+            initial_audit_queries, approval_evidence_hash,
+            initial_count_truncated, audit_fence_id, audit_memory_complete,
+            audit_linked_request_exhausted, audit_linked_complete,
+            memory_complete, scope_cleanup_complete, completed_at)
+         VALUES ($1, $2, $3, $4, 0, 0, 0, 0, 0, 1, 0, repeat('a', 64),
+                 '{}'::text[], $5, TRUE, TRUE, TRUE, TRUE, TRUE, clock_timestamp())
+         RETURNING run_id`,
+        [targetId, ownedId, operatorId, approvalId, auditId],
+      )).rows[0].run_id);
+      await pool.query(
+        `INSERT INTO coordination_principal_privacy_progress
+           (principal_id, detached_principal_id, privacy_version, audit_cursor_id,
+            completed_at)
+         VALUES ($1, '00000000-0000-4000-8000-000000000012', 2, $2,
+                 clock_timestamp())`,
+        [targetId, auditId],
+      );
+      expect((await pool.query(
+        'SELECT continuum_offboarding_actual_state_is_erased($1::uuid) AS erased',
+        [completedRunId],
+      )).rows).toEqual([{ erased: true }]);
       await pool.query(
         'SELECT continuum_register_trusted_database_identity($1::name, $2, TRUE, FALSE)',
         [role, operatorId],
@@ -176,10 +213,15 @@ describe('runMigrations', () => {
 
       await runMigrations(pool, join(process.cwd(), 'migrations'));
       expect((await pool.query(
-        `SELECT privacy_version, completed_at IS NULL AS reopened
+        `SELECT privacy_version, completed_at IS NULL AS reopened,
+                audit_cursor_id::text AS audit_cursor_id
            FROM coordination_principal_privacy_progress WHERE principal_id = $1`,
         [targetId],
-      )).rows).toEqual([{ privacy_version: 1, reopened: true }]);
+      )).rows).toEqual([{ privacy_version: 2, reopened: true, audit_cursor_id: '0' }]);
+      expect((await pool.query(
+        'SELECT continuum_offboarding_actual_state_is_erased($1::uuid) AS erased',
+        [completedRunId],
+      )).rows).toEqual([{ erased: false }]);
       const rolePool = new pg.Pool({
         connectionString: DATABASE_URL,
         max: 1,
@@ -196,6 +238,10 @@ describe('runMigrations', () => {
         operation: 'lock_acquire', outcome: 'acquired', fencing_token: '8',
         resource_bytes: 12, transport: 'rest', own_lease: true,
       } }]);
+      expect((await pool.query(
+        'SELECT continuum_offboarding_actual_state_is_erased($1::uuid) AS erased',
+        [completedRunId],
+      )).rows).toEqual([{ erased: true }]);
     } finally {
       await admin.query(`REVOKE ${quotedRole} FROM CURRENT_USER`).catch(() => undefined);
       await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined);

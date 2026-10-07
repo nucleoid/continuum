@@ -32,6 +32,52 @@ afterEach(async () => {
 });
 
 describe('coordination operator ACL upgrade', () => {
+  it('profiles and re-profiles an application role at schema 0064', async () => {
+    const suffix = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const schema = `coord_acl_0064_${suffix}`;
+    const role = `coord_acl_0064_app_${suffix}`;
+    const base = await makeTestPool();
+    pools.push(base);
+    const admin = new pg.Pool((base as unknown as { options: PoolConfig }).options);
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${quote(schema)}`);
+    await admin.query(`CREATE ROLE ${quote(role)} NOLOGIN`);
+    const pool = new pg.Pool({
+      ...(base as unknown as { options: PoolConfig }).options,
+      max: 1, options: `-c search_path=${schema},public`,
+    });
+    pools.push(pool);
+    const before = await mkdtemp(join(tmpdir(), 'continuum-0064-acl-'));
+    directories.push(before);
+    const source = new URL('../../migrations/', import.meta.url);
+    const files = (await readdir(source)).filter((name) => name.endsWith('.sql')).sort();
+    await Promise.all(files.filter((name) => name <= '0064_coordination_final_online_indexes.sql')
+      .map((name) => copyFile(new URL(name, source), join(before, name))));
+    try {
+      await runMigrations(pool, before);
+      await expect(grantScript(pool, schema, 'grant-application-role.sql', {
+        continuum_app_role: role,
+      })).resolves.toBeUndefined();
+      await expect(grantScript(pool, schema, 'grant-application-role.sql', {
+        continuum_app_role: role,
+      })).resolves.toBeUndefined();
+      expect((await pool.query(
+        `SELECT
+           has_function_privilege($1,
+             format('%I.continuum_coordination_reserve_resource_creation(uuid)', $2::text),
+             'EXECUTE') AS reserve_execute,
+           to_regprocedure(format(
+             '%I.continuum_coordination_privacy_state(uuid,uuid)', $2::text
+           )) IS NULL AS privacy_not_installed`,
+        [role, schema],
+      )).rows).toEqual([{ reserve_execute: true, privacy_not_installed: true }]);
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${quote(schema)} CASCADE`);
+      await admin.query(`DROP OWNED BY ${quote(role)}`);
+      await admin.query(`DROP ROLE ${quote(role)}`);
+    }
+  }, 60_000);
+
   it('moves a master-era operator grant to supported v2 and denies the legacy entry point', async () => {
     const suffix = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
     const schema = `coord_acl_upgrade_${suffix}`;

@@ -666,6 +666,61 @@ describe('coordination database role profiles', () => {
     }
   });
 
+  it('orders acquire behind same-principal offboarding without a membership deadlock', async () => {
+    const target = await createPrincipal(pool, {
+      externalId: 'user:acquire-offboarding-race', kind: 'user', displayName: 'Target',
+    });
+    const shared = await createScope(pool, {
+      kind: 'project', name: 'acquire-offboarding-race',
+    });
+    await addMembership(pool, target.id, shared.id, 'writer');
+    const application = await createApplicationRole();
+    const offboarding = await pool.connect();
+    try {
+      const acquirePid = Number((await application.connection.query(
+        'SELECT pg_backend_pid() AS pid',
+      )).rows[0].pid);
+      await offboarding.query('BEGIN');
+      await offboarding.query("SET LOCAL lock_timeout = '500ms'");
+      await offboarding.query(
+        'UPDATE principals SET disabled_at = clock_timestamp() WHERE id = $1',
+        [target.id],
+      );
+      const acquire = acquireLease(application.connection, target, {
+        scope: 'project:acquire-offboarding-race', resource: 'same-principal',
+        runId: randomUUID(), requestId: randomUUID(), ttlSeconds: 300,
+      }).then(
+        (value) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      let waiting = false;
+      for (let attempt = 0; attempt < 50 && !waiting; attempt += 1) {
+        waiting = Boolean((await pool.query(
+          `SELECT wait_event_type = 'Lock' AS waiting
+             FROM pg_stat_activity WHERE pid = $1`, [acquirePid],
+        )).rows[0]?.waiting);
+        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(waiting).toBe(true);
+      await expect(offboarding.query(
+        `UPDATE scope_memberships SET active = FALSE, deactivated_at = clock_timestamp()
+          WHERE principal_id = $1 AND scope_id = $2`, [target.id, shared.id],
+      )).resolves.toMatchObject({ rowCount: 1 });
+      await offboarding.query('COMMIT');
+      const outcome = await acquire;
+      expect(outcome.ok).toBe(false);
+      if (!outcome.ok) expect(outcome.error).toMatchObject({ code: 'SCOPE_NOT_FOUND' });
+      expect((await pool.query(
+        `SELECT count(*)::int AS count FROM coordination_leases
+          WHERE principal_id = $1 AND scope_id = $2`, [target.id, shared.id],
+      )).rows).toEqual([{ count: 0 }]);
+    } finally {
+      await offboarding.query('ROLLBACK').catch(() => undefined);
+      offboarding.release();
+      await application.connection.end();
+    }
+  });
+
   it('validates and detaches every shared scope kind without joinable audit identifiers', async () => {
     const operatorPrincipal = await createPrincipal(pool, {
       externalId: 'operator:shared-coordination-privacy',

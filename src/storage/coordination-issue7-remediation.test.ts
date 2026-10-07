@@ -185,6 +185,30 @@ describe('coordination issue 7 exact-head remediation', () => {
     expect(migrator).toMatch(/0063_coordination_final_privacy_repair\.sql[\s\S]+0062_coordination_forward_online_finish\.sql/);
     expect(migrator).toMatch(/0064_coordination_final_online_indexes\.sql[\s\S]+0063_coordination_final_privacy_repair\.sql/);
     expect(migrator).toMatch(/0065_coordination_review_remediation\.sql[\s\S]+0064_coordination_final_online_indexes\.sql/);
+    expect(migrator).toMatch(/0066_coordination_upgrade_privacy_repair\.sql[\s\S]+0065_coordination_review_remediation\.sql/);
+  });
+
+  it('locks the principal before membership on every coordination authorization', async () => {
+    const storage = await readFile(join(root, 'src/storage/coordination.ts'), 'utf8');
+    const authorization = storage.slice(
+      storage.indexOf('export async function lockCoordinationAuthorization'),
+      storage.indexOf('export async function coordinationAuthorizationIsCurrent'),
+    );
+    expect(authorization).toMatch(
+      /FROM principals[\s\S]+FOR SHARE[\s\S]+FROM scope_memberships[\s\S]+FOR SHARE/,
+    );
+    expect(authorization).not.toMatch(/FOR SHARE OF m, p/);
+  });
+
+  it('requires grant convergence before Entra coordination and offboarding traffic', async () => {
+    const coordination = await readFile(join(root, 'docs/coordination.md'), 'utf8');
+    const offboarding = await readFile(join(root, 'docs/offboarding.md'), 'utf8');
+    expect(coordination).toMatch(
+      /grant-profile\s+convergence before enabling Entra-sourced coordination or\s+offboarding traffic/i,
+    );
+    expect(offboarding).toMatch(
+      /grant-profile\s+convergence before enabling Entra-sourced coordination or\s+offboarding traffic/i,
+    );
   });
 
   it('keeps immutable operator evidence outside audit retention and offboarding mutation', async () => {

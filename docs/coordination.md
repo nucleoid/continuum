@@ -314,7 +314,8 @@ missing coordination grants and broader manual grants.
 Do not run the current offboarding binary against a database below 0063: it
 requires the versioned coordination privacy state introduced there. During a
 rolling application upgrade, finish database migration and exact grant-profile
-convergence before enabling offboarding on any current node.
+convergence before enabling Entra-sourced coordination or offboarding traffic
+on any current node.
 
 The schema supports 0056 and current writers concurrently. A database
 `BEFORE INSERT` guard clamps a 0056-style contended acquire receipt from its
