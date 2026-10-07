@@ -86,7 +86,7 @@ describe('membership sync CLI runner', () => {
       CONTINUUM_MEMBERSHIP_SYNC_ACTOR: actor.externalId,
     }, fetchSnapshot)).rejects.toMatchObject({
       code: 'FORBIDDEN',
-      publicMessage: 'membership sync actor must be an active manually managed org administrator',
+      publicMessage: 'membership sync requires the DB-bound sync service identity',
     });
     expect(fetchSnapshot).not.toHaveBeenCalled();
   });

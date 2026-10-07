@@ -78,7 +78,7 @@ describe('offboarding round-six safety contract', () => {
     const docs = await text('docs/offboarding.md');
     expect(migration).toMatch(/disabled_at[\s\S]+completed_at IS NULL/i);
     expect(migration).toMatch(/reactivation.*same transaction|reactivation guard/i);
-    expect(principalAdmin).toMatch(/continuum_reactivate_principal/);
+    expect(principalAdmin).toMatch(/continuum_operator_reactivate_principal/);
     expect(docs).toMatch(/zero incomplete.*run/i);
     expect(docs).toMatch(/rollback/i);
   });
