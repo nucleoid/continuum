@@ -11,6 +11,38 @@ Status: design, pre-implementation. This document is the source of truth for the
 5. **Decay is per-type**. A decision does not decay like a context snapshot. The taxonomy drives the lifecycle.
 6. **Build for the next milestone, not the next decade**. No speculative interfaces.
 
+## Coordination domain
+
+Coordination leases are a dedicated PostgreSQL domain, separate from memories,
+embeddings, capture, recall, and generated AGENTS.md content. The public
+contract is documented in [docs/coordination.md](./docs/coordination.md).
+
+`coordination_resources` preserves one monotonic `BIGINT` fencing history per
+exact scope/resource pair. `coordination_leases` preserves immutable lease
+generations with mutable expiry and release time.
+`coordination_operation_receipts` stores typed idempotency outcomes, while
+scope and principal usage tables enforce hard resource and retained-receipt
+limits. Resource history is never evicted.
+
+Only current explicit writer/admin membership on the exact scope grants access.
+A coordination transaction locks the relevant principal, membership, and Entra
+freshness state; then receipt/quota, resource, and lease rows in canonical
+order. It samples `clock_timestamp()` after row waits and revalidates
+authorization and cancellation immediately before commit. Lease mutation,
+receipt, quota, and bounded content-free audit metadata commit together.
+
+REST and MCP are thin naming adapters over one service. REST uses camelCase and
+MCP uses snake_case. Contention is success, stale or denied generations are
+masked as `LEASE_LOST`, and another holder's identifiers are never returned.
+Server-side lock and statement timeouts bound waits without allowing a locally
+timed-out mutating query to continue ambiguously.
+
+This service supplies ownership coordination, not end-to-end side-effect
+fencing. Downstream systems must validate fencing tokens for them to have
+effect. GitHub and ordinary filesystems do not do this natively, so
+orchestrator-only publication, exact-head checks, and branch protection remain
+required.
+
 ## Scope model
 
 Five scopes:

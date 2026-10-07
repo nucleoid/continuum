@@ -332,6 +332,7 @@ const PRESERVED_AUDIT_OPERATIONS = [
 // not safe merely because of its JSON shape: only named fields for the exact
 // operation/source survive erasure.
 const AUDIT_OPERATION_POLICIES = [
+  { operation: 'acquire', safeFields: [] },
   { operation: 'api_key_issued', safeFields: ['key_id', 'service_principal_id'] },
   { operation: 'api_key_revoked', safeFields: ['key_id', 'service_principal_id', 'key_revoked_at'] },
   { operation: 'api_key_rotated', safeFields: ['key_id', 'service_principal_id', 'key_rotated_at'] },
@@ -345,6 +346,10 @@ const AUDIT_OPERATION_POLICIES = [
   { operation: 'entra_membership_sync_screened', safeFields: ['groups_seen', 'groups_reactivated', 'groups_deactivated', 'memberships_active', 'memberships_deactivated', 'groups_skipped'] },
   { operation: 'get_memory', safeFields: ['request_id', 'record_kind'] },
   { operation: 'list_memories', safeFields: ['request_id', 'record_kind', 'state', 'scope_filtered', 'type_filter', 'limit', 'offset', 'count'] },
+  { operation: 'lock_acquire', safeFields: ['outcome', 'request_id', 'run_id', 'lease_id', 'fencing_token', 'resource_bytes', 'resource_sha256', 'transport'] },
+  { operation: 'lock_inspect', safeFields: ['outcome', 'own_lease', 'run_id', 'lease_id', 'fencing_token', 'resource_bytes', 'resource_sha256', 'transport'] },
+  { operation: 'lock_release', safeFields: ['outcome', 'request_id', 'run_id', 'lease_id', 'fencing_token', 'resource_bytes', 'resource_sha256', 'transport'] },
+  { operation: 'lock_renew', safeFields: ['outcome', 'request_id', 'run_id', 'lease_id', 'fencing_token', 'resource_bytes', 'resource_sha256', 'transport'] },
   { operation: 'principal_disabled', safeFields: ['principal_id'] },
   { operation: 'principal_memory_erased', safeFields: ['principal_id'] },
   { operation: 'principal_offboarded', safeFields: ['principal_id', 'approval_id', 'acknowledged_evidence_hash', 'memories', 'audit_rows', 'batches'] },
@@ -353,6 +358,8 @@ const AUDIT_OPERATION_POLICIES = [
   { operation: 'principal_reactivated', safeFields: ['principal_id', 'previously_offboarded'] },
   { operation: 'principal_user_scope_mapped', safeFields: ['principal_id', 'shared_scope_acknowledged', 'acknowledged_principal_ids', 'acknowledged_evidence_hash', 'approval_id', 'other_member_principal_ids', 'other_author_principal_ids', 'other_member_principal_ids_truncated', 'other_author_principal_ids_truncated'] },
   { operation: 'principal_user_scope_acknowledgement_replaced', safeFields: ['principal_id', 'shared_scope_acknowledged', 'acknowledged_principal_ids', 'acknowledged_evidence_hash', 'approval_id', 'other_member_principal_ids', 'other_author_principal_ids', 'other_member_principal_ids_truncated', 'other_author_principal_ids_truncated'] },
+  { operation: 'release', safeFields: [] },
+  { operation: 'renew', safeFields: [] },
   { operation: 'service_principal_provisioned', safeFields: ['service_principal_id', 'external_id'] },
 ] as const;
 

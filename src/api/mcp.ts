@@ -55,6 +55,12 @@ import {
 import type { MemoryReadRecord } from '../storage/memory-reads.js';
 import type { MemoryState, MemoryType } from '../types.js';
 import { decisionHistoryForPrincipal, supersedeForPrincipal } from '../services/supersede.js';
+import {
+  acquireLease,
+  inspectLease,
+  releaseLease,
+  renewLease,
+} from '../services/coordination.js';
 
 const SCOPE_KINDS = ['org', 'team', 'project', 'user', 'role'] as const;
 const MEMORY_TYPES = ['fact', 'decision', 'context', 'playbook', 'relationship'] as const;
@@ -140,6 +146,144 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     name: 'continuum',
     version: '0.1.0',
   });
+
+  server.registerTool(
+    'continuum.lock_acquire',
+    {
+      description: 'Acquire one exclusive, non-reentrant scoped coordination lease.',
+      inputSchema: {
+        scope: z.string(),
+        resource: z.string(),
+        run_id: z.string().uuid(),
+        request_id: z.string().uuid(),
+        ttl_seconds: z.number().int().min(30).max(900).default(300),
+      },
+    },
+    async (args, extra) => {
+      try {
+        const result = await acquireLease(pool, principal, {
+          scope: args.scope,
+          resource: args.resource,
+          runId: args.run_id,
+          requestId: args.request_id,
+          ttlSeconds: args.ttl_seconds,
+        }, { signal: extra.signal, transport: 'mcp' });
+        return jsonResult(result.acquired ? {
+          acquired: true,
+          scope: result.scope,
+          resource: result.resource,
+          lease_id: result.leaseId,
+          run_id: result.runId,
+          fencing_token: result.fencingToken,
+          expires_at: result.expiresAt,
+          server_time: result.serverTime,
+        } : {
+          acquired: false,
+          reason: result.reason,
+          scope: result.scope,
+          resource: result.resource,
+          expires_at: result.expiresAt,
+          retry_after_seconds: result.retryAfterSeconds,
+          server_time: result.serverTime,
+        });
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'continuum.lock_renew',
+    {
+      description: 'Renew the current lease generation owned by this principal and run.',
+      inputSchema: {
+        lease_id: z.string().uuid(),
+        run_id: z.string().uuid(),
+        request_id: z.string().uuid(),
+        ttl_seconds: z.number().int().min(30).max(900).default(300),
+      },
+    },
+    async (args, extra) => {
+      try {
+        const result = await renewLease(pool, principal, {
+          leaseId: args.lease_id,
+          runId: args.run_id,
+          requestId: args.request_id,
+          ttlSeconds: args.ttl_seconds,
+        }, { signal: extra.signal, transport: 'mcp' });
+        return jsonResult({
+          renewed: true,
+          lease_id: result.leaseId,
+          run_id: result.runId,
+          fencing_token: result.fencingToken,
+          expires_at: result.expiresAt,
+          server_time: result.serverTime,
+        });
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'continuum.lock_release',
+    {
+      description: 'Release the current lease generation owned by this principal and run.',
+      inputSchema: {
+        lease_id: z.string().uuid(),
+        run_id: z.string().uuid(),
+        request_id: z.string().uuid(),
+      },
+    },
+    async (args, extra) => {
+      try {
+        const result = await releaseLease(pool, principal, {
+          leaseId: args.lease_id,
+          runId: args.run_id,
+          requestId: args.request_id,
+        }, { signal: extra.signal, transport: 'mcp' });
+        return jsonResult({
+          released: true,
+          ...(result.alreadyReleased ? { already_released: true } : {}),
+        });
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'continuum.lock_inspect',
+    {
+      description: 'Inspect a scoped resource while masking any other holder identity.',
+      inputSchema: {
+        scope: z.string(),
+        resource: z.string(),
+      },
+    },
+    async (args, extra) => {
+      try {
+        const result = await inspectLease(pool, principal, args, {
+          signal: extra.signal,
+          transport: 'mcp',
+        });
+        return jsonResult({
+          held: result.held,
+          scope: result.scope,
+          resource: result.resource,
+          server_time: result.serverTime,
+          ...(result.expiresAt ? { expires_at: result.expiresAt } : {}),
+          ...(result.leaseId ? {
+            lease_id: result.leaseId,
+            run_id: result.runId,
+            fencing_token: result.fencingToken,
+          } : {}),
+        });
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+  );
 
   server.registerTool(
     'continuum.list_scopes',

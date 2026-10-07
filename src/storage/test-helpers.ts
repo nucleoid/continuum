@@ -26,6 +26,11 @@ export async function resetData(pool: pg.Pool): Promise<void> {
   try {
     await pool.query(`
       TRUNCATE TABLE
+        coordination_operation_receipts,
+        coordination_principal_usage,
+        coordination_scope_usage,
+        coordination_leases,
+        coordination_resources,
         ingest_deliveries,
         principal_aliases,
         audit_log,

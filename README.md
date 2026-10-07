@@ -11,6 +11,7 @@ Continuum is designed for organisations that want their developers (and the AI a
 - Serves memory back through the `continuum` CLI, an MCP server (works with Claude Code, Cursor, Copilot Chat, Continue, Zed), a stable HTTP REST API (for internal tooling and CI), and an `AGENTS.md` generator (drops a scope-aware context file into any repo).
 - Enforces per-scope ACLs at the API layer and writes a full audit trail for every read and write.
 - Storage is Postgres + pgvector. Embeddings are pluggable (local Ollama for sensitive material, hosted models for the rest).
+- Provides durable, scope-authorized coordination leases as a separate non-memory domain.
 
 ## What it is not
 
@@ -35,6 +36,7 @@ v0 design in progress. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the schema, 
 - [Offboarding and right to erasure](./docs/offboarding.md)
 - [Audit retention operations](./docs/audit-retention.md)
 - [Memory fetch and browse API](./docs/memory-api.md)
+- [Atomic scoped coordination leases](./docs/coordination.md)
 
 ## CLI quick start
 

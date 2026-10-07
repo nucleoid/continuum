@@ -1,0 +1,527 @@
+import { randomUUID } from 'node:crypto';
+import pg from 'pg';
+import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { createPrincipal } from './principals.js';
+import { createScope } from './scopes.js';
+import { addMembership } from './memberships.js';
+import { makeTestPool, resetData } from './test-helpers.js';
+import {
+  acquireLease,
+  inspectLease,
+  releaseLease,
+  renewLease,
+} from '../services/coordination.js';
+import { ServiceError } from '../services/errors.js';
+
+function expectCode(code: string) {
+  return expect.objectContaining({ code });
+}
+
+describe('coordination storage and service', () => {
+  let pool: pg.Pool;
+  let otherPool: pg.Pool;
+  let principal: Awaited<ReturnType<typeof createPrincipal>>;
+  let scope: Awaited<ReturnType<typeof createScope>>;
+
+  beforeEach(async () => {
+    pool ??= await makeTestPool();
+    otherPool ??= new pg.Pool({
+      connectionString: pool.options.connectionString,
+      max: 2,
+    });
+    await resetData(pool);
+    principal = await createPrincipal(pool, {
+      externalId: 'service:coordination-owner',
+      kind: 'service',
+      displayName: 'Coordination owner',
+    });
+    scope = await createScope(pool, { kind: 'project', name: 'coordination-tests' });
+    await addMembership(pool, principal.id, scope.id, 'writer');
+  }, 30_000);
+
+  afterAll(async () => {
+    await otherPool?.end();
+    await pool?.end();
+  });
+
+  function acquire(
+    selectedPool: pg.Pool,
+    resource: string,
+    requestId = randomUUID(),
+    runId = randomUUID(),
+  ) {
+    return acquireLease(selectedPool, principal, {
+      scope: 'project:coordination-tests',
+      resource,
+      runId,
+      requestId,
+      ttlSeconds: 300,
+    });
+  }
+
+  it('serializes a cross-pool race and keeps fencing as a decimal string', async () => {
+    const runId = randomUUID();
+    const results = await Promise.all([
+      acquire(pool, 'github:nucleoid/continuum:issue:7', randomUUID(), runId),
+      acquire(otherPool, 'github:nucleoid/continuum:issue:7', randomUUID(), runId),
+    ]);
+    expect(results.filter((result) => result.acquired)).toHaveLength(1);
+    expect(results.filter((result) => !result.acquired)).toHaveLength(1);
+    const winner = results.find((result) => result.acquired)!;
+    expect(winner.acquired && winner.fencingToken).toBe('1');
+    const state = await pool.query(
+      `SELECT r.fencing_token::text AS token, count(l.*)::int AS leases
+         FROM coordination_resources r
+         JOIN coordination_leases l USING (scope_id, resource)
+        WHERE r.scope_id = $1 AND r.resource = $2
+        GROUP BY r.fencing_token`,
+      [scope.id, 'github:nucleoid/continuum:issue:7'],
+    );
+    expect(state.rows).toEqual([{ token: '1', leases: 1 }]);
+  });
+
+  it('is non-reentrant for fresh requests and exactly replays the original acquire', async () => {
+    const runId = randomUUID();
+    const requestId = randomUUID();
+    const first = await acquire(pool, 'same-run', requestId, runId);
+    const replay = await acquire(pool, 'same-run', requestId, runId);
+    const fresh = await acquire(pool, 'same-run', randomUUID(), runId);
+    expect(first).toEqual(replay);
+    expect(fresh).toMatchObject({ acquired: false, reason: 'LOCK_HELD' });
+    await expect(acquire(pool, 'different-input', requestId, runId))
+      .rejects.toEqual(expectCode('IDEMPOTENCY_CONFLICT'));
+  });
+
+  it('replays a committed receipt and preserves fencing across process-pool restart', async () => {
+    const requestId = randomUUID();
+    const runId = randomUUID();
+    const crashedProcessPool = new pg.Pool({
+      connectionString: pool.options.connectionString,
+      max: 1,
+    });
+    const first = await acquire(
+      crashedProcessPool, 'restart-recovery', requestId, runId,
+    );
+    await crashedProcessPool.end();
+
+    const replacementProcessPool = new pg.Pool({
+      connectionString: pool.options.connectionString,
+      max: 1,
+    });
+    try {
+      expect(await acquire(
+        replacementProcessPool, 'restart-recovery', requestId, runId,
+      )).toEqual(first);
+      await pool.query(
+        `UPDATE coordination_leases
+            SET acquired_at = clock_timestamp() - interval '2 seconds',
+                expires_at = clock_timestamp() - interval '1 second'
+          WHERE lease_id = $1`,
+        [first.acquired ? first.leaseId : null],
+      );
+      expect(await acquire(replacementProcessPool, 'restart-recovery'))
+        .toMatchObject({ acquired: true, fencingToken: '2' });
+    } finally {
+      await replacementProcessPool.end();
+    }
+  });
+
+  it('takes over after expiry, increments fencing, and masks stale operations', async () => {
+    const firstRun = randomUUID();
+    const first = await acquire(pool, 'expiry', randomUUID(), firstRun);
+    expect(first.acquired).toBe(true);
+    await pool.query(
+      `UPDATE coordination_leases
+          SET acquired_at = clock_timestamp() - interval '2 seconds',
+              expires_at = clock_timestamp() - interval '1 second'
+        WHERE lease_id = $1`,
+      [first.acquired ? first.leaseId : null],
+    );
+    const secondRun = randomUUID();
+    const second = await acquire(pool, 'expiry', randomUUID(), secondRun);
+    expect(second).toMatchObject({ acquired: true, fencingToken: '2' });
+    await expect(renewLease(pool, principal, {
+      leaseId: first.acquired ? first.leaseId : '',
+      runId: firstRun,
+      requestId: randomUUID(),
+    })).rejects.toEqual(expectCode('LEASE_LOST'));
+    await expect(releaseLease(pool, principal, {
+      leaseId: first.acquired ? first.leaseId : '',
+      runId: firstRun,
+      requestId: randomUUID(),
+    })).rejects.toEqual(expectCode('LEASE_LOST'));
+    const inspected = await inspectLease(pool, principal, {
+      scope: 'project:coordination-tests',
+      resource: 'expiry',
+    });
+    expect(inspected).toMatchObject({
+      held: true,
+      leaseId: second.acquired ? second.leaseId : undefined,
+      fencingToken: '2',
+    });
+  });
+
+  it('replays renew and release without a late mutation or successor damage', async () => {
+    const runId = randomUUID();
+    const acquired = await acquire(pool, 'replay-mutations', randomUUID(), runId);
+    expect(acquired.acquired).toBe(true);
+    if (!acquired.acquired) throw new Error('expected acquisition');
+    const renewRequest = randomUUID();
+    const renewed = await renewLease(pool, principal, {
+      leaseId: acquired.leaseId,
+      runId,
+      requestId: renewRequest,
+      ttlSeconds: 400,
+    });
+    const renewReplay = await renewLease(pool, principal, {
+      leaseId: acquired.leaseId,
+      runId,
+      requestId: renewRequest,
+      ttlSeconds: 400,
+    });
+    expect(renewReplay).toEqual(renewed);
+
+    const releaseRequest = randomUUID();
+    expect(await releaseLease(pool, principal, {
+      leaseId: acquired.leaseId,
+      runId,
+      requestId: releaseRequest,
+    })).toEqual({ released: true });
+    const successor = await acquire(pool, 'replay-mutations');
+    expect(successor).toMatchObject({ acquired: true, fencingToken: '2' });
+    expect(await releaseLease(pool, principal, {
+      leaseId: acquired.leaseId,
+      runId,
+      requestId: releaseRequest,
+    })).toEqual({ released: true, alreadyReleased: true });
+    expect(await inspectLease(pool, principal, {
+      scope: 'project:coordination-tests',
+      resource: 'replay-mutations',
+    })).toMatchObject({
+      held: true,
+      leaseId: successor.acquired ? successor.leaseId : undefined,
+    });
+  });
+
+  it('revalidates current authorization and masks revoked holders', async () => {
+    const runId = randomUUID();
+    const acquired = await acquire(pool, 'revocation', randomUUID(), runId);
+    expect(acquired.acquired).toBe(true);
+    await pool.query(
+      `UPDATE scope_memberships SET active = FALSE, deactivated_at = clock_timestamp()
+        WHERE principal_id = $1 AND scope_id = $2`,
+      [principal.id, scope.id],
+    );
+    await expect(renewLease(pool, principal, {
+      leaseId: acquired.acquired ? acquired.leaseId : '',
+      runId,
+      requestId: randomUUID(),
+    })).rejects.toEqual(expectCode('LEASE_LOST'));
+    await expect(inspectLease(pool, principal, {
+      scope: 'project:coordination-tests',
+      resource: 'revocation',
+    })).rejects.toEqual(expectCode('SCOPE_NOT_FOUND'));
+  });
+
+  it('masks another holder identity in inspect and contention', async () => {
+    const acquired = await acquire(pool, 'masked');
+    expect(acquired.acquired).toBe(true);
+    const other = await createPrincipal(pool, {
+      externalId: 'service:coordination-other',
+      kind: 'service',
+      displayName: 'Other',
+    });
+    await addMembership(pool, other.id, scope.id, 'admin');
+    const inspected = await inspectLease(pool, other, {
+      scope: 'project:coordination-tests',
+      resource: 'masked',
+    });
+    expect(inspected).toEqual({
+      held: true,
+      scope: 'project:coordination-tests',
+      resource: 'masked',
+      serverTime: expect.any(String),
+      expiresAt: expect.any(String),
+    });
+    const contention = await acquireLease(pool, other, {
+      scope: 'project:coordination-tests',
+      resource: 'masked',
+      runId: randomUUID(),
+      requestId: randomUUID(),
+    });
+    expect(contention).toEqual({
+      acquired: false,
+      reason: 'LOCK_HELD',
+      scope: 'project:coordination-tests',
+      resource: 'masked',
+      expiresAt: expect.any(String),
+      retryAfterSeconds: expect.any(Number),
+      serverTime: expect.any(String),
+    });
+    const audit = await pool.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM audit_log
+        WHERE principal_id = $1
+          AND metadata->>'operation' IN ('lock_inspect', 'lock_acquire')
+        ORDER BY id`,
+      [other.id],
+    );
+    expect(audit.rows).toHaveLength(2);
+    expect(JSON.stringify(audit.rows)).not.toContain('masked');
+    for (const row of audit.rows) {
+      expect(row.metadata.resource_bytes).toBe(6);
+      expect(row.metadata.resource_sha256).toMatch(/^[0-9a-f]{64}$/);
+      expect(row.metadata).not.toHaveProperty('lease_id');
+      expect(row.metadata).not.toHaveProperty('run_id');
+      expect(row.metadata).not.toHaveProperty('fencing_token');
+    }
+  });
+
+  it('rolls back lease, receipt, quota, and audit together on audit failure', async () => {
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION coordination_test_reject_audit()
+      RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.metadata->>'operation' = 'lock_acquire' THEN
+          RAISE EXCEPTION 'injected audit failure';
+        END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER coordination_test_reject_audit
+      BEFORE INSERT ON audit_log
+      FOR EACH ROW EXECUTE FUNCTION coordination_test_reject_audit();
+    `);
+    try {
+      await expect(acquire(pool, 'audit-rollback')).rejects.toBeInstanceOf(ServiceError);
+      const counts = await pool.query(`
+        SELECT
+          (SELECT count(*)::int FROM coordination_resources WHERE scope_id = $1) AS resources,
+          (SELECT count(*)::int FROM coordination_leases WHERE scope_id = $1) AS leases,
+          (SELECT count(*)::int FROM coordination_operation_receipts
+            WHERE scope_id = $1) AS receipts,
+          (SELECT resource_count FROM coordination_scope_usage
+            WHERE scope_id = $1) AS resource_count
+      `, [scope.id]);
+      expect(counts.rows[0]).toEqual({
+        resources: 0,
+        leases: 0,
+        receipts: 0,
+        resource_count: null,
+      });
+    } finally {
+      await pool.query('DROP TRIGGER IF EXISTS coordination_test_reject_audit ON audit_log');
+      await pool.query('DROP FUNCTION IF EXISTS coordination_test_reject_audit()');
+    }
+  });
+
+  it('enforces resource, receipt, and fencing exhaustion without partial mutation', async () => {
+    const first = await acquire(pool, 'existing');
+    expect(first.acquired).toBe(true);
+    await pool.query(
+      `UPDATE coordination_leases SET acquired_at = clock_timestamp() - interval '2 seconds',
+          expires_at = clock_timestamp() - interval '1 second'
+        WHERE lease_id = $1`,
+      [first.acquired ? first.leaseId : null],
+    );
+    await pool.query(
+      'UPDATE coordination_scope_usage SET resource_count = 10000 WHERE scope_id = $1',
+      [scope.id],
+    );
+    await expect(acquire(pool, 'new-over-quota'))
+      .rejects.toEqual(expectCode('COORDINATION_QUOTA_EXCEEDED'));
+    expect((await acquire(pool, 'existing')).acquired).toBe(true);
+
+    await pool.query(
+      'UPDATE coordination_principal_usage SET receipt_count = 10000 WHERE principal_id = $1',
+      [principal.id],
+    );
+    await expect(acquire(pool, 'receipt-over-quota'))
+      .rejects.toEqual(expectCode('COORDINATION_QUOTA_EXCEEDED'));
+    expect((await pool.query(
+      `SELECT 1 FROM coordination_resources
+        WHERE scope_id = $1 AND resource = 'receipt-over-quota'`,
+      [scope.id],
+    )).rowCount).toBe(0);
+
+    await pool.query(
+      `UPDATE coordination_resources SET fencing_token = 9223372036854775807
+        WHERE scope_id = $1 AND resource = 'existing'`,
+      [scope.id],
+    );
+    await pool.query(
+      `UPDATE coordination_leases SET acquired_at = clock_timestamp() - interval '2 seconds',
+          expires_at = clock_timestamp() - interval '1 second'
+        WHERE lease_id = (SELECT current_lease_id FROM coordination_resources
+          WHERE scope_id = $1 AND resource = 'existing')`,
+      [scope.id],
+    );
+    await expect(acquire(pool, 'existing'))
+      .rejects.toEqual(expectCode('FENCING_TOKEN_EXHAUSTED'));
+  });
+
+  it('fails closed when Entra freshness expires while waiting on a resource row', async () => {
+    const first = await acquire(pool, 'freshness-wait');
+    expect(first.acquired).toBe(true);
+    await pool.query(
+      `UPDATE coordination_leases
+          SET acquired_at = clock_timestamp() - interval '2 seconds',
+              expires_at = clock_timestamp() - interval '1 second'
+        WHERE lease_id = $1`,
+      [first.acquired ? first.leaseId : null],
+    );
+    const groupId = randomUUID();
+    await pool.query(
+      `INSERT INTO entra_groups
+         (external_id, display_name, scope_id, role, approved_by, approved_at)
+       VALUES ($1, 'Coordination test group', $2, 'writer', $3, clock_timestamp())`,
+      [groupId, scope.id, principal.id],
+    );
+    await pool.query(
+      `UPDATE scope_memberships
+          SET source_kind = 'entra', source_id = $3, synced_at = clock_timestamp()
+        WHERE principal_id = $1 AND scope_id = $2 AND source_kind = 'manual'`,
+      [principal.id, scope.id, groupId],
+    );
+    await pool.query(
+      `UPDATE entra_sync_state
+          SET max_staleness = interval '1 hour',
+              last_success_at = clock_timestamp() - interval '59 minutes 59.7 seconds'`,
+    );
+
+    const blocker = await otherPool.connect();
+    const requestId = randomUUID();
+    try {
+      await blocker.query('BEGIN');
+      await blocker.query(
+        `SELECT 1 FROM coordination_resources
+          WHERE scope_id = $1 AND resource = 'freshness-wait' FOR UPDATE`,
+        [scope.id],
+      );
+      const attempt = acquire(pool, 'freshness-wait', requestId);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      await blocker.query('COMMIT');
+      await expect(attempt).rejects.toEqual(expectCode('SCOPE_NOT_FOUND'));
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => undefined);
+      blocker.release();
+    }
+    expect((await pool.query(
+      'SELECT 1 FROM coordination_operation_receipts WHERE request_id = $1',
+      [requestId],
+    )).rowCount).toBe(0);
+  });
+
+  it('holds authorization locks through commit so a waiting revocation applies afterward', async () => {
+    const first = await acquire(pool, 'revocation-wait');
+    expect(first.acquired).toBe(true);
+    await pool.query(
+      `UPDATE coordination_leases
+          SET acquired_at = clock_timestamp() - interval '2 seconds',
+              expires_at = clock_timestamp() - interval '1 second'
+        WHERE lease_id = $1`,
+      [first.acquired ? first.leaseId : null],
+    );
+    const blocker = await otherPool.connect();
+    const revoker = await otherPool.connect();
+    try {
+      await blocker.query('BEGIN');
+      await blocker.query(
+        `SELECT 1 FROM coordination_resources
+          WHERE scope_id = $1 AND resource = 'revocation-wait' FOR UPDATE`,
+        [scope.id],
+      );
+      const attempt = acquire(pool, 'revocation-wait');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const pid = (await revoker.query<{ pid: number }>('SELECT pg_backend_pid() AS pid'))
+        .rows[0]!.pid;
+      const revocation = revoker.query(
+        `UPDATE scope_memberships
+            SET active = FALSE, deactivated_at = clock_timestamp()
+          WHERE principal_id = $1 AND scope_id = $2`,
+        [principal.id, scope.id],
+      );
+      let waiting = false;
+      for (let index = 0; index < 25 && !waiting; index += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        const state = await blocker.query<{ wait_event_type: string | null }>(
+          'SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1',
+          [pid],
+        );
+        waiting = state.rows[0]?.wait_event_type === 'Lock';
+      }
+      expect(waiting).toBe(true);
+      await blocker.query('COMMIT');
+      expect(await attempt).toMatchObject({ acquired: true, fencingToken: '2' });
+      await revocation;
+      await expect(inspectLease(pool, principal, {
+        scope: 'project:coordination-tests',
+        resource: 'revocation-wait',
+      })).rejects.toEqual(expectCode('SCOPE_NOT_FOUND'));
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => undefined);
+      blocker.release();
+      revoker.release();
+    }
+  });
+
+  it('ends idempotency at the retained receipt boundary and permits key reuse', async () => {
+    const requestId = randomUUID();
+    const runId = randomUUID();
+    expect(await acquire(pool, 'old-receipt', requestId, runId))
+      .toMatchObject({ acquired: true });
+    await pool.query(
+      `UPDATE coordination_operation_receipts
+          SET retain_until = clock_timestamp() - interval '1 microsecond'
+        WHERE principal_id = $1 AND operation = 'acquire' AND request_id = $2`,
+      [principal.id, requestId],
+    );
+    expect(await acquire(pool, 'new-receipt', requestId, runId))
+      .toMatchObject({ acquired: true, resource: 'new-receipt' });
+    const retained = await pool.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM coordination_operation_receipts
+        WHERE principal_id = $1 AND operation = 'acquire' AND request_id = $2`,
+      [principal.id, requestId],
+    );
+    expect(retained.rows[0]!.count).toBe(1);
+  });
+
+  it('uses server lock timeout and leaves no late receipt after a blocked request', async () => {
+    const first = await acquire(pool, 'blocked');
+    expect(first.acquired).toBe(true);
+    const blocker = await otherPool.connect();
+    const requestId = randomUUID();
+    try {
+      await blocker.query('BEGIN');
+      await blocker.query(
+        `SELECT 1 FROM coordination_resources
+          WHERE scope_id = $1 AND resource = 'blocked' FOR UPDATE`,
+        [scope.id],
+      );
+      await expect(acquire(pool, 'blocked', requestId))
+        .rejects.toEqual(expectCode('COORDINATION_TIMEOUT'));
+    } finally {
+      await blocker.query('ROLLBACK');
+      blocker.release();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect((await pool.query(
+      'SELECT 1 FROM coordination_operation_receipts WHERE request_id = $1',
+      [requestId],
+    )).rowCount).toBe(0);
+  });
+
+  it('honors pre-cancellation without creating state', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await expect(acquireLease(pool, principal, {
+      scope: 'project:coordination-tests',
+      resource: 'cancelled',
+      runId: randomUUID(),
+      requestId: randomUUID(),
+    }, { signal: controller.signal })).rejects.toEqual(expectCode('COORDINATION_TIMEOUT'));
+    expect((await pool.query(
+      `SELECT 1 FROM coordination_resources
+        WHERE scope_id = $1 AND resource = 'cancelled'`,
+      [scope.id],
+    )).rowCount).toBe(0);
+  });
+});

@@ -37,6 +37,7 @@ import { ingestConfigFromEnv, type IngestConfig } from '../ingest/config.js';
 import { cliSupportRouter } from './routes/cli.js';
 import { supersedeRouter } from './routes/supersede.js';
 import { offboardingRouter } from './routes/offboarding.js';
+import { locksRouter } from './routes/locks.js';
 
 export { createReadinessState } from './readiness.js';
 
@@ -91,6 +92,8 @@ const KNOWN_LOG_PATHS = new Set([
   '/api/v0/supersede', '/api/v0/decisions/:id/history',
   '/api/v0/admin/principals/:principalId/owned-user-scope',
   '/api/v0/admin/principals/:principalId/offboard',
+  '/api/v0/locks', '/api/v0/locks/acquire', '/api/v0/locks/renew',
+  '/api/v0/locks/release',
 ]);
 
 const defaultLogger: OperationalLogger = {
@@ -308,6 +311,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   v0.use(insightsRouter(pool, provider, gapConfig, () => new Date((opts.clock ?? Date.now)())));
   v0.use(supersedeRouter(pool, provider));
   v0.use(offboardingRouter(pool));
+  v0.use(locksRouter(pool));
   app.use('/api/v0', v0);
 
   app.use('/api', (_req, res) => {

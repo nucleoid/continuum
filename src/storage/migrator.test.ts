@@ -57,6 +57,30 @@ afterEach(async () => {
 });
 
 describe('runMigrations', () => {
+  it('ships 0054 coordination tables as the next ordinary transactional migration', async () => {
+    const files = (await readdir(join(process.cwd(), 'migrations')))
+      .filter((name) => name.endsWith('.sql'))
+      .sort();
+    expect(files.slice(-2)).toEqual([
+      '0053_offboarding_restore_contract.sql',
+      '0054_coordination_leases.sql',
+    ]);
+    const migration = await readFile(
+      join(process.cwd(), 'migrations/0054_coordination_leases.sql'),
+      'utf8',
+    );
+    expect(migration.trimStart()).not.toMatch(/^-- continuum:no-transaction/);
+    for (const table of [
+      'coordination_resources', 'coordination_leases',
+      'coordination_operation_receipts', 'coordination_scope_usage',
+      'coordination_principal_usage',
+    ]) {
+      expect(migration).toContain(`CREATE TABLE ${table}`);
+    }
+    expect(migration).toMatch(/DEFERRABLE INITIALLY DEFERRED/);
+    expect(migration).toMatch(/fencing_token\s+BIGINT/);
+  });
+
   it('pins the published 0052 bytes and rejects a modified ledgered copy', async () => {
     const published = await readFile(
       join(process.cwd(), 'migrations/0052_offboarding_review_repair.sql'), 'utf8',
@@ -283,7 +307,7 @@ describe('runMigrations', () => {
         $$;
       `);
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-24).map((migration) => migration.name)).toEqual([
+      expect(applied.slice(-25).map((migration) => migration.name)).toEqual([
         '0030_offboarding_round7_integrity.sql',
         '0031_offboarding_round7_indexes.sql',
         '0032_offboarding_round7_compatibility.sql',
@@ -308,6 +332,7 @@ describe('runMigrations', () => {
         '0051_offboarding_security_contract.sql',
         '0052_offboarding_review_repair.sql',
         '0053_offboarding_restore_contract.sql',
+        '0054_coordination_leases.sql',
       ]);
       expect((await pool.query(
         `SELECT indisvalid AS valid FROM pg_index
@@ -548,7 +573,8 @@ describe('runMigrations', () => {
       && name !== '0050_offboarding_startup_verification_fix.sql'
       && name !== '0051_offboarding_security_contract.sql'
       && name !== '0052_offboarding_review_repair.sql'
-      && name !== '0053_offboarding_restore_contract.sql')) {
+      && name !== '0053_offboarding_restore_contract.sql'
+      && name !== '0054_coordination_leases.sql')) {
       if (file === '0038_offboarding_search_path_hardening.sql') {
         await copyFile(
           new URL(
