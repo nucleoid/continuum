@@ -2,7 +2,7 @@ import { chmod, mkdtemp, open, readFile, readdir, rm, symlink, writeFile } from 
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type pg from 'pg';
+import pg, { type PoolConfig } from 'pg';
 import { addMembership } from '../storage/memberships.js';
 import { createPrincipal } from '../storage/principals.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
@@ -53,6 +53,33 @@ describe('audit retention', () => {
     if (!org) throw new Error('org scope missing');
     if (role) await addMembership(pool, principal.id, org.id, role);
     return principal;
+  }
+
+  async function applyApplicationRoleGrants(role: string): Promise<void> {
+    const source = await readFile(
+      path.join(process.cwd(), 'scripts/grant-application-role.sql'), 'utf8',
+    );
+    const sql = source.split(/\r?\n/)
+      .filter((line) => !line.trimStart().startsWith('\\'))
+      .join('\n')
+      .replaceAll(':"continuum_schema"', '"public"')
+      .replaceAll(':"continuum_app_role"', `"${role}"`)
+      .replaceAll(":'continuum_app_role'", `'${role}'`);
+    await pool.query(sql);
+  }
+
+  async function applyOperatorRoleGrants(role: string, principalId: string): Promise<void> {
+    const source = await readFile(
+      path.join(process.cwd(), 'scripts/grant-operator-role.sql'), 'utf8',
+    );
+    const sql = source.split(/\r?\n/)
+      .filter((line) => !line.trimStart().startsWith('\\'))
+      .join('\n')
+      .replaceAll(':"continuum_schema"', '"public"')
+      .replaceAll(':"continuum_operator_role"', `"${role}"`)
+      .replaceAll(":'continuum_operator_role'", `'${role}'`)
+      .replaceAll(":'continuum_principal_id'", `'${principalId}'`);
+    await pool.query(sql);
   }
 
   async function insertAudit(
@@ -163,6 +190,71 @@ describe('audit retention', () => {
     expect(resumed).toMatchObject({ status: 'completed', batches: 1, deleted: 2, exhausted: true });
     const empty = await runAuditRetention(pool, options());
     expect(empty).toMatchObject({ status: 'completed', batches: 0, deleted: 0, exhausted: true });
+  });
+
+  it('deletes and summarizes retention as the documented non-owner operator role', async () => {
+    const admin = await createPrincipal(pool, {
+      externalId: 'svc:retention', kind: 'user', displayName: 'Retention operator',
+    });
+    const org = await getScopeByRef(pool, { kind: 'org', name: '' });
+    await addMembership(pool, admin.id, org!.id, 'admin');
+    const oldId = await insertAudit(admin.id, new Date('2026-01-01T00:00:00Z'));
+    const recentId = await insertAudit(admin.id, new Date(cutoff.getTime() + 60_000));
+    const role = `continuum_retention_${Date.now()}`;
+    const quotedRole = `"${role}"`;
+    await pool.query(`CREATE ROLE ${quotedRole} NOLOGIN`);
+    let rolePool: pg.Pool | undefined;
+    try {
+      await pool.query(
+        `GRANT ${quotedRole} TO CURRENT_USER WITH ADMIN OPTION, SET FALSE, INHERIT FALSE`,
+      );
+      await applyApplicationRoleGrants(role);
+      await applyOperatorRoleGrants(role, admin.id);
+      rolePool = new pg.Pool({
+        ...(pool as unknown as { options: PoolConfig }).options,
+        max: 1,
+        options: `-c role=${role}`,
+      });
+
+      await expect(rolePool.query('DELETE FROM audit_log WHERE id = $1', [oldId]))
+        .rejects.toThrow(/permission denied/i);
+      await expect(rolePool.query('DELETE FROM audit_log WHERE id = $1', [recentId]))
+        .rejects.toThrow(/permission denied/i);
+      await expect(rolePool.query(
+        `UPDATE audit_log SET metadata = '{"forged":true}'::jsonb WHERE id = $1`,
+        [oldId],
+      )).rejects.toThrow(/permission denied/i);
+      await expect(rolePool.query(
+        `SELECT continuum_operator_apply_audit_retention(
+           $1, 'infinity'::timestamptz, 30, gen_random_uuid(), 1,
+           '[]'::jsonb, 'none', NULL
+         )`,
+        [admin.id],
+      )).rejects.toThrow(/database-enforced cutoff/i);
+
+      await expect(runAuditRetention(rolePool, options())).resolves.toMatchObject({
+        status: 'completed', deleted: 1, batches: 1,
+      });
+      expect((await pool.query('SELECT 1 FROM audit_log WHERE id = $1', [oldId])).rowCount)
+        .toBe(0);
+      expect((await pool.query('SELECT 1 FROM audit_log WHERE id = $1', [recentId])).rowCount)
+        .toBe(1);
+      const summary = (await pool.query(
+        `SELECT id, metadata FROM audit_log
+          WHERE metadata->>'source' = 'audit-retention' ORDER BY id DESC LIMIT 1`,
+      )).rows[0];
+      await expect(pool.query(
+        `UPDATE audit_log SET metadata = '{"forged":true}'::jsonb WHERE id = $1`,
+        [summary.id],
+      )).rejects.toThrow(/retention evidence is immutable/i);
+      await expect(pool.query('DELETE FROM audit_log WHERE id = $1', [summary.id]))
+        .rejects.toThrow(/retention evidence is immutable/i);
+    } finally {
+      await rolePool?.end();
+      await pool.query(`DROP OWNED BY ${quotedRole}`);
+      await pool.query(`REVOKE ${quotedRole} FROM CURRENT_USER CASCADE`);
+      await pool.query(`DROP ROLE ${quotedRole}`);
+    }
   });
 
   it('previews eligible rows without export, deletion, or summary writes', async () => {

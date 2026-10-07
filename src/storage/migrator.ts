@@ -1,4 +1,5 @@
 import { readdir, readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type pg from 'pg';
@@ -10,6 +11,16 @@ const DEFAULT_MIGRATIONS_DIR = resolve(here, '../../migrations');
 // Changing it would break coordination with replicas running an older version.
 const CONTINUUM_MIGRATION_LOCK_ID = '7215328273579717613';
 const NO_TRANSACTION_MARKER = '-- continuum:no-transaction';
+const REPAIR_INVALID_INDEX = '-- continuum:repair-invalid-index ';
+const REQUIRE_VALID_INDEX = '-- continuum:require-valid-index ';
+const BACKFILL_OFFBOARDING_SELECTORS = '-- continuum:backfill-offboarding-selectors';
+const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
+  ['0052_offboarding_review_repair.sql',
+    '136cbd834277ca4fbfb48162644738ba2f96f7a5705290cc0c585e3ce7c82079'],
+]);
+const FORWARD_MIGRATION_REQUIREMENTS = new Map([
+  ['0053_offboarding_restore_contract.sql', '0052_offboarding_review_repair.sql'],
+]);
 const REVIEW_ENTRA_MIGRATION_RENAMES = [
   ['0005_entra_auth.sql', '0010_entra_auth.sql'],
   ['0006_entra_binding_approval.sql', '0011_entra_binding_approval.sql'],
@@ -24,6 +35,22 @@ const REVIEW_ENTRA_MIGRATION_RENAMES = [
   ['0015_entra_review_hardening.sql', '0020_entra_review_hardening.sql'],
 ] as const;
 
+function publishedMigrationChecksum(bytes: Buffer): string {
+  const checksum = createHash('sha256');
+  let chunkStart = 0;
+
+  // Git may materialize tracked text as CRLF on Windows. Canonicalize only
+  // that byte pair so the published LF checksum remains authoritative while
+  // lone CR bytes and every substantive byte continue to be tamper-evident.
+  for (let index = 0; index < bytes.length - 1; index += 1) {
+    if (bytes[index] === 0x0d && bytes[index + 1] === 0x0a) {
+      checksum.update(bytes.subarray(chunkStart, index));
+      chunkStart = index + 1;
+    }
+  }
+  return checksum.update(bytes.subarray(chunkStart)).digest('hex');
+}
+
 function nonTransactionalStatements(sql: string): string[] {
   const body = sql.trimStart().slice(NO_TRANSACTION_MARKER.length).trim();
   const statements = body
@@ -34,6 +61,83 @@ function nonTransactionalStatements(sql: string): string[] {
     throw new Error('no-transaction migration must contain at least one statement');
   }
   return statements;
+}
+
+function directiveIndexName(statement: string, directive: string): string | null {
+  const line = statement.split(/\r?\n/).find((candidate) => candidate.trim().startsWith(directive));
+  if (!line) return null;
+  const name = line.trim().slice(directive.length).trim();
+  if (!/^[a-z][a-z0-9_]*$/.test(name)) {
+    throw new Error(`invalid no-transaction index directive: ${statement}`);
+  }
+  return name;
+}
+
+function quoteIdentifier(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`;
+}
+
+async function indexState(
+  client: pg.PoolClient, indexName: string,
+): Promise<{ schema: string; valid: boolean } | null> {
+  const result = await client.query(
+    `SELECT n.nspname AS schema, i.indisvalid AS valid
+       FROM pg_class c
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       JOIN pg_index i ON i.indexrelid = c.oid
+      WHERE c.oid = to_regclass(format('%I.%I', current_schema(), $1::text))`,
+    [indexName],
+  );
+  return result.rows[0] ?? null;
+}
+
+async function runNonTransactionalStatement(
+  client: pg.PoolClient, statement: string,
+): Promise<void> {
+  if (statement.split(/\r?\n/).some(
+    (line) => line.trim() === BACKFILL_OFFBOARDING_SELECTORS,
+  )) {
+    const available = await client.query<{ available: boolean }>(
+      `SELECT to_regprocedure(format(
+         '%I.continuum_backfill_audit_offboarding_scopes(integer)', current_schema()
+       )) IS NOT NULL AS available`,
+    );
+    // Review-era 0033 installations did not create the bounded backfill
+    // function. 0036 installs it and 0037 invokes this same directive, so 0035
+    // must finish its retry-safe indexes without resolving another schema's
+    // function or failing before the compatibility migration can run.
+    if (available.rows[0]?.available !== true) return;
+    await client.query("SET statement_timeout = '30s'");
+    try {
+      for (;;) {
+        const result = await client.query<{ completed: boolean }>(
+          `SELECT continuum_backfill_audit_offboarding_scopes(1000) AS completed`,
+        );
+        if (result.rows[0]?.completed === true) return;
+      }
+    } finally {
+      await client.query('RESET statement_timeout');
+    }
+  }
+  const repairName = directiveIndexName(statement, REPAIR_INVALID_INDEX);
+  if (repairName) {
+    const state = await indexState(client, repairName);
+    if (state && !state.valid) {
+      await client.query(
+        `DROP INDEX CONCURRENTLY ${quoteIdentifier(state.schema)}.${quoteIdentifier(repairName)}`,
+      );
+    }
+    return;
+  }
+  const requiredName = directiveIndexName(statement, REQUIRE_VALID_INDEX);
+  if (requiredName) {
+    const state = await indexState(client, requiredName);
+    if (!state?.valid) {
+      throw new Error(`required index ${requiredName} is missing or invalid in current schema`);
+    }
+    return;
+  }
+  await client.query(statement);
 }
 
 export interface AppliedMigration {
@@ -83,7 +187,33 @@ export async function runMigrations(
         'SELECT 1 FROM _continuum_migrations WHERE name = $1',
         [file],
       );
-      if (rowCount && rowCount > 0) continue;
+      if (rowCount && rowCount > 0) {
+        const publishedChecksum = PUBLISHED_MIGRATION_CHECKSUMS.get(file);
+        if (publishedChecksum) {
+          const publishedBytes = await readFile(join(migrationsDir, file));
+          const actualChecksum = publishedMigrationChecksum(publishedBytes);
+          if (actualChecksum !== publishedChecksum) {
+            throw new Error(
+              `Published migration ${file} was modified after it was ledgered: `
+              + `expected checksum ${publishedChecksum}, received ${actualChecksum}`,
+            );
+          }
+        }
+        continue;
+      }
+
+      const requiredMigration = FORWARD_MIGRATION_REQUIREMENTS.get(file);
+      if (requiredMigration) {
+        const prerequisite = await client.query(
+          'SELECT 1 FROM _continuum_migrations WHERE name = $1',
+          [requiredMigration],
+        );
+        if (!prerequisite.rowCount) {
+          throw new Error(
+            `Migration ${file} requires ledgered prerequisite ${requiredMigration}`,
+          );
+        }
+      }
 
       const sql = await readFile(join(migrationsDir, file), 'utf8');
       try {
@@ -92,7 +222,7 @@ export async function runMigrations(
           // migrations use retry-safe statements so a crash before the ledger
           // write can rerun the file.
           for (const statement of nonTransactionalStatements(sql)) {
-            await client.query(statement);
+            await runNonTransactionalStatement(client, statement);
           }
           await client.query(
             'INSERT INTO _continuum_migrations (name) VALUES ($1)',

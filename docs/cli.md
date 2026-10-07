@@ -1,5 +1,19 @@
 # Continuum CLI
 
+Org-admin identity, group-binding, and offboarding commands are exposed through
+`npm run admin`; see [authentication.md](./authentication.md) and
+[offboarding.md](./offboarding.md). Offboarding supports a non-mutating
+`--dry-run` count and bounded UUID evidence before execution. Execution requires
+`--confirm-scope <user-scope-id>` matching the locked mapping and accepts
+`--batch-size <1-5000>` for the resumable fenced procedure. The exact final
+database proof defaults to 30 seconds; use
+`--verification-timeout-ms <1-300000>` only from measured operator evidence.
+The admin command loops until `complete: true` by default. Use `--once` for an
+external one-batch orchestrator, and `list-incomplete-offboarding` to enumerate
+durable unfinished runs before or after maintenance.
+Mapping a legitimately shared personal scope requires the explicit
+`map-user-scope ... --allow-other-active-members` acknowledgement.
+
 The `continuum` command uses the authenticated HTTP API. It never connects to
 PostgreSQL directly. Install the package, then run `continuum --help`.
 

@@ -1,6 +1,9 @@
 import type pg from 'pg';
 import type { MembershipRole, Principal } from '../types.js';
 import { requireOrgAdmin } from './access.js';
+import {
+  isOperatorAuthorizationError, isSyncAuthorizationError, rollbackOrDestroy,
+} from './database-authorization-errors.js';
 import { ServiceError } from './errors.js';
 
 export const MAX_SYNC_GROUPS = 500;
@@ -63,23 +66,17 @@ async function requireManualSyncActor(
   client: pg.PoolClient | pg.Pool,
   actorId: string,
 ): Promise<void> {
-  const manualAdmin = await client.query(
-    `SELECT m.principal_id
-       FROM scope_memberships m
-       JOIN scopes s ON s.id = m.scope_id
-       JOIN principals p ON p.id = m.principal_id AND p.disabled_at IS NULL
-      WHERE s.kind = 'org' AND s.name = ''
-        AND m.principal_id = $1
-        AND m.source_kind = 'manual' AND m.active AND m.role = 'admin'
-      LIMIT 1
-      FOR SHARE OF m`,
-    [actorId],
-  );
-  if (!manualAdmin.rowCount) {
-    throw new ServiceError(
-      'FORBIDDEN',
-      'membership sync actor must be an active manually managed org administrator',
-    );
+  try {
+    await client.query('SELECT continuum_require_sync_session($1)', [actorId]);
+  } catch (error) {
+    if (isSyncAuthorizationError(error)) {
+      throw new ServiceError(
+        'FORBIDDEN',
+        'membership sync requires the DB-bound sync service identity',
+        { cause: error },
+      );
+    }
+    throw error;
   }
 }
 
@@ -102,14 +99,18 @@ export async function provisionEntraGroupBinding(
   role(input.role);
   const displayName = input.displayName?.trim().slice(0, 256) || externalId;
   const client = await pool.connect();
+  let destroyClient = false;
   try {
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [SYNC_LOCK_ID]);
     await requireOrgAdmin(client, actor.id);
-    const scope = await client.query('SELECT id FROM scopes WHERE id = $1 FOR SHARE', [scopeId]);
+    // Scope IDs are immutable and the sync role cannot update or delete scopes,
+    // so a table-level UPDATE privilege solely for FOR SHARE would widen its
+    // authority without protecting any supported concurrent mutation.
+    const scope = await client.query('SELECT id FROM scopes WHERE id = $1', [scopeId]);
     if (!scope.rowCount) throw new ServiceError('INVALID_INPUT', 'scope not found');
     const prior = await client.query(
-      `SELECT scope_id, role, active FROM entra_groups WHERE external_id = $1 FOR UPDATE`,
+      `SELECT scope_id, role, active FROM entra_groups WHERE external_id = $1`,
       [externalId],
     );
     const alreadyApproved = await client.query(
@@ -150,23 +151,8 @@ export async function provisionEntraGroupBinding(
       }
     }
     await client.query(
-      `INSERT INTO entra_groups
-         (external_id, display_name, scope_id, role, active, approved_by, approved_at,
-          deactivated_at, last_seen_at)
-       VALUES ($1, $2, $3, $4, TRUE, $5, now(), NULL, NULL)
-       ON CONFLICT (external_id) DO UPDATE SET
-         display_name = EXCLUDED.display_name,
-         scope_id = EXCLUDED.scope_id,
-         role = EXCLUDED.role,
-         active = TRUE,
-         approved_by = EXCLUDED.approved_by,
-         approved_at = now(),
-         approval_revoked_by = NULL,
-         approval_revoked_at = NULL,
-         deactivated_at = NULL,
-         quarantined_at = NULL,
-         quarantine_reason = NULL`,
-      [externalId, displayName, scopeId, input.role, actor.id],
+      `SELECT continuum_upsert_entra_group_binding($1, $2, $3, $4, $5)`,
+      [actor.id, externalId, displayName, scopeId, input.role],
     );
     await client.query(
       `INSERT INTO audit_log (principal_id, action, scope_id, metadata)
@@ -183,9 +169,15 @@ export async function provisionEntraGroupBinding(
     await client.query('COMMIT');
     return { created, reactivated };
   } catch (error) {
-    await client.query('ROLLBACK');
+    destroyClient = await rollbackOrDestroy(client);
+    if (isOperatorAuthorizationError(error)) {
+      throw new ServiceError(
+        'FORBIDDEN', 'binding provisioning requires the DB-bound operator identity',
+        { cause: error },
+      );
+    }
     throw error;
-  } finally { client.release(); }
+  } finally { client.release(destroyClient); }
 }
 
 /** Revokes a binding and all access sourced from it in one audited transaction. */
@@ -196,58 +188,47 @@ export async function revokeEntraGroupBinding(
 ): Promise<boolean> {
   externalId = canonicalUuid(externalId, 'group id');
   const client = await pool.connect();
+  let destroyClient = false;
   try {
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [SYNC_LOCK_ID]);
     await requireOrgAdmin(client, actor.id);
-    const binding = await client.query(
-      `SELECT scope_id, role FROM entra_groups
-        WHERE external_id = $1 AND approved_by IS NOT NULL
-          AND approval_revoked_at IS NULL
-        FOR UPDATE`,
-      [externalId],
+    const binding = await client.query<{
+      scope_id: string;
+      binding_role: MembershipRole;
+      memberships_deactivated: number;
+    }>(
+      `SELECT scope_id, binding_role, memberships_deactivated
+         FROM continuum_operator_revoke_entra_group_binding($1, $2)`,
+      [actor.id, externalId],
     );
     if (!binding.rowCount) {
       await client.query('ROLLBACK');
       return false;
     }
-    const memberships = await client.query(
-      `UPDATE scope_memberships
-          SET active = FALSE, deactivated_at = COALESCE(deactivated_at, now()), synced_at = now()
-        WHERE source_kind = 'entra' AND source_id = $1 AND active
-        RETURNING principal_id`,
-      [externalId],
-    );
-    await requireOrgAdmin(client, actor.id);
-    const admins = await client.query(
-      `SELECT count(DISTINCT m.principal_id)::int AS count
-         FROM scope_memberships m JOIN scopes s ON s.id = m.scope_id
-        WHERE s.kind = 'org' AND s.name = '' AND m.active AND m.role = 'admin'`,
-    );
-    if ((admins.rows[0]?.count ?? 0) < 1) {
-      throw new ServiceError('CONFLICT', 'binding revocation cannot remove the last org administrator');
-    }
-    await client.query(
-      `UPDATE entra_groups
-          SET active = FALSE, deactivated_at = COALESCE(deactivated_at, now()),
-              approval_revoked_by = $2, approval_revoked_at = now()
-        WHERE external_id = $1`,
-      [externalId, actor.id],
-    );
     await client.query(
       `INSERT INTO audit_log (principal_id, action, scope_id, metadata)
        VALUES ($1, 'write', $2, $3::jsonb)`,
       [actor.id, binding.rows[0].scope_id, JSON.stringify({
         operation: 'entra_group_binding_revoked', group_id: externalId,
-        role: binding.rows[0].role, memberships_deactivated: memberships.rowCount ?? 0,
+        role: binding.rows[0].binding_role,
+        memberships_deactivated: binding.rows[0].memberships_deactivated,
       })],
     );
     await client.query('COMMIT');
     return true;
   } catch (error) {
-    await client.query('ROLLBACK');
+    destroyClient = await rollbackOrDestroy(client);
+    if (isOperatorAuthorizationError(error)
+      || (!(error instanceof ServiceError) && error instanceof Error
+        && /^binding revocation requires an effective manual org administrator$/i
+          .test(error.message))) {
+      throw new ServiceError(
+        'FORBIDDEN', 'binding revocation requires the DB-bound operator identity', { cause: error },
+      );
+    }
     throw error;
-  } finally { client.release(); }
+  } finally { client.release(destroyClient); }
 }
 
 export async function listBoundEntraGroupIds(pool: pg.Pool): Promise<string[]> {
@@ -266,33 +247,23 @@ function skip(result: MembershipSyncResult, code: string): void {
 
 async function quarantineBinding(
   client: pg.PoolClient,
+  actorId: string,
   externalId: string,
   result: MembershipSyncResult,
   reason: string,
 ): Promise<number> {
-  const memberships = await client.query(
-    `UPDATE scope_memberships
-        SET active = FALSE, deactivated_at = COALESCE(deactivated_at, now()), synced_at = now()
-      WHERE source_kind = 'entra' AND source_id = $1 AND active
-      RETURNING principal_id`,
-    [externalId],
+  const memberships = await client.query<{ count: number }>(
+    `SELECT continuum_sync_deactivate_entra_memberships(
+       $1, ARRAY[$2]::text[], NULL::uuid[])::int AS count`,
+    [actorId, externalId],
   );
-  const count = memberships.rowCount ?? 0;
+  const count = Number(memberships.rows[0]?.count ?? 0);
   result.membershipsDeactivated += count;
-  const group = await client.query(
-    `UPDATE entra_groups
-        SET active = FALSE, deactivated_at = COALESCE(deactivated_at, now())
-      WHERE external_id = $1 AND active
-      RETURNING external_id`,
-    [externalId],
+  const group = await client.query<{ changed: boolean }>(
+    `SELECT continuum_sync_quarantine_entra_group($1, $2, $3) AS changed`,
+    [actorId, externalId, reason],
   );
-  result.groupsDeactivated += group.rowCount ?? 0;
-  await client.query(
-    `UPDATE entra_groups
-        SET quarantined_at = COALESCE(quarantined_at, now()), quarantine_reason = $2
-      WHERE external_id = $1`,
-    [externalId, reason],
-  );
+  result.groupsDeactivated += group.rows[0]?.changed ? 1 : 0;
   return count;
 }
 
@@ -350,21 +321,18 @@ async function recordRejectedAttempt(
   quarantine: Pick<MembershipSyncResult, 'groupsDeactivated' | 'membershipsDeactivated' | 'skipCodes'>,
 ): Promise<void> {
   await requireManualSyncActor(client, actor.id);
+  await client.query('SELECT continuum_record_entra_sync_failure($1, $2, $3)', [
+    actor.id, rejectionReason(error), maxStalenessHours,
+  ]);
   const state = await client.query<{ last_success_at: Date; stale: boolean }>(
-    `UPDATE entra_sync_state
-        SET last_attempt_at = now(), last_failure_at = now(), last_failure_code = $1,
-            max_staleness = make_interval(hours => $2)
-      WHERE singleton
-      RETURNING last_success_at, now() >= last_success_at + max_staleness AS stale`,
-    [rejectionReason(error), maxStalenessHours],
+    `SELECT last_success_at, now() >= last_success_at + max_staleness AS stale
+       FROM entra_sync_state WHERE singleton`,
   );
   if (!state.rows[0]) throw new Error('Entra sync freshness state is missing');
-  const staleDeactivated = state.rows[0].stale ? await client.query(
-    `UPDATE scope_memberships
-        SET active = FALSE, deactivated_at = COALESCE(deactivated_at, now()), synced_at = now()
-      WHERE source_kind = 'entra' AND active
-      RETURNING principal_id`,
-  ) : { rowCount: 0 };
+  const staleDeactivated = state.rows[0].stale ? Number((await client.query<{ count: number }>(
+    `SELECT continuum_sync_deactivate_entra_memberships(
+       $1, NULL::text[], NULL::uuid[])::int AS count`, [actor.id],
+  )).rows[0]?.count ?? 0) : 0;
   await client.query(
     `INSERT INTO audit_log (principal_id, action, metadata)
      VALUES ($1, 'write', $2::jsonb)`,
@@ -374,7 +342,7 @@ async function recordRejectedAttempt(
       last_success_at: state.rows[0].last_success_at,
       max_staleness_hours: maxStalenessHours,
       stale: state.rows[0].stale,
-      stale_memberships_deactivated: staleDeactivated.rowCount ?? 0,
+      stale_memberships_deactivated: staleDeactivated,
       groups_deactivated: quarantine.groupsDeactivated,
       memberships_deactivated: quarantine.membershipsDeactivated,
       quarantine: {
@@ -398,6 +366,7 @@ export async function rejectEntraMembershipSync(
     throw new ServiceError('INVALID_INPUT', 'Entra membership staleness bound is invalid');
   }
   const client = await pool.connect();
+  let destroyClient = false;
   try {
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [SYNC_LOCK_ID]);
@@ -407,10 +376,10 @@ export async function rejectEntraMembershipSync(
     );
     await client.query('COMMIT');
   } catch (recordError) {
-    await client.query('ROLLBACK');
+    destroyClient = await rollbackOrDestroy(client);
     throw recordError;
   } finally {
-    client.release();
+    client.release(destroyClient);
   }
 }
 
@@ -464,6 +433,7 @@ export async function syncEntraMemberships(
   let durableQuarantine = result;
   let lockAcquired = false;
   let primaryError: unknown;
+  let rollbackFailure: unknown;
   try {
     await client.query('SELECT pg_advisory_lock($1::bigint)', [SYNC_LOCK_ID]);
     lockAcquired = true;
@@ -484,7 +454,7 @@ export async function syncEntraMemberships(
     await requireManualSyncActor(client, actor.id);
     const bindings = await client.query<BindingRow>(
       `SELECT external_id, scope_id, role, active, approval_revoked_at, quarantined_at FROM entra_groups
-        WHERE approved_by IS NOT NULL ORDER BY external_id FOR UPDATE`,
+        WHERE approved_by IS NOT NULL ORDER BY external_id`,
     );
     const byId = new Map(bindings.rows.map((row) => [row.external_id, row]));
     const idCounts = new Map<string, number>();
@@ -504,7 +474,7 @@ export async function syncEntraMemberships(
       if ((idCounts.get(snapshot.id) ?? 0) > 1) {
         skip(result, 'DUPLICATE_GROUP_ID');
         if (binding && !binding.approval_revoked_at && !quarantined.has(snapshot.id)) {
-          await quarantineBinding(client, snapshot.id, result, 'DUPLICATE_GROUP_ID');
+          await quarantineBinding(client, actor.id, snapshot.id, result, 'DUPLICATE_GROUP_ID');
           quarantined.add(snapshot.id);
         }
         continue;
@@ -515,19 +485,19 @@ export async function syncEntraMemberships(
       if (snapshot.status === 'invalid') {
         const code = snapshot.errorCode ?? 'INVALID_GROUP';
         skip(result, code);
-        await quarantineBinding(client, snapshot.id, result, code);
+        await quarantineBinding(client, actor.id, snapshot.id, result, code);
         continue;
       }
       if (snapshot.status === 'missing') { definitiveMissing.push(snapshot.id); continue; }
       if (typeof snapshot.displayName !== 'string' || snapshot.displayName.length > 256
         || !Array.isArray(snapshot.memberObjectIds)) {
         skip(result, 'MALFORMED_GROUP');
-        await quarantineBinding(client, snapshot.id, result, 'MALFORMED_GROUP');
+        await quarantineBinding(client, actor.id, snapshot.id, result, 'MALFORMED_GROUP');
         continue;
       }
       if (snapshot.memberObjectIds.length > MAX_GROUP_MEMBERS) {
         skip(result, 'GROUP_TOO_LARGE');
-        await quarantineBinding(client, snapshot.id, result, 'GROUP_TOO_LARGE');
+        await quarantineBinding(client, actor.id, snapshot.id, result, 'GROUP_TOO_LARGE');
         continue;
       }
       const unique = new Set<string>();
@@ -538,7 +508,7 @@ export async function syncEntraMemberships(
       }
       if (malformed) {
         skip(result, 'MALFORMED_MEMBERS');
-        await quarantineBinding(client, snapshot.id, result, 'MALFORMED_MEMBERS');
+        await quarantineBinding(client, actor.id, snapshot.id, result, 'MALFORMED_MEMBERS');
         continue;
       }
       prepared.push({
@@ -564,7 +534,7 @@ export async function syncEntraMemberships(
     await requireManualSyncActor(client, actor.id);
     const currentBindings = await client.query<BindingRow>(
       `SELECT external_id, scope_id, role, active, approval_revoked_at, quarantined_at FROM entra_groups
-        WHERE approved_by IS NOT NULL ORDER BY external_id FOR UPDATE`,
+        WHERE approved_by IS NOT NULL ORDER BY external_id`,
     );
     const currentById = new Map(currentBindings.rows.map((row) => [row.external_id, row]));
     const activeMembershipsBefore = await client.query(
@@ -578,13 +548,11 @@ export async function syncEntraMemberships(
       const binding = currentById.get(snapshot.id);
       if (!binding || binding.approval_revoked_at || binding.quarantined_at
         || quarantined.has(snapshot.id)) continue;
-      const reactivated = await client.query(
-        `UPDATE entra_groups SET display_name = $2, last_seen_at = now(), active = TRUE,
-                                 deactivated_at = NULL
-          WHERE external_id = $1 AND quarantined_at IS NULL`,
-        [snapshot.id, snapshot.displayName],
+      const reactivated = await client.query<{ changed: boolean }>(
+        `SELECT continuum_sync_observe_entra_group($1, $2, $3) AS changed`,
+        [actor.id, snapshot.id, snapshot.displayName],
       );
-      if (!candidate.binding.active && reactivated.rowCount) result.groupsReactivated += 1;
+      if (!candidate.binding.active && reactivated.rows[0]?.changed) result.groupsReactivated += 1;
       result.groupsSeen += 1;
       const externalIds = snapshot.memberObjectIds;
       if (externalIds.length > 0) {
@@ -614,26 +582,18 @@ export async function syncEntraMemberships(
         .filter((row) => row.disabled_at === null)
         .map((row) => row.id as string);
       if (principalIds.length > 0) {
-        const activated = await client.query(
-          `INSERT INTO scope_memberships
-             (principal_id, scope_id, role, source_kind, source_id, active, synced_at)
-           SELECT member_id, $2, $3, 'entra', $4, TRUE, now()
-             FROM unnest($1::uuid[]) member_id
-           ON CONFLICT (principal_id, scope_id, source_kind, source_id)
-           DO UPDATE SET role = EXCLUDED.role, active = TRUE,
-                         deactivated_at = NULL, synced_at = now()
-           RETURNING 1`,
-          [principalIds, binding.scope_id, binding.role, snapshot.id],
+        const activated = await client.query<{ count: number }>(
+          `SELECT continuum_activate_entra_memberships($1, $2, $3::uuid[])::int AS count`,
+          [actor.id, snapshot.id, principalIds],
         );
-        result.membershipsActive += activated.rowCount ?? 0;
+        result.membershipsActive += Number(activated.rows[0]?.count ?? 0);
       }
-      const deactivated = await client.query(
-        `UPDATE scope_memberships SET active = FALSE, deactivated_at = now(), synced_at = now()
-          WHERE source_kind = 'entra' AND source_id = $1 AND active
-            AND NOT (principal_id = ANY($2::uuid[])) RETURNING principal_id`,
-        [snapshot.id, principalIds],
+      const deactivated = await client.query<{ count: number }>(
+        `SELECT continuum_sync_deactivate_entra_memberships(
+           $1, ARRAY[$2]::text[], $3::uuid[])::int AS count`,
+        [actor.id, snapshot.id, principalIds],
       );
-      const removed = deactivated.rowCount ?? 0;
+      const removed = Number(deactivated.rows[0]?.count ?? 0);
       result.membershipsDeactivated += removed;
       authoritativeDeactivations += removed;
     }
@@ -650,20 +610,19 @@ export async function syncEntraMemberships(
       throw new ServiceError('CONFLICT', 'empty Entra snapshot cannot deactivate bound groups');
     }
     if (missingActive.length > 0) {
-      const memberships = await client.query(
-        `UPDATE scope_memberships SET active = FALSE, deactivated_at = now(), synced_at = now()
-          WHERE source_kind = 'entra' AND source_id = ANY($1::text[]) AND active`,
-        [missingActive],
+      const memberships = await client.query<{ count: number }>(
+        `SELECT continuum_sync_deactivate_entra_memberships(
+           $1, $2::text[], NULL::uuid[])::int AS count`,
+        [actor.id, missingActive],
       );
-      const removed = memberships.rowCount ?? 0;
+      const removed = Number(memberships.rows[0]?.count ?? 0);
       result.membershipsDeactivated += removed;
       authoritativeDeactivations += removed;
-      const disappeared = await client.query(
-        `UPDATE entra_groups SET active = FALSE, deactivated_at = now()
-          WHERE active AND external_id = ANY($1::text[]) RETURNING external_id`,
-        [missingActive],
+      const disappeared = await client.query<{ count: number }>(
+        `SELECT continuum_sync_deactivate_entra_groups($1, $2::text[])::int AS count`,
+        [actor.id, missingActive],
       );
-      result.groupsDeactivated += disappeared.rowCount ?? 0;
+      result.groupsDeactivated += Number(disappeared.rows[0]?.count ?? 0);
     }
 
     const priorMembershipCount = activeMembershipsBefore.rows[0]?.count ?? 0;
@@ -686,15 +645,9 @@ export async function syncEntraMemberships(
     if ((admins.rows[0]?.count ?? 0) < 1) {
       throw new ServiceError('CONFLICT', 'membership sync cannot remove the last org administrator');
     }
-    const freshness = await client.query(
-      `UPDATE entra_sync_state
-          SET last_success_at = now(), last_attempt_at = now(),
-              last_failure_at = NULL, last_failure_code = NULL,
-              max_staleness = make_interval(hours => $1)
-        WHERE singleton`,
-      [maxStalenessHours],
-    );
-    if (!freshness.rowCount) throw new Error('Entra sync freshness state is missing');
+    await client.query('SELECT continuum_record_entra_sync_success($1, $2)', [
+      actor.id, maxStalenessHours,
+    ]);
     await client.query(
       `INSERT INTO audit_log (principal_id, action, metadata)
        VALUES ($1, 'write', $2::jsonb)`,
@@ -706,9 +659,13 @@ export async function syncEntraMemberships(
   } catch (error) {
     try {
       if (transactionOpen) {
-        await client.query('ROLLBACK');
+        try {
+          await client.query('ROLLBACK');
+        } catch (failure) {
+          rollbackFailure = failure;
+        }
         transactionOpen = false;
-        if (authoritativePhase) {
+        if (rollbackFailure === undefined && authoritativePhase) {
           await auditRejectedSync(client, actor, error, durableQuarantine, maxStalenessHours);
         }
       }
@@ -719,8 +676,8 @@ export async function syncEntraMemberships(
       throw handledError;
     }
   } finally {
-    let cleanupError: unknown;
-    if (lockAcquired) {
+    let cleanupError: unknown = rollbackFailure;
+    if (lockAcquired && rollbackFailure === undefined) {
       try {
         const unlocked = await client.query<{ unlocked: boolean }>(
           'SELECT pg_advisory_unlock($1::bigint) AS unlocked', [SYNC_LOCK_ID],
@@ -733,7 +690,7 @@ export async function syncEntraMemberships(
     const unsafe = cleanupError ?? (!lockAcquired ? primaryError : undefined);
     client.release(unsafe instanceof Error ? unsafe
       : unsafe === undefined ? undefined : new Error('Membership sync connection is unsafe', { cause: unsafe }));
-    if (cleanupError !== undefined) {
+    if (cleanupError !== undefined && rollbackFailure === undefined) {
       if (primaryError !== undefined) {
         throw new AggregateError([primaryError, cleanupError], 'Membership sync failed and lock cleanup failed');
       }

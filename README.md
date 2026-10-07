@@ -32,6 +32,7 @@ v0 design in progress. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the schema, 
 - [API operations, health checks, and shutdown](./docs/api-operations.md)
 - [AGENTS.md ETag and freshness checks](./docs/agents-md-freshness.md)
 - [Lifecycle sweeper and review queue](./docs/lifecycle.md)
+- [Offboarding and right to erasure](./docs/offboarding.md)
 - [Audit retention operations](./docs/audit-retention.md)
 - [Memory fetch and browse API](./docs/memory-api.md)
 
@@ -45,7 +46,9 @@ continuum recall "deployment rollback" --json
 
 Installed packages also expose `continuum-migrate`; set
 `CONTINUUM_DATABASE_URL` and run it as a trusted operator before starting a
-newly installed application version.
+newly installed application version. Production uses a migration-owner URL for
+that command and a distinct non-owner application URL for running Continuum;
+the offboarding completion ledger relies on that PostgreSQL privilege boundary.
 
 The CLI supports capture, recall, audit, scope membership administration,
 promotion, verification, and AGENTS.md generation through the same authenticated

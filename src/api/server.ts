@@ -36,12 +36,14 @@ import { ingestRouter } from './routes/ingest.js';
 import { ingestConfigFromEnv, type IngestConfig } from '../ingest/config.js';
 import { cliSupportRouter } from './routes/cli.js';
 import { supersedeRouter } from './routes/supersede.js';
+import { offboardingRouter } from './routes/offboarding.js';
 
 export { createReadinessState } from './readiness.js';
 
 declare module 'express-serve-static-core' {
   interface Request {
     requestId: string;
+    clientRequestId?: string;
     rawBody?: Buffer;
   }
 }
@@ -87,6 +89,8 @@ const KNOWN_LOG_PATHS = new Set([
   '/api/v0/ingest/:pluginId',
   '/api/v0/scopes',
   '/api/v0/supersede', '/api/v0/decisions/:id/history',
+  '/api/v0/admin/principals/:principalId/owned-user-scope',
+  '/api/v0/admin/principals/:principalId/offboard',
 ]);
 
 const defaultLogger: OperationalLogger = {
@@ -171,12 +175,9 @@ function requestContext(
 ): express.RequestHandler {
   return (req, res, next) => {
     const inbound = req.header('x-request-id');
-    if (inbound && REQUEST_ID_PATTERN.test(inbound)) {
-      req.requestId = inbound;
-    } else {
-      const generated = requestIdFactory();
-      req.requestId = REQUEST_ID_PATTERN.test(generated) ? generated : randomUUID();
-    }
+    if (inbound && REQUEST_ID_PATTERN.test(inbound)) req.clientRequestId = inbound;
+    const generated = requestIdFactory();
+    req.requestId = REQUEST_ID_PATTERN.test(generated) ? generated : randomUUID();
     res.setHeader('X-Request-Id', req.requestId);
 
     const originalJson = res.json.bind(res);
@@ -306,6 +307,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   v0.use(reviewQueueRouter(pool, opts.reviewHorizonDays));
   v0.use(insightsRouter(pool, provider, gapConfig, () => new Date((opts.clock ?? Date.now)())));
   v0.use(supersedeRouter(pool, provider));
+  v0.use(offboardingRouter(pool));
   app.use('/api/v0', v0);
 
   app.use('/api', (_req, res) => {

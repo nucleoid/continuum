@@ -59,6 +59,13 @@ export async function sweepLifecycleBatch(
           AND type IN ('context', 'fact', 'relationship')
           AND expires_at IS NOT NULL
           AND expires_at <= $1
+          AND NOT EXISTS (
+            SELECT 1
+              FROM principal_user_scopes owned
+              JOIN principals owner ON owner.id = owned.principal_id
+             WHERE owned.scope_id = memories.scope_id
+               AND owner.offboarded_at IS NOT NULL
+          )
         ORDER BY expires_at ASC, id ASC
         LIMIT $2
         FOR UPDATE SKIP LOCKED`,
@@ -151,6 +158,13 @@ export async function previewLifecycle(
         AND type IN ('context', 'fact', 'relationship')
         AND expires_at IS NOT NULL
         AND expires_at <= $1
+        AND NOT EXISTS (
+          SELECT 1
+            FROM principal_user_scopes owned
+            JOIN principals owner ON owner.id = owned.principal_id
+           WHERE owned.scope_id = memories.scope_id
+             AND owner.offboarded_at IS NOT NULL
+        )
       GROUP BY key
       ORDER BY key`,
     [now],

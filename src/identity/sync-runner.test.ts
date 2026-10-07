@@ -1,5 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import type pg from 'pg';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import pg, { type PoolConfig } from 'pg';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { createPrincipal } from '../storage/principals.js';
 import { createScope, getScopeByRef } from '../storage/scopes.js';
@@ -10,13 +12,91 @@ import { runMembershipSync } from './sync-runner.js';
 
 describe('membership sync CLI runner', () => {
   let pool: pg.Pool;
+  const roles: string[] = [];
+  const rolePools: pg.Pool[] = [];
 
   beforeEach(async () => {
     pool ??= await makeTestPool();
     await resetData(pool);
   });
 
-  afterAll(async () => { await pool?.end(); });
+  afterAll(async () => {
+    await Promise.all(rolePools.splice(0).map((connection) => connection.end()));
+    for (const role of roles.reverse()) {
+      await pool.query(`DROP OWNED BY "${role}"`);
+      await pool.query(`REVOKE "${role}" FROM CURRENT_USER`);
+      await pool.query(`DROP ROLE "${role}"`);
+    }
+    await pool?.end();
+  });
+
+  async function syncRolePool(principalId: string): Promise<pg.Pool> {
+    const role = `continuum_sync_runner_${Date.now()}_${roles.length}`;
+    roles.push(role);
+    await pool.query(`CREATE ROLE "${role}" LOGIN PASSWORD 'continuum-test-password'`);
+    let sql = await readFile(join(process.cwd(), 'scripts/grant-sync-role.sql'), 'utf8');
+    sql = sql.split(/\r?\n/).filter((line) => !line.trimStart().startsWith('\\')).join('\n')
+      .replaceAll(':"continuum_schema"', '"public"')
+      .replaceAll(':"continuum_sync_role"', `"${role}"`)
+      .replaceAll(":'continuum_sync_role'", `'${role}'`)
+      .replaceAll(":'continuum_principal_id'", `'${principalId}'`);
+    await pool.query(sql);
+    await pool.query(
+      `ALTER ROLE "${role}" LOGIN PASSWORD 'continuum-test-password'`,
+    );
+    const base = (pool as unknown as { options: PoolConfig }).options;
+    const directUrl = new URL(base.connectionString!);
+    directUrl.username = role;
+    directUrl.password = 'continuum-test-password';
+    const connection = new pg.Pool({
+      connectionString: directUrl.toString(),
+      max: 1,
+    });
+    rolePools.push(connection);
+    return connection;
+  }
+
+  it.each([
+    Object.assign(new Error('operation requires a DB-bound trusted sync identity'), { code: 'XX000' }),
+    Object.assign(new Error('operation requires a role-name/OID-bound trusted sync identity'), { code: 'XX000' }),
+    Object.assign(new Error('permission denied'), { code: '42501' }),
+  ])('maps a supported database identity authorization failure to FORBIDDEN', async (failure) => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('continuum_verify_sync_database_identity')) throw failure;
+      return { rowCount: 1, rows: [{
+        id: '50000000-0000-4000-8000-000000000001',
+        external_id: 'sync-service', kind: 'service', display_name: 'Sync service',
+        created_at: new Date('2026-01-01T00:00:00Z'), disabled_at: null,
+      }] };
+    });
+    const fakePool = { query } as unknown as pg.Pool;
+    await expect(runMembershipSync(fakePool, {
+      CONTINUUM_ENTRA_MEMBERSHIP_SYNC: 'true',
+      CONTINUUM_GRAPH_ACCESS_TOKEN: 'x'.repeat(32),
+      CONTINUUM_MEMBERSHIP_SYNC_ACTOR: 'sync-service',
+    })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  });
+
+  it.each([
+    Object.assign(new Error('deadlock detected'), { code: '40P01' }),
+    Object.assign(new Error('canceling statement due to timeout'), { code: '57014' }),
+    Object.assign(new Error('connection terminated unexpectedly'), { code: '08006' }),
+  ])('does not reclassify an unrelated database identity failure', async (failure) => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('continuum_verify_sync_database_identity')) throw failure;
+      return { rowCount: 1, rows: [{
+        id: '50000000-0000-4000-8000-000000000001',
+        external_id: 'sync-service', kind: 'service', display_name: 'Sync service',
+        created_at: new Date('2026-01-01T00:00:00Z'), disabled_at: null,
+      }] };
+    });
+    const fakePool = { query } as unknown as pg.Pool;
+    await expect(runMembershipSync(fakePool, {
+      CONTINUUM_ENTRA_MEMBERSHIP_SYNC: 'true',
+      CONTINUUM_GRAPH_ACCESS_TOKEN: 'x'.repeat(32),
+      CONTINUUM_MEMBERSHIP_SYNC_ACTOR: 'sync-service',
+    })).rejects.toBe(failure);
+  });
 
   it('audits a production Graph overflow and fail-closes stale access before surfacing its code', async () => {
     const admin = await createPrincipal(pool, {
@@ -39,11 +119,15 @@ describe('membership sync CLI runner', () => {
     await pool.query(
       `UPDATE entra_sync_state SET last_success_at = now() - interval '25 hours'`,
     );
+    const syncService = await createPrincipal(pool, {
+      externalId: 'sync-overflow-service', kind: 'service', displayName: 'Sync service',
+    });
+    const syncPool = await syncRolePool(syncService.id);
 
-    await expect(runMembershipSync(pool, {
+    await expect(runMembershipSync(syncPool, {
       CONTINUUM_ENTRA_MEMBERSHIP_SYNC: 'true',
       CONTINUUM_GRAPH_ACCESS_TOKEN: 'x'.repeat(32),
-      CONTINUUM_MEMBERSHIP_SYNC_ACTOR: admin.externalId,
+      CONTINUUM_MEMBERSHIP_SYNC_ACTOR: syncService.externalId!,
       CONTINUUM_ENTRA_MAX_STALENESS_HOURS: '24',
     }, async () => { throw new MembershipSnapshotTooLargeError(); }))
       .rejects.toMatchObject({
@@ -86,7 +170,7 @@ describe('membership sync CLI runner', () => {
       CONTINUUM_MEMBERSHIP_SYNC_ACTOR: actor.externalId,
     }, fetchSnapshot)).rejects.toMatchObject({
       code: 'FORBIDDEN',
-      publicMessage: 'membership sync actor must be an active manually managed org administrator',
+      publicMessage: 'membership sync requires the DB-bound sync service identity',
     });
     expect(fetchSnapshot).not.toHaveBeenCalled();
   });

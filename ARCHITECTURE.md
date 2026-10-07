@@ -380,6 +380,41 @@ current service keys at the database boundary. Explicit audited reactivation
 does not restore either. Database triggers also prevent deletion, demotion, or
 disablement of the final effective manually managed org administrator.
 
+Reactivation has two audit records with distinct trust semantics. Its database
+capability validates that a presented UUID is an effective org administrator,
+then attributes mandatory guard evidence to the noninteractive lifecycle
+principal. The application service separately attributes the operator event to
+its authenticated actor in the same transaction. Continuum uses one shared
+database role and has no per-request database identity, so the presented UUID
+is authorization evidence, not proof of the SQL caller. Execute permission is
+revoked from `PUBLIC`, but the shared function-owning role and database-owner
+access remain trusted administrative capabilities.
+
+Offboarding uses an explicit `principal_user_scopes` UUID mapping; mutable names
+never establish ownership. Mapping requires target membership history and
+rejects other active members unless an operator records the explicit shared
+scope override. The acknowledgement is bound to a bounded sorted UUID set and
+hash, so newly observed member or author evidence fails closed. An org-admin
+operation locks against membership sync, immediately closes access and applies
+stable UUID-derived pseudonyms, then resumably tombstones only the mapped user
+scope and redacts linked audit rows in bounded transactions. It deletes
+embeddings and aliases, revokes and quarantines scope-targeting Entra bindings,
+deactivates every membership on that scope, and writes per-memory plus
+operation-summary audit records. Immutable approval and completion ledgers bind
+the approver, reviewed UUIDs, evidence hash, bounded preview semantics, exact
+cumulative completion counts, and batch progress.
+Database guards close an offboarded owned scope to non-tombstone writes, active
+memberships, and active Entra bindings. Durable memory, scope-cleanup, direct
+audit, and linked-audit phases establish completion without rescanning the
+subject's full history on every retry. Memory and `scope_ids` audit relationships
+are maintained in an ordered selector relation; principal, scope, request, and
+selector branches all advance on indexed keyset cursors. Mutable or recursive
+name matching is not an erasure criterion.
+Shared scopes and stable UUID references remain intact. Database archive and
+embedding triggers enforce cleanup for lifecycle, supersession, offboarding,
+and direct state transitions. See `docs/offboarding.md` for limits, retry
+semantics, operator surfaces, and the application-data privacy boundary.
+
 Entra groups are explicitly approved by immutable object ID and bound to one
 exact scope and role before sync. Renames only update group display metadata.
 Missing groups and missing

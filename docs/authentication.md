@@ -24,6 +24,15 @@ and tokens from unlisted or role-unassigned applications are rejected.
 All credential, JOSE, JWKS, key, and claim failures return an authentication
 failure without exposing provider details.
 
+Run the service with a non-owner database role after the migration owner has
+applied `scripts/grant-application-role.sql`. Those checked grants cover normal
+principal provisioning, scope and membership traffic, Entra binding and sync
+state, service-key issue and rotation, capture, embeddings, audit writes,
+ingest deliveries, and lifecycle operations. They do not grant schema
+creation, selector backfill execution, or access to lifecycle capability
+tables. Reapply the script after migrations that change this documented
+runtime surface.
+
 Set **Assignment required?** to **Yes** on Continuum's Entra enterprise
 application, then assign only approved users and groups. The API client used to
 obtain delegated tokens must also be present in
@@ -92,15 +101,31 @@ deactivates every membership and permanently revokes every current service key.
 Database triggers enforce those effects even for direct database changes and
 prevent deletion, demotion, or disabling of the final effective manual
 break-glass org administrator. Reactivation is also explicit and audited, but
-does not restore memberships or keys:
+does not itself restore memberships or keys:
 
 ```text
 npm run admin -- disable-principal <principal-id>
 npm run admin -- reactivate-principal <principal-id>
 ```
 
-After reactivation, explicitly restore required access and issue a new service
-key. Old keys never become valid again.
+The application checks the authenticated operator and records that actor in
+the same transaction as reactivation. The database also records a mandatory
+guard event under `system:lifecycle`. Its
+`authorization_principal_id` is the effective administrator UUID presented to
+the database function, not a database-authenticated caller identity. All
+application connections share one database role, so direct SQL access to that
+role is a trusted administrative capability and must not be interpreted as an
+end-user authentication boundary.
+
+After reactivation, review required access and issue a new service key. A later
+authoritative membership sync can restore eligible Entra-sourced memberships;
+manual memberships require explicit restoration. Old keys never become valid
+again. Reactivating an offboarded user clears the lifecycle marker so any later
+offboarding performs a complete new erasure pass.
+
+For user erasure, use the separate explicit ownership mapping and offboarding
+workflow in [offboarding.md](./offboarding.md). A disabled offboarded external ID
+cannot be silently provisioned by sign-in or membership sync.
 
 ## Approved group bindings
 

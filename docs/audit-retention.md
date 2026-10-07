@@ -1,12 +1,19 @@
 # Audit retention operations
 
+The database owns the minimum retention policy. Migration `0045` seeds a
+30-day minimum in `continuum_audit_retention_policy`; only the migration owner
+may change it. The deletion function derives its cutoff from database time and
+rejects a caller cutoff or retention period that would delete newer history.
+
 Continuum keeps audit records indefinitely by default. Audit retention is an
 external, one-shot maintenance command. Schedule it with the platform scheduler
 of your choice. Do not run it as an API or MCP process timer.
 
 ## Configuration
 
-Set `CONTINUUM_AUDIT_RETENTION_DAYS` to a positive integer to enable retention.
+Set `CONTINUUM_AUDIT_RETENTION_DAYS` to an integer at or above the database
+minimum (30 days by default) to enable retention. Values below the current
+owner-controlled policy fail before dry-run selection, export, or deletion.
 Unset or empty keeps retention disabled. Disabled mode ignores retention tuning
 and export settings because none of them can affect a disabled run. The runner
 derives one cutoff from PostgreSQL's transaction clock in a repeatable-read
@@ -36,6 +43,14 @@ application and any web root. The runner rejects symlinks and path aliases.
 Operators are responsible for encryption, backup, access control, and a separate
 retention policy for exported files. Exports contain sensitive complete audit
 rows, including queries and metadata.
+
+An export created before principal offboarding can retain query text,
+verification notes, scope names, and other metadata that the live database later
+tombstones. Offboarding cannot rewrite already published JSONL files. Treat each
+export as a separate personal-data store: restrict access, encrypt it, index it
+by principal, scope, or memory UUID where needed for erasure, and apply the
+organization's deletion schedule to every replica and backup. Do not restore a
+pre-offboarding row over its live tombstone.
 
 Durable JSONL export is supported on POSIX hosts only. Windows runs without an
 export directory remain supported, but configuring export on Windows fails
@@ -89,15 +104,30 @@ available for `--batch-size`, `--max-batches`, and `--max-rows`. All output is a
 single structured JSON summary. A disabled or lock-busy invocation exits without
 mutation. Failures exit nonzero and do not log credentials or audit payloads.
 
+Run this command as the documented non-owner Continuum application role after
+applying `scripts/grant-application-role.sql`, never as the migration/function
+owner. The configured principal supplies the audited org-admin identity; the
+database role supplies only the least-privilege execution boundary.
+The application role has no `UPDATE`, `DELETE`, or `TRUNCATE` privilege on
+`audit_log`. It can execute only the guarded retention function, which rechecks
+the current administrator, strict cutoff, exact exported rows, preserved
+offboarding evidence, and batch bounds before deleting and writing the summary.
+
 Only one runner can hold the dedicated advisory lock. Successful batches delete
 exactly their selected IDs and verify the deleted values still byte-match the
 selected export candidate. A concurrent row change rolls the delete back. The
 runner then writes one sanitized `action='archive'` summary in the same
-transaction. The summary includes the cutoff, ID and time
-range, row count, run and batch identifiers, and only the export basename and
-digest. It never includes raw queries, metadata, payloads, or credentials.
+transaction. The immutable summary includes the exact selected/applied cutoff
+reported by the runner, ID and time range, row
+count, run and batch identifiers, export mode, and digest. It never includes raw
+queries, metadata, payloads, credentials, or a host path.
 
 Keep normal autovacuum enabled and monitor dead tuples, table size, command
 duration, and replica lag. Increase limits only from measured evidence. This
-feature does not partition `audit_log`, implement issue #27 erasure, or invent
-the issue #24 credential model.
+feature does not partition `audit_log` or invent the issue #24 credential model.
+
+Principal offboarding receipts are stored separately in
+`principal_offboarding_events` and are intentionally not selected or deleted by
+this command. They contain bounded UUID evidence, counts, and timestamps rather
+than audit payloads. Govern that ledger under the organization's minimal legal
+and security evidence retention policy; deleting `audit_log` does not remove it.

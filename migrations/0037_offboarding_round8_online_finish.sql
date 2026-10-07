@@ -1,0 +1,4 @@
+-- continuum:no-transaction
+-- A fresh install completed this in 0035. An exact-head upgrade reaches the
+-- same retry-safe migrator loop here after 0036 installed its watermark.
+-- continuum:backfill-offboarding-selectors;

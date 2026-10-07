@@ -6,6 +6,7 @@ import { createScope } from '../storage/scopes.js';
 import { createMemory, getMemory } from '../storage/memories.js';
 import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
 import { addMembership } from '../storage/memberships.js';
+import { mapOwnedUserScope } from '../services/offboarding.js';
 import { LIFECYCLE_PRINCIPAL_ID } from './principal.js';
 import { previewLifecycle, sweepLifecycle, sweepLifecycleBatch } from './sweep.js';
 
@@ -151,6 +152,36 @@ describe('lifecycle sweeper', () => {
       counts: { 'archive:context': 2, 'stale:fact': 2, 'stale:relationship': 1 },
       batches: 3,
     });
+  });
+
+  it('skips fenced owned scopes without stalling eligible scopes', async () => {
+    const admin = await createPrincipal(pool, {
+      externalId: 'sweep-offboarding-admin', kind: 'user', displayName: 'Admin',
+    });
+    const owner = await createPrincipal(pool, {
+      externalId: 'sweep-offboarding-owner', kind: 'user', displayName: 'Owner',
+    });
+    const org = await pool.query("SELECT id FROM scopes WHERE kind = 'org' AND name = ''");
+    const owned = await createScope(pool, { kind: 'user', name: 'fenced-lifecycle' });
+    await addMembership(pool, admin.id, org.rows[0].id, 'admin');
+    await addMembership(pool, owner.id, owned.id, 'writer');
+    await mapOwnedUserScope(pool, admin, owner.id, owned.id);
+    const fenced = await createMemory(pool, {
+      scopeId: owned.id, scopeKind: 'user', type: 'context', title: 'private', body: 'private',
+      authorId: owner.id, source: 'manual',
+    });
+    await pool.query('UPDATE memories SET expires_at = $2 WHERE id = $1', [fenced.id, now]);
+    await pool.query(
+      'UPDATE principals SET offboarded_at = now(), disabled_at = now() WHERE id = $1',
+      [owner.id],
+    );
+    const eligible = await seed('context', now);
+
+    const result = await sweepLifecycleBatch(pool, { now, batchSize: 10 });
+
+    expect(result).toMatchObject({ selected: 1, transitioned: 1 });
+    expect((await getMemory(pool, fenced.id))?.state).toBe('live');
+    expect((await getMemory(pool, eligible.memory.id))?.state).toBe('archived');
   });
 
   it('rolls back state and embedding deletion when an audit insert fails', async () => {

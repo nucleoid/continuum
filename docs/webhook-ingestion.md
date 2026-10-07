@@ -33,6 +33,12 @@ scopes are rejected. Every selected scope, including an override, still
 requires writer or admin access by the configured service principal. Ingestion
 never creates scopes.
 
+Offboarding preserves memories in shared scopes. Their stable author UUID and
+source provenance remain, and GitHub-derived shared metadata can retain a
+mutable GitHub login. This is the documented shared-memory identity exception;
+personal-scope text, metadata, embeddings, and raw audit queries are still
+erased by the offboarding workflow.
+
 ## Responses and replay
 
 - `202`: a new delivery created one or more memories.
@@ -50,3 +56,8 @@ and plugin schemas also bound strings and arrays.
 
 All errors use the normal REST envelope and include `requestId`. Raw request
 bodies, credentials, and webhook secrets are never logged.
+
+The non-owner runtime role needs the checked `ingest_deliveries`, capture,
+embedding, and audit privileges in `scripts/grant-application-role.sql`.
+Applying only an offboarding-specific subset is insufficient for webhook
+traffic; do not compensate with table ownership or broad schema privileges.

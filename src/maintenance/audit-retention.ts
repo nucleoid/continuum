@@ -3,6 +3,7 @@ import { constants as fsConstants } from 'node:fs';
 import { lstat, link, open, realpath, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import type pg from 'pg';
+import { ServiceError } from '../services/errors.js';
 
 export const DEFAULT_AUDIT_RETENTION_BATCH_SIZE = 100;
 export const MAX_AUDIT_RETENTION_BATCH_SIZE = 1_000;
@@ -237,10 +238,10 @@ async function authorizedPrincipalId(client: pg.PoolClient, externalId: string):
        JOIN scope_memberships sm ON sm.principal_id = p.id
         AND sm.role = 'admin' AND sm.active
         AND continuum_membership_is_effective(sm.active, sm.source_kind)
-       JOIN scopes s ON s.id = sm.scope_id AND s.kind = 'org' AND s.name = ''
+        AND sm.scope_id = continuum_org_scope_id()
       WHERE p.external_id = $1
         AND p.disabled_at IS NULL
-      FOR KEY SHARE OF p, s
+      FOR KEY SHARE OF p
       FOR SHARE OF sm`,
     [externalId],
   );
@@ -269,15 +270,6 @@ class UnusableAuditRetentionConnectionError extends Error {
   }
 }
 
-function sameRows(left: AuditRow[], right: AuditRow[]): boolean {
-  const byId = (a: AuditRow, b: AuditRow) => {
-    const leftId = BigInt(a.id);
-    const rightId = BigInt(b.id);
-    return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
-  };
-  return serializeRows([...left].sort(byId)).equals(serializeRows([...right].sort(byId)));
-}
-
 async function deleteBatch(
   client: pg.PoolClient,
   rows: AuditRow[],
@@ -294,43 +286,17 @@ async function deleteBatch(
     await client.query('BEGIN');
     const principalId = await authorizedPrincipalId(client, principalExternalId);
     await afterExport?.(batchNumber);
-    const deletion = await client.query<AuditRow>(
-      `DELETE FROM audit_log
-        WHERE id = ANY($1::bigint[])
-          AND at < $2
-      RETURNING id::text,
-                ${AUDIT_TIMESTAMP_SQL} AS at,
-                principal_id, action, memory_id, scope_id, query,
-                metadata::text AS metadata_json`,
-      [rows.map((row) => row.id), cutoff],
+    const deletion = await client.query<{ deleted_count: number }>(
+      `SELECT continuum_operator_apply_audit_retention(
+         $1::uuid, $2::timestamptz, $3::integer, $4::uuid, $5::integer,
+         $6::jsonb, $7::text, $8::text
+       ) AS deleted_count`,
+      [principalId, cutoff, retentionDays, runId, batchNumber,
+        JSON.stringify(rows), exported ? 'jsonl' : 'none', exported?.sha256 ?? null],
     );
-    if (deletion.rowCount !== rows.length) {
+    if (Number(deletion.rows[0]?.deleted_count) !== rows.length) {
       throw new Error('Audit retention delete count did not match the selected batch');
     }
-    if (!sameRows(deletion.rows, rows)) {
-      throw new Error('Audit retention row changed after export; delete rolled back');
-    }
-    const first = rows[0];
-    const last = rows[rows.length - 1];
-    await client.query(
-      `INSERT INTO audit_log (principal_id, action, metadata)
-       VALUES ($1, 'archive', $2::jsonb)`,
-      [principalId, JSON.stringify({
-        source: 'audit-retention',
-        cutoff,
-        retention_days: retentionDays,
-        first_id: first.id,
-        last_id: last.id,
-        first_at: first.at,
-        last_at: last.at,
-        deleted_count: rows.length,
-        export_mode: exported ? 'jsonl' : 'none',
-        export_filename: exported?.filename ?? null,
-        export_sha256: exported?.sha256 ?? null,
-        run_id: runId,
-        batch_number: batchNumber,
-      })],
-    );
     await client.query('COMMIT');
   } catch (error) {
     try {
@@ -376,7 +342,22 @@ export async function runAuditRetention(
     let cutoff: string;
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
     try {
-      await authorizedPrincipalId(client, options.principalExternalId);
+      const authorizationPrincipalId = await authorizedPrincipalId(
+        client, options.principalExternalId,
+      );
+      await client.query(
+        'SELECT continuum_operator_authorize_audit_retention($1::uuid)',
+        [authorizationPrincipalId],
+      );
+      const policy = await client.query<{ minimum_days: number }>(
+        `SELECT continuum_audit_retention_minimum_days()::int AS minimum_days`,
+      );
+      const minimumDays = Number(policy.rows[0]?.minimum_days);
+      if (!Number.isSafeInteger(minimumDays) || retentionDays < minimumDays) {
+        throw new RangeError(
+          `retentionDays must satisfy the database minimum of ${minimumDays} days`,
+        );
+      }
       const lock = await client.query<{ acquired: boolean }>(
         'SELECT pg_try_advisory_lock($1::bigint) AS acquired',
         [AUDIT_RETENTION_LOCK_KEY],
@@ -467,6 +448,15 @@ export async function runAuditRetention(
   } catch (error) {
     if (error instanceof UnusableAuditRetentionConnectionError) destroyClient = true;
     primaryError = error;
+    const databaseError = error as { code?: string; message?: string };
+    if (databaseError.code === '42501'
+      || /(?:DB|role-name\/OID)-bound trusted approve identity|operator session/i
+        .test(databaseError.message ?? '')) {
+      throw new ServiceError(
+        'FORBIDDEN', 'audit retention requires a DB-bound operator session',
+        { cause: error },
+      );
+    }
     throw error;
   } finally {
     let unlockFailed = false;
