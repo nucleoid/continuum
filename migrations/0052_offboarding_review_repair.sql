@@ -1682,6 +1682,7 @@ BEGIN
          'continuum_assert_sync_role_allowlist', 'continuum_verify_sync_database_identity',
          'continuum_require_sync_retirement_authority',
          'continuum_verify_sync_retirement_authority_configuration',
+         'continuum_stamp_retired_identity_epoch',
          'continuum_retire_sync_database_identities',
          'continuum_install_sync_database_identity',
          'continuum_supersede_restore_pending_sync_identity',
