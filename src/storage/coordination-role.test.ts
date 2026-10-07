@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import pg, { type PoolConfig } from 'pg';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { acquireLease, releaseLease } from '../services/coordination.js';
+import { canonicalOperationHash } from '../coordination/model.js';
 import { addMembership } from './memberships.js';
 import { createPrincipal } from './principals.js';
 import { createScope, getScopeByRef } from './scopes.js';
@@ -112,6 +113,17 @@ describe('coordination database role profiles', () => {
            'EXECUTE') AS allowed`,
         [app.role],
       )).rows[0]?.allowed).toBe(false);
+      expect((await pool.query(
+        `SELECT has_table_privilege(
+           $1, 'coordination_operation_receipts', 'UPDATE') AS allowed`,
+        [app.role],
+      )).rows[0]?.allowed).toBe(false);
+      await expect(app.connection.query(
+        `UPDATE coordination_operation_receipts
+            SET payload_hash = gen_random_bytes(32)
+          WHERE principal_id = $1`,
+        [principal.id],
+      )).rejects.toMatchObject({ code: '42501' });
     } finally {
       await app.connection.end();
     }
@@ -255,6 +267,11 @@ describe('coordination database role profiles', () => {
         runId: randomUUID(), requestId: randomUUID(),
       });
       expect(personal).toMatchObject({ acquired: true, fencingToken: '1' });
+      if (!personal.acquired) throw new Error('expected personal acquisition');
+      const originalPayloadHash = canonicalOperationHash('acquire', [
+        'user:person@example.test', 'ticket:person@example.test',
+        personal.runId, '300',
+      ]);
       await expect(operator.connection.query(
         'SELECT continuum_operator_pseudonymize_scope($1, $2, $3)',
         [operatorPrincipal.id, userScope.id, 'offboarded-scope'],
@@ -295,10 +312,118 @@ describe('coordination database role profiles', () => {
         });
       }
       expect(JSON.stringify(scrubbed.rows)).not.toContain('person@example.test');
+      const scrubbedHashes = await pool.query<{ payload_hash: string }>(
+        `SELECT encode(payload_hash, 'hex') AS payload_hash
+           FROM coordination_operation_receipts WHERE scope_id = $1`,
+        [userScope.id],
+      );
+      expect(scrubbedHashes.rows).not.toHaveLength(0);
+      for (const row of scrubbedHashes.rows) {
+        expect(row.payload_hash).toMatch(/^[0-9a-f]{64}$/);
+        expect(row.payload_hash).not.toBe(originalPayloadHash);
+      }
       expect((await pool.query(
         'SELECT fencing_floor::text AS floor FROM coordination_scope_fencing_floors WHERE scope_id = $1',
         [userScope.id],
       )).rows).toEqual([{ floor: '1' }]);
+
+      const raceScope = await createScope(pool, {
+        kind: 'user', name: 'race-person@example.test',
+      });
+      await addMembership(pool, operatorPrincipal.id, raceScope.id, 'writer');
+      await pool.query(
+        `INSERT INTO coordination_resources (scope_id, resource, fencing_token)
+         VALUES ($1, 'existing-race-resource', 5)`,
+        [raceScope.id],
+      );
+      const racedLeaseId = randomUUID();
+      const racedRequestId = randomUUID();
+      const raceWriter = await operator.connection.connect();
+      const pseudonymizer = await operator.connection.connect();
+      try {
+        await raceWriter.query('BEGIN');
+        await raceWriter.query(
+          `SELECT 1 FROM scope_memberships
+            WHERE scope_id = $1 AND active ORDER BY principal_id, source_kind, source_id
+            FOR SHARE`,
+          [raceScope.id],
+        );
+        await raceWriter.query(
+          `UPDATE coordination_resources SET fencing_token = 6
+            WHERE scope_id = $1 AND resource = 'existing-race-resource'`,
+          [raceScope.id],
+        );
+        await raceWriter.query(
+          `INSERT INTO coordination_resources (scope_id, resource, fencing_token)
+           VALUES ($1, 'new-race-resource', 9)`,
+          [raceScope.id],
+        );
+        await raceWriter.query(
+          `INSERT INTO coordination_leases (
+             lease_id, scope_id, resource, principal_id, run_id, fencing_token,
+             acquired_at, expires_at, released_at
+           ) VALUES ($1, $2, 'new-race-resource', $3, $4, 9,
+             clock_timestamp() - interval '2 minutes',
+             clock_timestamp() - interval '1 minute',
+             clock_timestamp() - interval '30 seconds')`,
+          [racedLeaseId, raceScope.id, operatorPrincipal.id, randomUUID()],
+        );
+        await raceWriter.query(
+          `INSERT INTO coordination_operation_receipts (
+             principal_id, operation, request_id, payload_hash, outcome, scope_id,
+             resource, lease_id, run_id, fencing_token, expires_at, server_time, retain_until
+           ) VALUES ($1, 'acquire', $2, sha256(convert_to('known-race-input', 'UTF8')),
+             'acquired', $3, 'new-race-resource', $4, $5, 9,
+             clock_timestamp() - interval '1 minute',
+             clock_timestamp() - interval '2 minutes',
+             clock_timestamp() + interval '22 hours')`,
+          [operatorPrincipal.id, racedRequestId, raceScope.id, racedLeaseId, randomUUID()],
+        );
+
+        const pseudonymizerPid = Number((await pseudonymizer.query(
+          'SELECT pg_backend_pid() AS pid',
+        )).rows[0].pid);
+        const pseudonymize = pseudonymizer.query(
+          'SELECT continuum_operator_pseudonymize_scope($1, $2, $3)',
+          [operatorPrincipal.id, raceScope.id, 'offboarded-race-scope'],
+        );
+        let observedLockWait = false;
+        for (let attempt = 0; attempt < 40; attempt += 1) {
+          const activity = await pool.query<{ wait_event_type: string | null }>(
+            'SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1',
+            [pseudonymizerPid],
+          );
+          if (activity.rows[0]?.wait_event_type === 'Lock') {
+            observedLockWait = true;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        expect(observedLockWait).toBe(true);
+        await raceWriter.query('COMMIT');
+        await pseudonymize;
+      } finally {
+        await raceWriter.query('ROLLBACK').catch(() => undefined);
+        raceWriter.release();
+        pseudonymizer.release();
+      }
+      const racedState = await pool.query<{
+        resource: string; floor: string; payload_hash: string | null;
+      }>(
+        `SELECT resource.resource, floor.fencing_floor::text AS floor,
+                encode(receipt.payload_hash, 'hex') AS payload_hash
+           FROM coordination_resources resource
+           JOIN coordination_scope_fencing_floors floor USING (scope_id)
+           LEFT JOIN coordination_operation_receipts receipt USING (scope_id, resource)
+          WHERE resource.scope_id = $1 ORDER BY resource.fencing_token`,
+        [raceScope.id],
+      );
+      expect(racedState.rows).toHaveLength(2);
+      expect(racedState.rows.every((row) =>
+        /^offboarded:[0-9a-f-]{36}$/.test(row.resource))).toBe(true);
+      expect(racedState.rows.every((row) => row.floor === '9')).toBe(true);
+      expect(racedState.rows.find((row) => row.payload_hash)?.payload_hash)
+        .not.toBe(canonicalOperationHash('acquire', ['known-race-input']));
     } finally {
       await operator.connection.end();
     }

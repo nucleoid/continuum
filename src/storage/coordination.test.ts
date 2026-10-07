@@ -673,6 +673,19 @@ describe('coordination storage and service', () => {
           ORDER BY retain_until, principal_id, operation, request_id LIMIT 1000`,
         [scope.id, 'plan-resource'],
       );
+      const globalReceiptPlan = await plans.query(
+        `EXPLAIN (FORMAT JSON)
+         SELECT principal_id, operation, request_id
+           FROM coordination_operation_receipts
+          WHERE retain_until <= clock_timestamp()
+          ORDER BY retain_until, principal_id, operation, request_id LIMIT 1000`,
+      );
+      const globalLeasePlan = await plans.query(
+        `EXPLAIN (FORMAT JSON)
+         SELECT lease_id FROM coordination_leases
+          WHERE released_at IS NOT NULL OR expires_at <= clock_timestamp()
+          ORDER BY COALESCE(released_at, expires_at), lease_id LIMIT 1000`,
+      );
       expect(JSON.stringify(leasePlan.rows)).toContain(
         'coordination_leases_principal_terminal_idx',
       );
@@ -682,9 +695,65 @@ describe('coordination storage and service', () => {
       expect(JSON.stringify(receiptPlan.rows)).toContain(
         'coordination_receipts_resource_idx',
       );
+      expect(JSON.stringify(globalReceiptPlan.rows)).toContain(
+        'coordination_receipts_global_sweep_idx',
+      );
+      expect(JSON.stringify(globalLeasePlan.rows)).toContain(
+        'coordination_leases_terminal_sweep_idx',
+      );
     } finally {
       plans.release();
     }
+  });
+
+  it('enforces nondecreasing fencing tokens in the database', async () => {
+    const acquired = await acquire(pool, 'monotonic-db-guard');
+    expect(acquired).toMatchObject({ acquired: true, fencingToken: '1' });
+    await expect(pool.query(
+      `UPDATE coordination_resources SET fencing_token = fencing_token - 1
+        WHERE scope_id = $1 AND resource = 'monotonic-db-guard'`,
+      [scope.id],
+    )).rejects.toMatchObject({ code: '23514' });
+  });
+
+  it('separates short-lived contention receipts from acquired receipt quota', async () => {
+    const held = await acquire(pool, 'contention-retention');
+    expect(held.acquired).toBe(true);
+    const contended = await acquire(pool, 'contention-retention');
+    expect(contended).toMatchObject({ acquired: false, reason: 'LOCK_HELD' });
+    const usage = await pool.query<{
+      acquired_count: number; contended_count: number; maximum: number;
+    }>(
+      `SELECT usage.acquire_receipt_count AS acquired_count,
+              usage.contended_receipt_count AS contended_count,
+              max(extract(epoch FROM (receipt.retain_until - receipt.server_time)))
+                FILTER (WHERE receipt.outcome = 'contended')::int AS maximum
+         FROM coordination_principal_usage usage
+         JOIN coordination_operation_receipts receipt
+           ON receipt.principal_id = usage.principal_id
+        WHERE usage.principal_id = $1
+        GROUP BY usage.acquire_receipt_count, usage.contended_receipt_count`,
+      [principal.id],
+    );
+    expect(usage.rows).toEqual([{
+      acquired_count: 1, contended_count: 1, maximum: 90,
+    }]);
+  });
+
+  it('bounds retained renew receipts per lease', async () => {
+    const runId = randomUUID();
+    const held = await acquire(pool, 'bounded-renew-receipts', randomUUID(), runId);
+    if (!held.acquired) throw new Error('expected acquisition');
+    for (let index = 0; index < 105; index += 1) {
+      await renewLease(pool, principal, {
+        leaseId: held.leaseId, runId, requestId: randomUUID(), ttlSeconds: 300,
+      });
+    }
+    expect((await pool.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM coordination_operation_receipts
+        WHERE lease_id = $1 AND operation = 'renew'`,
+      [held.leaseId],
+    )).rows[0]?.count).toBeLessThanOrEqual(100);
   });
 
   it('uses server lock timeout and leaves no late receipt after a blocked request', async () => {

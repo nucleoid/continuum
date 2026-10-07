@@ -62,10 +62,10 @@ describe('runMigrations', () => {
       .filter((name) => name.endsWith('.sql'))
       .sort();
     expect(files.slice(-4)).toEqual([
-      '0053_offboarding_restore_contract.sql',
       '0054_coordination_leases.sql',
       '0055_coordination_review_remediation.sql',
       '0056_coordination_final_remediation.sql',
+      '0057_coordination_privacy_race_remediation.sql',
     ]);
     const migration = await readFile(
       join(process.cwd(), 'migrations/0054_coordination_leases.sql'),
