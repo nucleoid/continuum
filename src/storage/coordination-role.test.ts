@@ -75,6 +75,30 @@ describe('coordination database role profiles', () => {
     return { role, connection: await rolePool(role) };
   }
 
+  it('reprofiles 0060-era table-wide coordination UPDATE grants to exact columns', async () => {
+    const role = `coord_upgrade_${Date.now()}_${roles.length}`;
+    roles.push(role);
+    await pool.query('CREATE ROLE ' + quoteRole(role) + ' NOLOGIN');
+    await pool.query(
+      `GRANT UPDATE ON coordination_resources, coordination_leases TO ${quoteRole(role)}`,
+    );
+    await expect(applyGrantScript(pool, 'grant-application-role.sql', {
+      continuum_app_role: role,
+    })).resolves.toBeUndefined();
+    expect((await pool.query(
+      `SELECT has_table_privilege($1, 'coordination_resources', 'UPDATE') AS resources,
+              has_table_privilege($1, 'coordination_leases', 'UPDATE') AS leases,
+              has_column_privilege($1, 'coordination_resources', 'resource', 'UPDATE') AS resource_key,
+              has_column_privilege($1, 'coordination_resources', 'fencing_token', 'UPDATE') AS fencing_token,
+              has_column_privilege($1, 'coordination_leases', 'principal_id', 'UPDATE') AS lease_principal,
+              has_column_privilege($1, 'coordination_leases', 'expires_at', 'UPDATE') AS expires_at`,
+      [role],
+    )).rows[0]).toEqual({
+      resources: false, leases: false, resource_key: false,
+      fencing_token: true, lease_principal: false, expires_at: true,
+    });
+  });
+
   it('runs acquire, renew-state release, and exact verification as the provisioned app role', async () => {
     const principal = await createPrincipal(pool, {
       externalId: 'service:app-role-coordination', kind: 'service', displayName: 'App',
@@ -497,6 +521,64 @@ describe('coordination database role profiles', () => {
       await locker.query('ROLLBACK').catch(() => undefined);
       locker.release();
       contender.release();
+    }
+  });
+
+  it('serializes shared-scope scrub with active membership insertion in two sessions', async () => {
+    const operatorPrincipal = await createPrincipal(pool, {
+      externalId: 'operator:shared-scope-race', kind: 'user', displayName: 'Operator',
+    });
+    const target = await createPrincipal(pool, {
+      externalId: 'user:shared-scope-race-target', kind: 'user', displayName: 'Target',
+    });
+    const newcomer = await createPrincipal(pool, {
+      externalId: 'user:shared-scope-race-new', kind: 'user', displayName: 'New member',
+    });
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    const owned = await createScope(pool, { kind: 'user', name: 'race-owned' });
+    const shared = await createScope(pool, { kind: 'project', name: 'race-shared' });
+    await addMembership(pool, operatorPrincipal.id, org.id, 'admin');
+    await addMembership(pool, target.id, owned.id, 'writer');
+    await addMembership(pool, target.id, shared.id, 'writer');
+    await pool.query(
+      `INSERT INTO principal_user_scopes
+         (principal_id, scope_id, mapped_by, acknowledged_principal_ids,
+          acknowledged_evidence_hash)
+       VALUES ($1, $2, $3, '{}'::uuid[], repeat('a', 64))`,
+      [target.id, owned.id, operatorPrincipal.id],
+    );
+    const operator = await createApplicationRole();
+    await applyGrantScript(pool, 'grant-operator-role.sql', {
+      continuum_operator_role: operator.role,
+      continuum_principal_id: operatorPrincipal.id,
+    });
+    const held = await acquireLease(operator.connection, target, {
+      scope: 'project:race-shared', resource: 'race', runId: randomUUID(),
+      requestId: randomUUID(), ttlSeconds: 300,
+    });
+    if (!held.acquired) throw new Error('expected shared lease');
+    await pool.query(
+      `UPDATE principals SET disabled_at = clock_timestamp() WHERE id = $1`, [target.id],
+    );
+    const scrubber = await operator.connection.connect();
+    const contender = await pool.connect();
+    try {
+      await scrubber.query('BEGIN');
+      await scrubber.query(
+        `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 10)`,
+        [operatorPrincipal.id, target.id, owned.id],
+      );
+      await contender.query("SET lock_timeout = '100ms'");
+      await expect(contender.query(
+        `INSERT INTO scope_memberships (principal_id, scope_id, role)
+         VALUES ($1, $2, 'writer')`, [newcomer.id, shared.id],
+      )).rejects.toMatchObject({ code: '55P03' });
+    } finally {
+      await scrubber.query('ROLLBACK').catch(() => undefined);
+      await contender.query('RESET lock_timeout').catch(() => undefined);
+      scrubber.release();
+      contender.release();
+      await operator.connection.end();
     }
   });
 
