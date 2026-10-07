@@ -291,4 +291,88 @@ describe('coordination exact-head review regressions', () => {
       await operator.end();
     }
   });
+
+  it('orders cross-principal acquire with production offboarding in a shared user scope', async () => {
+    const value = await privacyFixture('cross-principal-deadlock');
+    const member = await createPrincipal(pool, {
+      externalId: 'user:cross-principal-member', kind: 'user', displayName: 'Member',
+    });
+    await addMembership(pool, member.id, value.owned.id, 'writer');
+    await mapOwnedUserScope(pool, value.operator, value.target.id, value.owned.id, true);
+    const operator = await createOperator(value.operator.id);
+    const appRole = `coord_exact_app_${Date.now()}_${roles.length}`;
+    roles.push(appRole);
+    await pool.query('CREATE ROLE ' + quoteRole(appRole) + ' NOLOGIN');
+    await applyGrantScript(pool, 'grant-application-role.sql', { continuum_app_role: appRole });
+    await pool.query(
+      'GRANT ' + quoteRole(appRole)
+      + ' TO CURRENT_USER WITH ADMIN OPTION, SET FALSE, INHERIT FALSE',
+    );
+    const schema = String((await pool.query('SELECT current_schema() AS schema')).rows[0].schema);
+    const application = new pg.Pool({
+      ...(pool as unknown as { options: PoolConfig }).options,
+      max: 2, options: `-c search_path=${schema},public -c role=${appRole}`,
+    });
+    const blocker = await pool.connect();
+    try {
+      const operatorPid = Number((await operator.query(
+        'SELECT pg_backend_pid() AS pid',
+      )).rows[0].pid);
+      const applicationPid = Number((await application.query(
+        'SELECT pg_backend_pid() AS pid',
+      )).rows[0].pid);
+      const approvalId = (await pool.query(
+        `SELECT id FROM principal_user_scope_approvals
+          WHERE principal_id = $1 AND scope_id = $2 ORDER BY id DESC LIMIT 1`,
+        [value.target.id, value.owned.id],
+      )).rows[0].id;
+      await blocker.query('BEGIN');
+      await blocker.query(
+        'SELECT 1 FROM principal_user_scope_approvals WHERE id = $1 FOR UPDATE',
+        [approvalId],
+      );
+      const offboarding = offboardPrincipal(operator, value.operator, value.target.id, {
+        confirmationScopeId: value.owned.id, batchSize: 10,
+      }).then(
+        (result) => ({ ok: true as const, result }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      let ownerLocked = false;
+      for (let attempt = 0; attempt < 100 && !ownerLocked; attempt += 1) {
+        ownerLocked = Boolean((await pool.query(
+          `SELECT wait_event_type = 'Lock' AS locked
+             FROM pg_stat_activity WHERE pid = $1`, [operatorPid],
+        )).rows[0]?.locked);
+        if (!ownerLocked) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(ownerLocked).toBe(true);
+      const acquire = acquireLease(application, member, {
+        scope: `user:${value.owned.name}`, resource: 'cross-principal',
+        runId: randomUUID(), requestId: randomUUID(), ttlSeconds: 300,
+      }).then(
+        (result) => ({ ok: true as const, result }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      let acquireWaiting = false;
+      for (let attempt = 0; attempt < 100 && !acquireWaiting; attempt += 1) {
+        acquireWaiting = Boolean((await pool.query(
+          `SELECT wait_event_type = 'Lock' AS waiting
+             FROM pg_stat_activity WHERE pid = $1`, [applicationPid],
+        )).rows[0]?.waiting);
+        if (!acquireWaiting) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(acquireWaiting).toBe(true);
+      await blocker.query('COMMIT');
+      const [offboardOutcome, acquireOutcome] = await Promise.all([offboarding, acquire]);
+      expect(offboardOutcome).toMatchObject({ ok: true });
+      expect(acquireOutcome).toMatchObject({
+        ok: false, error: { code: 'SCOPE_NOT_FOUND' },
+      });
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => undefined);
+      blocker.release();
+      await application.end();
+      await operator.end();
+    }
+  }, 30_000);
 });

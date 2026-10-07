@@ -4,6 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pg from 'pg';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { acquireLease, releaseLease } from '../services/coordination.js';
+import { mapOwnedUserScope, offboardPrincipal } from '../services/offboarding.js';
+import { addMembership } from './memberships.js';
+import { createPrincipal } from './principals.js';
+import { createScope, getScopeByRef } from './scopes.js';
 import { runMigrations } from './migrator.js';
 
 const DATABASE_URL =
@@ -57,6 +62,154 @@ afterEach(async () => {
 });
 
 describe('runMigrations', () => {
+  it.each([
+    ['zero-stale-row', 0, 10],
+    ['single-batch', 1, 10],
+    ['multi-batch', 3, 1],
+  ] as const)(
+    'completes a 0064 offboarding after upgrade for %s privacy work',
+    async (label, leaseCount, repairBatchSize) => {
+      const suffix = `${label.replaceAll('-', '_')}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+      const schema = `coordination_service_upgrade_${suffix}`;
+      const admin = new pg.Pool({ connectionString: DATABASE_URL });
+      pools.push(admin);
+      await admin.query(`CREATE SCHEMA ${schema}`);
+      const pool = schemaPool(schema);
+      const before = await mkdtemp(join(tmpdir(), 'continuum-service-before-0065-'));
+      directories.push(before);
+      const source = new URL('../../migrations/', import.meta.url);
+      const files = (await readdir(source)).filter((name) => name.endsWith('.sql')).sort();
+      await Promise.all(files
+        .filter((name) => name <= '0064_coordination_final_online_indexes.sql')
+        .map((name) => copyFile(new URL(name, source), join(before, name))));
+      try {
+        await runMigrations(pool, before);
+        const operator = await createPrincipal(pool, {
+          externalId: `operator:${suffix}`, kind: 'user', displayName: 'Upgrade operator',
+        });
+        const target = await createPrincipal(pool, {
+          externalId: `target:${suffix}`, kind: 'user', displayName: 'Upgrade target',
+        });
+        const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+        const owned = await createScope(pool, { kind: 'user', name: `owned-${suffix}` });
+        const shared = await createScope(pool, { kind: 'project', name: `shared-${suffix}` });
+        await addMembership(pool, operator.id, org.id, 'admin');
+        await addMembership(pool, target.id, owned.id, 'writer');
+        await addMembership(pool, target.id, shared.id, 'writer');
+        await mapOwnedUserScope(pool, operator, target.id, owned.id);
+        for (let index = 0; index < leaseCount; index += 1) {
+          const runId = randomUUID();
+          const acquired = await acquireLease(pool, target, {
+            scope: `project:${shared.name}`, resource: `upgrade-${index}`, runId,
+            requestId: randomUUID(), ttlSeconds: 300,
+          });
+          if (!acquired.acquired) throw new Error('expected upgrade fixture acquisition');
+          if (index > 0) {
+            await releaseLease(pool, target, {
+              leaseId: acquired.leaseId, runId, requestId: randomUUID(),
+            });
+          }
+        }
+        let completed = await offboardPrincipal(pool, operator, target.id, {
+          confirmationScopeId: owned.id, batchSize: 100,
+        });
+        if (!completed.complete) {
+          const privacyReady = (await pool.query(
+            `SELECT principal.completed_at IS NOT NULL
+                    AND scope.completed_at IS NOT NULL AS ready
+               FROM coordination_principal_privacy_progress principal
+               JOIN coordination_scope_privacy_progress scope ON scope.scope_id = $2
+              WHERE principal.principal_id = $1`,
+            [target.id, owned.id],
+          )).rows[0]?.ready === true;
+          if (privacyReady) {
+            await pool.query(
+              `SELECT continuum_operator_write_offboarding_run($1, $2, 'scope_complete', '{}'::jsonb)`,
+              [target.id, operator.id],
+            );
+          }
+        }
+        for (let attempt = 0; !completed.complete && attempt < 100; attempt += 1) {
+          completed = await offboardPrincipal(pool, operator, target.id, {
+            confirmationScopeId: owned.id, batchSize: 100,
+          });
+        }
+        expect(completed.complete, JSON.stringify(completed)).toBe(true);
+        const immutableBefore = (await pool.query(
+          `SELECT phase, evidence FROM principal_offboarding_run_events
+            WHERE principal_id = $1 ORDER BY id`, [target.id],
+        )).rows;
+
+        const disabledOnly = await createPrincipal(pool, {
+          externalId: `disabled:${suffix}`, kind: 'user', displayName: 'Disabled direct scrub',
+        });
+        const disabledOwned = await createScope(pool, {
+          kind: 'user', name: `disabled-owned-${suffix}`,
+        });
+        await addMembership(pool, disabledOnly.id, disabledOwned.id, 'writer');
+        await pool.query(
+          `INSERT INTO principal_user_scopes
+             (principal_id, scope_id, mapped_by, acknowledged_principal_ids,
+              acknowledged_evidence_hash)
+           VALUES ($1, $2, $3, '{}'::uuid[], repeat('d', 64))`,
+          [disabledOnly.id, disabledOwned.id, operator.id],
+        );
+        await pool.query(
+          'UPDATE principals SET disabled_at = clock_timestamp() WHERE id = $1',
+          [disabledOnly.id],
+        );
+        await pool.query(
+          `INSERT INTO coordination_principal_privacy_progress
+             (principal_id, detached_principal_id, privacy_version, audit_cursor_id, completed_at)
+           VALUES ($1, '00000000-0000-4000-8000-000000000012', 2, 0, clock_timestamp())`,
+          [disabledOnly.id],
+        );
+
+        await runMigrations(pool, join(process.cwd(), 'migrations'));
+        let repaired = await offboardPrincipal(pool, operator, target.id, {
+          confirmationScopeId: owned.id, batchSize: repairBatchSize,
+        });
+        let calls = 1;
+        for (; !repaired.complete && calls < 100; calls += 1) {
+          repaired = await offboardPrincipal(pool, operator, target.id, {
+            confirmationScopeId: owned.id, batchSize: repairBatchSize,
+          });
+        }
+        expect(repaired.complete).toBe(true);
+        if (label === 'multi-batch') expect(calls).toBeGreaterThan(1);
+        expect((await pool.query(
+          `SELECT count(*)::int AS stale FROM audit_log
+            WHERE principal_id = $1 AND metadata->>'operation' LIKE 'lock_%'
+              AND metadata ?| ARRAY['request_id','run_id','lease_id','resource','resource_sha256']`,
+          [target.id],
+        )).rows).toEqual([{ stale: 0 }]);
+        expect((await pool.query(
+          `SELECT completed_at IS NOT NULL AS persisted, privacy_version
+             FROM coordination_principal_privacy_progress WHERE principal_id = $1`,
+          [target.id],
+        )).rows).toEqual([{ persisted: true, privacy_version: 2 }]);
+        expect((await pool.query(
+          `SELECT phase, evidence FROM principal_offboarding_run_events
+            WHERE principal_id = $1 AND phase <> 'started' AND phase <> 'completed'
+            ORDER BY id`, [target.id],
+        )).rows).toEqual([]);
+        expect((await pool.query(
+          `SELECT phase, evidence FROM principal_offboarding_run_events
+            WHERE principal_id = $1 AND phase IN ('started', 'completed') ORDER BY id`,
+          [target.id],
+        )).rows).toEqual(immutableBefore);
+        expect((await pool.query(
+          `SELECT completed_at IS NULL AS reopened
+             FROM coordination_principal_privacy_progress WHERE principal_id = $1`,
+          [disabledOnly.id],
+        )).rows).toEqual([{ reopened: true }]);
+      } finally {
+        await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined);
+      }
+    },
+    120_000,
+  );
+
   it('ships coordination tables and review repair as ordinary transactional migrations', async () => {
     const files = (await readdir(join(process.cwd(), 'migrations')))
       .filter((name) => name.endsWith('.sql'))
