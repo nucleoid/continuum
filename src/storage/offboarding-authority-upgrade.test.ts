@@ -256,6 +256,12 @@ describe('0048 trusted database identity upgrade', () => {
 
   it('accepts database-owner inheritance of the PostgreSQL 16 public-schema owner role', async () => {
     const state = await fixture('0050_offboarding_startup_verification_fix.sql');
+    const syncRole = 'upgrade_database_owner_sync_' + state.suffix;
+    await createRole(state.admin, syncRole);
+    await state.pool.query(
+      'SELECT continuum_register_trusted_database_identity($1, $2, FALSE, TRUE)',
+      [syncRole, state.service.id],
+    );
     await state.admin.query(
       `ALTER SCHEMA ${quoteIdentifier(state.schema)} OWNER TO pg_database_owner`,
     );
@@ -267,7 +273,19 @@ describe('0048 trusted database identity upgrade', () => {
       `SELECT pg_has_role(current_user, nspowner, 'USAGE') AS effective_owner
          FROM pg_namespace WHERE nspname = current_schema()`,
     )).rows[0].effective_owner).toBe(true);
+    expect((await state.admin.query(
+      'SELECT rolcanlogin FROM pg_roles WHERE rolname = $1', [syncRole],
+    )).rows[0].rolcanlogin).toBe(false);
   }, 60_000);
+
+  it('does not let an inherited schema-owner role false-pass migration authority', async () => {
+    const migration = await readFile(
+      new URL('../../migrations/0051_offboarding_security_contract.sql', import.meta.url), 'utf8',
+    );
+    expect(migration).toMatch(/current_user::regrole::oid[\s\S]*rolsuper[\s\S]*rolcreaterole/i);
+    expect(migration).toMatch(/membership\.member\s*=\s*current_user::regrole::oid/i);
+    expect(migration).not.toMatch(/SELECT rolsuper, rolcreaterole INTO[\s\S]{0,100}WHERE oid = owner_oid/i);
+  });
 
   it('supports a non-superuser schema owner with scoped CREATEROLE and ADMIN OPTION', async () => {
     const state = await fixture('0050_offboarding_startup_verification_fix.sql');
