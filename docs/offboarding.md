@@ -470,6 +470,9 @@ identity, membership edges, and application-object ownership before revoking
 the role's application authority and login. The additional legacy phrase is
 required only for the pre-history 0048 case; it is a second operator
 confirmation that the reviewed name and OID are the removed legacy sync role.
+Legacy mode accepts only privileges within the historical sync footprint,
+serializes with rotation using the same advisory locks, and requires the exact
+least-privilege owner ADMIN edge.
 
 ```sh
 psql "$CONTINUUM_MIGRATION_OWNER_URL" \
@@ -512,7 +515,7 @@ psql "$CONTINUUM_MIGRATION_OWNER_URL" \
 The sync identity is a dedicated service principal with `kind = 'service'` and
 an enabled lifecycle state, never a
 named human administrator. To rotate credentials or the bound service identity,
-create a fresh empty non-owner role and have the currently bound operator rotate
+create a fresh empty LOGIN-capable non-owner role and have the currently bound operator rotate
 to it atomically:
 
 ```sql
@@ -539,6 +542,10 @@ separately reviewed maintenance change and retry. Run one sync and verify
 `entra_sync_state.last_success_at` before dropping the old service principal
 and retired database role. Human offboarding or demotion therefore cannot
 silently stop sync.
+Retirement is terminal for a PostgreSQL role OID: do not rotate back to a
+retired role as rollback. Create a fresh LOGIN role with new credentials and
+rotate forward. Deliberate reuse of a dropped role name is permitted only with
+a new OID; prior generations remain in owner-only history.
 
 One operator database role is bound to one manual organization-administrator
 principal. A takeover changes application membership, but does not silently
@@ -647,7 +654,8 @@ and revalidates isolation before committing. Active and retired identities are
 planned and rewritten as complete sets, so swapped or cyclic OID assignments do
 not collide. Retired names that were intentionally dropped are moved to an
 owner-only unresolved-history ledger instead of retaining an OID that may now
-belong to another role. Re-run the same rebind command if global roles are
+belong to another role. The ledger distinguishes terminal superseded
+generations from restore-pending rows. Re-run the same rebind command if global roles are
 restored in stages: a uniquely resolved retired name is moved back into live
 history. Earlier generations of a deliberately reused active sync-role name
 remain archived by name and old OID; any unbound recreation still fails

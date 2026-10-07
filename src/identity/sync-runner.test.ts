@@ -33,7 +33,7 @@ describe('membership sync CLI runner', () => {
   async function syncRolePool(principalId: string): Promise<pg.Pool> {
     const role = `continuum_sync_runner_${Date.now()}_${roles.length}`;
     roles.push(role);
-    await pool.query(`CREATE ROLE "${role}" NOLOGIN`);
+    await pool.query(`CREATE ROLE "${role}" LOGIN PASSWORD 'continuum-test-password'`);
     let sql = await readFile(join(process.cwd(), 'scripts/grant-sync-role.sql'), 'utf8');
     sql = sql.split(/\r?\n/).filter((line) => !line.trimStart().startsWith('\\')).join('\n')
       .replaceAll(':"continuum_schema"', '"public"')

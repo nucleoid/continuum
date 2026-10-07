@@ -55,7 +55,9 @@ describe('fresh independent review remediation', () => {
   async function createRole(profile: 'application' | 'operator' | 'sync', principalId?: string) {
     const role = `continuum_round4_${profile}_${Date.now()}_${roles.length}`;
     roles.push(role);
-    await pool.query('CREATE ROLE ' + quoteRole(role) + ' NOLOGIN');
+    await pool.query(
+      'CREATE ROLE ' + quoteRole(role) + (profile === 'sync' ? ' LOGIN' : ' NOLOGIN'),
+    );
     if (profile !== 'sync') {
       await applyGrantScript(pool, 'grant-application-role.sql', { continuum_app_role: role });
     }

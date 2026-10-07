@@ -35,8 +35,10 @@ async function rolePool(pool: pg.Pool, role: string): Promise<pg.Pool> {
 async function syncRolePool(
   pool: pg.Pool, role: string, principalId: string,
 ): Promise<pg.Pool> {
-  await pool.query(`CREATE ROLE "${role}" NOLOGIN`);
-  await pool.query(`GRANT "${role}" TO CURRENT_USER`);
+  await pool.query(`CREATE ROLE "${role}" LOGIN`);
+  await pool.query(
+    `GRANT "${role}" TO CURRENT_USER WITH ADMIN OPTION, SET FALSE, INHERIT FALSE`,
+  );
   const source = await readFile(join(process.cwd(), 'scripts/grant-sync-role.sql'), 'utf8');
   const sql = source.split(/\r?\n/)
     .filter((line) => !line.trimStart().startsWith('\\'))

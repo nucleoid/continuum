@@ -31,6 +31,13 @@ async function rolePool(pool: pg.Pool, role: string): Promise<pg.Pool> {
   });
 }
 
+async function grantOwnerRetirementAuthority(pool: pg.Pool, role: string): Promise<void> {
+  await pool.query(
+    'GRANT ' + quoteRole(role)
+    + ' TO CURRENT_USER WITH ADMIN OPTION, SET FALSE, INHERIT FALSE',
+  );
+}
+
 async function dropRoles(pool: pg.Pool, roles: string[]): Promise<void> {
   for (const role of roles) await pool.query('DROP OWNED BY ' + quoteRole(role));
   for (const role of roles) await pool.query('REVOKE ' + quoteRole(role) + ' FROM CURRENT_USER');
@@ -163,7 +170,7 @@ describe('sync database identity rotation security', () => {
     const nextRole = 'continuum_registration_next_' + Date.now();
     const applicationRole = 'continuum_registration_app_' + Date.now();
     await pool.query('CREATE ROLE ' + quoteRole(oldRole) + ' LOGIN');
-    await pool.query('CREATE ROLE ' + quoteRole(nextRole) + ' NOLOGIN');
+    await pool.query('CREATE ROLE ' + quoteRole(nextRole) + ' LOGIN');
     await pool.query('CREATE ROLE ' + quoteRole(applicationRole) + ' NOLOGIN');
     await applyGrantScript(pool, 'grant-application-role.sql', {
       continuum_app_role: applicationRole,
@@ -294,8 +301,8 @@ describe('sync database identity rotation security', () => {
       externalId: 'stale-sync-service', kind: 'service', displayName: 'Stale service',
     });
     const role = 'continuum_stale_sync_' + Date.now();
-    await pool.query('CREATE ROLE ' + quoteRole(role) + ' NOLOGIN');
-    await pool.query('GRANT ' + quoteRole(role) + ' TO CURRENT_USER');
+    await pool.query('CREATE ROLE ' + quoteRole(role) + ' LOGIN');
+    await grantOwnerRetirementAuthority(pool, role);
     await applyGrantScript(pool, 'grant-sync-role.sql', {
       continuum_sync_role: role, continuum_principal_id: service.id,
     });
@@ -305,8 +312,8 @@ describe('sync database identity rotation security', () => {
     await pool.query('DROP OWNED BY ' + quoteRole(role));
     await pool.query('REVOKE ' + quoteRole(role) + ' FROM CURRENT_USER');
     await pool.query('DROP ROLE ' + quoteRole(role));
-    await pool.query('CREATE ROLE ' + quoteRole(role) + ' NOLOGIN');
-    await pool.query('GRANT ' + quoteRole(role) + ' TO CURRENT_USER');
+    await pool.query('CREATE ROLE ' + quoteRole(role) + ' LOGIN');
+    await grantOwnerRetirementAuthority(pool, role);
     const replacement = await rolePool(pool, role);
     try {
       const binding = (await pool.query(
@@ -332,7 +339,7 @@ describe('sync database identity rotation security', () => {
       externalId: 'logical-restore-service', kind: 'service', displayName: 'Restored',
     });
     const role = 'continuum_restored_sync_' + Date.now();
-    await pool.query('CREATE ROLE ' + quoteRole(role) + ' NOLOGIN');
+    await pool.query('CREATE ROLE ' + quoteRole(role) + ' LOGIN');
     await pool.query(
       'SELECT continuum_register_trusted_database_identity($1, $2, FALSE, TRUE)',
       [role, service.id],
@@ -342,7 +349,7 @@ describe('sync database identity rotation security', () => {
     )).rows[0].oid;
     await pool.query('DROP OWNED BY ' + quoteRole(role));
     await pool.query('DROP ROLE ' + quoteRole(role));
-    await pool.query('CREATE ROLE ' + quoteRole(role) + ' NOLOGIN');
+    await pool.query('CREATE ROLE ' + quoteRole(role) + ' LOGIN');
     try {
       await expect(pool.query(
         "SELECT continuum_rebind_database_identity_oids('REBIND AFTER LOGICAL RESTORE')",
@@ -374,7 +381,7 @@ describe('sync database identity rotation security', () => {
     const nextRole = 'continuum_terminal_next_' + Date.now();
     for (const role of [firstRole, nextRole]) {
       await pool.query('CREATE ROLE ' + quoteRole(role) + ' LOGIN');
-      await pool.query('GRANT ' + quoteRole(role) + ' TO CURRENT_USER');
+      await grantOwnerRetirementAuthority(pool, role);
     }
     try {
       await applyGrantScript(pool, 'grant-sync-role.sql', {
@@ -406,9 +413,9 @@ describe('sync database identity rotation security', () => {
     const fixture = await operatorFixture('logical-restore-swap');
     const syncRole = 'continuum_restored_swap_sync_' + Date.now();
     const spareRole = 'continuum_restored_swap_spare_' + Date.now();
-    await pool.query('CREATE ROLE ' + quoteRole(syncRole) + ' NOLOGIN');
+    await pool.query('CREATE ROLE ' + quoteRole(syncRole) + ' LOGIN');
     await pool.query('CREATE ROLE ' + quoteRole(spareRole) + ' NOLOGIN');
-    await pool.query('GRANT ' + quoteRole(syncRole) + ' TO CURRENT_USER');
+    await grantOwnerRetirementAuthority(pool, syncRole);
     await applyGrantScript(pool, 'grant-sync-role.sql', {
       continuum_sync_role: syncRole, continuum_principal_id: fixture.service.id,
     });
@@ -548,7 +555,7 @@ describe('sync database identity rotation security', () => {
     const finalRole = 'continuum_reused_final_' + Date.now();
     for (const role of [reusedRole, bridgeRole, finalRole]) {
       await pool.query('CREATE ROLE ' + quoteRole(role) + ' LOGIN');
-      await pool.query('GRANT ' + quoteRole(role) + ' TO CURRENT_USER');
+      await grantOwnerRetirementAuthority(pool, role);
     }
     try {
       await applyGrantScript(pool, 'grant-sync-role.sql', {
@@ -564,7 +571,7 @@ describe('sync database identity rotation security', () => {
       await pool.query('REVOKE ' + quoteRole(reusedRole) + ' FROM CURRENT_USER');
       await pool.query('DROP ROLE ' + quoteRole(reusedRole));
       await pool.query('CREATE ROLE ' + quoteRole(reusedRole) + ' LOGIN');
-      await pool.query('GRANT ' + quoteRole(reusedRole) + ' TO CURRENT_USER');
+      await grantOwnerRetirementAuthority(pool, reusedRole);
       await applyGrantScript(pool, 'grant-sync-role.sql', {
         continuum_sync_role: reusedRole, continuum_principal_id: fixture.service.id,
       });
@@ -579,7 +586,7 @@ describe('sync database identity rotation security', () => {
       await pool.query('DROP ROLE ' + quoteRole(reusedRole));
       await pool.query("SELECT continuum_rebind_database_identity_oids('REBIND AFTER LOGICAL RESTORE')");
       await pool.query('CREATE ROLE ' + quoteRole(reusedRole) + ' LOGIN');
-      await pool.query('GRANT ' + quoteRole(reusedRole) + ' TO CURRENT_USER');
+      await grantOwnerRetirementAuthority(pool, reusedRole);
       await expect(pool.query(
         "SELECT continuum_rebind_database_identity_oids('REBIND AFTER LOGICAL RESTORE')",
       )).resolves.toBeDefined();
@@ -619,9 +626,9 @@ describe('sync database identity rotation security', () => {
     const syncRole = 'continuum_restored_stale_sync_' + Date.now();
     const appRole = 'continuum_restored_stale_app_' + Date.now();
     const missingRetiredRole = 'continuum_restored_missing_' + Date.now();
-    await pool.query('CREATE ROLE ' + quoteRole(syncRole) + ' NOLOGIN');
+    await pool.query('CREATE ROLE ' + quoteRole(syncRole) + ' LOGIN');
     await pool.query('CREATE ROLE ' + quoteRole(appRole) + ' NOLOGIN');
-    await pool.query('GRANT ' + quoteRole(syncRole) + ' TO CURRENT_USER');
+    await grantOwnerRetirementAuthority(pool, syncRole);
     await applyGrantScript(pool, 'grant-application-role.sql', { continuum_app_role: appRole });
     await applyGrantScript(pool, 'grant-sync-role.sql', {
       continuum_sync_role: syncRole, continuum_principal_id: fixture.service.id,
@@ -754,13 +761,13 @@ describe('sync database identity rotation security', () => {
     const fixture = await operatorFixture('old-read');
     const oldRole = 'continuum_old_read_' + Date.now();
     const newRole = 'continuum_new_read_' + Date.now();
-    await pool.query('CREATE ROLE ' + quoteRole(oldRole) + ' NOLOGIN');
-    await pool.query('GRANT ' + quoteRole(oldRole) + ' TO CURRENT_USER');
+    await pool.query('CREATE ROLE ' + quoteRole(oldRole) + ' LOGIN');
+    await grantOwnerRetirementAuthority(pool, oldRole);
     await applyGrantScript(pool, 'grant-sync-role.sql', {
       continuum_sync_role: oldRole, continuum_principal_id: fixture.service.id,
     });
     const oldConnection = await rolePool(pool, oldRole);
-    await pool.query('CREATE ROLE ' + quoteRole(newRole) + ' NOLOGIN');
+    await pool.query('CREATE ROLE ' + quoteRole(newRole) + ' LOGIN');
     try {
       await expect(oldConnection.query('SELECT body FROM memories LIMIT 1'))
         .rejects.toThrow(/permission denied/i);
@@ -768,7 +775,7 @@ describe('sync database identity rotation security', () => {
         'SELECT continuum_rotate_sync_database_identity($1, $2, $3)',
         [fixture.admin.id, newRole, fixture.service.id],
       );
-      await pool.query('GRANT ' + quoteRole(newRole) + ' TO CURRENT_USER');
+      await grantOwnerRetirementAuthority(pool, newRole);
       const newConnection = await rolePool(pool, newRole);
       try {
         for (const connection of [oldConnection, newConnection]) {

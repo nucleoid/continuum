@@ -27,8 +27,11 @@ async function applyGrantScript(
 async function createRolePool(
   pool: pg.Pool, role: string, profile: 'application' | 'operator' | 'sync', principalId?: string,
 ): Promise<pg.Pool> {
-  await pool.query('CREATE ROLE ' + quoteRole(role) + ' NOLOGIN');
-  await pool.query('GRANT ' + quoteRole(role) + ' TO CURRENT_USER');
+  await pool.query('CREATE ROLE ' + quoteRole(role) + (profile === 'sync' ? ' LOGIN' : ' NOLOGIN'));
+  await pool.query(
+    'GRANT ' + quoteRole(role) + ' TO CURRENT_USER'
+    + (profile === 'sync' ? ' WITH ADMIN OPTION, SET FALSE, INHERIT FALSE' : ''),
+  );
   if (profile !== 'sync') {
     await applyGrantScript(pool, 'grant-application-role.sql', { continuum_app_role: role });
   }
@@ -122,7 +125,11 @@ describe('independent exact-head review remediation', () => {
     const oldRole = 'continuum_sync_old_' + Date.now();
     const oldConnection = await createRolePool(pool, oldRole, 'sync', oldService.id);
     const newRole = 'continuum_sync_new_' + Date.now();
-    await pool.query('CREATE ROLE ' + quoteRole(newRole) + ' NOLOGIN');
+    await pool.query('CREATE ROLE ' + quoteRole(newRole) + ' LOGIN');
+    await pool.query(
+      'GRANT ' + quoteRole(newRole)
+      + ' TO CURRENT_USER WITH ADMIN OPTION, SET FALSE, INHERIT FALSE',
+    );
     const operatorRole = 'continuum_rotation_operator_' + Date.now();
     const operator = await createRolePool(pool, operatorRole, 'operator', admin.id);
     let newConnection: pg.Pool | undefined;
@@ -131,7 +138,6 @@ describe('independent exact-head review remediation', () => {
         'SELECT continuum_rotate_sync_database_identity($1, $2, $3)',
         [admin.id, newRole, newService.id],
       );
-      await pool.query('GRANT ' + quoteRole(newRole) + ' TO CURRENT_USER');
       newConnection = new pg.Pool({
         ...(pool as unknown as { options: PoolConfig }).options,
         max: 1, options: '-c role=' + newRole,

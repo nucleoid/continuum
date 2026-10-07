@@ -28,8 +28,11 @@ async function applyGrantScript(
 async function createRolePool(
   pool: pg.Pool, role: string, profile: 'application' | 'operator' | 'sync', principalId?: string,
 ): Promise<pg.Pool> {
-  await pool.query('CREATE ROLE ' + quoteRole(role) + ' NOLOGIN');
-  await pool.query('GRANT ' + quoteRole(role) + ' TO CURRENT_USER');
+  await pool.query('CREATE ROLE ' + quoteRole(role) + (profile === 'sync' ? ' LOGIN' : ' NOLOGIN'));
+  await pool.query(
+    'GRANT ' + quoteRole(role) + ' TO CURRENT_USER'
+    + (profile === 'sync' ? ' WITH ADMIN OPTION, SET FALSE, INHERIT FALSE' : ''),
+  );
   if (profile !== 'sync') {
     await applyGrantScript(pool, 'grant-application-role.sql', { continuum_app_role: role });
   }
@@ -253,7 +256,11 @@ describe('offboarding database-role remediation', () => {
     const { admin } = await adminFixture('sync-rotation');
     const service = await createPrincipal(pool, { externalId: 'rotated-sync-service', kind: 'service', displayName: 'Rotated sync' });
     const syncRole = 'continuum_rotated_sync_' + Date.now();
-    await pool.query('CREATE ROLE ' + quoteRole(syncRole) + ' NOLOGIN');
+    await pool.query('CREATE ROLE ' + quoteRole(syncRole) + ' LOGIN');
+    await pool.query(
+      'GRANT ' + quoteRole(syncRole)
+      + ' TO CURRENT_USER WITH ADMIN OPTION, SET FALSE, INHERIT FALSE',
+    );
     const operatorRole = 'continuum_rotation_operator_' + Date.now();
     const operator = await createRolePool(pool, operatorRole, 'operator', admin.id);
     try {

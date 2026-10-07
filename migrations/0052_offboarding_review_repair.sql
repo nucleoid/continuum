@@ -73,9 +73,19 @@ REVOKE ALL ON TABLE continuum_retired_sync_database_identities FROM PUBLIC;
 CREATE TABLE IF NOT EXISTS continuum_unresolved_retired_sync_database_identities (
   database_role NAME NOT NULL,
   previous_database_role_oid OID NOT NULL,
+  resolution_kind TEXT NOT NULL CHECK (resolution_kind IN ('superseded', 'restore_pending')),
   marked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (database_role, previous_database_role_oid)
 );
+ALTER TABLE continuum_unresolved_retired_sync_database_identities
+  ADD COLUMN IF NOT EXISTS resolution_kind TEXT;
+UPDATE continuum_unresolved_retired_sync_database_identities
+   SET resolution_kind = 'restore_pending' WHERE resolution_kind IS NULL;
+ALTER TABLE continuum_unresolved_retired_sync_database_identities
+  ALTER COLUMN resolution_kind SET NOT NULL,
+  DROP CONSTRAINT IF EXISTS continuum_unresolved_retired_sync_database_identities_resolution_kind_check,
+  ADD CONSTRAINT continuum_unresolved_retired_sync_database_identities_resolution_kind_check
+    CHECK (resolution_kind IN ('superseded', 'restore_pending'));
 ALTER TABLE continuum_unresolved_retired_sync_database_identities
   DROP CONSTRAINT IF EXISTS continuum_unresolved_retired_sync_database_identities_pkey,
   ADD CONSTRAINT continuum_unresolved_retired_sync_database_identities_pkey
@@ -848,7 +858,10 @@ BEGIN
       SELECT 1 FROM pg_auth_members membership
        WHERE old_identity.database_role_oid IN (membership.roleid, membership.member)
          AND NOT (membership.roleid = old_identity.database_role_oid
-                  AND membership.member = owner_oid)
+                  AND membership.member = owner_oid
+                  AND membership.admin_option
+                  AND NOT membership.set_option
+                  AND NOT membership.inherit_option)
     ) OR EXISTS (
       SELECT 1 FROM pg_namespace WHERE oid = schema_oid AND nspowner = old_identity.database_role_oid
     ) OR EXISTS (
@@ -897,6 +910,18 @@ BEGIN
   ) INTO already_bound;
   target_oid := continuum_validate_trusted_database_role(
     target_database_role, 'sync', already_bound);
+  IF EXISTS (
+    SELECT 1 FROM continuum_retired_sync_database_identities
+     WHERE database_role_oid = target_oid
+  ) OR EXISTS (
+    SELECT 1 FROM continuum_unresolved_retired_sync_database_identities
+     WHERE previous_database_role_oid = target_oid
+  ) THEN
+    RAISE EXCEPTION 'previously retired sync role OID is terminal and cannot be reinstalled';
+  END IF;
+  IF NOT (SELECT rolcanlogin FROM pg_roles WHERE oid = target_oid) THEN
+    RAISE EXCEPTION 'sync database role must be LOGIN-capable before installation';
+  END IF;
   -- Prove now that this definer can revoke the target during the next rotation.
   PERFORM continuum_require_sync_retirement_authority(target_oid);
   SELECT namespace.nspname INTO schema_name
@@ -906,8 +931,8 @@ BEGIN
   -- Preserve prior generations outside the live retired-role registry before
   -- the new generation can later be retired under the same name.
   INSERT INTO continuum_unresolved_retired_sync_database_identities
-    (database_role, previous_database_role_oid, marked_at)
-  SELECT history.database_role, history.database_role_oid, history.retired_at
+    (database_role, previous_database_role_oid, resolution_kind, marked_at)
+  SELECT history.database_role, history.database_role_oid, 'superseded', history.retired_at
     FROM continuum_retired_sync_database_identities history
    WHERE history.database_role = target_database_role
      AND history.database_role_oid <> target_oid
@@ -1245,8 +1270,8 @@ BEGIN
   -- A retired generation with the same name as an active restored identity is
   -- historical, not the active role. Archive it before resolving retirement.
   INSERT INTO continuum_unresolved_retired_sync_database_identities
-    (database_role, previous_database_role_oid, marked_at)
-  SELECT history.database_role, history.database_role_oid, history.retired_at
+    (database_role, previous_database_role_oid, resolution_kind, marked_at)
+  SELECT history.database_role, history.database_role_oid, 'superseded', history.retired_at
     FROM continuum_retired_sync_database_identities history
     JOIN continuum_active_identity_rebind_plan active
       ON active.database_role = history.database_role
@@ -1272,7 +1297,8 @@ BEGIN
       LEFT JOIN continuum_retired_sync_database_identities current_history
         ON current_history.database_role = unresolved.database_role
      WHERE active.database_role IS NULL
-       AND current_history.database_role IS NULL;
+       AND current_history.database_role IS NULL
+       AND unresolved.resolution_kind = 'restore_pending';
   IF EXISTS (
     SELECT database_role FROM continuum_unresolved_identity_rebind_plan
      GROUP BY database_role HAVING count(*) <> 1
@@ -1318,8 +1344,9 @@ BEGIN
     RAISE EXCEPTION 'retired database identity restore mapping is ambiguous';
   END IF;
   INSERT INTO continuum_unresolved_retired_sync_database_identities
-    (database_role, previous_database_role_oid)
-  SELECT database_role, previous_oid FROM continuum_retired_identity_rebind_plan
+    (database_role, previous_database_role_oid, resolution_kind)
+  SELECT database_role, previous_oid, 'restore_pending'
+    FROM continuum_retired_identity_rebind_plan
    WHERE restored_oid IS NULL
   ON CONFLICT (database_role, previous_database_role_oid) DO UPDATE SET
     marked_at = now();
