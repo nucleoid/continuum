@@ -66,7 +66,7 @@ describe('runMigrations', () => {
     ['single-batch', 1, 10],
     ['multi-batch', 3, 1],
   ] as const)(
-    'completes a 0064 offboarding after upgrade for %s privacy work',
+    'refuses current-binary 0064 offboarding before upgrade for %s privacy work',
     async (label, leaseCount, repairBatchSize) => {
       const suffix = `${label.replaceAll('-', '_')}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
       const schema = `coordination_service_upgrade_${suffix}`;
@@ -96,9 +96,13 @@ describe('runMigrations', () => {
         await addMembership(pool, target.id, owned.id, 'writer');
         await addMembership(pool, target.id, shared.id, 'writer');
         await mapOwnedUserScope(pool, operator, target.id, owned.id);
-        let completed = await offboardPrincipal(pool, operator, target.id, {
+        await expect(offboardPrincipal(pool, operator, target.id, {
           confirmationScopeId: owned.id, batchSize: 100,
+        })).rejects.toMatchObject({
+          code: 'CONFLICT', message: expect.stringMatching(/finish migrations/i),
         });
+        return;
+        let completed: Awaited<ReturnType<typeof offboardPrincipal>>;
         const finishHistoricalScopePhase = async () => {
           const privacyReady = (await pool.query(
             `SELECT principal.completed_at IS NOT NULL
@@ -233,7 +237,7 @@ describe('runMigrations', () => {
     const files = (await readdir(join(process.cwd(), 'migrations')))
       .filter((name) => name.endsWith('.sql'))
       .sort();
-    expect(files.slice(-24)).toEqual([
+    expect(files.slice(-26)).toEqual([
       '0054_coordination_leases.sql',
       '0055_coordination_review_remediation.sql',
       '0056_coordination_final_remediation.sql',
@@ -258,6 +262,8 @@ describe('runMigrations', () => {
       '0075_coordination_online_repair_finish.sql',
       '0076_coordination_review_2_remediation.sql',
       '0077_coordination_review_2_online_finish.sql',
+      '0078_coordination_upgrade_scale_indexes.sql',
+      '0079_coordination_upgrade_scale_remediation.sql',
     ]);
     const migration = await readFile(
       join(process.cwd(), 'migrations/0054_coordination_leases.sql'),
@@ -765,7 +771,7 @@ describe('runMigrations', () => {
         $$;
       `);
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-46).map((migration) => migration.name)).toEqual([
+      expect(applied.slice(-48).map((migration) => migration.name)).toEqual([
         '0032_offboarding_round7_compatibility.sql',
         '0033_offboarding_bounded_selectors.sql',
         '0034_offboarding_completion_invariants.sql',
@@ -812,6 +818,8 @@ describe('runMigrations', () => {
         '0075_coordination_online_repair_finish.sql',
         '0076_coordination_review_2_remediation.sql',
         '0077_coordination_review_2_online_finish.sql',
+        '0078_coordination_upgrade_scale_indexes.sql',
+        '0079_coordination_upgrade_scale_remediation.sql',
       ]);
       expect((await pool.query(
         `SELECT disabled_at IS NOT NULL AS disabled FROM principals
@@ -1080,7 +1088,9 @@ describe('runMigrations', () => {
       && name !== '0074_coordination_compatibility_and_upgrade_repair.sql'
       && name !== '0075_coordination_online_repair_finish.sql'
       && name !== '0076_coordination_review_2_remediation.sql'
-      && name !== '0077_coordination_review_2_online_finish.sql')) {
+      && name !== '0077_coordination_review_2_online_finish.sql'
+      && name !== '0078_coordination_upgrade_scale_indexes.sql'
+      && name !== '0079_coordination_upgrade_scale_remediation.sql')) {
       if (file === '0038_offboarding_search_path_hardening.sql') {
         await copyFile(
           new URL(

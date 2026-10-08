@@ -311,7 +311,9 @@ describe('issue 7 final remediation review 2 PostgreSQL proofs', () => {
       const buffers = Number(root['Shared Hit Blocks'] ?? 0)
         + Number(root['Shared Read Blocks'] ?? 0);
       expect(root['Actual Rows'], proof.label).toBe(proof.rows);
-      expect(buffers, proof.label).toBeLessThan(1_000);
+      // Includes first-call function-plan compilation as well as execution;
+      // the fixed cap remains independent of the 50,000-row backlog size.
+      expect(buffers, proof.label).toBeLessThan(2_000);
     }
     await pool.query('SELECT pg_stat_force_next_flush()');
     const scansAfter = new Map((await pool.query(

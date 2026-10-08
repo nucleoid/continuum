@@ -40,7 +40,7 @@ describe('coordination exact-head review regressions', () => {
     await pool?.end();
   });
 
-  async function createOperator(principalId: string) {
+  async function createOperator(principalId: string, max = 2) {
     const role = `coord_exact_${Date.now()}_${roles.length}`;
     roles.push(role);
     await pool.query('CREATE ROLE ' + quoteRole(role) + ' NOLOGIN');
@@ -52,7 +52,7 @@ describe('coordination exact-head review regressions', () => {
     const schema = String((await pool.query('SELECT current_schema() AS schema')).rows[0].schema);
     return new pg.Pool({
       ...(pool as unknown as { options: PoolConfig }).options,
-      max: 2, options: `-c search_path=${schema},public -c role=${role}`,
+      max, options: `-c search_path=${schema},public -c role=${role}`,
     });
   }
 
@@ -310,7 +310,7 @@ describe('coordination exact-head review regressions', () => {
     });
     await addMembership(pool, member.id, value.owned.id, 'writer');
     await mapOwnedUserScope(pool, value.operator, value.target.id, value.owned.id, true);
-    const operator = await createOperator(value.operator.id);
+    const operator = await createOperator(value.operator.id, 1);
     const appRole = `coord_exact_app_${Date.now()}_${roles.length}`;
     roles.push(appRole);
     await pool.query('CREATE ROLE ' + quoteRole(appRole) + ' NOLOGIN');
@@ -322,7 +322,7 @@ describe('coordination exact-head review regressions', () => {
     const schema = String((await pool.query('SELECT current_schema() AS schema')).rows[0].schema);
     const application = new pg.Pool({
       ...(pool as unknown as { options: PoolConfig }).options,
-      max: 2, options: `-c search_path=${schema},public -c role=${appRole}`,
+      max: 1, options: `-c search_path=${schema},public -c role=${appRole}`,
     });
     const blocker = await pool.connect();
     try {

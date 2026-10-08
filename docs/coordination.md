@@ -388,9 +388,11 @@ The guard applies only to a separate non-owner runtime role. PostgreSQL owners
 bypass it for maintenance, so a single-role installation where the application
 connects as the migration/function owner has no old-client refusal boundary.
 Use distinct migration-owner, application, and operator roles before relying on
-the guard. The current application binary also checks that the 0076 guard exists
-and the 0077 reconciliation completed before any privacy repair or non-dry-run
-offboarding mutation.
+the guard. The current application binary also requires the schema-local version
+marker installed by `0079_coordination_upgrade_scale_remediation.sql` before any
+privacy repair or non-dry-run offboarding mutation. Reaching 0079 requires the
+ledgered 0077 reconciliation prerequisite, so a binary deployed ahead of the
+0076-0079 chain fails closed without touching tenant privacy state.
 
 0076 is transactional and uses a one-second lock timeout while replacing
 triggers on `principal_user_scopes`. Apply it in a quiet window and retry the
@@ -399,6 +401,10 @@ partial 0076 state. 0077 is restartable and safe to retry. The historical
 environment name `CONTINUUM_COORDINATION_V4_BACKFILL_BATCH_SIZE` controls both
 the v4 and v5 reconciliation batches despite its name. 0076 also preserves
 completed scrub work when only detached cleanup is busy.
+0078 builds the legacy-incomplete discovery index concurrently and is safe to
+retry. 0079 installs range-bounded NULL-cursor, shallow-cursor, and targeted
+discovery plus contention-safe dirty-marker and detached-receipt handling. Apply
+0078 and 0079 before the current binary; rollback remains forward-only.
 The packaged migrator applies lock and statement timeouts to the restartable
 backfill, reduces a contended batch adaptively, and accepts
 `CONTINUUM_COORDINATION_V4_BACKFILL_BATCH_SIZE` from 1 through 5,000. Re-run

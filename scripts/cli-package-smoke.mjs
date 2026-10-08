@@ -69,6 +69,8 @@ try {
     'migrations/0075_coordination_online_repair_finish.sql',
     'migrations/0076_coordination_review_2_remediation.sql',
     'migrations/0077_coordination_review_2_online_finish.sql',
+    'migrations/0078_coordination_upgrade_scale_indexes.sql',
+    'migrations/0079_coordination_upgrade_scale_remediation.sql',
     'bin/continuum-migrate.mjs',
     'scripts/ensure-scope.mjs',
     'scripts/create-scope-operator.sql',

@@ -150,6 +150,25 @@ async function setCoordinationPrivacyClientVersion(client: pg.PoolClient): Promi
   );
 }
 
+async function requireCurrentCoordinationPrivacySchema(
+  client: pg.PoolClient,
+): Promise<void> {
+  const contract = await client.query<{ ready: boolean }>(
+    `SELECT to_regprocedure(format(
+       '%I.continuum_coordination_privacy_schema_ready()', namespace.nspname
+     )) IS NOT NULL AS ready
+       FROM pg_class relation
+       JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+      WHERE relation.oid = to_regclass('principals')`,
+  );
+  if (contract.rows[0]?.ready !== true) {
+    throw new ServiceError(
+      'CONFLICT',
+      'coordination privacy schema is incomplete; finish migrations before mutation',
+    );
+  }
+}
+
 async function tryAdvisoryXactLock(
   client: pg.PoolClient, sql: string, values: unknown[],
 ): Promise<void> {
@@ -201,6 +220,7 @@ export async function repairCoordinationPrivacy(
     await client.query('BEGIN');
     await client.query("SET LOCAL lock_timeout = '5s'");
     await client.query("SET LOCAL statement_timeout = '30s'");
+    await requireCurrentCoordinationPrivacySchema(client);
     await setCoordinationPrivacyClientVersion(client);
     await requireOrgAdmin(client, actor.id);
     await tryAdvisoryXactLock(
@@ -837,6 +857,7 @@ async function offboardPrincipalCore(
     await client.query('BEGIN');
     await client.query("SET LOCAL lock_timeout = '5s'");
     await client.query("SET LOCAL statement_timeout = '30s'");
+    if (!dryRun) await requireCurrentCoordinationPrivacySchema(client);
     await setCoordinationPrivacyClientVersion(client);
     if (!dryRun) {
       await tryAdvisoryXactLock(

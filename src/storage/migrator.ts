@@ -116,6 +116,10 @@ const FORWARD_MIGRATION_REQUIREMENTS = new Map([
     '0075_coordination_online_repair_finish.sql'],
   ['0077_coordination_review_2_online_finish.sql',
     '0076_coordination_review_2_remediation.sql'],
+  ['0078_coordination_upgrade_scale_indexes.sql',
+    '0077_coordination_review_2_online_finish.sql'],
+  ['0079_coordination_upgrade_scale_remediation.sql',
+    '0078_coordination_upgrade_scale_indexes.sql'],
 ]);
 const REVIEW_ENTRA_MIGRATION_RENAMES = [
   ['0005_entra_auth.sql', '0010_entra_auth.sql'],
@@ -198,13 +202,17 @@ function repair0074PartialUpgradeDiscovery(sql: string): string {
       `WHERE function.pronamespace = quote_ident(current_schema())::regnamespace
        AND function.proname LIKE 'continuum\\_%' ESCAPE '\\'
        AND function.proowner = current_user::regrole
-       AND position(chr(13) IN function.prosrc) > 0
+       AND position(chr(13) || chr(10) IN function.prosrc) > 0
        AND NOT EXISTS (
          SELECT 1 FROM pg_depend dependency
           WHERE dependency.classid = 'pg_proc'::regclass
             AND dependency.objid = function.oid
             AND dependency.refclassid = 'pg_extension'::regclass
             AND dependency.deptype = 'e')`,
+    ],
+    [
+      `    normalized := replace(replace(definition, chr(13) || chr(10), chr(10)), chr(13), chr(10));`,
+      `    normalized := replace(definition, chr(13) || chr(10), chr(10));`,
     ],
   ] as const;
   let repaired = sql;
@@ -239,6 +247,20 @@ END;
 $harden_partial_0074$;`;
 }
 
+function repair0076CrLfNormalization(sql: string): string {
+  const before = String.raw`       AND position(chr(13) IN function.prosrc) > 0`;
+  const after = String.raw`       AND position(chr(13) || chr(10) IN function.prosrc) > 0`;
+  const normalizationBefore =
+    `    normalized := replace(replace(definition, chr(13) || chr(10), chr(10)), `
+    + `chr(13), chr(10));`;
+  const normalizationAfter =
+    `    normalized := replace(definition, chr(13) || chr(10), chr(10));`;
+  if (!sql.includes(before) || !sql.includes(normalizationBefore)) {
+    throw new Error('published 0076 CRLF normalization boundary was not found');
+  }
+  return sql.replace(before, after).replace(normalizationBefore, normalizationAfter);
+}
+
 async function repairStoredCrLfFunctions(client: pg.PoolClient): Promise<void> {
   const functions = await client.query<{ definition: string }>(
     String.raw`SELECT pg_get_functiondef(function.oid) AS definition
@@ -246,7 +268,7 @@ async function repairStoredCrLfFunctions(client: pg.PoolClient): Promise<void> {
       WHERE function.pronamespace = quote_ident(current_schema())::regnamespace
         AND function.proname LIKE 'continuum\_%' ESCAPE '\'
         AND function.proowner = current_user::regrole
-        AND position(chr(13) IN function.prosrc) > 0
+        AND position(chr(13) || chr(10) IN function.prosrc) > 0
         AND NOT EXISTS (
           SELECT 1 FROM pg_depend dependency
            WHERE dependency.classid = 'pg_proc'::regclass
@@ -256,7 +278,7 @@ async function repairStoredCrLfFunctions(client: pg.PoolClient): Promise<void> {
       ORDER BY function.oid`,
   );
   for (const row of functions.rows) {
-    const normalized = row.definition.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+    const normalized = row.definition.replaceAll('\r\n', '\n');
     await client.query(normalized);
   }
   const remaining = await client.query<{ count: number }>(
@@ -265,7 +287,7 @@ async function repairStoredCrLfFunctions(client: pg.PoolClient): Promise<void> {
       WHERE function.pronamespace = quote_ident(current_schema())::regnamespace
         AND function.proname LIKE 'continuum\_%' ESCAPE '\'
         AND function.proowner = current_user::regrole
-        AND position(chr(13) IN function.prosrc) > 0
+        AND position(chr(13) || chr(10) IN function.prosrc) > 0
         AND NOT EXISTS (
           SELECT 1 FROM pg_depend dependency
            WHERE dependency.classid = 'pg_proc'::regclass
@@ -551,6 +573,8 @@ export async function runMigrations(
         ? deferLegacy0073Backfill(canonicalSql)
         : file === '0074_coordination_compatibility_and_upgrade_repair.sql'
           ? repair0074PartialUpgradeDiscovery(canonicalSql)
+          : file === '0076_coordination_review_2_remediation.sql'
+            ? repair0076CrLfNormalization(canonicalSql)
           : canonicalSql;
       try {
         if (sql.trimStart().startsWith(NO_TRANSACTION_MARKER)) {
