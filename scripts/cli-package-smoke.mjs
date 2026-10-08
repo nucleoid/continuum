@@ -71,6 +71,7 @@ try {
     'migrations/0077_coordination_review_2_online_finish.sql',
     'migrations/0078_coordination_upgrade_scale_indexes.sql',
     'migrations/0079_coordination_upgrade_scale_remediation.sql',
+    'migrations/0080_pgvector_provider_grants.sql',
     'bin/continuum-migrate.mjs',
     'scripts/ensure-scope.mjs',
     'scripts/create-scope-operator.sql',
@@ -99,6 +100,9 @@ try {
   let ledgerChecks = 0;
   const client = {
     async query(sql) {
+      if (String(sql).includes('pg_try_advisory_lock')) {
+        return { rowCount: 1, rows: [{ locked: true }] };
+      }
       if (String(sql).includes('FROM _continuum_migrations')) {
         ledgerChecks += 1;
         return { rowCount: 1, rows: [] };
