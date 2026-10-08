@@ -44,6 +44,54 @@ async function dropRoles(pool: pg.Pool, roles: string[]): Promise<void> {
   for (const role of [...roles].reverse()) await pool.query('DROP ROLE ' + quoteRole(role));
 }
 
+async function retiredRoleSafety(pool: pg.Pool, roleName: string) {
+  return (await pool.query(
+    `WITH target AS (
+       SELECT oid, rolcanlogin FROM pg_roles WHERE rolname = $1
+     ), owner AS (
+       SELECT relowner AS oid FROM pg_class WHERE oid = 'principals'::regclass
+     )
+     SELECT target.rolcanlogin,
+       EXISTS (
+         SELECT 1 FROM pg_auth_members membership, owner
+          WHERE target.oid IN (membership.roleid, membership.member)
+            AND NOT (membership.roleid = target.oid AND membership.member = owner.oid
+                     AND membership.admin_option AND NOT membership.set_option
+                     AND NOT membership.inherit_option)
+       ) AS unsafe_membership,
+       EXISTS (
+         SELECT 1 FROM pg_namespace namespace
+         CROSS JOIN LATERAL aclexplode(COALESCE(
+           namespace.nspacl, acldefault('n', namespace.nspowner))) privilege
+          WHERE namespace.nspname = current_schema() AND privilege.grantee = target.oid
+       ) AS schema_acl,
+       EXISTS (
+         SELECT 1 FROM pg_class relation
+         CROSS JOIN LATERAL aclexplode(COALESCE(
+           relation.relacl, acldefault(
+             CASE WHEN relation.relkind = 'S' THEN 's'::"char" ELSE 'r'::"char" END,
+             relation.relowner))) privilege
+          WHERE relation.relnamespace = quote_ident(current_schema())::regnamespace
+            AND privilege.grantee = target.oid
+       ) AS relation_acl,
+       EXISTS (
+         SELECT 1 FROM pg_attribute attribute
+         CROSS JOIN LATERAL aclexplode(attribute.attacl) privilege
+         JOIN pg_class relation ON relation.oid = attribute.attrelid
+          WHERE relation.relnamespace = quote_ident(current_schema())::regnamespace
+            AND privilege.grantee = target.oid
+       ) AS column_acl,
+       EXISTS (
+         SELECT 1 FROM pg_proc function
+         CROSS JOIN LATERAL aclexplode(COALESCE(
+           function.proacl, acldefault('f', function.proowner))) privilege
+          WHERE function.pronamespace = quote_ident(current_schema())::regnamespace
+            AND privilege.grantee = target.oid
+       ) AS function_acl
+     FROM target`, [roleName],
+  )).rows[0];
+}
+
 describe('sync database identity rotation security', () => {
   let pool: pg.Pool;
   beforeEach(async () => { pool ??= await makeTestPool(); await resetData(pool); }, 30_000);
@@ -219,6 +267,10 @@ describe('sync database identity rotation security', () => {
         'GRANT ' + quoteRole(oldRole)
         + ' TO CURRENT_USER WITH ADMIN OPTION, SET FALSE, INHERIT FALSE',
       );
+      expect(await retiredRoleSafety(pool, oldRole)).toEqual({
+        rolcanlogin: false, unsafe_membership: false, schema_acl: false,
+        relation_acl: false, column_acl: false, function_acl: false,
+      });
       await expect(applyGrantScript(pool, 'verify-database-identities.sql', {
         continuum_schema: 'public',
         continuum_app_role: applicationRole,
@@ -269,6 +321,18 @@ describe('sync database identity rotation security', () => {
     } finally {
       await pool.query('REVOKE ' + quoteRole(oldRole) + ' FROM CURRENT_USER');
       await fixture.operator.end();
+      await pool.query(
+        `DELETE FROM continuum_trusted_database_identities
+          WHERE database_role = ANY($1::name[])`, [[oldRole, nextRole, fixture.operatorRole]],
+      );
+      await pool.query(
+        `DELETE FROM continuum_retired_sync_database_identities
+          WHERE database_role = $1::name`, [oldRole],
+      );
+      await pool.query(
+        `DELETE FROM continuum_unresolved_retired_sync_database_identities
+          WHERE database_role = $1::name`, [oldRole],
+      );
       await dropRoles(pool, [oldRole, nextRole, applicationRole, fixture.operatorRole]);
     }
   });
@@ -934,28 +998,31 @@ describe('sync database identity rotation security', () => {
     const recordedName = 'continuum_retired_collision_' + Date.now();
     const renamedRetired = 'continuum_retired_collision_old_' + Date.now();
     const appRole = 'continuum_retired_collision_app_' + Date.now();
-    await pool.query('CREATE ROLE ' + quoteRole(recordedName) + ' NOLOGIN');
-    await pool.query('CREATE ROLE ' + quoteRole(appRole) + ' NOLOGIN');
-    await grantOwnerRetirementAuthority(pool, recordedName);
-    const retiredOid = (await pool.query(
-      'SELECT oid::text FROM pg_roles WHERE rolname = $1', [recordedName],
-    )).rows[0].oid;
-    await pool.query(
-      `INSERT INTO continuum_retired_sync_database_identities
-         (database_role_oid, database_role) VALUES ($1, $2::name)`,
-      [retiredOid, recordedName],
-    );
-    await pool.query('ALTER ROLE ' + quoteRole(recordedName) + ' RENAME TO ' + quoteRole(renamedRetired));
-    await pool.query('CREATE ROLE ' + quoteRole(recordedName) + ' LOGIN');
-    await grantOwnerRetirementAuthority(pool, recordedName);
-    await applyGrantScript(pool, 'grant-application-role.sql', { continuum_app_role: appRole });
-    await applyGrantScript(pool, 'grant-sync-role.sql', {
-      continuum_sync_role: recordedName, continuum_principal_id: fixture.service.id,
-    });
-    const activeOid = (await pool.query(
-      'SELECT oid::text FROM pg_roles WHERE rolname = $1', [recordedName],
-    )).rows[0].oid;
+    let retiredOid: string | undefined;
     try {
+      await pool.query('CREATE ROLE ' + quoteRole(recordedName) + ' NOLOGIN');
+      await pool.query('CREATE ROLE ' + quoteRole(appRole) + ' NOLOGIN');
+      await grantOwnerRetirementAuthority(pool, recordedName);
+      retiredOid = (await pool.query(
+        'SELECT oid::text FROM pg_roles WHERE rolname = $1', [recordedName],
+      )).rows[0].oid;
+      await pool.query(
+        `INSERT INTO continuum_retired_sync_database_identities
+           (database_role_oid, database_role) VALUES ($1, $2::name)`,
+        [retiredOid, recordedName],
+      );
+      await pool.query(
+        'ALTER ROLE ' + quoteRole(recordedName) + ' RENAME TO ' + quoteRole(renamedRetired),
+      );
+      await pool.query('CREATE ROLE ' + quoteRole(recordedName) + ' LOGIN');
+      await grantOwnerRetirementAuthority(pool, recordedName);
+      await applyGrantScript(pool, 'grant-application-role.sql', { continuum_app_role: appRole });
+      await applyGrantScript(pool, 'grant-sync-role.sql', {
+        continuum_sync_role: recordedName, continuum_principal_id: fixture.service.id,
+      });
+      const activeOid = (await pool.query(
+        'SELECT oid::text FROM pg_roles WHERE rolname = $1', [recordedName],
+      )).rows[0].oid;
       await expect(pool.query(
         "SELECT continuum_rebind_database_identity_oids('REBIND DATABASE IDENTITIES', 'PRESERVED OID NAMESPACE')",
       )).rejects.toThrow(/retired.*OID.*renamed|active.*retired|ambiguous/i);
@@ -982,10 +1049,20 @@ describe('sync database identity rotation security', () => {
         [[fixture.operatorRole, recordedName]],
       );
       await pool.query(
-        'DELETE FROM continuum_retired_sync_database_identities WHERE database_role_oid = $1::oid',
-        [retiredOid],
+        `DELETE FROM continuum_retired_sync_database_identities
+          WHERE database_role = $1::name
+             OR ($2::text IS NOT NULL AND database_role_oid = $2::oid)`,
+        [recordedName, retiredOid ?? null],
       );
-      await dropRoles(pool, [recordedName, renamedRetired, appRole, fixture.operatorRole]);
+      await pool.query(
+        `DELETE FROM continuum_unresolved_retired_sync_database_identities
+          WHERE database_role = $1::name`, [recordedName],
+      );
+      const existingRoles = (await pool.query<{ rolname: string }>(
+        `SELECT rolname FROM pg_roles WHERE rolname = ANY($1::name[])`,
+        [[recordedName, renamedRetired, appRole, fixture.operatorRole]],
+      )).rows.map((row) => row.rolname);
+      await dropRoles(pool, existingRoles);
     }
   });
 

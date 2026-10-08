@@ -22,10 +22,22 @@ export async function resetData(pool: pg.Pool): Promise<void> {
       DISABLE TRIGGER preserve_offboarding_takeover_event;
     ALTER TABLE principal_offboarding_runs
       DISABLE TRIGGER guard_offboarding_run_truncate;
+    ALTER TABLE coordination_operator_events
+      DISABLE TRIGGER preserve_coordination_operator_event_truncate;
   `);
   try {
     await pool.query(`
       TRUNCATE TABLE
+        coordination_operation_receipts,
+        coordination_operator_events,
+        coordination_scope_privacy_progress,
+        coordination_principal_privacy_progress,
+        coordination_migration_progress,
+        coordination_scope_fencing_floors,
+        coordination_principal_usage,
+        coordination_scope_usage,
+        coordination_leases,
+        coordination_resources,
         ingest_deliveries,
         principal_aliases,
         audit_log,
@@ -60,6 +72,8 @@ export async function resetData(pool: pg.Pool): Promise<void> {
       ENABLE TRIGGER preserve_offboarding_takeover_event;
       ALTER TABLE principal_offboarding_runs
         ENABLE TRIGGER guard_offboarding_run_truncate;
+      ALTER TABLE coordination_operator_events
+        ENABLE TRIGGER preserve_coordination_operator_event_truncate;
     `);
   }
   // Re-seed static rows inserted by migrations.
@@ -70,6 +84,12 @@ export async function resetData(pool: pg.Pool): Promise<void> {
     `INSERT INTO principals (id, external_id, kind, display_name)
      VALUES ('00000000-0000-4000-8000-000000000011',
              NULL, 'service', 'system:lifecycle')`,
+  );
+  await pool.query(
+    `INSERT INTO principals (id, external_id, kind, display_name)
+     VALUES ('00000000-0000-4000-8000-000000000012',
+             gen_random_uuid()::text, 'service',
+             'system:detached-coordination-history')`,
   );
   await pool.query('INSERT INTO entra_sync_state (singleton) VALUES (TRUE)');
 }

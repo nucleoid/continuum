@@ -14,9 +14,10 @@ const quoteRole = (role: string) => '"' + role.replaceAll('"', '""') + '"';
 async function applyGrantScript(
   pool: pg.Pool, filename: string, variables: Record<string, string>,
 ): Promise<void> {
+  const schema = (await pool.query('SELECT current_schema() AS schema')).rows[0].schema as string;
   const source = await readFile(join(process.cwd(), 'scripts', filename), 'utf8');
   let sql = source.split(/\r?\n/).filter((line) => !line.trimStart().startsWith('\\')).join('\n')
-    .replaceAll(':"continuum_schema"', '"public"');
+    .replaceAll(':"continuum_schema"', quoteRole(schema));
   for (const [name, value] of Object.entries(variables)) {
     sql = sql.replaceAll(':"' + name + '"', quoteRole(value));
     sql = sql.replaceAll(":'" + name + "'", "'" + value.replaceAll("'", "''") + "'");
@@ -47,7 +48,8 @@ async function createRolePool(
   return new pg.Pool({
     ...(pool as unknown as { options: PoolConfig }).options,
     max: 1,
-    options: '-c role=' + role,
+    options: `${(pool as unknown as { options: PoolConfig }).options.options
+      ?? process.env.PGOPTIONS ?? ''} -c role=${role}`.trim(),
   });
 }
 
@@ -140,7 +142,9 @@ describe('independent exact-head review remediation', () => {
       );
       newConnection = new pg.Pool({
         ...(pool as unknown as { options: PoolConfig }).options,
-        max: 1, options: '-c role=' + newRole,
+        max: 1,
+        options: `${(pool as unknown as { options: PoolConfig }).options.options
+          ?? process.env.PGOPTIONS ?? ''} -c role=${newRole}`.trim(),
       });
       await expect(newConnection.query(
         'SELECT continuum_require_sync_session($1)', [newService.id],

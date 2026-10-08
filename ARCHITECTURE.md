@@ -11,6 +11,48 @@ Status: design, pre-implementation. This document is the source of truth for the
 5. **Decay is per-type**. A decision does not decay like a context snapshot. The taxonomy drives the lifecycle.
 6. **Build for the next milestone, not the next decade**. No speculative interfaces.
 
+## Coordination domain
+
+Coordination leases are a dedicated PostgreSQL domain, separate from memories,
+embeddings, capture, recall, and generated AGENTS.md content. The public
+contract is documented in [docs/coordination.md](./docs/coordination.md).
+
+`coordination_resources` preserves a monotonic `BIGINT` fencing counter for
+each unreclaimed scope/resource pair, with an owner-only scope floor preserving
+monotonicity after reclaim or erasure. `coordination_leases` records lease
+generations whose identity and token are immutable while expiry and release
+time are lifecycle fields.
+`coordination_operation_receipts` stores typed idempotency outcomes, while
+scope and principal usage tables enforce hard resource and retained-receipt
+limits. Release evicts the oldest release receipt at saturation so relinquishing
+a lease cannot be blocked by observability quota. Bounded operator maintenance
+uses durable cleanup eligibility rather than rescanning current expired leases,
+and may reclaim inactive keys after preserving the scope fencing floor.
+
+Only current explicit writer/admin membership on the exact scope grants access.
+A coordination transaction locks membership and Entra freshness state, then
+the exact receipt/resource/lease rows in canonical order. Principal quota rows
+are touched only near receipt insertion or new-key creation rather than
+serializing the whole transaction. It samples `clock_timestamp()` after row
+waits and revalidates authorization and cancellation immediately before commit.
+Lease mutation, receipt, quota, and bounded metadata commit together. Before offboarding, audit metadata includes a one-way resource digest;
+offboarding removes it. Owned user-scope coordination rows are erased in
+bounded resumable phases after preserving the scope fencing floor. Team,
+project, and organization history is detached to a noninteractive principal
+with fresh run identifiers and random payload hashes.
+
+REST and MCP are thin naming adapters over one service. REST uses camelCase and
+MCP uses snake_case. Contention is success, stale or denied generations are
+masked as `LEASE_LOST`, and another holder's identifiers are never returned.
+Server-side lock and statement timeouts bound waits without allowing a locally
+timed-out mutating query to continue ambiguously.
+
+This service supplies ownership coordination, not end-to-end side-effect
+fencing. Downstream systems must validate fencing tokens for them to have
+effect. GitHub and ordinary filesystems do not do this natively, so
+orchestrator-only publication, exact-head checks, and branch protection remain
+required.
+
 ## Scope model
 
 Five scopes:

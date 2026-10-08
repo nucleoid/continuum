@@ -20,12 +20,24 @@ SELECT :"continuum_schema".continuum_register_trusted_database_identity(
 );
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE :"continuum_schema".entra_groups
 FROM :"continuum_operator_role";
+REVOKE ALL ON FUNCTION
+  :"continuum_schema".continuum_operator_pseudonymize_scope_v2_legacy(UUID, UUID, TEXT)
+FROM :"continuum_operator_role";
 GRANT EXECUTE ON FUNCTION
   :"continuum_schema".continuum_create_user_scope_approval(UUID, UUID, UUID, UUID[], TEXT),
   :"continuum_schema".continuum_upsert_entra_group_binding(UUID, TEXT, TEXT, UUID, TEXT),
   :"continuum_schema".continuum_operator_revoke_entra_group_binding(UUID, TEXT),
   :"continuum_schema".continuum_operator_offboard_scope_access(UUID, UUID),
   :"continuum_schema".continuum_operator_pseudonymize_scope(UUID, UUID, TEXT),
+  :"continuum_schema".continuum_operator_pseudonymize_scope_v2(UUID, UUID, TEXT),
+  :"continuum_schema".continuum_operator_reclaim_coordination_resource(UUID, UUID, TEXT),
+  :"continuum_schema".continuum_operator_set_coordination_scope_quota(UUID, UUID, INTEGER),
+  :"continuum_schema".continuum_operator_sweep_coordination_state(UUID, INTEGER),
+  :"continuum_schema".continuum_operator_scrub_coordination_principal(UUID, UUID, UUID, INTEGER),
+  :"continuum_schema".continuum_operator_list_coordination_privacy_repairs(UUID, UUID, INTEGER),
+  :"continuum_schema".continuum_operator_list_coordination_privacy_repairs(UUID, UUID, UUID, INTEGER),
+  :"continuum_schema".continuum_operator_offboarding_actual_state_is_erased(UUID, UUID),
+  :"continuum_schema".continuum_operator_set_coordination_principal_quota(UUID, UUID, INTEGER, INTEGER),
   :"continuum_schema".continuum_change_manual_org_admin(UUID, UUID, TEXT, BOOLEAN),
   :"continuum_schema".continuum_takeover_manual_org_admin(UUID, UUID, UUID),
   :"continuum_schema".continuum_operator_complete_offboarding_run(UUID, UUID, JSONB),
