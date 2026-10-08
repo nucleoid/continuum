@@ -68,6 +68,17 @@ async function fullMigrationDirectory(): Promise<string> {
   return directory;
 }
 
+async function migrationDirectoryThrough(lastName: string): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), 'continuum-pgvector-partial-chain-'));
+  directories.push(directory);
+  const source = join(process.cwd(), 'migrations');
+  for (const file of (await readdir(source))
+    .filter((name) => name.endsWith('.sql') && name <= lastName)) {
+    await copyFile(join(source, file), join(directory, file));
+  }
+  return directory;
+}
+
 async function grantApplicationRole(
   pool: pg.Pool,
   schema: string,
@@ -128,6 +139,129 @@ afterEach(async () => {
 });
 
 describe('pgvector rollout remediation', () => {
+  it('refuses a foreign-owned default provider schema without leaving fresh state', async () => {
+    const foreignOwner = identifier('continuum_provider_owner');
+    roles.push(foreignOwner);
+    await withFreshDatabase(async (root, target, url) => {
+      const applicationSchema = identifier('continuum_app');
+      await root.query(`CREATE ROLE ${quoteIdentifier(foreignOwner)} NOLOGIN`);
+      await target.query(`CREATE SCHEMA ${quoteIdentifier(applicationSchema)}`);
+      await target.query(
+        `CREATE SCHEMA continuum_extensions AUTHORIZATION ${quoteIdentifier(foreignOwner)}`,
+      );
+      const pool = migrationPool(url, applicationSchema);
+      const directory = await migrationDirectoryThrough('0001_init.sql');
+
+      await expect(runMigrations(pool, directory)).rejects.toThrow(
+        /continuum_extensions.*owned.*current migration role|fix ownership/i,
+      );
+      expect((await target.query(
+        `SELECT to_regtype('continuum_extensions.vector') IS NULL AS no_vector,
+                to_regclass($1) IS NULL AS no_ledger`,
+        [`${applicationSchema}._continuum_migrations`],
+      )).rows).toEqual([{ no_vector: true, no_ledger: true }]);
+    });
+  });
+
+  it('refuses CREATE on the default provider schema granted to a non-owner', async () => {
+    const outsider = identifier('continuum_provider_writer');
+    roles.push(outsider);
+    await withFreshDatabase(async (root, target, url) => {
+      const applicationSchema = identifier('continuum_app');
+      await root.query(`CREATE ROLE ${quoteIdentifier(outsider)} NOLOGIN`);
+      await target.query(`CREATE SCHEMA ${quoteIdentifier(applicationSchema)}`);
+      await target.query('CREATE SCHEMA continuum_extensions');
+      await target.query(
+        `GRANT CREATE ON SCHEMA continuum_extensions TO ${quoteIdentifier(outsider)}`,
+      );
+      const pool = migrationPool(url, applicationSchema);
+      const directory = await migrationDirectoryThrough('0001_init.sql');
+
+      await expect(runMigrations(pool, directory)).rejects.toThrow(
+        /continuum_extensions.*CREATE.*non-owner|revoke CREATE/i,
+      );
+      expect((await target.query(
+        `SELECT to_regtype('continuum_extensions.vector') IS NULL AS no_vector`,
+      )).rows).toEqual([{ no_vector: true }]);
+    });
+  });
+
+  it('refuses a fresh tenant binding to another Continuum schema provider', async () => {
+    await withFreshDatabase(async (_root, target, url) => {
+      const firstSchema = identifier('continuum_existing_tenant');
+      const secondSchema = identifier('continuum_new_tenant');
+      await target.query(`CREATE SCHEMA ${quoteIdentifier(firstSchema)}`);
+      await target.query(`CREATE SCHEMA ${quoteIdentifier(secondSchema)}`);
+      await target.query(
+        `CREATE EXTENSION vector WITH SCHEMA ${quoteIdentifier(firstSchema)}`,
+      );
+      await target.query(`
+        CREATE TABLE ${quoteIdentifier(firstSchema)}._continuum_migrations (
+          name TEXT PRIMARY KEY,
+          applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        INSERT INTO ${quoteIdentifier(firstSchema)}._continuum_migrations (name)
+        VALUES ('0001_init.sql');
+      `);
+      const pool = migrationPool(url, secondSchema);
+      const directory = await migrationDirectoryThrough('0001_init.sql');
+
+      await expect(runMigrations(pool, directory)).rejects.toThrow(
+        /another Continuum.*schema|legacy shared.*opt-in|relocat/i,
+      );
+      expect((await target.query(
+        `SELECT to_regclass($1) IS NULL AS no_memories,
+                to_regclass($2) IS NULL AS no_ledger`,
+        [`${secondSchema}.memories`, `${secondSchema}._continuum_migrations`],
+      )).rows).toEqual([{ no_memories: true, no_ledger: true }]);
+    });
+  });
+
+  it('rejects an empty migration search_path before creating a ledger', async () => {
+    await withFreshDatabase(async (_root, target, url) => {
+      const pool = new pg.Pool({
+        connectionString: url,
+        max: 1,
+        options: '-c search_path=',
+      });
+      pool.on('error', () => undefined);
+      pools.push(pool);
+      const directory = await migrationDirectoryThrough('0001_init.sql');
+
+      await expect(runMigrations(pool, directory)).rejects.toThrow(
+        /search_path.*application schema|empty search_path/i,
+      );
+      expect((await target.query(
+        `SELECT to_regclass('_continuum_migrations') IS NULL AS no_ledger`,
+      )).rows).toEqual([{ no_ledger: true }]);
+    });
+  });
+
+  it('rejects an application-schema vector shadow before 0001', async () => {
+    await withFreshDatabase(async (_root, target, url) => {
+      const applicationSchema = `${identifier('continuum_app')}"quoted`;
+      const providerSchema = identifier('provider_extensions');
+      await target.query(`CREATE SCHEMA ${quoteIdentifier(applicationSchema)}`);
+      await target.query(`CREATE SCHEMA ${quoteIdentifier(providerSchema)}`);
+      await target.query(
+        `CREATE EXTENSION vector WITH SCHEMA ${quoteIdentifier(providerSchema)}`,
+      );
+      await target.query(
+        `CREATE DOMAIN ${quoteIdentifier(applicationSchema)}.vector AS text`,
+      );
+      const pool = migrationPool(url, applicationSchema);
+      const directory = await migrationDirectoryThrough('0001_init.sql');
+
+      await expect(runMigrations(pool, directory)).rejects.toThrow(
+        /application schema.*shadows.*vector|remove.*vector.*shadow/i,
+      );
+      expect((await target.query(
+        `SELECT to_regclass($1) IS NULL AS no_memories`,
+        [`${applicationSchema}.memories`],
+      )).rows).toEqual([{ no_memories: true }]);
+    });
+  });
+
   it('restores search_path immediately after 0001 and preserves sibling colliding indexes', async () => {
     await withFreshDatabase(async (_root, target, url) => {
       const applicationSchema = `continuum_app_${randomUUID()}"quoted`;
@@ -381,4 +515,44 @@ describe('pgvector rollout remediation', () => {
       );
     });
   });
+
+  it('upgrades only exact application profiles and ignores a SELECT-only outsider', async () => {
+    const appRole = identifier('continuum_app');
+    const outsider = identifier('continuum_reporter');
+    roles.push(outsider, appRole);
+    await withFreshDatabase(async (root, target, url) => {
+      const applicationSchema = identifier('continuum_data');
+      const providerSchema = identifier('provider_extensions');
+      await root.query(`CREATE ROLE ${quoteIdentifier(appRole)} NOLOGIN`);
+      await root.query(`CREATE ROLE ${quoteIdentifier(outsider)} NOLOGIN`);
+      await target.query(`CREATE SCHEMA ${quoteIdentifier(applicationSchema)}`);
+      await target.query(`CREATE SCHEMA ${quoteIdentifier(providerSchema)}`);
+      await target.query(
+        `CREATE EXTENSION vector WITH SCHEMA ${quoteIdentifier(providerSchema)}`,
+      );
+      const before0080 = await migrationDirectoryThrough(
+        '0079_coordination_upgrade_scale_remediation.sql',
+      );
+      const pool = migrationPool(url, applicationSchema);
+      await runMigrations(pool, before0080);
+      await grantApplicationRole(pool, applicationSchema, appRole);
+      await pool.query(`GRANT SELECT ON memories TO ${quoteIdentifier(outsider)}`);
+      await target.query(
+        `REVOKE USAGE ON SCHEMA ${quoteIdentifier(providerSchema)} FROM PUBLIC`,
+      );
+      await target.query(
+        `REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA ${quoteIdentifier(providerSchema)} FROM PUBLIC`,
+      );
+      const full = await fullMigrationDirectory();
+
+      await expect(runMigrations(pool, full)).resolves.toEqual([
+        expect.objectContaining({ name: '0080_pgvector_provider_grants.sql' }),
+      ]);
+      expect((await target.query(
+        `SELECT has_schema_privilege($1, $2, 'USAGE') AS app_usage,
+                has_schema_privilege($3, $2, 'USAGE') AS outsider_usage`,
+        [appRole, providerSchema, outsider],
+      )).rows).toEqual([{ app_usage: true, outsider_usage: false }]);
+    });
+  }, 240_000);
 });
