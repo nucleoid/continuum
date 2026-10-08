@@ -513,55 +513,23 @@ export async function runMigrations(
     // pending migration must never get an opportunity to execute.
     for (const file of files) await verifyPublishedMigration(migrationsDir, file);
 
-    if (files.includes('0001_init.sql')) {
-      const schema = await client.query<{
-        schema: string | null;
-        owned: boolean;
-        unsafeCreate: boolean;
-        ledgerExists: boolean;
-      }>(`
-        SELECT namespace.nspname AS schema,
-               (namespace.nspowner = role.oid
-                 OR pg_has_role(role.oid, namespace.nspowner, 'USAGE')) AS owned,
-               EXISTS (
-                 SELECT 1
-                   FROM aclexplode(COALESCE(
-                     namespace.nspacl,
-                     acldefault('n', namespace.nspowner))) privilege
-                  WHERE upper(privilege.privilege_type) = 'CREATE'
-                    AND privilege.grantee <> namespace.nspowner
-               ) AS "unsafeCreate",
-               CASE WHEN namespace.oid IS NULL THEN FALSE ELSE
-                 to_regclass(format('%I._continuum_migrations', namespace.nspname))
-                   IS NOT NULL
-               END AS "ledgerExists"
-          FROM pg_roles role
-          LEFT JOIN pg_namespace namespace ON namespace.nspname = current_schema()
-         WHERE role.rolname = current_user
+    try {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS _continuum_migrations (
+          name        TEXT PRIMARY KEY,
+          applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
       `);
-      applicationSchema = schema.rows[0]?.schema ?? undefined;
-      if (!applicationSchema) {
+    } catch (error) {
+      if ((error as { code?: string }).code === '3F000') {
         throw new Error(
           'The migration search_path does not select an application schema; '
           + 'configure a non-empty owner-controlled schema first',
+          { cause: error },
         );
       }
-      if (!schema.rows[0]?.owned || schema.rows[0]?.unsafeCreate) {
-        throw new Error(
-          `The application schema ${quoteIdentifier(applicationSchema)} selected by `
-          + `search_path must be owner-controlled by the current migration role and must not `
-          + `grant CREATE to PUBLIC or a non-owner`,
-        );
-      }
-      migrationLedgerCreated = !schema.rows[0]?.ledgerExists;
+      throw error;
     }
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS _continuum_migrations (
-        name        TEXT PRIMARY KEY,
-        applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-      )
-    `);
 
     if (files.includes('0001_init.sql')) {
       const initialMigration = await client.query(
@@ -575,6 +543,41 @@ export async function runMigrations(
           WHERE extension.extname = 'vector'`,
       );
       if (!initialMigration.rowCount) {
+        const schema = await client.query<{
+          schema: string | null;
+          owned: boolean;
+          unsafeCreate: boolean;
+        }>(`
+          SELECT namespace.nspname AS schema,
+                 (namespace.nspowner = role.oid
+                   OR pg_has_role(role.oid, namespace.nspowner, 'USAGE')) AS owned,
+                 EXISTS (
+                   SELECT 1
+                     FROM aclexplode(COALESCE(
+                       namespace.nspacl,
+                       acldefault('n', namespace.nspowner))) privilege
+                    WHERE upper(privilege.privilege_type) = 'CREATE'
+                      AND privilege.grantee <> namespace.nspowner
+                 ) AS "unsafeCreate"
+            FROM pg_roles role
+            LEFT JOIN pg_namespace namespace ON namespace.nspname = current_schema()
+           WHERE role.rolname = current_user
+        `);
+        applicationSchema = schema.rows[0]?.schema ?? undefined;
+        if (!applicationSchema) {
+          throw new Error(
+            'The migration search_path does not select an application schema; '
+            + 'configure a non-empty owner-controlled schema first',
+          );
+        }
+        if (!schema.rows[0]?.owned || schema.rows[0]?.unsafeCreate) {
+          throw new Error(
+            `The application schema ${quoteIdentifier(applicationSchema)} selected by `
+            + `search_path must be owner-controlled by the current migration role and must not `
+            + `grant CREATE to PUBLIC or a non-owner`,
+          );
+        }
+        migrationLedgerCreated = true;
         if (vectorExtension.rows.length === 0) {
           // Extension installation is database-wide. Keep it under the same
           // advisory lock as 0001 and place a fresh installation in a stable
