@@ -207,12 +207,6 @@ GRANT EXECUTE ON FUNCTION
   :"continuum_schema".continuum_disable_principal(UUID, UUID)
 TO :"continuum_app_role";
 
--- PUBLIC function execution is closed across the application schema. Restore
--- only pgvector provider-schema USAGE and extension routines directly to roles
--- with the application profile; the owner-only helper discovers this role
--- from its memories grant and reports provider-owned grants it cannot delegate.
-SELECT :"continuum_schema".continuum_grant_application_vector_functions();
-
 REVOKE ALL ON FUNCTION
   :"continuum_schema".continuum_create_user_scope_approval(UUID, UUID, UUID, UUID[], TEXT),
   :"continuum_schema".continuum_upsert_entra_group_binding(UUID, TEXT, TEXT, UUID, TEXT),
@@ -319,6 +313,10 @@ REVOKE ALL ON TABLE
   :"continuum_schema".continuum_offboarding_restart_requests
 FROM :"continuum_app_role";
 
+-- Reconcile provider access only after the exact application profile is in
+-- place. The owner-only helper also removes provider grants retained by roles
+-- that no longer match the application/operator profile.
+SELECT :"continuum_schema".continuum_grant_application_vector_functions();
 SELECT :"continuum_schema".continuum_assert_application_role_allowlist(
   :'continuum_app_role'::name
 );

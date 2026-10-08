@@ -139,6 +139,25 @@ afterEach(async () => {
 });
 
 describe('pgvector rollout remediation', () => {
+  it('supports PostgreSQL database-owner control of a hardened public app schema', async () => {
+    await withFreshDatabase(async (_root, target, url) => {
+      const pool = migrationPool(url, 'public');
+      await expect(runMigrations(
+        pool, await migrationDirectoryThrough('0001_init.sql'),
+      )).resolves.toEqual([expect.objectContaining({ name: '0001_init.sql' })]);
+      expect((await target.query(`
+        SELECT relation.relnamespace::regnamespace::text AS schema,
+               type_namespace.nspname AS vector_schema
+          FROM pg_class relation
+          JOIN pg_attribute attribute
+            ON attribute.attrelid = relation.oid AND attribute.attname = 'embedding'
+          JOIN pg_type type ON type.oid = attribute.atttypid
+          JOIN pg_namespace type_namespace ON type_namespace.oid = type.typnamespace
+         WHERE relation.oid = 'public.memory_embeddings'::regclass
+      `)).rows).toEqual([{ schema: 'public', vector_schema: 'continuum_extensions' }]);
+    });
+  });
+
   it('refuses a foreign-owned default provider schema without leaving fresh state', async () => {
     const foreignOwner = identifier('continuum_provider_owner');
     roles.push(foreignOwner);
@@ -214,6 +233,48 @@ describe('pgvector rollout remediation', () => {
                 to_regclass($2) IS NULL AS no_ledger`,
         [`${secondSchema}.memories`, `${secondSchema}._continuum_migrations`],
       )).rows).toEqual([{ no_memories: true, no_ledger: true }]);
+    });
+  });
+
+  it('requires and honors the explicit reviewed legacy shared-schema opt-in', async () => {
+    await withFreshDatabase(async (_root, target, url) => {
+      const firstSchema = identifier('continuum_existing_tenant');
+      const secondSchema = identifier('continuum_new_tenant');
+      await target.query(`CREATE SCHEMA ${quoteIdentifier(firstSchema)}`);
+      await target.query(`CREATE SCHEMA ${quoteIdentifier(secondSchema)}`);
+      await target.query(
+        `CREATE EXTENSION vector WITH SCHEMA ${quoteIdentifier(firstSchema)}`,
+      );
+      await target.query(`
+        CREATE TABLE ${quoteIdentifier(firstSchema)}._continuum_migrations (
+          name TEXT PRIMARY KEY,
+          applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        INSERT INTO ${quoteIdentifier(firstSchema)}._continuum_migrations (name)
+        VALUES ('0001_init.sql');
+      `);
+      const pool = migrationPool(url, secondSchema);
+      const directory = await migrationDirectoryThrough('0001_init.sql');
+      const previous = process.env.CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA;
+      process.env.CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA = '1';
+      try {
+        await expect(runMigrations(pool, directory)).resolves.toEqual([
+          expect.objectContaining({ name: '0001_init.sql' }),
+        ]);
+      } finally {
+        if (previous === undefined) {
+          delete process.env.CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA;
+        } else {
+          process.env.CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA = previous;
+        }
+      }
+      expect((await target.query(
+        `SELECT format_type(attribute.atttypid, attribute.atttypmod) AS type
+           FROM pg_attribute attribute
+          WHERE attribute.attrelid = $1::regclass
+            AND attribute.attname = 'embedding'`,
+        [`${secondSchema}.memory_embeddings`],
+      )).rows).toEqual([{ type: `${firstSchema}.vector(768)` }]);
     });
   });
 
@@ -555,4 +616,133 @@ describe('pgvector rollout remediation', () => {
       )).rows).toEqual([{ app_usage: true, outsider_usage: false }]);
     });
   }, 240_000);
+
+  it('supports a hardened public provider without letting an outsider block 0080', async () => {
+    const appRole = identifier('continuum_app');
+    const outsider = identifier('continuum_backup');
+    roles.push(outsider, appRole);
+    await withFreshDatabase(async (root, target, url) => {
+      const applicationSchema = identifier('continuum_data');
+      await root.query(`CREATE ROLE ${quoteIdentifier(appRole)} NOLOGIN`);
+      await root.query(`CREATE ROLE ${quoteIdentifier(outsider)} NOLOGIN`);
+      await target.query(`CREATE SCHEMA ${quoteIdentifier(applicationSchema)}`);
+      await target.query('CREATE EXTENSION vector WITH SCHEMA public');
+      const pool = migrationPool(url, applicationSchema);
+      await runMigrations(pool, await migrationDirectoryThrough(
+        '0079_coordination_upgrade_scale_remediation.sql',
+      ));
+      await grantApplicationRole(pool, applicationSchema, appRole);
+      await pool.query(`GRANT SELECT ON memories TO ${quoteIdentifier(outsider)}`);
+      await target.query('REVOKE USAGE ON SCHEMA public FROM PUBLIC');
+      await target.query('REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC');
+
+      await expect(runMigrations(pool, await fullMigrationDirectory())).resolves.toEqual([
+        expect.objectContaining({ name: '0080_pgvector_provider_grants.sql' }),
+      ]);
+      expect((await target.query(
+        `SELECT has_schema_privilege($1, 'public', 'USAGE') AS app_usage,
+                has_schema_privilege($2, 'public', 'USAGE') AS outsider_usage`,
+        [appRole, outsider],
+      )).rows).toEqual([{ app_usage: true, outsider_usage: false }]);
+    });
+  }, 240_000);
+
+  it('reconciles exact provider grants across drift, rerun, and role revocation', async () => {
+    const appRole = identifier('continuum_app');
+    const outsider = identifier('continuum_reporter');
+    roles.push(outsider, appRole);
+    await withFreshDatabase(async (root, target, url) => {
+      const applicationSchema = identifier('continuum_data');
+      await root.query(`CREATE ROLE ${quoteIdentifier(appRole)} NOLOGIN`);
+      await root.query(`CREATE ROLE ${quoteIdentifier(outsider)} NOLOGIN`);
+      await target.query(`CREATE SCHEMA ${quoteIdentifier(applicationSchema)}`);
+      const pool = migrationPool(url, applicationSchema);
+      await runMigrations(pool, await fullMigrationDirectory());
+      await grantApplicationRole(pool, applicationSchema, appRole);
+
+      await expect(pool.query(
+        'SELECT continuum_assert_application_vector_profile($1::name)', [appRole],
+      )).resolves.toBeDefined();
+      expect((await pool.query(`
+        SELECT has_schema_privilege('public', 'continuum_extensions', 'USAGE')
+                 AS public_usage,
+               bool_or(privilege.grantee = 0) FILTER (
+                 WHERE upper(privilege.privilege_type) = 'EXECUTE'
+               ) AS public_execute
+          FROM pg_proc function
+          JOIN pg_depend dependency
+            ON dependency.classid = 'pg_proc'::regclass
+           AND dependency.objid = function.oid
+           AND dependency.refclassid = 'pg_extension'::regclass
+           AND dependency.deptype = 'e'
+          JOIN pg_extension extension ON extension.oid = dependency.refobjid
+          CROSS JOIN LATERAL aclexplode(COALESCE(
+            function.proacl, acldefault('f', function.proowner))) privilege
+         WHERE extension.extname = 'vector'
+      `)).rows).toEqual([{ public_usage: false, public_execute: false }]);
+
+      await pool.query(
+        `GRANT CREATE ON SCHEMA continuum_extensions TO ${quoteIdentifier(appRole)}`,
+      );
+      await expect(pool.query(
+        'SELECT continuum_assert_application_vector_profile($1::name)', [appRole],
+      )).rejects.toThrow(/forbidden CREATE/i);
+      await pool.query(
+        `REVOKE CREATE ON SCHEMA continuum_extensions FROM ${quoteIdentifier(appRole)}`,
+      );
+
+      await pool.query(
+        `REVOKE USAGE ON SCHEMA continuum_extensions FROM ${quoteIdentifier(appRole)}`,
+      );
+      await expect(pool.query(
+        'SELECT continuum_assert_application_vector_profile($1::name)', [appRole],
+      )).rejects.toThrow(/missing direct USAGE/i);
+      await pool.query('SELECT continuum_grant_application_vector_functions()');
+      await pool.query('SELECT continuum_grant_application_vector_functions()');
+
+      await pool.query(`
+        GRANT SELECT ON memories TO ${quoteIdentifier(outsider)};
+        GRANT USAGE ON SCHEMA continuum_extensions TO ${quoteIdentifier(outsider)};
+      `);
+      await expect(pool.query(
+        'SELECT continuum_assert_application_vector_profile($1::name)', [appRole],
+      )).rejects.toThrow(/non-profile role/i);
+      await pool.query('SELECT continuum_grant_application_vector_functions()');
+      expect((await pool.query(
+        `SELECT has_schema_privilege($1, 'continuum_extensions', 'USAGE') AS usage`,
+        [outsider],
+      )).rows).toEqual([{ usage: false }]);
+
+      await pool.query(`REVOKE SELECT ON memories FROM ${quoteIdentifier(appRole)}`);
+      await pool.query('SELECT continuum_grant_application_vector_functions()');
+      expect((await pool.query(
+        `SELECT has_schema_privilege($1, 'continuum_extensions', 'USAGE') AS usage,
+                EXISTS (
+                  SELECT 1 FROM continuum_pgvector_role_profiles
+                   WHERE database_role_oid = $1::regrole::oid
+                ) AS registered`,
+        [appRole],
+      )).rows).toEqual([{ usage: false, registered: false }]);
+    });
+  }, 240_000);
+
+  it('documents the practical old-runtime search_path compatibility boundary', async () => {
+    await withFreshDatabase(async (_root, target, url) => {
+      const applicationSchema = identifier('continuum_data');
+      await target.query(`CREATE SCHEMA ${quoteIdentifier(applicationSchema)}`);
+      const pool = migrationPool(url, applicationSchema);
+      await runMigrations(pool, await fullMigrationDirectory());
+
+      await expect(pool.query(
+        `SELECT '[1,0]'::vector <=> '[1,0]'::vector AS distance`,
+      )).rejects.toThrow(/type "vector" does not exist|operator does not exist/i);
+      await pool.query(
+        `SELECT set_config('search_path', format('%I, %I', $1::text, $2::text), FALSE)`,
+        [applicationSchema, 'continuum_extensions'],
+      );
+      expect((await pool.query(
+        `SELECT '[1,0]'::vector <=> '[1,0]'::vector AS distance`,
+      )).rows).toEqual([{ distance: 0 }]);
+    });
+  }, 180_000);
 });

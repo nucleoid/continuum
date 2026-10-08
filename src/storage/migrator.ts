@@ -7,6 +7,8 @@ import type pg from 'pg';
 const here = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_MIGRATIONS_DIR = resolve(here, '../../migrations');
 const DEFAULT_VECTOR_PROVIDER_SCHEMA = 'continuum_extensions';
+const LEGACY_SHARED_VECTOR_SCHEMA_OPT_IN =
+  'CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA';
 
 // This key coordinates every Continuum migrator connected to the same database.
 // Changing it would break coordination with replicas running an older version.
@@ -71,6 +73,8 @@ const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
     '5a1320f5890a4c99d53d83baabd54ee7025e4a4963227f95f4b2806071839623'],
   ['0077_coordination_review_2_online_finish.sql',
     '1eef4ffacc6ddd36e0c34c4029a06b766a8f2dd6a12f1018217904e334b7637d'],
+  ['0080_pgvector_provider_grants.sql',
+    'de4e6bac65bd20676fa98f6233e75849f2ff52e09ddbcae4f2bd92d6c04a7806'],
 ]);
 const FORWARD_MIGRATION_REQUIREMENTS = new Map([
   ['0053_offboarding_restore_contract.sql', '0052_offboarding_review_repair.sql'],
@@ -471,6 +475,10 @@ export async function runMigrations(
   let runFailed = false;
   let runError: unknown;
   let originalSearchPath: string | undefined;
+  let applicationSchema: string | undefined;
+  let migrationLedgerCreated = false;
+  let providerSchemaCreated = false;
+  let vectorExtensionCreated = false;
 
   const restoreInitialMigrationSearchPath = async (): Promise<void> => {
     if (originalSearchPath === undefined) return;
@@ -497,20 +505,63 @@ export async function runMigrations(
       }
     }
 
+    const files = (await readdir(migrationsDir))
+      .filter((f) => f.endsWith('.sql'))
+      .sort();
+
+    // Verify every pinned file before consulting or creating the ledger. A modified
+    // pending migration must never get an opportunity to execute.
+    for (const file of files) await verifyPublishedMigration(migrationsDir, file);
+
+    if (files.includes('0001_init.sql')) {
+      const schema = await client.query<{
+        schema: string | null;
+        owned: boolean;
+        unsafeCreate: boolean;
+        ledgerExists: boolean;
+      }>(`
+        SELECT namespace.nspname AS schema,
+               (namespace.nspowner = role.oid
+                 OR pg_has_role(role.oid, namespace.nspowner, 'USAGE')) AS owned,
+               EXISTS (
+                 SELECT 1
+                   FROM aclexplode(COALESCE(
+                     namespace.nspacl,
+                     acldefault('n', namespace.nspowner))) privilege
+                  WHERE upper(privilege.privilege_type) = 'CREATE'
+                    AND privilege.grantee <> namespace.nspowner
+               ) AS "unsafeCreate",
+               CASE WHEN namespace.oid IS NULL THEN FALSE ELSE
+                 to_regclass(format('%I._continuum_migrations', namespace.nspname))
+                   IS NOT NULL
+               END AS "ledgerExists"
+          FROM pg_roles role
+          LEFT JOIN pg_namespace namespace ON namespace.nspname = current_schema()
+         WHERE role.rolname = current_user
+      `);
+      applicationSchema = schema.rows[0]?.schema ?? undefined;
+      if (!applicationSchema) {
+        throw new Error(
+          'The migration search_path does not select an application schema; '
+          + 'configure a non-empty owner-controlled schema first',
+        );
+      }
+      if (!schema.rows[0]?.owned || schema.rows[0]?.unsafeCreate) {
+        throw new Error(
+          `The application schema ${quoteIdentifier(applicationSchema)} selected by `
+          + `search_path must be owner-controlled by the current migration role and must not `
+          + `grant CREATE to PUBLIC or a non-owner`,
+        );
+      }
+      migrationLedgerCreated = !schema.rows[0]?.ledgerExists;
+    }
+
     await client.query(`
       CREATE TABLE IF NOT EXISTS _continuum_migrations (
         name        TEXT PRIMARY KEY,
         applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
       )
     `);
-
-    const files = (await readdir(migrationsDir))
-      .filter((f) => f.endsWith('.sql'))
-      .sort();
-
-    // Verify every pinned file before consulting the ledger. A modified
-    // pending migration must never get an opportunity to execute.
-    for (const file of files) await verifyPublishedMigration(migrationsDir, file);
 
     if (files.includes('0001_init.sql')) {
       const initialMigration = await client.query(
@@ -528,12 +579,49 @@ export async function runMigrations(
           // Extension installation is database-wide. Keep it under the same
           // advisory lock as 0001 and place a fresh installation in a stable
           // provider schema. App schemas can then be dropped independently.
+          const providerBefore = await client.query<{ exists: boolean }>(
+            'SELECT to_regnamespace($1) IS NOT NULL AS exists',
+            [DEFAULT_VECTOR_PROVIDER_SCHEMA],
+          );
+          providerSchemaCreated = providerBefore.rows[0]?.exists !== true;
           await client.query(
             `CREATE SCHEMA IF NOT EXISTS ${quoteIdentifier(DEFAULT_VECTOR_PROVIDER_SCHEMA)}`,
           );
+          const providerTrust = await client.query<{
+            owned: boolean;
+            unsafeCreate: boolean;
+          }>(`
+            SELECT namespace.nspowner = role.oid AS owned,
+                   EXISTS (
+                     SELECT 1
+                       FROM aclexplode(COALESCE(
+                         namespace.nspacl,
+                         acldefault('n', namespace.nspowner))) privilege
+                      WHERE upper(privilege.privilege_type) = 'CREATE'
+                        AND privilege.grantee <> namespace.nspowner
+                   ) AS "unsafeCreate"
+              FROM pg_namespace namespace
+              JOIN pg_roles role ON role.rolname = current_user
+             WHERE namespace.nspname = $1
+          `, [DEFAULT_VECTOR_PROVIDER_SCHEMA]);
+          if (providerTrust.rows[0]?.owned !== true) {
+            throw new Error(
+              `The fresh pgvector provider schema `
+              + `${quoteIdentifier(DEFAULT_VECTOR_PROVIDER_SCHEMA)} must be owned by `
+              + `the current migration role; fix ownership before retrying`,
+            );
+          }
+          if (providerTrust.rows[0]?.unsafeCreate === true) {
+            throw new Error(
+              `The fresh pgvector provider schema `
+              + `${quoteIdentifier(DEFAULT_VECTOR_PROVIDER_SCHEMA)} grants CREATE to `
+              + `PUBLIC or a non-owner; revoke CREATE before retrying`,
+            );
+          }
           await client.query(
             `CREATE EXTENSION vector WITH SCHEMA ${quoteIdentifier(DEFAULT_VECTOR_PROVIDER_SCHEMA)}`,
           );
+          vectorExtensionCreated = true;
           vectorExtension = await client.query<{ schema: string }>(
             `SELECT namespace.nspname AS schema
                FROM pg_extension extension
@@ -558,6 +646,78 @@ export async function runMigrations(
             + `${quoteIdentifier(vectorSchema)} TO ${quoteIdentifier(role)}`,
           );
         }
+        if (vectorSchema === DEFAULT_VECTOR_PROVIDER_SCHEMA
+            && !vectorExtensionCreated) {
+          const providerTrust = await client.query<{
+            owned: boolean;
+            unsafeCreate: boolean;
+          }>(`
+            SELECT namespace.nspowner = role.oid AS owned,
+                   EXISTS (
+                     SELECT 1
+                       FROM aclexplode(COALESCE(
+                         namespace.nspacl,
+                         acldefault('n', namespace.nspowner))) privilege
+                      WHERE upper(privilege.privilege_type) = 'CREATE'
+                        AND privilege.grantee <> namespace.nspowner
+                   ) AS "unsafeCreate"
+              FROM pg_namespace namespace
+              JOIN pg_roles role ON role.rolname = current_user
+             WHERE namespace.nspname = $1
+          `, [vectorSchema]);
+          if (providerTrust.rows[0]?.owned !== true) {
+            throw new Error(
+              `The fresh pgvector provider schema ${quoteIdentifier(vectorSchema)} `
+              + `must be owned by the current migration role; fix ownership before retrying`,
+            );
+          }
+          if (providerTrust.rows[0]?.unsafeCreate === true) {
+            throw new Error(
+              `The fresh pgvector provider schema ${quoteIdentifier(vectorSchema)} grants `
+              + `CREATE to PUBLIC or a non-owner; revoke CREATE before retrying`,
+            );
+          }
+        }
+        if (vectorSchema !== applicationSchema) {
+          const legacyTenant = await client.query<{ tenantObjects: boolean }>(`
+            SELECT to_regclass(format('%I._continuum_migrations', $1::text)) IS NOT NULL
+                   OR (
+                     to_regclass(format('%I.memories', $1::text)) IS NOT NULL
+                     AND to_regclass(format('%I.principals', $1::text)) IS NOT NULL
+                     AND to_regclass(format('%I.scopes', $1::text)) IS NOT NULL
+                   )
+                     AS "tenantObjects"
+          `, [vectorSchema]);
+          if (vectorSchema !== 'public'
+              && legacyTenant.rows[0]?.tenantObjects === true
+              && process.env[LEGACY_SHARED_VECTOR_SCHEMA_OPT_IN] !== '1') {
+            throw new Error(
+              `Refusing to bind a fresh Continuum tenant to pgvector in another `
+              + `Continuum application schema ${quoteIdentifier(vectorSchema)}. Relocate `
+              + `the extension to provider infrastructure, or set `
+              + `${LEGACY_SHARED_VECTOR_SCHEMA_OPT_IN}=1 for a reviewed legacy shared-schema opt-in`,
+            );
+          }
+          const shadows = await client.query<{ vectorType: boolean; vectorOpclass: boolean }>(`
+            SELECT EXISTS (
+                     SELECT 1 FROM pg_type type
+                      JOIN pg_namespace namespace ON namespace.oid = type.typnamespace
+                     WHERE namespace.nspname = $1 AND type.typname = 'vector'
+                   ) AS "vectorType",
+                   EXISTS (
+                     SELECT 1 FROM pg_opclass operator_class
+                      JOIN pg_namespace namespace ON namespace.oid = operator_class.opcnamespace
+                     WHERE namespace.nspname = $1
+                       AND operator_class.opcname = 'vector_cosine_ops'
+                   ) AS "vectorOpclass"
+          `, [applicationSchema]);
+          if (shadows.rows[0]?.vectorType || shadows.rows[0]?.vectorOpclass) {
+            throw new Error(
+              `The application schema ${quoteIdentifier(applicationSchema!)} shadows the `
+              + `pgvector vector type or vector_cosine_ops; remove the vector shadow before retrying`,
+            );
+          }
+        }
         const searchPath = await client.query<{ path: string }>(
           `SELECT current_setting('search_path') AS path`,
         );
@@ -567,9 +727,9 @@ export async function runMigrations(
         }
         await client.query(
           `SELECT set_config(
-             'search_path', current_setting('search_path') || ', ' || quote_ident($1), FALSE
+             'search_path', format('%I, %I', $1::text, $2::text), FALSE
            )`,
-          [vectorSchema],
+          [applicationSchema, vectorSchema],
         );
       }
     }
@@ -729,6 +889,38 @@ export async function runMigrations(
   if (originalSearchPath !== undefined) {
     try {
       await restoreInitialMigrationSearchPath();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+  if (runFailed && applicationSchema && migrationLedgerCreated) {
+    try {
+      const bootstrap = await client.query<{ initialApplied: boolean; ledgerEmpty: boolean }>(`
+        SELECT EXISTS (
+                 SELECT 1 FROM ${quoteIdentifier(applicationSchema)}._continuum_migrations
+                  WHERE name = '0001_init.sql'
+               ) AS "initialApplied",
+               NOT EXISTS (
+                 SELECT 1 FROM ${quoteIdentifier(applicationSchema)}._continuum_migrations
+               ) AS "ledgerEmpty"
+      `);
+      if (bootstrap.rows[0]?.initialApplied !== true) {
+        if (vectorExtensionCreated) {
+          await client.query('DROP EXTENSION IF EXISTS vector');
+          vectorExtensionCreated = false;
+        }
+        if (providerSchemaCreated) {
+          await client.query(
+            `DROP SCHEMA IF EXISTS ${quoteIdentifier(DEFAULT_VECTOR_PROVIDER_SCHEMA)}`,
+          );
+          providerSchemaCreated = false;
+        }
+        if (bootstrap.rows[0]?.ledgerEmpty === true) {
+          await client.query(
+            `DROP TABLE ${quoteIdentifier(applicationSchema)}._continuum_migrations`,
+          );
+        }
+      }
     } catch (error) {
       cleanupErrors.push(error);
     }

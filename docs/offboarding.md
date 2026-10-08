@@ -513,9 +513,32 @@ another installation. Treat `continuum_extensions` as database provider
 infrastructure: its owner controls extension upgrades and it must be dropped
 only after every dependent Continuum schema has been retired.
 
+For a fresh application schema, Continuum refuses an existing provider schema
+that contains another Continuum ledger or application tables. Relocate that
+extension into reviewed provider infrastructure before retrying. The temporary
+escape hatch `CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA=1` is only for an
+operator-reviewed legacy topology where cascade-drop coupling is understood and
+accepted; it is not a normal multi-tenant rollout setting. A fresh
+`continuum_extensions` schema must be owned by the connecting migration role
+and must grant `CREATE` to neither `PUBLIC` nor any non-owner. Failure occurs
+before `0001`, with the exact ownership or ACL repair in the diagnostic.
+The conventional database-wide `public` extension location remains an explicit
+compatibility case because managed PostgreSQL commonly installs pgvector there;
+its schema must still pass the provider access and forbidden-`CREATE` checks.
+
+The migration connection's first effective `search_path` schema is the
+application schema. It must be owner-controlled by the migration role (including
+PostgreSQL's database-owner control of `public`) and must not grant `CREATE` to
+`PUBLIC` or another role; an empty or hostile path is
+rejected before the ledger is created. During `0001`, the path is replaced by
+exactly the quoted application schema followed by the quoted provider schema.
+An application-local `vector` type or `vector_cosine_ops` shadow is rejected.
+This keeps unqualified objects in the application schema while resolving the
+published migration's vector type and opclass only from pgvector.
+
 The migration owner needs `USAGE` on the installed extension schema.
 `runMigrations` reports the exact missing grant before applying `0001`. It
-temporarily appends the discovered provider schema only while applying
+temporarily sets the exact application/provider path only while applying
 `0001_init.sql`, then restores the caller's path immediately after `0001`
 commits or rolls back. Later migrations never inherit the provider schema.
 Runtime embedding queries infer the vector type from the
@@ -528,10 +551,11 @@ If pgvector is absent, `runMigrations` creates the provider schema and attempts
 database superuser or provider role to do this. In that case no application
 migration is recorded: have the DBA install pgvector in a reviewed schema,
 grant the migration owner `USAGE` on that schema, and rerun the migration. The
-provider schema or extension can remain after a failed `0001` because both are
-created outside its transaction; inspect and retain or remove those empty
-provider objects deliberately before retrying. Do not move an existing
-extension merely to use the default schema.
+provider schema and extension created by that attempt are removed when `0001`
+fails, together with an empty ledger created by the attempt. Once `0001` is
+ledgered, later migration failure retains the provider and application state so
+the forward migration can be retried. Do not move an existing extension merely
+to use the default schema.
 
 Application roles also require `USAGE` on the provider schema and `EXECUTE` on
 the extension routines used by vector operators. Migration `0080` upgrades the
@@ -544,11 +568,43 @@ grant when it cannot delegate. Do not grant schema `CREATE`, provider
 ownership, a provider role, or blanket database privileges to the application
 role.
 
+Migration `0080` discovers only roles that satisfy the existing exact
+application or operator allow-list; `SELECT` on `memories` alone is not a
+profile. It records profile OIDs, grants direct provider `USAGE` and direct
+extension-function `EXECUTE`, forbids provider `CREATE`, and removes grants
+from recorded roles that lose their profile. It also removes provider grants
+from non-profile roles that still touch this application schema. The dedicated
+owner-controlled `continuum_extensions` provider additionally closes `PUBLIC`
+schema and function access. A shared/provider-managed custom schema remains an
+explicit compatibility boundary: Continuum verifies each profiled role and
+forbidden `CREATE`, while unrelated tenants remain the provider owner's
+responsibility. Re-run the grant script after role rotation, revocation, or a
+pgvector extension update; its final assertions report the exact missing or
+extra provider privilege.
+
 Rolling back to a binary from before provider-schema support is unsafe while
 the extension schema is absent from that binary's runtime `search_path`,
 because older embedding SQL used unqualified vector casts and operators.
 Restore the prior path contract before such a rollback, or keep the current
-binary until a forward repair is available.
+binary until a forward repair is available. For a fresh dedicated-provider
+install, the bounded compatibility procedure is:
+
+```sql
+ALTER ROLE continuum_app IN DATABASE continuum
+  SET search_path = continuum_app_schema, continuum_extensions;
+```
+
+Quote the actual role, database, and schema identifiers in operator tooling.
+Apply the same setting to every old application/operator login before starting
+an old replica, verify an unqualified vector query, and remove the role setting
+again before returning to the current binary. Do not overlap old and new
+binaries while changing this contract.
+
+Run exactly one migrator during a rolling deployment. New migrators use
+nonblocking advisory-lock polling so concurrent indexes can finish; older
+migrators use a blocking advisory lock and can still form the historical
+virtual-transaction/`CREATE INDEX CONCURRENTLY` cycle. Stop old migrators, run
+the complete chain once, and only then roll application replicas.
 
 Before migration, confirm the named app, operator, and sync roles have no rows
 in `pg_db_role_setting` and no explicit or inherited entries in
