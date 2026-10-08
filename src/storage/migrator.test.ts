@@ -61,6 +61,97 @@ afterEach(async () => {
 });
 
 describe('runMigrations', () => {
+  it('installs pgvector in public when concurrent fresh-database migrations start in different schemas', async () => {
+    const database = `continuum_vector_bootstrap_${randomUUID().replaceAll('-', '')}`;
+    const firstSchema = 'first_migration_schema';
+    const migrationLockId = '7215328273579717613';
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-vector-bootstrap-'));
+    directories.push(directory);
+    await copyFile(
+      join(process.cwd(), 'migrations/0001_init.sql'),
+      join(directory, '0001_init.sql'),
+    );
+
+    const admin = new pg.Pool({ connectionString: DATABASE_URL, max: 1 });
+    const databaseUrl = new URL(DATABASE_URL);
+    databaseUrl.pathname = `/${database}`;
+    let blocker: pg.Pool | undefined;
+    let first: pg.Pool | undefined;
+    let second: pg.Pool | undefined;
+    let lockHeld = false;
+    let firstRun: Promise<unknown> | undefined;
+    let secondRun: Promise<unknown> | undefined;
+
+    const waitUntilQueued = async (applicationName: string) => {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const waiting = await blocker!.query<{ queued: boolean }>(
+          `SELECT EXISTS (
+             SELECT 1 FROM pg_stat_activity
+              WHERE datname = current_database()
+                AND application_name = $1
+                AND wait_event_type = 'Lock'
+                AND wait_event = 'advisory'
+           ) AS queued`,
+          [applicationName],
+        );
+        if (waiting.rows[0]?.queued === true) return;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      throw new Error(`${applicationName} did not queue for the migration lock`);
+    };
+
+    try {
+      await admin.query(`CREATE DATABASE "${database}"`);
+      blocker = new pg.Pool({ connectionString: databaseUrl.toString(), max: 1 });
+      await blocker.query(`CREATE SCHEMA ${firstSchema}`);
+      await blocker.query('SELECT pg_advisory_lock($1::bigint)', [migrationLockId]);
+      lockHeld = true;
+
+      first = new pg.Pool({
+        connectionString: databaseUrl.toString(),
+        max: 1,
+        application_name: 'continuum-vector-bootstrap-first',
+        options: `-c search_path=${firstSchema},public`,
+      });
+      second = new pg.Pool({
+        connectionString: databaseUrl.toString(),
+        max: 1,
+        application_name: 'continuum-vector-bootstrap-second',
+        options: '-c search_path=public',
+      });
+
+      firstRun = runMigrations(first, directory);
+      await waitUntilQueued('continuum-vector-bootstrap-first');
+      secondRun = runMigrations(second, directory);
+      await waitUntilQueued('continuum-vector-bootstrap-second');
+      await blocker.query('SELECT pg_advisory_unlock($1::bigint)', [migrationLockId]);
+      lockHeld = false;
+
+      await expect(Promise.all([firstRun, secondRun])).resolves.toHaveLength(2);
+      expect((await blocker.query(
+        `SELECT namespace.nspname AS schema
+           FROM pg_extension extension
+           JOIN pg_namespace namespace ON namespace.oid = extension.extnamespace
+          WHERE extension.extname = 'vector'`,
+      )).rows).toEqual([{ schema: 'public' }]);
+    } finally {
+      if (lockHeld) {
+        await blocker?.query(
+          'SELECT pg_advisory_unlock($1::bigint)', [migrationLockId],
+        ).catch(() => undefined);
+      }
+      await Promise.allSettled([firstRun, secondRun].filter(
+        (run): run is Promise<unknown> => run !== undefined,
+      ));
+      await Promise.allSettled(
+        [first, second, blocker].filter((pool): pool is pg.Pool => pool !== undefined)
+          .map((pool) => pool.end()),
+      );
+      await admin.query(`DROP DATABASE IF EXISTS "${database}"`);
+      await admin.end();
+    }
+  }, 30_000);
+
   it.each([
     ['zero-stale-row', 0, 10],
     ['single-batch', 1, 10],
