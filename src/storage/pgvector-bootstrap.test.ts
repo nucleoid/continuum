@@ -54,7 +54,7 @@ async function withFreshDatabase(
     await run(root, target, url, database, directory);
   } finally {
     await target?.end().catch(() => undefined);
-    await root.query(`DROP DATABASE IF EXISTS "${database}"`)
+    await root.query(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`)
       .catch(() => undefined);
     await root.end();
     await rm(directory, { recursive: true, force: true });

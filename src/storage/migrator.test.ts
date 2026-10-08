@@ -156,7 +156,7 @@ describe('runMigrations', () => {
         endings,
         new Promise((resolve) => setTimeout(resolve, 5_000)),
       ]);
-      await admin.query(`DROP DATABASE IF EXISTS "${database}"`);
+      await admin.query(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`);
       await endings;
       await admin.end();
     }
