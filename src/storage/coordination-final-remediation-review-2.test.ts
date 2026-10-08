@@ -51,7 +51,7 @@ describe('issue 7 final remediation review 2 contract', () => {
   it('preserves useful v3 progress when only detached-row purge is contended', async () => {
     const sql = await migration('0076_coordination_review_2_remediation.sql');
     expect(sql).toMatch(
-      /result\s*:=\s*continuum_operator_scrub_coordination_principal_v3[\s\S]*EXCEPTION WHEN lock_not_available[\s\S]*client_coordination_privacy_version/i,
+      /result\s*:=\s*continuum_operator_scrub_coordination_principal_v3[\s\S]*EXCEPTION WHEN lock_not_available[\s\S]*reason['"]?,\s*['"]lock_busy/i,
     );
     expect(sql).toMatch(
       /BEGIN[\s\S]*coordination_principal_usage[\s\S]*FOR UPDATE NOWAIT[\s\S]*EXCEPTION WHEN lock_not_available[\s\S]*purge_busy/i,
@@ -62,19 +62,22 @@ describe('issue 7 final remediation review 2 contract', () => {
   it('restores both deep-cursor index bounds and NULL-safe discovery', async () => {
     const sql = await migration('0076_coordination_review_2_remediation.sql');
     expect(sql).toMatch(
-      /progress\.principal_id\s*>=\s*COALESCE\(after_principal_id/i,
+      /progress\.principal_id\s*>=\s*COALESCE\(\s*after_principal_id/i,
     );
     expect(sql).toMatch(
-      /marker\.principal_id\s*>=\s*COALESCE\(after_principal_id/i,
+      /marker\.principal_id\s*>=\s*COALESCE\(\s*after_principal_id/i,
     );
-    expect(sql).toMatch(
-      /COALESCE\(progress\.repair_eligible,\s*principal\.disabled_at IS NOT NULL\)/i,
-    );
+    expect(sql).toMatch(/progress\.repair_eligible IS NOT TRUE/i);
+    expect(sql).toMatch(/principal\.disabled_at IS NOT NULL/i);
   });
 
   it('unifies lifecycle eligibility and reacts to mapping changes', async () => {
     const sql = await migration('0076_coordination_review_2_remediation.sql');
-    expect(sql).not.toMatch(/repair_eligible\s*:=\s*EXISTS[\s\S]*principal_user_scopes/i);
+    const eligibility = sql.match(
+      /CREATE OR REPLACE FUNCTION continuum_set_coordination_repair_eligibility[\s\S]*?\$\$;/i,
+    )?.[0] ?? '';
+    expect(eligibility).toMatch(/repair_eligible\s*:=\s*EXISTS/i);
+    expect(eligibility).not.toMatch(/principal_user_scopes/i);
     expect(sql).toMatch(/ON principal_user_scopes/i);
     expect(sql).toMatch(/INSERT OR DELETE|INSERT[\s\S]*DELETE/i);
     expect(sql).toMatch(/continuum_refresh_coordination_privacy_dirty/i);
@@ -111,8 +114,8 @@ describe('issue 7 final remediation review 2 contract', () => {
   it('documents the enforced drain and forward-only rollback contract exactly', async () => {
     const docs = await readFile(join(root, 'docs/coordination.md'), 'utf8');
     expect(docs).toMatch(/0076_coordination_review_2_remediation/i);
-    expect(docs).toMatch(/pre-0074[\s\S]*before any mutation|before any mutation[\s\S]*pre-0074/i);
-    expect(docs).toMatch(/rollback is forward-only/i);
+    expect(docs).toMatch(/pre-0074[\s\S]*before\s+any mutation|before\s+any mutation[\s\S]*pre-0074/i);
+    expect(docs).toMatch(/rollback is\s+forward-only/i);
     expect(docs).not.toMatch(/refuses an unversioned pre-0074 client if lock contention occurs/i);
   });
 });

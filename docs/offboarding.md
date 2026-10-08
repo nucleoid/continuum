@@ -193,12 +193,13 @@ preserved rows. It exits 0 only for truthful completion (or a requested dry
 run), exits 3 for a typed blocking state, and exits 2 for an incomplete
 single-batch run, bounded attempt cap, or untyped no-progress state. The
 `repair-coordination-privacy` command uses the same status contract.
-Migrations 0074 and 0075 require a maintenance drain of pre-0074 offboarding
-workers, install explicit client-version negotiation, and finish lifecycle
-eligibility repair online in restartable batches. A rollback to a pre-0074
-offboarding worker is refused after contention rather than returning an
-ambiguous incomplete object. Resume with a current worker; database rollback
-requires a new forward migration.
+Migrations 0074 through 0077 require a maintenance drain of pre-0074
+offboarding workers and finish lifecycle eligibility repair online in
+restartable, timeout-bounded batches. Migration 0076 enforces explicit
+client-version negotiation at the database entry points before runtime-role
+mutation; a pre-0074 worker is refused deterministically, not only after
+contention. Resume with a current worker. Rollback is forward-only and requires
+a new migration; do not remove the negotiation guard.
 
 Offboarding is not globally atomic across all batches. Until `complete: true`,
 audit rows beyond the current keyset cursors can still contain raw query text and

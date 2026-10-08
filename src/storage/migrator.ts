@@ -16,6 +16,9 @@ const REQUIRE_VALID_INDEX = '-- continuum:require-valid-index ';
 const BACKFILL_OFFBOARDING_SELECTORS = '-- continuum:backfill-offboarding-selectors';
 const BACKFILL_COORDINATION_REPAIR = '-- continuum:backfill-coordination-repair';
 const BACKFILL_COORDINATION_V4 = '-- continuum:backfill-coordination-v4';
+const BACKFILL_COORDINATION_V5 = '-- continuum:backfill-coordination-v5';
+const COORDINATION_V4_BACKFILL_BATCH_ENV =
+  'CONTINUUM_COORDINATION_V4_BACKFILL_BATCH_SIZE';
 const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
   ['0052_offboarding_review_repair.sql',
     '136cbd834277ca4fbfb48162644738ba2f96f7a5705290cc0c585e3ce7c82079'],
@@ -63,6 +66,10 @@ const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
     'e3b743394f640ef2db5daeb8596793066a6c4f5c1a6222c50d1b9daff95fbd66'],
   ['0075_coordination_online_repair_finish.sql',
     'd1d69f661803f7546ca23234a6babb96a104ad098d4c48e3388ab30bf7d5d9cf'],
+  ['0076_coordination_review_2_remediation.sql',
+    '5a1320f5890a4c99d53d83baabd54ee7025e4a4963227f95f4b2806071839623'],
+  ['0077_coordination_review_2_online_finish.sql',
+    '1eef4ffacc6ddd36e0c34c4029a06b766a8f2dd6a12f1018217904e334b7637d'],
 ]);
 const FORWARD_MIGRATION_REQUIREMENTS = new Map([
   ['0053_offboarding_restore_contract.sql', '0052_offboarding_review_repair.sql'],
@@ -105,6 +112,10 @@ const FORWARD_MIGRATION_REQUIREMENTS = new Map([
     '0073_coordination_bounded_discovery_and_locking.sql'],
   ['0075_coordination_online_repair_finish.sql',
     '0074_coordination_compatibility_and_upgrade_repair.sql'],
+  ['0076_coordination_review_2_remediation.sql',
+    '0075_coordination_online_repair_finish.sql'],
+  ['0077_coordination_review_2_online_finish.sql',
+    '0076_coordination_review_2_remediation.sql'],
 ]);
 const REVIEW_ENTRA_MIGRATION_RENAMES = [
   ['0005_entra_auth.sql', '0010_entra_auth.sql'],
@@ -161,12 +172,87 @@ function deferLegacy0073Backfill(sql: string): string {
   return `${sql.slice(0, start)}-- Backfill deferred to online migration 0075.\n\n${sql.slice(end)}`;
 }
 
+function repair0074PartialUpgradeDiscovery(sql: string): string {
+  const replacements = [
+    [
+      'WHERE progress.repair_eligible IS TRUE',
+      `WHERE (COALESCE(progress.repair_eligible, principal.disabled_at IS NOT NULL)
+            OR (progress.repair_eligible IS FALSE
+                AND principal.disabled_at IS NOT NULL))`,
+    ],
+    [
+      'AND (after_principal_id IS NULL OR progress.principal_id > after_principal_id)',
+      `AND progress.principal_id >= COALESCE(
+         after_principal_id, '00000000-0000-0000-0000-000000000000'::uuid)
+       AND (after_principal_id IS NULL OR progress.principal_id > after_principal_id)`,
+    ],
+    [
+      'WHERE (after_principal_id IS NULL OR marker.principal_id > after_principal_id)',
+      `WHERE marker.principal_id >= COALESCE(
+         after_principal_id, '00000000-0000-0000-0000-000000000000'::uuid)
+       AND (after_principal_id IS NULL OR marker.principal_id > after_principal_id)`,
+    ],
+    [
+      `WHERE function.pronamespace = quote_ident(current_schema())::regnamespace
+       AND position(chr(13) IN function.prosrc) > 0`,
+      `WHERE function.pronamespace = quote_ident(current_schema())::regnamespace
+       AND function.proname LIKE 'continuum\\_%' ESCAPE '\\'
+       AND function.proowner = current_user::regrole
+       AND position(chr(13) IN function.prosrc) > 0
+       AND NOT EXISTS (
+         SELECT 1 FROM pg_depend dependency
+          WHERE dependency.classid = 'pg_proc'::regclass
+            AND dependency.objid = function.oid
+            AND dependency.refclassid = 'pg_extension'::regclass
+            AND dependency.deptype = 'e')`,
+    ],
+  ] as const;
+  let repaired = sql;
+  for (const [before, after] of replacements) {
+    if (!repaired.includes(before)) {
+      throw new Error('published 0074 partial-upgrade discovery boundary was not found');
+    }
+    repaired = repaired.replace(before, after);
+  }
+  return repaired;
+}
+
+function repaired0074CandidateFunction(sql: string): string {
+  const repaired = repair0074PartialUpgradeDiscovery(sql);
+  const start = repaired.indexOf(
+    'CREATE OR REPLACE FUNCTION continuum_coordination_privacy_repair_candidates',
+  );
+  const end = repaired.indexOf(
+    'CREATE OR REPLACE FUNCTION continuum_operator_scrub_coordination_principal', start,
+  );
+  if (start < 0 || end < 0) {
+    throw new Error('published 0074 candidate-function boundary was not found');
+  }
+  return `${repaired.slice(start, end)}
+DO $harden_partial_0074$
+DECLARE schema_name TEXT := current_schema();
+BEGIN
+  EXECUTE format(
+    'ALTER FUNCTION %I.continuum_coordination_privacy_repair_candidates(uuid,uuid,integer) '
+    || 'SET search_path = pg_catalog, %I, pg_temp', schema_name, schema_name);
+END;
+$harden_partial_0074$;`;
+}
+
 async function repairStoredCrLfFunctions(client: pg.PoolClient): Promise<void> {
   const functions = await client.query<{ definition: string }>(
-    `SELECT pg_get_functiondef(function.oid) AS definition
+    String.raw`SELECT pg_get_functiondef(function.oid) AS definition
        FROM pg_proc function
       WHERE function.pronamespace = quote_ident(current_schema())::regnamespace
+        AND function.proname LIKE 'continuum\_%' ESCAPE '\'
+        AND function.proowner = current_user::regrole
         AND position(chr(13) IN function.prosrc) > 0
+        AND NOT EXISTS (
+          SELECT 1 FROM pg_depend dependency
+           WHERE dependency.classid = 'pg_proc'::regclass
+             AND dependency.objid = function.oid
+             AND dependency.refclassid = 'pg_extension'::regclass
+             AND dependency.deptype = 'e')
       ORDER BY function.oid`,
   );
   for (const row of functions.rows) {
@@ -174,13 +260,56 @@ async function repairStoredCrLfFunctions(client: pg.PoolClient): Promise<void> {
     await client.query(normalized);
   }
   const remaining = await client.query<{ count: number }>(
-    `SELECT count(*)::int AS count
+    String.raw`SELECT count(*)::int AS count
        FROM pg_proc function
       WHERE function.pronamespace = quote_ident(current_schema())::regnamespace
-        AND position(chr(13) IN function.prosrc) > 0`,
+        AND function.proname LIKE 'continuum\_%' ESCAPE '\'
+        AND function.proowner = current_user::regrole
+        AND position(chr(13) IN function.prosrc) > 0
+        AND NOT EXISTS (
+          SELECT 1 FROM pg_depend dependency
+           WHERE dependency.classid = 'pg_proc'::regclass
+             AND dependency.objid = function.oid
+             AND dependency.refclassid = 'pg_extension'::regclass
+             AND dependency.deptype = 'e')`,
   );
   if (remaining.rows[0]?.count !== 0) {
     throw new Error('stored CRLF function-body repair did not converge');
+  }
+}
+
+function coordinationBackfillBatchSize(): number {
+  const configured = process.env[COORDINATION_V4_BACKFILL_BATCH_ENV];
+  if (configured === undefined || configured === '') return 1000;
+  const batchSize = Number(configured);
+  if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 5000) {
+    throw new Error(`${COORDINATION_V4_BACKFILL_BATCH_ENV} must be an integer from 1 to 5000`);
+  }
+  return batchSize;
+}
+
+async function runAdaptiveCoordinationBackfill(
+  client: pg.PoolClient, functionName: string,
+): Promise<void> {
+  let batchSize = coordinationBackfillBatchSize();
+  await client.query("SET lock_timeout = '1s'");
+  await client.query("SET statement_timeout = '5s'");
+  try {
+    for (;;) {
+      try {
+        const result = await client.query<{ completed: boolean }>(
+          `SELECT ${functionName}($1) AS completed`, [batchSize],
+        );
+        if (result.rows[0]?.completed === true) return;
+      } catch (error) {
+        const code = (error as { code?: string }).code;
+        if ((code !== '55P03' && code !== '57014') || batchSize === 1) throw error;
+        batchSize = Math.max(1, Math.floor(batchSize / 2));
+      }
+    }
+  } finally {
+    await client.query('RESET statement_timeout');
+    await client.query('RESET lock_timeout');
   }
 }
 
@@ -231,17 +360,14 @@ async function runNonTransactionalStatement(
   if (statement.split(/\r?\n/).some(
     (line) => line.trim() === BACKFILL_COORDINATION_V4,
   )) {
-    await client.query("SET statement_timeout = '5s'");
-    try {
-      for (;;) {
-        const result = await client.query<{ completed: boolean }>(
-          `SELECT continuum_backfill_coordination_v4(1000) AS completed`,
-        );
-        if (result.rows[0]?.completed === true) return;
-      }
-    } finally {
-      await client.query('RESET statement_timeout');
-    }
+    await runAdaptiveCoordinationBackfill(client, 'continuum_backfill_coordination_v4');
+    return;
+  }
+  if (statement.split(/\r?\n/).some(
+    (line) => line.trim() === BACKFILL_COORDINATION_V5,
+  )) {
+    await runAdaptiveCoordinationBackfill(client, 'continuum_backfill_coordination_v5');
+    return;
   }
   if (statement.split(/\r?\n/).some(
     (line) => line.trim() === BACKFILL_COORDINATION_REPAIR,
@@ -341,6 +467,7 @@ export async function runMigrations(
     // pending migration must never get an opportunity to execute.
     for (const file of files) await verifyPublishedMigration(migrationsDir, file);
 
+    let repairPre0065StoredCrLf = false;
     if (files.includes('0074_coordination_compatibility_and_upgrade_repair.sql')) {
       const compatibility = await client.query<{ before0065: boolean }>(
         `SELECT EXISTS (
@@ -351,9 +478,7 @@ export async function runMigrations(
             WHERE name = '0065_coordination_review_remediation.sql'
          ) AS "before0065"`,
       );
-      if (compatibility.rows[0]?.before0065 === true) {
-        await repairStoredCrLfFunctions(client);
-      }
+      repairPre0065StoredCrLf = compatibility.rows[0]?.before0065 === true;
     }
 
     for (const file of files) {
@@ -388,6 +513,33 @@ export async function runMigrations(
         }
       }
 
+      if (file === '0065_coordination_review_remediation.sql'
+          && repairPre0065StoredCrLf) {
+        await client.query('BEGIN');
+        try {
+          await repairStoredCrLfFunctions(client);
+          await client.query('COMMIT');
+        } catch (error) {
+          await client.query('ROLLBACK');
+          throw error;
+        }
+        repairPre0065StoredCrLf = false;
+      }
+
+      if (file === '0075_coordination_online_repair_finish.sql') {
+        const published0074 = (await readFile(join(
+          migrationsDir, '0074_coordination_compatibility_and_upgrade_repair.sql',
+        ), 'utf8')).replaceAll('\r\n', '\n');
+        await client.query('BEGIN');
+        try {
+          await client.query(repaired0074CandidateFunction(published0074));
+          await client.query('COMMIT');
+        } catch (error) {
+          await client.query('ROLLBACK');
+          throw error;
+        }
+      }
+
       // PostgreSQL preserves line endings inside dollar-quoted function bodies.
       // Execute one canonical LF form so pg_get_functiondef-based forward
       // repairs behave identically from Git LF and Windows CRLF checkouts.
@@ -396,7 +548,10 @@ export async function runMigrations(
       const canonicalSql = (await readFile(join(migrationsDir, file), 'utf8'))
         .replaceAll('\r\n', '\n');
       const sql = file === '0073_coordination_bounded_discovery_and_locking.sql'
-        ? deferLegacy0073Backfill(canonicalSql) : canonicalSql;
+        ? deferLegacy0073Backfill(canonicalSql)
+        : file === '0074_coordination_compatibility_and_upgrade_repair.sql'
+          ? repair0074PartialUpgradeDiscovery(canonicalSql)
+          : canonicalSql;
       try {
         if (sql.trimStart().startsWith(NO_TRANSACTION_MARKER)) {
           // CREATE INDEX CONCURRENTLY cannot run in a transaction block. Such

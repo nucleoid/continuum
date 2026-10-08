@@ -304,7 +304,7 @@ vectors. Audit failure rolls back the whole operation.
 
 ## Deployment, mixed versions, and rollback
 
-Apply through migration `0075_coordination_online_repair_finish.sql`
+Apply through migration `0077_coordination_review_2_online_finish.sql`
 (0064 and 0070 remain concurrent-index steps), then **re-run
 `scripts/grant-application-role.sql`** for every application and dedicated
 operator role. Re-run `scripts/grant-operator-role.sql` immediately afterward
@@ -372,26 +372,32 @@ Advisory contention uses try-locks and usage rows use `NOWAIT`; the supported
 wrapper converts SQLSTATE 55P03 into `reason: lock_busy` instead of waiting for
 a caller timeout. Expired detached receipts are purged only after the scrub has
 finished taking scope locks, with `SKIP LOCKED` on receipt rows and the detached
-usage row already held. This behavior applies to direct SQL, current service
-calls, and older compatible binaries that call the stable wrapper signature.
+usage row already held. Current service calls translate typed SQLSTATE 55P03
+to `lock_busy`; direct SQL receives the SQLSTATE and must handle it explicitly.
 0073 preserves existing grants on the replaced operator entry points and adds
 no new runtime-role grant requirement.
 
-Migrations 0074 and 0075 are the forward-only repair for existing 0073
+Migrations 0074 through 0077 are the forward-only repair for existing 0073
 installations. Drain every pre-0074 offboarding and privacy-repair worker before
-applying them. The stable database wrapper refuses an unversioned pre-0074
-client if lock contention occurs, so an old client cannot interpret
-`lock_busy` as successful completion. Keep those workers drained through the
-0075 concurrent index and resumable 1,000-row backfill, then re-run the exact
-grant profiles before restart. Binary rollback to a pre-0074 worker is refused
-for offboarding and privacy repair. Rollback is forward-only: restore a current
-binary or ship another migration, never remove the negotiation guard or mark a
-partial repair complete.
+applying them and keep those workers drained through the 0075 index/backfill
+and 0076/0077 remediation. Migration
+`0076_coordination_review_2_remediation.sql` adds database-enforced entry
+negotiation: runtime roles without client privacy version 4 are refused before
+any mutation by the stable privacy wrapper and offboarding start/create guard.
+It also preserves completed scrub work when only detached cleanup is busy.
+The packaged migrator applies lock and statement timeouts to the restartable
+backfill, reduces a contended batch adaptively, and accepts
+`CONTINUUM_COORDINATION_V4_BACKFILL_BATCH_SIZE` from 1 through 5,000. Re-run
+the exact grant profiles before restart. Binary rollback to a pre-0074 worker
+is unsupported and is refused on the protected mutation paths. Rollback is
+forward-only: restore a current binary or ship another migration; never remove
+the negotiation guard or mark a partial repair complete.
 
 The packaged migrator verifies every pinned published checksum before any
 fresh or upgrade SQL executes. It defers 0073's historical in-transaction
 backfill and performs that work after the 0074 trigger and lifecycle repair
-through 0075's concurrent index and restartable batches. Use the packaged
+through 0075's concurrent index and restartable batches. Migration 0077 runs
+the bounded eligibility reconciliation introduced by 0076. Use the packaged
 migrator for fresh installs and upgrades. Applying 0073 directly with `psql`
 retains its published historical blocking behavior and is unsupported.
 
