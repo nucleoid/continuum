@@ -371,7 +371,7 @@ describe('post-rejection database authority remediation', () => {
          AND dependency.refclassid = 'pg_extension'::regclass
          AND dependency.deptype = 'e'
         JOIN pg_extension extension ON extension.oid = dependency.refobjid
-       WHERE extension.extname = 'vector' AND function.pronamespace = 'public'::regnamespace
+       WHERE extension.extname = 'vector'
        ORDER BY function.oid LIMIT 1
     `)).rows[0];
     expect(vectorFunction).toBeDefined();
