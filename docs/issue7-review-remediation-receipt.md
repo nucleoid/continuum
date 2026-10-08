@@ -145,3 +145,128 @@ Those two failures reproduce in their isolated rotation-security file and no
 rotation, identity, workflow, lockfile, or grant-script production source was
 changed by this remediation. They are residual repository/test-environment
 risks, not acceptance evidence for issue 7.
+
+## Final upgrade/scale remediation addendum (2026-10-08)
+
+This addendum supersedes the residual-risk statement immediately above. The
+full rotation-security file now passes on the final implementation, and the
+previous 40/42 result has a demonstrated fixture-state cause.
+
+### Frozen commits and trees
+
+- Required starting HEAD: `1a3390b3e85fe85c4ae2955d0bba4de1dea00a8a`
+  (tree `427ddacbbeeb834ce6a062f610898e06d14ff361`).
+- Merge base: `7bfedb7a00ae5f2b28dd349324bbf4f7cd197874`.
+- Deterministic tests/docs RED:
+  `afda9c2351af7a7e7f4810be704625ac887160ff`
+  (tree `c233af2f5247c72781be642621514cfcc1d70473`).
+- GREEN implementation:
+  `be9996d363bb4565368c35d8c2e70fe0443af48f`
+  (tree `70899cf0bc98657fe9301155cc94f919e9eca7b2`).
+
+The GREEN implementation adds only forward migrations 0078 and 0079. It does
+not alter package-lock, workflows, generic runners, package manifest behavior,
+or migrations 0054-0077. The latter range is byte-identical to starting HEAD;
+`git diff` over the 24 exact paths is empty. New migration SHA-256 values are:
+
+- 0078: `39d21c91e36bb67698c593a6d9929982c0f3138eee6575e4008a929c6853a120`
+- 0079: `147497bac862bfc7f25123cd3f655550c2c6c4c574a3519fa2a98dd62828d85a`
+
+### Grounded fixes
+
+- 0078 creates the concurrent legacy-incomplete partial index. 0079 gives all
+  eligible, legacy-incomplete, and dirty branches explicit lower and upper UUID
+  range bounds for NULL, shallow, and targeted generic plans.
+- The current client resolves a schema-version marker in the exact schema that
+  owns its resolved `principals` relation before privacy repair or non-dry-run
+  offboarding. Schemas stopped at 0073 and 0075 refuse with `CONFLICT` before
+  changing audit or lifecycle state. 0079 can only follow ledgered 0077, whose
+  restartable v5 reconciliation must already have completed.
+- Dirty-marker NOWAIT contention leaves completed v3 work intact. Detached
+  receipt purge first checks for expired rows and uses `SKIP LOCKED`, preserving
+  bounded truthful progress between different principals sharing the detached
+  usage row.
+- Published 0074/0076 bytes remain pinned; the packaged migrator executes exact
+  CRLF-pair-only runtime repairs. Lone CR data survives in owner-owned prefixed
+  functions, while foreign-owner, co-tenant, and extension members remain out
+  of scope.
+- Documentation now states the owner bypass honestly: only separate non-owner
+  runtime roles receive the database old-client guard; a single owner role has
+  no such boundary.
+
+### Stale-role cause and recovery evidence
+
+The leaked `continuum_retired_collision_1791366571420` generation was a test
+fixture leak, not a failed retirement primitive or grant profile. The fixture
+created cluster-wide roles and inserted retired history before entering its
+`try`. Its old cleanup deleted retired history only by the pre-rebind OID; once
+the registry referred to the recreated LOGIN generation, that deletion missed
+the row and subsequent teardown aborted, while `resetData` deliberately did not
+clear the installation-wide retired registries. That stale live-name/OID row
+then made later rebinds fail closed. Both grant scripts pass in the final fresh
+42/42 file; neither is the source of the leak.
+
+The corrected fixture encloses creation, grants, registry insertion, rename,
+recreation, rebind, and verification in `try/finally`; cleanup removes active,
+retired, and unresolved entries by role name and known OID before dropping every
+still-existing role. A fresh isolated proof covers retire, verify, rebind,
+old-role removal, preserved-provenance rebind, and stale retired-registry
+recovery. The exact leaked test roles and one exact retired row were removed
+from the local test cluster after evidence capture; they are reproducible test
+artifacts, not recoverable tenant data.
+
+### Accepted bounded evidence
+
+Every command used `MemoryMax=768M`, `MemorySwapMax=128M`, a 1,200-second hard
+cap, and one Vitest worker/no file parallelism where applicable. Every accepted
+run reported 0 B swap peak.
+
+| Invocation | Result | Runtime | Memory peak | Accepted evidence |
+|---|---:|---:|---:|---|
+| `333fdc6f664443a19acc589c709ed53e` | expected RED: 55 pass / 7 fail | 2m15.770s | 328 KiB | final deterministic RED, including full fresh rotation 42/42 |
+| `de97fb8b706d4fab91609874da36f5b3` | 1 pass / 9 skipped | 2.24s | 256 KiB | detached two-session contention control |
+| `cfe98fabe4f448709db4e24c4b1a29f2` | 20/20 | 30.558s | 324 KiB | final static + PostgreSQL core proof, exact production four-argument plans over 50,000 rows |
+| `247c7a58a9b5403fb42faca9b89a6f54` | 42/42 | 26.914s | 404 KiB | complete final rotation-security file |
+| `66e0bf89a343493ba7dfe82c97b63324` | 44/44 | 47.575s | 256 KiB | fresh/upgrade/custom-schema/CRLF/checksum migrator matrix |
+| `06d0c39f21fc41a2ab5d9e07099f588d` | 39/39 | 55.353s | 320 KiB | coordination storage and role/grant ACL matrix |
+| `5061bd90873b4dafad7d1f6a4f5c8530` | 6/6 | 8.835s | 472 KiB | exact-head lock-order and offboarding races |
+| `f0ce4f9d82774605b67baf3690828805` | 54/54 | 58.477s | 664 KiB | adjacent coordination/offboarding services |
+| `452953c9ac9941da8d9900514b3e6043` | 94/94 | 28.853s | 256 KiB | REST/MCP malformed input, parity, offboarding routes, and CLI exits |
+| `3841654464f842968455dc19827bdf9c` | pass | 5.979s | 512 KiB | TypeScript build |
+| `2b6ef821a7da4863b83da9ead6431a60` | pass | 12.032s | 668 KiB | packed CLI install/runtime smoke including 0078/0079 |
+| `8ec43435ca1d46a485d2ae2d1ed70e43` | pass, 303 entries | 8.717s | 312 KiB | `npm pack --dry-run --json` |
+
+The final plan proof forces generic plans through the production four-argument
+wrapper for NULL cursor, shallow cursor, and targeted legacy lookup. It asserts
+the exact row counts, fewer than 2,000 shared buffers including first-call plan
+compilation, and increased scan counters for both eligible and legacy partial
+indexes. The fixed cap is independent of the 50,000-row backlog size.
+
+### Excluded and superseded evidence
+
+- `e1b917ce4b5549299fe9eae89c85575d` is root-cause evidence only: it reproduced
+  40/42 against the contaminated cluster before exact leaked-role cleanup.
+- `70dcb21c7d7d4da0b07cf42ff6c7f547` is an earlier RED (53 pass / 9 fail),
+  superseded by the committed deterministic RED.
+- `64bfbe80b050408b87643521c73ad167` and
+  `f95e193493a5413491dfbf9e73d44377` are setup-only shell/cwd failures.
+- `78936baf107c400f81ef05c6d2662a85` ran from `/home/fuego` and discovered
+  three worktrees; none of its 30 cwd failures is acceptance evidence.
+- `d2db2da5cfae4aa1a20bce609198de1b`,
+  `92b74093af8e40a59c7df31f9914ae82`,
+  `77db9f1458534f10a4560748299f1c4e`,
+  `6e4fa9d5670547c9971630de55442104`,
+  `448c7d7949464c5292ebfb8e1aadd575`, and
+  `573097c6a0014ee08b885c9bcba62da1` are implementation/diagnostic iterations
+  that exposed the missing directive terminators, lone-CR runtime rewrite, and
+  an over-tight first-call buffer threshold. They are superseded by the final
+  20/20 proof.
+- `c78d31c789ce4a97a6305fc0222e807d` is excluded as a whole because adjacent
+  expectations had not yet been advanced to 0078/0079 and one pooled-session
+  race used an unstable PID. Its corrected subsets are accepted above.
+- `28d750d77b534fa18f454c07ce804dae` exposed cross-schema marker resolution and
+  is superseded by the schema-local final core proof.
+
+No unbounded full suite, external publication, independent Claude review,
+push, PR mutation, merge, deploy, rebase/reset, branch deletion, archive, or
+remote mutation was performed.
