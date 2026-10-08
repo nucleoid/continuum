@@ -502,24 +502,53 @@ The supported and CI-tested database major is PostgreSQL 16 with pgvector.
 Qualify another major independently before migration; successful SQL parsing
 alone is not a supported rollout.
 
-Pgvector is a database-wide prerequisite whose objects may live in `public`,
-the Continuum application schema, or a dedicated provider-managed extension
-schema. The migration owner needs `USAGE` on the installed extension schema;
-that schema does not need to remain on the application's `search_path`.
-`runMigrations` temporarily appends the actual extension schema while applying
-the initial migration and restores the caller's path before releasing its
-connection. Runtime embedding queries infer the vector type from the
-`memory_embeddings.embedding` column and also support paths that omit the
-extension schema.
+Pgvector is one database-wide provider prerequisite whose objects may already
+live in `public`, an existing Continuum application schema, or a dedicated
+provider-managed schema. Existing and already-ledgered placement is preserved.
+A fresh automatic installation instead creates the dedicated
+`continuum_extensions` schema under the migration advisory lock and installs
+pgvector there. It never chooses a tenant application schema. Dropping one
+application schema therefore does not own or cascade through the provider into
+another installation. Treat `continuum_extensions` as database provider
+infrastructure: its owner controls extension upgrades and it must be dropped
+only after every dependent Continuum schema has been retired.
 
-If pgvector is absent, `runMigrations` attempts `CREATE EXTENSION vector` under
-the migration advisory lock, using the caller's first writable schema. Some
-packaged or managed pgvector installations permit only a database superuser or
-provider role to create the extension. In that case the failed attempt records
-no application migration: have the DBA install pgvector in a reviewed schema,
-grant the migration owner `USAGE` on that schema, and rerun the same migration.
-Do not move an existing extension merely to place it in `public`; already
-ledgered databases and provider-managed non-public layouts remain supported.
+The migration owner needs `USAGE` on the installed extension schema.
+`runMigrations` reports the exact missing grant before applying `0001`. It
+temporarily appends the discovered provider schema only while applying
+`0001_init.sql`, then restores the caller's path immediately after `0001`
+commits or rolls back. Later migrations never inherit the provider schema.
+Runtime embedding queries infer the vector type from the
+`memory_embeddings.embedding` column and schema-qualify the distance operator,
+so the provider schema does not need to remain on the runtime `search_path`.
+
+If pgvector is absent, `runMigrations` creates the provider schema and attempts
+`CREATE EXTENSION vector WITH SCHEMA continuum_extensions` before opening the
+`0001` transaction. Some packaged or managed installations permit only a
+database superuser or provider role to do this. In that case no application
+migration is recorded: have the DBA install pgvector in a reviewed schema,
+grant the migration owner `USAGE` on that schema, and rerun the migration. The
+provider schema or extension can remain after a failed `0001` because both are
+created outside its transaction; inspect and retain or remove those empty
+provider objects deliberately before retrying. Do not move an existing
+extension merely to use the default schema.
+
+Application roles also require `USAGE` on the provider schema and `EXECUTE` on
+the extension routines used by vector operators. Migration `0080` upgrades the
+owner-only grant refresher, and `grant-application-role.sql` invokes it after
+granting the Continuum application profile. For an owner-installed extension,
+the migration owner supplies these narrow grants. For a provider-owned schema,
+either pregrant the application role directly or grant the migration owner the
+corresponding grant options; the refresher fails with the exact provider-owner
+grant when it cannot delegate. Do not grant schema `CREATE`, provider
+ownership, a provider role, or blanket database privileges to the application
+role.
+
+Rolling back to a binary from before provider-schema support is unsafe while
+the extension schema is absent from that binary's runtime `search_path`,
+because older embedding SQL used unqualified vector casts and operators.
+Restore the prior path contract before such a rollback, or keep the current
+binary until a forward repair is available.
 
 Before migration, confirm the named app, operator, and sync roles have no rows
 in `pg_db_role_setting` and no explicit or inherited entries in

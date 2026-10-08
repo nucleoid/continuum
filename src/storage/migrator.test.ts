@@ -64,6 +64,7 @@ describe('runMigrations', () => {
   it('serializes pgvector bootstrap when concurrent fresh migrations use different public-less schemas', async () => {
     const database = `continuum_vector_bootstrap_${randomUUID().replaceAll('-', '')}`;
     const firstSchema = 'first_migration_schema';
+    const secondSchema = 'second_migration_schema';
     const migrationLockId = '7215328273579717613';
     const directory = await mkdtemp(join(tmpdir(), 'continuum-vector-bootstrap-'));
     directories.push(directory);
@@ -82,29 +83,29 @@ describe('runMigrations', () => {
     let firstRun: Promise<unknown> | undefined;
     let secondRun: Promise<unknown> | undefined;
 
-    const waitUntilQueued = async (applicationName: string) => {
+    const waitUntilConnected = async (applicationName: string) => {
       const deadline = Date.now() + 10_000;
       while (Date.now() < deadline) {
-        const waiting = await blocker!.query<{ queued: boolean }>(
+        const connected = await blocker!.query<{ connected: boolean }>(
           `SELECT EXISTS (
              SELECT 1 FROM pg_stat_activity
               WHERE datname = current_database()
                 AND application_name = $1
-                AND wait_event_type = 'Lock'
-                AND wait_event = 'advisory'
-           ) AS queued`,
+           ) AS connected`,
           [applicationName],
         );
-        if (waiting.rows[0]?.queued === true) return;
+        if (connected.rows[0]?.connected === true) return;
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
-      throw new Error(`${applicationName} did not queue for the migration lock`);
+      throw new Error(`${applicationName} did not connect for migration locking`);
     };
 
     try {
       await admin.query(`CREATE DATABASE "${database}"`);
       blocker = new pg.Pool({ connectionString: databaseUrl.toString(), max: 1 });
+      blocker.on('error', () => undefined);
       await blocker.query(`CREATE SCHEMA ${firstSchema}`);
+      await blocker.query(`CREATE SCHEMA ${secondSchema}`);
       await blocker.query('SELECT pg_advisory_lock($1::bigint)', [migrationLockId]);
       lockHeld = true;
 
@@ -114,17 +115,19 @@ describe('runMigrations', () => {
         application_name: 'continuum-vector-bootstrap-first',
         options: `-c search_path=${firstSchema}`,
       });
+      first.on('error', () => undefined);
       second = new pg.Pool({
         connectionString: databaseUrl.toString(),
         max: 1,
         application_name: 'continuum-vector-bootstrap-second',
-        options: '-c search_path=public',
+        options: `-c search_path=${secondSchema}`,
       });
+      second.on('error', () => undefined);
 
       firstRun = runMigrations(first, directory);
-      await waitUntilQueued('continuum-vector-bootstrap-first');
+      await waitUntilConnected('continuum-vector-bootstrap-first');
       secondRun = runMigrations(second, directory);
-      await waitUntilQueued('continuum-vector-bootstrap-second');
+      await waitUntilConnected('continuum-vector-bootstrap-second');
       await blocker.query('SELECT pg_advisory_unlock($1::bigint)', [migrationLockId]);
       lockHeld = false;
 
@@ -134,7 +137,7 @@ describe('runMigrations', () => {
            FROM pg_extension extension
            JOIN pg_namespace namespace ON namespace.oid = extension.extnamespace
           WHERE extension.extname = 'vector'`,
-      )).rows).toEqual([{ schema: firstSchema }]);
+      )).rows).toEqual([{ schema: 'continuum_extensions' }]);
     } finally {
       if (lockHeld) {
         await blocker?.query(
@@ -338,7 +341,7 @@ describe('runMigrations', () => {
     const files = (await readdir(join(process.cwd(), 'migrations')))
       .filter((name) => name.endsWith('.sql'))
       .sort();
-    expect(files.slice(-26)).toEqual([
+    expect(files.slice(-27)).toEqual([
       '0054_coordination_leases.sql',
       '0055_coordination_review_remediation.sql',
       '0056_coordination_final_remediation.sql',
@@ -365,6 +368,7 @@ describe('runMigrations', () => {
       '0077_coordination_review_2_online_finish.sql',
       '0078_coordination_upgrade_scale_indexes.sql',
       '0079_coordination_upgrade_scale_remediation.sql',
+      '0080_pgvector_provider_grants.sql',
     ]);
     const migration = await readFile(
       join(process.cwd(), 'migrations/0054_coordination_leases.sql'),
@@ -872,7 +876,7 @@ describe('runMigrations', () => {
         $$;
       `);
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-48).map((migration) => migration.name)).toEqual([
+      expect(applied.slice(-49).map((migration) => migration.name)).toEqual([
         '0032_offboarding_round7_compatibility.sql',
         '0033_offboarding_bounded_selectors.sql',
         '0034_offboarding_completion_invariants.sql',
@@ -921,6 +925,7 @@ describe('runMigrations', () => {
         '0077_coordination_review_2_online_finish.sql',
         '0078_coordination_upgrade_scale_indexes.sql',
         '0079_coordination_upgrade_scale_remediation.sql',
+        '0080_pgvector_provider_grants.sql',
       ]);
       expect((await pool.query(
         `SELECT disabled_at IS NOT NULL AS disabled FROM principals
@@ -1191,7 +1196,8 @@ describe('runMigrations', () => {
       && name !== '0076_coordination_review_2_remediation.sql'
       && name !== '0077_coordination_review_2_online_finish.sql'
       && name !== '0078_coordination_upgrade_scale_indexes.sql'
-      && name !== '0079_coordination_upgrade_scale_remediation.sql')) {
+      && name !== '0079_coordination_upgrade_scale_remediation.sql'
+      && name !== '0080_pgvector_provider_grants.sql')) {
       if (file === '0038_offboarding_search_path_hardening.sql') {
         await copyFile(
           new URL(
@@ -2415,6 +2421,9 @@ describe('runMigrations', () => {
     const client = {
       query: vi.fn(async (query: string) => {
         queries.push(query.trim());
+        if (query.includes('pg_try_advisory_lock')) {
+          return { rowCount: 1, rows: [{ locked: true }] };
+        }
         if (query.includes('SELECT 1 FROM _continuum_migrations')) {
           return { rowCount: 0, rows: [] };
         }
@@ -2448,6 +2457,9 @@ describe('runMigrations', () => {
     const client = {
       query: vi.fn(async (query: string) => {
         queries.push(query.trim());
+        if (query.includes('pg_try_advisory_lock')) {
+          return { rowCount: 1, rows: [{ locked: true }] };
+        }
         if (query.includes('SELECT 1 FROM _continuum_migrations')) {
           return { rowCount: 0, rows: [] };
         }
@@ -2484,6 +2496,9 @@ describe('runMigrations', () => {
     const client = {
       query: vi.fn(async (query: string) => {
         queries.push(query.trim());
+        if (query.includes('pg_try_advisory_lock')) {
+          return { rowCount: 1, rows: [{ locked: true }] };
+        }
         if (query.includes('SELECT 1 FROM _continuum_migrations')) return { rowCount: 0, rows: [] };
         if (query.includes('JOIN pg_index')) {
           stateChecks += 1;
@@ -2519,6 +2534,9 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS exact_idx ON exact_table (id);
     const client = {
       query: vi.fn(async (query: string) => {
         queries.push(query.trim());
+        if (query.includes('pg_try_advisory_lock')) {
+          return { rowCount: 1, rows: [{ locked: true }] };
+        }
         if (query.includes('SELECT 1 FROM _continuum_migrations')) return { rowCount: 0, rows: [] };
         if (query.includes('JOIN pg_index')) {
           return { rowCount: 1, rows: [{ schema: 'tenant_exact', valid: false }] };
@@ -2549,6 +2567,9 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS exact_idx ON exact_table (id);
     const client = {
       query: vi.fn(async (query: string) => {
         queries.push(query.trim());
+        if (query.includes('pg_try_advisory_lock')) {
+          return { rowCount: 1, rows: [{ locked: true }] };
+        }
         if (query.includes('SELECT 1 FROM _continuum_migrations')) {
           return { rowCount: 0, rows: [] };
         }
@@ -2572,7 +2593,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS exact_idx ON exact_table (id);
     expect(applied).toHaveLength(1);
     expect(pool.connect).toHaveBeenCalledTimes(1);
     expect(pool.query).not.toHaveBeenCalled();
-    expect(queries[0]).toContain('pg_advisory_lock');
+    expect(queries[0]).toContain('pg_try_advisory_lock');
     expect(queries[1]).toContain('CREATE TABLE IF NOT EXISTS _continuum_migrations');
     expect(queries.at(-1)).toContain('pg_advisory_unlock');
     expect(release).toHaveBeenCalledTimes(1);
@@ -2600,6 +2621,9 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS exact_idx ON exact_table (id);
     const release = vi.fn();
     const client = {
       query: vi.fn(async (query: string) => {
+        if (query.includes('pg_try_advisory_lock')) {
+          return { rowCount: 1, rows: [{ locked: true }] };
+        }
         if (query.includes('SELECT 1 FROM _continuum_migrations')) {
           return { rowCount: 0, rows: [] };
         }

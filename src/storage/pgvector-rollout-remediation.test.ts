@@ -53,6 +53,7 @@ function migrationPool(url: string, schema: string, role?: string): pg.Pool {
     max: 1,
     options: `-c search_path=${searchPath(schema)}${role ? ` -c role=${role}` : ''}`,
   });
+  pool.on('error', () => undefined);
   pools.push(pool);
   return pool;
 }
@@ -96,6 +97,7 @@ async function withFreshDatabase(
   await root.query(`CREATE DATABASE ${quoteIdentifier(database)}`);
   const url = databaseUrl(database);
   const target = new pg.Pool({ connectionString: url, max: 1 });
+  target.on('error', () => undefined);
   pools.push(target);
   try {
     await run(root, target, url, database);
@@ -157,7 +159,7 @@ describe('pgvector rollout remediation', () => {
       await expect(runMigrations(pool, migrations)).resolves.toEqual(
         expect.arrayContaining([
           expect.objectContaining({ name: '0001_init.sql' }),
-          expect.objectContaining({ name: '0077_coordination_review_2_online_finish.sql' }),
+          expect.objectContaining({ name: '0080_pgvector_provider_grants.sql' }),
         ]),
       );
       expect((await target.query(
@@ -244,6 +246,40 @@ describe('pgvector rollout remediation', () => {
     });
   }, 240_000);
 
+  it('preserves an already-ledgered non-public app-schema extension during upgrade', async () => {
+    await withFreshDatabase(async (_root, target, url) => {
+      const applicationSchema = identifier('continuum_legacy');
+      await target.query(`CREATE SCHEMA ${quoteIdentifier(applicationSchema)}`);
+      await target.query(
+        `CREATE EXTENSION vector WITH SCHEMA ${quoteIdentifier(applicationSchema)}`,
+      );
+      const initial = await mkdtemp(join(tmpdir(), 'continuum-pgvector-initial-'));
+      directories.push(initial);
+      await copyFile(
+        join(process.cwd(), 'migrations/0001_init.sql'),
+        join(initial, '0001_init.sql'),
+      );
+      const pool = migrationPool(url, applicationSchema);
+      await runMigrations(pool, initial);
+
+      const full = await fullMigrationDirectory();
+      await expect(runMigrations(pool, full)).resolves.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ name: '0080_pgvector_provider_grants.sql' }),
+        ]),
+      );
+      expect((await target.query(
+        `SELECT namespace.nspname AS schema
+           FROM pg_extension extension
+           JOIN pg_namespace namespace ON namespace.oid = extension.extnamespace
+          WHERE extension.extname = 'vector'`,
+      )).rows).toEqual([{ schema: applicationSchema }]);
+      expect((await target.query(
+        `SELECT to_regnamespace('continuum_extensions') IS NULL AS no_default_provider`,
+      )).rows).toEqual([{ no_default_provider: true }]);
+    });
+  }, 180_000);
+
   it('grants a least-privilege app role provider access for runtime vector search', async () => {
     const ownerRole = identifier('continuum_owner');
     const appRole = identifier('continuum_app');
@@ -264,7 +300,13 @@ describe('pgvector rollout remediation', () => {
         `CREATE EXTENSION vector WITH SCHEMA ${quoteIdentifier(providerSchema)}`,
       );
       await target.query(
-        `GRANT USAGE ON SCHEMA ${quoteIdentifier(providerSchema)} TO ${quoteIdentifier(ownerRole)}`,
+        `GRANT USAGE ON SCHEMA ${quoteIdentifier(providerSchema)} TO ${quoteIdentifier(ownerRole)} WITH GRANT OPTION`,
+      );
+      await target.query(
+        `REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA ${quoteIdentifier(providerSchema)} FROM PUBLIC`,
+      );
+      await target.query(
+        `GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA ${quoteIdentifier(providerSchema)} TO ${quoteIdentifier(ownerRole)} WITH GRANT OPTION`,
       );
       const directory = await fullMigrationDirectory();
       const owner = migrationPool(url, applicationSchema, ownerRole);
@@ -297,6 +339,18 @@ describe('pgvector rollout remediation', () => {
         `SELECT has_schema_privilege(current_user, $1, 'USAGE') AS usage`,
         [providerSchema],
       )).rows).toEqual([{ usage: true }]);
+      expect((await runtime.query(
+        `SELECT bool_and(has_function_privilege(current_user, function.oid, 'EXECUTE'))
+                AS executable
+           FROM pg_proc function
+           JOIN pg_depend dependency
+             ON dependency.classid = 'pg_proc'::regclass
+            AND dependency.objid = function.oid
+            AND dependency.refclassid = 'pg_extension'::regclass
+            AND dependency.deptype = 'e'
+           JOIN pg_extension extension ON extension.oid = dependency.refobjid
+          WHERE extension.extname = 'vector'`,
+      )).rows).toEqual([{ executable: true }]);
       await expect(vectorSearchMemoryIds(runtime, vector, [scopeId], provider, 5))
         .resolves.toEqual([{ id: memoryId, distance: 0 }]);
     });
@@ -323,7 +377,7 @@ describe('pgvector rollout remediation', () => {
       const owner = migrationPool(url, applicationSchema, ownerRole);
 
       await expect(runMigrations(owner, directory)).rejects.toThrow(
-        new RegExp(`GRANT USAGE ON SCHEMA ${providerSchema} TO ${ownerRole}`),
+        new RegExp(`GRANT USAGE ON SCHEMA.*${providerSchema}.*TO.*${ownerRole}`),
       );
     });
   });

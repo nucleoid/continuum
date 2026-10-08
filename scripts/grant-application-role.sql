@@ -208,8 +208,9 @@ GRANT EXECUTE ON FUNCTION
 TO :"continuum_app_role";
 
 -- PUBLIC function execution is closed across the application schema. Restore
--- only pgvector extension routines directly to roles with the application
--- profile; the owner-only helper discovers this role from its memories grant.
+-- only pgvector provider-schema USAGE and extension routines directly to roles
+-- with the application profile; the owner-only helper discovers this role
+-- from its memories grant and reports provider-owned grants it cannot delegate.
 SELECT :"continuum_schema".continuum_grant_application_vector_functions();
 
 REVOKE ALL ON FUNCTION

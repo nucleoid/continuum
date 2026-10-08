@@ -51,6 +51,7 @@ async function withFreshDatabase(
     await root.query(`CREATE DATABASE "${database}"`);
     const url = databaseUrl(database);
     target = new pg.Pool({ connectionString: url, max: 1 });
+    target.on('error', () => undefined);
     await run(root, target, url, database, directory);
   } finally {
     await target?.end().catch(() => undefined);
@@ -63,11 +64,13 @@ async function withFreshDatabase(
 
 function migrationPool(url: string, searchPath: string, role?: string): pg.Pool {
   const roleOption = role ? ` -c role=${role}` : '';
-  return new pg.Pool({
+  const pool = new pg.Pool({
     connectionString: url,
     max: 1,
     options: `-c search_path=${searchPath}${roleOption}`,
   });
+  pool.on('error', () => undefined);
+  return pool;
 }
 
 describe('pgvector schema contract', () => {

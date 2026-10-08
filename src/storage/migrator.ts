@@ -6,6 +6,7 @@ import type pg from 'pg';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_MIGRATIONS_DIR = resolve(here, '../../migrations');
+const DEFAULT_VECTOR_PROVIDER_SCHEMA = 'continuum_extensions';
 
 // This key coordinates every Continuum migrator connected to the same database.
 // Changing it would break coordination with replicas running an older version.
@@ -120,6 +121,8 @@ const FORWARD_MIGRATION_REQUIREMENTS = new Map([
     '0077_coordination_review_2_online_finish.sql'],
   ['0079_coordination_upgrade_scale_remediation.sql',
     '0078_coordination_upgrade_scale_indexes.sql'],
+  ['0080_pgvector_provider_grants.sql',
+    '0079_coordination_upgrade_scale_remediation.sql'],
 ]);
 const REVIEW_ENTRA_MIGRATION_RENAMES = [
   ['0005_entra_auth.sql', '0010_entra_auth.sql'],
@@ -469,11 +472,30 @@ export async function runMigrations(
   let runError: unknown;
   let originalSearchPath: string | undefined;
 
+  const restoreInitialMigrationSearchPath = async (): Promise<void> => {
+    if (originalSearchPath === undefined) return;
+    const path = originalSearchPath;
+    await client.query(
+      `SELECT set_config('search_path', $1, FALSE)`,
+      [path],
+    );
+    originalSearchPath = undefined;
+  };
+
   try {
-    await client.query('SELECT pg_advisory_lock($1::bigint)', [
-      CONTINUUM_MIGRATION_LOCK_ID,
-    ]);
-    lockAcquired = true;
+    // A session blocked inside pg_advisory_lock owns a virtual transaction.
+    // CREATE INDEX CONCURRENTLY in the lock holder must wait for that virtual
+    // transaction, producing a lock cycle. Poll without retaining a snapshot.
+    while (!lockAcquired) {
+      const lockResult = await client.query<{ locked: boolean }>(
+        'SELECT pg_try_advisory_lock($1::bigint) AS locked',
+        [CONTINUUM_MIGRATION_LOCK_ID],
+      );
+      lockAcquired = lockResult.rows[0]?.locked === true;
+      if (!lockAcquired) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS _continuum_migrations (
@@ -504,9 +526,14 @@ export async function runMigrations(
       if (!initialMigration.rowCount) {
         if (vectorExtension.rows.length === 0) {
           // Extension installation is database-wide. Keep it under the same
-          // advisory lock as 0001, but let PostgreSQL use the caller's first
-          // writable schema so custom-schema owners do not need CREATE on public.
-          await client.query('CREATE EXTENSION vector');
+          // advisory lock as 0001 and place a fresh installation in a stable
+          // provider schema. App schemas can then be dropped independently.
+          await client.query(
+            `CREATE SCHEMA IF NOT EXISTS ${quoteIdentifier(DEFAULT_VECTOR_PROVIDER_SCHEMA)}`,
+          );
+          await client.query(
+            `CREATE EXTENSION vector WITH SCHEMA ${quoteIdentifier(DEFAULT_VECTOR_PROVIDER_SCHEMA)}`,
+          );
           vectorExtension = await client.query<{ schema: string }>(
             `SELECT namespace.nspname AS schema
                FROM pg_extension extension
@@ -517,6 +544,19 @@ export async function runMigrations(
         const vectorSchema = vectorExtension.rows[0]?.schema;
         if (vectorSchema === undefined) {
           throw new Error('The vector extension is unavailable after installation');
+        }
+        const vectorAccess = await client.query<{ allowed: boolean; role: string }>(
+          `SELECT has_schema_privilege(current_user, $1, 'USAGE') AS allowed,
+                  current_user AS role`,
+          [vectorSchema],
+        );
+        if (vectorAccess.rows[0]?.allowed !== true) {
+          const role = vectorAccess.rows[0]?.role ?? 'migration_role';
+          throw new Error(
+            `The migration role cannot use the pgvector provider schema. `
+            + `Grant it explicitly with GRANT USAGE ON SCHEMA `
+            + `${quoteIdentifier(vectorSchema)} TO ${quoteIdentifier(role)}`,
+          );
         }
         const searchPath = await client.query<{ path: string }>(
           `SELECT current_setting('search_path') AS path`,
@@ -647,20 +687,34 @@ export async function runMigrations(
           );
           await client.query('COMMIT');
         }
+        if (file === '0001_init.sql') {
+          await restoreInitialMigrationSearchPath();
+        }
         applied.push({ name: file, appliedAt: new Date() });
       } catch (error) {
         const migrationError = new Error(
           `Migration ${file} failed: ${(error as Error).message}`,
           { cause: error },
         );
+        const migrationCleanupErrors: unknown[] = [];
         try {
           if (!sql.trimStart().startsWith(NO_TRANSACTION_MARKER)) {
             await client.query('ROLLBACK');
           }
         } catch (rollbackError) {
+          migrationCleanupErrors.push(rollbackError);
+        }
+        if (file === '0001_init.sql' && originalSearchPath !== undefined) {
+          try {
+            await restoreInitialMigrationSearchPath();
+          } catch (restoreError) {
+            migrationCleanupErrors.push(restoreError);
+          }
+        }
+        if (migrationCleanupErrors.length > 0) {
           throw new AggregateError(
-            [migrationError, rollbackError],
-            `Migration ${file} failed and rollback failed`,
+            [migrationError, ...migrationCleanupErrors],
+            `Migration ${file} failed and cleanup failed`,
           );
         }
         throw migrationError;
@@ -674,10 +728,7 @@ export async function runMigrations(
   const cleanupErrors: unknown[] = [];
   if (originalSearchPath !== undefined) {
     try {
-      await client.query(
-        `SELECT set_config('search_path', $1, FALSE)`,
-        [originalSearchPath],
-      );
+      await restoreInitialMigrationSearchPath();
     } catch (error) {
       cleanupErrors.push(error);
     }
