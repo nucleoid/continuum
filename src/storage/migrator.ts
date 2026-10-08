@@ -489,6 +489,28 @@ export async function runMigrations(
     // pending migration must never get an opportunity to execute.
     for (const file of files) await verifyPublishedMigration(migrationsDir, file);
 
+    if (files.includes('0001_init.sql')) {
+      const vectorExtension = await client.query<{ schema: string }>(
+        `SELECT namespace.nspname AS schema
+           FROM pg_extension extension
+           JOIN pg_namespace namespace ON namespace.oid = extension.extnamespace
+          WHERE extension.extname = 'vector'`,
+      );
+      const vectorSchema = vectorExtension.rows[0]?.schema;
+      if (vectorSchema === undefined) {
+        // Extension installation is database-wide, while CREATE EXTENSION
+        // otherwise uses the first writable schema in the current search path.
+        // Keep it under the migration lock and pin its shared type to public so
+        // concurrent schema-scoped migration runners resolve vector uniformly.
+        await client.query('CREATE EXTENSION vector WITH SCHEMA public');
+      } else if (vectorSchema !== 'public') {
+        throw new Error(
+          `The vector extension is installed in schema ${vectorSchema}; `
+          + 'Continuum requires it in public',
+        );
+      }
+    }
+
     let repairPre0065StoredCrLf = false;
     if (files.includes('0074_coordination_compatibility_and_upgrade_repair.sql')) {
       const compatibility = await client.query<{ before0065: boolean }>(
