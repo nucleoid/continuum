@@ -817,6 +817,21 @@ alter, rename, or drop makes the whole transaction fail without partial
 changes. Quiesce role administration, then retry the complete rebind command;
 do not retry individual statements from the aborted transaction.
 
+A stale retired-registry row is installation-wide and can make every later
+verification or rebind fail closed. Do not delete it ad hoc. First inspect its
+recorded name and OID against `pg_roles`. If the recorded role is genuinely
+absent in a preserved OID namespace, the complete preserved-provenance rebind
+above archives it as `superseded` in
+`continuum_unresolved_retired_sync_database_identities`. If the OID still names
+a live or renamed role, restore the recorded name or complete checked retirement
+for that exact role and OID before retrying. If a restore-pending name was
+deliberately reused, use the explicit supersede operation documented above.
+Always rerun all three grant profiles and `verify-database-identities.sql` after
+recovery. Test fixtures that create cluster-wide PostgreSQL roles must put role
+creation and retired-registry insertion inside `try` and remove both live and
+unresolved history in `finally`; truncating tenant data does not reset these
+security registries.
+
 Then reapply the application, operator, and sync profiles and run verification
 before restart. The rebind operation is owner-only, locks both registries,
 resolves roles by exact name, rejects missing or conflicting active identities,

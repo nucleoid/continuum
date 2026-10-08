@@ -29,10 +29,12 @@ const published = new Map([
   ['0073_coordination_bounded_discovery_and_locking.sql', 'b2f96e35511e563cc9890d871d3910d70a3d99856e233f4da9b151405ef72e7b'],
   ['0074_coordination_compatibility_and_upgrade_repair.sql', 'e3b743394f640ef2db5daeb8596793066a6c4f5c1a6222c50d1b9daff95fbd66'],
   ['0075_coordination_online_repair_finish.sql', 'd1d69f661803f7546ca23234a6babb96a104ad098d4c48e3388ab30bf7d5d9cf'],
+  ['0076_coordination_review_2_remediation.sql', '5a1320f5890a4c99d53d83baabd54ee7025e4a4963227f95f4b2806071839623'],
+  ['0077_coordination_review_2_online_finish.sql', '1eef4ffacc6ddd36e0c34c4029a06b766a8f2dd6a12f1018217904e334b7637d'],
 ]);
 
 describe('issue 7 final remediation review 2 contract', () => {
-  it('CONTROL: keeps every published coordination migration through 0075 byte-identical', async () => {
+  it('CONTROL: keeps every published coordination migration through 0077 byte-identical', async () => {
     for (const [name, expected] of published) {
       const bytes = await readFile(join(root, 'migrations', name));
       expect(createHash('sha256').update(bytes).digest('hex'), name).toBe(expected);
@@ -69,6 +71,17 @@ describe('issue 7 final remediation review 2 contract', () => {
     );
     expect(sql).toMatch(/progress\.repair_eligible IS NOT TRUE/i);
     expect(sql).toMatch(/principal\.disabled_at IS NOT NULL/i);
+  });
+
+  it('adds a concurrent legacy-incomplete index and range-bounds every candidate branch', async () => {
+    const online = await migration('0078_coordination_upgrade_scale_indexes.sql');
+    const remediation = await migration('0079_coordination_upgrade_scale_remediation.sql');
+    expect(online).toMatch(/CREATE INDEX CONCURRENTLY[\s\S]*repair_eligible IS NOT TRUE/i);
+    expect(remediation).toMatch(/GREATEST\([\s\S]*target_principal_id/i);
+    expect(remediation).toMatch(/COALESCE\(\s*target_principal_id[\s\S]*ffff/i);
+    expect(remediation).not.toMatch(
+      /target_principal_id IS NULL OR (?:progress|marker)\.principal_id/i,
+    );
   });
 
   it('unifies lifecycle eligibility and reacts to mapping changes', async () => {
@@ -109,6 +122,7 @@ describe('issue 7 final remediation review 2 contract', () => {
     expect(migrator).toMatch(/proowner\s*=\s*current_user::regrole/i);
     expect(migrator).toMatch(/pg_extension[\s\S]*deptype\s*=\s*['"]e['"]/i);
     expect(migrator).toMatch(/BEGIN[\s\S]*repairStoredCrLfFunctions[\s\S]*COMMIT/i);
+    expect(migrator).not.toMatch(/replaceAll\(['"]\\r['"],\s*['"]\\n['"]\)/);
   });
 
   it('documents the enforced drain and forward-only rollback contract exactly', async () => {
@@ -116,6 +130,8 @@ describe('issue 7 final remediation review 2 contract', () => {
     expect(docs).toMatch(/0076_coordination_review_2_remediation/i);
     expect(docs).toMatch(/pre-0074[\s\S]*before\s+any mutation|before\s+any mutation[\s\S]*pre-0074/i);
     expect(docs).toMatch(/rollback is\s+forward-only/i);
+    expect(docs).toMatch(/guard applies only[\s\S]*non-owner runtime role/i);
+    expect(docs).toMatch(/single-role installation[\s\S]*no old-client refusal boundary/i);
     expect(docs).not.toMatch(/refuses an unversioned pre-0074 client if lock contention occurs/i);
   });
 });

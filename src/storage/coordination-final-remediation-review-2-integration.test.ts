@@ -9,7 +9,9 @@ import { runMigrations } from './migrator.js';
 import { createPrincipal } from './principals.js';
 import { createScope, getScopeByRef } from './scopes.js';
 import { makeTestPool, resetData } from './test-helpers.js';
-import { mapOwnedUserScope } from '../services/offboarding.js';
+import {
+  mapOwnedUserScope, offboardPrincipal, repairCoordinationPrivacy,
+} from '../services/offboarding.js';
 
 const detachedPrincipalId = '00000000-0000-4000-8000-000000000012';
 const quoteRole = (role: string) => `"${role.replaceAll('"', '""')}"`;
@@ -32,12 +34,7 @@ describe('issue 7 final remediation review 2 PostgreSQL proofs', () => {
   let pool: pg.Pool;
 
   beforeEach(async () => {
-    if (!pool) {
-      pool = await makeTestPool();
-      await pool.query(await readFile(
-        join(process.cwd(), 'migrations/0076_coordination_review_2_remediation.sql'), 'utf8',
-      ));
-    }
+    pool ??= await makeTestPool();
     await resetData(pool);
   }, 30_000);
   afterAll(async () => pool?.end());
@@ -78,11 +75,32 @@ describe('issue 7 final remediation review 2 PostgreSQL proofs', () => {
     )).rows[0].id);
   }
 
-  it('keeps one principal scrub committed while another session holds detached usage', async () => {
+  async function insertSharedReceipt(value: Awaited<ReturnType<typeof fixture>>, label: string) {
+    await pool.query(
+      `INSERT INTO coordination_resources (scope_id, resource) VALUES ($1, $2)`,
+      [value.shared.id, label],
+    );
+    await pool.query(
+      `INSERT INTO coordination_operation_receipts
+         (principal_id, operation, request_id, payload_hash, outcome, scope_id,
+          resource, expires_at, server_time, retry_after_seconds, retain_until)
+       VALUES ($1, 'acquire', $2, sha256(convert_to($3, 'UTF8')),
+               'contended', $4, $3, clock_timestamp(), clock_timestamp(), 1,
+               clock_timestamp() + interval '1 day')`,
+      [value.target.id, randomUUID(), label, value.shared.id],
+    );
+  }
+
+  it('makes bounded truthful progress across detached-usage receipt contention', async () => {
     const first = await fixture('detached-first');
     const second = await fixture('detached-second');
-    await makeIncomplete(first);
+    const firstAuditId = await makeIncomplete(first);
     const secondAuditId = await makeIncomplete(second);
+    await pool.query('DELETE FROM audit_log WHERE id = ANY($1::bigint[])', [
+      [firstAuditId, secondAuditId],
+    ]);
+    await insertSharedReceipt(first, `first-${randomUUID()}`);
+    await insertSharedReceipt(second, `second-${randomUUID()}`);
     await pool.query(
       `INSERT INTO coordination_principal_usage (principal_id)
        VALUES ($1) ON CONFLICT (principal_id) DO NOTHING`, [detachedPrincipalId],
@@ -97,25 +115,78 @@ describe('issue 7 final remediation review 2 PostgreSQL proofs', () => {
         `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 10) AS result`,
         [first.operator.id, first.target.id, first.owned.id],
       );
-      expect(firstResult.rows[0].result.progressed).toBe(true);
+      expect(firstResult.rows[0].result).toMatchObject({ progressed: true, reason: null });
 
       await secondSession.query('BEGIN');
+      await secondSession.query("SET LOCAL lock_timeout = '100ms'");
       await secondSession.query("SET LOCAL continuum.client_coordination_privacy_version = '4'");
       const secondResult = await secondSession.query(
         `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 10) AS result`,
         [second.operator.id, second.target.id, second.owned.id],
       );
-      expect(secondResult.rows[0].result).toMatchObject({ progressed: true, reason: null });
+      expect(secondResult.rows[0].result).toMatchObject({ progressed: false, reason: 'lock_busy' });
       await secondSession.query('COMMIT');
-
       expect((await pool.query(
-        'SELECT metadata FROM audit_log WHERE id = $1', [secondAuditId],
-      )).rows).toEqual([{ metadata: { operation: 'lock_inspect' } }]);
+        `SELECT count(*)::int AS count FROM coordination_operation_receipts
+          WHERE principal_id = $1`, [second.target.id],
+      )).rows).toEqual([{ count: 1 }]);
+
+      await firstSession.query('ROLLBACK');
+      await secondSession.query('BEGIN');
+      await secondSession.query("SET LOCAL continuum.client_coordination_privacy_version = '4'");
+      const retry = await secondSession.query(
+        `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 10) AS result`,
+        [second.operator.id, second.target.id, second.owned.id],
+      );
+      expect(retry.rows[0].result).toMatchObject({ progressed: true, reason: null });
+      await secondSession.query('COMMIT');
     } finally {
       await secondSession.query('ROLLBACK').catch(() => undefined);
       await firstSession.query('ROLLBACK').catch(() => undefined);
       secondSession.release();
       firstSession.release();
+    }
+  }, 30_000);
+
+  it('preserves completed v3 audit progress when the dirty marker is locked', async () => {
+    const value = await fixture('dirty-marker-contention');
+    const auditId = await makeIncomplete(value);
+    await pool.query(
+      `UPDATE coordination_principal_privacy_progress
+          SET privacy_version = 3, completed_at = clock_timestamp()
+        WHERE principal_id = $1`, [value.target.id],
+    );
+    await pool.query(
+      `INSERT INTO coordination_privacy_dirty_principals (principal_id)
+       VALUES ($1) ON CONFLICT (principal_id) DO NOTHING`, [value.target.id],
+    );
+
+    const blocker = await pool.connect();
+    const caller = await pool.connect();
+    try {
+      await blocker.query('BEGIN');
+      await blocker.query(
+        `SELECT 1 FROM coordination_privacy_dirty_principals
+          WHERE principal_id = $1 FOR UPDATE`, [value.target.id],
+      );
+      await caller.query('BEGIN');
+      await caller.query("SET LOCAL lock_timeout = '100ms'");
+      await caller.query("SET LOCAL continuum.client_coordination_privacy_version = '4'");
+      const result = await caller.query(
+        `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 1) AS result`,
+        [value.operator.id, value.target.id, value.owned.id],
+      );
+      expect(result.rows[0].result).toMatchObject({ progressed: true, reason: null });
+      await caller.query('COMMIT');
+      expect((await pool.query(
+        `SELECT metadata ? 'request_id' AS raw_request FROM audit_log WHERE id = $1`,
+        [auditId],
+      )).rows).toEqual([{ raw_request: false }]);
+    } finally {
+      await caller.query('ROLLBACK').catch(() => undefined);
+      await blocker.query('ROLLBACK').catch(() => undefined);
+      caller.release();
+      blocker.release();
     }
   }, 30_000);
 
@@ -166,7 +237,7 @@ describe('issue 7 final remediation review 2 PostgreSQL proofs', () => {
     }
   }, 30_000);
 
-  it('uses the four-argument production function and repair index at a 50000-row deep cursor', async () => {
+  it('bounds NULL, shallow, and targeted generic plans across 50000 incomplete rows', async () => {
     const operator = await createPrincipal(pool, {
       externalId: `operator:deep:${randomUUID()}`, kind: 'user', displayName: 'Operator',
     });
@@ -199,44 +270,148 @@ describe('issue 7 final remediation review 2 PostgreSQL proofs', () => {
        SELECT ('61000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid,
               $1, 2, NULL FROM generate_series(1, 50000) n`, [detachedPrincipalId],
     );
+    const legacyTarget = '61000000-0000-4000-8000-00000000c350';
+    await pool.query(
+      `UPDATE coordination_principal_privacy_progress
+          SET repair_eligible = FALSE WHERE principal_id = $1`, [legacyTarget],
+    );
     for (const table of [
       'principals', 'principal_user_scopes', 'coordination_principal_privacy_progress',
     ]) await pool.query(`ANALYZE ${table}`);
 
     await pool.query('SELECT pg_stat_force_next_flush()');
-    const scansBefore = BigInt((await pool.query(
-      `SELECT COALESCE(idx_scan, 0)::text AS scans FROM pg_stat_user_indexes
+    const scansBefore = new Map((await pool.query(
+      `SELECT indexrelname, COALESCE(idx_scan, 0)::text AS scans
+         FROM pg_stat_user_indexes
         WHERE schemaname = current_schema()
-          AND indexrelname = 'coordination_privacy_repair_eligible_idx'`,
-    )).rows[0]?.scans ?? '0');
+          AND indexrelname = ANY($1::text[])`, [[
+        'coordination_privacy_repair_eligible_idx',
+        'coordination_privacy_repair_legacy_incomplete_idx',
+      ]],
+    )).rows.map((row) => [row.indexrelname as string, BigInt(row.scans as string)]));
     await pool.query('SET plan_cache_mode = force_generic_plan');
     await pool.query(
-      `PREPARE review_2_deep(uuid, uuid, uuid, integer) AS
+      `PREPARE review_2_scale(uuid, uuid, uuid, integer) AS
        SELECT * FROM continuum_operator_list_coordination_privacy_repairs($1, $2, $3, $4)`,
     );
-    const cursor = '61000000-0000-4000-8000-00000000bf68';
-    const explained = await pool.query(
-      `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
-       EXECUTE review_2_deep('${operator.id}'::uuid, '${cursor}'::uuid, NULL::uuid, 100)`,
-    );
-    const root = explained.rows[0]['QUERY PLAN'][0].Plan as Record<string, unknown>;
-    const buffers = Number(root['Shared Hit Blocks'] ?? 0)
-      + Number(root['Shared Read Blocks'] ?? 0);
-    expect(root['Actual Rows']).toBe(100);
-    expect(buffers).toBeLessThan(5_000);
+    const cases = [
+      { label: 'NULL cursor', after: 'NULL', target: 'NULL', rows: 100 },
+      {
+        label: 'shallow cursor', after: "'61000000-0000-4000-8000-00000000000a'::uuid",
+        target: 'NULL', rows: 100,
+      },
+      { label: 'targeted legacy lookup', after: 'NULL', target: `'${legacyTarget}'::uuid`, rows: 1 },
+    ];
+    for (const proof of cases) {
+      const explained = await pool.query(
+        `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+         EXECUTE review_2_scale('${operator.id}'::uuid, ${proof.after}, ${proof.target}, 100)`,
+      );
+      const root = explained.rows[0]['QUERY PLAN'][0].Plan as Record<string, unknown>;
+      const buffers = Number(root['Shared Hit Blocks'] ?? 0)
+        + Number(root['Shared Read Blocks'] ?? 0);
+      expect(root['Actual Rows'], proof.label).toBe(proof.rows);
+      expect(buffers, proof.label).toBeLessThan(1_000);
+    }
     await pool.query('SELECT pg_stat_force_next_flush()');
-    const scansAfter = BigInt((await pool.query(
-      `SELECT COALESCE(idx_scan, 0)::text AS scans FROM pg_stat_user_indexes
+    const scansAfter = new Map((await pool.query(
+      `SELECT indexrelname, COALESCE(idx_scan, 0)::text AS scans
+         FROM pg_stat_user_indexes
         WHERE schemaname = current_schema()
-          AND indexrelname = 'coordination_privacy_repair_eligible_idx'`,
-    )).rows[0]?.scans ?? '0');
-    expect(scansAfter).toBeGreaterThan(scansBefore);
-    const page = await pool.query(
-      `SELECT principal_id::text FROM continuum_operator_list_coordination_privacy_repairs(
-         $1, $2, NULL, 100)`, [operator.id, cursor],
-    );
-    expect(page.rows[0].principal_id).toBe('61000000-0000-4000-8000-00000000bf69');
-    expect(page.rows.at(-1).principal_id).toBe('61000000-0000-4000-8000-00000000bfcc');
+          AND indexrelname = ANY($1::text[])`, [[
+        'coordination_privacy_repair_eligible_idx',
+        'coordination_privacy_repair_legacy_incomplete_idx',
+      ]],
+    )).rows.map((row) => [row.indexrelname as string, BigInt(row.scans as string)]));
+    for (const index of [
+      'coordination_privacy_repair_eligible_idx',
+      'coordination_privacy_repair_legacy_incomplete_idx',
+    ]) expect(scansAfter.get(index) ?? 0n, index)
+      .toBeGreaterThan(scansBefore.get(index) ?? 0n);
+  }, 120_000);
+
+  it.each([
+    '0073_coordination_bounded_discovery_and_locking.sql',
+    '0075_coordination_online_repair_finish.sql',
+  ])('refuses current privacy and offboarding mutations on a schema stopped at %s', async (stop) => {
+    const suffix = `${stop.slice(0, 4)}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const schema = `review_2_old_binary_${suffix}`;
+    const connectionString = (pool as unknown as { options: PoolConfig }).options.connectionString!;
+    const admin = new pg.Pool({ connectionString, max: 2 });
+    const oldSchema = new pg.Pool({
+      connectionString, max: 2, options: `-c search_path=${schema},public`,
+    });
+    const partialDirectory = await mkdtemp(join(tmpdir(), `continuum-review-2-${suffix}-`));
+    try {
+      await admin.query(`CREATE SCHEMA "${schema}"`);
+      const migrations = join(process.cwd(), 'migrations');
+      for (const name of (await readdir(migrations)).filter(
+        (name) => name.endsWith('.sql') && name <= stop,
+      )) await copyFile(join(migrations, name), join(partialDirectory, name));
+      await runMigrations(oldSchema, partialDirectory);
+
+      const operator = await createPrincipal(oldSchema, {
+        externalId: `old-operator:${suffix}`, kind: 'user', displayName: 'Operator',
+      });
+      const org = (await getScopeByRef(oldSchema, { kind: 'org', name: '' }))!;
+      await addMembership(oldSchema, operator.id, org.id, 'admin');
+
+      const repairTarget = await createPrincipal(oldSchema, {
+        externalId: `old-repair:${suffix}`, kind: 'user', displayName: 'Repair target',
+      });
+      const repairOwned = await createScope(oldSchema, {
+        kind: 'user', name: `old-repair-owned:${suffix}`,
+      });
+      await addMembership(oldSchema, repairTarget.id, repairOwned.id, 'writer');
+      await mapOwnedUserScope(oldSchema, operator, repairTarget.id, repairOwned.id);
+      await oldSchema.query(
+        `UPDATE principals SET disabled_at = clock_timestamp() WHERE id = $1`,
+        [repairTarget.id],
+      );
+      await oldSchema.query(
+        `INSERT INTO coordination_principal_privacy_progress
+           (principal_id, detached_principal_id, privacy_version, completed_at)
+         VALUES ($1, $2, 2, NULL)`, [repairTarget.id, detachedPrincipalId],
+      );
+      const rawAuditId = String((await oldSchema.query(
+        `INSERT INTO audit_log (principal_id, action, scope_id, metadata)
+         VALUES ($1, 'write', $2, jsonb_build_object(
+           'operation', 'lock_inspect', 'request_id', gen_random_uuid())) RETURNING id`,
+        [repairTarget.id, repairOwned.id],
+      )).rows[0].id);
+      await expect(repairCoordinationPrivacy(oldSchema, operator, repairTarget.id, {
+        confirmationScopeId: repairOwned.id, batchSize: 10,
+      })).rejects.toMatchObject({
+        code: 'CONFLICT', message: expect.stringMatching(/finish migrations/i),
+      });
+      expect((await oldSchema.query(
+        `SELECT metadata ? 'request_id' AS raw_request FROM audit_log WHERE id = $1`,
+        [rawAuditId],
+      )).rows).toEqual([{ raw_request: true }]);
+
+      const offboardTarget = await createPrincipal(oldSchema, {
+        externalId: `old-offboard:${suffix}`, kind: 'user', displayName: 'Offboard target',
+      });
+      const offboardOwned = await createScope(oldSchema, {
+        kind: 'user', name: `old-offboard-owned:${suffix}`,
+      });
+      await addMembership(oldSchema, offboardTarget.id, offboardOwned.id, 'writer');
+      await mapOwnedUserScope(oldSchema, operator, offboardTarget.id, offboardOwned.id);
+      await expect(offboardPrincipal(oldSchema, operator, offboardTarget.id, {
+        confirmationScopeId: offboardOwned.id, batchSize: 10,
+      })).rejects.toMatchObject({
+        code: 'CONFLICT', message: expect.stringMatching(/finish migrations/i),
+      });
+      expect((await oldSchema.query(
+        `SELECT disabled_at, offboarded_at FROM principals WHERE id = $1`,
+        [offboardTarget.id],
+      )).rows).toEqual([{ disabled_at: null, offboarded_at: null }]);
+    } finally {
+      await oldSchema.end();
+      await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`).catch(() => undefined);
+      await admin.end();
+      await rm(partialDirectory, { recursive: true, force: true });
+    }
   }, 120_000);
 
   it('keeps partial-0074 discovery available across a timed-out 0075 retry in a custom schema', async () => {
@@ -390,7 +565,7 @@ describe('issue 7 final remediation review 2 PostgreSQL proofs', () => {
       )).rows[0].definition).replaceAll(/(?<!\r)\n/g, '\r\n');
       await schemaPool.query(continuumDefinition);
       await schemaPool.query(
-        `CREATE FUNCTION tenant_meaningful_cr() RETURNS text LANGUAGE sql
+        `CREATE FUNCTION continuum_tenant_meaningful_cr() RETURNS text LANGUAGE sql
          AS $$ SELECT 'left${'\r'}right'::text $$`,
       );
       await schemaPool.query(
@@ -423,15 +598,15 @@ describe('issue 7 final remediation review 2 PostgreSQL proofs', () => {
           WHERE pronamespace = quote_ident(current_schema())::regnamespace
             AND proname IN (
               'continuum_operator_scrub_coordination_principal',
-              'tenant_meaningful_cr', 'foreign_crlf', 'continuum_extension_cr')
+              'continuum_tenant_meaningful_cr', 'foreign_crlf', 'continuum_extension_cr')
           ORDER BY proname`,
       )).rows).toEqual([
         { proname: 'continuum_extension_cr', raw_cr: true },
         { proname: 'continuum_operator_scrub_coordination_principal', raw_cr: false },
+        { proname: 'continuum_tenant_meaningful_cr', raw_cr: true },
         { proname: 'foreign_crlf', raw_cr: true },
-        { proname: 'tenant_meaningful_cr', raw_cr: true },
       ]);
-      expect((await schemaPool.query('SELECT tenant_meaningful_cr() AS value')).rows)
+      expect((await schemaPool.query('SELECT continuum_tenant_meaningful_cr() AS value')).rows)
         .toEqual([{ value: `left${'\r'}right` }]);
     } finally {
       if (extensionMember) {
@@ -526,12 +701,34 @@ describe('issue 7 final remediation review 2 PostgreSQL proofs', () => {
         continuum_sync_role: roles.next, continuum_operator_role: roles.operator,
         retired_sync_role: roles.old,
       })).resolves.toBeUndefined();
+      await expect(fresh.query(
+        `SELECT continuum_rebind_database_identity_oids(
+          'REBIND DATABASE IDENTITIES', 'PRESERVED OID NAMESPACE')`,
+      )).resolves.toMatchObject({ rows: [{ continuum_rebind_database_identity_oids: 0 }] });
       expect((await fresh.query(
         `SELECT role.rolcanlogin, history.database_role_oid::text = role.oid::text AS oid_bound
            FROM continuum_retired_sync_database_identities history
            JOIN pg_roles role ON role.oid = history.database_role_oid
           WHERE history.database_role = $1::name`, [roles.old],
       )).rows).toEqual([{ rolcanlogin: false, oid_bound: true }]);
+
+      await fresh.query(`REVOKE ${quoteRole(roles.old)} FROM CURRENT_USER`);
+      await fresh.query(`DROP OWNED BY ${quoteRole(roles.old)}`);
+      await fresh.query(`DROP ROLE ${quoteRole(roles.old)}`);
+      await expect(fresh.query(
+        `SELECT continuum_rebind_database_identity_oids(
+          'REBIND DATABASE IDENTITIES', 'PRESERVED OID NAMESPACE')`,
+      )).resolves.toBeDefined();
+      expect((await fresh.query(
+        `SELECT
+           EXISTS (SELECT 1 FROM continuum_retired_sync_database_identities
+                    WHERE database_role = $1::name) AS live_history,
+           (SELECT resolution_kind
+              FROM continuum_unresolved_retired_sync_database_identities
+             WHERE database_role = $1::name
+               AND previous_database_role_oid = $2::oid) AS recovery_kind`,
+        [roles.old, oldOid],
+      )).rows).toEqual([{ live_history: false, recovery_kind: 'superseded' }]);
     } finally {
       await fresh?.end();
       await maintenance.query(

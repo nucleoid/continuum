@@ -384,7 +384,21 @@ and 0076/0077 remediation. Migration
 `0076_coordination_review_2_remediation.sql` adds database-enforced entry
 negotiation: runtime roles without client privacy version 4 are refused before
 any mutation by the stable privacy wrapper and offboarding start/create guard.
-It also preserves completed scrub work when only detached cleanup is busy.
+The guard applies only to a separate non-owner runtime role. PostgreSQL owners
+bypass it for maintenance, so a single-role installation where the application
+connects as the migration/function owner has no old-client refusal boundary.
+Use distinct migration-owner, application, and operator roles before relying on
+the guard. The current application binary also checks that the 0076 guard exists
+and the 0077 reconciliation completed before any privacy repair or non-dry-run
+offboarding mutation.
+
+0076 is transactional and uses a one-second lock timeout while replacing
+triggers on `principal_user_scopes`. Apply it in a quiet window and retry the
+complete migration if lock acquisition fails; the failed transaction leaves no
+partial 0076 state. 0077 is restartable and safe to retry. The historical
+environment name `CONTINUUM_COORDINATION_V4_BACKFILL_BATCH_SIZE` controls both
+the v4 and v5 reconciliation batches despite its name. 0076 also preserves
+completed scrub work when only detached cleanup is busy.
 The packaged migrator applies lock and statement timeouts to the restartable
 backfill, reduces a contended batch adaptively, and accepts
 `CONTINUUM_COORDINATION_V4_BACKFILL_BATCH_SIZE` from 1 through 5,000. Re-run
@@ -406,6 +420,10 @@ migration verification continues hashing original bytes with only Git CRLF
 materialization canonicalized. `.gitattributes` also pins `*.sql` to LF. A
 fresh CRLF checkout therefore completes the full chain, while lone CR bytes,
 extra CR bytes, and substantive published migration changes still fail closed.
+Stored-function repair converts only CRLF pairs. A lone CR inside a string
+literal remains data, including inside an owner-owned function whose name starts
+with `continuum_`; foreign-owner, co-tenant non-Continuum, and extension-member
+functions remain outside the repair boundary.
 
 Migration 0061 contains the historical installation-wide receipt-counter
 recount and takes coordination table locks. An installation upgrading from
