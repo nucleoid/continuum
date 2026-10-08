@@ -467,6 +467,7 @@ export async function runMigrations(
   let lockAcquired = false;
   let runFailed = false;
   let runError: unknown;
+  let originalSearchPath: string | undefined;
 
   try {
     await client.query('SELECT pg_advisory_lock($1::bigint)', [
@@ -490,23 +491,45 @@ export async function runMigrations(
     for (const file of files) await verifyPublishedMigration(migrationsDir, file);
 
     if (files.includes('0001_init.sql')) {
-      const vectorExtension = await client.query<{ schema: string }>(
+      const initialMigration = await client.query(
+        'SELECT 1 FROM _continuum_migrations WHERE name = $1',
+        ['0001_init.sql'],
+      );
+      let vectorExtension = await client.query<{ schema: string }>(
         `SELECT namespace.nspname AS schema
            FROM pg_extension extension
            JOIN pg_namespace namespace ON namespace.oid = extension.extnamespace
           WHERE extension.extname = 'vector'`,
       );
-      const vectorSchema = vectorExtension.rows[0]?.schema;
-      if (vectorSchema === undefined) {
-        // Extension installation is database-wide, while CREATE EXTENSION
-        // otherwise uses the first writable schema in the current search path.
-        // Keep it under the migration lock and pin its shared type to public so
-        // concurrent schema-scoped migration runners resolve vector uniformly.
-        await client.query('CREATE EXTENSION vector WITH SCHEMA public');
-      } else if (vectorSchema !== 'public') {
-        throw new Error(
-          `The vector extension is installed in schema ${vectorSchema}; `
-          + 'Continuum requires it in public',
+      if (!initialMigration.rowCount) {
+        if (vectorExtension.rows.length === 0) {
+          // Extension installation is database-wide. Keep it under the same
+          // advisory lock as 0001, but let PostgreSQL use the caller's first
+          // writable schema so custom-schema owners do not need CREATE on public.
+          await client.query('CREATE EXTENSION vector');
+          vectorExtension = await client.query<{ schema: string }>(
+            `SELECT namespace.nspname AS schema
+               FROM pg_extension extension
+               JOIN pg_namespace namespace ON namespace.oid = extension.extnamespace
+              WHERE extension.extname = 'vector'`,
+          );
+        }
+        const vectorSchema = vectorExtension.rows[0]?.schema;
+        if (vectorSchema === undefined) {
+          throw new Error('The vector extension is unavailable after installation');
+        }
+        const searchPath = await client.query<{ path: string }>(
+          `SELECT current_setting('search_path') AS path`,
+        );
+        originalSearchPath = searchPath.rows[0]?.path;
+        if (originalSearchPath === undefined) {
+          throw new Error('The migration search_path could not be read');
+        }
+        await client.query(
+          `SELECT set_config(
+             'search_path', current_setting('search_path') || ', ' || quote_ident($1), FALSE
+           )`,
+          [vectorSchema],
         );
       }
     }
@@ -649,6 +672,16 @@ export async function runMigrations(
   }
 
   const cleanupErrors: unknown[] = [];
+  if (originalSearchPath !== undefined) {
+    try {
+      await client.query(
+        `SELECT set_config('search_path', $1, FALSE)`,
+        [originalSearchPath],
+      );
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
   if (lockAcquired) {
     try {
       const unlockResult = await client.query<{ unlocked: boolean }>(

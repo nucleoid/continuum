@@ -502,6 +502,25 @@ The supported and CI-tested database major is PostgreSQL 16 with pgvector.
 Qualify another major independently before migration; successful SQL parsing
 alone is not a supported rollout.
 
+Pgvector is a database-wide prerequisite whose objects may live in `public`,
+the Continuum application schema, or a dedicated provider-managed extension
+schema. The migration owner needs `USAGE` on the installed extension schema;
+that schema does not need to remain on the application's `search_path`.
+`runMigrations` temporarily appends the actual extension schema while applying
+the initial migration and restores the caller's path before releasing its
+connection. Runtime embedding queries infer the vector type from the
+`memory_embeddings.embedding` column and also support paths that omit the
+extension schema.
+
+If pgvector is absent, `runMigrations` attempts `CREATE EXTENSION vector` under
+the migration advisory lock, using the caller's first writable schema. Some
+packaged or managed pgvector installations permit only a database superuser or
+provider role to create the extension. In that case the failed attempt records
+no application migration: have the DBA install pgvector in a reviewed schema,
+grant the migration owner `USAGE` on that schema, and rerun the same migration.
+Do not move an existing extension merely to place it in `public`; already
+ledgered databases and provider-managed non-public layouts remain supported.
+
 Before migration, confirm the named app, operator, and sync roles have no rows
 in `pg_db_role_setting` and no explicit or inherited entries in
 `pg_parameter_acl`; remove reviewed drift before continuing. Migration `0052`

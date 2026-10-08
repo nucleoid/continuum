@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import {
   storeMemoryEmbeddingVector,
   vectorSearchMemoryIds,
+  vectorSearchRelatedMemories,
 } from './embeddings.js';
 import { runMigrations } from './migrator.js';
 
@@ -246,6 +247,19 @@ describe('pgvector schema contract', () => {
           .resolves.toBeUndefined();
         await expect(vectorSearchMemoryIds(runtime, vector, [scopeId], provider, 5))
           .resolves.toEqual([{ id: memoryId, distance: 0 }]);
+        await expect(vectorSearchRelatedMemories(
+          runtime,
+          vector,
+          [scopeId],
+          provider,
+          { threshold: 0.9, excludeMemoryId: randomUUID(), limit: 5 },
+        )).resolves.toEqual([{
+          id: memoryId,
+          type: 'fact',
+          title: 'Vector contract',
+          body: 'Public-less path',
+          distance: 0,
+        }]);
       } finally {
         await runtime.end();
         await migrator.end();
