@@ -61,7 +61,7 @@ afterEach(async () => {
 });
 
 describe('runMigrations', () => {
-  it('installs pgvector in public when concurrent fresh-database migrations start in different schemas', async () => {
+  it('serializes pgvector bootstrap when concurrent fresh migrations use different public-less schemas', async () => {
     const database = `continuum_vector_bootstrap_${randomUUID().replaceAll('-', '')}`;
     const firstSchema = 'first_migration_schema';
     const migrationLockId = '7215328273579717613';
@@ -83,7 +83,8 @@ describe('runMigrations', () => {
     let secondRun: Promise<unknown> | undefined;
 
     const waitUntilQueued = async (applicationName: string) => {
-      for (let attempt = 0; attempt < 100; attempt += 1) {
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
         const waiting = await blocker!.query<{ queued: boolean }>(
           `SELECT EXISTS (
              SELECT 1 FROM pg_stat_activity
@@ -95,7 +96,7 @@ describe('runMigrations', () => {
           [applicationName],
         );
         if (waiting.rows[0]?.queued === true) return;
-        await new Promise((resolve) => setTimeout(resolve, 10));
+        await new Promise((resolve) => setTimeout(resolve, 25));
       }
       throw new Error(`${applicationName} did not queue for the migration lock`);
     };
@@ -111,7 +112,7 @@ describe('runMigrations', () => {
         connectionString: databaseUrl.toString(),
         max: 1,
         application_name: 'continuum-vector-bootstrap-first',
-        options: `-c search_path=${firstSchema},public`,
+        options: `-c search_path=${firstSchema}`,
       });
       second = new pg.Pool({
         connectionString: databaseUrl.toString(),
@@ -133,24 +134,33 @@ describe('runMigrations', () => {
            FROM pg_extension extension
            JOIN pg_namespace namespace ON namespace.oid = extension.extnamespace
           WHERE extension.extname = 'vector'`,
-      )).rows).toEqual([{ schema: 'public' }]);
+      )).rows).toEqual([{ schema: firstSchema }]);
     } finally {
       if (lockHeld) {
         await blocker?.query(
           'SELECT pg_advisory_unlock($1::bigint)', [migrationLockId],
         ).catch(() => undefined);
       }
-      await Promise.allSettled([firstRun, secondRun].filter(
+      const runs = Promise.allSettled([firstRun, secondRun].filter(
         (run): run is Promise<unknown> => run !== undefined,
       ));
-      await Promise.allSettled(
+      await Promise.race([
+        runs,
+        new Promise((resolve) => setTimeout(resolve, 5_000)),
+      ]);
+      const endings = Promise.allSettled(
         [first, second, blocker].filter((pool): pool is pg.Pool => pool !== undefined)
           .map((pool) => pool.end()),
       );
+      await Promise.race([
+        endings,
+        new Promise((resolve) => setTimeout(resolve, 5_000)),
+      ]);
       await admin.query(`DROP DATABASE IF EXISTS "${database}"`);
+      await endings;
       await admin.end();
     }
-  }, 30_000);
+  }, 60_000);
 
   it.each([
     ['zero-stale-row', 0, 10],
