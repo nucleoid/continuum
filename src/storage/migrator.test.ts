@@ -1788,7 +1788,7 @@ describe('runMigrations', () => {
       )).rows[0].id;
       await pool.query(
         `INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
-         VALUES ($1, 'test', 768, $2::vector)`,
+         VALUES ($1, 'test', 768, $2)`,
         [memoryId, `[${Array(768).fill(0).join(',')}]`],
       );
       await copyFile(
