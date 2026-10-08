@@ -233,7 +233,7 @@ describe('runMigrations', () => {
     const files = (await readdir(join(process.cwd(), 'migrations')))
       .filter((name) => name.endsWith('.sql'))
       .sort();
-    expect(files.slice(-22)).toEqual([
+    expect(files.slice(-24)).toEqual([
       '0054_coordination_leases.sql',
       '0055_coordination_review_remediation.sql',
       '0056_coordination_final_remediation.sql',
@@ -256,6 +256,8 @@ describe('runMigrations', () => {
       '0073_coordination_bounded_discovery_and_locking.sql',
       '0074_coordination_compatibility_and_upgrade_repair.sql',
       '0075_coordination_online_repair_finish.sql',
+      '0076_coordination_review_2_remediation.sql',
+      '0077_coordination_review_2_online_finish.sql',
     ]);
     const migration = await readFile(
       join(process.cwd(), 'migrations/0054_coordination_leases.sql'),
@@ -410,6 +412,7 @@ describe('runMigrations', () => {
         options: `-c search_path=${schema},public -c role=${role}`,
       });
       pools.push(rolePool);
+      await rolePool.query("SET continuum.client_coordination_privacy_version = '4'");
       let privacyComplete = false;
       for (let attempt = 0; !privacyComplete && attempt < 5; attempt += 1) {
         const scrub = await rolePool.query<{ privacy: { complete?: boolean } }>(
@@ -762,7 +765,7 @@ describe('runMigrations', () => {
         $$;
       `);
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-44).map((migration) => migration.name)).toEqual([
+      expect(applied.slice(-46).map((migration) => migration.name)).toEqual([
         '0032_offboarding_round7_compatibility.sql',
         '0033_offboarding_bounded_selectors.sql',
         '0034_offboarding_completion_invariants.sql',
@@ -807,6 +810,8 @@ describe('runMigrations', () => {
         '0073_coordination_bounded_discovery_and_locking.sql',
         '0074_coordination_compatibility_and_upgrade_repair.sql',
         '0075_coordination_online_repair_finish.sql',
+        '0076_coordination_review_2_remediation.sql',
+        '0077_coordination_review_2_online_finish.sql',
       ]);
       expect((await pool.query(
         `SELECT disabled_at IS NOT NULL AS disabled FROM principals
@@ -1073,7 +1078,9 @@ describe('runMigrations', () => {
       && name !== '0072_coordination_final_review_remediation.sql'
       && name !== '0073_coordination_bounded_discovery_and_locking.sql'
       && name !== '0074_coordination_compatibility_and_upgrade_repair.sql'
-      && name !== '0075_coordination_online_repair_finish.sql')) {
+      && name !== '0075_coordination_online_repair_finish.sql'
+      && name !== '0076_coordination_review_2_remediation.sql'
+      && name !== '0077_coordination_review_2_online_finish.sql')) {
       if (file === '0038_offboarding_search_path_hardening.sql') {
         await copyFile(
           new URL(

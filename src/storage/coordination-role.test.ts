@@ -61,7 +61,8 @@ describe('coordination database role profiles', () => {
     return new pg.Pool({
       ...(pool as unknown as { options: PoolConfig }).options,
       max: 2,
-      options: `-c search_path=${schema},public -c role=${role}`,
+      options: `-c search_path=${schema},public -c role=${role}`
+        + ' -c continuum.client_coordination_privacy_version=4',
     });
   }
 
@@ -639,11 +640,15 @@ describe('coordination database role profiles', () => {
       continuum_operator_role: operator.role,
       continuum_principal_id: operatorPrincipal.id,
     });
+    const heldRunId = randomUUID();
     const held = await acquireLease(operator.connection, target, {
-      scope: 'project:race-shared', resource: 'race', runId: randomUUID(),
+      scope: 'project:race-shared', resource: 'race', runId: heldRunId,
       requestId: randomUUID(), ttlSeconds: 300,
     });
     if (!held.acquired) throw new Error('expected shared lease');
+    await releaseLease(operator.connection, target, {
+      leaseId: held.leaseId, runId: heldRunId, requestId: randomUUID(),
+    });
     await pool.query(
       `UPDATE principals SET disabled_at = clock_timestamp() WHERE id = $1`, [target.id],
     );
@@ -651,6 +656,7 @@ describe('coordination database role profiles', () => {
     const contender = await pool.connect();
     try {
       await scrubber.query('BEGIN');
+      await scrubber.query("SET LOCAL continuum.client_coordination_privacy_version = '4'");
       await scrubber.query(
         `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 10)`,
         [operatorPrincipal.id, target.id, owned.id],
@@ -744,6 +750,9 @@ describe('coordination database role profiles', () => {
       continuum_principal_id: operatorPrincipal.id,
     });
     try {
+      await operator.connection.query(
+        "SET continuum.client_coordination_privacy_version = '4'",
+      );
       const target = await createPrincipal(pool, {
         externalId: 'service:shared-coordination-subject',
         kind: 'user', displayName: 'Shared coordination subject',

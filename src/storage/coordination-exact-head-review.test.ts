@@ -107,6 +107,7 @@ describe('coordination exact-head review regressions', () => {
     );
     const operator = await createOperator(value.operator.id);
     try {
+      await operator.query("SET continuum.client_coordination_privacy_version = '4'");
       await expect(operator.query(
         'SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 10)',
         [value.operator.id, value.target.id, value.owned.id],
@@ -269,6 +270,7 @@ describe('coordination exact-head review regressions', () => {
     const scrubber = await operator.connect();
     const membershipWriter = await pool.connect();
     try {
+      await scrubber.query("SET continuum.client_coordination_privacy_version = '4'");
       const scrubberPid = Number((await scrubber.query('SELECT pg_backend_pid() AS pid')).rows[0].pid);
       await membershipWriter.query('BEGIN');
       await membershipWriter.query('SELECT 1 FROM principals WHERE id = $1 FOR UPDATE', [
@@ -431,7 +433,9 @@ describe('coordination exact-head review regressions', () => {
       const offboarding = offboardPrincipal(pool, value.operator, value.target.id, {
         confirmationScopeId: value.owned.id, batchSize: 100,
       }).finally(() => { offboardingSettled = true; });
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      for (let attempt = 0; attempt < 100 && !offboardingSettled; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
       expect(offboardingSettled).toBe(true);
       await blocker.query('COMMIT');
       const acquired = await acquire;
