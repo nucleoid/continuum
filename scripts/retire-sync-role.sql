@@ -236,6 +236,13 @@ BEGIN
     application_schema, retired_sync);
   EXECUTE format('REVOKE ALL PRIVILEGES ON SCHEMA %I FROM %I',
     application_schema, retired_sync);
+  IF to_regclass(format('%I.continuum_pgvector_role_profiles', application_schema))
+      IS NOT NULL THEN
+    EXECUTE format(
+      'DELETE FROM %I.continuum_pgvector_role_profiles WHERE database_role_oid = $1',
+      application_schema
+    ) USING retired_oid;
+  END IF;
   EXECUTE format('ALTER ROLE %I NOLOGIN PASSWORD NULL', retired_sync);
 END;
 $retire$;

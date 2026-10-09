@@ -100,6 +100,28 @@ async function grantApplicationRole(
   await pool.query(sql);
 }
 
+async function grantSyncRole(
+  pool: pg.Pool,
+  schema: string,
+  role: string,
+  principalId: string,
+): Promise<void> {
+  const source = await readFile(
+    join(process.cwd(), 'scripts/grant-sync-role.sql'), 'utf8',
+  );
+  const sql = source.split(/\r?\n/)
+    .filter((line) => !line.trimStart().startsWith('\\'))
+    .join('\n')
+    .replaceAll(':"continuum_schema"', quoteIdentifier(schema))
+    .replaceAll(':"continuum_sync_role"', quoteIdentifier(role))
+    .replaceAll(
+      ":'continuum_sync_role'",
+      `'${role.replaceAll("'", "''")}'`,
+    )
+    .replaceAll(":'continuum_principal_id'", `'${principalId}'`);
+  await pool.query(sql);
+}
+
 async function withFreshDatabase(
   run: (root: pg.Pool, target: pg.Pool, url: string, database: string) => Promise<void>,
 ): Promise<void> {
@@ -707,7 +729,7 @@ describe('pgvector rollout remediation', () => {
       );
       await expect(pool.query(
         'SELECT continuum_assert_application_vector_profile($1::name)', [appRole],
-      )).rejects.toThrow(/missing direct USAGE/i);
+      )).rejects.toThrow(/missing effective USAGE/i);
       await pool.query('SELECT continuum_grant_application_vector_functions()');
       await pool.query('SELECT continuum_grant_application_vector_functions()');
 
@@ -717,12 +739,12 @@ describe('pgvector rollout remediation', () => {
       `);
       await expect(pool.query(
         'SELECT continuum_assert_application_vector_profile($1::name)', [appRole],
-      )).rejects.toThrow(/non-profile role/i);
+      )).resolves.toBeDefined();
       await pool.query('SELECT continuum_grant_application_vector_functions()');
       expect((await pool.query(
         `SELECT has_schema_privilege($1, 'continuum_extensions', 'USAGE') AS usage`,
         [outsider],
-      )).rows).toEqual([{ usage: false }]);
+      )).rows).toEqual([{ usage: true }]);
 
       await pool.query(`REVOKE SELECT ON memories FROM ${quoteIdentifier(appRole)}`);
       await pool.query('SELECT continuum_grant_application_vector_functions()');
@@ -990,6 +1012,10 @@ describe('pgvector rollout remediation', () => {
       const owner = migrationPool(url, applicationSchema);
       await runMigrations(owner, await fullMigrationDirectory());
       await owner.query(
+        `GRANT USAGE ON SCHEMA ${quoteIdentifier(applicationSchema)}
+           TO ${quoteIdentifier(reporterRole)}`,
+      );
+      await owner.query(
         'SELECT continuum_register_pgvector_reporting_profile($1::name, TRUE)',
         [reporterRole],
       );
@@ -1076,16 +1102,17 @@ describe('pgvector rollout remediation', () => {
     roles.push(syncRole);
     await withFreshDatabase(async (root, target, url) => {
       const applicationSchema = identifier('continuum_data');
-      await root.query(`CREATE ROLE ${quoteIdentifier(syncRole)} NOLOGIN`);
+      const principalId = randomUUID();
+      await root.query(`CREATE ROLE ${quoteIdentifier(syncRole)} LOGIN`);
       await target.query(`CREATE SCHEMA ${quoteIdentifier(applicationSchema)}`);
       const owner = migrationPool(url, applicationSchema);
       await runMigrations(owner, await fullMigrationDirectory());
-      await owner.query(`
-        INSERT INTO continuum_pgvector_role_profiles
-          (database_role_oid, provider_schema_oid, profile_kind)
-        SELECT $1::regrole::oid, extnamespace, 'sync'
-          FROM pg_extension WHERE extname = 'vector'
-      `, [syncRole]);
+      await owner.query(
+        `INSERT INTO principals (id, external_id, kind, display_name)
+         VALUES ($1, $2, 'service', 'Sync lifecycle test')`,
+        [principalId, `sync-${principalId}`],
+      );
+      await grantSyncRole(owner, applicationSchema, syncRole, principalId);
 
       await expect(owner.query(
         'SELECT continuum_grant_application_vector_functions()',
@@ -1095,6 +1122,15 @@ describe('pgvector rollout remediation', () => {
           WHERE database_role_oid = $1::regrole::oid`,
         [syncRole],
       )).rows).toEqual([{ profile_kind: 'sync' }]);
+      const runtime = migrationPool(url, applicationSchema, syncRole);
+      expect((await runtime.query(
+        `SELECT has_function_privilege(
+           current_user,
+           'continuum_assert_current_pgvector_profile()'::regprocedure,
+           'EXECUTE'
+         ) AS executable`,
+      )).rows).toEqual([{ executable: true }]);
+      await expect(reconcilePgvectorProviderGrants(runtime)).resolves.toBeUndefined();
     });
   }, 240_000);
 
@@ -1109,6 +1145,11 @@ describe('pgvector rollout remediation', () => {
       await target.query(
         `CREATE SCHEMA ${quoteIdentifier(ownerRole)} AUTHORIZATION ${quoteIdentifier(ownerRole)}`,
       );
+      await target.query(`
+        CREATE SCHEMA continuum_extensions;
+        CREATE EXTENSION vector WITH SCHEMA continuum_extensions;
+        GRANT USAGE ON SCHEMA continuum_extensions TO ${quoteIdentifier(ownerRole)};
+      `);
       const pool = new pg.Pool({
         connectionString: url,
         max: 1,
@@ -1154,6 +1195,44 @@ describe('pgvector rollout remediation', () => {
                 to_regclass($2) IS NULL AS application_ledger`,
         [`${plantedSchema}._continuum_migrations`, `${applicationSchema}._continuum_migrations`],
       )).rows).toEqual([{ planted_ledger: true, application_ledger: true }]);
+    });
+  });
+
+  it('rejects an already-ledgered attacker-owned leading schema on upgrade', async () => {
+    const attackerRole = identifier('continuum_attacker');
+    roles.push(attackerRole);
+    await withFreshDatabase(async (root, target, url) => {
+      const plantedSchema = identifier('continuum_planted');
+      await root.query(`CREATE ROLE ${quoteIdentifier(attackerRole)} NOLOGIN`);
+      await target.query(
+        `CREATE SCHEMA ${quoteIdentifier(plantedSchema)} AUTHORIZATION ${quoteIdentifier(attackerRole)}`,
+      );
+      await target.query(`
+        SET ROLE ${quoteIdentifier(attackerRole)};
+        CREATE TABLE ${quoteIdentifier(plantedSchema)}._continuum_migrations (
+          name TEXT PRIMARY KEY,
+          applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        INSERT INTO ${quoteIdentifier(plantedSchema)}._continuum_migrations (name)
+        VALUES ('0001_init.sql');
+        RESET ROLE;
+      `);
+      const pool = new pg.Pool({
+        connectionString: url,
+        max: 1,
+        options: `-c search_path=${searchPath(plantedSchema)},public`,
+      });
+      pool.on('error', () => undefined);
+      pools.push(pool);
+
+      await expect(runMigrations(pool, await fullMigrationDirectory()))
+        .rejects.toThrow(/owner-controlled|attacker-owned|search_path/i);
+      expect((await target.query(
+        `SELECT array_agg(name ORDER BY name) AS names,
+                to_regclass($1) IS NULL AS no_principals
+           FROM ${quoteIdentifier(plantedSchema)}._continuum_migrations`,
+        [`${plantedSchema}.principals`],
+      )).rows).toEqual([{ names: ['0001_init.sql'], no_principals: true }]);
     });
   });
 

@@ -81,6 +81,17 @@ FROM :"continuum_operator_role";
 REVOKE ALL ON FUNCTION
   :"continuum_schema".continuum_get_offboarding_run(UUID, UUID)
 FROM :"continuum_operator_role";
+INSERT INTO :"continuum_schema".continuum_pgvector_role_profiles
+  (database_role_oid, provider_schema_oid, profile_kind, refreshed_at)
+SELECT role.oid, extension.extnamespace, 'operator', now()
+  FROM pg_roles role
+  CROSS JOIN pg_extension extension
+ WHERE role.rolname = :'continuum_operator_role'
+   AND extension.extname = 'vector'
+ON CONFLICT (database_role_oid) DO UPDATE SET
+  provider_schema_oid = EXCLUDED.provider_schema_oid,
+  profile_kind = 'operator',
+  refreshed_at = EXCLUDED.refreshed_at;
 SELECT :"continuum_schema".continuum_assert_operator_role_allowlist(
   :'continuum_operator_role'::name
 );

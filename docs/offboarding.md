@@ -581,11 +581,19 @@ profiles plus explicitly registered reporting profiles; `SELECT` on
 `memories` alone is not a provider profile. It records profile OIDs, grants
 provider `USAGE` and extension-function `EXECUTE` when they are not already
 effective, forbids provider `CREATE`, and removes stale direct provider grants
-from roles that lose their profile. When pgvector is application-local, schema
+only from roles registered to this tenant. Inherited function execution is an
+effective grant and is accepted consistently by reconciliation and assertion.
+Unregistered DBA/reporting grants are left untouched and do not affect another
+application role's assertion. When pgvector is application-local, schema
 `USAGE` belongs to the application ACL and is never revoked as provider drift.
-The dedicated migration-owner-controlled `continuum_extensions` provider also
-closes `PUBLIC` schema and function access. A DBA-owned dedicated provider
-keeps its provider-owned `PUBLIC` policy and direct pregrants intact.
+
+The dedicated `continuum_extensions` provider closes `PUBLIC` schema and
+function access only when the tenant owner owns the schema and every extension
+function, is the grantor of the `PUBLIC` privileges, and no relation in another
+schema depends on the provider vector type. A shared, DBA-owned, or
+provider-owned installation keeps its existing `PUBLIC` policy and unrelated
+direct grants intact. This prevents one tenant from changing another tenant's
+live provider contract.
 
 Register or retire a read-only reporting role only through the tenant migration
 owner, after granting or before revoking its reviewed application-schema
@@ -596,18 +604,26 @@ SELECT continuum_register_pgvector_reporting_profile('continuum_reporter', TRUE)
 SELECT continuum_register_pgvector_reporting_profile('continuum_reporter', FALSE);
 ```
 
-The owner-only function reconciles provider grants immediately. Disabling the
-profile revokes provider-schema/function grants while preserving legitimate
+The owner-only function reconciles provider grants immediately. Existing DBA
+grants can remain in place while 0080 is applied, then the owner can register
+the reviewed reporting role without a migration deadlock. Disabling the
+profile revokes tenant-managed provider grants while preserving legitimate
 application-schema access. A provider-owned schema must either delegate the
-narrow grant options to the tenant owner or apply the reported direct
+narrow grant options to the tenant owner or apply any reported direct
 pregrants/revocations itself.
 
 Provider reconciliation runs during API, MCP, and membership-sync startup and
 immediately before non-preview offboarding mutation. This catches extension
 updates and role drift outside migration windows and revokes stale direct
-provider grants before lifecycle work proceeds. Re-run the grant script after
-role rotation, revocation, or a pgvector extension update; its final assertions
-report the exact missing or extra provider privilege.
+provider grants before lifecycle work proceeds. Non-owner application,
+operator, sync, and reporting sessions call the OID-bound current-profile gate;
+they cannot read the owner-only registry. Owner startup first confirms 0080 is
+ledgered and takes the migration advisory lock before catalog reconciliation.
+Re-run the applicable role grant script after role rotation, revocation, or a
+pgvector extension update; its final assertions report the exact missing or
+extra provider privilege. Sync registration remains durable across owner
+reconciliation, and `grant-operator-role.sql` changes an application profile to
+the explicit operator kind.
 
 Rolling back to a binary from before provider-schema support is unsafe while
 the extension schema is absent from that binary's runtime `search_path`,

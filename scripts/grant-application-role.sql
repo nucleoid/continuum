@@ -313,6 +313,20 @@ REVOKE ALL ON TABLE
   :"continuum_schema".continuum_offboarding_restart_requests
 FROM :"continuum_app_role";
 
+DO $provider_runtime_gate$
+DECLARE schema_name TEXT := current_setting('continuum.application_grant_schema');
+        target_role NAME := current_setting('continuum.application_grant_target')::name;
+BEGIN
+  IF to_regprocedure(format(
+    '%I.continuum_assert_current_pgvector_profile()', schema_name
+  )) IS NOT NULL THEN
+    EXECUTE format(
+      'GRANT EXECUTE ON FUNCTION %I.continuum_assert_current_pgvector_profile() TO %I',
+      schema_name, target_role);
+  END IF;
+END;
+$provider_runtime_gate$;
+
 -- Reconcile provider access only after the exact application profile is in
 -- place. The owner-only helper also removes provider grants retained by roles
 -- that no longer match the application/operator profile.

@@ -80,7 +80,7 @@ const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
   ['0079_coordination_upgrade_scale_remediation.sql',
     '147497bac862bfc7f25123cd3f655550c2c6c4c574a3519fa2a98dd62828d85a'],
   ['0080_pgvector_provider_grants.sql',
-    'f6ee75ea98e560e65ec3be95c2e290184d902af7f0e083ce02bb551d72b987d3'],
+    'ed30dc0671d16bf1a7d1678d6bd8c753e561d670fb7c578490790de1aa59a6e7'],
 ]);
 const FORWARD_MIGRATION_REQUIREMENTS = new Map([
   ['0053_offboarding_restore_contract.sql', '0052_offboarding_review_repair.sql'],
@@ -556,15 +556,22 @@ export async function runMigrations(
       const pathState = await client.query<{
         path: string;
         schema: string | null;
+        currentUser: string;
         owned: boolean;
         unsafeCreate: boolean;
         userSchemaExists: boolean;
       }>(`
         SELECT current_setting('search_path') AS path,
                namespace.nspname AS schema,
+               current_user AS "currentUser",
                COALESCE(
                  namespace.nspowner = role.oid
-                   OR pg_has_role(role.oid, namespace.nspowner, 'USAGE'),
+                   OR (namespace.nspowner = 'pg_database_owner'::regrole
+                       AND role.oid = (
+                         SELECT database.datdba FROM pg_database database
+                          WHERE database.datname = current_database()))
+                   OR (NOT role.rolsuper
+                       AND pg_has_role(role.oid, namespace.nspowner, 'USAGE')),
                  FALSE
                ) AS owned,
                COALESCE(EXISTS (
@@ -582,13 +589,16 @@ export async function runMigrations(
       `);
       applicationSchema = pathState.rows[0]?.schema ?? undefined;
       const firstPathSchema = firstSearchPathIdentifier(pathState.rows[0]?.path ?? '');
-      const safeImplicitUserPath = firstPathSchema === '$user'
-        && pathState.rows[0]?.userSchemaExists !== true;
+      const resolvedFirstPathSchema = firstPathSchema === '$user'
+        ? (pathState.rows[0]?.userSchemaExists === true
+            ? pathState.rows[0]?.currentUser
+            : applicationSchema)
+        : firstPathSchema;
       if (!applicationSchema
-          || (firstPathSchema !== applicationSchema && !safeImplicitUserPath)) {
+          || resolvedFirstPathSchema !== applicationSchema) {
         throw new Error(
           'The migration search_path first entry must name an existing application schema; '
-          + 'empty, planted, $user, or malformed leading entries are not allowed',
+          + 'empty, planted, or malformed leading entries are not allowed',
         );
       }
       if (!pathState.rows[0]?.owned) {
@@ -739,7 +749,12 @@ export async function runMigrations(
         }>(`
           SELECT namespace.nspname AS schema,
                  (namespace.nspowner = role.oid
-                   OR pg_has_role(role.oid, namespace.nspowner, 'USAGE')) AS owned,
+                   OR (namespace.nspowner = 'pg_database_owner'::regrole
+                       AND role.oid = (
+                         SELECT database.datdba FROM pg_database database
+                          WHERE database.datname = current_database()))
+                   OR (NOT role.rolsuper
+                       AND pg_has_role(role.oid, namespace.nspowner, 'USAGE'))) AS owned,
                  EXISTS (
                    SELECT 1
                      FROM aclexplode(COALESCE(

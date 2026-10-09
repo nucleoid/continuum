@@ -53,6 +53,25 @@ GRANT EXECUTE ON FUNCTION
   :"continuum_schema".continuum_sync_quarantine_entra_group(UUID, TEXT, TEXT),
   :"continuum_schema".continuum_verify_sync_database_identity(UUID)
 TO :"continuum_sync_role";
+SELECT set_config('continuum.sync_grant_schema', namespace.nspname, TRUE)
+  FROM :"continuum_schema".principals principal
+  JOIN pg_class relation ON relation.oid = principal.tableoid
+  JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+ LIMIT 1;
+SELECT set_config('continuum.sync_grant_target', :'continuum_sync_role', TRUE);
+DO $provider_runtime_gate$
+DECLARE schema_name TEXT := current_setting('continuum.sync_grant_schema');
+        target_role NAME := current_setting('continuum.sync_grant_target')::name;
+BEGIN
+  IF to_regprocedure(format(
+    '%I.continuum_assert_current_pgvector_profile()', schema_name
+  )) IS NOT NULL THEN
+    EXECUTE format(
+      'GRANT EXECUTE ON FUNCTION %I.continuum_assert_current_pgvector_profile() TO %I',
+      schema_name, target_role);
+  END IF;
+END;
+$provider_runtime_gate$;
 INSERT INTO :"continuum_schema".continuum_pgvector_role_profiles
   (database_role_oid, provider_schema_oid, profile_kind, refreshed_at)
 SELECT role.oid, extension.extnamespace, 'sync', now()
