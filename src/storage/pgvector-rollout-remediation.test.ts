@@ -745,4 +745,174 @@ describe('pgvector rollout remediation', () => {
       )).rows).toEqual([{ distance: 0 }]);
     });
   }, 180_000);
+
+  it('preserves legitimate application-schema USAGE when pgvector is application-local', async () => {
+    const appRole = identifier('continuum_app');
+    const reporterRole = identifier('continuum_reporter');
+    roles.push(reporterRole, appRole);
+    await withFreshDatabase(async (root, target, url) => {
+      const applicationSchema = identifier('continuum_data');
+      await root.query(`CREATE ROLE ${quoteIdentifier(appRole)} NOLOGIN`);
+      await root.query(`CREATE ROLE ${quoteIdentifier(reporterRole)} NOLOGIN`);
+      await target.query(`CREATE SCHEMA ${quoteIdentifier(applicationSchema)}`);
+      await target.query(
+        `CREATE EXTENSION vector WITH SCHEMA ${quoteIdentifier(applicationSchema)}`,
+      );
+      const pool = migrationPool(url, applicationSchema);
+      await runMigrations(pool, await migrationDirectoryThrough(
+        '0079_coordination_upgrade_scale_remediation.sql',
+      ));
+      await grantApplicationRole(pool, applicationSchema, appRole);
+      await pool.query(`
+        GRANT USAGE ON SCHEMA ${quoteIdentifier(applicationSchema)}
+          TO ${quoteIdentifier(reporterRole)};
+        GRANT SELECT ON memories TO ${quoteIdentifier(reporterRole)};
+      `);
+
+      await expect(runMigrations(pool, await fullMigrationDirectory())).resolves.toEqual([
+        expect.objectContaining({ name: '0080_pgvector_provider_grants.sql' }),
+      ]);
+      expect((await target.query(
+        `SELECT has_schema_privilege($1, $2, 'USAGE') AS reporter_usage,
+                has_table_privilege($1, format('%I.memories', $2), 'SELECT') AS reporter_read`,
+        [reporterRole, applicationSchema],
+      )).rows).toEqual([{ reporter_usage: true, reporter_read: true }]);
+    });
+  }, 240_000);
+
+  it('accepts sufficient provider-owner direct pregrants without delegation authority', async () => {
+    const ownerRole = identifier('continuum_owner');
+    const appRole = identifier('continuum_app');
+    roles.push(appRole, ownerRole);
+    await withFreshDatabase(async (root, target, url, database) => {
+      const applicationSchema = identifier('continuum_data');
+      const providerSchema = identifier('provider_extensions');
+      await root.query(`CREATE ROLE ${quoteIdentifier(ownerRole)} NOLOGIN`);
+      await root.query(`CREATE ROLE ${quoteIdentifier(appRole)} NOLOGIN`);
+      await target.query(
+        `GRANT CONNECT ON DATABASE ${quoteIdentifier(database)} TO ${quoteIdentifier(ownerRole)}`,
+      );
+      await target.query(
+        `CREATE SCHEMA ${quoteIdentifier(applicationSchema)} AUTHORIZATION ${quoteIdentifier(ownerRole)}`,
+      );
+      await target.query(`CREATE SCHEMA ${quoteIdentifier(providerSchema)}`);
+      await target.query(
+        `CREATE EXTENSION vector WITH SCHEMA ${quoteIdentifier(providerSchema)}`,
+      );
+      await target.query(
+        `GRANT USAGE ON SCHEMA ${quoteIdentifier(providerSchema)} TO ${quoteIdentifier(ownerRole)}`,
+      );
+      const owner = migrationPool(url, applicationSchema, ownerRole);
+      await runMigrations(owner, await migrationDirectoryThrough(
+        '0079_coordination_upgrade_scale_remediation.sql',
+      ));
+      await grantApplicationRole(owner, applicationSchema, appRole);
+      await target.query(`
+        REVOKE USAGE ON SCHEMA ${quoteIdentifier(providerSchema)} FROM PUBLIC;
+        REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA ${quoteIdentifier(providerSchema)} FROM PUBLIC;
+        GRANT USAGE ON SCHEMA ${quoteIdentifier(providerSchema)} TO ${quoteIdentifier(appRole)};
+        GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA ${quoteIdentifier(providerSchema)}
+          TO ${quoteIdentifier(appRole)};
+      `);
+
+      await expect(runMigrations(owner, await fullMigrationDirectory())).resolves.toEqual([
+        expect.objectContaining({ name: '0080_pgvector_provider_grants.sql' }),
+      ]);
+      await expect(owner.query(
+        'SELECT continuum_assert_application_vector_profile($1::name)', [appRole],
+      )).resolves.toBeDefined();
+    });
+  }, 240_000);
+
+  it('refuses an unreviewed public provider before creating the tenant ledger', async () => {
+    await withFreshDatabase(async (_root, target, url) => {
+      const applicationSchema = identifier('continuum_data');
+      await target.query(`CREATE SCHEMA ${quoteIdentifier(applicationSchema)}`);
+      await target.query('CREATE EXTENSION vector WITH SCHEMA public');
+      const pool = migrationPool(url, applicationSchema);
+
+      await expect(runMigrations(
+        pool, await migrationDirectoryThrough('0001_init.sql'),
+      )).rejects.toThrow(/public.*shared.*provider|compatibility.*opt-in/i);
+      expect((await target.query(
+        `SELECT to_regclass($1) IS NULL AS no_ledger,
+                to_regclass($2) IS NULL AS no_memories`,
+        [`${applicationSchema}._continuum_migrations`, `${applicationSchema}.memories`],
+      )).rows).toEqual([{ no_ledger: true, no_memories: true }]);
+    });
+  });
+
+  it('supports a DBA-owned dedicated provider for a second tenant without grant option', async () => {
+    const ownerRole = identifier('continuum_owner');
+    roles.push(ownerRole);
+    await withFreshDatabase(async (root, target, url, database) => {
+      const firstSchema = identifier('continuum_first');
+      const secondSchema = identifier('continuum_second');
+      await root.query(`CREATE ROLE ${quoteIdentifier(ownerRole)} NOLOGIN`);
+      await target.query(
+        `GRANT CONNECT ON DATABASE ${quoteIdentifier(database)} TO ${quoteIdentifier(ownerRole)}`,
+      );
+      await target.query('CREATE SCHEMA continuum_extensions');
+      await target.query('CREATE EXTENSION vector WITH SCHEMA continuum_extensions');
+      await target.query(
+        `GRANT USAGE ON SCHEMA continuum_extensions TO ${quoteIdentifier(ownerRole)}`,
+      );
+      await target.query(
+        `CREATE SCHEMA ${quoteIdentifier(firstSchema)} AUTHORIZATION ${quoteIdentifier(ownerRole)}`,
+      );
+      await target.query(
+        `CREATE SCHEMA ${quoteIdentifier(secondSchema)} AUTHORIZATION ${quoteIdentifier(ownerRole)}`,
+      );
+      const first = migrationPool(url, firstSchema, ownerRole);
+      const second = migrationPool(url, secondSchema, ownerRole);
+      const directory = await migrationDirectoryThrough('0001_init.sql');
+
+      await expect(runMigrations(first, directory)).resolves.toEqual([
+        expect.objectContaining({ name: '0001_init.sql' }),
+      ]);
+      await expect(runMigrations(second, directory)).resolves.toEqual([
+        expect.objectContaining({ name: '0001_init.sql' }),
+      ]);
+      expect((await target.query(
+        `SELECT to_regclass($1) IS NOT NULL AS first_tenant,
+                to_regclass($2) IS NOT NULL AS second_tenant`,
+        [`${firstSchema}.memories`, `${secondSchema}.memories`],
+      )).rows).toEqual([{ first_tenant: true, second_tenant: true }]);
+    });
+  });
+
+  it('rejects a planted leading search_path entry before ledger DDL', async () => {
+    await withFreshDatabase(async (_root, target, url) => {
+      const applicationSchema = identifier('continuum_data');
+      const plantedSchema = identifier('continuum_planted');
+      await target.query(`CREATE SCHEMA ${quoteIdentifier(applicationSchema)}`);
+      const pool = new pg.Pool({
+        connectionString: url,
+        max: 1,
+        options: `-c search_path=${searchPath(plantedSchema)},${searchPath(applicationSchema)}`,
+      });
+      pool.on('error', () => undefined);
+      pools.push(pool);
+
+      await expect(runMigrations(
+        pool, await migrationDirectoryThrough('0001_init.sql'),
+      )).rejects.toThrow(/search_path.*first.*exist|planted.*search_path/i);
+      expect((await target.query(
+        `SELECT to_regclass($1) IS NULL AS no_ledger`,
+        [`${applicationSchema}._continuum_migrations`],
+      )).rows).toEqual([{ no_ledger: true }]);
+    });
+  });
+
+  it('wires provider reconciliation into API, MCP, sync, and offboarding lifecycle gates', async () => {
+    const [api, mcp, sync, offboarding] = await Promise.all([
+      readFile(join(process.cwd(), 'src/api/server.ts'), 'utf8'),
+      readFile(join(process.cwd(), 'src/api/mcp.ts'), 'utf8'),
+      readFile(join(process.cwd(), 'src/identity/sync-runner.ts'), 'utf8'),
+      readFile(join(process.cwd(), 'src/services/offboarding.ts'), 'utf8'),
+    ]);
+    for (const source of [api, mcp, sync, offboarding]) {
+      expect(source).toMatch(/reconcilePgvectorProviderGrants\s*\(/);
+    }
+  });
 });

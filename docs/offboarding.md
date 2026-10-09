@@ -517,14 +517,21 @@ For a fresh application schema, Continuum refuses an existing provider schema
 that contains another Continuum ledger or application tables. Relocate that
 extension into reviewed provider infrastructure before retrying. The temporary
 escape hatch `CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA=1` is only for an
-operator-reviewed legacy topology where cascade-drop coupling is understood and
-accepted; it is not a normal multi-tenant rollout setting. A fresh
-`continuum_extensions` schema must be owned by the connecting migration role
-and must grant `CREATE` to neither `PUBLIC` nor any non-owner. Failure occurs
-before `0001`, with the exact ownership or ACL repair in the diagnostic.
-The conventional database-wide `public` extension location remains an explicit
-compatibility case because managed PostgreSQL commonly installs pgvector there;
-its schema must still pass the provider access and forbidden-`CREATE` checks.
+operator-reviewed legacy topology where cascade-drop or shared-`public`
+coupling is understood and accepted; it is not a normal multi-tenant rollout
+setting. An unreviewed extension in `public` is refused before tenant ledger
+DDL. PostgreSQL grants `USAGE` and function `EXECUTE` to `PUBLIC` as effective
+privileges for every role, so compatibility mode records that truth instead of
+pretending those privileges are direct grants.
+
+The preferred shared provider is a dedicated `continuum_extensions` schema.
+It may be owned by a DBA/provider role rather than a tenant migration owner,
+may serve multiple Continuum application schemas, and must grant `CREATE` to
+neither `PUBLIC` nor any non-owner. Each tenant migration owner needs only
+`USAGE`; it does not need ownership or grant option when provider access has
+already been granted directly to every profiled runtime role. The provider
+owner controls extension install, update, and final removal. Remove it only
+after every dependent tenant has been retired.
 
 The migration connection's first effective `search_path` schema is the
 application schema. It must be owner-controlled by the migration role (including
@@ -562,25 +569,30 @@ the extension routines used by vector operators. Migration `0080` upgrades the
 owner-only grant refresher, and `grant-application-role.sql` invokes it after
 granting the Continuum application profile. For an owner-installed extension,
 the migration owner supplies these narrow grants. For a provider-owned schema,
-either pregrant the application role directly or grant the migration owner the
-corresponding grant options; the refresher fails with the exact provider-owner
-grant when it cannot delegate. Do not grant schema `CREATE`, provider
+either pregrant every profiled role directly or grant the migration owner the
+corresponding grant options. Existing sufficient direct grants are accepted
+before delegation is considered; the refresher asks for grant option only for
+a genuinely missing grant. Do not grant schema `CREATE`, provider
 ownership, a provider role, or blanket database privileges to the application
 role.
 
-Migration `0080` discovers only roles that satisfy the existing exact
-application or operator allow-list; `SELECT` on `memories` alone is not a
-profile. It records profile OIDs, grants direct provider `USAGE` and direct
-extension-function `EXECUTE`, forbids provider `CREATE`, and removes grants
-from recorded roles that lose their profile. It also removes provider grants
-from non-profile roles that still touch this application schema. The dedicated
-owner-controlled `continuum_extensions` provider additionally closes `PUBLIC`
-schema and function access. A shared/provider-managed custom schema remains an
-explicit compatibility boundary: Continuum verifies each profiled role and
-forbidden `CREATE`, while unrelated tenants remain the provider owner's
-responsibility. Re-run the grant script after role rotation, revocation, or a
-pgvector extension update; its final assertions report the exact missing or
-extra provider privilege.
+Migration `0080` recognizes exact application, operator, and registered sync
+profiles plus explicitly registered reporting profiles; `SELECT` on
+`memories` alone is not a provider profile. It records profile OIDs, grants
+provider `USAGE` and extension-function `EXECUTE` when they are not already
+effective, forbids provider `CREATE`, and removes stale direct provider grants
+from roles that lose their profile. When pgvector is application-local, schema
+`USAGE` belongs to the application ACL and is never revoked as provider drift.
+The dedicated migration-owner-controlled `continuum_extensions` provider also
+closes `PUBLIC` schema and function access. A DBA-owned dedicated provider
+keeps its provider-owned `PUBLIC` policy and direct pregrants intact.
+
+Provider reconciliation runs during API, MCP, and membership-sync startup and
+immediately before non-preview offboarding mutation. This catches extension
+updates and role drift outside migration windows and revokes stale direct
+provider grants before lifecycle work proceeds. Re-run the grant script after
+role rotation, revocation, or a pgvector extension update; its final assertions
+report the exact missing or extra provider privilege.
 
 Rolling back to a binary from before provider-schema support is unsafe while
 the extension schema is absent from that binary's runtime `search_path`,
