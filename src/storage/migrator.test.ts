@@ -172,7 +172,9 @@ describe('runMigrations', () => {
   ] as const)(
     'refuses current-binary 0064 offboarding before upgrade for %s privacy work',
     async (label, leaseCount, repairBatchSize) => {
-      const suffix = `${label.replaceAll('-', '_')}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+      // Keep the schema below PostgreSQL's 63-byte identifier limit. A silently
+      // truncated CREATE SCHEMA name must not masquerade as a valid search_path.
+      const suffix = `${label.slice(0, 5).replaceAll('-', '_')}_${randomUUID().slice(0, 8)}`;
       const schema = `coordination_service_upgrade_${suffix}`;
       const admin = new pg.Pool({ connectionString: DATABASE_URL });
       pools.push(admin);
@@ -634,7 +636,7 @@ describe('runMigrations', () => {
     directories.push(directory);
     await writeFile(join(directory, '0052_offboarding_review_repair.sql'), windowsCheckout);
     await writeFile(
-      join(directory, '0053_offboarding_restore_contract.sql'),
+      join(directory, '0081_crlf_checksum_probe.sql'),
       'CREATE TABLE continuum_crlf_checksum_probe (applied boolean NOT NULL);\r\n',
     );
     const schema = `migrator_published_checksum_crlf_${Date.now()}`;
@@ -652,7 +654,7 @@ describe('runMigrations', () => {
     `);
 
     await expect(runMigrations(pool, directory)).resolves.toEqual([
-      expect.objectContaining({ name: '0053_offboarding_restore_contract.sql' }),
+      expect.objectContaining({ name: '0081_crlf_checksum_probe.sql' }),
     ]);
 
     const invalidCheckouts = [
@@ -731,7 +733,7 @@ describe('runMigrations', () => {
     }
   });
 
-  it('applies 0053 when the published 0052 is already ledgered', async () => {
+  it('applies a forward migration when the published 0052 is already ledgered', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'continuum-forward-0053-'));
     directories.push(directory);
     await copyFile(
@@ -739,7 +741,7 @@ describe('runMigrations', () => {
       join(directory, '0052_offboarding_review_repair.sql'),
     );
     await writeFile(
-      join(directory, '0053_offboarding_restore_contract.sql'),
+      join(directory, '0081_forward_probe.sql'),
       `CREATE TABLE continuum_0053_forward_probe (applied boolean NOT NULL);\n`,
     );
     const schema = `migrator_forward_0053_${Date.now()}`;
@@ -757,7 +759,7 @@ describe('runMigrations', () => {
     `);
 
     await expect(runMigrations(pool, directory)).resolves.toEqual([
-      expect.objectContaining({ name: '0053_offboarding_restore_contract.sql' }),
+      expect.objectContaining({ name: '0081_forward_probe.sql' }),
     ]);
     expect((await pool.query(
       `SELECT namespace.nspname AS schema
@@ -770,9 +772,9 @@ describe('runMigrations', () => {
   it('refuses to apply 0053 before 0052 is ledgered', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'continuum-forward-0053-prerequisite-'));
     directories.push(directory);
-    await writeFile(
+    await copyFile(
+      join(process.cwd(), 'migrations/0053_offboarding_restore_contract.sql'),
       join(directory, '0053_offboarding_restore_contract.sql'),
-      'SELECT 1;\n',
     );
     const schema = `migrator_forward_0053_prerequisite_${Date.now()}`;
     const admin = new pg.Pool({ connectionString: DATABASE_URL });

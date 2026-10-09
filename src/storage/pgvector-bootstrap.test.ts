@@ -199,7 +199,7 @@ describe('pgvector schema contract', () => {
           expect((await target.query(
             `SELECT to_regclass($1) IS NOT NULL AS ledger, to_regclass($2) IS NULL AS no_schema`,
             [`${applicationSchema}._continuum_migrations`, `${applicationSchema}.principals`],
-          )).rows).toEqual([{ ledger: true, no_schema: true }]);
+          )).rows).toEqual([{ ledger: false, no_schema: true }]);
 
           await target.query(`CREATE SCHEMA "${extensionSchema}"`);
           await target.query(`CREATE EXTENSION vector WITH SCHEMA "${extensionSchema}"`);

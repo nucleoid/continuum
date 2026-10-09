@@ -38,6 +38,7 @@ import { cliSupportRouter } from './routes/cli.js';
 import { supersedeRouter } from './routes/supersede.js';
 import { offboardingRouter } from './routes/offboarding.js';
 import { locksRouter } from './routes/locks.js';
+import { reconcilePgvectorProviderGrants } from '../storage/provider-lifecycle.js';
 
 export { createReadinessState } from './readiness.js';
 
@@ -353,6 +354,7 @@ async function main(): Promise<void> {
   const readinessTimeoutMs = positiveIntegerEnv('CONTINUUM_READINESS_TIMEOUT_MS', 1_000);
   const shutdownTimeoutMs = positiveIntegerEnv('CONTINUUM_SHUTDOWN_TIMEOUT_MS', 10_000);
   const pool = getPool();
+  await reconcilePgvectorProviderGrants(pool);
   const authMode = authModeFromEnv();
   warnOnDevAuthMode(authMode);
   const authenticator = createAuthenticator(

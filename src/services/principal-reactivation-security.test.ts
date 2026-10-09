@@ -844,7 +844,7 @@ describe('principal reactivation database trust boundary', () => {
           `CREATE TEMP TABLE memories (id UUID, state TEXT);
            INSERT INTO memories VALUES ('${memoryId}', 'live')`,
           `INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
-           VALUES ($1, 'forged', 768, $2::vector)`,
+           VALUES ($1, 'forged', 768, $2)`,
           [memoryId, `[${Array(768).fill(0).join(',')}]`],
           /embedding requires a live memory/i,
         );

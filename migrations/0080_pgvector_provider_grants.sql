@@ -5,6 +5,8 @@
 CREATE TABLE continuum_pgvector_role_profiles (
   database_role_oid OID PRIMARY KEY,
   provider_schema_oid OID NOT NULL,
+  profile_kind TEXT NOT NULL DEFAULT 'application'
+    CHECK (profile_kind IN ('application', 'operator', 'sync', 'reporting')),
   refreshed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 REVOKE ALL ON TABLE continuum_pgvector_role_profiles FROM PUBLIC;
@@ -49,13 +51,15 @@ BEGIN
     FROM pg_class relation WHERE relation.oid = 'memories'::regclass;
   SELECT oid INTO invoking_role_oid
     FROM pg_roles WHERE rolname = continuum_invoking_database_role();
-  IF invoking_role_oid <> application_owner_oid THEN
-    RAISE EXCEPTION 'only the migration owner may validate an application vector profile';
-  END IF;
   SELECT oid INTO target_role_oid FROM pg_roles WHERE rolname = target_database_role;
   IF target_role_oid IS NULL THEN
     RAISE EXCEPTION 'application vector profile role % does not exist',
       quote_ident(target_database_role);
+  END IF;
+  IF invoking_role_oid <> application_owner_oid
+      AND invoking_role_oid <> target_role_oid THEN
+    RAISE EXCEPTION
+      'only the migration owner or the profiled role may validate an application vector profile';
   END IF;
   IF NOT continuum_application_profile_matches(target_database_role) THEN
     RAISE EXCEPTION 'role % does not hold an exact Continuum application or operator profile',
@@ -95,7 +99,7 @@ BEGIN
     CROSS JOIN LATERAL aclexplode(COALESCE(
       namespace.nspacl, acldefault('n', namespace.nspowner))) privilege
      WHERE namespace.oid = vector_schema_oid
-       AND privilege.grantee = target_role_oid
+       AND privilege.grantee IN (0, target_role_oid)
        AND upper(privilege.privilege_type) = 'USAGE'
   ) THEN
     RAISE EXCEPTION
@@ -123,7 +127,7 @@ BEGIN
      AND NOT EXISTS (
        SELECT 1 FROM aclexplode(COALESCE(
          function.proacl, acldefault('f', function.proowner))) privilege
-        WHERE privilege.grantee = target_role_oid
+        WHERE privilege.grantee IN (0, target_role_oid)
           AND upper(privilege.privilege_type) = 'EXECUTE'
      )
    ORDER BY function.oid
@@ -138,6 +142,12 @@ BEGIN
     FROM pg_roles role
    WHERE role.oid <> application_owner_oid
      AND NOT continuum_application_profile_matches(role.rolname)
+     AND NOT EXISTS (
+       SELECT 1 FROM continuum_pgvector_role_profiles profile
+        WHERE profile.database_role_oid = role.oid
+          AND profile.provider_schema_oid = vector_schema_oid
+          AND profile.profile_kind IN ('sync', 'reporting')
+     )
      AND EXISTS (
        SELECT 1 FROM pg_class relation
        CROSS JOIN LATERAL aclexplode(COALESCE(
@@ -148,14 +158,14 @@ BEGIN
           AND privilege.grantee = role.oid
      )
      AND (
-       EXISTS (
+       (vector_schema_oid <> application_schema_oid AND EXISTS (
          SELECT 1 FROM pg_namespace namespace
          CROSS JOIN LATERAL aclexplode(COALESCE(
            namespace.nspacl, acldefault('n', namespace.nspowner))) privilege
           WHERE namespace.oid = vector_schema_oid
             AND privilege.grantee = role.oid
             AND upper(privilege.privilege_type) IN ('USAGE', 'CREATE')
-       ) OR EXISTS (
+       )) OR EXISTS (
          SELECT 1 FROM pg_proc function
          JOIN pg_depend dependency
            ON dependency.classid = 'pg_proc'::regclass
@@ -273,31 +283,58 @@ BEGIN
 
   FOR candidate IN
     SELECT role.oid, role.rolname,
-           continuum_application_profile_matches(role.rolname) AS exact_profile
+           continuum_application_profile_matches(role.rolname) AS exact_profile,
+           profile.profile_kind
       FROM pg_roles role
+      LEFT JOIN continuum_pgvector_role_profiles profile
+        ON profile.database_role_oid = role.oid
      WHERE role.oid <> application_owner_oid
-       AND EXISTS (
-         SELECT 1 FROM pg_class relation
-         CROSS JOIN LATERAL aclexplode(COALESCE(
-           relation.relacl,
-           acldefault(CASE WHEN relation.relkind = 'S' THEN 's'::"char" ELSE 'r'::"char" END,
-                      relation.relowner))) privilege
-          WHERE relation.relnamespace = application_schema_oid
-            AND privilege.grantee = role.oid
-       )
+       AND (profile.database_role_oid IS NOT NULL OR EXISTS (
+              SELECT 1 FROM pg_class relation
+              CROSS JOIN LATERAL aclexplode(COALESCE(
+                relation.relacl,
+                acldefault(CASE WHEN relation.relkind = 'S' THEN 's'::"char" ELSE 'r'::"char" END,
+                           relation.relowner))) privilege
+               WHERE relation.relnamespace = application_schema_oid
+                 AND privilege.grantee = role.oid
+            ))
   LOOP
-    IF candidate.exact_profile THEN
-      BEGIN
-        EXECUTE format('REVOKE CREATE ON SCHEMA %I FROM %I',
-          vector_schema_name, candidate.rolname);
-        EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I',
-          vector_schema_name, candidate.rolname);
-      EXCEPTION WHEN insufficient_privilege THEN
-        RAISE EXCEPTION
-          'provider owner must GRANT USAGE ON SCHEMA % TO % WITH GRANT OPTION before refreshing application grants',
-          quote_ident(vector_schema_name),
-          quote_ident((SELECT rolname FROM pg_roles WHERE oid = application_owner_oid));
-      END;
+    IF candidate.exact_profile OR candidate.profile_kind = 'reporting' THEN
+      IF EXISTS (
+        SELECT 1 FROM pg_namespace namespace
+        CROSS JOIN LATERAL aclexplode(COALESCE(
+          namespace.nspacl, acldefault('n', namespace.nspowner))) privilege
+         WHERE namespace.oid = vector_schema_oid
+           AND privilege.grantee = candidate.oid
+           AND upper(privilege.privilege_type) = 'CREATE'
+      ) THEN
+        BEGIN
+          EXECUTE format('REVOKE CREATE ON SCHEMA %I FROM %I',
+            vector_schema_name, candidate.rolname);
+        EXCEPTION WHEN insufficient_privilege THEN
+          RAISE EXCEPTION
+            'provider owner must revoke CREATE on schema % from % before refreshing application grants',
+            quote_ident(vector_schema_name), quote_ident(candidate.rolname);
+        END;
+      END IF;
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_namespace namespace
+        CROSS JOIN LATERAL aclexplode(COALESCE(
+          namespace.nspacl, acldefault('n', namespace.nspowner))) privilege
+         WHERE namespace.oid = vector_schema_oid
+           AND privilege.grantee IN (0, candidate.oid)
+           AND upper(privilege.privilege_type) = 'USAGE'
+      ) THEN
+        BEGIN
+          EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I',
+            vector_schema_name, candidate.rolname);
+        EXCEPTION WHEN insufficient_privilege THEN
+          RAISE EXCEPTION
+            'provider owner must GRANT USAGE ON SCHEMA % TO % WITH GRANT OPTION before refreshing application grants',
+            quote_ident(vector_schema_name),
+            quote_ident((SELECT rolname FROM pg_roles WHERE oid = application_owner_oid));
+        END;
+      END IF;
       FOR vector_function IN
         SELECT function.oid,
                function.proowner = application_owner_oid OR EXISTS (
@@ -319,6 +356,9 @@ BEGIN
           JOIN pg_extension extension ON extension.oid = dependency.refobjid
          WHERE extension.extname = 'vector'
       LOOP
+        IF has_function_privilege(candidate.oid, vector_function.oid, 'EXECUTE') THEN
+          CONTINUE;
+        END IF;
         IF NOT vector_function.can_delegate THEN
           RAISE EXCEPTION
             'extension owner must GRANT EXECUTE ON FUNCTION % TO % WITH GRANT OPTION before refreshing application grants',
@@ -329,15 +369,25 @@ BEGIN
           vector_function.signature, candidate.rolname);
       END LOOP;
       INSERT INTO continuum_pgvector_role_profiles
-        (database_role_oid, provider_schema_oid, refreshed_at)
-      VALUES (candidate.oid, vector_schema_oid, now())
+        (database_role_oid, provider_schema_oid, profile_kind, refreshed_at)
+      VALUES (
+        candidate.oid, vector_schema_oid,
+        COALESCE(candidate.profile_kind, 'application'), now()
+      )
       ON CONFLICT (database_role_oid) DO UPDATE
         SET provider_schema_oid = EXCLUDED.provider_schema_oid,
+            profile_kind = CASE
+              WHEN continuum_pgvector_role_profiles.profile_kind = 'reporting'
+                THEN 'reporting'
+              ELSE EXCLUDED.profile_kind
+            END,
             refreshed_at = EXCLUDED.refreshed_at;
     ELSE
       BEGIN
-        EXECUTE format('REVOKE USAGE, CREATE ON SCHEMA %I FROM %I',
-          vector_schema_name, candidate.rolname);
+        IF vector_schema_oid <> application_schema_oid THEN
+          EXECUTE format('REVOKE USAGE, CREATE ON SCHEMA %I FROM %I',
+            vector_schema_name, candidate.rolname);
+        END IF;
         FOR vector_function IN
           SELECT format('%I.%I(%s)', namespace.nspname, function.proname,
                         pg_get_function_identity_arguments(function.oid)) AS signature
@@ -369,12 +419,15 @@ BEGIN
       FROM continuum_pgvector_role_profiles profile
       LEFT JOIN pg_roles role ON role.oid = profile.database_role_oid
      WHERE role.oid IS NULL
-        OR NOT continuum_application_profile_matches(role.rolname)
+        OR (profile.profile_kind NOT IN ('sync', 'reporting')
+            AND NOT continuum_application_profile_matches(role.rolname))
   LOOP
     IF candidate.rolname IS NOT NULL THEN
       BEGIN
-        EXECUTE format('REVOKE USAGE, CREATE ON SCHEMA %I FROM %I',
-          vector_schema_name, candidate.rolname);
+        IF vector_schema_oid <> application_schema_oid THEN
+          EXECUTE format('REVOKE USAGE, CREATE ON SCHEMA %I FROM %I',
+            vector_schema_name, candidate.rolname);
+        END IF;
         FOR vector_function IN
           SELECT format('%I.%I(%s)', namespace.nspname, function.proname,
                         pg_get_function_identity_arguments(function.oid)) AS signature
@@ -405,12 +458,122 @@ BEGIN
     SELECT role.rolname
       FROM continuum_pgvector_role_profiles profile
       JOIN pg_roles role ON role.oid = profile.database_role_oid
+     WHERE profile.profile_kind IN ('application', 'operator')
   LOOP
     PERFORM continuum_assert_application_vector_profile(candidate.rolname);
   END LOOP;
 END;
 $$;
 REVOKE ALL ON FUNCTION continuum_grant_application_vector_functions() FROM PUBLIC;
+
+-- Runtime roles cannot read the owner-only profile registry directly. This
+-- SECURITY DEFINER gate resolves the real session/SET ROLE identity and checks
+-- only that role. The owner path performs the full reconciler, so startup and
+-- retirement gates also revoke stale managed-provider grants when authorized.
+CREATE OR REPLACE FUNCTION continuum_assert_current_pgvector_profile()
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE
+  invoking_role NAME := continuum_invoking_database_role();
+  invoking_role_oid OID;
+  application_owner_oid OID;
+  application_schema_oid OID;
+  vector_schema_oid OID;
+  profile_kind_value TEXT;
+BEGIN
+  SELECT oid INTO invoking_role_oid FROM pg_roles WHERE rolname = invoking_role;
+  SELECT relation.relowner, relation.relnamespace
+    INTO application_owner_oid, application_schema_oid
+    FROM pg_class relation WHERE relation.oid = 'memories'::regclass;
+  IF invoking_role_oid = application_owner_oid THEN
+    PERFORM continuum_grant_application_vector_functions();
+    RETURN;
+  END IF;
+
+  SELECT extension.extnamespace INTO vector_schema_oid
+    FROM pg_extension extension WHERE extension.extname = 'vector';
+  SELECT profile.profile_kind INTO profile_kind_value
+    FROM continuum_pgvector_role_profiles profile
+   WHERE profile.database_role_oid = invoking_role_oid
+     AND profile.provider_schema_oid = vector_schema_oid;
+  IF profile_kind_value IS NULL THEN
+    RAISE EXCEPTION
+      'pgvector provider grant/profile drift detected for role %; rerun the exact role grant profile',
+      quote_ident(invoking_role);
+  END IF;
+  IF has_schema_privilege(invoking_role, vector_schema_oid, 'CREATE') THEN
+    RAISE EXCEPTION 'pgvector provider role % has forbidden CREATE', quote_ident(invoking_role);
+  END IF;
+
+  IF profile_kind_value IN ('application', 'operator') THEN
+    PERFORM continuum_assert_application_vector_profile(invoking_role);
+  ELSIF profile_kind_value = 'reporting' THEN
+    IF NOT has_schema_privilege(invoking_role, vector_schema_oid, 'USAGE') OR EXISTS (
+      SELECT 1
+        FROM pg_proc function
+        JOIN pg_depend dependency
+          ON dependency.classid = 'pg_proc'::regclass
+         AND dependency.objid = function.oid
+         AND dependency.refclassid = 'pg_extension'::regclass
+         AND dependency.deptype = 'e'
+       WHERE dependency.refobjid = (SELECT oid FROM pg_extension WHERE extname = 'vector')
+         AND NOT has_function_privilege(invoking_role, function.oid, 'EXECUTE')
+    ) THEN
+      RAISE EXCEPTION 'pgvector reporting profile drift detected for role %',
+        quote_ident(invoking_role);
+    END IF;
+  ELSIF profile_kind_value = 'sync' AND vector_schema_oid <> application_schema_oid
+      AND has_schema_privilege(invoking_role, vector_schema_oid, 'USAGE') THEN
+    RAISE EXCEPTION 'pgvector sync profile retains provider-schema USAGE for role %',
+      quote_ident(invoking_role);
+  END IF;
+END;
+$$;
+REVOKE ALL ON FUNCTION continuum_assert_current_pgvector_profile() FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION continuum_register_pgvector_reporting_profile(
+  target_database_role NAME,
+  enabled BOOLEAN DEFAULT TRUE
+) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE
+  application_owner_oid OID;
+  invoking_role_oid OID;
+  target_role_oid OID;
+  vector_schema_oid OID;
+BEGIN
+  SELECT relation.relowner INTO application_owner_oid
+    FROM pg_class relation WHERE relation.oid = 'memories'::regclass;
+  SELECT oid INTO invoking_role_oid
+    FROM pg_roles WHERE rolname = continuum_invoking_database_role();
+  IF invoking_role_oid <> application_owner_oid THEN
+    RAISE EXCEPTION 'only the migration owner may register pgvector reporting profiles';
+  END IF;
+  SELECT oid INTO target_role_oid FROM pg_roles WHERE rolname = target_database_role;
+  IF target_role_oid IS NULL OR target_role_oid = application_owner_oid THEN
+    RAISE EXCEPTION 'reporting profile role % must be an existing non-owner role',
+      quote_ident(target_database_role);
+  END IF;
+  SELECT extnamespace INTO vector_schema_oid
+    FROM pg_extension WHERE extname = 'vector';
+  IF enabled THEN
+    INSERT INTO continuum_pgvector_role_profiles
+      (database_role_oid, provider_schema_oid, profile_kind, refreshed_at)
+    VALUES (target_role_oid, vector_schema_oid, 'reporting', now())
+    ON CONFLICT (database_role_oid) DO UPDATE
+      SET provider_schema_oid = EXCLUDED.provider_schema_oid,
+          profile_kind = 'reporting',
+          refreshed_at = EXCLUDED.refreshed_at;
+  ELSE
+    -- Make the existing row stale so the owner reconciler revokes provider
+    -- grants before deleting the registration.
+    UPDATE continuum_pgvector_role_profiles
+       SET profile_kind = 'application', refreshed_at = now()
+     WHERE database_role_oid = target_role_oid;
+  END IF;
+  PERFORM continuum_grant_application_vector_functions();
+END;
+$$;
+REVOKE ALL ON FUNCTION continuum_register_pgvector_reporting_profile(NAME, BOOLEAN)
+FROM PUBLIC;
 
 DO $harden$
 DECLARE schema_name TEXT := current_schema();
@@ -423,6 +586,12 @@ BEGIN
     || 'SET search_path = pg_catalog, %I, pg_temp', schema_name, schema_name);
   EXECUTE format(
     'ALTER FUNCTION %I.continuum_grant_application_vector_functions() '
+    || 'SET search_path = pg_catalog, %I, pg_temp', schema_name, schema_name);
+  EXECUTE format(
+    'ALTER FUNCTION %I.continuum_assert_current_pgvector_profile() '
+    || 'SET search_path = pg_catalog, %I, pg_temp', schema_name, schema_name);
+  EXECUTE format(
+    'ALTER FUNCTION %I.continuum_register_pgvector_reporting_profile(name, boolean) '
     || 'SET search_path = pg_catalog, %I, pg_temp', schema_name, schema_name);
 END;
 $harden$;

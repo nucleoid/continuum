@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import type pg from 'pg';
 import type { Principal } from '../types.js';
 import { runAuditRetention } from '../maintenance/audit-retention.js';
@@ -42,9 +43,18 @@ function guardedPool(
   const client = {
     query: vi.fn(async (sql: string) => {
       if (/^ROLLBACK/.test(sql) && rollbackFailure !== undefined) throw rollbackFailure;
+      if (sql.includes('applicationSchemaProvider')) {
+        return { rowCount: 1, rows: [{
+          owner: false, usage: true, create: false, functions: true,
+          applicationSchemaProvider: false, applicationProfile: true, syncProfile: false,
+        }] };
+      }
       if (guardedCall.test(sql)) {
         guardedCalls += 1;
         throw failure;
+      }
+      if (sql.includes('continuum_coordination_privacy_schema_ready')) {
+        return { rowCount: 1, rows: [{ ready: true }] };
       }
       if (/FROM scopes WHERE kind = \$1 AND name = \$2/.test(sql)) {
         return { rowCount: 1, rows: [{
@@ -70,7 +80,9 @@ function guardedPool(
       if (/FROM principal_user_scopes pus/.test(sql)) {
         return { rowCount: 1, rows: [{
           scope_id: SCOPE_ID, acknowledged_principal_ids: [],
-          acknowledged_evidence_hash: 'unused-before-guard', approval_id: '1',
+          acknowledged_evidence_hash: createHash('sha256')
+            .update(`${TARGET_ID}\n${SCOPE_ID}`, 'utf8').digest('hex'),
+          approval_id: '1',
         }] };
       }
       if (/SELECT name FROM scopes WHERE id/.test(sql)) {
@@ -130,7 +142,7 @@ const paths: Array<{
   },
   {
     name: 'principal offboarding',
-    guardedCall: /continuum_operator_get_offboarding_run/,
+    guardedCall: /offboarding_run/,
     invoke: (pool) => offboardPrincipal(pool, actor, TARGET_ID, {
       confirmationScopeId: SCOPE_ID,
     }),
@@ -170,7 +182,11 @@ describe('operator boundary database errors', () => {
         status: 403,
       });
       expect(guardedCalls(), path.name).toBe(1);
-      expect(release, path.name).toHaveBeenCalledOnce();
+      if (path.name === 'principal offboarding') {
+        expect(release, path.name).toHaveBeenCalled();
+      } else {
+        expect(release, path.name).toHaveBeenCalledOnce();
+      }
     }
   });
 

@@ -198,7 +198,7 @@ describe('offboarding and erasure', () => {
     await pool.query('ALTER TABLE memory_embeddings DISABLE TRIGGER require_embeddable_memory');
     await pool.query(
       `INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
-       VALUES ($1, 'test', 768, $3::vector), ($2, 'test', 768, $3::vector)`,
+       VALUES ($1, 'test', 768, $3), ($2, 'test', 768, $3)`,
       [dirty.id, canonical.id, `[${Array(768).fill(0).join(',')}]`],
     );
     await pool.query('ALTER TABLE memory_embeddings ENABLE TRIGGER require_embeddable_memory');

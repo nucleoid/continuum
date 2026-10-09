@@ -206,7 +206,10 @@ describe('pgvector rollout remediation', () => {
   });
 
   it('refuses a fresh tenant binding to another Continuum schema provider', async () => {
-    await withFreshDatabase(async (_root, target, url) => {
+    const previousCompatibility = process.env.CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA;
+    delete process.env.CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA;
+    try {
+      await withFreshDatabase(async (_root, target, url) => {
       const firstSchema = identifier('continuum_existing_tenant');
       const secondSchema = identifier('continuum_new_tenant');
       await target.query(`CREATE SCHEMA ${quoteIdentifier(firstSchema)}`);
@@ -233,7 +236,14 @@ describe('pgvector rollout remediation', () => {
                 to_regclass($2) IS NULL AS no_ledger`,
         [`${secondSchema}.memories`, `${secondSchema}._continuum_migrations`],
       )).rows).toEqual([{ no_memories: true, no_ledger: true }]);
-    });
+      });
+    } finally {
+      if (previousCompatibility === undefined) {
+        delete process.env.CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA;
+      } else {
+        process.env.CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA = previousCompatibility;
+      }
+    }
   });
 
   it('requires and honors the explicit reviewed legacy shared-schema opt-in', async () => {
@@ -825,21 +835,38 @@ describe('pgvector rollout remediation', () => {
   }, 240_000);
 
   it('refuses an unreviewed public provider before creating the tenant ledger', async () => {
-    await withFreshDatabase(async (_root, target, url) => {
-      const applicationSchema = identifier('continuum_data');
-      await target.query(`CREATE SCHEMA ${quoteIdentifier(applicationSchema)}`);
-      await target.query('CREATE EXTENSION vector WITH SCHEMA public');
-      const pool = migrationPool(url, applicationSchema);
+    const previous = process.env.CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA;
+    delete process.env.CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA;
+    try {
+      await withFreshDatabase(async (_root, target, url) => {
+        const applicationSchema = identifier('continuum_data');
+        await target.query(`CREATE SCHEMA ${quoteIdentifier(applicationSchema)}`);
+        await target.query('CREATE EXTENSION vector WITH SCHEMA public');
+        await target.query(`
+          CREATE TABLE public._continuum_migrations (
+            name TEXT PRIMARY KEY,
+            applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+          );
+          INSERT INTO public._continuum_migrations (name) VALUES ('0001_init.sql');
+        `);
+        const pool = migrationPool(url, applicationSchema);
 
-      await expect(runMigrations(
-        pool, await migrationDirectoryThrough('0001_init.sql'),
-      )).rejects.toThrow(/public.*shared.*provider|compatibility.*opt-in/i);
-      expect((await target.query(
-        `SELECT to_regclass($1) IS NULL AS no_ledger,
-                to_regclass($2) IS NULL AS no_memories`,
-        [`${applicationSchema}._continuum_migrations`, `${applicationSchema}.memories`],
-      )).rows).toEqual([{ no_ledger: true, no_memories: true }]);
-    });
+        await expect(runMigrations(
+          pool, await migrationDirectoryThrough('0001_init.sql'),
+        )).rejects.toThrow(/public.*shared.*provider|compatibility.*opt-in/i);
+        expect((await target.query(
+          `SELECT to_regclass($1) IS NULL AS no_ledger,
+                  to_regclass($2) IS NULL AS no_memories`,
+          [`${applicationSchema}._continuum_migrations`, `${applicationSchema}.memories`],
+        )).rows).toEqual([{ no_ledger: true, no_memories: true }]);
+      });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA;
+      } else {
+        process.env.CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA = previous;
+      }
+    }
   });
 
   it('supports a DBA-owned dedicated provider for a second tenant without grant option', async () => {

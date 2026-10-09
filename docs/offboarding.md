@@ -587,6 +587,21 @@ The dedicated migration-owner-controlled `continuum_extensions` provider also
 closes `PUBLIC` schema and function access. A DBA-owned dedicated provider
 keeps its provider-owned `PUBLIC` policy and direct pregrants intact.
 
+Register or retire a read-only reporting role only through the tenant migration
+owner, after granting or before revoking its reviewed application-schema
+`SELECT` profile:
+
+```sql
+SELECT continuum_register_pgvector_reporting_profile('continuum_reporter', TRUE);
+SELECT continuum_register_pgvector_reporting_profile('continuum_reporter', FALSE);
+```
+
+The owner-only function reconciles provider grants immediately. Disabling the
+profile revokes provider-schema/function grants while preserving legitimate
+application-schema access. A provider-owned schema must either delegate the
+narrow grant options to the tenant owner or apply the reported direct
+pregrants/revocations itself.
+
 Provider reconciliation runs during API, MCP, and membership-sync startup and
 immediately before non-preview offboarding mutation. This catches extension
 updates and role drift outside migration windows and revokes stale direct

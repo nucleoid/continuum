@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type pg from 'pg';
+import { reconcilePgvectorProviderGrants } from '../storage/provider-lifecycle.js';
 import type { Principal } from '../types.js';
 import { requireOrgAdmin } from './access.js';
 import { ServiceError } from './errors.js';
@@ -1082,6 +1083,7 @@ async function offboardPrincipalCore(
     } : null;
     const pseudonym = erasedPrincipalPseudonym(principalId);
     const scopePseudonym = erasedScopePseudonym(scopeId);
+    if (!dryRun) await reconcilePgvectorProviderGrants(client);
     const privacyState = await client.query(
       `SELECT privacy_version, principal_complete, scope_complete
          FROM continuum_coordination_privacy_state($1, $2)`,

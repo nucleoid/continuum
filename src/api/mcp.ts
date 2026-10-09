@@ -11,6 +11,7 @@ import type { Principal, ScopeKind } from '../types.js';
 import { getPool } from '../storage/pool.js';
 import { makeEmbeddingRouterFromEnv } from '../embeddings/factory.js';
 import { isDirectEntrypoint } from './entrypoint.js';
+import { reconcilePgvectorProviderGrants } from '../storage/provider-lifecycle.js';
 import { accessibleScopes } from '../services/access.js';
 import { captureMemory } from '../services/capture.js';
 import { recallForPrincipal } from '../services/recall.js';
@@ -840,6 +841,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   const pool = getPool();
+  await reconcilePgvectorProviderGrants(pool);
   const authMode = authModeFromEnv();
   warnOnDevAuthMode(authMode);
   const authenticator = createAuthenticator(

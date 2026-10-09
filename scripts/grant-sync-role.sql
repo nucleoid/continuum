@@ -53,6 +53,17 @@ GRANT EXECUTE ON FUNCTION
   :"continuum_schema".continuum_sync_quarantine_entra_group(UUID, TEXT, TEXT),
   :"continuum_schema".continuum_verify_sync_database_identity(UUID)
 TO :"continuum_sync_role";
+INSERT INTO :"continuum_schema".continuum_pgvector_role_profiles
+  (database_role_oid, provider_schema_oid, profile_kind, refreshed_at)
+SELECT role.oid, extension.extnamespace, 'sync', now()
+  FROM pg_roles role
+  CROSS JOIN pg_extension extension
+ WHERE role.rolname = :'continuum_sync_role'
+   AND extension.extname = 'vector'
+ON CONFLICT (database_role_oid) DO UPDATE SET
+  provider_schema_oid = EXCLUDED.provider_schema_oid,
+  profile_kind = 'sync',
+  refreshed_at = EXCLUDED.refreshed_at;
 REVOKE ALL ON TABLE :"continuum_schema".continuum_trusted_database_identities
 FROM :"continuum_sync_role";
 REVOKE ALL ON TABLE :"continuum_schema".continuum_retired_sync_database_identities

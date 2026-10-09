@@ -98,16 +98,61 @@ try {
     pathToFileURL(join(installedRoot, 'dist', 'storage', 'migrator.js')).href
   );
   let ledgerChecks = 0;
+  let vectorExtensionCreated = false;
   const client = {
     async query(sql) {
-      if (String(sql).includes('pg_try_advisory_lock')) {
+      const statement = String(sql);
+      if (statement.includes('pg_try_advisory_lock')) {
         return { rowCount: 1, rows: [{ locked: true }] };
       }
-      if (String(sql).includes('FROM _continuum_migrations')) {
+      if (statement.includes("current_setting('search_path') AS path")
+          && statement.includes('LEFT JOIN pg_namespace')) {
+        return {
+          rowCount: 1,
+          rows: [{
+            path: 'public',
+            schema: 'public',
+            owned: true,
+            unsafeCreate: false,
+            userSchemaExists: false,
+          }],
+        };
+      }
+      if (statement.includes("extension.extname = 'vector'")) {
+        return vectorExtensionCreated
+          ? { rowCount: 1, rows: [{ schema: 'continuum_extensions' }] }
+          : { rowCount: 0, rows: [] };
+      }
+      if (statement.includes("to_regclass(format('%I._continuum_migrations'")) {
+        return { rowCount: 1, rows: [{ exists: false }] };
+      }
+      if (statement.includes('namespace.nspowner = role.oid AS owned')) {
+        return { rowCount: 1, rows: [{ owned: true, unsafeCreate: false }] };
+      }
+      if (statement.includes("to_regnamespace($1) IS NOT NULL AS exists")) {
+        return { rowCount: 1, rows: [{ exists: false }] };
+      }
+      if (statement.includes('CREATE EXTENSION vector')) {
+        vectorExtensionCreated = true;
+        return { rowCount: 0, rows: [] };
+      }
+      if (statement.includes("has_schema_privilege(current_user, $1, 'USAGE')")) {
+        return { rowCount: 1, rows: [{ allowed: true, role: 'continuum_smoke' }] };
+      }
+      if (statement.includes('AS "tenantObjects"')) {
+        return { rowCount: 1, rows: [{ tenantObjects: false }] };
+      }
+      if (statement.includes('AS "vectorType"')) {
+        return { rowCount: 1, rows: [{ vectorType: false, vectorOpclass: false }] };
+      }
+      if (statement.includes("current_setting('search_path') AS path")) {
+        return { rowCount: 1, rows: [{ path: 'public' }] };
+      }
+      if (statement.includes('FROM _continuum_migrations')) {
         ledgerChecks += 1;
         return { rowCount: 1, rows: [] };
       }
-      if (String(sql).includes('pg_advisory_unlock')) return { rows: [{ unlocked: true }] };
+      if (statement.includes('pg_advisory_unlock')) return { rows: [{ unlocked: true }] };
       return { rowCount: 0, rows: [] };
     },
     release() {},

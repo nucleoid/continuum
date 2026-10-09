@@ -183,7 +183,7 @@ describe('capture + recall with embeddings', () => {
     const [vector] = await provider.embed(['wrong dimension metadata']);
     await pool.query(
       `INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
-       VALUES ($1, $2, 384, $3::vector)`,
+       VALUES ($1, $2, 384, $3)`,
       [memory.rows[0].id, provider.id, `[${vector.join(',')}]`],
     );
 

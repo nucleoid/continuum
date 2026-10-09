@@ -62,6 +62,12 @@ describe('membership sync CLI runner', () => {
     Object.assign(new Error('permission denied'), { code: '42501' }),
   ])('maps a supported database identity authorization failure to FORBIDDEN', async (failure) => {
     const query = vi.fn(async (sql: string) => {
+      if (sql.includes('applicationSchemaProvider')) {
+        return { rowCount: 1, rows: [{
+          owner: false, usage: false, create: false, functions: false,
+          applicationSchemaProvider: false, applicationProfile: false, syncProfile: true,
+        }] };
+      }
       if (sql.includes('continuum_verify_sync_database_identity')) throw failure;
       return { rowCount: 1, rows: [{
         id: '50000000-0000-4000-8000-000000000001',
@@ -83,6 +89,12 @@ describe('membership sync CLI runner', () => {
     Object.assign(new Error('connection terminated unexpectedly'), { code: '08006' }),
   ])('does not reclassify an unrelated database identity failure', async (failure) => {
     const query = vi.fn(async (sql: string) => {
+      if (sql.includes('applicationSchemaProvider')) {
+        return { rowCount: 1, rows: [{
+          owner: false, usage: false, create: false, functions: false,
+          applicationSchemaProvider: false, applicationProfile: false, syncProfile: true,
+        }] };
+      }
       if (sql.includes('continuum_verify_sync_database_identity')) throw failure;
       return { rowCount: 1, rows: [{
         id: '50000000-0000-4000-8000-000000000001',
