@@ -107,7 +107,7 @@ export async function ensureExecutionLedger(client: pg.PoolClient): Promise<bool
       DO $trust$
       DECLARE schema_owner OID;
       BEGIN
-        SELECT nspowner INTO schema_owner FROM pg_namespace WHERE oid=current_schema()::regnamespace;
+        SELECT nspowner INTO schema_owner FROM pg_namespace WHERE nspname=current_schema();
         IF schema_owner IS NULL OR NOT (
           schema_owner=current_user::regrole OR pg_has_role(current_user,schema_owner,'USAGE')
           OR (schema_owner='pg_database_owner'::regrole AND current_user::regrole=
@@ -116,7 +116,7 @@ export async function ensureExecutionLedger(client: pg.PoolClient): Promise<bool
         END IF;
         IF EXISTS(SELECT 1 FROM pg_namespace namespace
           CROSS JOIN LATERAL aclexplode(COALESCE(namespace.nspacl,acldefault('n',namespace.nspowner))) privilege
-          WHERE namespace.oid=current_schema()::regnamespace AND privilege.privilege_type='CREATE'
+          WHERE namespace.nspname=current_schema() AND privilege.privilege_type='CREATE'
             AND privilege.grantee<>namespace.nspowner) THEN
           RAISE EXCEPTION 'migration provenance application schema has untrusted CREATE grants';
         END IF;

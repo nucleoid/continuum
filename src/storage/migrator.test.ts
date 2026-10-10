@@ -343,7 +343,7 @@ describe('runMigrations', () => {
     const files = (await readdir(join(process.cwd(), 'migrations')))
       .filter((name) => name.endsWith('.sql'))
       .sort();
-    expect(files.slice(-27)).toEqual([
+    expect(files.slice(-28)).toEqual([
       '0054_coordination_leases.sql',
       '0055_coordination_review_remediation.sql',
       '0056_coordination_final_remediation.sql',
@@ -371,6 +371,7 @@ describe('runMigrations', () => {
       '0078_coordination_upgrade_scale_indexes.sql',
       '0079_coordination_upgrade_scale_remediation.sql',
       '0080_pgvector_provider_grants.sql',
+      '0081_coordination_public_contract.sql',
     ]);
     const migration = await readFile(
       join(process.cwd(), 'migrations/0054_coordination_leases.sql'),
@@ -706,9 +707,9 @@ describe('runMigrations', () => {
 
   it('rejects tampering in every ledgered issue-7 migration', async () => {
     const names = (await readdir(join(process.cwd(), 'migrations')))
-      .filter((name) => /^(?:005[2-9]|006\d|007\d|0080)_.*\.sql$/.test(name))
+      .filter((name) => /^(?:005[2-9]|006\d|007\d|008[01])_.*\.sql$/.test(name))
       .sort();
-    expect(names).toHaveLength(29);
+    expect(names).toHaveLength(30);
     const schema = `migrator_issue7_checksums_${Date.now()}`;
     const admin = new pg.Pool({ connectionString: DATABASE_URL });
     pools.push(admin);
@@ -878,7 +879,7 @@ describe('runMigrations', () => {
         $$;
       `);
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-49).map((migration) => migration.name)).toEqual([
+      expect(applied.slice(-50).map((migration) => migration.name)).toEqual([
         '0032_offboarding_round7_compatibility.sql',
         '0033_offboarding_bounded_selectors.sql',
         '0034_offboarding_completion_invariants.sql',
@@ -928,6 +929,7 @@ describe('runMigrations', () => {
         '0078_coordination_upgrade_scale_indexes.sql',
         '0079_coordination_upgrade_scale_remediation.sql',
         '0080_pgvector_provider_grants.sql',
+        '0081_coordination_public_contract.sql',
       ]);
       expect((await pool.query(
         `SELECT disabled_at IS NOT NULL AS disabled FROM principals
@@ -1199,7 +1201,8 @@ describe('runMigrations', () => {
       && name !== '0077_coordination_review_2_online_finish.sql'
       && name !== '0078_coordination_upgrade_scale_indexes.sql'
       && name !== '0079_coordination_upgrade_scale_remediation.sql'
-      && name !== '0080_pgvector_provider_grants.sql')) {
+      && name !== '0080_pgvector_provider_grants.sql'
+      && name !== '0081_coordination_public_contract.sql')) {
       if (file === '0038_offboarding_search_path_hardening.sql') {
         await copyFile(
           new URL(
@@ -2426,6 +2429,8 @@ describe('runMigrations', () => {
         if (query.includes('pg_try_advisory_lock')) {
           return { rowCount: 1, rows: [{ locked: true }] };
         }
+        if (query.includes('SELECT 1 FROM _continuum_migration_execution')
+          && query.includes("state='started'")) return { rowCount: 0, rows: [] };
         if (query.includes('SELECT 1 FROM _continuum_migrations')) {
           return { rowCount: 0, rows: [] };
         }
@@ -2442,8 +2447,13 @@ describe('runMigrations', () => {
 
     await runMigrations({ connect: vi.fn(async () => client) } as unknown as pg.Pool, directory);
 
-    expect(queries).not.toContain('BEGIN');
-    expect(queries).not.toContain('COMMIT');
+    // Bookkeeping transactions are separate from the concurrent DDL itself.
+    let inTransaction = false;
+    for (const query of queries) {
+      if (query === 'BEGIN') inTransaction = true;
+      if (query === 'COMMIT' || query === 'ROLLBACK') inTransaction = false;
+      if (/^(?:CREATE|DROP) INDEX CONCURRENTLY/.test(query)) expect(inTransaction).toBe(false);
+    }
     expect(queries).not.toContain('ROLLBACK');
     const index = queries.findIndex((query) => query.includes('CREATE INDEX CONCURRENTLY'));
     const drop = queries.findIndex((query) => query.includes('DROP INDEX CONCURRENTLY'));
@@ -2451,6 +2461,8 @@ describe('runMigrations', () => {
     expect(drop).toBeGreaterThan(-1);
     expect(index).toBeGreaterThan(drop);
     expect(ledger).toBeGreaterThan(index);
+    expect(queries.slice(index + 1, ledger)).toContain('BEGIN');
+    expect(queries.slice(ledger + 1)).toContain('COMMIT');
   });
 
   it('runs a commented selector-backfill directive until its watermark completes', async () => {
@@ -2462,6 +2474,8 @@ describe('runMigrations', () => {
         if (query.includes('pg_try_advisory_lock')) {
           return { rowCount: 1, rows: [{ locked: true }] };
         }
+        if (query.includes('SELECT 1 FROM _continuum_migration_execution')
+          && query.includes("state='started'")) return { rowCount: 0, rows: [] };
         if (query.includes('SELECT 1 FROM _continuum_migrations')) {
           return { rowCount: 0, rows: [] };
         }
@@ -2501,6 +2515,8 @@ describe('runMigrations', () => {
         if (query.includes('pg_try_advisory_lock')) {
           return { rowCount: 1, rows: [{ locked: true }] };
         }
+        if (query.includes('SELECT 1 FROM _continuum_migration_execution')
+          && query.includes("state='started'")) return { rowCount: 0, rows: [] };
         if (query.includes('SELECT 1 FROM _continuum_migrations')) return { rowCount: 0, rows: [] };
         if (query.includes('JOIN pg_index')) {
           stateChecks += 1;
@@ -2539,6 +2555,8 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS exact_idx ON exact_table (id);
         if (query.includes('pg_try_advisory_lock')) {
           return { rowCount: 1, rows: [{ locked: true }] };
         }
+        if (query.includes('SELECT 1 FROM _continuum_migration_execution')
+          && query.includes("state='started'")) return { rowCount: 0, rows: [] };
         if (query.includes('SELECT 1 FROM _continuum_migrations')) return { rowCount: 0, rows: [] };
         if (query.includes('JOIN pg_index')) {
           return { rowCount: 1, rows: [{ schema: 'tenant_exact', valid: false }] };

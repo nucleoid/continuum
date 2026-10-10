@@ -45,6 +45,19 @@ function independentlyDigest(sql: string, values: unknown[] = []): string {
 }
 
 describe('migration execution provenance', () => {
+  it('refuses the contract migration before its ledgered provider prerequisite without applying contract DDL', async () => {
+    await fixture(async (pool, directory) => {
+      await copyFile(join(process.cwd(), 'migrations/0081_coordination_public_contract.sql'),
+        join(directory, '0081_coordination_public_contract.sql'));
+      await expect(runMigrations(pool, directory)).rejects.toThrow(
+        /0081.*requires ledgered prerequisite 0080_pgvector_provider_grants.sql/,
+      );
+      expect((await pool.query("SELECT to_regclass('coordination_contract_backfill_state') AS relation"))
+        .rows[0].relation).toBeNull();
+      expect((await pool.query('SELECT 1 FROM _continuum_migrations')).rowCount).toBe(0);
+    });
+  });
+
   it('discards the client if rollback fails and retains the original BEGIN error', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'continuum-execution-discard-'));
     await writeFile(join(directory, '001_probe.sql'), 'SELECT 1;');

@@ -86,6 +86,8 @@ const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
     '147497bac862bfc7f25123cd3f655550c2c6c4c574a3519fa2a98dd62828d85a'],
   ['0080_pgvector_provider_grants.sql',
     'b2be3171bc8ac47858874573a413e5c2dc3326e003ff2063d067d27618627fdf'],
+  ['0081_coordination_public_contract.sql',
+    'c3b73e3996ecb97190962fa2209876c5db8cb7bcbc8a3b48c8c67194f64a515f'],
 ]);
 const FORWARD_MIGRATION_REQUIREMENTS = new Map([
   ['0053_offboarding_restore_contract.sql', '0052_offboarding_review_repair.sql'],
@@ -138,6 +140,8 @@ const FORWARD_MIGRATION_REQUIREMENTS = new Map([
     '0078_coordination_upgrade_scale_indexes.sql'],
   ['0080_pgvector_provider_grants.sql',
     '0079_coordination_upgrade_scale_remediation.sql'],
+  ['0081_coordination_public_contract.sql',
+    '0080_pgvector_provider_grants.sql'],
 ]);
 const REVIEW_ENTRA_MIGRATION_RENAMES = [
   ['0005_entra_auth.sql', '0010_entra_auth.sql'],
