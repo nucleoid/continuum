@@ -53,6 +53,16 @@ effect. GitHub and ordinary filesystems do not do this natively, so
 orchestrator-only publication, exact-head checks, and branch protection remain
 required.
 
+Runtime startup verifies the tenant's registered pgvector role profiles in a
+bounded server-side transaction without changing live grants. Migration-owner
+verification fails promptly when an online migrator owns the advisory key;
+explicit owner grant commands perform permission reconciliation. Existing
+OID-bound sync identities retain their hardened installation and retirement
+rules during provider-profile upgrades. Privacy erasure keeps its operator and
+identity authorization and deletes stored vectors without depending on
+provider execution grants. See `docs/offboarding.md` for profile preflight,
+grant convergence, and restart order.
+
 ## Scope model
 
 Five scopes:

@@ -954,16 +954,17 @@ describe('pgvector rollout remediation', () => {
     });
   });
 
-  it('wires provider reconciliation into API, MCP, sync, and offboarding lifecycle gates', async () => {
+  it('verifies provider profiles at runtime startup without coupling them to privacy erasure', async () => {
     const [api, mcp, sync, offboarding] = await Promise.all([
       readFile(join(process.cwd(), 'src/api/server.ts'), 'utf8'),
       readFile(join(process.cwd(), 'src/api/mcp.ts'), 'utf8'),
       readFile(join(process.cwd(), 'src/identity/sync-runner.ts'), 'utf8'),
       readFile(join(process.cwd(), 'src/services/offboarding.ts'), 'utf8'),
     ]);
-    for (const source of [api, mcp, sync, offboarding]) {
+    for (const source of [api, mcp, sync]) {
       expect(source).toMatch(/reconcilePgvectorProviderGrants\s*\(/);
     }
+    expect(offboarding).not.toMatch(/reconcilePgvectorProviderGrants\s*\(/);
   });
 
   it('makes non-owner lifecycle startup enforce the registered exact profile', async () => {
@@ -1094,6 +1095,45 @@ describe('pgvector rollout remediation', () => {
           WHERE extension.extname = 'vector'`,
         [reporterRole, providerSchema],
       )).rows).toEqual([{ usage: true, executable: true }]);
+    });
+  }, 240_000);
+
+  it('provider review: inventories non-profile readers without granting application authority', async () => {
+    const readerRole = identifier('continuum_reader_preflight');
+    roles.push(readerRole);
+    await withFreshDatabase(async (root, target, url) => {
+      const applicationSchema = identifier('continuum_data');
+      await root.query(`CREATE ROLE ${quoteIdentifier(readerRole)} NOLOGIN`);
+      await target.query(`CREATE SCHEMA ${quoteIdentifier(applicationSchema)}`);
+      const owner = migrationPool(url, applicationSchema);
+      await runMigrations(owner, await fullMigrationDirectory());
+      await owner.query(`GRANT USAGE ON SCHEMA ${quoteIdentifier(applicationSchema)} TO ${quoteIdentifier(readerRole)}`);
+      await owner.query(`GRANT SELECT ON memories TO ${quoteIdentifier(readerRole)}`);
+      const source = await readFile(
+        join(process.cwd(), 'scripts/preflight-pgvector-role-profiles.sql'), 'utf8',
+      );
+      const sql = source.split(/\r?\n/)
+        .filter((line) => !line.trimStart().startsWith('\\')).join('\n')
+        .replaceAll(":'continuum_schema'", quoteLiteral(applicationSchema));
+      const client = await owner.connect();
+      const messages: string[] = [];
+      const onNotice = (notice: { message?: string }) => { messages.push(notice.message ?? ''); };
+      client.on('notice', onNotice);
+      try {
+        await client.query(sql);
+      } finally {
+        client.removeListener('notice', onNotice);
+        client.release();
+      }
+      expect(messages.some((message) => message.includes(readerRole)
+        && message.includes('lacks an exact'))).toBe(true);
+      expect((await owner.query(
+        `SELECT has_table_privilege($1, 'memories', 'INSERT') AS write,
+                has_schema_privilege($1, 'continuum_extensions', 'USAGE') AS provider_usage,
+                EXISTS (SELECT 1 FROM continuum_pgvector_role_profiles
+                         WHERE database_role_oid = $1::regrole::oid) AS registered`,
+        [readerRole],
+      )).rows).toEqual([{ write: false, provider_usage: false, registered: false }]);
     });
   }, 240_000);
 
@@ -1354,7 +1394,7 @@ describe('pgvector rollout remediation', () => {
     });
   }, 240_000);
 
-  it('serializes owner startup reconciliation with the migration advisory lock', async () => {
+  it('refuses owner startup verification while a migration holds the advisory lock', async () => {
     await withFreshDatabase(async (_root, target, url) => {
       const applicationSchema = identifier('continuum_data');
       await target.query(`CREATE SCHEMA ${quoteIdentifier(applicationSchema)}`);
@@ -1364,14 +1404,11 @@ describe('pgvector rollout remediation', () => {
       const blocker = await owner.connect();
       try {
         await blocker.query('SELECT pg_advisory_lock(7215328273579717613::bigint)');
-        const reconciliation = reconcilePgvectorProviderGrants(startup);
-        const raced = await Promise.race([
-          reconciliation.then(() => 'completed'),
-          new Promise<'blocked'>((resolve) => setTimeout(() => resolve('blocked'), 150)),
-        ]);
-        expect(raced).toBe('blocked');
+        await expect(reconcilePgvectorProviderGrants(startup)).rejects.toMatchObject({
+          code: '55P03',
+        });
         await blocker.query('SELECT pg_advisory_unlock(7215328273579717613::bigint)');
-        await expect(reconciliation).resolves.toBeUndefined();
+        await expect(reconcilePgvectorProviderGrants(startup)).resolves.toBeUndefined();
       } finally {
         await blocker.query('SELECT pg_advisory_unlock_all()').catch(() => undefined);
         blocker.release();

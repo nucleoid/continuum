@@ -281,15 +281,25 @@ BEGIN
   END IF;
 
   FOR candidate IN
-    SELECT role.oid, role.rolname,
-           continuum_application_profile_matches(role.rolname) AS exact_profile,
-           profile.profile_kind
-      FROM pg_roles role
-      LEFT JOIN continuum_pgvector_role_profiles profile
-        ON profile.database_role_oid = role.oid
-     WHERE role.oid <> application_owner_oid
-       AND (profile.database_role_oid IS NOT NULL
-            OR continuum_application_profile_matches(role.rolname))
+    WITH candidates AS MATERIALIZED (
+      SELECT role.oid, role.rolname, profile.profile_kind
+        FROM pg_roles role
+        LEFT JOIN continuum_pgvector_role_profiles profile
+          ON profile.database_role_oid = role.oid
+       WHERE role.oid <> application_owner_oid
+         AND (profile.database_role_oid IS NOT NULL OR EXISTS (
+           SELECT 1 FROM pg_class relation
+           CROSS JOIN LATERAL aclexplode(COALESCE(
+             relation.relacl, acldefault('r', relation.relowner))) privilege
+            WHERE relation.oid = 'memories'::regclass
+              AND privilege.grantee = role.oid
+              AND upper(privilege.privilege_type) = 'SELECT'
+         ))
+    ), checked AS MATERIALIZED (
+      SELECT candidates.*, continuum_application_profile_matches(rolname) AS exact_profile
+        FROM candidates
+    )
+    SELECT * FROM checked WHERE profile_kind IS NOT NULL OR exact_profile
   LOOP
     IF candidate.exact_profile OR candidate.profile_kind = 'reporting' THEN
       IF EXISTS (
@@ -484,8 +494,9 @@ REVOKE ALL ON FUNCTION continuum_grant_application_vector_functions() FROM PUBLI
 
 -- Runtime roles cannot read the owner-only profile registry directly. This
 -- SECURITY DEFINER gate resolves the real session/SET ROLE identity and checks
--- only that role. The owner path performs the full reconciler, so startup and
--- retirement gates also revoke stale managed-provider grants when authorized.
+-- only that role. Owner startup verifies registered profiles without altering
+-- live privileges. Explicit owner grant/reconciliation commands revoke stale
+-- grants; rollout must converge profiles before restarting runtime processes.
 CREATE OR REPLACE FUNCTION continuum_assert_current_pgvector_profile()
 RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER AS $$
 DECLARE
@@ -495,14 +506,54 @@ DECLARE
   application_schema_oid OID;
   vector_schema_oid OID;
   profile_kind_value TEXT;
+  candidate RECORD;
 BEGIN
   SELECT oid INTO invoking_role_oid FROM pg_roles WHERE rolname = invoking_role;
   SELECT relation.relowner, relation.relnamespace
     INTO application_owner_oid, application_schema_oid
     FROM pg_class relation WHERE relation.oid = 'memories'::regclass;
   IF invoking_role_oid = application_owner_oid THEN
-    PERFORM pg_advisory_xact_lock(7215328273579717613::bigint);
-    PERFORM continuum_grant_application_vector_functions();
+    -- Never retain a blocking advisory-lock snapshot: online index builders
+    -- holding the migration lock can otherwise wait for this same transaction.
+    IF NOT pg_try_advisory_xact_lock(7215328273579717613::bigint) THEN
+      RAISE EXCEPTION 'pgvector profile verification is busy; retry after migration'
+        USING ERRCODE = '55P03';
+    END IF;
+    SELECT extnamespace INTO vector_schema_oid
+      FROM pg_extension WHERE extname = 'vector';
+    FOR candidate IN
+      SELECT profile.*, role.rolname
+        FROM continuum_pgvector_role_profiles profile
+        LEFT JOIN pg_roles role ON role.oid = profile.database_role_oid
+       ORDER BY profile.database_role_oid
+    LOOP
+      IF candidate.rolname IS NULL
+          OR candidate.provider_schema_oid <> vector_schema_oid THEN
+        RAISE EXCEPTION 'registered pgvector profile drift; rerun the exact role grant profile';
+      END IF;
+      IF candidate.profile_kind IN ('application', 'operator') THEN
+        PERFORM continuum_assert_application_vector_profile(candidate.rolname);
+      ELSIF candidate.profile_kind = 'reporting' THEN
+        IF has_schema_privilege(candidate.rolname, vector_schema_oid, 'CREATE')
+            OR NOT has_schema_privilege(candidate.rolname, vector_schema_oid, 'USAGE')
+            OR EXISTS (
+              SELECT 1 FROM pg_proc function
+              JOIN pg_depend dependency
+                ON dependency.classid = 'pg_proc'::regclass
+               AND dependency.objid = function.oid
+               AND dependency.refclassid = 'pg_extension'::regclass
+               AND dependency.deptype = 'e'
+               WHERE dependency.refobjid = (SELECT oid FROM pg_extension WHERE extname = 'vector')
+                 AND NOT has_function_privilege(candidate.rolname, function.oid, 'EXECUTE')
+            ) THEN
+          RAISE EXCEPTION 'registered pgvector reporting profile drift';
+        END IF;
+      ELSIF has_schema_privilege(candidate.rolname, vector_schema_oid, 'CREATE')
+          OR (vector_schema_oid <> application_schema_oid
+              AND has_schema_privilege(candidate.rolname, vector_schema_oid, 'USAGE')) THEN
+        RAISE EXCEPTION 'registered pgvector sync profile drift';
+      END IF;
+    END LOOP;
     RETURN;
   END IF;
 
@@ -569,6 +620,14 @@ BEGIN
     SELECT role.rolname
       FROM pg_roles role
      WHERE role.oid <> application_owner_oid
+       AND EXISTS (
+         SELECT 1 FROM pg_class relation
+         CROSS JOIN LATERAL aclexplode(COALESCE(
+           relation.relacl, acldefault('r', relation.relowner))) privilege
+          WHERE relation.oid = 'memories'::regclass
+            AND privilege.grantee = role.oid
+            AND upper(privilege.privilege_type) = 'SELECT'
+       )
        AND continuum_application_profile_matches(role.rolname)
   LOOP
     EXECUTE format(
@@ -598,7 +657,7 @@ BEGIN
     'IF (SELECT oid FROM pg_roles WHERE rolname = '
       || 'continuum_invoking_database_role()) <> owner_oid'
       || E'\n    AND (SELECT oid FROM pg_roles WHERE rolname = '
-      || 'continuum_invoking_database_role()) <> target_oid THEN'
+      || 'continuum_invoking_database_role()) <> (SELECT oid FROM pg_roles WHERE rolname = target_database_role) THEN'
   );
   EXECUTE validator_definition;
 
@@ -612,6 +671,19 @@ BEGIN
       'GRANT EXECUTE ON FUNCTION %I.continuum_assert_current_pgvector_profile() TO %I',
       current_schema(), candidate.rolname);
   END LOOP;
+  INSERT INTO continuum_pgvector_role_profiles
+    (database_role_oid, provider_schema_oid, profile_kind, refreshed_at)
+  SELECT role.oid, extension.extnamespace, 'sync', now()
+    FROM continuum_trusted_database_identities identity
+    JOIN pg_roles role
+      ON role.oid = identity.database_role_oid
+     AND role.rolname = identity.database_role
+    CROSS JOIN pg_extension extension
+   WHERE identity.can_sync AND NOT identity.can_approve
+     AND extension.extname = 'vector'
+  ON CONFLICT (database_role_oid) DO UPDATE SET
+    provider_schema_oid = EXCLUDED.provider_schema_oid,
+    profile_kind = 'sync', refreshed_at = EXCLUDED.refreshed_at;
   SELECT pg_get_functiondef(
     'continuum_assert_sync_role_allowlist(name,uuid)'::regprocedure
   ) INTO sync_validator_definition;
@@ -630,76 +702,46 @@ $extend_application_profile$;
 -- Keep database-side sync registration/rotation aligned with the extended
 -- 0052 exact function profile. This is the path used by
 -- continuum_register_trusted_database_identity(), not only the psql helper.
-CREATE OR REPLACE FUNCTION continuum_install_sync_database_identity(
-  target_database_role NAME, target_service_principal_id UUID
-) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER AS $$
-DECLARE schema_name TEXT; target_oid OID; already_bound BOOLEAN;
+-- Extend the live hardened installer rather than copying an older body.
+-- Its restore-pending, terminal OID, LOGIN, retirement-authority, and epoch
+-- history safeguards remain the exact effective 0052/0053 contract.
+DO $extend_sync_installer$
+DECLARE
+  definition TEXT;
+  retire_marker CONSTANT TEXT := 'PERFORM continuum_retire_sync_database_identities(target_oid);';
+  grant_marker CONSTANT TEXT := '%I.continuum_verify_sync_database_identity(UUID) TO %I';
+  arguments_marker CONSTANT TEXT := 'schema_name, schema_name, schema_name, target_database_role);';
+  registry_marker CONSTANT TEXT := 'INSERT INTO continuum_trusted_database_identities';
 BEGIN
-  PERFORM pg_advisory_xact_lock(834641726154302119::bigint);
-  PERFORM pg_advisory_xact_lock(834641726154302120::bigint);
-  IF NOT EXISTS (
-    SELECT 1 FROM principals principal
-     WHERE principal.id = target_service_principal_id
-       AND principal.kind = 'service' AND principal.disabled_at IS NULL
-  ) THEN RAISE EXCEPTION 'sync identity must be an enabled service principal'; END IF;
-  SELECT EXISTS (
-    SELECT 1 FROM continuum_trusted_database_identities identity
-     WHERE identity.database_role = target_database_role
-       AND identity.principal_id = target_service_principal_id
-       AND identity.can_sync AND NOT identity.can_approve
-  ) INTO already_bound;
-  target_oid := continuum_validate_trusted_database_role(
-    target_database_role, 'sync', already_bound);
-  SELECT namespace.nspname INTO schema_name
-    FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
-   WHERE relation.oid = 'principals'::regclass;
-  PERFORM continuum_retire_sync_database_identities(target_oid);
-  DELETE FROM continuum_pgvector_role_profiles
-   WHERE profile_kind = 'sync' AND database_role_oid <> target_oid;
-  EXECUTE format('REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I FROM %I',
-    schema_name, target_database_role);
-  EXECUTE format('REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA %I FROM %I',
-    schema_name, target_database_role);
-  EXECUTE format('REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA %I FROM %I',
-    schema_name, target_database_role);
-  EXECUTE format('REVOKE ALL PRIVILEGES ON SCHEMA %I FROM %I',
-    schema_name, target_database_role);
-  EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', schema_name, target_database_role);
-  EXECUTE format('GRANT SELECT ON TABLE %I.scopes, %I.principals, %I.entra_groups, '
-    || '%I.scope_memberships, %I.entra_sync_state TO %I',
-    schema_name, schema_name, schema_name, schema_name, schema_name, target_database_role);
-  EXECUTE format('GRANT INSERT ON TABLE %I.principals, %I.audit_log TO %I',
-    schema_name, schema_name, target_database_role);
-  EXECUTE format('GRANT USAGE, SELECT ON SEQUENCE %I.audit_log_id_seq TO %I',
-    schema_name, target_database_role);
-  EXECUTE format('GRANT EXECUTE ON FUNCTION '
-    || '%I.continuum_activate_entra_memberships(UUID, TEXT, UUID[]), '
-    || '%I.continuum_require_sync_session(UUID), '
-    || '%I.continuum_record_entra_sync_success(UUID, INTEGER), '
-    || '%I.continuum_record_entra_sync_failure(UUID, TEXT, INTEGER), '
-    || '%I.continuum_sync_observe_entra_group(UUID, TEXT, TEXT), '
-    || '%I.continuum_sync_deactivate_entra_memberships(UUID, TEXT[], UUID[]), '
-    || '%I.continuum_sync_deactivate_entra_groups(UUID, TEXT[]), '
-    || '%I.continuum_sync_quarantine_entra_group(UUID, TEXT, TEXT), '
-    || '%I.continuum_verify_sync_database_identity(UUID), '
-    || '%I.continuum_assert_current_pgvector_profile() TO %I',
-    schema_name, schema_name, schema_name, schema_name, schema_name, schema_name,
-    schema_name, schema_name, schema_name, schema_name, target_database_role);
-  INSERT INTO continuum_pgvector_role_profiles
+  SELECT pg_get_functiondef(
+    'continuum_install_sync_database_identity(name,uuid)'::regprocedure
+  ) INTO definition;
+  IF position(retire_marker IN definition) = 0
+      OR position(grant_marker IN definition) = 0
+      OR position(arguments_marker IN definition) = 0
+      OR position(registry_marker IN definition) = 0 THEN
+    RAISE EXCEPTION '0080 could not locate the hardened sync installer extension markers';
+  END IF;
+  definition := replace(definition, retire_marker,
+    retire_marker || E'\n  DELETE FROM continuum_pgvector_role_profiles'
+      || E'\n   WHERE profile_kind = ''sync'' AND database_role_oid <> target_oid;');
+  definition := replace(definition, grant_marker,
+    '%I.continuum_verify_sync_database_identity(UUID), '
+      || '%I.continuum_assert_current_pgvector_profile() TO %I');
+  definition := replace(definition, arguments_marker,
+    'schema_name, schema_name, schema_name, schema_name, target_database_role);');
+  definition := replace(definition, registry_marker,
+    $profile$INSERT INTO continuum_pgvector_role_profiles
     (database_role_oid, provider_schema_oid, profile_kind, refreshed_at)
   SELECT target_oid, extension.extnamespace, 'sync', now()
     FROM pg_extension extension WHERE extension.extname = 'vector'
   ON CONFLICT (database_role_oid) DO UPDATE SET
     provider_schema_oid = EXCLUDED.provider_schema_oid,
     profile_kind = 'sync', refreshed_at = EXCLUDED.refreshed_at;
-  INSERT INTO continuum_trusted_database_identities
-    (database_role, database_role_oid, principal_id, can_approve, can_sync)
-  VALUES (target_database_role, target_oid, target_service_principal_id, FALSE, TRUE)
-  ON CONFLICT (database_role) DO UPDATE SET
-    database_role_oid = EXCLUDED.database_role_oid,
-    principal_id = EXCLUDED.principal_id, can_approve = FALSE, can_sync = TRUE;
+  $profile$ || registry_marker);
+  EXECUTE definition;
 END;
-$$;
+$extend_sync_installer$;
 
 CREATE OR REPLACE FUNCTION continuum_register_pgvector_reporting_profile(
   target_database_role NAME,

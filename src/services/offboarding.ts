@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 import type pg from 'pg';
-import { reconcilePgvectorProviderGrants } from '../storage/provider-lifecycle.js';
 import type { Principal } from '../types.js';
 import { requireOrgAdmin } from './access.js';
 import { ServiceError } from './errors.js';
@@ -186,6 +185,7 @@ export async function listCoordinationPrivacyRepairs(
   const cursor = afterPrincipalId === undefined
     ? null : id(afterPrincipalId, 'repair cursor principal id');
   const client = await pool.connect();
+  let destroyClient = false;
   try {
     await client.query('BEGIN');
     await client.query("SET LOCAL statement_timeout = '30s'");
@@ -202,10 +202,10 @@ export async function listCoordinationPrivacyRepairs(
       state: row.repair_state as CoordinationPrivacyRepairCandidate['state'],
     }));
   } catch (error) {
-    await client.query('ROLLBACK');
+    try { await client.query('ROLLBACK'); } catch { destroyClient = true; }
     throw operatorBoundaryError(error) ?? error;
   } finally {
-    client.release();
+    client.release(destroyClient);
   }
 }
 
@@ -217,6 +217,7 @@ export async function repairCoordinationPrivacy(
   const confirmationScopeId = id(options.confirmationScopeId, 'confirmation scope id');
   const batchSize = requestedBatchSize(options.batchSize);
   const client = await pool.connect();
+  let destroyClient = false;
   try {
     await client.query('BEGIN');
     await client.query("SET LOCAL lock_timeout = '5s'");
@@ -235,7 +236,7 @@ export async function repairCoordinationPrivacy(
          FROM principals principal
          JOIN principal_user_scopes mapping ON mapping.principal_id = principal.id
         WHERE principal.id = $1 AND principal.kind = 'user'
-        FOR UPDATE OF principal NOWAIT`,
+         FOR UPDATE OF principal`,
       [principalId],
     );
     if (!target.rowCount || target.rows[0].disabled_at === null) {
@@ -293,8 +294,8 @@ export async function repairCoordinationPrivacy(
       reason: scrub.rows[0]?.privacy?.reason ?? null,
     };
   } catch (error) {
-    await client.query('ROLLBACK');
-    if (isCoordinationPrivacyLockBusy(error)) {
+    try { await client.query('ROLLBACK'); } catch { destroyClient = true; }
+    if (!destroyClient && isCoordinationPrivacyLockBusy(error)) {
       const snapshot = await client.query(
         `SELECT principal.offboarded_at, mapping.scope_id
            FROM principals principal
@@ -313,7 +314,7 @@ export async function repairCoordinationPrivacy(
     }
     throw operatorBoundaryError(error) ?? error;
   } finally {
-    client.release();
+    client.release(destroyClient);
   }
 }
 
@@ -893,13 +894,13 @@ async function offboardPrincipalCore(
                 WHERE mapping.principal_id = $1
              )
           ORDER BY principal.id
-          FOR UPDATE NOWAIT`,
+          FOR UPDATE`,
         [principalId],
       );
     }
     const target = await client.query(
       `SELECT id, display_name, disabled_at, offboarded_at, reactivated_at
-         FROM principals WHERE id = $1 AND kind = 'user'${dryRun ? '' : ' FOR UPDATE NOWAIT'}`, [principalId],
+          FROM principals WHERE id = $1 AND kind = 'user'${dryRun ? '' : ' FOR UPDATE'}`, [principalId],
     );
     if (!target.rowCount) throw new ServiceError('INVALID_INPUT', 'user principal not found');
     const mapping = await client.query(
@@ -912,7 +913,7 @@ async function offboardPrincipalCore(
             WHERE principal_id = pus.principal_id AND scope_id = pus.scope_id
             ORDER BY id DESC LIMIT 1
          ) approval ON TRUE
-        WHERE pus.principal_id = $1${dryRun ? '' : ' FOR UPDATE OF pus NOWAIT'}`, [principalId],
+         WHERE pus.principal_id = $1${dryRun ? '' : ' FOR UPDATE OF pus'}`, [principalId],
     );
     if (!mapping.rowCount) {
       throw new ServiceError('CONFLICT', 'principal has no explicit owned user scope mapping');
@@ -1083,7 +1084,6 @@ async function offboardPrincipalCore(
     } : null;
     const pseudonym = erasedPrincipalPseudonym(principalId);
     const scopePseudonym = erasedScopePseudonym(scopeId);
-    if (!dryRun) await reconcilePgvectorProviderGrants(client);
     const privacyState = await client.query(
       `SELECT privacy_version, principal_complete, scope_complete
          FROM continuum_coordination_privacy_state($1, $2)`,
@@ -1111,7 +1111,12 @@ async function offboardPrincipalCore(
         );
       }
     }
-    if (!dryRun && wasOffboarded && !coordinationPrivacyComplete) {
+    // An open scope-cleanup phase performs its one privacy batch below. A
+    // resumed run whose scope cleanup is already durable still needs this
+    // pre-scrub if a later upgrade reopened only principal privacy progress.
+    const scrubBeforeVerification = runCompleted
+      || (resumedRun && Boolean(run.rows[0].scope_cleanup_complete));
+    if (!dryRun && scrubBeforeVerification && wasOffboarded && !coordinationPrivacyComplete) {
       const privacyRepair = await client.query<{ privacy: {
         complete?: boolean; progressed?: boolean; blocked_until?: string | null;
         reason?: CoordinationPrivacyBlockReason;

@@ -81,17 +81,26 @@ FROM :"continuum_operator_role";
 REVOKE ALL ON FUNCTION
   :"continuum_schema".continuum_get_offboarding_run(UUID, UUID)
 FROM :"continuum_operator_role";
-INSERT INTO :"continuum_schema".continuum_pgvector_role_profiles
-  (database_role_oid, provider_schema_oid, profile_kind, refreshed_at)
-SELECT role.oid, extension.extnamespace, 'operator', now()
-  FROM pg_roles role
-  CROSS JOIN pg_extension extension
- WHERE role.rolname = :'continuum_operator_role'
-   AND extension.extname = 'vector'
-ON CONFLICT (database_role_oid) DO UPDATE SET
-  provider_schema_oid = EXCLUDED.provider_schema_oid,
-  profile_kind = 'operator',
-  refreshed_at = EXCLUDED.refreshed_at;
+SELECT set_config('continuum.operator_grant_schema', :'continuum_schema', TRUE);
+SELECT set_config('continuum.operator_grant_target', :'continuum_operator_role', TRUE);
+DO $provider_profile$
+DECLARE schema_name TEXT := current_setting('continuum.operator_grant_schema');
+        target_role NAME := current_setting('continuum.operator_grant_target')::name;
+BEGIN
+  IF to_regclass(format('%I.continuum_pgvector_role_profiles', schema_name)) IS NOT NULL THEN
+    EXECUTE format(
+      'INSERT INTO %I.continuum_pgvector_role_profiles '
+      || '(database_role_oid, provider_schema_oid, profile_kind, refreshed_at) '
+      || 'SELECT role.oid, extension.extnamespace, ''operator'', now() '
+      || 'FROM pg_roles role CROSS JOIN pg_extension extension '
+      || 'WHERE role.rolname = $1 AND extension.extname = ''vector'' '
+      || 'ON CONFLICT (database_role_oid) DO UPDATE SET '
+      || 'provider_schema_oid = EXCLUDED.provider_schema_oid, '
+      || 'profile_kind = ''operator'', refreshed_at = EXCLUDED.refreshed_at', schema_name
+    ) USING target_role;
+  END IF;
+END;
+$provider_profile$;
 SELECT :"continuum_schema".continuum_assert_operator_role_allowlist(
   :'continuum_operator_role'::name
 );
