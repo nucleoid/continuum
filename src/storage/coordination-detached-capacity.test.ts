@@ -59,7 +59,7 @@ describe('coordination detached total receipt capacity', () => {
     } finally { client.release(); }
   }
 
-  async function verifyCountsAndEvidence(value: Awaited<ReturnType<typeof fixture>>, budget: number) {
+  async function verifyCountsAndEvidence(value: Awaited<ReturnType<typeof fixture>>) {
     expect((await pool.query(`SELECT acquire_receipt_count+contended_receipt_count+mutation_receipt_count AS counted,
       (SELECT count(*)::int FROM coordination_operation_receipts WHERE principal_id=$1) AS actual
       FROM coordination_principal_usage WHERE principal_id=$1`, [detached])).rows).toEqual([{ counted: 1, actual: 1 }]);
@@ -67,7 +67,6 @@ describe('coordination detached total receipt capacity', () => {
       [detached, value.preservedRequest])).rowCount).toBe(1);
     expect((await pool.query('SELECT resource,fencing_token::text FROM coordination_resources WHERE scope_id=$1', [value.shared.id])).rows)
       .toEqual(value.fences);
-    expect(budget).toBeGreaterThanOrEqual(1);
   }
 
   it.each([2, 3])('uses one combined available budget of %i across acquire, contention, renewal, and release', async (budget) => {
@@ -75,11 +74,11 @@ describe('coordination detached total receipt capacity', () => {
     expect((await scrub(value)).progressed).toBe(true); // Bounded audit phase.
     const receiptBatch = await scrub(value);
     expect(receiptBatch).toMatchObject({ complete: false, progressed: true, receipts_scrubbed: budget - 1 });
-    await verifyCountsAndEvidence(value, budget);
+    await verifyCountsAndEvidence(value);
     let complete = receiptBatch.complete;
     for (let attempt = 0; attempt < 20 && !complete; attempt += 1) complete = (await scrub(value)).complete;
     expect(complete).toBe(true);
-    await verifyCountsAndEvidence(value, budget);
+    await verifyCountsAndEvidence(value);
     expect((await pool.query('SELECT acquire_receipt_count,contended_receipt_count,mutation_receipt_count FROM coordination_principal_usage WHERE principal_id=$1',
       [value.target.id])).rows).toEqual([{ acquire_receipt_count: 0, contended_receipt_count: 0, mutation_receipt_count: 0 }]);
   }, 30_000);
@@ -89,7 +88,7 @@ describe('coordination detached total receipt capacity', () => {
     await scrub(value); // Audit phase.
     await scrub(value); // Eligible lease can detach independently.
     expect(await scrub(value)).toMatchObject({ complete: false, progressed: false, receipts_scrubbed: 0, reason: 'detached_quota' });
-    await verifyCountsAndEvidence(value, 1);
+    await verifyCountsAndEvidence(value);
     expect((await pool.query('SELECT count(*)::int AS count FROM coordination_operation_receipts WHERE principal_id=$1', [value.target.id])).rows)
       .toEqual([{ count: 4 }]);
     await pool.query(`UPDATE coordination_operation_receipts SET server_time=clock_timestamp()-interval '25 hours',
