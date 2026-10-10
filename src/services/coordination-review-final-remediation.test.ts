@@ -76,6 +76,88 @@ describe('coordination final review remediation', () => {
   const principalId = (ordinal: number) =>
     `10000000-0000-4000-8000-${ordinal.toString(16).padStart(12, '0')}`;
 
+  it.each([
+    { label: 'empty', firstEligible: false },
+    { label: 'short', firstEligible: true },
+  ])('discovery page review: continues after a $label filtered page without filling an unbounded scan', async ({ label, firstEligible }) => {
+    const value = await fixture(`filtered-discovery-${label}`);
+    const nonce = randomUUID();
+    await pool.query(
+      `INSERT INTO principals (id, external_id, kind, display_name, disabled_at, reactivated_at)
+       SELECT ('10000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid,
+              $1 || ':' || n, 'user', 'Filtered page target',
+              CASE WHEN n = 5 OR ($2 AND n = 2) THEN clock_timestamp() ELSE NULL END,
+              CASE WHEN n < 5 AND NOT ($2 AND n = 2) THEN clock_timestamp() ELSE NULL END
+         FROM generate_series(1, 5) n`,
+      [`filtered-page:${nonce}`, firstEligible],
+    );
+    await pool.query(
+      `INSERT INTO scopes (id, kind, name)
+       SELECT ('20000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid,
+              'user', $1 || ':' || n FROM generate_series(1, 5) n`,
+      [`filtered-page-scope:${nonce}`],
+    );
+    await pool.query(
+      `INSERT INTO principal_user_scopes
+         (principal_id, scope_id, mapped_by, acknowledged_principal_ids,
+          acknowledged_evidence_hash)
+       SELECT ('10000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid,
+              ('20000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid,
+              $1, ARRAY[('10000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid],
+              repeat('a', 64) FROM generate_series(1, 5) n`,
+      [value.operator.id],
+    );
+    await pool.query(
+      `INSERT INTO coordination_principal_privacy_progress
+         (principal_id, detached_principal_id, privacy_version, completed_at)
+       SELECT ('10000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid,
+              $1, 2, NULL FROM generate_series(1, 5) n`,
+      [detachedPrincipalId],
+    );
+    // Reproduce the stale derived flag covered by 0079's legacy branch.
+    // Updating this field alone does not run the insert/lifecycle trigger.
+    await pool.query(
+      'UPDATE coordination_principal_privacy_progress SET repair_eligible = FALSE WHERE principal_id = $1',
+      [principalId(5)],
+    );
+    expect((await pool.query(
+      'SELECT repair_eligible FROM coordination_principal_privacy_progress WHERE principal_id = $1',
+      [principalId(5)],
+    )).rows).toEqual([{ repair_eligible: false }]);
+
+    const first = await adminCli(value.operator, [
+      'list-coordination-privacy-repairs', '--limit', '2',
+    ]);
+    expect(first.exitCode).toBe(0);
+    const firstRepairs = first.payload.repairs as Array<{ principalId: string }>;
+    expect(firstRepairs.map(({ principalId }) => principalId))
+      .toEqual(firstEligible ? [principalId(2)] : []);
+    // The current CLI incorrectly reports NULL here because returned rows
+    // were filtered after the SQL limit. Raw scan progress must survive.
+    expect(first.payload.nextCursor).toBe(principalId(2));
+    expect(first.payload).toMatchObject({ hasMore: true, scannedCount: 2 });
+
+    const second = await adminCli(value.operator, [
+      'list-coordination-privacy-repairs', '--limit', '2',
+      '--after', first.payload.nextCursor as string,
+    ]);
+    expect(second.exitCode).toBe(0);
+    expect(second.payload).toMatchObject({
+      repairs: [], nextCursor: principalId(4), hasMore: true, scannedCount: 2,
+    });
+    const third = await adminCli(value.operator, [
+      'list-coordination-privacy-repairs', '--limit', '2',
+      '--after', second.payload.nextCursor as string,
+    ]);
+    expect(third.exitCode).toBe(0);
+    const lastRepairs = third.payload.repairs as Array<{ principalId: string }>;
+    expect(lastRepairs.map(({ principalId }) => principalId)).toEqual([principalId(5)]);
+    expect(third.payload).toMatchObject({ nextCursor: null, hasMore: false, scannedCount: 1 });
+    const seen = [...firstRepairs, ...lastRepairs].map(({ principalId }) => principalId);
+    expect(seen).toEqual(firstEligible ? [principalId(2), principalId(5)] : [principalId(5)]);
+    expect(new Set(seen).size).toBe(seen.length);
+  }, 30_000);
+
   it('fills stable pages from eligible disabled principals beyond 1000 rows during mutations', async () => {
     const value = await fixture('eligible-pages');
     const label = randomUUID();
