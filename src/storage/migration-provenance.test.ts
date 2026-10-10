@@ -1,41 +1,118 @@
-import { copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import type pg from 'pg';
-import { describe, expect, it, vi } from 'vitest';
+import { join } from 'node:path';
+import pg from 'pg';
+import { describe, expect, it } from 'vitest';
 import { runMigrations } from './migrator.js';
 
+const databaseUrl = process.env.CONTINUUM_TEST_DATABASE_URL
+  ?? 'postgres://continuum:continuum@localhost:5433/continuum';
+
+async function fixture(run: (pool: pg.Pool, directory: string, schema: string) => Promise<void>) {
+  const schema = `execution_${randomUUID().replaceAll('-', '').slice(0, 16)}`;
+  const admin = new pg.Pool({ connectionString: databaseUrl, max: 1 });
+  const directory = await mkdtemp(join(tmpdir(), 'continuum-execution-'));
+  await admin.query(`CREATE SCHEMA "${schema}"`);
+  const pool = new pg.Pool({ connectionString: databaseUrl, max: 1,
+    options: `-c search_path=${schema}` });
+  try { await run(pool, directory, schema); }
+  finally {
+    await pool.end();
+    await admin.query(`DROP SCHEMA "${schema}" CASCADE`);
+    await admin.end();
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+function independentlyDigest(sql: string, values: unknown[] = []): string {
+  const hash = createHash('sha256');
+  for (const value of [sql, JSON.stringify(values)]) {
+    const bytes = Buffer.from(value, 'utf8');
+    const size = Buffer.alloc(4); size.writeUInt32BE(bytes.length);
+    hash.update(size); hash.update(bytes);
+  }
+  return hash.digest('hex');
+}
+
 describe('migration execution provenance', () => {
-  it('executes the verified source snapshot when the file changes after verification', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'continuum-provenance-race-'));
-    const name = '0052_offboarding_review_repair.sql';
-    const path = join(directory, name);
-    await copyFile(join(process.cwd(), 'migrations', name), path);
-    const original = await readFile(path, 'utf8');
-    const marker = 'UNVERIFIED_MIGRATION_FILE_REPLACEMENT';
-    const submitted: string[] = [];
-    let changed = false;
-    const client = {
-      query: vi.fn(async (sql: string) => {
-        submitted.push(sql);
-        if (sql.includes('pg_try_advisory_lock')) return { rows: [{ locked: true }], rowCount: 1 };
-        if (sql.includes('pg_advisory_unlock')) return { rows: [{ unlocked: true }], rowCount: 1 };
-        if (!changed && sql.includes('CREATE TABLE IF NOT EXISTS _continuum_migrations')) {
-          changed = true;
-          await writeFile(path, original + `\nSELECT '${marker}';\n`);
-        }
-        return { rows: [], rowCount: 0 };
-      }),
-      release: vi.fn(),
-    };
-    const pool = { connect: vi.fn(async () => client) } as unknown as pg.Pool;
-    try {
-      await expect(runMigrations(pool, directory)).resolves.toHaveLength(1);
-      expect(changed).toBe(true);
-      expect(submitted.some((sql) => sql.includes(marker))).toBe(false);
-      expect(submitted).toContain(original.replaceAll('\r\n', '\n'));
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
+  it('atomically records the actual submitted transaction, without persisting SQL', async () => {
+    await fixture(async (pool, directory) => {
+      const sql = 'CREATE TABLE effect (value text); INSERT INTO effect VALUES (\'private-value\');';
+      await writeFile(join(directory, '001_effect.sql'), sql);
+      await runMigrations(pool, directory);
+      const evidence = (await pool.query(
+        `SELECT variant, source_sha256, effective_sql_sha256, executed_sql_sha256,
+                statement_count, state FROM _continuum_migration_execution
+          WHERE migration_name='001_effect.sql' AND phase='file'`,
+      )).rows;
+      const sourceHash = createHash('sha256').update(sql).digest('hex');
+      expect(evidence).toEqual([{ variant: 'canonical-lf-v1', source_sha256: sourceHash,
+        effective_sql_sha256: sourceHash, executed_sql_sha256: independentlyDigest(sql),
+        statement_count: 1, state: 'completed' }]);
+      expect(JSON.stringify((await pool.query('SELECT * FROM _continuum_migration_execution')).rows))
+        .not.toContain('private-value');
+      await pool.query(`CREATE FUNCTION reject_evidence() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'injected evidence failure'; END $$;
+        CREATE TRIGGER reject_evidence BEFORE INSERT ON _continuum_migration_execution
+        FOR EACH ROW EXECUTE FUNCTION reject_evidence()`);
+      await writeFile(join(directory, '002_rollback.sql'), 'CREATE TABLE rolled_back (id integer);');
+      await expect(runMigrations(pool, directory)).rejects.toThrow(/injected evidence failure/);
+      expect((await pool.query("SELECT to_regclass('rolled_back') AS relation")).rows[0].relation).toBeNull();
+      expect((await pool.query("SELECT 1 FROM _continuum_migrations WHERE name='002_rollback.sql'")).rowCount).toBe(0);
+    });
+  });
+
+  it('retains honest interrupted online evidence and commits completion with the ledger on retry', async () => {
+    await fixture(async (pool, directory) => {
+      const sql = '-- continuum:no-transaction\nCREATE TABLE IF NOT EXISTS online_effect(id integer);\nSELECT 1 / 0;';
+      await writeFile(join(directory, '001_online.sql'), sql);
+      await expect(runMigrations(pool, directory)).rejects.toThrow();
+      expect((await pool.query('SELECT state, executed_sql_sha256 FROM _continuum_migration_execution')).rows)
+        .toEqual([{ state: 'started', executed_sql_sha256: null }]);
+      expect((await pool.query('SELECT 1 FROM _continuum_migrations')).rowCount).toBe(0);
+      // A changed interrupted recipe must not silently reinterpret prior effects.
+      await writeFile(join(directory, '001_online.sql'), sql.replace('SELECT 1 / 0', 'SELECT 1'));
+      await expect(runMigrations(pool, directory)).rejects.toThrow(/execution recipe.*changed/i);
+    });
+  });
+
+  it('resumes the bounded contract backfill even when its SQL filename was ledgered', async () => {
+    await fixture(async (pool, directory) => {
+      await pool.query(`CREATE TABLE contract_probe (calls integer NOT NULL DEFAULT 0);
+        INSERT INTO contract_probe DEFAULT VALUES;
+        CREATE FUNCTION continuum_backfill_coordination_contract(batch_limit integer)
+        RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN
+          IF batch_limit > 1000 THEN RAISE EXCEPTION 'batch too large'; END IF;
+          IF current_setting('lock_timeout') <> '1s' OR current_setting('statement_timeout') <> '5s'
+          THEN RAISE EXCEPTION 'unbounded call'; END IF;
+          UPDATE contract_probe SET calls=calls+1;
+          RETURN (SELECT calls>=2 FROM contract_probe);
+        END $$;
+        CREATE TABLE _continuum_migrations(name text PRIMARY KEY,applied_at timestamptz DEFAULT now());
+        INSERT INTO _continuum_migrations(name) VALUES('0081_contract_probe.sql')`);
+      await writeFile(join(directory, '0081_contract_probe.sql'),
+        '-- continuum:backfill-coordination-contract\nSELECT 1;');
+      const applied = await runMigrations(pool, directory);
+      expect(applied).toEqual([]);
+      expect((await pool.query('SELECT calls FROM contract_probe')).rows[0].calls).toBe(2);
+      expect((await pool.query(`SELECT state,phase FROM _continuum_migration_execution
+        WHERE phase='contract-backfill'`)).rows).toEqual([{ state: 'completed', phase: 'contract-backfill' }]);
+      expect((await pool.query(`SELECT state,executed_sql_sha256 FROM _continuum_migration_execution
+        WHERE phase='legacy-history'`)).rows).toEqual([{ state: 'history-unknown', executed_sql_sha256: null }]);
+    });
+  });
+
+  it('keeps bookkeeping owner-only and refuses an existing broadened table ACL', async () => {
+    await fixture(async (pool, directory) => {
+      await writeFile(join(directory, '001_effect.sql'), 'SELECT 1;');
+      await runMigrations(pool, directory);
+      expect((await pool.query(`SELECT privilege.grantee FROM pg_class relation
+        CROSS JOIN LATERAL aclexplode(COALESCE(relation.relacl,acldefault('r',relation.relowner))) privilege
+        WHERE relation.oid='_continuum_migration_execution'::regclass
+          AND privilege.grantee<>relation.relowner`)).rows).toEqual([]);
+      await pool.query('GRANT SELECT ON _continuum_migration_execution TO PUBLIC');
+      await expect(runMigrations(pool, directory)).rejects.toThrow(/provenance.*privilege drift/i);
+    });
   });
 });
