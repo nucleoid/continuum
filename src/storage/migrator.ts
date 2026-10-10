@@ -531,6 +531,12 @@ async function finishContractBackfill(
         RAISE EXCEPTION 'coordination contract backfill requires its function owner';
       END IF;
     END $contract_owner$;`);
+  if (await execution.hasCompleted(client)) {
+    const state = await client.query<{ completed: boolean }>(
+      `SELECT phase='complete' AS completed FROM coordination_contract_backfill_state WHERE singleton`,
+    );
+    if (state.rows[0]?.completed === true) return;
+  }
   await execution.start(client);
   await runAdaptiveCoordinationBackfill(client, 'continuum_backfill_coordination_contract', execution, 1000);
   if (file === '0081_coordination_public_contract.sql') {

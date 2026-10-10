@@ -213,12 +213,17 @@ describe('migration execution provenance', () => {
     await fixture(async (pool, directory) => {
       await pool.query(`CREATE TABLE contract_probe (calls integer NOT NULL DEFAULT 0);
         INSERT INTO contract_probe DEFAULT VALUES;
+        CREATE TABLE coordination_contract_backfill_state(singleton boolean PRIMARY KEY,phase text NOT NULL);
+        INSERT INTO coordination_contract_backfill_state VALUES(true,'receipts');
         CREATE FUNCTION continuum_backfill_coordination_contract(batch_limit integer)
         RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN
           IF batch_limit > 1000 THEN RAISE EXCEPTION 'batch too large'; END IF;
           IF current_setting('lock_timeout') <> '1s' OR current_setting('statement_timeout') <> '5s'
           THEN RAISE EXCEPTION 'unbounded call'; END IF;
           UPDATE contract_probe SET calls=calls+1;
+          IF (SELECT calls>=2 FROM contract_probe) THEN
+            UPDATE coordination_contract_backfill_state SET phase='complete' WHERE singleton;
+          END IF;
           RETURN (SELECT calls>=2 FROM contract_probe);
         END $$;
         CREATE TABLE _continuum_migrations(name text PRIMARY KEY,applied_at timestamptz DEFAULT now());
@@ -232,6 +237,16 @@ describe('migration execution provenance', () => {
         WHERE phase='contract-backfill'`)).rows).toEqual([{ state: 'completed', phase: 'contract-backfill' }]);
       expect((await pool.query(`SELECT state,executed_sql_sha256 FROM _continuum_migration_execution
         WHERE phase='legacy-history'`)).rows).toEqual([{ state: 'history-unknown', executed_sql_sha256: null }]);
+      await expect(runMigrations(pool, directory)).resolves.toEqual([]);
+      expect((await pool.query('SELECT calls FROM contract_probe')).rows[0].calls).toBe(2);
+      expect((await pool.query("SELECT count(*)::int AS count FROM _continuum_migration_execution WHERE phase='contract-backfill'"))
+        .rows[0].count).toBe(1);
+      // Completed history alone cannot hide a deliberately reopened repair.
+      await pool.query("UPDATE coordination_contract_backfill_state SET phase='receipts'; UPDATE contract_probe SET calls=0");
+      await expect(runMigrations(pool, directory)).resolves.toEqual([]);
+      expect((await pool.query('SELECT calls FROM contract_probe')).rows[0].calls).toBe(2);
+      expect((await pool.query("SELECT count(*)::int AS count FROM _continuum_migration_execution WHERE phase='contract-backfill'"))
+        .rows[0].count).toBe(2);
     });
   });
 

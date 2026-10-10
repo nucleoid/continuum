@@ -72,6 +72,7 @@ try {
     'migrations/0078_coordination_upgrade_scale_indexes.sql',
     'migrations/0079_coordination_upgrade_scale_remediation.sql',
     'migrations/0080_pgvector_provider_grants.sql',
+    'migrations/0081_coordination_public_contract.sql',
     'bin/continuum-migrate.mjs',
     'scripts/ensure-scope.mjs',
     'scripts/create-scope-operator.sql',
@@ -97,10 +98,27 @@ try {
   const { runMigrations } = await import(
     pathToFileURL(join(installedRoot, 'dist', 'storage', 'migrator.js')).href
   );
-  let ledgerChecks = 0;
+  const migrationNames = packed[0].files
+    .filter(({ path }) => /^migrations\/[^/]+\.sql$/.test(path))
+    .map(({ path }) => path.slice('migrations/'.length));
+  const discoveredMigrations = new Set();
+  const contractSource = readFileSync(join(installedRoot,
+    'migrations/0081_coordination_public_contract.sql'), 'utf8').replaceAll('\r\n', '\n');
+  const contractBodies = new Map();
+  for (const name of ['continuum_coordination_require_contract_ready',
+    'continuum_backfill_coordination_contract']) {
+    const definition = contractSource.match(new RegExp(
+      `CREATE OR REPLACE FUNCTION ${name}\\([\\s\\S]*?AS \\$\\$([\\s\\S]*?)\\$\\$;`,
+    ));
+    if (!definition) throw new Error(`Packaged contract function definition is missing: ${name}`);
+    contractBodies.set(name, definition[1]);
+  }
+  let verifiedContractBodies = 0;
+  let contractBackfillCalls = 0;
+  let completedContractAttempts = 0;
   let vectorExtensionCreated = false;
   const client = {
-    async query(sql) {
+    async query(sql, values = []) {
       const statement = String(sql);
       if (statement.includes('pg_try_advisory_lock')) {
         return { rowCount: 1, rows: [{ locked: true }] };
@@ -148,8 +166,31 @@ try {
       if (statement.includes("current_setting('search_path') AS path")) {
         return { rowCount: 1, rows: [{ path: 'public' }] };
       }
+      // This fixture represents an already migrated package database. Supply
+      // catalog bodies from the installed SQL, not invented verifier output.
+      if (statement.includes('SELECT function.prosrc')
+          && statement.includes('to_regprocedure')) {
+        const body = contractBodies.get(values[0]);
+        if (body === undefined) throw new Error('Unexpected packaged function verification');
+        verifiedContractBodies += 1;
+        return { rowCount: 1, rows: [{ prosrc: body, owner: true, language: 'plpgsql',
+          prosecdef: true, hardened: true, publicExecute: false }] };
+      }
+      if (statement.startsWith('SELECT continuum_backfill_coordination_contract($1)')) {
+        if (!Number.isInteger(values[0]) || values[0] < 1 || values[0] > 1000) {
+          throw new Error('Packaged contract backfill exceeded its bounded batch');
+        }
+        contractBackfillCalls += 1;
+        return { rowCount: 1, rows: [{ completed: true }] };
+      }
+      if (statement.includes('UPDATE _continuum_migration_execution SET state=\'completed\'')) {
+        completedContractAttempts += 1;
+        return { rowCount: 1, rows: [] };
+      }
       if (statement.includes('FROM _continuum_migrations')) {
-        ledgerChecks += 1;
+        if (statement.includes('SELECT 1 FROM _continuum_migrations WHERE name = $1')) {
+          discoveredMigrations.add(values[0]);
+        }
         return { rowCount: 1, rows: [] };
       }
       if (statement.includes('pg_advisory_unlock')) return { rows: [{ unlocked: true }] };
@@ -158,7 +199,12 @@ try {
     release() {},
   };
   await runMigrations({ connect: async () => client });
-  if (ledgerChecks < 8) throw new Error('Packed migrator did not discover packaged migrations');
+  if (migrationNames.some((name) => !discoveredMigrations.has(name))) {
+    throw new Error('Packed migrator did not discover every packaged migration');
+  }
+  if (verifiedContractBodies !== 4 || contractBackfillCalls !== 1 || completedContractAttempts !== 1) {
+    throw new Error('Packed migrator did not verify and finish the ledgered contract backfill');
+  }
   process.stdout.write('Packed continuum CLI entrypoint passed\n');
 } finally {
   rmSync(temporary, { recursive: true, force: true });

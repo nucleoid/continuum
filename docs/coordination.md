@@ -314,6 +314,20 @@ reduce the batch down to one before failing. Each successful call durably advanc
 its cursor. A ledgered SQL filename does not imply completion: the current
 migrator retries this directive on subsequent runs even when schema work is
 already ledgered. Runtime write gates remain closed until the backfill finishes.
+After function-body and owner verification, a matching completed backfill record
+and a singleton phase of `complete` skip further operative calls and attempt
+records. Unknown history or interrupted attempts without matching completed
+evidence cannot use that skip; changed recipes and a reopened pending singleton
+also require operative repair.
+
+Adaptive backfill treats PostgreSQL `57014` as a retryable cancellation category.
+That SQLSTATE covers both statement deadlines and an administrator's
+`pg_cancel_backend`; the driver does not provide a portable distinction. Batch
+halving is deterministic and stops with failure at one: at most 10 consecutive
+failed calls from the contract's maximum 1000 batch, or 13 from the legacy
+maximum 5000. A successful batch advances durable progress. To stop the entire
+job, stop the migrator process; a single backend cancellation may be retried.
+Resume later with a smaller configured batch when operator control requires it.
 
 The migrator's owner-only `_continuum_migration_execution` sidecar distinguishes
 canonical source, transformed SQL and separately committed repair phases. It

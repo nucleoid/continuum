@@ -634,6 +634,16 @@ narrow grant options to the tenant owner or apply any reported direct
 pregrants/revocations itself.
 
 Provider verification runs during API, MCP, and membership-sync startup.
+The verifier is resolved and invoked in the namespace of the actual `memories`
+relation. A same-named function in an earlier search-path schema does not replace
+that gate. Its owner, SECURITY DEFINER setting, pinned search path and PUBLIC
+revocation must match the tenant's trusted function contract.
+A missing verifier fails current non-owner startup closed. Only the migration
+owner can establish the pre-0080 compatibility skip by reading that tenant's
+qualified migration ledger and proving 0080 is absent; a ledgered 0080 with a
+missing verifier fails closed. This requires the owner to upgrade and regrant
+profiles before starting current runtime roles, without granting them ledger
+read access. Privacy erasure remains independent of provider execution grants.
 Startup verifies registered profiles without changing live grants. Owner
 startup first confirms 0080 is ledgered, uses a nonblocking migration advisory
 lock, and checks only this tenant's registry. A busy migration fails startup

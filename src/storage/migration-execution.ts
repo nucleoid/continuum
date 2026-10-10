@@ -71,6 +71,18 @@ export class MigrationExecution {
     );
   }
 
+  async hasCompleted(client: pg.PoolClient): Promise<boolean> {
+    const result = await client.query(
+      `SELECT 1 FROM _continuum_migration_execution
+        WHERE migration_name=$1 AND phase=$2 AND state='completed'
+          AND variant=$3 AND source_sha256 IS NOT DISTINCT FROM $4
+          AND effective_sql_sha256=$5
+          AND dependency_source_sha256 IS NOT DISTINCT FROM $6 LIMIT 1`,
+      [this.name, this.phase, this.variant, this.sourceHash, this.effectiveHash, this.dependencyHash],
+    );
+    return result.rowCount === 1;
+  }
+
   async complete(client: pg.PoolClient, started = false): Promise<void> {
     const digest = this.hash.copy().digest('hex');
     if (started) {
