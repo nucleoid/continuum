@@ -145,9 +145,14 @@ describe('pgvector tenant-scoped explicit regrant', () => {
 
   it('keeps legacy helper delegation working when the current script profiles a pre80 schema', async () => {
     await isolated(async ({ admin, tenant, role, through79 }) => {
-      const schema = name('tenant'); const pool = await tenant(schema); await runMigrations(pool, await through79());
+      const schema = name('tenant'); const pool = await tenant(schema);
+      await admin.query(`CREATE EXTENSION vector WITH SCHEMA ${q(schema)}`);
+      await runMigrations(pool, await through79());
       const app = await role(); await grants(pool, schema, app);
-      expect(await providerAccess(admin, app)).toEqual({ usage: true, execute: true });
+      expect((await admin.query(`SELECT has_schema_privilege($1,$2,'USAGE') AS usage,
+        has_function_privilege($1,$3,'EXECUTE') AS execute`,
+      [app, schema, `${q(schema)}.vector_dims(${q(schema)}.vector)`])).rows)
+        .toEqual([{ usage: true, execute: true }]);
     });
   }, 180_000);
 });
