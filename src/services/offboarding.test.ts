@@ -215,7 +215,7 @@ describe('offboarding and erasure', () => {
     try {
       await pool.query(`CREATE OR REPLACE FUNCTION
                         continuum_operator_offboarding_actual_state_is_erased(
-                          authorization_principal_id UUID, target_principal_id UUID)
+                          authorization_principal_id UUID, target_run_id UUID)
                         RETURNS BOOLEAN LANGUAGE plpgsql AS $$
                         BEGIN
                           IF current_setting('statement_timeout') <> '20ms' THEN
