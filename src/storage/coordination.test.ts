@@ -928,7 +928,7 @@ describe('coordination storage and service', () => {
     )).rowCount).toBe(0);
   });
 
-  it('reports cancellation after commit as ambiguous and replays the committed receipt', async () => {
+  it('returns the committed result after cancellation and replays its receipt', async () => {
     const controller = new AbortController();
     const requestId = randomUUID();
     const runId = randomUUID();
@@ -945,13 +945,14 @@ describe('coordination storage and service', () => {
         } as unknown as pg.PoolClient;
       },
     } as pg.Pool;
-    await expect(acquireLease(commitInterceptPool, principal, {
+    const committed = await acquireLease(commitInterceptPool, principal, {
       scope: 'project:coordination-tests', resource: 'commit-cancelled',
       runId, requestId,
-    }, { signal: controller.signal })).rejects.toEqual(expectCode('COORDINATION_TIMEOUT'));
+    }, { signal: controller.signal });
+    expect(committed).toMatchObject({ acquired: true, fencingToken: '1' });
 
     await expect(acquire(pool, 'commit-cancelled', requestId, runId))
-      .resolves.toMatchObject({ acquired: true, fencingToken: '1' });
+      .resolves.toEqual(committed);
     expect((await pool.query(
       'SELECT count(*)::int AS count FROM coordination_operation_receipts WHERE request_id = $1',
       [requestId],
