@@ -6,6 +6,7 @@ import { createScope } from './scopes.js';
 import { addMembership } from './memberships.js';
 import { makeTestPool, resetData } from './test-helpers.js';
 import { acquireLease, inspectLease, releaseLease, renewLease } from '../services/coordination.js';
+import { preparePrincipalReceipts } from './coordination.js';
 
 describe('coordination public handoff contract', () => {
   let pool: pg.Pool;
@@ -36,6 +37,31 @@ describe('coordination public handoff contract', () => {
       expect(metadata).toMatchObject({ resource_bytes: Buffer.byteLength(input.resource) });
       expect(metadata).not.toHaveProperty('resource_sha256');
       expect(metadata).not.toHaveProperty('resource');
+    }
+  });
+
+  it('skips an expired receipt held by a peer cleanup transaction', async () => {
+    const { principal, input } = await fixture();
+    await acquireLease(pool, principal, input);
+    await pool.query(`UPDATE coordination_operation_receipts SET
+      server_time = clock_timestamp() - interval '25 hours',
+      retain_until = clock_timestamp() - interval '1 hour'
+      WHERE principal_id = $1`, [principal.id]);
+    const blocker = await pool.connect();
+    const cleaner = await pool.connect();
+    try {
+      await blocker.query('BEGIN');
+      await blocker.query('SELECT 1 FROM coordination_operation_receipts WHERE principal_id = $1 FOR UPDATE', [principal.id]);
+      await cleaner.query('BEGIN');
+      await cleaner.query("SET LOCAL statement_timeout = '500ms'");
+      await expect(preparePrincipalReceipts(cleaner, principal.id)).resolves.toBe(1);
+      expect((await cleaner.query('SELECT count(*)::int AS count FROM coordination_operation_receipts WHERE principal_id = $1', [principal.id])).rows)
+        .toEqual([{ count: 1 }]);
+    } finally {
+      await cleaner.query('ROLLBACK');
+      await blocker.query('ROLLBACK');
+      cleaner.release();
+      blocker.release();
     }
   });
 

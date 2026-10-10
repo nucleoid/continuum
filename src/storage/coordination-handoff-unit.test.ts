@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { describe, expect, it, vi } from 'vitest';
 import { acquireLease } from '../services/coordination.js';
-import { lockCoordinationAuthorization, preparePrincipalReceipts, withCoordinationTransaction } from './coordination.js';
+import { lockCoordinationAuthorization, withCoordinationTransaction } from './coordination.js';
 
 function transactionClient(query: ReturnType<typeof vi.fn>) {
   const client = { query, release: vi.fn() } as unknown as pg.PoolClient;
@@ -46,11 +46,4 @@ describe('coordination handoff unit regressions', () => {
       .rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE', message: expect.not.stringContaining('private') });
   });
 
-  it('locks only available expired receipt candidates so concurrent cleanup skips held rows', async () => {
-    const query = vi.fn(async (_sql: string) => ({ rows: [], rowCount: 0 }));
-    const { client } = transactionClient(query);
-    await preparePrincipalReceipts(client, randomUUID());
-    const sql = String(query.mock.calls[0]?.[0]);
-    expect(sql).toContain('FOR UPDATE SKIP LOCKED');
-  });
 });
