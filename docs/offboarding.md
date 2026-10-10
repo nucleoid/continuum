@@ -160,14 +160,26 @@ re-scrub and therefore is not in that list. After upgrade, use
 `list-coordination-privacy-repairs`; it returns a bounded list classified as
 `offboarded` or `disabled_only` without granting direct progress-table reads.
 Page the list with `--limit <1-1000>` and the returned `nextCursor`. Pass that
-value back with `--after <principal-id>` until `nextCursor` is null. The cursor
-is deterministic, exclusive, and based on the last eligible disabled principal
-returned. Active or reactivated principals never consume a page slot. A
+value back with `--after <principal-id>` until `nextCursor` is null. Each command
+scans one bounded window before filtering current eligibility. `scannedCount`
+counts the consumed candidate UUIDs, and `hasMore` indicates raw candidates
+beyond that window. The deterministic, exclusive cursor is the last consumed
+raw UUID across the common window of all discovery branches. Reactivated or
+unmapped candidates can consume scan slots but never appear as repairs. Empty
+and short returned lists can therefore have a nonterminal cursor; continue
+with that cursor rather than treating the returned count as exhaustion. A
 principal that becomes ineligible after an earlier page is omitted from later
 pages; a newly eligible principal sorts after the cursor and can appear on a
 later page, while one sorting at or before the cursor is left for the next full
-discovery pass. A short page therefore means there were no later eligible rows
-in that statement's snapshot.
+discovery pass. A page is terminal only when its `nextCursor` is null. Discovery
+does not loop internally to fill a requested number of eligible results.
+Forward migration 0081 and the matching operator grant profile are required for
+this paged CLI. A missing helper fails with a sanitized `DEPENDENCY_UNAVAILABLE`
+upgrade message. Each successful page commits one query-free read audit with
+bounded counts; it does not record subject IDs or the cursor. The existing
+flat-array service and SQL point lookup remain compatible, but an array alone
+cannot indicate whether filtered candidates remain. Bulk consumers must use
+`listCoordinationPrivacyRepairPage` and its explicit paging metadata.
 For `offboarded` rows, rerun the normal `offboard-principal --confirm-scope`
 command. For `disabled_only` rows, run the non-lifecycle
 `repair-coordination-privacy <principal-id> --confirm-scope <scope-id>` command

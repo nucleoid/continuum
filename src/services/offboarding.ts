@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type pg from 'pg';
 import type { Principal } from '../types.js';
+import { record } from '../audit/log.js';
 import { requireOrgAdmin } from './access.js';
 import { ServiceError } from './errors.js';
 
@@ -131,6 +132,13 @@ export interface CoordinationPrivacyRepairResult extends CoordinationPrivacyRepa
   reason: CoordinationPrivacyBlockReason;
 }
 
+export interface CoordinationPrivacyRepairPage {
+  repairs: CoordinationPrivacyRepairCandidate[];
+  nextCursor: string | null;
+  hasMore: boolean;
+  scannedCount: number;
+}
+
 export type CoordinationPrivacyBlockReason =
   'live_lease' | 'detached_quota' | 'lock_busy' | 'no_progress' | null;
 
@@ -211,6 +219,88 @@ export async function listCoordinationPrivacyRepairs(
   } catch (error) {
     try { await client.query('ROLLBACK'); } catch { destroyClient = true; }
     throw operatorBoundaryError(error) ?? error;
+  } finally {
+    client.release(destroyClient);
+  }
+}
+
+/** One bounded scan window; returned candidate count never determines exhaustion. */
+export async function listCoordinationPrivacyRepairPage(
+  pool: pg.Pool, actor: Principal, limit = 100, afterPrincipalId?: string,
+): Promise<CoordinationPrivacyRepairPage> {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 1_000) {
+    throw new ServiceError('INVALID_INPUT', 'repair list limit must be between 1 and 1000');
+  }
+  const cursor = afterPrincipalId === undefined
+    ? null : id(afterPrincipalId, 'repair cursor principal id');
+  let client: pg.PoolClient;
+  try {
+    client = await pool.connect();
+  } catch (error) {
+    throw new ServiceError('DEPENDENCY_UNAVAILABLE', 'coordination privacy discovery is unavailable', { cause: error });
+  }
+  let destroyClient = false;
+  try {
+    await client.query('BEGIN');
+    await client.query("SET LOCAL statement_timeout = '30s'");
+    await client.query("SET LOCAL lock_timeout = '5s'");
+    await requireOrgAdmin(client, actor.id);
+    const result = await client.query<{
+      repairs: Array<{ principal_id: string; scope_id: string; repair_state: string }>;
+      next_cursor: string | null;
+      has_more: boolean;
+      scanned_count: number;
+    }>(
+      `SELECT repairs, next_cursor::text, has_more, scanned_count
+         FROM continuum_operator_list_coordination_privacy_repair_page($1, $2, $3)`,
+      [actor.id, cursor, limit],
+    );
+    const row = result.rows[0];
+    if (!row) {
+      throw new ServiceError(
+        'DEPENDENCY_UNAVAILABLE',
+        'coordination privacy discovery paging requires current migrations and operator grants',
+      );
+    }
+    const page: CoordinationPrivacyRepairPage = {
+      repairs: row.repairs.map((candidate) => ({
+        principalId: candidate.principal_id,
+        scopeId: candidate.scope_id,
+        state: candidate.repair_state as CoordinationPrivacyRepairCandidate['state'],
+      })),
+      nextCursor: row.next_cursor,
+      hasMore: row.has_more,
+      scannedCount: row.scanned_count,
+    };
+    // One request-level audit, including empty windows. Do not persist subject
+    // IDs, the input cursor, or any private content in this discovery receipt.
+    await record(client, {
+      principalId: actor.id,
+      action: 'read',
+      metadata: {
+        view: 'coordination-privacy-repairs', limit,
+        resultCount: page.repairs.length, scannedCount: page.scannedCount,
+        hasMore: page.hasMore,
+      },
+    });
+    await client.query('COMMIT');
+    return page;
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch { destroyClient = true; }
+    if (error instanceof ServiceError) throw error;
+    if ((error as { code?: string }).code === '42883') {
+      throw new ServiceError(
+        'DEPENDENCY_UNAVAILABLE',
+        'coordination privacy discovery paging requires current migrations and operator grants',
+        { cause: error },
+      );
+    }
+    if ((error as { code?: string }).code === '57014') {
+      throw new ServiceError('COORDINATION_TIMEOUT', 'coordination privacy discovery deadline exceeded', { cause: error });
+    }
+    throw operatorBoundaryError(error) ?? new ServiceError(
+      'DEPENDENCY_UNAVAILABLE', 'coordination privacy discovery is unavailable', { cause: error },
+    );
   } finally {
     client.release(destroyClient);
   }

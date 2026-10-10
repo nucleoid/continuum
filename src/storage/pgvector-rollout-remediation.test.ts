@@ -1139,11 +1139,12 @@ describe('pgvector rollout remediation', () => {
 
   it('provider review: preserves pre-0080 sync identities without a regrant', async () => {
     const syncRole = identifier('continuum_sync_upgrade');
+    const syncPassword = randomUUID();
     roles.push(syncRole);
     await withFreshDatabase(async (root, target, url) => {
       const applicationSchema = identifier('continuum_data');
       const principalId = randomUUID();
-      await root.query(`CREATE ROLE ${quoteIdentifier(syncRole)} LOGIN`);
+      await root.query(`CREATE ROLE ${quoteIdentifier(syncRole)} LOGIN PASSWORD ${quoteLiteral(syncPassword)}`);
       await target.query(`CREATE SCHEMA ${quoteIdentifier(applicationSchema)}`);
       const owner = migrationPool(url, applicationSchema);
       await runMigrations(owner, await migrationDirectoryThrough(
@@ -1159,7 +1160,12 @@ describe('pgvector rollout remediation', () => {
         [syncRole, principalId],
       );
       await runMigrations(owner, await fullMigrationDirectory());
-      const runtime = migrationPool(url, applicationSchema, syncRole);
+      // The sync trust boundary requires a real role-authenticated session;
+      // a superuser connection using SET ROLE intentionally does not qualify.
+      const syncUrl = new URL(url);
+      syncUrl.username = syncRole;
+      syncUrl.password = syncPassword;
+      const runtime = migrationPool(syncUrl.toString(), applicationSchema);
       await expect(reconcilePgvectorProviderGrants(runtime)).resolves.toBeUndefined();
       expect((await owner.query(
         `SELECT profile_kind FROM continuum_pgvector_role_profiles

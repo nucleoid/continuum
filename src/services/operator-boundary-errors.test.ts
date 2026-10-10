@@ -6,7 +6,7 @@ import { runAuditRetention } from '../maintenance/audit-retention.js';
 import {
   provisionEntraGroupBinding, revokeEntraGroupBinding,
 } from './membership-sync.js';
-import { mapOwnedUserScope, offboardPrincipal } from './offboarding.js';
+import { listCoordinationPrivacyRepairPage, mapOwnedUserScope, offboardPrincipal } from './offboarding.js';
 import { disablePrincipal, reactivatePrincipal } from './principal-admin.js';
 import { ServiceError } from './errors.js';
 
@@ -170,6 +170,17 @@ const paths: Array<{
 ];
 
 describe('operator boundary database errors', () => {
+  it('returns a sanitized upgrade dependency when the paged discovery helper is missing', async () => {
+    const original = databaseFailure('function private_schema.secret_page(uuid,uuid,integer) does not exist', '42883');
+    const fixture = guardedPool(/continuum_operator_list_coordination_privacy_repair_page/, original);
+    await expect(listCoordinationPrivacyRepairPage(fixture.pool, actor, 2)).rejects.toMatchObject({
+      code: 'DEPENDENCY_UNAVAILABLE', status: 503,
+      publicMessage: 'coordination privacy discovery paging requires current migrations and operator grants',
+      cause: original,
+    });
+    expect(fixture.guardedCalls()).toBe(1);
+  });
+
   it.each([
     ['DB wording', databaseFailure('operation requires a DB-bound trusted approve identity')],
     ['role/OID wording', databaseFailure('operation requires a role-name/OID-bound trusted approve identity')],
