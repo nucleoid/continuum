@@ -206,9 +206,8 @@ canonical length-prefixed tuple of normalized semantic input after defaults are
 applied. Reusing a key with different input returns
 `IDEMPOTENCY_CONFLICT` without mutating lease state.
 
-Acquire and release receipts are retained for 24 hours from the operation's
-database server time. Renew receipts are short-lived: through the renewed
-expiry plus a 60-second retry margin, capped at 24 hours:
+Acquire, contention, renew, and release receipts are retained for at least
+24 hours from the operation's database server time:
 
 - acquire success replays its original response only while that generation is
   still current and unexpired;
@@ -223,10 +222,8 @@ Authorization is revalidated before any receipt result or conflict is exposed.
 Replay adds no duplicate audit row.
 
 Once a receipt expires, bounded cleanup may remove it and its idempotency
-guarantee ends. For renew, do not retry after the renewed expiry plus the
-60-second margin. A contended acquire receipt is retained for 90 seconds; a successful acquire or
-release receipt is retained for 24 hours. Do not blindly retry beyond the
-applicable horizon. Inspect, reconcile local ownership state, and use a new
+guarantee ends. Do not blindly retry beyond the 24-hour horizon. Inspect,
+reconcile local ownership state, and use a new
 request ID.
 
 Server-side `lock_timeout` is one second and `statement_timeout` is five
@@ -240,24 +237,21 @@ uncertain, retry the exact request within the receipt horizon.
 
 V1 hard limits are:
 
-- 10,000 ever-created, unreclaimed resource keys per scope by default
-  (operator-adjustable from 1 through 1,000,000);
+- 10,000 unreclaimed resource keys per scope; operators may lower the limit,
+  but cannot raise it above 10,000;
 - at most 100 newly created resource keys per principal per rolling hour;
-- 10,000 retained successful-acquire receipts per principal by default;
-- 1,000 separately counted contended-acquire receipts per principal by default,
-  each with a 90-second horizon. Approval-bound operators may raise either
-  limit through `continuum_operator_set_coordination_principal_quota` for a
-  shared service principal or fleet;
-- release receipts remain available for their full 24-hour replay horizon and
-  do not consume a counter. A later release never evicts retained replay
-  evidence;
-- at most 100 retained renew receipts per lease; renew receipts do not consume
-  acquire or release quota, so documented TTL/3 renewal cannot starve lease
-  maintenance;
+- 10,000 total retained receipts per principal across successful acquisitions,
+  contention, renewals, and releases. Every receipt consumes this budget;
+  retained replay evidence is never evicted to admit another operation;
 - at most 100 expired receipts and terminal lease histories reclaimed by an
   application operation, and at most 1,000 of each by operator maintenance.
 
-An existing resource remains usable when its scope reaches the key limit.
+An existing resource remains usable when its scope reaches the key limit,
+subject to the principal's receipt quota. Receipt saturation rejects every
+fresh mutation, including renewal and release, with
+`COORDINATION_QUOTA_EXCEEDED`. Exact authorized replays remain available.
+Plan fleet size and renewal cadence for the full 24-hour receipt budget; a
+harness must stop dispatch and reconcile if it cannot renew before its deadline.
 Continuum never automatically evicts resource rows or fencing history. Quota, lease state,
 receipt, usage counters, and audit metadata commit atomically.
 
@@ -265,9 +259,13 @@ Coordination operations lock authorization first, then the exact receipt and
 resource state. Offboarding locks active memberships in deterministic principal
 and source order before it reads any coordination state. A PostgreSQL deadlock
 or lock timeout maps to `COORDINATION_TIMEOUT`; retry the complete idempotent
-operation, never a statement inside the aborted transaction. Principal usage
-remains a residual hot row only when a successful acquire, contention, release,
-or new-resource rate reservation changes its counter. Renewals do not touch it.
+operation, never a statement inside the aborted transaction. Fresh mutations
+briefly serialize on the principal usage row before resource and lease locks.
+This is required to enforce the combined receipt cap, including renewals.
+Cleanup skips expired receipt rows already held by a peer, but counter updates
+can still wait and time out. Membership sync also briefly blocks coordination
+while it holds authorization rows. Shared-principal fleets should account for
+these bounded waits when scheduling renewal before the conservative deadline.
 
 Global receipt sweeping uses `coordination_receipts_global_sweep_idx`.
 Terminal leases receive `cleanup_eligible_at` only after release or displacement
@@ -290,21 +288,21 @@ set transaction-level `lock_timeout` and `statement_timeout` before invoking
 maintenance; PostgreSQL function `SET` clauses do not bound the already-running
 calling statement, so Continuum does not claim a function-local deadline.
 `continuum_operator_set_coordination_scope_quota` adjusts a reviewed scope
-limit, while `continuum_operator_set_coordination_principal_quota` adjusts the
-two acquire limits. The shared application role cannot execute these operator
+limit within the hard ceiling. Principal quota configuration cannot increase
+the combined 10,000 receipt ceiling. The shared application role cannot execute these operator
 functions, directly update usage/counter tables, or update protected lease and
 resource identity columns; owner-owned triggers and narrow `SECURITY DEFINER`
 helpers maintain counters.
 
 Audit metadata is bounded and server-generated. It includes operation, outcome,
 owned request/run/lease IDs where applicable, owned token, resource UTF-8
-length, and SHA-256 of exact resource bytes. It never contains resource text,
+length. It never contains a resource digest, resource text,
 credentials, request bodies, another holder's identifiers, memory bodies, or
 vectors. Audit failure rolls back the whole operation.
 
 ## Deployment, mixed versions, and rollback
 
-Apply through migration `0077_coordination_review_2_online_finish.sql`
+Apply all migrations in order through the forward public-contract repair 0081
 (0064 and 0070 remain concurrent-index steps), then **re-run
 `scripts/grant-application-role.sql`** for every application and dedicated
 operator role. Re-run `scripts/grant-operator-role.sql` immediately afterward
@@ -317,15 +315,17 @@ rolling application upgrade, finish database migration and exact grant-profile
 convergence before enabling Entra-sourced coordination or offboarding traffic
 on any current node.
 
-The schema supports 0056 and current writers concurrently. A database
-`BEFORE INSERT` guard clamps a 0056-style contended acquire receipt from its
-legacy 24-hour retention to 90 seconds before the 0057 CHECK is evaluated.
-Current writers already emit 90 seconds. Older nodes still return the generic
+The forward repair enforces a minimum 24-hour receipt horizon even for older
+writers. Historical short-lived or evicted receipts cannot be reconstructed;
+their former replay guarantees cannot be restored. Preserve retained rows and
+fencing history when upgrading, including historical usage above a new limit;
+growth is refused until bounded cleanup brings usage below the hard ceiling.
+Older nodes still return the generic
 API `NOT_FOUND` for lock routes while upgraded nodes return coordination codes.
 Harnesses must branch on the response `code`, never HTTP 404 alone, and must
-fail closed until all target nodes advertise the coordination surface. Keep
-the compatibility trigger until a later published migration explicitly retires
-0056 rollback support.
+fail closed until all target nodes advertise the coordination surface. Freeze
+offboarding throughout mixed-version deployment and resume only after every
+node runs the current binary and migrations and exact grants have converged.
 
 A binary rollback leaves coordination tables, receipts, quota counters, and
 fencing floors in place. Do not drop or truncate them. Migration 0061 gates the
@@ -493,7 +493,8 @@ lock per ordinary membership write. No-op active updates do not lock. An
 explicit principal reactivation may reopen its
 mapped owned user scope; it does not restore detached historical identities.
 
-Release always commits when otherwise authorized. Exact replay remains
+Release requires an unexpired current generation, current authorization, and
+space for its receipt. Exact replay remains
 available for every release receipt throughout its documented 24-hour horizon.
 
 ## Harness guidance
