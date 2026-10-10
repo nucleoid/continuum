@@ -3,6 +3,10 @@ import { createHash } from 'node:crypto';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type pg from 'pg';
+import {
+  ensureExecutionLedger, MigrationExecution, recordUnknownHistory, sqlHash,
+  verifyContractFunctionBodies,
+} from './migration-execution.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_MIGRATIONS_DIR = resolve(here, '../../migrations');
@@ -20,6 +24,7 @@ const BACKFILL_OFFBOARDING_SELECTORS = '-- continuum:backfill-offboarding-select
 const BACKFILL_COORDINATION_REPAIR = '-- continuum:backfill-coordination-repair';
 const BACKFILL_COORDINATION_V4 = '-- continuum:backfill-coordination-v4';
 const BACKFILL_COORDINATION_V5 = '-- continuum:backfill-coordination-v5';
+const BACKFILL_COORDINATION_CONTRACT = '-- continuum:backfill-coordination-contract';
 const COORDINATION_V4_BACKFILL_BATCH_ENV =
   'CONTINUUM_COORDINATION_V4_BACKFILL_BATCH_SIZE';
 const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
@@ -309,7 +314,9 @@ function repair0076CrLfNormalization(sql: string): string {
   return sql.replace(before, after).replace(normalizationBefore, normalizationAfter);
 }
 
-async function repairStoredCrLfFunctions(client: pg.PoolClient): Promise<void> {
+async function repairStoredCrLfFunctions(
+  client: pg.PoolClient, execution: MigrationExecution,
+): Promise<void> {
   const functions = await client.query<{ definition: string }>(
     String.raw`SELECT pg_get_functiondef(function.oid) AS definition
        FROM pg_proc function
@@ -327,7 +334,7 @@ async function repairStoredCrLfFunctions(client: pg.PoolClient): Promise<void> {
   );
   for (const row of functions.rows) {
     const normalized = row.definition.replaceAll('\r\n', '\n');
-    await client.query(normalized);
+    await execution.query(client, normalized);
   }
   const remaining = await client.query<{ count: number }>(
     String.raw`SELECT count(*)::int AS count
@@ -359,15 +366,16 @@ function coordinationBackfillBatchSize(): number {
 }
 
 async function runAdaptiveCoordinationBackfill(
-  client: pg.PoolClient, functionName: string,
+  client: pg.PoolClient, functionName: string, execution: MigrationExecution,
+  maximumBatchSize = 5000,
 ): Promise<void> {
-  let batchSize = coordinationBackfillBatchSize();
+  let batchSize = Math.min(coordinationBackfillBatchSize(), maximumBatchSize);
   await client.query("SET lock_timeout = '1s'");
   await client.query("SET statement_timeout = '5s'");
   try {
     for (;;) {
       try {
-        const result = await client.query<{ completed: boolean }>(
+        const result = await execution.query<{ completed: boolean }>(client,
           `SELECT ${functionName}($1) AS completed`, [batchSize],
         );
         if (result.rows[0]?.completed === true) return;
@@ -425,18 +433,19 @@ async function indexState(
 
 async function runNonTransactionalStatement(
   client: pg.PoolClient, statement: string,
+  execution: MigrationExecution,
   deferCoordinationBackfill = false,
 ): Promise<void> {
   if (statement.split(/\r?\n/).some(
     (line) => line.trim() === BACKFILL_COORDINATION_V4,
   )) {
-    await runAdaptiveCoordinationBackfill(client, 'continuum_backfill_coordination_v4');
+    await runAdaptiveCoordinationBackfill(client, 'continuum_backfill_coordination_v4', execution);
     return;
   }
   if (statement.split(/\r?\n/).some(
     (line) => line.trim() === BACKFILL_COORDINATION_V5,
   )) {
-    await runAdaptiveCoordinationBackfill(client, 'continuum_backfill_coordination_v5');
+    await runAdaptiveCoordinationBackfill(client, 'continuum_backfill_coordination_v5', execution);
     return;
   }
   if (statement.split(/\r?\n/).some(
@@ -446,7 +455,7 @@ async function runNonTransactionalStatement(
     await client.query("SET statement_timeout = '5s'");
     try {
       for (;;) {
-        const result = await client.query<{ completed: boolean }>(
+        const result = await execution.query<{ completed: boolean }>(client,
           `SELECT continuum_backfill_coordination_cleanup(1000) AS completed`,
         );
         if (result.rows[0]?.completed === true) return;
@@ -471,7 +480,7 @@ async function runNonTransactionalStatement(
     await client.query("SET statement_timeout = '30s'");
     try {
       for (;;) {
-        const result = await client.query<{ completed: boolean }>(
+        const result = await execution.query<{ completed: boolean }>(client,
           `SELECT continuum_backfill_audit_offboarding_scopes(1000) AS completed`,
         );
         if (result.rows[0]?.completed === true) return;
@@ -484,7 +493,7 @@ async function runNonTransactionalStatement(
   if (repairName) {
     const state = await indexState(client, repairName);
     if (state && !state.valid) {
-      await client.query(
+      await execution.query(client,
         `DROP INDEX CONCURRENTLY ${quoteIdentifier(state.schema)}.${quoteIdentifier(repairName)}`,
       );
     }
@@ -498,7 +507,39 @@ async function runNonTransactionalStatement(
     }
     return;
   }
-  await client.query(statement);
+  await execution.query(client, statement);
+}
+
+async function finishContractBackfill(
+  client: pg.PoolClient, file: string, source: string,
+): Promise<void> {
+  const execution = new MigrationExecution(file, 'contract-backfill',
+    'coordination-contract-adaptive-1000-v1', sqlHash(source),
+    sqlHash('continuum_backfill_coordination_contract(integer); max=1000; lock=1s; statement=5s; adaptive-v1'));
+  if (file === '0081_coordination_public_contract.sql') {
+    await verifyContractFunctionBodies(client, source);
+  }
+  await client.query(`DO $contract_owner$
+    DECLARE target OID;
+    BEGIN
+      target := to_regprocedure(format('%I.continuum_backfill_coordination_contract(integer)',current_schema()));
+      IF target IS NULL OR NOT EXISTS(SELECT 1 FROM pg_proc WHERE oid=target AND proowner=current_user::regrole) THEN
+        RAISE EXCEPTION 'coordination contract backfill requires its function owner';
+      END IF;
+    END $contract_owner$;`);
+  await execution.start(client);
+  await runAdaptiveCoordinationBackfill(client, 'continuum_backfill_coordination_contract', execution, 1000);
+  if (file === '0081_coordination_public_contract.sql') {
+    await verifyContractFunctionBodies(client, source);
+  }
+  await client.query('BEGIN');
+  try {
+    await execution.complete(client, true);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  }
 }
 
 export interface AppliedMigration {
@@ -518,6 +559,7 @@ export async function runMigrations(
   let originalSearchPath: string | undefined;
   let applicationSchema: string | undefined;
   let migrationLedgerCreated = false;
+  let executionLedgerCreated = false;
   let providerSchemaCreated = false;
   let vectorExtensionCreated = false;
 
@@ -735,6 +777,7 @@ export async function runMigrations(
       throw error;
     }
     migrationLedgerCreated = files.includes('0001_init.sql') && !ledgerAlreadyExisted;
+    executionLedgerCreated = await ensureExecutionLedger(client);
 
     if (files.includes('0001_init.sql')) {
       const initialMigration = await client.query(
@@ -944,6 +987,11 @@ export async function runMigrations(
         [file],
       );
       if (rowCount && rowCount > 0) {
+        await recordUnknownHistory(client, file);
+        const source = verifiedSources.get(file)!;
+        if (source.split('\n').some((line) => line.trim() === BACKFILL_COORDINATION_CONTRACT)) {
+          await finishContractBackfill(client, file, source);
+        }
         continue;
       }
 
@@ -964,7 +1012,12 @@ export async function runMigrations(
           && repairPre0065StoredCrLf) {
         await client.query('BEGIN');
         try {
-          await repairStoredCrLfFunctions(client);
+          const execution = new MigrationExecution(file, 'pre-0065-stored-crlf',
+            'owner-continuum-crlf-pairs-only-v1', null,
+            sqlHash('owner-owned continuum non-extension functions; CRLF pairs only; v1'),
+            sqlHash(verifiedSources.get('0074_coordination_compatibility_and_upgrade_repair.sql')!));
+          await repairStoredCrLfFunctions(client, execution);
+          await execution.complete(client);
           await client.query('COMMIT');
         } catch (error) {
           await client.query('ROLLBACK');
@@ -982,7 +1035,12 @@ export async function runMigrations(
         }
         await client.query('BEGIN');
         try {
-          await client.query(repaired0074CandidateFunction(published0074));
+          const candidateSql = repaired0074CandidateFunction(published0074);
+          const execution = new MigrationExecution(file, 'pre-0075-candidate-reinstall',
+            '0074-candidate-reinstall-hardened-v1', sqlHash(verifiedSources.get(file)!),
+            sqlHash(candidateSql), sqlHash(published0074));
+          await execution.query(client, candidateSql);
+          await execution.complete(client);
           await client.query('COMMIT');
         } catch (error) {
           await client.query('ROLLBACK');
@@ -1003,36 +1061,62 @@ export async function runMigrations(
           : file === '0076_coordination_review_2_remediation.sql'
             ? repair0076CrLfNormalization(canonicalSql)
           : canonicalSql;
+      const online = sql.trimStart().startsWith(NO_TRANSACTION_MARKER);
+      const deferCleanup = file === '0060_coordination_online_finish.sql'
+        && files.includes('0061_coordination_forward_security_repair.sql');
+      const variant = file === '0073_coordination_bounded_discovery_and_locking.sql'
+        ? '0073-online-backfill-deferred-v1'
+        : file === '0074_coordination_compatibility_and_upgrade_repair.sql'
+          ? '0074-partial-upgrade-discovery-crlf-v1'
+          : file === '0076_coordination_review_2_remediation.sql'
+            ? '0076-crlf-pairs-only-v1'
+            : online ? (deferCleanup ? 'online-directives-deferred-cleanup-v1' : 'online-directives-v1')
+              : 'canonical-lf-v1';
+      const execution = new MigrationExecution(file, online ? 'file-online' : 'file',
+        variant, sqlHash(canonicalSql), sqlHash(sql));
+      let transactionOpen = false;
       try {
-        if (sql.trimStart().startsWith(NO_TRANSACTION_MARKER)) {
+        if (online) {
           // CREATE INDEX CONCURRENTLY cannot run in a transaction block. Such
           // migrations use retry-safe statements so a crash before the ledger
           // write can rerun the file.
+          await execution.start(client);
           for (const statement of nonTransactionalStatements(sql)) {
             await runNonTransactionalStatement(
               client,
               statement,
-              file === '0060_coordination_online_finish.sql'
-                && files.includes('0061_coordination_forward_security_repair.sql'),
+              execution,
+              deferCleanup,
             );
           }
-          await client.query(
-            'INSERT INTO _continuum_migrations (name) VALUES ($1)',
-            [file],
-          );
-        } else {
           await client.query('BEGIN');
-          await client.query(sql);
+          transactionOpen = true;
+          await execution.complete(client, true);
           await client.query(
             'INSERT INTO _continuum_migrations (name) VALUES ($1)',
             [file],
           );
           await client.query('COMMIT');
+          transactionOpen = false;
+        } else {
+          await client.query('BEGIN');
+          transactionOpen = true;
+          await execution.query(client, sql);
+          await execution.complete(client);
+          await client.query(
+            'INSERT INTO _continuum_migrations (name) VALUES ($1)',
+            [file],
+          );
+          await client.query('COMMIT');
+          transactionOpen = false;
         }
         if (file === '0001_init.sql') {
           await restoreInitialMigrationSearchPath();
         }
         applied.push({ name: file, appliedAt: new Date() });
+        if (canonicalSql.split('\n').some((line) => line.trim() === BACKFILL_COORDINATION_CONTRACT)) {
+          await finishContractBackfill(client, file, canonicalSql);
+        }
       } catch (error) {
         const migrationError = new Error(
           `Migration ${file} failed: ${(error as Error).message}`,
@@ -1040,9 +1124,7 @@ export async function runMigrations(
         );
         const migrationCleanupErrors: unknown[] = [];
         try {
-          if (!sql.trimStart().startsWith(NO_TRANSACTION_MARKER)) {
-            await client.query('ROLLBACK');
-          }
+          if (transactionOpen) await client.query('ROLLBACK');
         } catch (rollbackError) {
           migrationCleanupErrors.push(rollbackError);
         }
@@ -1098,6 +1180,11 @@ export async function runMigrations(
           providerSchemaCreated = false;
         }
         if (bootstrap.rows[0]?.ledgerEmpty === true) {
+          if (executionLedgerCreated) {
+            await client.query(
+              `DROP TABLE ${quoteIdentifier(applicationSchema)}._continuum_migration_execution`,
+            );
+          }
           await client.query(
             `DROP TABLE ${quoteIdentifier(applicationSchema)}._continuum_migrations`,
           );

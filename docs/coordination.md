@@ -306,6 +306,34 @@ vectors. Audit failure rolls back the whole operation.
 
 ## Deployment, mixed versions, and rollback
 
+The public-contract migration carries a bounded owner-only backfill directive.
+The migrator commits its schema work, then calls
+`continuum_backfill_coordination_contract(integer)` in batches of at most 1000,
+with a 1-second lock wait and 5-second statement deadline. Lock/deadline failures
+reduce the batch down to one before failing. Each successful call durably advances
+its cursor. A ledgered SQL filename does not imply completion: the current
+migrator retries this directive on subsequent runs even when schema work is
+already ledgered. Runtime write gates remain closed until the backfill finishes.
+
+The migrator's owner-only `_continuum_migration_execution` sidecar distinguishes
+canonical source, transformed SQL and separately committed repair phases. It
+stores named variants, SHA-256 digests and statement counts, never raw SQL or
+bound values. Transactional effects, completed evidence and the migration-name
+ledger commit together. Online DDL cannot share that transaction: an interrupted
+attempt remains `started` with unknown partial effects, and retry-safe work reruns
+before completed evidence and the ledger commit together. A changed recipe on an
+unfinished attempt requires operator reconciliation.
+
+Already-ledgered files without historical execution evidence are recorded as
+`history-unknown`. Current checksums do not retroactively prove which SQL ran.
+Earlier unrestricted carriage-return repairs may have altered unrelated function
+bodies; this record cannot discover or undo that historical damage. The current
+contract's directly defined ready/backfill functions are checked against verified
+source bodies, owner, SECURITY DEFINER, pinned search path and PUBLIC revocation.
+Matching those functions does not certify every historical function or prove
+against database-owner changes. Only a trusted migration owner may inspect this
+bookkeeping; runtime, operator and sync roles gain no new capability.
+
 Apply all migrations in order through the forward public-contract repair 0081
 (0064 and 0070 remain concurrent-index steps), then **re-run
 `scripts/grant-application-role.sql`** for every application and dedicated

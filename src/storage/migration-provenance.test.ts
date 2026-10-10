@@ -107,6 +107,32 @@ describe('migration execution provenance', () => {
     });
   });
 
+  it('retries the same online recipe and rolls back the final evidence/ledger pair together', async () => {
+    await fixture(async (pool, directory) => {
+      await pool.query(`CREATE TABLE online_gate(ready boolean NOT NULL);
+        INSERT INTO online_gate VALUES(false);
+        CREATE FUNCTION require_online_ready() RETURNS void LANGUAGE plpgsql AS $$ BEGIN
+          IF NOT (SELECT ready FROM online_gate) THEN RAISE EXCEPTION 'not ready'; END IF;
+        END $$;`);
+      const sql = '-- continuum:no-transaction\nCREATE TABLE IF NOT EXISTS online_effect(id integer);\nSELECT require_online_ready();';
+      await writeFile(join(directory, '001_online.sql'), sql);
+      await expect(runMigrations(pool, directory)).rejects.toThrow(/not ready/);
+      await pool.query('UPDATE online_gate SET ready=true');
+      await pool.query(`CREATE FUNCTION reject_completed_evidence() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        IF NEW.state='completed' THEN RAISE EXCEPTION 'completed evidence failed'; END IF; RETURN NEW; END $$;
+        CREATE TRIGGER reject_completed BEFORE UPDATE ON _continuum_migration_execution
+        FOR EACH ROW EXECUTE FUNCTION reject_completed_evidence();`);
+      await expect(runMigrations(pool, directory)).rejects.toThrow(/completed evidence failed/);
+      expect((await pool.query('SELECT 1 FROM _continuum_migrations')).rowCount).toBe(0);
+      expect((await pool.query("SELECT 1 FROM _continuum_migration_execution WHERE state='completed'")).rowCount).toBe(0);
+      await pool.query('DROP TRIGGER reject_completed ON _continuum_migration_execution');
+      await expect(runMigrations(pool, directory)).resolves.toHaveLength(1);
+      expect((await pool.query("SELECT state FROM _continuum_migration_execution ORDER BY started_at")).rows)
+        .toEqual([{ state: 'started' }, { state: 'started' }, { state: 'completed' }]);
+      expect((await pool.query('SELECT 1 FROM _continuum_migrations')).rowCount).toBe(1);
+    });
+  });
+
   it('resumes the bounded contract backfill even when its SQL filename was ledgered', async () => {
     await fixture(async (pool, directory) => {
       await pool.query(`CREATE TABLE contract_probe (calls integer NOT NULL DEFAULT 0);
