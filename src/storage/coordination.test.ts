@@ -284,7 +284,7 @@ describe('coordination storage and service', () => {
     expect(JSON.stringify(audit.rows)).not.toContain('masked');
     for (const row of audit.rows) {
       expect(row.metadata.resource_bytes).toBe(6);
-      expect(row.metadata.resource_sha256).toMatch(/^[0-9a-f]{64}$/);
+      expect(row.metadata).not.toHaveProperty('resource_sha256');
       expect(row.metadata).not.toHaveProperty('lease_id');
       expect(row.metadata).not.toHaveProperty('run_id');
       expect(row.metadata).not.toHaveProperty('fencing_token');
@@ -511,7 +511,8 @@ describe('coordination storage and service', () => {
       .toMatchObject({ acquired: true });
     await pool.query(
       `UPDATE coordination_operation_receipts
-          SET retain_until = clock_timestamp() - interval '1 microsecond'
+          SET server_time = clock_timestamp() - interval '25 hours',
+              retain_until = clock_timestamp() - interval '1 microsecond'
         WHERE principal_id = $1 AND operation = 'acquire' AND request_id = $2`,
       [principal.id, requestId],
     );
@@ -531,7 +532,8 @@ describe('coordination storage and service', () => {
     await acquire(pool, 'expired-key-old', requestId, runId);
     await pool.query(
       `UPDATE coordination_operation_receipts
-          SET retain_until = clock_timestamp() - interval '1 microsecond'
+          SET server_time = clock_timestamp() - interval '25 hours',
+              retain_until = clock_timestamp() - interval '1 microsecond'
         WHERE principal_id = $1 AND operation = 'acquire' AND request_id = $2`,
       [principal.id, requestId],
     );
@@ -560,7 +562,7 @@ describe('coordination storage and service', () => {
       .toMatchObject({ acquired: true, resource: 'expired-key-new' });
   });
 
-  it('keeps renew and release available when acquire receipts are saturated', async () => {
+  it('rejects fresh renew and release when the total receipt budget is saturated', async () => {
     const runId = randomUUID();
     const held = await acquire(pool, 'saturated-maintenance', randomUUID(), runId);
     expect(held.acquired).toBe(true);
@@ -574,13 +576,13 @@ describe('coordination storage and service', () => {
       .rejects.toEqual(expectCode('COORDINATION_QUOTA_EXCEEDED'));
     await expect(renewLease(pool, principal, {
       leaseId: held.leaseId, runId, requestId: randomUUID(),
-    })).resolves.toMatchObject({ renewed: true, leaseId: held.leaseId });
+    })).rejects.toEqual(expectCode('COORDINATION_QUOTA_EXCEEDED'));
     await expect(releaseLease(pool, principal, {
       leaseId: held.leaseId, runId, requestId: randomUUID(),
-    })).resolves.toEqual({ released: true });
+    })).rejects.toEqual(expectCode('COORDINATION_QUOTA_EXCEEDED'));
   });
 
-  it('keeps realistic multi-lease renewal independent of the principal usage lock', async () => {
+  it('bounds counter contention and resumes renewal after the principal usage lock is released', async () => {
     const leases: Array<{ leaseId: string; runId: string }> = [];
     for (let index = 0; index < 12; index += 1) {
       const runId = randomUUID();
@@ -590,11 +592,6 @@ describe('coordination storage and service', () => {
       if (!acquired.acquired) throw new Error('expected acquisition');
       leases.push({ leaseId: acquired.leaseId, runId });
     }
-    await pool.query(
-      `UPDATE coordination_principal_usage SET mutation_receipt_count = 10000
-        WHERE principal_id = $1`,
-      [principal.id],
-    );
     const blocker = await otherPool.connect();
     try {
       await blocker.query('BEGIN');
@@ -602,15 +599,17 @@ describe('coordination storage and service', () => {
         'SELECT 1 FROM coordination_principal_usage WHERE principal_id = $1 FOR UPDATE',
         [principal.id],
       );
-      const renewed = await Promise.all(leases.map((lease) =>
-        renewLease(pool, principal, {
-          ...lease, requestId: randomUUID(), ttlSeconds: 30,
-        })));
-      expect(renewed).toHaveLength(12);
+      await expect(renewLease(pool, principal, {
+        ...leases[0]!, requestId: randomUUID(), ttlSeconds: 30,
+      })).rejects.toEqual(expectCode('COORDINATION_TIMEOUT'));
     } finally {
       await blocker.query('ROLLBACK');
       blocker.release();
     }
+    const renewed = await Promise.all(leases.map((lease) => renewLease(pool, principal, {
+      ...lease, requestId: randomUUID(), ttlSeconds: 30,
+    })));
+    expect(renewed).toHaveLength(12);
     const retention = await pool.query<{ maximum: number; mutation_count: number }>(
       `SELECT max(extract(epoch FROM (receipt.retain_until - receipt.server_time)))::int
                 AS maximum,
@@ -622,7 +621,7 @@ describe('coordination storage and service', () => {
         GROUP BY usage.mutation_receipt_count`,
       [principal.id],
     );
-    expect(retention.rows).toEqual([{ maximum: 90, mutation_count: 10000 }]);
+    expect(retention.rows).toEqual([{ maximum: 86400, mutation_count: 12 }]);
   });
 
   it('enforces the new-resource rate limit without blocking existing resources', async () => {
@@ -848,7 +847,7 @@ describe('coordination storage and service', () => {
     }
   });
 
-  it('separates short-lived contention receipts from acquired receipt quota', async () => {
+  it('counts contention receipts in the full 24-hour receipt budget', async () => {
     const held = await acquire(pool, 'contention-retention');
     expect(held.acquired).toBe(true);
     const contended = await acquire(pool, 'contention-retention');
@@ -868,11 +867,11 @@ describe('coordination storage and service', () => {
       [principal.id],
     );
     expect(usage.rows).toEqual([{
-      acquired_count: 1, contended_count: 1, maximum: 90,
+      acquired_count: 1, contended_count: 1, maximum: 86400,
     }]);
   });
 
-  it('bounds retained renew receipts per lease', async () => {
+  it('preserves every retained renew receipt under the principal budget', async () => {
     const runId = randomUUID();
     const held = await acquire(pool, 'bounded-renew-receipts', randomUUID(), runId);
     if (!held.acquired) throw new Error('expected acquisition');
@@ -885,7 +884,7 @@ describe('coordination storage and service', () => {
       `SELECT count(*)::int AS count FROM coordination_operation_receipts
         WHERE lease_id = $1 AND operation = 'renew'`,
       [held.leaseId],
-    )).rows[0]?.count).toBeLessThanOrEqual(100);
+    )).rows[0]?.count).toBe(105);
   });
 
   it('uses server lock timeout and leaves no late receipt after a blocked request', async () => {

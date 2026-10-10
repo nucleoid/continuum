@@ -33,6 +33,7 @@ import {
   lockCoordinationAuthorization,
   lockExistingResource,
   lockReceiptRequest,
+  lockPrincipalUsage,
   preparePrincipalReceipts,
   releaseLeaseGeneration,
   renewLeaseGeneration,
@@ -92,7 +93,7 @@ function safeCoordinationError(error: unknown): ServiceError {
       'Coordination storage quota exceeded',
     );
   }
-  if (['42501', '42P01', '3F000', '42883', '42703'].includes(String(code))) {
+  if (['42501', '42P01', '3F000', '42883', '42703', '55000'].includes(String(code))) {
     return new ServiceError(
       'DEPENDENCY_UNAVAILABLE',
       'Coordination storage is not provisioned for the application role',
@@ -229,6 +230,8 @@ export async function acquireLease(
         return replayAcquire(prior, scopeLabel);
       }
 
+      await preparePrincipalReceipts(client, principal.id);
+      await lockPrincipalUsage(client, principal.id);
       await ensureAndLockResource(client, scope.id, resource, principal.id);
       const serverTime = await sampleServerTime(client);
       const current = await getCurrentLease(client, scope.id, resource, serverTime);
@@ -245,7 +248,6 @@ export async function acquireLease(
           retryAfterSeconds,
           serverTime,
         };
-        await preparePrincipalReceipts(client, principal.id);
         await insertReceipt(client, {
           principalId: principal.id,
           operation: 'acquire',
@@ -296,7 +298,6 @@ export async function acquireLease(
         expiresAt: generation.expiresAt,
         serverTime,
       };
-      await preparePrincipalReceipts(client, principal.id);
       await insertReceipt(client, {
         principalId: principal.id,
         operation: 'acquire',
@@ -396,6 +397,8 @@ export async function renewLease(
         };
       }
 
+      await preparePrincipalReceipts(client, principal.id);
+      await lockPrincipalUsage(client, principal.id);
       if (!await lockExistingResource(client, target.scopeId, target.resource)) {
         throw leaseLost();
       }
@@ -418,7 +421,6 @@ export async function renewLease(
         expiresAt,
         serverTime,
       };
-      await preparePrincipalReceipts(client, principal.id);
       await insertReceipt(client, {
         principalId: principal.id,
         operation: 'renew',
@@ -485,6 +487,8 @@ export async function releaseLease(
         return { released: true, alreadyReleased: true };
       }
 
+      await preparePrincipalReceipts(client, principal.id);
+      await lockPrincipalUsage(client, principal.id);
       if (!await lockExistingResource(client, target.scopeId, target.resource)) {
         throw leaseLost();
       }
@@ -499,7 +503,6 @@ export async function releaseLease(
       await releaseLeaseGeneration(
         client, target.scopeId, target.resource, leaseId, serverTime,
       );
-      await preparePrincipalReceipts(client, principal.id);
       await insertReceipt(client, {
         principalId: principal.id,
         operation: 'release',

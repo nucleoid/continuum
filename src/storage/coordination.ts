@@ -210,7 +210,7 @@ export async function preparePrincipalReceipts(
          FROM coordination_operation_receipts
         WHERE principal_id = $1 AND retain_until <= clock_timestamp()
         ORDER BY retain_until, operation, request_id
-        LIMIT $2
+        LIMIT $2 FOR UPDATE SKIP LOCKED
      ), removed AS (
        DELETE FROM coordination_operation_receipts r
        USING doomed d
@@ -238,7 +238,7 @@ export async function preparePrincipalReceipts(
               WHERE receipt.lease_id = candidate.lease_id
            )
          ORDER BY candidate.cleanup_eligible_at, candidate.lease_id
-         LIMIT $2
+         LIMIT $2 FOR UPDATE SKIP LOCKED
       )`,
     [principalId, RECEIPT_CLEANUP_BATCH],
   );
@@ -248,6 +248,10 @@ export async function preparePrincipalReceipts(
     [principalId],
   );
   return usage.rows[0]?.receipt_count ?? 0;
+}
+
+export async function lockPrincipalUsage(client: pg.PoolClient, principalId: string): Promise<void> {
+  await client.query('SELECT continuum_coordination_lock_principal_usage($1)', [principalId]);
 }
 
 export async function lockReceiptRequest(
@@ -407,7 +411,7 @@ export async function ensureAndLockResource(
        FROM coordination_scope_usage WHERE scope_id = $1`,
     [scopeId],
   );
-  if ((usage.rows[0]?.resource_count ?? 0) >= (usage.rows[0]?.resource_limit ?? 10_000)) {
+  if ((usage.rows[0]?.resource_count ?? 0) >= Math.min(10_000, usage.rows[0]?.resource_limit ?? 10_000)) {
     throw new CoordinationStorageError('RESOURCE_QUOTA');
   }
   const rate = await client.query<{ allowed: boolean }>(

@@ -112,7 +112,8 @@ BEGIN
       'continuum_coordination_reserve_resource_creation(uuid)',
       'continuum_coordination_scope_fencing_floor(uuid)',
       'continuum_coordination_privacy_state(uuid,uuid)',
-      'continuum_coordination_lock_entra_freshness()'
+      'continuum_coordination_lock_entra_freshness()',
+      'continuum_coordination_lock_principal_usage(uuid)'
     ] LOOP
       IF to_regprocedure(format('%I.%s', schema_name, function_signature)) IS NOT NULL THEN
         EXECUTE format('GRANT EXECUTE ON FUNCTION %I.%s TO %I',
@@ -264,6 +265,7 @@ BEGIN
   FOREACH signature IN ARRAY ARRAY[
     'continuum_operator_list_coordination_privacy_repairs(uuid,uuid,integer)',
     'continuum_operator_list_coordination_privacy_repairs(uuid,uuid,uuid,integer)',
+    'continuum_operator_list_coordination_privacy_repair_page(uuid,uuid,integer)',
     'continuum_operator_offboarding_actual_state_is_erased(uuid,uuid)'
   ] LOOP
     IF to_regprocedure(format('%I.%s', schema_name, signature)) IS NOT NULL THEN

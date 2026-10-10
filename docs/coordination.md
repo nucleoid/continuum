@@ -288,8 +288,12 @@ set transaction-level `lock_timeout` and `statement_timeout` before invoking
 maintenance; PostgreSQL function `SET` clauses do not bound the already-running
 calling statement, so Continuum does not claim a function-local deadline.
 `continuum_operator_set_coordination_scope_quota` adjusts a reviewed scope
-limit within the hard ceiling. Principal quota configuration cannot increase
-the combined 10,000 receipt ceiling. The shared application role cannot execute these operator
+limit within the hard ceiling. The principal quota setter's `acquire_limit`
+parameter now sets the combined receipt budget, capped at 10,000. Its legacy
+`contended_limit` remains a bounded compatibility field and is ignored by quota
+enforcement. Lowering a budget preserves existing receipts and authorized
+replays and refuses fresh growth until cleanup frees space.
+The shared application role cannot execute these operator
 functions, directly update usage/counter tables, or update protected lease and
 resource identity columns; owner-owned triggers and narrow `SECURITY DEFINER`
 helpers maintain counters.
@@ -308,6 +312,14 @@ Apply all migrations in order through the forward public-contract repair 0081
 operator role. Re-run `scripts/grant-operator-role.sql` immediately afterward
 for dedicated operators. The exact role verifier deliberately rejects both
 missing coordination grants and broader manual grants.
+
+The 0081 repair rebuilds all receipt counters and extends remaining historical
+short receipts in durable, bounded keyset batches. Fresh coordination mutations
+return `DEPENDENCY_UNAVAILABLE` while the repair is pending; retained authorized
+replays remain available. An interrupted repair resumes from its saved cursors,
+including after the migration file has been ledgered. Finish repair before
+enabling current mutation or offboarding traffic. Only the actual schema owner
+may execute the repair capability; a client-supplied repair flag grants no access.
 
 Do not run the current offboarding binary against a database below 0063: it
 requires the versioned coordination privacy state introduced there. During a
