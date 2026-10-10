@@ -131,6 +131,94 @@ describe('offboarding and erasure', () => {
     })).rejects.toThrow('principal kind conflicts');
   });
 
+  it('offboarding review: waits for an in-flight principal audit lock within the server deadline', async () => {
+    const value = await fixture();
+    const blocker = await pool.connect();
+    let pending: ReturnType<typeof offboardPrincipal> | undefined;
+    try {
+      await blocker.query('BEGIN');
+      await blocker.query('SELECT id FROM principals WHERE id = $1 FOR KEY SHARE', [value.target.id]);
+      let settled = false;
+      pending = offboardPrincipal(pool, value.admin, value.target.id);
+      pending.finally(() => { settled = true; }).catch(() => undefined);
+      let waiting = false;
+      for (let attempt = 0; !settled && !waiting && attempt < 100; attempt += 1) {
+        waiting = (await pool.query(
+          `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                           WHERE datname = current_database() AND wait_event_type = 'Lock'
+                             AND query LIKE '%FROM principals principal%') AS waiting`,
+        )).rows[0].waiting === true;
+        if (!waiting && !settled) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await blocker.query('COMMIT');
+      expect((await pending).complete).toBe(true);
+      expect(waiting).toBe(true);
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => undefined);
+      await pending?.catch(() => undefined);
+      blocker.release();
+    }
+  });
+
+  it('offboarding review: commits a privacy batch before full-state verification and honors its timeout', async () => {
+    const value = await fixture();
+    expect((await offboardPrincipal(pool, value.admin, value.target.id)).complete).toBe(true);
+    await pool.query(
+      `UPDATE coordination_principal_privacy_progress
+          SET privacy_version = 2, audit_cursor_id = 0, completed_at = NULL
+        WHERE principal_id = $1`, [value.target.id],
+    );
+    const definition = (await pool.query(
+      `SELECT pg_get_functiondef(
+        'continuum_operator_offboarding_actual_state_is_erased(uuid,uuid)'::regprocedure
+      ) AS definition`,
+    )).rows[0].definition as string;
+    try {
+      await pool.query(`CREATE OR REPLACE FUNCTION
+                        continuum_operator_offboarding_actual_state_is_erased(UUID, UUID)
+                        RETURNS BOOLEAN LANGUAGE plpgsql AS $$
+                        BEGIN
+                          IF current_setting('statement_timeout') <> '20ms' THEN
+                            RAISE EXCEPTION 'verification budget was not installed';
+                          END IF;
+                          PERFORM pg_sleep(0.1);
+                          RETURN TRUE;
+                        END; $$`);
+      // No expensive verification is allowed to undo this bounded scrub.
+      let batch = await offboardPrincipal(pool, value.admin, value.target.id, {
+        verificationTimeoutMs: 20, batchSize: 1,
+      });
+      expect(batch).toMatchObject({ complete: false, progressed: true });
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        const privacy = (await pool.query(
+          `SELECT privacy_version, completed_at IS NOT NULL AS complete
+             FROM coordination_principal_privacy_progress WHERE principal_id = $1`,
+          [value.target.id],
+        )).rows[0];
+        if (privacy.privacy_version >= 3 && privacy.complete) break;
+        batch = await offboardPrincipal(pool, value.admin, value.target.id, {
+          verificationTimeoutMs: 20, batchSize: 1,
+        });
+        expect(batch.complete).toBe(false);
+      }
+      expect((await pool.query(
+        `SELECT privacy_version, completed_at IS NOT NULL AS complete
+           FROM coordination_principal_privacy_progress WHERE principal_id = $1`,
+        [value.target.id],
+      )).rows).toEqual([{ privacy_version: 3, complete: true }]);
+      await expect(offboardPrincipal(pool, value.admin, value.target.id, {
+        verificationTimeoutMs: 20,
+      })).rejects.toMatchObject({ code: 'COORDINATION_TIMEOUT' });
+      expect((await pool.query(
+        'SELECT completed_at IS NOT NULL AS complete FROM coordination_principal_privacy_progress WHERE principal_id = $1',
+        [value.target.id],
+      )).rows).toEqual([{ complete: true }]);
+    } finally {
+      await pool.query(definition);
+    }
+    expect((await offboardPrincipal(pool, value.admin, value.target.id)).complete).toBe(true);
+  });
+
   it('provider review: completes privacy erasure when provider verification is unavailable', async () => {
     const value = await fixture();
     const definition = (await pool.query(
