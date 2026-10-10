@@ -58,6 +58,21 @@ describe('coordination REST/MCP parity', () => {
     ]));
   });
 
+  it('advertises discoverable fields and required arguments for all coordination tools', async () => {
+    const { tools } = await client.listTools();
+    for (const [name, required, optional] of [
+      ['acquire', ['scope', 'resource', 'run_id', 'request_id'], ['ttl_seconds']],
+      ['renew', ['lease_id', 'run_id', 'request_id'], ['ttl_seconds']],
+      ['release', ['lease_id', 'run_id', 'request_id'], []],
+      ['inspect', ['scope', 'resource'], []],
+    ] as const) {
+      const schema = tools.find((tool) => tool.name === `continuum.lock_${name}`)!.inputSchema;
+      expect(Object.keys(schema.properties ?? {}).sort()).toEqual([...required, ...optional].sort());
+      expect(schema.required?.slice().sort()).toEqual([...required].sort());
+      expect(schema.additionalProperties).toBe(false);
+    }
+  });
+
   it('keeps acquire/renew/release semantics equivalent with transport casing', async () => {
     const restRun = randomUUID();
     const restAcquire = await request(createApp(pool))
