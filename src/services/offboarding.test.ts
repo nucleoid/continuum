@@ -1,4 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import type pg from 'pg';
 import { createAuthenticator } from '../api/auth.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
@@ -18,6 +20,8 @@ import {
 import { provisionEntraGroupBinding } from './membership-sync.js';
 import { disablePrincipal, reactivatePrincipal } from './principal-admin.js';
 import { recallForPrincipal } from './recall.js';
+
+const execFileAsync = promisify(execFile);
 
 async function offboardPrincipal(
   pool: pg.Pool, actor: Parameters<typeof serviceOffboardPrincipal>[1], principalId: string,
@@ -253,6 +257,22 @@ describe('offboarding and erasure', () => {
         'SELECT completed_at IS NOT NULL AS complete FROM coordination_principal_privacy_progress WHERE principal_id = $1',
         [value.target.id],
       )).rows).toEqual([{ complete: true }]);
+      await expect(offboardPrincipal(pool, value.admin, value.target.id, {
+        dryRun: true,
+      })).resolves.toMatchObject({ dryRun: true, complete: false, alreadyOffboarded: false });
+      const connectionString = (pool as unknown as {
+        options: { connectionString: string };
+      }).options.connectionString;
+      await expect(execFileAsync(process.execPath, [
+        'dist/identity/admin-cli.js', 'offboard-principal', value.target.id,
+        '--confirm-scope', value.personal.id, '--verification-timeout-ms', '20', '--once',
+      ], {
+        cwd: process.cwd(), timeout: 10_000,
+        env: {
+          ...process.env, CONTINUUM_DATABASE_URL: connectionString,
+          CONTINUUM_ADMIN_ACTOR: value.admin.externalId, CONTINUUM_DB_POOL_MAX: '1',
+        },
+      })).rejects.toMatchObject({ code: 2 });
     } finally {
       await pool.query(definition);
     }

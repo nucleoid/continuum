@@ -470,9 +470,16 @@ event trigger checks every memory and every audit row linked to the run's
 bounded fence before appending completion. On very large per-subject histories,
 set the supported `verificationTimeoutMs` API option or
 `--verification-timeout-ms <1-300000>` admin-CLI option from measured query plans
-and database load. The default is 30 seconds. A timeout rolls back the current
-batch and commits no completion receipt; retain the run and retry. Do not weaken
-or skip verification, and do not claim completion from progress counters alone.
+and database load. The default is 30 seconds. This configured budget also
+applies to full-state verification of an already completed run. Upgrade privacy
+re-scrub batches commit before that proof is attempted on the next invocation,
+so an expensive full-history check cannot undo bounded privacy progress.
+Finishing that privacy phase is reported as progress until the next invocation
+verifies completion or restarts dirty lifecycle work. A server deadline returns
+`COORDINATION_TIMEOUT`; the admin CLI exits 2 with a sanitized error and retains
+previously committed batches. The timed-out transaction appends no completion
+receipt. Retain the run and resume using a measured verification budget. Do not
+weaken or skip verification, or claim completion from progress counters alone.
 
 Directly setting `principals.offboarded_at` is an internal write fence, not a
 supported offboarding operation or evidence that erasure completed. It may be

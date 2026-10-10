@@ -7,6 +7,7 @@ import {
 } from '../services/principal-admin.js';
 import type { MembershipRole } from '../types.js';
 import { cliFailure } from './cli-errors.js';
+import { ServiceError } from '../services/errors.js';
 import {
   listCoordinationPrivacyRepairs, listIncompleteOffboardingRuns, mapOwnedUserScope,
   offboardPrincipal, repairCoordinationPrivacy,
@@ -221,5 +222,5 @@ async function main(): Promise<void> {
 
 void main().catch((error) => {
   process.stderr.write(`${cliFailure('continuum_admin_failed', error)}\n`);
-  process.exitCode = 1;
+  process.exitCode = error instanceof ServiceError && error.code === 'COORDINATION_TIMEOUT' ? 2 : 1;
 });

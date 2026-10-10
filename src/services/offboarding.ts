@@ -6,6 +6,13 @@ import { ServiceError } from './errors.js';
 
 function operatorBoundaryError(error: unknown): ServiceError | null {
   const databaseError = error as { code?: string; message?: string };
+  if (databaseError.code === '57014') {
+    return new ServiceError(
+      'COORDINATION_TIMEOUT',
+      'offboarding database deadline exceeded; earlier committed progress can be resumed',
+      { cause: error },
+    );
+  }
   if (databaseError.code === '42501'
       || /(?:DB|role-name\/OID)-bound trusted approve identity|operator path/i
         .test(databaseError.message ?? '')) {
@@ -1133,12 +1140,23 @@ async function offboardPrincipalCore(
         ? new Date(privacyRepair.rows[0].privacy.blocked_until!) : null;
       coordinationPrivacyReason = privacyRepair.rows[0]?.privacy?.reason ?? null;
     }
-    const actualStateErased = runCompleted && wasOffboarded
-      ? (await client.query<{ erased: boolean }>(
+    let actualStateErased = false;
+    // A bounded scrub must commit independently of the full-history predicate.
+    // Verify on the next invocation once privacy is complete. Shared-role
+    // previews remain read-only and do not invoke an operator-only capability
+    // or claim exact completion from the bounded count preview.
+    if (!dryRun && runCompleted && wasOffboarded && coordinationPrivacyComplete
+        && !coordinationPrivacyMutated) {
+      await client.query(
+        `SELECT set_config('statement_timeout', $1, TRUE)`,
+        [`${verificationTimeoutMs}ms`],
+      );
+      actualStateErased = (await client.query<{ erased: boolean }>(
         `SELECT continuum_operator_offboarding_actual_state_is_erased($1, $2) AS erased`,
         [actor.id, run.rows[0].run_id],
-      )).rows[0]?.erased === true
-      : false;
+      )).rows[0]?.erased === true;
+      await client.query("SET LOCAL statement_timeout = '30s'");
+    }
     const clean = resumedRun
       ? Boolean(run.rows[0].memory_complete) && Boolean(run.rows[0].scope_cleanup_complete)
         && !resumedAuditRemains
@@ -1174,7 +1192,11 @@ async function offboardPrincipalCore(
       await client.query('COMMIT');
       return {
         ...baseResult,
-        complete: coordinationPrivacyComplete && actualStateErased,
+        complete: false,
+        // Completing a durable privacy phase is progress even when no row
+        // changed in its final batch. The next call must verify or restart the
+        // dirty lifecycle rather than stop the CLI as a no-progress result.
+        progressed: coordinationPrivacyProgressed || coordinationPrivacyComplete,
       };
     }
 
