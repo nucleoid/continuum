@@ -11,17 +11,26 @@ const databaseUrl = process.env.CONTINUUM_TEST_DATABASE_URL
 
 async function fixture(run: (pool: pg.Pool, directory: string, schema: string) => Promise<void>) {
   const schema = `execution_${randomUUID().replaceAll('-', '').slice(0, 16)}`;
-  const admin = new pg.Pool({ connectionString: databaseUrl, max: 1 });
+  const admin = new pg.Pool({ connectionString: databaseUrl, max: 1,
+    application_name: `${schema}_setup` });
   const directory = await mkdtemp(join(tmpdir(), 'continuum-execution-'));
-  await admin.query(`CREATE SCHEMA "${schema}"`);
-  const pool = new pg.Pool({ connectionString: databaseUrl, max: 1,
-    options: `-c search_path=${schema}` });
-  try { await run(pool, directory, schema); }
+  let pool: pg.Pool | undefined;
+  let created = false;
+  try {
+    await admin.query(`CREATE SCHEMA "${schema}"`);
+    created = true;
+    pool = new pg.Pool({ connectionString: databaseUrl, max: 1,
+      application_name: `${schema}_migrator`, options: `-c search_path=${schema}` });
+    await run(pool, directory, schema);
+  }
   finally {
-    await pool.end();
-    await admin.query(`DROP SCHEMA "${schema}" CASCADE`);
-    await admin.end();
-    await rm(directory, { recursive: true, force: true });
+    try {
+      await pool?.end();
+      if (created) await admin.query(`DROP SCHEMA "${schema}" CASCADE`);
+    } finally {
+      await admin.end();
+      await rm(directory, { recursive: true, force: true });
+    }
   }
 }
 
@@ -36,6 +45,36 @@ function independentlyDigest(sql: string, values: unknown[] = []): string {
 }
 
 describe('migration execution provenance', () => {
+  it('rolls back an uncertain bookkeeping BEGIN before releasing the checked-out client', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-execution-begin-'));
+    await writeFile(join(directory, '001_probe.sql'), 'SELECT 1;');
+    let transactionOpen = false;
+    let releasedOpen: boolean | undefined;
+    const queries: string[] = [];
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        queries.push(sql);
+        if (sql.includes('pg_try_advisory_lock')) return { rows: [{ locked: true }], rowCount: 1 };
+        if (sql.includes('pg_advisory_unlock')) return { rows: [{ unlocked: true }], rowCount: 1 };
+        if (sql === 'BEGIN') {
+          transactionOpen = true;
+          throw new Error('BEGIN response lost after server execution');
+        }
+        if (sql === 'ROLLBACK') transactionOpen = false;
+        return { rows: [], rowCount: 0 };
+      }),
+      release: vi.fn(() => { releasedOpen = transactionOpen; }),
+    };
+    try {
+      await expect(runMigrations({ connect: vi.fn(async () => client) } as unknown as pg.Pool, directory))
+        .rejects.toThrow(/BEGIN response lost/);
+      expect(queries).toContain('ROLLBACK');
+      expect(client.release).toHaveBeenCalledOnce();
+      expect(releasedOpen).toBe(false);
+      expect(queries.some((sql) => sql.includes('pg_advisory_unlock'))).toBe(true);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
   it('executes the verified source snapshot when the file changes after verification', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'continuum-provenance-race-'));
     const name = '0052_offboarding_review_repair.sql';
