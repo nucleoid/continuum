@@ -127,18 +127,6 @@ function serviceErrorResult(error: unknown, logger: ServiceLogger): {
   return { ...jsonResult(body), isError: true };
 }
 
-const rawCoordinationInputSchema = z.preprocess(
-  (value) => {
-    if (typeof value === 'object' && value !== null
-        && Object.hasOwn(value, '__proto__')) {
-      return { __continuum_invalid_prototype_key__: true };
-    }
-    return value;
-  },
-  z.custom<Record<string, unknown>>(
-    (value) => typeof value === 'object' && value !== null && !Array.isArray(value),
-  ),
-);
 const acquireCoordinationInputSchema = z.object({
   scope: z.string(), resource: z.string(), run_id: z.string(), request_id: z.string(),
   ttl_seconds: z.number().int().optional(),
@@ -195,7 +183,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     'continuum.lock_acquire',
     {
       description: 'Acquire one exclusive, non-reentrant scoped coordination lease.',
-      inputSchema: rawCoordinationInputSchema,
+      inputSchema: acquireCoordinationInputSchema,
     },
     async (args, extra) => {
       try {
@@ -235,7 +223,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     'continuum.lock_renew',
     {
       description: 'Renew the current lease generation owned by this principal and run.',
-      inputSchema: rawCoordinationInputSchema,
+      inputSchema: mutationCoordinationInputSchema,
     },
     async (args, extra) => {
       try {
@@ -264,7 +252,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     'continuum.lock_release',
     {
       description: 'Release the current lease generation owned by this principal and run.',
-      inputSchema: rawCoordinationInputSchema,
+      inputSchema: releaseCoordinationInputSchema,
     },
     async (args, extra) => {
       try {
@@ -288,7 +276,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     'continuum.lock_inspect',
     {
       description: 'Inspect a scoped resource while masking any other holder identity.',
-      inputSchema: rawCoordinationInputSchema,
+      inputSchema: inspectCoordinationInputSchema,
     },
     async (args, extra) => {
       try {
@@ -800,32 +788,45 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     },
   );
 
-  // The SDK validates tools/call with z.record() before it invokes a tool.
-  // Zod reconstructs that record and silently loses an own "__proto__" key,
-  // so preserve the malformed-input signal at the transport boundary. The
-  // sentinel is then rejected by each coordination tool's strict schema.
+  // Advertise object schemas to MCP clients, while preserving the shared
+  // INVALID_INPUT envelope before the SDK converts schema failures to text.
+  // Validate original arguments here: SDK z.record() parsing drops __proto__.
+  const coordinationSchemas = new Map<string, z.ZodTypeAny>([
+    ['continuum.lock_acquire', acquireCoordinationInputSchema],
+    ['continuum.lock_renew', mutationCoordinationInputSchema],
+    ['continuum.lock_release', releaseCoordinationInputSchema],
+    ['continuum.lock_inspect', inspectCoordinationInputSchema],
+  ]);
   const sdkConnect = server.connect.bind(server);
   server.connect = async (transport) => {
-    const priorOnMessage = transport.onmessage;
-    transport.onmessage = (message, extra) => {
+    await sdkConnect(transport);
+    const sdkOnMessage = transport.onmessage;
+    transport.onmessage = async (message, extra) => {
       const request = message as {
+        jsonrpc?: unknown;
+        id?: unknown;
         method?: unknown;
         params?: { name?: unknown; arguments?: unknown };
       };
-      const args = request.params?.arguments;
-      if (request.method === 'tools/call'
-          && typeof request.params?.name === 'string'
-          && request.params.name.startsWith('continuum.lock_')
-          && typeof args === 'object' && args !== null && !Array.isArray(args)
-          && Object.hasOwn(args, '__proto__')) {
-        Reflect.deleteProperty(args, '__proto__');
-        Object.defineProperty(args, '__continuum_invalid_prototype_key__', {
-          value: true, enumerable: true, configurable: true,
-        });
+      if (request.jsonrpc === '2.0' && request.method === 'tools/call'
+        && (typeof request.id === 'string' || typeof request.id === 'number')
+        && typeof request.params?.name === 'string') {
+        const schema = coordinationSchemas.get(request.params.name);
+        if (schema) {
+          try {
+            strictCoordinationInput(request.params.arguments, schema);
+          } catch (error) {
+            try {
+              await transport.send({ jsonrpc: '2.0', id: request.id, result: errorResult(error) });
+            } catch (sendError) {
+              transport.onerror?.(sendError instanceof Error ? sendError : new Error('MCP response failed'));
+            }
+            return;
+          }
+        }
       }
-      priorOnMessage?.(message, extra);
+      sdkOnMessage?.(message, extra);
     };
-    await sdkConnect(transport);
   };
 
   return server;

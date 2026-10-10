@@ -99,7 +99,6 @@ export async function withCoordinationTransaction<T>(
     const result = await work(client);
     checkCancelled(signal);
     await client.query('COMMIT');
-    checkCancelled(signal);
     return result;
   } catch (error) {
     try {
@@ -165,7 +164,8 @@ export async function lockCoordinationAuthorization(
     const freshness = await client.query<{ fresh: boolean }>(
       'SELECT continuum_coordination_lock_entra_freshness() AS fresh',
     );
-    if (freshness.rows[0]?.fresh !== true) return false;
+    if (freshness.rows[0]?.fresh !== true
+      && !candidates.rows.some((row) => row.source_kind !== 'entra')) return false;
   }
   return coordinationAuthorizationIsCurrent(client, principalId, scopeId);
 }
@@ -367,26 +367,13 @@ export async function insertReceipt(
        $1, $2, $3, decode($4, 'hex'), $5,
        $6, $7, $8, $9, $10::bigint,
        $11::timestamptz, $12::timestamptz, $13,
-       CASE
-         WHEN $2 = 'renew' THEN LEAST(
-           $12::timestamptz + interval '24 hours',
-           $12::timestamptz + make_interval(secs => $14) + interval '60 seconds'
-         )
-         WHEN $5 = 'contended'
-           THEN $12::timestamptz + interval '90 seconds'
-         ELSE $12::timestamptz + interval '24 hours'
-       END
+       $12::timestamptz + interval '24 hours'
      )`,
     [
       input.principalId, input.operation, input.requestId, input.payloadHash,
       input.outcome, input.scopeId, input.resource, input.leaseId ?? null,
       input.runId ?? null, input.fencingToken ?? null, input.expiresAt ?? null,
       input.serverTime, input.retryAfterSeconds ?? null,
-      input.operation === 'renew' && input.expiresAt
-        ? Math.max(0, Math.ceil(
-          (Date.parse(input.expiresAt) - Date.parse(input.serverTime)) / 1000,
-        ))
-        : 0,
     ],
   );
 }

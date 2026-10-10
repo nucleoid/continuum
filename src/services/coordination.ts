@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import type { Principal } from '../types.js';
 import { record } from '../audit/log.js';
@@ -92,10 +92,7 @@ function safeCoordinationError(error: unknown): ServiceError {
       'Coordination storage quota exceeded',
     );
   }
-  if (code === '23514') {
-    return new ServiceError('INVALID_INPUT', 'Coordination input violates the storage contract');
-  }
-  if (code === '42501' || code === '42P01' || code === '3F000') {
+  if (['42501', '42P01', '3F000', '42883', '42703'].includes(String(code))) {
     return new ServiceError(
       'DEPENDENCY_UNAVAILABLE',
       'Coordination storage is not provisioned for the application role',
@@ -129,10 +126,9 @@ function scopeNotFound(): ServiceError {
   return new ServiceError('SCOPE_NOT_FOUND', 'Scope not found');
 }
 
-function resourceAudit(resource: string): { resource_bytes: number; resource_sha256: string } {
+function resourceAudit(resource: string): { resource_bytes: number } {
   return {
     resource_bytes: Buffer.byteLength(resource, 'utf8'),
-    resource_sha256: createHash('sha256').update(resource, 'utf8').digest('hex'),
   };
 }
 
