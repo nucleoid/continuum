@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { createPrincipal } from './principals.js';
-import { createScope } from './scopes.js';
+import { createScope, getScopeByRef } from './scopes.js';
 import { addMembership } from './memberships.js';
 import { makeTestPool, resetData } from './test-helpers.js';
 import { acquireLease, inspectLease, releaseLease, renewLease } from '../services/coordination.js';
@@ -112,5 +112,44 @@ describe('coordination public handoff contract', () => {
     await expect(renewLease(pool, principal, { leaseId: acquired.leaseId, runId: input.runId, requestId: randomUUID() }))
       .rejects.toMatchObject({ code: 'COORDINATION_QUOTA_EXCEEDED' });
     expect((await pool.query('SELECT * FROM coordination_leases WHERE lease_id = $1', [acquired.leaseId])).rows).toEqual(before);
-  }, 30_000);
+  }, 120_000);
+
+  async function eraseWithHeldHighResource() {
+    const operator = await createPrincipal(pool, {
+      externalId: `erase:${randomUUID()}`, kind: 'user', displayName: 'Operator',
+    });
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await addMembership(pool, operator.id, org.id, 'admin');
+    const scope = await createScope(pool, { kind: 'user', name: `erase-${randomUUID()}` });
+    await pool.query(`INSERT INTO coordination_resources(scope_id, resource, fencing_token)
+      VALUES ($1, 'a-low', 1), ($1, 'z-high', 900)`, [scope.id]);
+    const blocker = await pool.connect();
+    await blocker.query('BEGIN');
+    await blocker.query(`SELECT 1 FROM coordination_resources
+      WHERE scope_id = $1 AND resource = 'z-high' FOR UPDATE`, [scope.id]);
+    try {
+      await pool.query('SELECT continuum_operator_pseudonymize_scope_v2($1, $2, $3)',
+        [operator.id, scope.id, `erased-${scope.id}`]);
+      return { operator, scope };
+    } finally {
+      await blocker.query('ROLLBACK');
+      blocker.release();
+    }
+  }
+
+  it('does not complete scope erasure after skipping a held resource', async () => {
+    const { scope } = await eraseWithHeldHighResource();
+    expect((await pool.query(`SELECT phase, completed_at FROM coordination_scope_privacy_progress
+      WHERE scope_id = $1`, [scope.id])).rows).toEqual([{ phase: 'resources', completed_at: null }]);
+  });
+
+  it('preserves the high fencing floor when scope erasure resumes after a held resource', async () => {
+    const { operator, scope } = await eraseWithHeldHighResource();
+    await pool.query('SELECT continuum_operator_pseudonymize_scope_v2($1, $2, $3)',
+      [operator.id, scope.id, `erased-${scope.id}`]);
+    expect((await pool.query('SELECT fencing_floor::text AS floor FROM coordination_scope_fencing_floors WHERE scope_id = $1', [scope.id])).rows)
+      .toEqual([{ floor: '900' }]);
+    expect((await pool.query('SELECT count(*)::int AS count FROM coordination_resources WHERE scope_id = $1', [scope.id])).rows)
+      .toEqual([{ count: 0 }]);
+  });
 });

@@ -53,7 +53,7 @@ describe('coordination database role profiles', () => {
   async function rolePool(role: string): Promise<pg.Pool> {
     await pool.query(
       'GRANT ' + quoteRole(role)
-      + ' TO CURRENT_USER WITH ADMIN OPTION, SET FALSE, INHERIT FALSE',
+      + ' TO CURRENT_USER WITH ADMIN OPTION, SET TRUE, INHERIT FALSE',
     );
     const schema = String((await pool.query(
       'SELECT current_schema() AS schema',
@@ -259,9 +259,9 @@ describe('coordination database role profiles', () => {
         `UPDATE coordination_principal_usage SET mutation_receipt_count = 10000
           WHERE principal_id = $1`, [principal.id],
       );
-      await releaseLease(app.connection, principal, {
+      await expect(releaseLease(app.connection, principal, {
         leaseId: second.leaseId, runId: secondRun, requestId: randomUUID(),
-      });
+      })).rejects.toMatchObject({ code: 'COORDINATION_QUOTA_EXCEEDED' });
       await expect(releaseLease(app.connection, principal, {
         leaseId: first.leaseId, runId: firstRun, requestId: firstRequest,
       })).resolves.toEqual({ released: true, alreadyReleased: true });
@@ -363,7 +363,7 @@ describe('coordination database role profiles', () => {
       });
       await pool.query(
         `UPDATE coordination_operation_receipts
-            SET server_time = clock_timestamp() - interval '2 seconds',
+            SET server_time = clock_timestamp() - interval '25 hours',
                 retain_until = clock_timestamp() - interval '1 second'
           WHERE principal_id = $1`,
         [operatorPrincipal.id],
@@ -384,10 +384,18 @@ describe('coordination database role profiles', () => {
       await expect(operator.connection.query(
         'SELECT continuum_operator_set_coordination_scope_quota($1, $2, 12000)',
         [operatorPrincipal.id, scope.id],
+      )).rejects.toThrow(/supported range/);
+      await expect(operator.connection.query(
+        'SELECT continuum_operator_set_coordination_principal_quota($1, $1, 12000, 2000)',
+        [operatorPrincipal.id],
+      )).rejects.toThrow(/between 1 and 10000/);
+      await expect(operator.connection.query(
+        'SELECT continuum_operator_set_coordination_scope_quota($1, $2, 10000)',
+        [operatorPrincipal.id, scope.id],
       )).resolves.toBeDefined();
       await expect(operator.connection.query(
         `SELECT continuum_operator_set_coordination_principal_quota(
-           $1, $1, 12000, 2000
+           $1, $1, 10000, 2000
          )`, [operatorPrincipal.id],
       )).resolves.toBeDefined();
       const second = await acquireLease(operator.connection, operatorPrincipal, {
@@ -447,7 +455,7 @@ describe('coordination database role profiles', () => {
       });
       await pool.query(
         `UPDATE coordination_operation_receipts
-            SET server_time = clock_timestamp() - interval '2 seconds',
+            SET server_time = clock_timestamp() - interval '25 hours',
                 retain_until = clock_timestamp() - interval '1 second'
           WHERE principal_id = $1`,
         [inactivePrincipal.id],
@@ -915,6 +923,25 @@ describe('coordination database role profiles', () => {
       ]));
     } finally {
       await operator.connection.end();
+    }
+  });
+  it('denies a forged repair flag even when the session owner has SET ROLE to the app profile', async () => {
+    const principal = await createPrincipal(pool, {
+      externalId: `repair-flag:${randomUUID()}`, kind: 'service', displayName: 'Flag test',
+    });
+    const app = await createApplicationRole();
+    await pool.query("UPDATE coordination_contract_backfill_state SET phase = 'usage' WHERE singleton");
+    try {
+      await app.connection.query("SET continuum.coordination_contract_repair = 'on'");
+      await expect(app.connection.query('SELECT continuum_coordination_lock_principal_usage($1)', [principal.id]))
+        .rejects.toMatchObject({ code: '55000' });
+      await expect(app.connection.query('SELECT continuum_backfill_coordination_contract(100)'))
+        .rejects.toMatchObject({ code: '42501' });
+      expect((await pool.query('SELECT count(*)::int AS count FROM coordination_principal_usage WHERE principal_id = $1', [principal.id])).rows)
+        .toEqual([{ count: 0 }]);
+    } finally {
+      await pool.query("UPDATE coordination_contract_backfill_state SET phase = 'complete' WHERE singleton");
+      await app.connection.end();
     }
   });
 });

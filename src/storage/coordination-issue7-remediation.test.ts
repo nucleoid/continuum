@@ -29,7 +29,7 @@ describe('coordination issue 7 exact-head remediation', () => {
 
   afterAll(async () => pool?.end());
 
-  it('accepts and clamps a 0056-era contended receipt after schema upgrade', async () => {
+  it('accepts a 0056-era contended receipt with the full public retention horizon', async () => {
     const serverTime = new Date();
     await pool.query(
       `INSERT INTO coordination_resources (scope_id, resource) VALUES ($1, 'mixed-version')`,
@@ -49,7 +49,7 @@ describe('coordination issue 7 exact-head remediation', () => {
          FROM coordination_operation_receipts WHERE principal_id = $1`,
       [principal.id],
     );
-    expect(retained.rows).toEqual([{ seconds: 90 }]);
+    expect(retained.rows).toEqual([{ seconds: 86400 }]);
   });
 
   it('enforces the persisted scope fencing floor on direct resource INSERT', async () => {
@@ -68,7 +68,7 @@ describe('coordination issue 7 exact-head remediation', () => {
     expect(result.rows).toEqual([{ token: '41' }]);
   });
 
-  it('commits release and retains bounded replay evidence at saturated quota', async () => {
+  it('refuses fresh release at saturation and preserves the held generation', async () => {
     const runId = randomUUID();
     const requestId = randomUUID();
     const held = await acquireLease(pool, principal, {
@@ -82,10 +82,12 @@ describe('coordination issue 7 exact-head remediation', () => {
     );
     await expect(releaseLease(pool, principal, {
       leaseId: held.leaseId, runId, requestId,
-    })).resolves.toEqual({ released: true });
+    })).rejects.toMatchObject({ code: 'COORDINATION_QUOTA_EXCEEDED' });
     await expect(releaseLease(pool, principal, {
       leaseId: held.leaseId, runId, requestId,
-    })).resolves.toEqual({ released: true, alreadyReleased: true });
+    })).rejects.toMatchObject({ code: 'COORDINATION_QUOTA_EXCEEDED' });
+    expect((await pool.query('SELECT released_at FROM coordination_leases WHERE lease_id = $1', [held.leaseId])).rows)
+      .toEqual([{ released_at: null }]);
   });
 
   it('marks only displaced or released generations cleanup-eligible', async () => {

@@ -87,6 +87,9 @@ DO $provider_profile$
 DECLARE schema_name TEXT := current_setting('continuum.operator_grant_schema');
         target_role NAME := current_setting('continuum.operator_grant_target')::name;
 BEGIN
+  IF to_regprocedure(format('%I.continuum_operator_list_coordination_privacy_repair_page(uuid,uuid,integer)', schema_name)) IS NOT NULL THEN
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_operator_list_coordination_privacy_repair_page(UUID,UUID,INTEGER) TO %I',schema_name,target_role);
+  END IF;
   IF to_regclass(format('%I.continuum_pgvector_role_profiles', schema_name)) IS NOT NULL THEN
     EXECUTE format(
       'INSERT INTO %I.continuum_pgvector_role_profiles '
