@@ -51,4 +51,40 @@ describe('coordination public handoff contract', () => {
     expect(rows).toHaveLength(4);
     expect(rows.every((row) => row.retained)).toBe(true);
   });
+
+  it('never evicts a retained renewal when a lease records more than 100 renewals', async () => {
+    const { principal, input } = await fixture();
+    const acquired = await acquireLease(pool, principal, input);
+    if (!acquired.acquired) throw new Error('expected acquisition');
+    const requestId = randomUUID();
+    const renewed = await renewLease(pool, principal, { leaseId: acquired.leaseId, runId: input.runId, requestId });
+    await pool.query(`INSERT INTO coordination_operation_receipts
+      (principal_id, operation, request_id, payload_hash, outcome, scope_id, resource,
+       lease_id, run_id, fencing_token, expires_at, server_time, retain_until)
+      SELECT principal_id, operation, gen_random_uuid(), payload_hash, outcome, scope_id, resource,
+        lease_id, run_id, fencing_token, expires_at, server_time, retain_until
+      FROM coordination_operation_receipts, generate_series(1, 100)
+      WHERE principal_id = $1 AND operation = 'renew' AND request_id = $2`, [principal.id, requestId]);
+    expect((await pool.query(`SELECT count(*)::int AS count FROM coordination_operation_receipts
+      WHERE principal_id = $1 AND operation = 'renew'`, [principal.id])).rows).toEqual([{ count: 101 }]);
+    await expect(renewLease(pool, principal, { leaseId: acquired.leaseId, runId: input.runId, requestId }))
+      .resolves.toEqual(renewed);
+  });
+
+  it('rejects a renewal at the combined 10000 retained receipt limit without changing the lease', async () => {
+    const { principal, input } = await fixture();
+    const acquired = await acquireLease(pool, principal, input);
+    if (!acquired.acquired) throw new Error('expected acquisition');
+    await pool.query(`INSERT INTO coordination_operation_receipts
+      (principal_id, operation, request_id, payload_hash, outcome, scope_id, resource,
+       lease_id, run_id, fencing_token, expires_at, server_time, retain_until)
+      SELECT principal_id, operation, gen_random_uuid(), payload_hash, outcome, scope_id, resource,
+        lease_id, run_id, fencing_token, expires_at, server_time, retain_until
+      FROM coordination_operation_receipts, generate_series(1, 9999)
+      WHERE principal_id = $1 AND operation = 'acquire' AND request_id = $2`, [principal.id, input.requestId]);
+    const before = (await pool.query('SELECT * FROM coordination_leases WHERE lease_id = $1', [acquired.leaseId])).rows;
+    await expect(renewLease(pool, principal, { leaseId: acquired.leaseId, runId: input.runId, requestId: randomUUID() }))
+      .rejects.toMatchObject({ code: 'COORDINATION_QUOTA_EXCEEDED' });
+    expect((await pool.query('SELECT * FROM coordination_leases WHERE lease_id = $1', [acquired.leaseId])).rows).toEqual(before);
+  }, 30_000);
 });
