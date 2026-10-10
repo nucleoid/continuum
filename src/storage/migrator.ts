@@ -198,16 +198,19 @@ function firstSearchPathIdentifier(searchPath: string): string | undefined {
 
 async function verifyPublishedMigration(
   migrationsDir: string, file: string,
-): Promise<void> {
+): Promise<string> {
+  const bytes = await readFile(join(migrationsDir, file));
+  const source = bytes.toString('utf8').replaceAll('\r\n', '\n');
   const publishedChecksum = PUBLISHED_MIGRATION_CHECKSUMS.get(file);
-  if (!publishedChecksum) return;
-  const actualChecksum = publishedMigrationChecksum(await readFile(join(migrationsDir, file)));
+  if (!publishedChecksum) return source;
+  const actualChecksum = publishedMigrationChecksum(bytes);
   if (actualChecksum !== publishedChecksum) {
     throw new Error(
       `Published migration ${file} was modified after publication: `
       + `expected checksum ${publishedChecksum}, received ${actualChecksum}`,
     );
   }
+  return source;
 }
 
 function deferLegacy0073Backfill(sql: string): string {
@@ -549,7 +552,10 @@ export async function runMigrations(
 
     // Verify every pinned file before consulting or creating the ledger. A modified
     // pending migration must never get an opportunity to execute.
-    for (const file of files) await verifyPublishedMigration(migrationsDir, file);
+    const verifiedSources = new Map<string, string>();
+    for (const file of files) {
+      verifiedSources.set(file, await verifyPublishedMigration(migrationsDir, file));
+    }
 
     let ledgerAlreadyExisted = false;
     if (files.includes('0001_init.sql')) {
@@ -968,9 +974,12 @@ export async function runMigrations(
       }
 
       if (file === '0075_coordination_online_repair_finish.sql') {
-        const published0074 = (await readFile(join(
-          migrationsDir, '0074_coordination_compatibility_and_upgrade_repair.sql',
-        ), 'utf8')).replaceAll('\r\n', '\n');
+        const published0074 = verifiedSources.get(
+          '0074_coordination_compatibility_and_upgrade_repair.sql',
+        );
+        if (published0074 === undefined) {
+          throw new Error('Migration 0075 requires verified 0074 source');
+        }
         await client.query('BEGIN');
         try {
           await client.query(repaired0074CandidateFunction(published0074));
@@ -986,8 +995,7 @@ export async function runMigrations(
       // repairs behave identically from Git LF and Windows CRLF checkouts.
       // Published-byte verification remains separate and rejects every change
       // other than Git's CRLF materialization.
-      const canonicalSql = (await readFile(join(migrationsDir, file), 'utf8'))
-        .replaceAll('\r\n', '\n');
+      const canonicalSql = verifiedSources.get(file)!;
       const sql = file === '0073_coordination_bounded_discovery_and_locking.sql'
         ? deferLegacy0073Backfill(canonicalSql)
         : file === '0074_coordination_compatibility_and_upgrade_repair.sql'
