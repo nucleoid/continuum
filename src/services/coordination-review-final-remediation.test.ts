@@ -156,6 +156,26 @@ describe('coordination final review remediation', () => {
     const seen = [...firstRepairs, ...lastRepairs].map(({ principalId }) => principalId);
     expect(seen).toEqual(firstEligible ? [principalId(2), principalId(5)] : [principalId(5)]);
     expect(new Set(seen).size).toBe(seen.length);
+    const audits = await pool.query(
+      `SELECT action, query, metadata FROM audit_log
+        WHERE principal_id = $1 AND metadata->>'view' = 'coordination-privacy-repairs'
+        ORDER BY id`,
+      [value.operator.id],
+    );
+    expect(audits.rows).toEqual([
+      { action: 'read', query: null, metadata: {
+        view: 'coordination-privacy-repairs', limit: 2,
+        resultCount: firstEligible ? 1 : 0, scannedCount: 2, hasMore: true,
+      } },
+      { action: 'read', query: null, metadata: {
+        view: 'coordination-privacy-repairs', limit: 2,
+        resultCount: 0, scannedCount: 2, hasMore: true,
+      } },
+      { action: 'read', query: null, metadata: {
+        view: 'coordination-privacy-repairs', limit: 2,
+        resultCount: 1, scannedCount: 1, hasMore: false,
+      } },
+    ]);
   }, 30_000);
 
   it('fills stable pages from eligible disabled principals beyond 1000 rows during mutations', async () => {

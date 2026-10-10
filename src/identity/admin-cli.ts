@@ -9,7 +9,7 @@ import type { MembershipRole } from '../types.js';
 import { cliFailure } from './cli-errors.js';
 import { ServiceError } from '../services/errors.js';
 import {
-  listCoordinationPrivacyRepairs, listIncompleteOffboardingRuns, mapOwnedUserScope,
+  listCoordinationPrivacyRepairPage, listIncompleteOffboardingRuns, mapOwnedUserScope,
   offboardPrincipal, repairCoordinationPrivacy,
 } from '../services/offboarding.js';
 
@@ -160,11 +160,9 @@ async function main(): Promise<void> {
         || (afterIndex >= 0 && !after)) {
         throw new Error('usage: list-coordination-privacy-repairs [--limit <1-1000>] [--after <principal-id>]');
       }
-      const repairs = await listCoordinationPrivacyRepairs(pool, actor, limit, after);
-      const effectiveLimit = limit ?? 100;
+      const page = await listCoordinationPrivacyRepairPage(pool, actor, limit, after);
       process.stdout.write(`${JSON.stringify({
-        operation, repairs,
-        nextCursor: repairs.length === effectiveLimit ? repairs.at(-1)!.principalId : null,
+        operation, ...page,
       })}\n`);
     } else if (operation === 'repair-coordination-privacy') {
       const once = args.includes('--once');
