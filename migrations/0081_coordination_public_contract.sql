@@ -525,6 +525,106 @@ BEGIN
 END;
 $$;
 
+-- Apply only the effective v3 capacity and erased-retention fixes; keep its guards and ACLs.
+DO $detached_capacity$
+DECLARE definition TEXT; revised TEXT; old_anchor TEXT; new_anchor TEXT;
+BEGIN
+  SELECT replace(pg_get_functiondef('continuum_operator_scrub_coordination_principal_v3(uuid,uuid,uuid,integer)'::regprocedure),chr(13)||chr(10),chr(10)) INTO definition;
+  revised := definition;
+  old_anchor := $old_anchor_0$DECLARE detached_acquire_available INTEGER := 0;
+DECLARE detached_contended_available INTEGER := 0;$old_anchor_0$;
+  new_anchor := $new_anchor_0$DECLARE detached_receipt_available INTEGER := 0;$new_anchor_0$;
+  IF position(old_anchor IN revised)=0 THEN RAISE EXCEPTION 'coordination detached capacity source anchor 0 is missing'; END IF;
+  revised := replace(revised,old_anchor,new_anchor);
+  old_anchor := $old_anchor_1$    SELECT COALESCE((
+             SELECT acquire_receipt_limit - acquire_receipt_count
+               FROM coordination_principal_usage WHERE principal_id = detached_id
+           ), 10000),
+           COALESCE((
+             SELECT contended_receipt_limit - contended_receipt_count
+               FROM coordination_principal_usage WHERE principal_id = detached_id
+           ), 1000)
+      INTO detached_acquire_available, detached_contended_available;
+$old_anchor_1$;
+  new_anchor := $new_anchor_1$    SELECT COALESCE((
+      SELECT GREATEST(0,LEAST(acquire_receipt_limit,10000)-acquire_receipt_count::bigint-contended_receipt_count-mutation_receipt_count)::int
+      FROM coordination_principal_usage WHERE principal_id=detached_id
+    ),10000) INTO detached_receipt_available;
+$new_anchor_1$;
+  IF position(old_anchor IN revised)=0 THEN RAISE EXCEPTION 'coordination detached capacity source anchor 1 is missing'; END IF;
+  revised := replace(revised,old_anchor,new_anchor);
+  old_anchor := $old_anchor_2$    WITH ranked AS MATERIALIZED (
+      SELECT receipt.operation, receipt.request_id, receipt.outcome,
+             row_number() OVER (
+               PARTITION BY receipt.outcome
+               ORDER BY receipt.operation, receipt.request_id
+             ) AS outcome_ordinal
+        FROM coordination_operation_receipts receipt
+       WHERE receipt.principal_id = target_principal_id
+         AND receipt.scope_id <> owned_scope_id
+    ), candidates AS MATERIALIZED (
+      SELECT operation, request_id FROM ranked
+       WHERE operation <> 'acquire'
+          OR (outcome = 'acquired'
+              AND outcome_ordinal <= detached_acquire_available)
+          OR (outcome = 'contended'
+              AND outcome_ordinal <= detached_contended_available)
+       ORDER BY operation, request_id LIMIT batch_limit
+    )
+$old_anchor_2$;
+  new_anchor := $new_anchor_2$    WITH bounded AS MATERIALIZED (
+      SELECT receipt.operation,receipt.request_id
+      FROM coordination_operation_receipts receipt
+      WHERE receipt.principal_id=target_principal_id AND receipt.scope_id<>owned_scope_id
+      ORDER BY receipt.operation,receipt.request_id LIMIT batch_limit
+    ), ranked AS MATERIALIZED (
+      SELECT bounded.*,row_number() OVER(ORDER BY operation,request_id) AS receipt_ordinal FROM bounded
+    ), candidates AS MATERIALIZED (
+      SELECT operation,request_id FROM ranked WHERE receipt_ordinal<=detached_receipt_available
+      ORDER BY operation,request_id
+    )
+$new_anchor_2$;
+  IF position(old_anchor IN revised)=0 THEN RAISE EXCEPTION 'coordination detached capacity source anchor 2 is missing'; END IF;
+  revised := replace(revised,old_anchor,new_anchor);
+  old_anchor := $old_anchor_3$    SELECT LEAST(detached_acquire_available,
+                 acquire_receipt_limit - acquire_receipt_count),
+           LEAST(detached_contended_available,
+                 contended_receipt_limit - contended_receipt_count)
+      INTO detached_acquire_available, detached_contended_available
+      FROM coordination_principal_usage WHERE principal_id = detached_id;
+
+$old_anchor_3$;
+  new_anchor := $new_anchor_3$    SELECT LEAST(detached_receipt_available,
+      GREATEST(0,LEAST(acquire_receipt_limit,10000)-acquire_receipt_count::bigint-contended_receipt_count-mutation_receipt_count)::int)
+    INTO detached_receipt_available FROM coordination_principal_usage WHERE principal_id=detached_id;
+$new_anchor_3$;
+  IF position(old_anchor IN revised)=0 THEN RAISE EXCEPTION 'coordination detached capacity source anchor 3 is missing'; END IF;
+  revised := replace(revised,old_anchor,new_anchor);
+  old_anchor := $old_anchor_4$             receipt.outcome,
+             row_number() OVER (
+               PARTITION BY receipt.outcome
+               ORDER BY receipt.operation, receipt.request_id
+             ) AS outcome_ordinal$old_anchor_4$;
+  new_anchor := $new_anchor_4$             row_number() OVER(ORDER BY receipt.operation,receipt.request_id) AS receipt_ordinal$new_anchor_4$;
+  IF position(old_anchor IN revised)=0 THEN RAISE EXCEPTION 'coordination detached capacity source anchor 4 is missing'; END IF;
+  revised := replace(revised,old_anchor,new_anchor);
+  old_anchor := $old_anchor_5$       WHERE ranked.operation <> 'acquire'
+          OR (ranked.outcome = 'acquired'
+              AND ranked.outcome_ordinal <= detached_acquire_available)
+          OR (ranked.outcome = 'contended'
+              AND ranked.outcome_ordinal <= detached_contended_available)$old_anchor_5$;
+  new_anchor := $new_anchor_5$       WHERE ranked.receipt_ordinal<=detached_receipt_available$new_anchor_5$;
+  IF position(old_anchor IN revised)=0 THEN RAISE EXCEPTION 'coordination detached capacity source anchor 5 is missing'; END IF;
+  revised := replace(revised,old_anchor,new_anchor);
+  old_anchor := $old_anchor_6$        retain_until = '2000-01-01 00:00:00+00'::timestamptz,$old_anchor_6$;
+  new_anchor := $new_anchor_6$        retain_until = '2000-01-02 00:00:00+00'::timestamptz,$new_anchor_6$;
+  IF position(old_anchor IN revised)=0 THEN RAISE EXCEPTION 'coordination detached capacity source anchor 6 is missing'; END IF;
+  revised := replace(revised,old_anchor,new_anchor);
+  IF position('detached_acquire_available' IN revised)>0 OR position('detached_contended_available' IN revised)>0 OR position('outcome_ordinal' IN revised)>0 THEN RAISE EXCEPTION 'coordination detached capacity legacy bypass remains'; END IF;
+  EXECUTE revised;
+END;
+$detached_capacity$;
+
 DO $harden$
 DECLARE schema_name TEXT := current_schema(); function_record RECORD;
 BEGIN
@@ -536,7 +636,8 @@ BEGIN
         'continuum_coordination_receipt_reassign_counter','continuum_backfill_coordination_contract',
         'continuum_coordination_resource_counter','continuum_operator_set_coordination_scope_quota',
         'continuum_operator_set_coordination_principal_quota','continuum_operator_reclaim_coordination_resource',
-        'continuum_operator_list_coordination_privacy_repair_page','continuum_operator_pseudonymize_scope_v2_legacy'
+        'continuum_operator_list_coordination_privacy_repair_page','continuum_operator_pseudonymize_scope_v2_legacy',
+        'continuum_operator_scrub_coordination_principal_v3'
       ]) LOOP
     EXECUTE format('ALTER FUNCTION %I.%I(%s) SET search_path=pg_catalog,%I,pg_temp',schema_name,function_record.proname,function_record.arguments,schema_name);
     EXECUTE format('REVOKE ALL ON FUNCTION %I.%I(%s) FROM PUBLIC',schema_name,function_record.proname,function_record.arguments);
