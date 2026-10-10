@@ -1,5 +1,9 @@
 import type pg from 'pg';
 
+function quoteIdentifier(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`;
+}
+
 /** Verify startup profiles without changing live provider privileges. */
 export async function reconcilePgvectorProviderGrants(pool: pg.Pool): Promise<void> {
   const client = await pool.connect();
@@ -15,17 +19,29 @@ export async function reconcilePgvectorProviderGrants(pool: pg.Pool): Promise<vo
         FROM pg_settings WHERE name = 'statement_timeout'
     `);
     await client.query("SET LOCAL lock_timeout = '1s'");
-    const readiness = await client.query<{ owner: boolean; helper: boolean }>(`
+    const readiness = await client.query<{
+      owner: boolean; helper: boolean; trusted: boolean; schema: string;
+    }>(`
     SELECT relation.relowner = current_user::regrole::oid AS owner,
-           to_regprocedure('continuum_assert_current_pgvector_profile()') IS NOT NULL
-             AS helper
-      FROM pg_class relation
-     WHERE relation.oid = 'memories'::regclass
+           namespace.nspname AS schema,
+           verifier.oid IS NOT NULL AS helper,
+           COALESCE(verifier.proowner=relation.relowner AND verifier.prosecdef
+             AND verifier.proconfig @> ARRAY[pg_catalog.format(
+               'search_path=pg_catalog, %I, pg_temp',namespace.nspname)]
+             AND NOT EXISTS (
+               SELECT 1 FROM pg_catalog.aclexplode(COALESCE(
+                 verifier.proacl,pg_catalog.acldefault('f',verifier.proowner))) privilege
+                WHERE privilege.grantee=0 AND privilege.privilege_type='EXECUTE'
+             ),FALSE) AS trusted
+      FROM pg_catalog.pg_class relation
+      JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace
+      LEFT JOIN pg_catalog.pg_proc verifier ON verifier.oid=pg_catalog.to_regprocedure(
+        pg_catalog.format('%I.continuum_assert_current_pgvector_profile()',namespace.nspname))
+     WHERE relation.oid = pg_catalog.to_regclass('memories')
   `);
     const state = readiness.rows[0];
-    if (!state?.helper) {
-      await client.query('COMMIT');
-      return;
+    if (!state?.schema) {
+      throw new Error('Pgvector startup memories relation is missing');
     }
 
     // Owners can read the ledger directly. Check it before the SECURITY DEFINER
@@ -34,19 +50,24 @@ export async function reconcilePgvectorProviderGrants(pool: pg.Pool): Promise<vo
     if (state.owner) {
       const migration = await client.query<{ applied: boolean }>(`
       SELECT EXISTS (
-        SELECT 1 FROM _continuum_migrations
+        SELECT 1 FROM ${quoteIdentifier(state.schema)}._continuum_migrations
          WHERE name = '0080_pgvector_provider_grants.sql'
       ) AS applied
     `);
-      if (migration.rows[0]?.applied !== true) {
+      if (migration.rows[0]?.applied === false) {
         await client.query('COMMIT');
         return;
       }
     }
 
+    // Runtime roles cannot prove a pre-0080 ledger state. Current binaries
+    // require the owner to finish the documented upgrade before startup.
+    if (!state.helper) throw new Error('Pgvector startup verifier is missing');
+    if (!state.trusted) throw new Error('Pgvector startup verifier trust drift');
+
     // Runtime roles cannot inspect the owner-only registry. The definer gate
     // resolves the real session/SET ROLE identity and validates only that role.
-    await client.query('SELECT continuum_assert_current_pgvector_profile()');
+    await client.query(`SELECT ${quoteIdentifier(state.schema)}.continuum_assert_current_pgvector_profile()`);
     await client.query('COMMIT');
   } catch (error) {
     try { await client.query('ROLLBACK'); } catch { destroyClient = true; }
