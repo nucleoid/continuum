@@ -481,12 +481,27 @@ work is restartable, keyset-bounded, and backed by concurrently built indexes.
 Offboarding first deactivates every owned-scope membership and disables the
 principal in the same transaction. The owned user scope is then erased in
 bounded receipt, lease, and resource phases. Each call processes at most 1,000
-rows per phase and records durable progress; the maximum fencing token is
+rows across all phases and records durable progress; the maximum fencing token is
 preserved in the owner-only scope floor before resource deletion. All non-owned
 scopes, including team, project, organization, role, and another user's scope,
 remain shared state, but retained leases and receipts are moved to an
 installation-wide detached principal and their run IDs and payload hashes are
 independently randomized in bounded batches. The detached identity is disabled.
+Detachment uses the same combined receipt budget across acquire, contention,
+renew, and release. It freezes a bounded candidate page, then rechecks available
+space under the detached usage lock. A full budget leaves the repair incomplete
+with a bounded quota block; it never evicts unexpired anonymous evidence for
+space. Eligible lease or audit work can still progress independently.
+
+Authorized privacy erasure ends the departing principal's authenticated replay
+guarantee. Owned-scope receipts are erased; shared receipts lose their original
+principal, request/run identity, payload hash, and operation timestamps.
+Anonymous timestamps use January 1, 2000, with retention through January 2,
+2000, satisfying the 24-hour interval while making these erased receipts
+eligible for the existing bounded anonymous cleanup. This explicit privacy
+operation is the exception to ordinary receipt retention and replay. It does
+not shorten another principal's unexpired receipts to admit new operations,
+and reactivation does not restore the erased request identities.
 Shared-scope handling is independent of scope kind: team, project, role,
 organization, and another user's scope are all retained while the departing
 principal's lease/receipt identity is detached. Lock audit metadata is reduced
