@@ -131,6 +131,32 @@ describe('offboarding and erasure', () => {
     })).rejects.toThrow('principal kind conflicts');
   });
 
+  it('provider review: completes privacy erasure when provider verification is unavailable', async () => {
+    const value = await fixture();
+    const definition = (await pool.query(
+      `SELECT pg_get_functiondef('continuum_assert_current_pgvector_profile()'::regprocedure)
+                AS definition`,
+    )).rows[0].definition as string;
+    try {
+      // Simulate provider catalog/ACL failure without touching identity,
+      // membership, or the operator's erasure capabilities.
+      await pool.query(`CREATE OR REPLACE FUNCTION continuum_assert_current_pgvector_profile()
+                        RETURNS VOID LANGUAGE plpgsql AS $$
+                        BEGIN RAISE EXCEPTION 'provider unavailable'; END; $$`);
+      const result = await offboardPrincipal(pool, value.admin, value.target.id);
+      expect(result.complete).toBe(true);
+      expect((await pool.query(
+        'SELECT title, body, state FROM memories WHERE id = $1', [value.personalMemory.id],
+      )).rows).toEqual([{ title: '[erased]', body: '[erased]', state: 'archived' }]);
+      expect((await pool.query(
+        'SELECT count(*)::int AS count FROM memory_embeddings WHERE memory_id = $1',
+        [value.personalMemory.id],
+      )).rows).toEqual([{ count: 0 }]);
+    } finally {
+      await pool.query(definition);
+    }
+  });
+
   it('fully erases again after explicit reactivation, membership restoration, and new capture', async () => {
     const value = await fixture();
     await offboardPrincipal(pool, value.admin, value.target.id);

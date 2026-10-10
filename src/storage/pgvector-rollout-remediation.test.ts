@@ -1097,6 +1097,111 @@ describe('pgvector rollout remediation', () => {
     });
   }, 240_000);
 
+  it('provider review: preserves pre-0080 sync identities without a regrant', async () => {
+    const syncRole = identifier('continuum_sync_upgrade');
+    roles.push(syncRole);
+    await withFreshDatabase(async (root, target, url) => {
+      const applicationSchema = identifier('continuum_data');
+      const principalId = randomUUID();
+      await root.query(`CREATE ROLE ${quoteIdentifier(syncRole)} LOGIN`);
+      await target.query(`CREATE SCHEMA ${quoteIdentifier(applicationSchema)}`);
+      const owner = migrationPool(url, applicationSchema);
+      await runMigrations(owner, await migrationDirectoryThrough(
+        '0079_coordination_upgrade_scale_remediation.sql',
+      ));
+      await owner.query(
+        `INSERT INTO principals (id, external_id, kind, display_name)
+         VALUES ($1, $2, 'service', 'Pre-upgrade sync')`,
+        [principalId, `sync-${principalId}`],
+      );
+      await owner.query(
+        'SELECT continuum_register_trusted_database_identity($1::name, $2::uuid, FALSE, TRUE)',
+        [syncRole, principalId],
+      );
+      await runMigrations(owner, await fullMigrationDirectory());
+      const runtime = migrationPool(url, applicationSchema, syncRole);
+      await expect(reconcilePgvectorProviderGrants(runtime)).resolves.toBeUndefined();
+      expect((await owner.query(
+        `SELECT profile_kind FROM continuum_pgvector_role_profiles
+          WHERE database_role_oid = $1::regrole::oid`, [syncRole],
+      )).rows).toEqual([{ profile_kind: 'sync' }]);
+      await expect(runtime.query(
+        'SELECT continuum_verify_sync_database_identity($1::uuid)', [principalId],
+      )).resolves.toBeDefined();
+    });
+  }, 240_000);
+
+  it('provider review: keeps the LOGIN guard on the installed sync function', async () => {
+    const syncRole = identifier('continuum_sync_nologin');
+    roles.push(syncRole);
+    await withFreshDatabase(async (root, target, url) => {
+      const applicationSchema = identifier('continuum_data');
+      const principalId = randomUUID();
+      await root.query(`CREATE ROLE ${quoteIdentifier(syncRole)} NOLOGIN`);
+      await target.query(`CREATE SCHEMA ${quoteIdentifier(applicationSchema)}`);
+      const owner = migrationPool(url, applicationSchema);
+      await runMigrations(owner, await fullMigrationDirectory());
+      await owner.query(
+        `INSERT INTO principals (id, external_id, kind, display_name)
+         VALUES ($1, $2, 'service', 'Invalid sync')`,
+        [principalId, `sync-${principalId}`],
+      );
+      await expect(owner.query(
+        'SELECT continuum_register_trusted_database_identity($1::name, $2::uuid, FALSE, TRUE)',
+        [syncRole, principalId],
+      )).rejects.toThrow(/LOGIN-capable/i);
+      expect((await owner.query(
+        'SELECT count(*)::int AS count FROM continuum_trusted_database_identities',
+      )).rows).toEqual([{ count: 0 }]);
+    });
+  }, 240_000);
+
+  it('provider review: owner startup detects drift without revoking live provider grants', async () => {
+    const appRole = identifier('continuum_app_drift');
+    roles.push(appRole);
+    await withFreshDatabase(async (root, target, url) => {
+      const applicationSchema = identifier('continuum_data');
+      await root.query(`CREATE ROLE ${quoteIdentifier(appRole)} NOLOGIN`);
+      await target.query(`CREATE SCHEMA ${quoteIdentifier(applicationSchema)}`);
+      const owner = migrationPool(url, applicationSchema);
+      await runMigrations(owner, await fullMigrationDirectory());
+      await grantApplicationRole(owner, applicationSchema, appRole);
+      await owner.query(`REVOKE SELECT ON memories FROM ${quoteIdentifier(appRole)}`);
+      await expect(reconcilePgvectorProviderGrants(owner)).rejects.toThrow(/exact|profile/i);
+      expect((await owner.query(
+        `SELECT has_schema_privilege($1, 'continuum_extensions', 'USAGE') AS usage,
+                EXISTS (SELECT 1 FROM continuum_pgvector_role_profiles
+                         WHERE database_role_oid = $1::regrole::oid) AS registered`,
+        [appRole],
+      )).rows).toEqual([{ usage: true, registered: true }]);
+    });
+  }, 240_000);
+
+  it('provider review: owner startup fails fast behind an online migrator', async () => {
+    await withFreshDatabase(async (_root, target, url) => {
+      const applicationSchema = identifier('continuum_data');
+      await target.query(`CREATE SCHEMA ${quoteIdentifier(applicationSchema)}`);
+      const owner = migrationPool(url, applicationSchema);
+      await runMigrations(owner, await fullMigrationDirectory());
+      const startup = migrationPool(url, applicationSchema);
+      const blocker = await owner.connect();
+      try {
+        await blocker.query('SELECT pg_advisory_lock(7215328273579717613::bigint)');
+        // An existing server timeout bounds the RED test too. A correct gate
+        // rejects immediately with lock_not_available, before that timer fires.
+        await startup.query("SET statement_timeout = '250ms'");
+        await expect(reconcilePgvectorProviderGrants(startup)).rejects.toMatchObject({
+          code: '55P03',
+        });
+        await blocker.query(`CREATE INDEX CONCURRENTLY provider_review_live_memory_idx
+                             ON memories (id) WHERE state = 'live'`);
+      } finally {
+        await blocker.query('SELECT pg_advisory_unlock_all()').catch(() => undefined);
+        blocker.release();
+      }
+    });
+  }, 240_000);
+
   it('keeps sync profile registration across owner reconciliation', async () => {
     const syncRole = identifier('continuum_sync');
     roles.push(syncRole);
