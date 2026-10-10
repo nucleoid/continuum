@@ -1,12 +1,18 @@
 import { createHash } from 'node:crypto';
 import type pg from 'pg';
-import { reconcilePgvectorProviderGrants } from '../storage/provider-lifecycle.js';
 import type { Principal } from '../types.js';
 import { requireOrgAdmin } from './access.js';
 import { ServiceError } from './errors.js';
 
 function operatorBoundaryError(error: unknown): ServiceError | null {
   const databaseError = error as { code?: string; message?: string };
+  if (databaseError.code === '57014') {
+    return new ServiceError(
+      'COORDINATION_TIMEOUT',
+      'offboarding database deadline exceeded; earlier committed progress can be resumed',
+      { cause: error },
+    );
+  }
   if (databaseError.code === '42501'
       || /(?:DB|role-name\/OID)-bound trusted approve identity|operator path/i
         .test(databaseError.message ?? '')) {
@@ -186,6 +192,7 @@ export async function listCoordinationPrivacyRepairs(
   const cursor = afterPrincipalId === undefined
     ? null : id(afterPrincipalId, 'repair cursor principal id');
   const client = await pool.connect();
+  let destroyClient = false;
   try {
     await client.query('BEGIN');
     await client.query("SET LOCAL statement_timeout = '30s'");
@@ -202,10 +209,10 @@ export async function listCoordinationPrivacyRepairs(
       state: row.repair_state as CoordinationPrivacyRepairCandidate['state'],
     }));
   } catch (error) {
-    await client.query('ROLLBACK');
+    try { await client.query('ROLLBACK'); } catch { destroyClient = true; }
     throw operatorBoundaryError(error) ?? error;
   } finally {
-    client.release();
+    client.release(destroyClient);
   }
 }
 
@@ -217,6 +224,7 @@ export async function repairCoordinationPrivacy(
   const confirmationScopeId = id(options.confirmationScopeId, 'confirmation scope id');
   const batchSize = requestedBatchSize(options.batchSize);
   const client = await pool.connect();
+  let destroyClient = false;
   try {
     await client.query('BEGIN');
     await client.query("SET LOCAL lock_timeout = '5s'");
@@ -235,7 +243,7 @@ export async function repairCoordinationPrivacy(
          FROM principals principal
          JOIN principal_user_scopes mapping ON mapping.principal_id = principal.id
         WHERE principal.id = $1 AND principal.kind = 'user'
-        FOR UPDATE OF principal NOWAIT`,
+         FOR UPDATE OF principal`,
       [principalId],
     );
     if (!target.rowCount || target.rows[0].disabled_at === null) {
@@ -293,8 +301,8 @@ export async function repairCoordinationPrivacy(
       reason: scrub.rows[0]?.privacy?.reason ?? null,
     };
   } catch (error) {
-    await client.query('ROLLBACK');
-    if (isCoordinationPrivacyLockBusy(error)) {
+    try { await client.query('ROLLBACK'); } catch { destroyClient = true; }
+    if (!destroyClient && isCoordinationPrivacyLockBusy(error)) {
       const snapshot = await client.query(
         `SELECT principal.offboarded_at, mapping.scope_id
            FROM principals principal
@@ -313,7 +321,7 @@ export async function repairCoordinationPrivacy(
     }
     throw operatorBoundaryError(error) ?? error;
   } finally {
-    client.release();
+    client.release(destroyClient);
   }
 }
 
@@ -893,13 +901,13 @@ async function offboardPrincipalCore(
                 WHERE mapping.principal_id = $1
              )
           ORDER BY principal.id
-          FOR UPDATE NOWAIT`,
+          FOR UPDATE`,
         [principalId],
       );
     }
     const target = await client.query(
       `SELECT id, display_name, disabled_at, offboarded_at, reactivated_at
-         FROM principals WHERE id = $1 AND kind = 'user'${dryRun ? '' : ' FOR UPDATE NOWAIT'}`, [principalId],
+          FROM principals WHERE id = $1 AND kind = 'user'${dryRun ? '' : ' FOR UPDATE'}`, [principalId],
     );
     if (!target.rowCount) throw new ServiceError('INVALID_INPUT', 'user principal not found');
     const mapping = await client.query(
@@ -912,7 +920,7 @@ async function offboardPrincipalCore(
             WHERE principal_id = pus.principal_id AND scope_id = pus.scope_id
             ORDER BY id DESC LIMIT 1
          ) approval ON TRUE
-        WHERE pus.principal_id = $1${dryRun ? '' : ' FOR UPDATE OF pus NOWAIT'}`, [principalId],
+         WHERE pus.principal_id = $1${dryRun ? '' : ' FOR UPDATE OF pus'}`, [principalId],
     );
     if (!mapping.rowCount) {
       throw new ServiceError('CONFLICT', 'principal has no explicit owned user scope mapping');
@@ -1083,7 +1091,6 @@ async function offboardPrincipalCore(
     } : null;
     const pseudonym = erasedPrincipalPseudonym(principalId);
     const scopePseudonym = erasedScopePseudonym(scopeId);
-    if (!dryRun) await reconcilePgvectorProviderGrants(client);
     const privacyState = await client.query(
       `SELECT privacy_version, principal_complete, scope_complete
          FROM continuum_coordination_privacy_state($1, $2)`,
@@ -1111,7 +1118,12 @@ async function offboardPrincipalCore(
         );
       }
     }
-    if (!dryRun && wasOffboarded && !coordinationPrivacyComplete) {
+    // An open scope-cleanup phase performs its one privacy batch below. A
+    // resumed run whose scope cleanup is already durable still needs this
+    // pre-scrub if a later upgrade reopened only principal privacy progress.
+    const scrubBeforeVerification = runCompleted
+      || (resumedRun && Boolean(run.rows[0].scope_cleanup_complete));
+    if (!dryRun && scrubBeforeVerification && wasOffboarded && !coordinationPrivacyComplete) {
       const privacyRepair = await client.query<{ privacy: {
         complete?: boolean; progressed?: boolean; blocked_until?: string | null;
         reason?: CoordinationPrivacyBlockReason;
@@ -1128,12 +1140,23 @@ async function offboardPrincipalCore(
         ? new Date(privacyRepair.rows[0].privacy.blocked_until!) : null;
       coordinationPrivacyReason = privacyRepair.rows[0]?.privacy?.reason ?? null;
     }
-    const actualStateErased = runCompleted && wasOffboarded
-      ? (await client.query<{ erased: boolean }>(
+    let actualStateErased = false;
+    // A bounded scrub must commit independently of the full-history predicate.
+    // Verify on the next invocation once privacy is complete. Shared-role
+    // previews remain read-only and do not invoke an operator-only capability
+    // or claim exact completion from the bounded count preview.
+    if (!dryRun && runCompleted && wasOffboarded && coordinationPrivacyComplete
+        && !coordinationPrivacyMutated) {
+      await client.query(
+        `SELECT set_config('statement_timeout', $1, TRUE)`,
+        [`${verificationTimeoutMs}ms`],
+      );
+      actualStateErased = (await client.query<{ erased: boolean }>(
         `SELECT continuum_operator_offboarding_actual_state_is_erased($1, $2) AS erased`,
         [actor.id, run.rows[0].run_id],
-      )).rows[0]?.erased === true
-      : false;
+      )).rows[0]?.erased === true;
+      await client.query("SET LOCAL statement_timeout = '30s'");
+    }
     const clean = resumedRun
       ? Boolean(run.rows[0].memory_complete) && Boolean(run.rows[0].scope_cleanup_complete)
         && !resumedAuditRemains
@@ -1169,7 +1192,11 @@ async function offboardPrincipalCore(
       await client.query('COMMIT');
       return {
         ...baseResult,
-        complete: coordinationPrivacyComplete && actualStateErased,
+        complete: false,
+        // Completing a durable privacy phase is progress even when no row
+        // changed in its final batch. The next call must verify or restart the
+        // dirty lifecycle rather than stop the CLI as a no-progress result.
+        progressed: coordinationPrivacyProgressed || coordinationPrivacyComplete,
       };
     }
 

@@ -19,6 +19,12 @@ remain status 1. Automation must inspect both the status and the structured
 `incompleteReason`, `reason`, `blockedUntil`, `resumeRecommended`, and
 `resumeAfter` fields. `no_progress` is a resumable status 2 stop.
 `detached_quota`, `lock_busy`, and `live_lease` are typed status 3 blocks.
+A server verification deadline returns `COORDINATION_TIMEOUT` and exits 2 with
+a sanitized error on stderr. Previously committed batches remain durable;
+resume using a verification budget chosen from measured database behavior.
+Completed-run privacy re-scrubs commit before the subsequent exact proof.
+A dry-run preview never claims exact completion from bounded counts and does
+not require execution of operator-only verification routines.
 `resumeAfter` is populated only when the database supplied a `blockedUntil`
 timestamp. A false `resumeRecommended` means the command is complete.
 Mapping a legitimately shared personal scope requires the explicit

@@ -129,9 +129,11 @@ explicit release is required before resource deletion.
 
 During rollout, complete every forward migration and exact application/operator
 grant-profile convergence before enabling Entra-sourced coordination or
-offboarding traffic. The grant scripts are safe to rehearse and rerun on schema
-versions 0054 through current; functions introduced by later migrations are
-granted only after they exist.
+offboarding traffic. Apply the full operator profile only after the current
+migration chain completes. Provider additions tolerate pre-0080 schemas, but
+this does not make the full operator profile safe on historical schema versions.
+Rehearse the current binaries, full migration chain, and matching grant scripts
+together on an isolated copy.
 
 Team, project, role, organization, and other users' resources remain intact. Their historical
 leases and receipts are detached from the departing principal in batches of at
@@ -468,9 +470,16 @@ event trigger checks every memory and every audit row linked to the run's
 bounded fence before appending completion. On very large per-subject histories,
 set the supported `verificationTimeoutMs` API option or
 `--verification-timeout-ms <1-300000>` admin-CLI option from measured query plans
-and database load. The default is 30 seconds. A timeout rolls back the current
-batch and commits no completion receipt; retain the run and retry. Do not weaken
-or skip verification, and do not claim completion from progress counters alone.
+and database load. The default is 30 seconds. This configured budget also
+applies to full-state verification of an already completed run. Upgrade privacy
+re-scrub batches commit before that proof is attempted on the next invocation,
+so an expensive full-history check cannot undo bounded privacy progress.
+Finishing that privacy phase is reported as progress until the next invocation
+verifies completion or restarts dirty lifecycle work. A server deadline returns
+`COORDINATION_TIMEOUT`; the admin CLI exits 2 with a sanitized error and retains
+previously committed batches. The timed-out transaction appends no completion
+receipt. Retain the run and resume using a measured verification budget. Do not
+weaken or skip verification, or claim completion from progress counters alone.
 
 Directly setting `principals.offboarded_at` is an internal write fence, not a
 supported offboarding operation or evidence that erasure completed. It may be
@@ -612,17 +621,33 @@ application-schema access. A provider-owned schema must either delegate the
 narrow grant options to the tenant owner or apply any reported direct
 pregrants/revocations itself.
 
-Provider reconciliation runs during API, MCP, and membership-sync startup and
-immediately before non-preview offboarding mutation. This catches extension
-updates and role drift outside migration windows and revokes stale direct
-provider grants before lifecycle work proceeds. Non-owner application,
-operator, sync, and reporting sessions call the OID-bound current-profile gate;
-they cannot read the owner-only registry. Owner startup first confirms 0080 is
-ledgered and takes the migration advisory lock before catalog reconciliation.
+Provider verification runs during API, MCP, and membership-sync startup.
+Startup verifies registered profiles without changing live grants. Owner
+startup first confirms 0080 is ledgered, uses a nonblocking migration advisory
+lock, and checks only this tenant's registry. A busy migration fails startup
+promptly; retry after migration and grant-profile convergence. Verification
+statements have a server deadline of at most five seconds and a one-second
+lock timeout. Non-owner application, operator, sync, and reporting sessions
+call the OID-bound current-profile gate; they cannot read the owner-only registry.
+Privacy erasure keeps its operator/identity authorization but does not depend
+on provider grants or vector operators.
+
+Before applying 0080 and again before starting upgraded runtime processes, run
+`scripts/preflight-pgvector-role-profiles.sql` as the tenant migration owner.
+It lists reader roles that do not match an exact application/operator profile.
+Classify these roles; a reporting reader must not receive application authority.
+After the complete migration chain, reapply `grant-application-role.sql` for
+every application and operator runtime role, then `grant-operator-role.sql` for
+the dedicated operator and `grant-sync-role.sql` for the bound sync service.
+This convergence is mandatory before restarting runtime processes. Migration
+0080 itself preserves existing OID-bound sync profiles, so it does not require
+sync rotation merely to retain startup verification access.
+
 Re-run the applicable role grant script after role rotation, revocation, or a
-pgvector extension update; its final assertions report the exact missing or
-extra provider privilege. Sync registration remains durable across owner
-reconciliation, and `grant-operator-role.sql` changes an application profile to
+pgvector extension update. Explicit owner grant/reconciliation commands remove
+stale direct provider grants; startup only detects drift. Final assertions
+report missing or extra privilege. Sync registration remains durable across
+owner reconciliation, and `grant-operator-role.sql` changes an application profile to
 the explicit operator kind.
 
 Rolling back to a binary from before provider-schema support is unsafe while

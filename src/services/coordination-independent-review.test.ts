@@ -132,7 +132,11 @@ describe('coordination independent review regressions', () => {
     const exhausted = await offboardPrincipal(pool, value.operator, value.target.id, {
       confirmationScopeId: value.owned.id, batchSize: 1,
     });
-    expect(exhausted).toMatchObject({ complete: true, alreadyOffboarded: false });
+    expect(exhausted).toMatchObject({ complete: false, alreadyOffboarded: false, progressed: true });
+    const verified = await offboardPrincipal(pool, value.operator, value.target.id, {
+      confirmationScopeId: value.owned.id, batchSize: 1,
+    });
+    expect(verified).toMatchObject({ complete: true, alreadyOffboarded: true });
   });
 
   it('reports a live-lease block without appending no-progress batch evidence', async () => {
