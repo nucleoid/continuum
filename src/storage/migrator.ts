@@ -4,8 +4,8 @@ import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type pg from 'pg';
 import {
-  ensureExecutionLedger, MigrationExecution, recordUnknownHistory, sqlHash,
-  verifyContractFunctionBodies,
+  ensureExecutionLedger, executionClientIsUnsafe, MigrationExecution, recordUnknownHistory,
+  rollbackExecutionTransaction, sqlHash, verifyContractFunctionBodies,
 } from './migration-execution.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -532,13 +532,12 @@ async function finishContractBackfill(
   if (file === '0081_coordination_public_contract.sql') {
     await verifyContractFunctionBodies(client, source);
   }
-  await client.query('BEGIN');
   try {
+    await client.query('BEGIN');
     await execution.complete(client, true);
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
+    await rollbackExecutionTransaction(client, error);
   }
 }
 
@@ -560,6 +559,7 @@ export async function runMigrations(
   let applicationSchema: string | undefined;
   let migrationLedgerCreated = false;
   let executionLedgerCreated = false;
+  let discardClient = false;
   let providerSchemaCreated = false;
   let vectorExtensionCreated = false;
 
@@ -1010,8 +1010,8 @@ export async function runMigrations(
 
       if (file === '0065_coordination_review_remediation.sql'
           && repairPre0065StoredCrLf) {
-        await client.query('BEGIN');
         try {
+          await client.query('BEGIN');
           const execution = new MigrationExecution(file, 'pre-0065-stored-crlf',
             'owner-continuum-crlf-pairs-only-v1', null,
             sqlHash('owner-owned continuum non-extension functions; CRLF pairs only; v1'),
@@ -1020,8 +1020,7 @@ export async function runMigrations(
           await execution.complete(client);
           await client.query('COMMIT');
         } catch (error) {
-          await client.query('ROLLBACK');
-          throw error;
+          await rollbackExecutionTransaction(client, error);
         }
         repairPre0065StoredCrLf = false;
       }
@@ -1033,8 +1032,8 @@ export async function runMigrations(
         if (published0074 === undefined) {
           throw new Error('Migration 0075 requires verified 0074 source');
         }
-        await client.query('BEGIN');
         try {
+          await client.query('BEGIN');
           const candidateSql = repaired0074CandidateFunction(published0074);
           const execution = new MigrationExecution(file, 'pre-0075-candidate-reinstall',
             '0074-candidate-reinstall-hardened-v1', sqlHash(verifiedSources.get(file)!),
@@ -1043,8 +1042,7 @@ export async function runMigrations(
           await execution.complete(client);
           await client.query('COMMIT');
         } catch (error) {
-          await client.query('ROLLBACK');
-          throw error;
+          await rollbackExecutionTransaction(client, error);
         }
       }
 
@@ -1089,8 +1087,8 @@ export async function runMigrations(
               deferCleanup,
             );
           }
-          await client.query('BEGIN');
           transactionOpen = true;
+          await client.query('BEGIN');
           await execution.complete(client, true);
           await client.query(
             'INSERT INTO _continuum_migrations (name) VALUES ($1)',
@@ -1099,8 +1097,8 @@ export async function runMigrations(
           await client.query('COMMIT');
           transactionOpen = false;
         } else {
-          await client.query('BEGIN');
           transactionOpen = true;
+          await client.query('BEGIN');
           await execution.query(client, sql);
           await execution.complete(client);
           await client.query(
@@ -1126,6 +1124,7 @@ export async function runMigrations(
         try {
           if (transactionOpen) await client.query('ROLLBACK');
         } catch (rollbackError) {
+          discardClient = true;
           migrationCleanupErrors.push(rollbackError);
         }
         if (file === '0001_init.sql' && originalSearchPath !== undefined) {
@@ -1211,7 +1210,10 @@ export async function runMigrations(
   try {
     const unlockError = cleanupErrors[0];
     const lockError = !lockAcquired && runFailed ? runError : undefined;
-    const releaseError = unlockError ?? lockError;
+    const releaseError = unlockError ?? lockError
+      ?? (discardClient || executionClientIsUnsafe(client)
+        ? (runError instanceof Error ? runError : new Error('Migration transaction cleanup was unsafe'))
+        : undefined);
     client.release(
       releaseError instanceof Error
         ? releaseError

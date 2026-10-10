@@ -1,6 +1,23 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
 
+const unsafeClients = new WeakSet<pg.PoolClient>();
+
+export function executionClientIsUnsafe(client: pg.PoolClient): boolean {
+  return unsafeClients.has(client);
+}
+
+export async function rollbackExecutionTransaction(client: pg.PoolClient, error: unknown): Promise<never> {
+  try {
+    await client.query('ROLLBACK');
+  } catch (rollbackError) {
+    unsafeClients.add(client);
+    throw new AggregateError([error, rollbackError],
+      'Migration transaction failed and rollback failed', { cause: error });
+  }
+  throw error;
+}
+
 export function sqlHash(sql: string): string {
   return createHash('sha256').update(sql, 'utf8').digest('hex');
 }
@@ -84,8 +101,8 @@ export async function ensureExecutionLedger(client: pg.PoolClient): Promise<bool
       IS NOT NULL AS exists`,
   );
   const created = previous.rows[0]?.exists !== true;
-  await client.query('BEGIN');
   try {
+    await client.query('BEGIN');
     await client.query(`
       DO $trust$
       DECLARE schema_owner OID;
@@ -169,8 +186,7 @@ export async function ensureExecutionLedger(client: pg.PoolClient): Promise<bool
     `);
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
+    await rollbackExecutionTransaction(client, error);
   }
   return created;
 }

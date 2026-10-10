@@ -45,6 +45,30 @@ function independentlyDigest(sql: string, values: unknown[] = []): string {
 }
 
 describe('migration execution provenance', () => {
+  it('discards the client if rollback fails and retains the original BEGIN error', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-execution-discard-'));
+    await writeFile(join(directory, '001_probe.sql'), 'SELECT 1;');
+    const beginError = new Error('uncertain BEGIN acknowledgement');
+    const rollbackError = new Error('rollback transport failed');
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes('pg_try_advisory_lock')) return { rows: [{ locked: true }], rowCount: 1 };
+        if (sql.includes('pg_advisory_unlock')) return { rows: [{ unlocked: true }], rowCount: 1 };
+        if (sql === 'BEGIN') throw beginError;
+        if (sql === 'ROLLBACK') throw rollbackError;
+        return { rows: [], rowCount: 0 };
+      }), release: vi.fn(),
+    };
+    try {
+      const error = await runMigrations({ connect: vi.fn(async () => client) } as unknown as pg.Pool, directory)
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(AggregateError);
+      expect((error as AggregateError).errors).toEqual([beginError, rollbackError]);
+      expect((error as Error).cause).toBe(beginError);
+      expect(client.release).toHaveBeenCalledExactlyOnceWith(error);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
   it('rolls back an uncertain bookkeeping BEGIN before releasing the checked-out client', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'continuum-execution-begin-'));
     await writeFile(join(directory, '001_probe.sql'), 'SELECT 1;');
