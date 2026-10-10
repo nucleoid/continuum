@@ -152,4 +152,58 @@ describe('coordination public handoff contract', () => {
     expect((await pool.query('SELECT count(*)::int AS count FROM coordination_resources WHERE scope_id = $1', [scope.id])).rows)
       .toEqual([{ count: 0 }]);
   });
+
+  it('resumes bounded counter repair, preserves over-budget evidence, and gates only fresh mutations', async () => {
+    const { principal, scope, input } = await fixture();
+    const acquired = await acquireLease(pool, principal, input);
+    if (!acquired.acquired) throw new Error('expected acquisition');
+    for (let count = 0; count < 2; count += 1) await acquireLease(pool, principal, { ...input, requestId: randomUUID() });
+    for (let count = 0; count < 3; count += 1) await renewLease(pool, principal, {
+      leaseId: acquired.leaseId, runId: input.runId, requestId: randomUUID(),
+    });
+    const release = { leaseId: acquired.leaseId, runId: input.runId, requestId: randomUUID() };
+    await releaseLease(pool, principal, release);
+    const before = (await pool.query(`SELECT operation,request_id,payload_hash FROM coordination_operation_receipts
+      WHERE principal_id=$1 ORDER BY operation,request_id`, [principal.id])).rows;
+    // Reproduce an older installation's short windows and uncounted mutations.
+    await pool.query('ALTER TABLE coordination_operation_receipts DROP CONSTRAINT coordination_receipt_minimum_retention');
+    await pool.query('ALTER TABLE coordination_operation_receipts DISABLE TRIGGER coordination_receipt_compatibility_guard');
+    try {
+      await pool.query(`UPDATE coordination_operation_receipts SET retain_until=server_time+interval '90 seconds'
+        WHERE principal_id=$1 AND (operation='renew' OR outcome='contended')`, [principal.id]);
+    } finally {
+      await pool.query('ALTER TABLE coordination_operation_receipts ENABLE TRIGGER coordination_receipt_compatibility_guard');
+      await pool.query(`ALTER TABLE coordination_operation_receipts ADD CONSTRAINT coordination_receipt_minimum_retention
+        CHECK(retain_until>=server_time+interval '24 hours') NOT VALID`);
+    }
+    await pool.query(`UPDATE coordination_principal_usage SET mutation_receipt_count=0,acquire_receipt_limit=3 WHERE principal_id=$1`, [principal.id]);
+    await pool.query('UPDATE coordination_scope_usage SET resource_limit=20000 WHERE scope_id=$1', [scope.id]);
+    await pool.query(`UPDATE coordination_contract_backfill_state SET phase='usage',principal_cursor=NULL,scope_cursor=NULL,
+      receipt_principal_cursor=NULL,receipt_operation_cursor=NULL,receipt_request_cursor=NULL WHERE singleton`);
+    try {
+      await expect(acquireLease(pool, principal, { ...input, resource: 'pending-repair', requestId: randomUUID() }))
+        .rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE' });
+      await expect(releaseLease(pool, principal, release)).resolves.toEqual({ released: true, alreadyReleased: true });
+      let complete = false;
+      for (let batch = 0; batch < 20 && !complete; batch += 1) {
+        complete = (await pool.query('SELECT continuum_backfill_coordination_contract(2) AS complete')).rows[0].complete;
+        if (batch === 0) expect(complete).toBe(false);
+      }
+      expect(complete).toBe(true);
+      expect((await pool.query(`SELECT acquire_receipt_count,contended_receipt_count,mutation_receipt_count,acquire_receipt_limit
+        FROM coordination_principal_usage WHERE principal_id=$1`, [principal.id])).rows)
+        .toEqual([{ acquire_receipt_count: 1, contended_receipt_count: 2, mutation_receipt_count: 4, acquire_receipt_limit: 3 }]);
+      expect((await pool.query(`SELECT operation,request_id,payload_hash FROM coordination_operation_receipts
+        WHERE principal_id=$1 ORDER BY operation,request_id`, [principal.id])).rows).toEqual(before);
+      expect((await pool.query(`SELECT bool_and(retain_until>=server_time+interval '24 hours') AS retained
+        FROM coordination_operation_receipts WHERE principal_id=$1`, [principal.id])).rows).toEqual([{ retained: true }]);
+      expect((await pool.query('SELECT resource_limit FROM coordination_scope_usage WHERE scope_id=$1', [scope.id])).rows)
+        .toEqual([{ resource_limit: 10000 }]);
+      await expect(acquireLease(pool, principal, { ...input, requestId: randomUUID() }))
+        .rejects.toMatchObject({ code: 'COORDINATION_QUOTA_EXCEEDED' });
+      await expect(releaseLease(pool, principal, release)).resolves.toEqual({ released: true, alreadyReleased: true });
+    } finally {
+      await pool.query("UPDATE coordination_contract_backfill_state SET phase='complete' WHERE singleton");
+    }
+  }, 30_000);
 });
