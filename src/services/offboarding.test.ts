@@ -160,6 +160,45 @@ describe('offboarding and erasure', () => {
     }
   });
 
+  it('offboarding review: executes one bounded privacy scrub in a resumed historical run', async () => {
+    const value = await fixture();
+    const definition = (await pool.query(
+      `SELECT pg_get_functiondef(
+        'continuum_operator_scrub_coordination_principal(uuid,uuid,uuid,integer)'::regprocedure
+      ) AS definition`,
+    )).rows[0].definition as string;
+    await pool.query('CREATE TABLE offboarding_review_scrub_calls (batch_limit INTEGER NOT NULL)');
+    try {
+      // A bounded unfinished scrub keeps scope cleanup open. Count invocations
+      // at the database boundary, where each call owns a separate batch budget.
+      await pool.query(`CREATE OR REPLACE FUNCTION continuum_operator_scrub_coordination_principal(
+                        authorization_principal_id UUID, target_principal_id UUID,
+                        owned_scope_id UUID, batch_limit INTEGER DEFAULT 1000)
+                        RETURNS JSONB LANGUAGE plpgsql AS $$
+                        BEGIN
+                          INSERT INTO offboarding_review_scrub_calls VALUES (batch_limit);
+                          RETURN '{"complete":false,"progressed":true,"reason":null}'::jsonb;
+                        END; $$`);
+      const first = await offboardPrincipal(pool, value.admin, value.target.id, { batchSize: 1 });
+      expect(first.complete).toBe(false);
+      // Historical repaired runs can be in progress while the old offboarding
+      // marker is retained. This fixture emulates that imported state only.
+      await pool.query('ALTER TABLE principals DISABLE TRIGGER USER');
+      try {
+        await pool.query('UPDATE principals SET offboarded_at = clock_timestamp() WHERE id = $1', [value.target.id]);
+      } finally {
+        await pool.query('ALTER TABLE principals ENABLE TRIGGER USER');
+      }
+      await pool.query('TRUNCATE offboarding_review_scrub_calls');
+      await offboardPrincipal(pool, value.admin, value.target.id, { batchSize: 1 });
+      expect((await pool.query('SELECT batch_limit FROM offboarding_review_scrub_calls')).rows)
+        .toEqual([{ batch_limit: 1 }]);
+    } finally {
+      await pool.query(definition);
+      await pool.query('DROP TABLE offboarding_review_scrub_calls');
+    }
+  });
+
   it('offboarding review: commits a privacy batch before full-state verification and honors its timeout', async () => {
     const value = await fixture();
     expect((await offboardPrincipal(pool, value.admin, value.target.id)).complete).toBe(true);
