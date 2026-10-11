@@ -19,7 +19,7 @@ const databaseUrl = process.env.CONTINUUM_TEST_DATABASE_URL
 const quote = (value: string) => `"${value.replaceAll('"', '""')}"`;
 const literal = (value: string) => `'${value.replaceAll("'", "''")}'`;
 
-async function roleUpgradeAcceptance(review?: 'poison' | 'null') {
+async function roleUpgradeAcceptance(review?: 'poison' | 'null' | 'regrant') {
   const suffix = randomUUID().replaceAll('-', '').slice(0, 16);
   const schema = `promotion_roles_${suffix}`;
   const roles = ['app', 'operator', 'sync', 'report'].map((kind) => `promotion_${kind}_${suffix}`);
@@ -270,6 +270,22 @@ async function roleUpgradeAcceptance(review?: 'poison' | 'null') {
       .resolves.toBeDefined();
     expect((await app.query("SELECT pg_catalog.has_table_privilege('promotion_events','DELETE') AS allowed")).rows)
       .toEqual([{ allowed: false }]);
+    if (review === 'regrant') {
+      const operatorOid = originalProfiles.find((row) => row.profile_kind === 'operator')!.database_role_oid;
+      for (const step of ['application', 'operator', 'application'] as const) {
+        if (step === 'operator') await grant('grant-operator-role.sql', { continuum_operator_role: operatorRole, continuum_principal_id: administrator });
+        else await grant('grant-application-role.sql', { continuum_app_role: operatorRole });
+        expect((await owner.query('SELECT database_role_oid,profile_kind FROM continuum_pgvector_role_profiles WHERE database_role_oid=$1::oid',
+          [operatorOid])).rows).toEqual([{ database_role_oid: operatorOid, profile_kind: step }]);
+        await owner.query('SELECT continuum_assert_application_role_allowlist($1::name,$2::boolean)', [operatorRole, step === 'operator']);
+        await reconcilePgvectorProviderGrants(operator, { expectedSchema: schema });
+        expect((await operator.query(`SELECT pg_catalog.has_function_privilege(
+          'continuum_operator_scrub_promotion_scope(uuid,uuid,uuid,integer)','EXECUTE') AS allowed`)).rows)
+          .toEqual([{ allowed: step === 'operator' }]);
+        if (step === 'application') await expect(operator.query('SELECT continuum_operator_scrub_promotion_scope($1::uuid,$2::uuid,$3::uuid,1::integer)',
+          [administrator, target.id, personal.id])).rejects.toMatchObject({ code: '42501' });
+      }
+    }
   } finally {
     await Promise.all([...logins.values()].map((connection) => connection.end()));
     await owner.end();
@@ -288,3 +304,5 @@ it('promotion privacy boundary review: rejects application poisoning of the term
   () => roleUpgradeAcceptance('poison'), 180_000);
 it('promotion privacy boundary review: rejects NULL and out-of-range batch limits without mutation',
   () => roleUpgradeAcceptance('null'), 180_000);
+it('promotion operator regrant review: reapplies APP then OP then APP on the same bound role OID',
+  () => roleUpgradeAcceptance('regrant'), 180_000);
