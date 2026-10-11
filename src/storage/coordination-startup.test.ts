@@ -1,3 +1,4 @@
+import { dropIsolatedTestDatabase } from './test-helpers.js';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -69,7 +70,7 @@ async function fixture(run: (owner: pg.Pool, url: string, principal: string) => 
     await run(owner, url.toString(), principal);
   } finally {
     await owner?.end();
-    await admin.query(`DROP DATABASE IF EXISTS ${q(database)} WITH (FORCE)`);
+    await dropIsolatedTestDatabase(admin, database);
     await admin.query(`DROP ROLE IF EXISTS ${q(role)}`);
     await admin.end();
   }

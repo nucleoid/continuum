@@ -3,6 +3,54 @@ import { runMigrations } from './migrator.js';
 
 const DEFAULT_URL = 'postgres://continuum:continuum@localhost:5433/continuum';
 
+/** Normal fixture cleanup must not terminate clients whose sockets are ending. */
+export async function dropIsolatedTestDatabase(maintenance: pg.Pool, database: string): Promise<void> {
+  const client = await maintenance.connect();
+  let original: { statement: string; lock: string; database: string } | undefined;
+  let failure: unknown;
+  let discard = false;
+  try {
+    original = (await client.query<{ statement: string; lock: string; database: string }>(
+      `SELECT pg_catalog.current_setting('statement_timeout') AS statement,
+              pg_catalog.current_setting('lock_timeout') AS lock,
+              pg_catalog.current_database() AS database`,
+    )).rows[0];
+    if (!database || database.includes('\0') || database === original.database) {
+      throw new Error('Fixture cleanup requires a separate, nonempty database name');
+    }
+    await client.query("SELECT pg_catalog.set_config('statement_timeout','1s',FALSE), pg_catalog.set_config('lock_timeout','1s',FALSE)");
+    const deadline = Date.now() + 5_000;
+    for (;;) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error('Fixture database sessions did not drain within 5 seconds');
+      await client.query("SELECT pg_catalog.set_config('statement_timeout',$1,FALSE)", [`${Math.min(1_000, remaining)}ms`]);
+      const sessions = (await client.query<{ sessions: number }>(
+        'SELECT count(*)::int AS sessions FROM pg_catalog.pg_stat_activity WHERE datname=$1::text', [database],
+      )).rows[0].sessions;
+      if (sessions === 0) break;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(20, Math.max(1, deadline - Date.now()))));
+    }
+    await client.query("SELECT pg_catalog.set_config('statement_timeout','5s',FALSE)");
+    const identifier = '"' + database.replaceAll('"', '""') + '"';
+    await client.query(`DROP DATABASE IF EXISTS ${identifier}`);
+  } catch (error) {
+    failure = error;
+    throw error;
+  } finally {
+    try {
+      if (original) await client.query(
+        "SELECT pg_catalog.set_config('statement_timeout',$1,FALSE), pg_catalog.set_config('lock_timeout',$2,FALSE)",
+        [original.statement, original.lock],
+      );
+    } catch (restoreError) {
+      discard = true;
+      if (failure !== undefined) throw new AggregateError([failure, restoreError],
+        'Fixture database cleanup and session restoration failed', { cause: failure });
+      throw restoreError;
+    } finally { client.release(discard); }
+  }
+}
+
 export async function makeTestPool(): Promise<pg.Pool> {
   const url = process.env.CONTINUUM_TEST_DATABASE_URL ?? DEFAULT_URL;
   const pool = new pg.Pool({ connectionString: url, max: 4 });

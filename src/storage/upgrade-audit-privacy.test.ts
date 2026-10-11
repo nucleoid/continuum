@@ -1,3 +1,4 @@
+import { dropIsolatedTestDatabase } from './test-helpers.js';
 import { randomUUID } from 'node:crypto';
 import { copyFile, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -112,7 +113,7 @@ it('reopens genuine completed80 privacy cursors including inspection-only princi
       .toMatchObject({acquired:true,fencingToken:'2'});
     await expect(runMigrations(pool)).resolves.toEqual([]);
   } finally {
-    await pool?.end();await admin.query(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`);await admin.end();
+    await pool?.end();await dropIsolatedTestDatabase(admin, database);await admin.end();
     await rm(directory,{recursive:true,force:true});
   }
 },120000);

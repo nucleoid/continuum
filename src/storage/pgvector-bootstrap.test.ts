@@ -1,3 +1,4 @@
+import { dropIsolatedTestDatabase } from './test-helpers.js';
 import { copyFile, mkdtemp, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -54,9 +55,8 @@ async function withFreshDatabase(
     target.on('error', () => undefined);
     await run(root, target, url, database, directory);
   } finally {
-    await target?.end().catch(() => undefined);
-    await root.query(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`)
-      .catch(() => undefined);
+    await target?.end();
+    await dropIsolatedTestDatabase(root, database);
     await root.end();
     await rm(directory, { recursive: true, force: true });
   }

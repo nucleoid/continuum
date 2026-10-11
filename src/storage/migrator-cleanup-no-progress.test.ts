@@ -1,3 +1,4 @@
+import { dropIsolatedTestDatabase } from './test-helpers.js';
 import { randomUUID } from 'node:crypto';
 import { copyFile, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -97,7 +98,7 @@ it('bounds0062 no-progress retries for a legitimately skipped legacy noncurrent 
       .toEqual([{marked:true}]);
   } finally {
     if(holder){await holder.query('ROLLBACK').catch(()=>undefined);holder.release();}
-    await pool?.end();await admin.query(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`);await admin.end();
+    await pool?.end();await dropIsolatedTestDatabase(admin, database);await admin.end();
     await rm(directory,{recursive:true,force:true});
   }
 },120_000);
