@@ -130,6 +130,15 @@ describe('coordination contract scale and recovery', () => {
       .toEqual([{ count: 0 }]);
     expect((await pool.query('SELECT count(*)::int AS count FROM coordination_scope_privacy_progress WHERE scope_id=$1', [scope.id])).rows)
       .toEqual([{ count: 0 }]);
+    // Replay the forward upgrade's repair against this historical snapshot.
+    await pool.query(`UPDATE coordination_contract_backfill_state SET phase='usage',
+      principal_cursor=NULL,scope_cursor=NULL,receipt_principal_cursor=NULL,
+      receipt_operation_cursor=NULL,receipt_request_cursor=NULL`);
+    let complete = false;
+    for (let calls = 0; !complete && calls < 10; calls += 1) {
+      complete = (await pool.query('SELECT continuum_backfill_coordination_contract(1000) AS complete')).rows[0].complete;
+    }
+    expect(complete).toBe(true);
     const acquired = await acquireLease(pool, writer, { scope: 'user:historical-reactivation',
       resource: 'original-key', runId: randomUUID(), requestId: randomUUID(), ttlSeconds: 300 });
     expect(acquired.acquired).toBe(true);
