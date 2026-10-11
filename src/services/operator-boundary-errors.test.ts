@@ -14,6 +14,7 @@ const ACTOR_ID = '10000000-0000-4000-8000-000000000001';
 const TARGET_ID = '20000000-0000-4000-8000-000000000001';
 const SCOPE_ID = '30000000-0000-4000-8000-000000000001';
 const GROUP_ID = '40000000-0000-4000-8000-000000000001';
+const ORG_SCOPE_ID = '60000000-0000-4000-8000-000000000001';
 
 const actor: Principal = {
   id: ACTOR_ID,
@@ -53,17 +54,32 @@ function guardedPool(
         guardedCalls += 1;
         throw failure;
       }
+      if (sql.includes('pg_try_advisory_xact_lock')) {
+        return { rowCount: 1, rows: [{ locked: true }] };
+      }
+      if (sql.includes('AS dirty_memories') && sql.includes('AS entra_bindings')) {
+        return { rowCount: 1, rows: [{ memories: 0, live_memories: 0, dirty_memories: 0,
+          embeddings: 0, memberships: 1, aliases: 0, entra_bindings: 0 }] };
+      }
+      if (sql.includes('WITH examined AS MATERIALIZED')) {
+        return { rowCount: 1, rows: [{ principal: 0, scope: 0, memory: 0, scope_ids: 0,
+          total: 0, queries: 0, truncated: false }] };
+      }
+      if (sql.includes('FROM continuum_coordination_privacy_state')) {
+        return { rowCount: 1, rows: [{ privacy_version: 3, principal_complete: true,
+          scope_complete: false }] };
+      }
       if (sql.includes('continuum_coordination_privacy_schema_ready')) {
         return { rowCount: 1, rows: [{ ready: true }] };
       }
       if (/FROM scopes WHERE kind = \$1 AND name = \$2/.test(sql)) {
         return { rowCount: 1, rows: [{
-          id: SCOPE_ID, kind: 'org', name: '', created_at: new Date('2026-01-01T00:00:00Z'),
+          id: ORG_SCOPE_ID, kind: 'org', name: '', created_at: new Date('2026-01-01T00:00:00Z'),
         }] };
       }
       if (/FROM scope_memberships m JOIN principals p/.test(sql)) {
         return { rowCount: 1, rows: [{
-          principal_id: ACTOR_ID, scope_id: SCOPE_ID, role: 'admin',
+          principal_id: ACTOR_ID, scope_id: ORG_SCOPE_ID, role: 'admin',
           added_at: new Date('2026-01-01T00:00:00Z'), source_kind: 'manual',
           source_id: 'manual', active: true,
         }] };
@@ -142,7 +158,7 @@ const paths: Array<{
   },
   {
     name: 'principal offboarding',
-    guardedCall: /offboarding_run/,
+    guardedCall: /continuum_operator_get_offboarding_run/,
     invoke: (pool) => offboardPrincipal(pool, actor, TARGET_ID, {
       confirmationScopeId: SCOPE_ID,
     }),
@@ -307,7 +323,12 @@ describe('operator boundary database errors', () => {
   ])('does not map unrelated %s errors to FORBIDDEN', async (_label, failure) => {
     for (const path of paths) {
       const { pool, guardedCalls } = guardedPool(path.guardedCall, failure);
-      if (failure.code === '57014' && (
+      if (failure.code === '55P03' && path.name === 'principal offboarding') {
+        await expect(path.invoke(pool), path.name).resolves.toMatchObject({
+          dryRun: false, complete: false, alreadyOffboarded: false,
+          progressed: false, reason: 'lock_busy',
+        });
+      } else if (failure.code === '57014' && (
         path.name === 'owned-scope offboarding administration' || path.name === 'principal offboarding'
       )) {
         await expect(path.invoke(pool), path.name).rejects.toMatchObject({
