@@ -220,7 +220,8 @@ describe('coordination final review remediation', () => {
               runId, requestId: randomUUID(), ttlSeconds: 900,
             });
             expect(lease.acquired).toBe(true);
-            await releaseLease(pool, value.target, { leaseId: lease.leaseId!, runId, requestId: randomUUID() });
+            if (!lease.acquired) throw new Error('pending history fixture did not acquire');
+            await releaseLease(pool, value.target, { leaseId: lease.leaseId, runId, requestId: randomUUID() });
           }
           // Establish a real open run with durable scope cleanup and lifecycle
           // work still pending, then simulate the upgrade reopening privacy.
@@ -233,7 +234,7 @@ describe('coordination final review remediation', () => {
           )).rows[0].scope_cleanup_complete).toBe(true);
           const residual = (await pool.query(
             `SELECT EXISTS(SELECT 1 FROM coordination_operation_receipts WHERE principal_id=$1::uuid AND scope_id=$2::uuid)
-                OR EXISTS(SELECT 1 FROM coordination_leases WHERE holder_principal_id=$1::uuid AND scope_id=$2::uuid) AS remains,
+                OR EXISTS(SELECT 1 FROM coordination_leases WHERE principal_id=$1::uuid AND scope_id=$2::uuid) AS remains,
                NOT principal_complete AS incomplete FROM continuum_coordination_privacy_state($1::uuid,$3::uuid)`,
             [value.target.id, value.shared.id, value.owned.id],
           )).rows[0];
