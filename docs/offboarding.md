@@ -209,6 +209,15 @@ allowlisted request/run identifiers. Immutable coordination operator events
 record direct pseudonymization start and completion outside ordinary audit
 retention and offboarding mutation.
 
+The bounded 0081 usage/progress pass clears the original `last_lease_id` and
+`last_request_id` compatibility fields written by 0059-0061 scrubs. Current
+audit-ID progress and active resumable phases remain separate from those old
+UUIDs, and the actual erased-state predicate rejects any retained legacy UUID
+link. Detached rows already produced by the old scrub can retain historical
+timestamps. Clearing the principal's UUID link does not erase temporal
+correlation or rewrite earlier backups; treat retained installation history and
+backups under the organization's independent retention policy.
+
 Migration 0063 reopens every version-1 coordination privacy row by clearing its
 completion timestamp. `list-incomplete-offboarding` reports unfinished durable
 offboarding runs, but a previously completed run can require only this upgrade
