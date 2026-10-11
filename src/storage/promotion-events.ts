@@ -241,6 +241,12 @@ export async function claimPromotionDeliveries(
             AND d.available_at <= pg_catalog.clock_timestamp()
             AND (d.lease_expires_at IS NULL OR d.lease_expires_at <= pg_catalog.clock_timestamp())
             AND d.attempt_count < $5
+            AND NOT EXISTS (
+              SELECT 1 FROM promotion_events private_event
+              JOIN principal_user_scopes ownership ON ownership.scope_id=private_event.destination_scope_id
+              JOIN principals private_owner ON private_owner.id=ownership.principal_id
+              WHERE private_event.id=d.event_id AND private_owner.disabled_at IS NOT NULL
+            )
           ORDER BY r.webhook_rank, d.available_at, d.event_id, d.webhook_id
           FOR UPDATE OF d SKIP LOCKED
           LIMIT $3
@@ -257,6 +263,12 @@ export async function claimPromotionDeliveries(
             AND (d.lease_expires_at IS NULL OR d.lease_expires_at <= pg_catalog.clock_timestamp())
             AND d.attempt_count = c.prior_attempt_count AND d.lease_generation = c.prior_generation
             AND d.attempt_count < $5
+            AND NOT EXISTS (
+              SELECT 1 FROM promotion_events private_event
+              JOIN principal_user_scopes ownership ON ownership.scope_id=private_event.destination_scope_id
+              JOIN principals private_owner ON private_owner.id=ownership.principal_id
+              WHERE private_event.id=d.event_id AND private_owner.disabled_at IS NOT NULL
+            )
           RETURNING d.event_id, d.webhook_id, d.attempt_count, d.lease_generation,
                     c.lease_recovered
        )
@@ -387,7 +399,13 @@ export async function manualRetryPromotionDelivery(
         SET state = 'pending', available_at = now(), attempt_count = 0,
             lease_owner = NULL, lease_expires_at = NULL,
             last_error = NULL, dead_lettered_at = NULL
-      WHERE event_id = $1 AND webhook_id = $2 AND state = 'dead_letter'`,
+      WHERE event_id = $1 AND webhook_id = $2 AND state = 'dead_letter'
+        AND NOT EXISTS (
+          SELECT 1 FROM promotion_events private_event
+          JOIN principal_user_scopes ownership ON ownership.scope_id=private_event.destination_scope_id
+          JOIN principals private_owner ON private_owner.id=ownership.principal_id
+          WHERE private_event.id=promotion_event_deliveries.event_id AND private_owner.disabled_at IS NOT NULL
+        )`,
     [eventId, webhookId],
   );
   return result.rowCount === 1;
