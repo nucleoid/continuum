@@ -47,8 +47,8 @@ describe('coordination receipt scope authorization', () => {
       'SELECT scope_id FROM coordination_operation_receipts WHERE principal_id = $1 AND operation = $2 AND request_id = $3',
       [actor.id, operation, requestId],
     )).rows).toEqual([{ scope_id: first.id }]);
-    // A genuinely authorized same-scope changed payload retains CONFLICT.
+    // An authorized same-scope changed payload retains the precise conflict code.
     await addMembership(pool, actor.id, first.id, 'writer');
-    await expect(mutate(leaseA.leaseId, randomUUID(), 301)).rejects.toMatchObject({ code: 'CONFLICT' });
+    await expect(mutate(leaseA.leaseId, randomUUID(), 301)).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
   });
 });
