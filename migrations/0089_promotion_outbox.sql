@@ -144,11 +144,11 @@ BEGIN
     END IF;
     IF EXISTS(SELECT 1 FROM principal_user_scopes mapping JOIN principals principal ON principal.id=mapping.principal_id
       WHERE mapping.scope_id=NEW.destination_scope_id AND principal.disabled_at IS NOT NULL) THEN
-      RAISE check_violation USING MESSAGE='promotion event destination is disabled';
+      RAISE check_violation USING MESSAGE='promotion event destination is disabled',CONSTRAINT='promotion_destination_disabled';
     END IF;
   ELSIF TG_OP='INSERT' AND EXISTS(SELECT 1 FROM promotion_events event JOIN principal_user_scopes mapping ON mapping.scope_id=event.destination_scope_id
     JOIN principals principal ON principal.id=mapping.principal_id AND principal.disabled_at IS NOT NULL WHERE event.id=NEW.event_id) THEN
-    RAISE check_violation USING MESSAGE='promotion delivery destination is disabled';
+    RAISE check_violation USING MESSAGE='promotion delivery destination is disabled',CONSTRAINT='promotion_destination_disabled';
 
   END IF;
   RETURN NEW;

@@ -93,6 +93,10 @@ export async function verifyForPrincipal(
 }
 
 function mapLifecycleError(error: unknown): ServiceError {
+  const databaseError = error as { code?: string; constraint?: string };
+  if (databaseError.code === '23514' && databaseError.constraint === 'promotion_destination_disabled') {
+    return new ServiceError('FORBIDDEN', 'Target scope is unavailable for promotion');
+  }
   if (error instanceof StorageDependencyError) {
     return dependencyUnavailable(error.cause ?? error);
   }

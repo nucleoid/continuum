@@ -99,6 +99,12 @@ async function promoteOperation(
     throw new PromoteError(`principal lacks ${roleName} role on target scope`, 403);
   }
 
+  const disabledOwner = await client.query(
+    `SELECT 1 FROM principal_user_scopes mapping JOIN principals owner ON owner.id=mapping.principal_id
+      WHERE mapping.scope_id=$1::uuid AND owner.disabled_at IS NOT NULL`, [destinationScope.id],
+  );
+  if (disabledOwner.rowCount) throw new PromoteError('Target scope is unavailable for promotion', 403);
+
   const matchedTags = await lockRequestedTags(client, destinationScope.kind, source.tags);
   const matchedSet = new Set(matchedTags);
   const unknownTags = [...new Set(source.tags.filter((tag) => !matchedSet.has(tag)))].sort();
