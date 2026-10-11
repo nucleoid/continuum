@@ -908,8 +908,10 @@ describe('coordination final review remediation', () => {
            FROM generate_series(1, 50000) n`,
         [`clean-completed-scope:${randomUUID()}`],
       );
-      await query(
-        `INSERT INTO principal_user_scopes
+      for (let first = 1; first <= 50_000; first += 5_000) {
+        const last = Math.min(first + 4_999, 50_000);
+        await query(
+          `INSERT INTO principal_user_scopes
            (principal_id, scope_id, mapped_by, acknowledged_principal_ids,
             acknowledged_evidence_hash)
          SELECT ('30000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid,
@@ -917,9 +919,11 @@ describe('coordination final review remediation', () => {
                 $1,
                 ARRAY[('30000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid],
                 repeat('c', 64)
-           FROM generate_series(1, 50000) n`,
-        [dirty.operator.id],
-      );
+           FROM generate_series($2::integer, $3::integer) n`,
+          [dirty.operator.id, first, last],
+        );
+        console.info('privacy-scale-mapping-chunk', JSON.stringify({ first, last, seeded: last }));
+      }
       await query(
         `INSERT INTO coordination_principal_privacy_progress
            (principal_id, detached_principal_id, privacy_version, completed_at)
