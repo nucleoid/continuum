@@ -267,7 +267,7 @@ BEGIN
   IF invoking_role_oid = application_owner_oid THEN
     -- Never retain a blocking advisory-lock snapshot: online index builders
     -- holding the migration lock can otherwise wait for this same transaction.
-    IF NOT pg_try_advisory_xact_lock(7215328273579717613::bigint) THEN
+    IF NOT pg_try_advisory_xact_lock_shared(7215328273579717613::bigint) THEN
       RAISE EXCEPTION 'pgvector profile verification is busy; retry after migration'
         USING ERRCODE = '55P03';
     END IF;
@@ -279,8 +279,10 @@ BEGIN
         LEFT JOIN pg_roles role ON role.oid = profile.database_role_oid
        ORDER BY profile.database_role_oid
     LOOP
-      IF candidate.rolname IS NULL
-          OR candidate.provider_schema_oid <> vector_schema_oid THEN
+      -- A dropped role cannot exercise privileges. Retain its owner metadata
+      -- without changing grants; validate every live role normally.
+      IF candidate.rolname IS NULL THEN CONTINUE; END IF;
+      IF candidate.provider_schema_oid <> vector_schema_oid THEN
         RAISE EXCEPTION 'registered pgvector profile drift; rerun the exact role grant profile';
       END IF;
       IF candidate.profile_kind IN ('application', 'operator') THEN
@@ -302,7 +304,14 @@ BEGIN
         END IF;
       ELSIF has_schema_privilege(candidate.rolname, vector_schema_oid, 'CREATE')
           OR (vector_schema_oid <> application_schema_oid
-              AND has_schema_privilege(candidate.rolname, vector_schema_oid, 'USAGE')) THEN
+              AND EXISTS (
+                SELECT 1 FROM pg_namespace namespace
+                CROSS JOIN LATERAL aclexplode(COALESCE(
+                  namespace.nspacl, acldefault('n', namespace.nspowner))) privilege
+                WHERE namespace.oid = vector_schema_oid AND privilege.grantee <> 0
+                  AND privilege.privilege_type = 'USAGE'
+                  AND pg_has_role(candidate.database_role_oid, privilege.grantee, 'USAGE')
+              )) THEN
         RAISE EXCEPTION 'registered pgvector sync profile drift';
       END IF;
     END LOOP;
@@ -341,8 +350,17 @@ BEGIN
       RAISE EXCEPTION 'pgvector reporting profile drift detected for role %',
         quote_ident(invoking_role);
     END IF;
+  -- PUBLIC provider USAGE is preserved for shared and legacy layouts. Only
+  -- direct or inherited non-PUBLIC grants constitute sync profile drift.
   ELSIF profile_kind_value = 'sync' AND vector_schema_oid <> application_schema_oid
-      AND has_schema_privilege(invoking_role, vector_schema_oid, 'USAGE') THEN
+      AND EXISTS (
+        SELECT 1 FROM pg_namespace namespace
+        CROSS JOIN LATERAL aclexplode(COALESCE(
+          namespace.nspacl, acldefault('n', namespace.nspowner))) privilege
+        WHERE namespace.oid = vector_schema_oid AND privilege.grantee <> 0
+          AND privilege.privilege_type = 'USAGE'
+          AND pg_has_role(invoking_role_oid, privilege.grantee, 'USAGE')
+      ) THEN
     RAISE EXCEPTION 'pgvector sync profile retains provider-schema USAGE for role %',
       quote_ident(invoking_role);
   END IF;

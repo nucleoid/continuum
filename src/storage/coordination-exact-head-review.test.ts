@@ -478,8 +478,21 @@ describe('coordination exact-head review regressions', () => {
       const offboardingOutcome = await offboarding;
       if (!offboardingOutcome.ok) throw offboardingOutcome.error;
       expect(offboardingOutcome.result).toMatchObject({
-        complete: false, reason: 'live_lease',
+        complete: false, reason: 'owned_live_lease',
       });
+      expect((await pool.query(
+        'SELECT disabled_at IS NOT NULL AS disabled FROM principals WHERE id = $1',
+        [value.target.id],
+      )).rows).toEqual([{ disabled: true }]);
+      expect((await pool.query(
+        `SELECT count(*)::int AS active FROM scope_memberships
+          WHERE principal_id = $1 AND scope_id = $2 AND active`,
+        [value.target.id, value.owned.id],
+      )).rows).toEqual([{ active: 0 }]);
+      expect((await pool.query(
+        `SELECT completed_at IS NULL AS pending FROM principal_offboarding_runs
+          WHERE principal_id = $1`, [value.target.id],
+      )).rows).toEqual([{ pending: true }]);
       await releaseLease(application, value.target, {
         leaseId: acquired.leaseId, runId: acquireRunId, requestId: randomUUID(),
       });

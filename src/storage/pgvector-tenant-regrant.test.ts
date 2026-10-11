@@ -113,6 +113,8 @@ describe('pgvector tenant-scoped explicit regrant', () => {
           .toEqual([{ usage: true, create: false, memory_read: false }]);
       } finally { await client.query('ROLLBACK'); client.release(); }
       await expect(reconcilePgvectorProviderGrants(pool)).resolves.toBeUndefined();
+      await admin.query(`GRANT USAGE ON SCHEMA ${q(provider)} TO ${q(sync)}`);
+      await expect(reconcilePgvectorProviderGrants(pool)).rejects.toThrow(/sync profile drift/i);
     });
   }, 180_000);
 
