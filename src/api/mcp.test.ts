@@ -581,6 +581,7 @@ describe('MCP server', () => {
   it('materializes registered webhook deliveries without changing the MCP response', async () => {
     const webhooks = new PromotionWebhookRegistry();
     webhooks.register({ id: 'consumer', onPromoted: vi.fn() });
+    await pool.query('UPDATE promotion_webhook_registry SET webhook_ids=$1::text[] WHERE singleton', [webhooks.ids()]);
     const { client, me, org } = await connectClient(provider, pool, undefined, webhooks);
     await addMembership(pool, me.id, org.id, 'admin');
     const capture = (await client.callTool({
