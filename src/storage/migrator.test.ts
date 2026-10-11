@@ -500,12 +500,14 @@ describe('runMigrations', () => {
         privacyComplete = scrub.rows[0]?.privacy?.complete === true;
       }
       expect(privacyComplete).toBe(true);
-      expect((await pool.query(
+      const scrubbedMetadata = (await pool.query(
         'SELECT metadata FROM audit_log WHERE id = $1', [auditId],
-      )).rows).toEqual([{ metadata: {
-        operation: 'lock_acquire', outcome: 'acquired', fencing_token: '8',
-        resource_bytes: 12, transport: 'rest', own_lease: true,
-      } }]);
+      )).rows[0].metadata;
+      expect(scrubbedMetadata).toEqual({
+        operation: 'lock_acquire', outcome: 'acquired', transport: 'rest', own_lease: true,
+      });
+      expect(scrubbedMetadata).not.toHaveProperty('fencing_token');
+      expect(scrubbedMetadata).not.toHaveProperty('resource_bytes');
       expect((await pool.query(
         'SELECT continuum_offboarding_actual_state_is_erased($1::uuid) AS erased',
         [completedRunId],

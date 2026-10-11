@@ -38,7 +38,7 @@ describe('coordination detached total receipt capacity', () => {
       VALUES($1,'acquire',$2,sha256(convert_to('preserved-anonymous','UTF8')),'contended',$3,'mixed-receipts',
         clock_timestamp()+interval '1 minute',clock_timestamp(),1,clock_timestamp()+interval '24 hours')`,
     [detached, preservedRequest, shared.id]);
-    await pool.query('SELECT continuum_operator_set_coordination_principal_quota($1,$2,$3,1000)', [operator.id, detached, budget]);
+    await pool.query('SELECT continuum_operator_set_coordination_principal_quota($1::uuid,$2::uuid,$3::integer,$3::integer)', [operator.id, detached, budget]);
     await pool.query('UPDATE principals SET disabled_at=clock_timestamp() WHERE id=$1', [target.id]);
     const fences = (await pool.query('SELECT resource,fencing_token::text FROM coordination_resources WHERE scope_id=$1', [shared.id])).rows;
     return { operator, target, owned, shared, preservedRequest, fences };

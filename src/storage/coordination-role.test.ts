@@ -133,9 +133,10 @@ describe('coordination database role profiles', () => {
         })],
       );
       expect(redacted.rows[0]?.metadata).toMatchObject({
-        operation: 'lock_acquire', outcome: 'acquired', fencing_token: '9',
-        resource_bytes: 12, transport: 'rest',
+        operation: 'lock_acquire', outcome: 'acquired', transport: 'rest',
       });
+      expect(redacted.rows[0]?.metadata).not.toHaveProperty('fencing_token');
+      expect(redacted.rows[0]?.metadata).not.toHaveProperty('resource_bytes');
       expect(redacted.rows[0]?.metadata).not.toHaveProperty('resource_sha256');
       expect(redacted.rows[0]?.metadata).not.toHaveProperty('resource');
       expect(redacted.rows[0]?.metadata).not.toHaveProperty('unexpected');
@@ -387,7 +388,7 @@ describe('coordination database role profiles', () => {
         [operatorPrincipal.id, scope.id],
       )).rejects.toThrow(/supported range/);
       await expect(operator.connection.query(
-        'SELECT continuum_operator_set_coordination_principal_quota($1, $1, 12000, 2000)',
+        'SELECT continuum_operator_set_coordination_principal_quota($1, $1, 10001, 10001)',
         [operatorPrincipal.id],
       )).rejects.toThrow(/between 1 and 10000/);
       await expect(operator.connection.query(
@@ -396,7 +397,7 @@ describe('coordination database role profiles', () => {
       )).resolves.toBeDefined();
       await expect(operator.connection.query(
         `SELECT continuum_operator_set_coordination_principal_quota(
-           $1, $1, 10000, 2000
+           $1, $1, 10000, 10000
          )`, [operatorPrincipal.id],
       )).resolves.toBeDefined();
       const second = await acquireLease(operator.connection, operatorPrincipal, {
