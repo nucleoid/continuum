@@ -44,6 +44,11 @@ at 100 attempts with bounded backoff. `repair-coordination-privacy` has no
 memory or lifecycle audit phase to continue through a live-lease block.
 That blocking status takes precedence over `--once`: an unblocked incomplete
 single batch exits 2, while a typed block exits 3 even with `--once`.
+An overlapping membership sync can hold the installation-wide lock and stop
+`offboard-principal` with transient `lock_busy` and status 3, including between
+committed batches. The CLI does not automatically poll this block. Rerun after
+the sync or other contention ends; committed progress remains durable. No
+`resumeAfter` timestamp is inferred for lock contention.
 A server verification deadline returns `COORDINATION_TIMEOUT` and exits 2 with
 a sanitized error on stderr. Previously committed batches remain durable;
 resume using a verification budget chosen from measured database behavior.
