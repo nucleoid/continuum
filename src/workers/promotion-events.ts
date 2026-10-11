@@ -419,9 +419,15 @@ export class PromotionEventWorker implements RuntimeWorker {
     // Require fresh exact ownership after a material admission delay, before invoking user code.
     const claimStarted = this.claimStartedAt.get(delivery) ?? Date.now();
     if (Date.now() - claimStarted >= Math.max(1, Math.floor(this.options.leaseMs / 3))) {
-      const ownership = await this.databaseOperation(this.store.renew(
-        this.pool, this.options.owner, [delivery], this.options.leaseMs,
-      ));
+      let ownership: PromotionLeaseRenewalResult | number;
+      try {
+        ownership = await this.databaseOperation(this.store.renew(
+          this.pool, this.options.owner, [delivery], this.options.leaseMs,
+        ));
+      } catch (error) {
+        await this.abandonDeliveries([delivery], 'promotion_delivery_admission_refresh_abandoned');
+        throw error;
+      }
       const owned = typeof ownership === 'number'
         ? ownership >= 1
         : ownership.renewed.some((current) => deliveryKey(current) === deliveryKey(delivery)
@@ -708,6 +714,10 @@ export class PromotionEventWorker implements RuntimeWorker {
         this.retainLease(delivery);
         const key = deliveryKey(delivery);
         this.pendingAcknowledgements.set(key, controller);
+        // Ownership uncertainty may have removed this callback's renewal entry
+        // before its late success. Re-register only the completed callback's
+        // exact fence for ACK reconciliation, never for another invocation.
+        this.controllers.set(controller, delivery);
         // Observe a late committed ACK even when the deadline race has already returned.
         void acknowledging.then(() => {
           if (this.pendingAcknowledgements.get(key) === controller) {
