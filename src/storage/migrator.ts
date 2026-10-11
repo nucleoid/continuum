@@ -87,7 +87,7 @@ const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
   ['0080_pgvector_provider_grants.sql',
     '46a42e2380db431ea9280d7bcf0a2a3cdcc7751efbddf8347d701e37c92df5f9'],
   ['0081_coordination_public_contract.sql',
-    '0e3fc156bbc1441fb063a7737e7696c0a811205e90199c863465f11d72d62a69'],
+    '169061f54352fc35db9faa10596d8648cf5725208caef821bff15491a9bdaccd'],
 ]);
 const FORWARD_MIGRATION_REQUIREMENTS = new Map([
   ['0053_offboarding_restore_contract.sql', '0052_offboarding_review_repair.sql'],
@@ -725,7 +725,7 @@ export async function runMigrations(
           throw new Error(
             'Refusing a pgvector provider whose owner controls another Continuum application schema. '
             + 'Use independently owned provider infrastructure, or set '
-            + `${LEGACY_SHARED_VECTOR_SCHEMA_OPT_IN}=1 only for reviewed shared-provider ownership`,
+            + `${LEGACY_SHARED_VECTOR_SCHEMA_OPT_IN}=1 only for a reviewed legacy shared-provider compatibility opt-in`,
           );
         }
         if (providerState.schema === 'public' && applicationSchema !== 'public'
