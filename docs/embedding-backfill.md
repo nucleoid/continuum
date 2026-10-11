@@ -128,11 +128,11 @@ Valid registered APP and OP profiles gain CRUD on both durable backfill tables
 after both exist. SYNC and reporting roles gain no access. Use the current grant
 scripts for explicit profile regrants and verify runtime startup before serving.
 
-The installed migrator takes one deployment-wide advisory lock and gives up
-after its bounded acquisition deadline (30 seconds by default). It does not
-wait indefinitely or start a second migration stream. Treat that nonzero exit
-as a deployment failure: do not route new application binaries until one
-migrator has completed all pending files.
+The installed migrator polls for one deployment-wide advisory lock until it is
+available. It has no built-in whole acquisition deadline. Run it under a finite
+external process deadline and treat deadline expiry or any nonzero exit as a
+deployment failure. Do not route new application binaries until one migrator
+has completed all pending files.
 
 Before applying 0084, drain every process running the old write path. Old writers
 use the former `memory_id` conflict target and are incompatible after the primary
