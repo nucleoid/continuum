@@ -121,11 +121,13 @@ describe('offboarding and erasure', () => {
          SELECT gen_random_uuid(), $1, 'context', 'bulk ' || n, 'private ' || n, $2, 'manual'
            FROM generate_series(1, $3) n`, [value.personal.id, value.target.id, MAX_OFFBOARD_MEMORIES],
       );
-      await bounded.query(
-        `INSERT INTO audit_log(principal_id, action, scope_id, query, metadata)
-         SELECT $1, 'read', $2, 'bounded secret ' || n, '{}'::jsonb FROM generate_series(1, $3) n`,
-        [value.admin.id, value.personal.id, MAX_OFFBOARD_AFFECTED_ROWS + 1],
-      );
+      for (let first = 1; first <= MAX_OFFBOARD_AFFECTED_ROWS + 1; first += 1_000) {
+        await bounded.query(
+          `INSERT INTO audit_log(principal_id, action, scope_id, query, metadata)
+           SELECT $1, 'read', $2, 'bounded secret ' || n, '{}'::jsonb FROM generate_series($3::integer, $4::integer) n`,
+          [value.admin.id, value.personal.id, first, Math.min(first + 999, MAX_OFFBOARD_AFFECTED_ROWS + 1)],
+        );
+      }
       await bounded.query('COMMIT');
     } catch (error) { await bounded.query('ROLLBACK'); throw error; }
   }
