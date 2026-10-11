@@ -54,6 +54,17 @@ describe('qualified provider startup gate', () => {
     });
   });
 
+  it('reports a missing tenant readiness helper with the sanitized migration cause', async () => {
+    await fixture(async (pool, admin, schema, shadow) => {
+      await admin.query(`CREATE FUNCTION "${shadow}".continuum_coordination_contract_is_ready()
+        RETURNS BOOLEAN LANGUAGE sql AS 'SELECT TRUE'`);
+      await expect(requireCoordinationContractReady(pool)).rejects.toMatchObject({
+        code: 'DEPENDENCY_UNAVAILABLE',
+        message: 'Coordination contract readiness is unavailable; finish migrations before starting runtimes',
+      });
+    });
+  });
+
   it('verifies startup under a direct quoted LOGIN role without parsing its name as regrole', async () => {
     await fixture(async (_pool, admin, schema, shadow) => {
       const role = `startup-role-${randomUUID().slice(0, 8)}`;
