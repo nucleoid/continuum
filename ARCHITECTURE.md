@@ -24,8 +24,11 @@ generations whose identity and token are immutable while expiry and release
 time are lifecycle fields.
 `coordination_operation_receipts` stores typed idempotency outcomes, while
 scope and principal usage tables enforce hard resource and retained-receipt
-limits. Release evicts the oldest release receipt at saturation so relinquishing
-a lease cannot be blocked by observability quota. Bounded operator maintenance
+limits. Each principal has one 10,000-receipt budget across all operation types,
+with receipts retained for at least 24 hours. Saturation rejects every fresh
+mutation, including release, with `COORDINATION_QUOTA_EXCEEDED` (409); exact
+authorized replays remain available. Receipts are not evicted to admit a fresh
+operation. Bounded operator maintenance
 uses durable cleanup eligibility rather than rescanning current expired leases,
 and may reclaim inactive keys after preserving the scope fencing floor.
 
