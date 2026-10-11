@@ -140,7 +140,84 @@ export interface CoordinationPrivacyRepairPage {
 }
 
 export type CoordinationPrivacyBlockReason =
-  'live_lease' | 'detached_quota' | 'lock_busy' | 'no_progress' | null;
+  'live_lease' | 'owned_live_lease' | 'migration_pending'
+  | 'detached_quota' | 'lock_busy' | 'no_progress' | 'offboarding_required' | null;
+
+function isCoordinationContractPending(error: unknown): boolean {
+  const failure = error as { code?: string; constraint?: string; message?: string };
+  return failure.code === '55000' && (
+    failure.constraint === 'coordination_contract_pending'
+    || failure.message === 'coordination contract repair is incomplete'
+  );
+}
+
+function isOwnedScopeLiveLease(error: unknown): boolean {
+  const failure = error as { code?: string; constraint?: string };
+  return failure.code === '23514' && failure.constraint === 'coordination_scope_live_lease';
+}
+
+interface CoordinationPrivacyBatch {
+  complete?: boolean;
+  progressed?: boolean;
+  blocked_until?: string | null;
+  reason?: CoordinationPrivacyBlockReason;
+  expired_detached_receipts_purged?: number;
+}
+
+function privacyBatchProgressed(batch: CoordinationPrivacyBatch | undefined): boolean {
+  return batch?.progressed === true || Number(batch?.expired_detached_receipts_purged ?? 0) > 0;
+}
+
+function privacyBatchReason(batch: CoordinationPrivacyBatch | undefined): CoordinationPrivacyBlockReason {
+  // A purge that just freed capacity makes this quota result retryable. A live
+  // lease or a genuinely saturated pool remains a block, without busy polling.
+  if (batch?.reason === 'detached_quota' && !batch.blocked_until
+      && Number(batch.expired_detached_receipts_purged ?? 0) > 0) return null;
+  return batch?.reason ?? null;
+}
+
+interface OwnedScopePrivacyState {
+  repair_exists: boolean;
+  phase: string | null;
+  pseudonym: string | null;
+  rows_processed: string | number;
+  scope_complete: boolean;
+  resources_remain: boolean;
+  receipts_remain: boolean;
+  leases_remain: boolean;
+  live_lease_until: Date | null;
+}
+
+async function ownedScopePrivacyState(
+  client: pg.PoolClient, actorId: string, scopeId: string,
+): Promise<OwnedScopePrivacyState> {
+  let result: pg.QueryResult<OwnedScopePrivacyState>;
+  try {
+    result = await client.query<OwnedScopePrivacyState>(
+      'SELECT * FROM continuum_operator_coordination_scope_privacy_state($1::uuid, $2::uuid)',
+      [actorId, scopeId],
+    );
+  } catch (error) {
+    if ((error as { code?: string }).code !== '42883') throw error;
+    throw new ServiceError('DEPENDENCY_UNAVAILABLE',
+      'owned-scope privacy verification requires current migrations', { cause: error });
+  }
+  if (!result.rows[0]) {
+    throw new ServiceError('DEPENDENCY_UNAVAILABLE', 'owned-scope privacy verification requires current migrations');
+  }
+  return result.rows[0];
+}
+
+function ownedScopeIsClean(state: OwnedScopePrivacyState): boolean {
+  return state.scope_complete === true && !state.resources_remain
+    && !state.receipts_remain && !state.leases_remain;
+}
+
+function ownedScopeProgressed(before: OwnedScopePrivacyState, after: OwnedScopePrivacyState): boolean {
+  return before.phase !== after.phase
+    || BigInt(after.rows_processed ?? 0) > BigInt(before.rows_processed ?? 0)
+    || (!ownedScopeIsClean(before) && ownedScopeIsClean(after));
+}
 
 export interface CoordinationPrivacyRepairOptions {
   confirmationScopeId: string;
@@ -168,10 +245,13 @@ async function setCoordinationPrivacyClientVersion(client: pg.PoolClient): Promi
 async function requireCurrentCoordinationPrivacySchema(
   client: pg.PoolClient,
 ): Promise<void> {
-  const contract = await client.query<{ ready: boolean }>(
+  const contract = await client.query<{ ready: boolean; owned_scope_ready: boolean }>(
     `SELECT to_regprocedure(format(
        '%I.continuum_coordination_privacy_schema_ready()', namespace.nspname
-     )) IS NOT NULL AS ready
+     )) IS NOT NULL AS ready,
+       to_regprocedure(format(
+         '%I.continuum_operator_coordination_scope_privacy_state(uuid,uuid)', namespace.nspname
+       )) IS NOT NULL AS owned_scope_ready
        FROM pg_class relation
        JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
       WHERE relation.oid = to_regclass('principals')`,
@@ -181,6 +261,10 @@ async function requireCurrentCoordinationPrivacySchema(
       'CONFLICT',
       'coordination privacy schema is incomplete; finish migrations before mutation',
     );
+  }
+  if (contract.rows[0]?.owned_scope_ready !== true) {
+    throw new ServiceError('DEPENDENCY_UNAVAILABLE',
+      'owned-scope privacy verification requires current migrations');
   }
 }
 
@@ -207,7 +291,7 @@ export async function listCoordinationPrivacyRepairs(
     await requireOrgAdmin(client, actor.id);
     const result = await client.query(
       `SELECT principal_id::text, scope_id::text, repair_state
-         FROM continuum_operator_list_coordination_privacy_repairs($1, $2, NULL, $3)`,
+         FROM continuum_operator_list_coordination_privacy_repairs($1::uuid, $2::uuid, NULL::uuid, $3::integer)`,
       [actor.id, cursor, limit],
     );
     await client.query('COMMIT');
@@ -252,7 +336,7 @@ export async function listCoordinationPrivacyRepairPage(
       scanned_count: number;
     }>(
       `SELECT repairs, next_cursor::text, has_more, scanned_count
-         FROM continuum_operator_list_coordination_privacy_repair_page($1, $2, $3)`,
+         FROM continuum_operator_list_coordination_privacy_repair_page($1::uuid, $2::uuid, $3::integer)`,
       [actor.id, cursor, limit],
     );
     const row = result.rows[0];
@@ -347,17 +431,32 @@ export async function repairCoordinationPrivacy(
       target.rows[0].offboarded_at === null ? 'disabled_only' : 'offboarded';
     const candidate = await client.query(
       `SELECT repair_state
-         FROM continuum_operator_list_coordination_privacy_repairs($1, $2, 1)`,
+         FROM continuum_operator_list_coordination_privacy_repairs($1::uuid, $2::uuid, 1::integer)`,
       [actor.id, principalId],
     );
+    if (state === 'offboarded') {
+      // Principal privacy alone is not proof of full lifecycle erasure.
+      // The confirmed offboarding path owns that bounded verification.
+      await record(client, {
+        principalId: actor.id, action: 'read',
+        metadata: { operation: 'coordination_privacy_repair', outcome: 'offboarding_required' },
+      });
+      await client.query('COMMIT');
+      return {
+        principalId, scopeId, state, complete: false,
+        progressed: false, blockedUntil: null, reason: 'offboarding_required',
+      };
+    }
     const privacy = await client.query(
       `SELECT privacy_version, principal_complete
-         FROM continuum_coordination_privacy_state($1, $2)`,
+         FROM continuum_coordination_privacy_state($1::uuid, $2::uuid)`,
       [principalId, scopeId],
     );
+    const ownedBefore = await ownedScopePrivacyState(client, actor.id, scopeId);
+    const ownedRepairPending = ownedBefore.repair_exists && !ownedScopeIsClean(ownedBefore);
     const alreadyComplete = Number(privacy.rows[0]?.privacy_version) >= 3
-      && privacy.rows[0]?.principal_complete === true;
-    if (!candidate.rowCount) {
+      && privacy.rows[0]?.principal_complete === true && !ownedRepairPending;
+    if (!candidate.rowCount && !ownedRepairPending) {
       if (!alreadyComplete) {
         throw new ServiceError('CONFLICT', 'principal has no pending coordination privacy repair');
       }
@@ -367,46 +466,80 @@ export async function repairCoordinationPrivacy(
         progressed: false, blockedUntil: null, reason: null,
       };
     }
-    if (candidate.rows[0].repair_state !== 'disabled_only') {
+    if (candidate.rowCount && candidate.rows[0].repair_state !== 'disabled_only') {
       throw new ServiceError(
         'CONFLICT', 'offboarded principals must resume the confirmed offboarding command',
       );
     }
-    const scrub = await client.query<{
-      privacy: {
-        complete?: boolean; progressed?: boolean; blocked_until?: string | null;
-        reason?: CoordinationPrivacyBlockReason;
+    await client.query('SAVEPOINT repair_coordination_privacy');
+    try {
+      if (ownedRepairPending) {
+        if (!ownedBefore.pseudonym) {
+          throw new ServiceError('CONFLICT', 'existing owned-scope privacy repair lacks its authorized pseudonym');
+        }
+        // An existing approved scope phase is authority to resume its work.
+        // Mere disablement or an erased-looking scope name is not authority.
+        await client.query('SELECT continuum_operator_pseudonymize_scope_v2($1::uuid, $2::uuid, $3::text)', [
+          actor.id, scopeId, ownedBefore.pseudonym,
+        ]);
+      }
+      const scrub = await client.query<{ privacy: CoordinationPrivacyBatch }>(
+        `SELECT continuum_operator_scrub_coordination_principal($1::uuid, $2::uuid, $3::uuid, $4::integer) AS privacy`,
+        [actor.id, principalId, scopeId, Math.min(batchSize, 1_000)],
+      );
+      const ownedAfter = await ownedScopePrivacyState(client, actor.id, scopeId);
+      await client.query('RELEASE SAVEPOINT repair_coordination_privacy');
+      await client.query('COMMIT');
+      return {
+        principalId, scopeId, state,
+        complete: scrub.rows[0]?.privacy?.complete === true
+          && (!ownedBefore.repair_exists || ownedScopeIsClean(ownedAfter)),
+        progressed: privacyBatchProgressed(scrub.rows[0]?.privacy)
+          || (ownedRepairPending && ownedScopeProgressed(ownedBefore, ownedAfter)),
+        blockedUntil: scrub.rows[0]?.privacy?.blocked_until
+          ? new Date(scrub.rows[0].privacy.blocked_until) : null,
+        reason: privacyBatchReason(scrub.rows[0]?.privacy),
       };
-    }>(
-      `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, $4) AS privacy`,
-      [actor.id, principalId, scopeId, Math.min(batchSize, 1_000)],
-    );
-    await client.query('COMMIT');
-    return {
-      principalId, scopeId, state,
-      complete: scrub.rows[0]?.privacy?.complete === true,
-      progressed: scrub.rows[0]?.privacy?.progressed === true,
-      blockedUntil: scrub.rows[0]?.privacy?.blocked_until
-        ? new Date(scrub.rows[0].privacy.blocked_until) : null,
-      reason: scrub.rows[0]?.privacy?.reason ?? null,
-    };
+    } catch (error) {
+      if (!isCoordinationContractPending(error) && !isOwnedScopeLiveLease(error)) throw error;
+      const reason: CoordinationPrivacyBlockReason = isOwnedScopeLiveLease(error)
+        ? 'owned_live_lease' : 'migration_pending';
+      await client.query('ROLLBACK TO SAVEPOINT repair_coordination_privacy');
+      await client.query('RELEASE SAVEPOINT repair_coordination_privacy');
+      await record(client, {
+        principalId: actor.id, action: 'read',
+        metadata: { operation: 'coordination_privacy_repair', outcome: reason },
+      });
+      await client.query('COMMIT');
+      return {
+        principalId, scopeId, state, complete: false, progressed: false,
+        blockedUntil: reason === 'owned_live_lease' ? ownedBefore.live_lease_until : null,
+        reason,
+      };
+    }
   } catch (error) {
     try { await client.query('ROLLBACK'); } catch { destroyClient = true; }
     if (!destroyClient && isCoordinationPrivacyLockBusy(error)) {
-      const snapshot = await client.query(
-        `SELECT principal.offboarded_at, mapping.scope_id
-           FROM principals principal
-           JOIN principal_user_scopes mapping ON mapping.principal_id = principal.id
-          WHERE principal.id = $1 AND principal.kind = 'user'
-            AND principal.disabled_at IS NOT NULL`,
-        [principalId],
-      );
-      if (snapshot.rowCount && snapshot.rows[0].scope_id === confirmationScopeId) {
-        return {
-          principalId, scopeId: confirmationScopeId,
-          state: snapshot.rows[0].offboarded_at === null ? 'disabled_only' : 'offboarded',
-          complete: false, progressed: false, blockedUntil: null, reason: 'lock_busy',
-        };
+      try {
+        const snapshot = await client.query(
+          `SELECT principal.offboarded_at, mapping.scope_id
+             FROM principals principal
+             JOIN principal_user_scopes mapping ON mapping.principal_id = principal.id
+            WHERE principal.id = $1 AND principal.kind = 'user'
+              AND principal.disabled_at IS NOT NULL`,
+          [principalId],
+        );
+        if (snapshot.rowCount && snapshot.rows[0].scope_id === confirmationScopeId) {
+          return {
+            principalId, scopeId: confirmationScopeId,
+            state: snapshot.rows[0].offboarded_at === null ? 'disabled_only' : 'offboarded',
+            complete: false, progressed: false, blockedUntil: null, reason: 'lock_busy',
+          };
+        }
+      } catch {
+        // A failed fallback cannot replace the operation's original failure.
+        destroyClient = true;
+        throw error;
       }
     }
     throw operatorBoundaryError(error) ?? error;
@@ -588,9 +721,7 @@ export async function mapOwnedUserScope(
     }
     if (acknowledgementChanged) {
       const approval = await client.query(
-        `SELECT continuum_create_user_scope_approval(
-           $1, $2, $3, $4::uuid[], $5
-         )::text AS id`,
+        `SELECT continuum_create_user_scope_approval($1::uuid, $2::uuid, $3::uuid, $4::uuid[], $5::text)::text AS id`,
         [actor.id, principalId, scopeId, acknowledgedPrincipalIds, acknowledgedEvidenceHash],
       );
       await client.query(
@@ -634,6 +765,7 @@ const PRESERVED_AUDIT_OPERATIONS = [
   'principal_memory_erased',
   'principal_offboarded',
   'principal_offboarding_repaired',
+  'principal_offboarding_access_revoked',
 ] as const;
 
 const AUDIT_EXPECTED_METADATA =
@@ -687,7 +819,7 @@ async function writeOffboardingRun(
   details: Record<string, unknown> = {},
 ): Promise<pg.QueryResult> {
   return client.query(
-    `SELECT * FROM continuum_operator_write_offboarding_run($1, $2, $3, $4::jsonb)`,
+    `SELECT * FROM continuum_operator_write_offboarding_run($1::uuid, $2::uuid, $3::text, $4::jsonb)`,
     [principalId, actorId, command, JSON.stringify(details)],
   );
 }
@@ -892,7 +1024,7 @@ async function startOffboardingRunEvent(
 ): Promise<void> {
   // phase started: immutable authorization exists before the first fence/write.
   await client.query(
-    `SELECT continuum_operator_start_offboarding_run($1, $2, $3::jsonb)`,
+    `SELECT continuum_operator_start_offboarding_run($1::uuid, $2::uuid, $3::jsonb)`,
     [run.run_id, initiatedBy, JSON.stringify(evidence)],
   );
 }
@@ -904,7 +1036,7 @@ async function finalizeOffboardingRun(
   completionEvidence: Record<string, unknown>,
 ): Promise<void> {
   const completed = await client.query(
-    `SELECT continuum_operator_complete_offboarding_run($1, $2, $3::jsonb) AS completed`,
+    `SELECT continuum_operator_complete_offboarding_run($1::uuid, $2::uuid, $3::jsonb) AS completed`,
     [run.run_id, finalizedBy, JSON.stringify(completionEvidence)],
   );
   if (!completed.rows[0]?.completed) {
@@ -924,7 +1056,9 @@ export async function offboardPrincipal(
     return await offboardPrincipalCore(pool, actor, principalId, options);
   } catch (error) {
     if (!isCoordinationPrivacyLockBusy(error)) throw error;
-    const preview = await previewOffboarding(pool, actor, principalId, options);
+    let preview: OffboardingResult;
+    try { preview = await previewOffboarding(pool, actor, principalId, options); }
+    catch { throw error; }
     return {
       ...preview, dryRun: false, complete: false, alreadyOffboarded: false,
       progressed: false, blockedUntil: null, reason: 'lock_busy',
@@ -1040,7 +1174,7 @@ async function offboardPrincipalCore(
         'SELECT * FROM principal_offboarding_runs WHERE principal_id = $1', [principalId],
       )
       : await client.query(
-        'SELECT * FROM continuum_operator_get_offboarding_run($1, $2)', [principalId, actor.id],
+        'SELECT * FROM continuum_operator_get_offboarding_run($1::uuid, $2::uuid)', [principalId, actor.id],
       );
     const completedEvidence = run.rowCount ? await client.query(
       `SELECT 1 FROM principal_offboarding_run_events
@@ -1183,21 +1317,26 @@ async function offboardPrincipalCore(
     const scopePseudonym = erasedScopePseudonym(scopeId);
     const privacyState = await client.query(
       `SELECT privacy_version, principal_complete, scope_complete
-         FROM continuum_coordination_privacy_state($1, $2)`,
+         FROM continuum_coordination_privacy_state($1::uuid, $2::uuid)`,
       [principalId, scopeId],
     );
     let coordinationPrivacyComplete = Number(privacyState.rows[0]?.privacy_version) >= 3
       && privacyState.rows[0]?.principal_complete === true;
+    const initialOwnedPrivacy = !dryRun && target.rows[0].disabled_at !== null
+      ? await ownedScopePrivacyState(client, actor.id, scopeId) : null;
+    if (initialOwnedPrivacy) {
+      coordinationPrivacyComplete = coordinationPrivacyComplete && ownedScopeIsClean(initialOwnedPrivacy);
+    }
     let coordinationPrivacyMutated = false;
     let coordinationPrivacyProgressed = false;
     let coordinationPrivacyBlockedUntil: Date | null = null;
     let coordinationPrivacyReason: CoordinationPrivacyBlockReason = null;
     const wasOffboarded = target.rows[0].offboarded_at !== null;
-    if (!dryRun && !wasOffboarded && target.rows[0].disabled_at !== null
+    if (!dryRun && !resumedRun && !wasOffboarded && target.rows[0].disabled_at !== null
         && !coordinationPrivacyComplete) {
       const pendingDisabledRepair = await client.query(
         `SELECT 1
-           FROM continuum_operator_list_coordination_privacy_repairs($1, $2, 1)
+           FROM continuum_operator_list_coordination_privacy_repairs($1::uuid, $2::uuid, 1::integer)
           WHERE repair_state = 'disabled_only'`,
         [actor.id, principalId],
       );
@@ -1210,25 +1349,42 @@ async function offboardPrincipalCore(
     }
     // An open scope-cleanup phase performs its one privacy batch below. A
     // resumed run whose scope cleanup is already durable still needs this
-    // pre-scrub if a later upgrade reopened only principal privacy progress.
+    // bounded repair if an upgrade reopened principal or owned-scope privacy.
     const scrubBeforeVerification = runCompleted
       || (resumedRun && Boolean(run.rows[0].scope_cleanup_complete));
     if (!dryRun && scrubBeforeVerification && wasOffboarded && !coordinationPrivacyComplete) {
-      const privacyRepair = await client.query<{ privacy: {
-        complete?: boolean; progressed?: boolean; blocked_until?: string | null;
-        reason?: CoordinationPrivacyBlockReason;
-      } }>(
-        `SELECT continuum_operator_scrub_coordination_principal(
-           $1, $2, $3, $4
-         ) AS privacy`,
-        [actor.id, principalId, scopeId, Math.min(batchSize, 1_000)],
-      );
-      coordinationPrivacyMutated = true;
-      coordinationPrivacyComplete = privacyRepair.rows[0]?.privacy?.complete === true;
-      coordinationPrivacyProgressed = privacyRepair.rows[0]?.privacy?.progressed === true;
-      coordinationPrivacyBlockedUntil = privacyRepair.rows[0]?.privacy?.blocked_until
-        ? new Date(privacyRepair.rows[0].privacy.blocked_until!) : null;
-      coordinationPrivacyReason = privacyRepair.rows[0]?.privacy?.reason ?? null;
+      await client.query('SAVEPOINT offboarding_preverification_privacy');
+      try {
+        const ownedBefore = initialOwnedPrivacy ?? await ownedScopePrivacyState(client, actor.id, scopeId);
+        if (!ownedScopeIsClean(ownedBefore)) {
+          await client.query('SELECT continuum_operator_pseudonymize_scope_v2($1::uuid, $2::uuid, $3::text)', [
+            actor.id, scopeId, ownedBefore.pseudonym ?? scopePseudonym,
+          ]);
+        }
+        const privacyRepair = await client.query<{ privacy: CoordinationPrivacyBatch }>(
+          `SELECT continuum_operator_scrub_coordination_principal($1::uuid, $2::uuid, $3::uuid, $4::integer) AS privacy`,
+          [actor.id, principalId, scopeId, Math.min(batchSize, 1_000)],
+        );
+        const ownedAfter = await ownedScopePrivacyState(client, actor.id, scopeId);
+        coordinationPrivacyMutated = true;
+        coordinationPrivacyComplete = privacyRepair.rows[0]?.privacy?.complete === true
+          && ownedScopeIsClean(ownedAfter);
+        coordinationPrivacyProgressed = privacyBatchProgressed(privacyRepair.rows[0]?.privacy)
+          || ownedScopeProgressed(ownedBefore, ownedAfter);
+        coordinationPrivacyBlockedUntil = privacyRepair.rows[0]?.privacy?.blocked_until
+          ? new Date(privacyRepair.rows[0].privacy.blocked_until!) : null;
+        coordinationPrivacyReason = privacyBatchReason(privacyRepair.rows[0]?.privacy);
+        await client.query('RELEASE SAVEPOINT offboarding_preverification_privacy');
+      } catch (error) {
+        if (!isCoordinationContractPending(error) && !isOwnedScopeLiveLease(error)) throw error;
+        await client.query('ROLLBACK TO SAVEPOINT offboarding_preverification_privacy');
+        await client.query('RELEASE SAVEPOINT offboarding_preverification_privacy');
+        coordinationPrivacyComplete = false;
+        coordinationPrivacyMutated = true;
+        coordinationPrivacyReason = isOwnedScopeLiveLease(error) ? 'owned_live_lease' : 'migration_pending';
+        coordinationPrivacyBlockedUntil = isOwnedScopeLiveLease(error)
+          ? initialOwnedPrivacy?.live_lease_until ?? null : null;
+      }
     }
     let actualStateErased = false;
     // A bounded scrub must commit independently of the full-history predicate.
@@ -1242,7 +1398,7 @@ async function offboardPrincipalCore(
         [`${verificationTimeoutMs}ms`],
       );
       actualStateErased = (await client.query<{ erased: boolean }>(
-        `SELECT continuum_operator_offboarding_actual_state_is_erased($1, $2) AS erased`,
+        `SELECT continuum_operator_offboarding_actual_state_is_erased($1::uuid, $2::uuid) AS erased`,
         [actor.id, run.rows[0].run_id],
       )).rows[0]?.erased === true;
       await client.query("SET LOCAL statement_timeout = '30s'");
@@ -1296,7 +1452,7 @@ async function offboardPrincipalCore(
         [`${verificationTimeoutMs}ms`],
       );
       run = await client.query(
-        `SELECT * FROM continuum_operator_restart_offboarding_run($1, $2, $3::jsonb)`,
+        `SELECT * FROM continuum_operator_restart_offboarding_run($1::uuid, $2::uuid, $3::jsonb)`,
         [principalId, actor.id, JSON.stringify({
           approval_id: approvalId, approval_evidence_hash: acknowledgedEvidenceHash,
           initial_memories: memories, initial_embeddings: embeddings,
@@ -1319,7 +1475,7 @@ async function offboardPrincipalCore(
     }
 
     if (resumedRun) {
-      await client.query('SELECT continuum_operator_resume_offboarding_run($1, $2)', [
+      await client.query('SELECT continuum_operator_resume_offboarding_run($1::uuid, $2::uuid)', [
         run.rows[0].run_id, actor.id,
       ]);
     } else {
@@ -1341,7 +1497,7 @@ async function offboardPrincipalCore(
         bindings_quarantined: number;
       }>(
         `SELECT memberships_deactivated, bindings_quarantined
-           FROM continuum_operator_offboard_scope_access($1, $2)`,
+           FROM continuum_operator_offboard_scope_access($1::uuid, $2::uuid)`,
         [actor.id, scopeId],
       );
       const aliasDelete = await client.query(
@@ -1352,39 +1508,83 @@ async function offboardPrincipalCore(
       await client.query('SELECT continuum_disable_principal($1::uuid, $2::uuid)', [
         actor.id, principalId,
       ]);
-      await client.query(
-        'SELECT continuum_operator_pseudonymize_scope_v2($1, $2, $3)',
-        [actor.id, scopeId, scopePseudonym],
-      );
-      const coordinationPrivacy = await client.query<{
-        privacy: {
-          complete?: boolean; progressed?: boolean; blocked_until?: string | null;
-          reason?: CoordinationPrivacyBlockReason;
-        };
-      }>(
-        `SELECT continuum_operator_scrub_coordination_principal(
-           $1, $2, $3, $4
-         ) AS privacy`,
-        [actor.id, principalId, scopeId, Math.min(batchSize, 1_000)],
-      );
-      const currentPrivacyState = await client.query(
-        `SELECT principal_complete, scope_complete
-           FROM continuum_coordination_privacy_state($1, $2)`,
-        [principalId, scopeId],
-      );
-      const ownedCoordinationComplete =
-        currentPrivacyState.rows[0]?.scope_complete === true;
-      coordinationPrivacyComplete =
-        coordinationPrivacy.rows[0]?.privacy?.complete === true
-        && currentPrivacyState.rows[0]?.principal_complete === true;
-      coordinationPrivacyProgressed =
-        coordinationPrivacy.rows[0]?.privacy?.progressed === true;
-      coordinationPrivacyBlockedUntil = coordinationPrivacy.rows[0]?.privacy?.blocked_until
-        ? new Date(coordinationPrivacy.rows[0].privacy.blocked_until!) : null;
-      coordinationPrivacyReason = coordinationPrivacy.rows[0]?.privacy?.reason ?? null;
       aliasCount = aliasDelete.rowCount ?? 0;
-      if (ownedCoordinationComplete && coordinationPrivacyComplete) {
-        await writeOffboardingRun(client, principalId, actor.id, 'scope_complete');
+      // Access revocation is authorized above and must remain durable even
+      // while a migration pauses the independent coordination privacy phase.
+      await client.query('SAVEPOINT offboarding_coordination_privacy');
+      let ownedLiveLeaseUntil: Date | null = null;
+      try {
+        const ownedBefore = await ownedScopePrivacyState(client, actor.id, scopeId);
+        ownedLiveLeaseUntil = ownedBefore.live_lease_until;
+        await client.query(
+          'SELECT continuum_operator_pseudonymize_scope_v2($1::uuid, $2::uuid, $3::text)',
+          [actor.id, scopeId, scopePseudonym],
+        );
+        const coordinationPrivacy = await client.query<{ privacy: CoordinationPrivacyBatch }>(
+          `SELECT continuum_operator_scrub_coordination_principal($1::uuid, $2::uuid, $3::uuid, $4::integer) AS privacy`,
+          [actor.id, principalId, scopeId, Math.min(batchSize, 1_000)],
+        );
+        const currentPrivacyState = await client.query(
+          `SELECT principal_complete, scope_complete
+             FROM continuum_coordination_privacy_state($1::uuid, $2::uuid)`,
+          [principalId, scopeId],
+        );
+        const ownedAfter = await ownedScopePrivacyState(client, actor.id, scopeId);
+        const ownedCoordinationComplete = currentPrivacyState.rows[0]?.scope_complete === true
+          && ownedScopeIsClean(ownedAfter);
+        coordinationPrivacyComplete =
+          coordinationPrivacy.rows[0]?.privacy?.complete === true
+          && currentPrivacyState.rows[0]?.principal_complete === true;
+        coordinationPrivacyProgressed =
+          privacyBatchProgressed(coordinationPrivacy.rows[0]?.privacy)
+          || ownedScopeProgressed(ownedBefore, ownedAfter);
+        coordinationPrivacyBlockedUntil = coordinationPrivacy.rows[0]?.privacy?.blocked_until
+          ? new Date(coordinationPrivacy.rows[0].privacy.blocked_until!) : null;
+        coordinationPrivacyReason = privacyBatchReason(coordinationPrivacy.rows[0]?.privacy);
+        aliasCount = aliasDelete.rowCount ?? 0;
+        if (ownedCoordinationComplete && coordinationPrivacyComplete) {
+          await writeOffboardingRun(client, principalId, actor.id, 'scope_complete');
+        }
+        await client.query('RELEASE SAVEPOINT offboarding_coordination_privacy');
+      } catch (error) {
+        if (!isCoordinationContractPending(error) && !isOwnedScopeLiveLease(error)) throw error;
+        const reason: CoordinationPrivacyBlockReason = isOwnedScopeLiveLease(error)
+          ? 'owned_live_lease' : 'migration_pending';
+        await client.query('ROLLBACK TO SAVEPOINT offboarding_coordination_privacy');
+        await client.query('RELEASE SAVEPOINT offboarding_coordination_privacy');
+        const accessRevoked = target.rows[0].disabled_at === null || membershipCount > 0
+          || aliasCount > 0 || entraCount > 0;
+        let batch = Number(run.rows[0].batches);
+        // Preserve one atomic receipt for actual revocation. An unchanged
+        // blocked retry must not mint permanent evidence or another batch.
+        if (accessRevoked) {
+          const progressUpdate = await writeOffboardingRun(
+            client, principalId, actor.id, 'add_progress', {
+              memories: 0, audit_rows: 0, embeddings: 0,
+              memberships: membershipCount, aliases: aliasCount,
+              entra_bindings: entraCount, audit_queries: 0,
+            },
+          );
+          await client.query(
+            `INSERT INTO audit_log(principal_id, action, scope_id, metadata)
+             VALUES($1, 'archive', $2, $3::jsonb)`,
+            [actor.id, scopeId, JSON.stringify({
+              operation: 'principal_offboarding_access_revoked', principal_id: principalId,
+              approval_id: approvalId, acknowledged_evidence_hash: acknowledgedEvidenceHash,
+              run_id: run.rows[0].run_id, privacy_pending: true,
+              reason,
+              memberships: membershipCount, aliases: aliasCount, entra_bindings: entraCount,
+            })],
+          );
+          batch = Number(progressUpdate.rows[0].batches);
+        }
+        await client.query('COMMIT');
+        return {
+          ...baseResult, dryRun: false, alreadyOffboarded: false, complete: false,
+          progressed: accessRevoked,
+          blockedUntil: reason === 'owned_live_lease' ? ownedLiveLeaseUntil : null, reason,
+          progress: { ...previewProgress, batch },
+        };
       }
     } else {
       await client.query('SELECT continuum_disable_principal($1::uuid, $2::uuid)', [
@@ -1506,7 +1706,7 @@ async function offboardPrincipalCore(
     }
     const redaction = await client.query(
       `SELECT * FROM continuum_operator_redact_offboarding_audit(
-         $1, $2,
+         $1::uuid, $2::uuid,
          ARRAY(SELECT id FROM offboarding_audit_targets ORDER BY id)::bigint[]
        )`,
       [principalId, actor.id],
@@ -1571,7 +1771,7 @@ async function offboardPrincipalCore(
         audit_queries_processed: Number(progressRow.audit_queries_processed),
         batches: Number(progressRow.batches),
       });
-      await client.query('SELECT continuum_operator_record_offboarding_event($1)', [progressRow.run_id]);
+      await client.query('SELECT continuum_operator_record_offboarding_event($1::uuid)', [progressRow.run_id]);
       await client.query(
         `INSERT INTO audit_log (principal_id, action, scope_id, metadata)
          VALUES ($1, 'archive', $2, $3::jsonb)`,

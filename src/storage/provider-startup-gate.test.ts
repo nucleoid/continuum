@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { describe, expect, it } from 'vitest';
-import { reconcilePgvectorProviderGrants } from './provider-lifecycle.js';
+import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoordinationContractReady } from './provider-lifecycle.js';
 
 const databaseUrl = process.env.CONTINUUM_TEST_DATABASE_URL
   ?? 'postgres://continuum:continuum@localhost:5433/continuum';
@@ -27,6 +27,159 @@ async function fixture(run: (pool: pg.Pool, admin: pg.Pool, schema: string, shad
 }
 
 describe('qualified provider startup gate', () => {
+  it('uses an explicit schema anchor and validates PostgreSQL identifier byte limits', () => {
+    expect(applicationSchemaFromEnv({})).toBe('public');
+    expect(applicationSchemaFromEnv({ CONTINUUM_APPLICATION_SCHEMA: 'Tenant-Schema' })).toBe('Tenant-Schema');
+    expect(applicationSchemaFromEnv({ CONTINUUM_APPLICATION_SCHEMA: '\u00e9'.repeat(31) })).toBe('\u00e9'.repeat(31));
+    for (const schema of ['', 'nul\0schema', 'a'.repeat(64), '\u00e9'.repeat(32)]) {
+      expect(() => applicationSchemaFromEnv({ CONTINUUM_APPLICATION_SCHEMA: schema }))
+        .toThrow('CONTINUUM_APPLICATION_SCHEMA must be a valid PostgreSQL schema name');
+    }
+  });
+
+  it('refuses caller-owned planted memories and hardened no-op startup helpers before the tenant', async () => {
+    await fixture(async (pool, admin, schema, shadow) => {
+      const role = `shadow_runtime_${randomUUID().replaceAll('-', '').slice(0,12)}`;
+      try {
+        await admin.query(`CREATE ROLE "${role}" NOLOGIN;
+          ALTER SCHEMA "${shadow}" OWNER TO "${role}";
+          GRANT USAGE ON SCHEMA "${schema}" TO "${role}";
+          GRANT SELECT ON "${schema}".memories TO "${role}";`);
+        await pool.query(`SET ROLE "${role}"`);
+        await pool.query(`CREATE TABLE "${shadow}".memories(id integer);
+          CREATE TABLE "${shadow}"._continuum_migrations(name text PRIMARY KEY);
+          INSERT INTO "${shadow}"._continuum_migrations VALUES('0080_pgvector_provider_grants.sql');
+          CREATE FUNCTION "${shadow}".continuum_assert_current_pgvector_profile() RETURNS void
+          LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,"${shadow}",pg_temp
+          AS $$ BEGIN RETURN; END $$;
+          REVOKE ALL ON FUNCTION "${shadow}".continuum_assert_current_pgvector_profile() FROM PUBLIC;
+          CREATE FUNCTION "${shadow}".continuum_coordination_contract_is_ready() RETURNS BOOLEAN
+          LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,"${shadow}",pg_temp AS 'SELECT TRUE';
+          REVOKE ALL ON FUNCTION "${shadow}".continuum_coordination_contract_is_ready() FROM PUBLIC;`);
+        await expect(reconcilePgvectorProviderGrants(pool, { expectedSchema: schema })).rejects.toThrow(/runtime application schema.*trust/i);
+        await expect(requireCoordinationContractReady(pool, { expectedSchema: schema })).rejects.toThrow(/runtime application schema.*trust/i);
+      } finally {
+        await pool.query('RESET ROLE');
+        await admin.query(`DROP OWNED BY "${role}"; DROP ROLE IF EXISTS "${role}"`);
+      }
+    });
+  });
+
+  it('refuses an empty leading schema before the configured tenant', async () => {
+    await fixture(async (pool, _admin, schema) => {
+      await expect(reconcilePgvectorProviderGrants(pool, { expectedSchema: schema }))
+        .rejects.toThrow(/runtime application schema.*trust/i);
+      await expect(requireCoordinationContractReady(pool, { expectedSchema: schema }))
+        .rejects.toThrow(/runtime application schema.*trust/i);
+      await pool.query(`SET search_path="${schema}"`);
+      await expect(reconcilePgvectorProviderGrants(pool, { expectedSchema: schema })).resolves.toBeUndefined();
+    });
+  });
+
+  it('resolves contract readiness in the actual memories namespace and rejects untrusted helpers', async () => {
+    await fixture(async (pool, admin, schema, shadow) => {
+      await admin.query(`CREATE FUNCTION "${schema}".continuum_coordination_contract_is_ready()
+        RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER
+        SET search_path=pg_catalog,"${schema}",pg_temp AS 'SELECT FALSE';
+        REVOKE ALL ON FUNCTION "${schema}".continuum_coordination_contract_is_ready() FROM PUBLIC;
+        CREATE FUNCTION "${shadow}".continuum_coordination_contract_is_ready()
+        RETURNS BOOLEAN LANGUAGE sql AS 'SELECT TRUE';`);
+      await expect(requireCoordinationContractReady(pool)).rejects.toMatchObject({
+        code: 'DEPENDENCY_UNAVAILABLE', message: expect.stringContaining('repair is incomplete'),
+      });
+      await admin.query(`CREATE OR REPLACE FUNCTION "${schema}".continuum_coordination_contract_is_ready()
+        RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER
+        SET search_path=pg_catalog,"${schema}",pg_temp AS 'SELECT TRUE'`);
+      await expect(requireCoordinationContractReady(pool)).resolves.toBeUndefined();
+      await admin.query(`GRANT EXECUTE ON FUNCTION "${schema}".continuum_coordination_contract_is_ready() TO PUBLIC`);
+      await expect(requireCoordinationContractReady(pool)).rejects.toMatchObject({
+        code: 'DEPENDENCY_UNAVAILABLE', message: expect.stringContaining('readiness is unavailable'),
+      });
+      await admin.query(`REVOKE ALL ON FUNCTION "${schema}".continuum_coordination_contract_is_ready() FROM PUBLIC;
+        ALTER FUNCTION "${schema}".continuum_coordination_contract_is_ready() SECURITY INVOKER`);
+      await expect(requireCoordinationContractReady(pool)).rejects.toMatchObject({
+        code: 'DEPENDENCY_UNAVAILABLE', message: expect.stringContaining('readiness is unavailable'),
+      });
+    });
+  });
+
+  it('reports a missing tenant readiness helper with the sanitized migration cause', async () => {
+    await fixture(async (pool, admin, schema, shadow) => {
+      await admin.query(`CREATE FUNCTION "${shadow}".continuum_coordination_contract_is_ready()
+        RETURNS BOOLEAN LANGUAGE sql AS 'SELECT TRUE'`);
+      await expect(requireCoordinationContractReady(pool)).rejects.toMatchObject({
+        code: 'DEPENDENCY_UNAVAILABLE',
+        message: 'Coordination contract readiness is unavailable; finish migrations before starting runtimes',
+      });
+    });
+  });
+
+  it.each([true, false])('verifies direct quoted LOGIN startup with helper present=%s', async (helperPresent) => {
+    await fixture(async (_pool, admin, schema, shadow) => {
+      const role = `startup-role-${randomUUID().slice(0, 8)}`;
+      const password = randomUUID();
+      let runtime: pg.Pool | undefined;
+      try {
+        await admin.query(`CREATE ROLE "${role}" LOGIN PASSWORD '${password}';
+          GRANT USAGE ON SCHEMA "${schema}" TO "${role}";
+          GRANT SELECT ON "${schema}".memories TO "${role}";
+          CREATE FUNCTION "${schema}".continuum_assert_current_pgvector_profile() RETURNS void
+          LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,"${schema}",pg_temp
+          AS $$ BEGIN RETURN; END $$;
+          REVOKE ALL ON FUNCTION "${schema}".continuum_assert_current_pgvector_profile() FROM PUBLIC;
+          GRANT EXECUTE ON FUNCTION "${schema}".continuum_assert_current_pgvector_profile() TO "${role}";`);
+        const url = new URL(databaseUrl); url.username = role; url.password = password;
+        runtime = new pg.Pool({ connectionString: url.toString(), max: 1,
+          options: `-c search_path=${shadow},${schema}` });
+        expect((await runtime.query('SELECT current_user AS role')).rows).toEqual([{ role }]);
+        if (helperPresent) {
+          await expect(reconcilePgvectorProviderGrants(runtime)).resolves.toBeUndefined();
+        } else {
+          await admin.query(`DROP FUNCTION "${schema}".continuum_assert_current_pgvector_profile()`);
+          await expect(reconcilePgvectorProviderGrants(runtime)).rejects.toThrow(
+            'Pgvector startup verifier is missing',
+          );
+        }
+      } finally {
+        await runtime?.end();
+        await admin.query(`DROP OWNED BY "${role}"; DROP ROLE IF EXISTS "${role}"`);
+      }
+    });
+  });
+
+
+  it('uses the exact mixed-case LOGIN OID despite a lowercase collision and owner changes', async () => {
+    await fixture(async (_pool, admin, schema) => {
+      const role = `Quoted-Startup-${randomUUID().slice(0, 8)}`;
+      const collision = role.toLowerCase(); const password = randomUUID();
+      let runtime: pg.Pool | undefined;
+      try {
+        await admin.query(`CREATE ROLE "${role}" LOGIN PASSWORD '${password}';
+          CREATE ROLE "${collision}" NOLOGIN;
+          GRANT USAGE, CREATE ON SCHEMA "${schema}" TO "${role}","${collision}";
+          GRANT SELECT ON "${schema}".memories,"${schema}"._continuum_migrations TO "${role}";`);
+        const url = new URL(databaseUrl); url.username = role; url.password = password;
+        runtime = new pg.Pool({ connectionString: url.toString(), max: 1,
+          options: `-c search_path=${schema}` });
+        // Characterize the unsafe PostgreSQL name-to-regrole coercion: it picks
+        // the lowercase collision. Startup must use exact catalog lookup instead.
+        expect((await runtime.query(`SELECT pg_typeof(current_user)::text AS input_type,
+          current_user::regrole::oid=(SELECT oid FROM pg_roles WHERE rolname=current_user) AS exact,
+          current_user::regrole::oid<>(SELECT oid FROM pg_roles WHERE rolname=$1) AS distinct_collision`,
+        [collision])).rows).toEqual([{ input_type: 'name', exact: false, distinct_collision: false }]);
+        await admin.query(`ALTER TABLE "${schema}".memories OWNER TO "${collision}"`);
+        await expect(reconcilePgvectorProviderGrants(runtime, { expectedSchema: schema }))
+          .rejects.toThrow('Pgvector startup verifier is missing');
+        await admin.query(`ALTER TABLE "${schema}".memories OWNER TO "${role}"`);
+        await expect(reconcilePgvectorProviderGrants(runtime, { expectedSchema: schema })).resolves.toBeUndefined();
+      } finally {
+        await runtime?.end();
+        await admin.query(`DROP OWNED BY "${role}","${collision}";
+          DROP ROLE IF EXISTS "${role}"; DROP ROLE IF EXISTS "${collision}";`);
+      }
+    });
+  });
+
   it('runs the verifier in the actual memories namespace despite an earlier no-op', async () => {
     await fixture(async (pool, admin, schema, shadow) => {
       await admin.query(`INSERT INTO "${schema}"._continuum_migrations VALUES('0080_pgvector_provider_grants.sql');

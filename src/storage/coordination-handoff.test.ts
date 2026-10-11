@@ -13,6 +13,18 @@ describe('coordination public handoff contract', () => {
   beforeEach(async () => { pool ??= await makeTestPool(); await resetData(pool); }, 30_000);
   afterAll(async () => pool?.end());
 
+
+  it('resets detached history to the disabled production principal and hard quota', async () => {
+    expect((await pool.query(
+      `SELECT principal.disabled_at IS NOT NULL AS disabled,
+              usage.acquire_receipt_limit, usage.contended_receipt_limit,
+              usage.acquire_receipt_count + usage.contended_receipt_count + usage.mutation_receipt_count AS total
+         FROM principals principal LEFT JOIN coordination_principal_usage usage ON usage.principal_id=principal.id
+        WHERE principal.id='00000000-0000-4000-8000-000000000012'`,
+    )).rows).toEqual([{ disabled: true, acquire_receipt_limit: 10000,
+      contended_receipt_limit: 10000, total: 0 }]);
+  });
+
   async function fixture() {
     const principal = await createPrincipal(pool, {
       externalId: `handoff:${randomUUID()}`, kind: 'service', displayName: 'Handoff',

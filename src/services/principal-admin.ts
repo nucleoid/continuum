@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import type { Principal } from '../types.js';
-import { LIFECYCLE_PRINCIPAL_ID } from '../lifecycle/principal.js';
+import { DETACHED_COORDINATION_PRINCIPAL_ID, LIFECYCLE_PRINCIPAL_ID } from '../lifecycle/principal.js';
 import { canonicalPrincipalExternalId } from '../storage/principals.js';
 import { requireOrgAdmin } from './access.js';
 import { isOperatorAuthorizationError, rollbackOrDestroy } from './database-authorization-errors.js';
@@ -106,6 +106,9 @@ export async function reactivatePrincipal(
 ): Promise<void> {
   if (principalId === LIFECYCLE_PRINCIPAL_ID) {
     throw new ServiceError('INVALID_INPUT', 'system lifecycle principal cannot be reactivated');
+  }
+  if (principalId === DETACHED_COORDINATION_PRINCIPAL_ID) {
+    throw new ServiceError('INVALID_INPUT', 'system detached coordination principal cannot be reactivated');
   }
   const client = await pool.connect();
   let destroyClient = false;

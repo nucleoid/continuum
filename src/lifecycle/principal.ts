@@ -1,6 +1,7 @@
 import type { Principal } from '../types.js';
 
 export const LIFECYCLE_PRINCIPAL_ID = '00000000-0000-4000-8000-000000000011';
+export const DETACHED_COORDINATION_PRINCIPAL_ID = '00000000-0000-4000-8000-000000000012';
 
 export function isLifecyclePrincipal(
   principal: Pick<Principal, 'id'>,

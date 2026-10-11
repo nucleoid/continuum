@@ -12,6 +12,12 @@ export const MAX_AUDIT_RETENTION_MAX_BATCHES = 1_000;
 export const DEFAULT_AUDIT_RETENTION_MAX_ROWS = 1_000;
 export const MAX_AUDIT_RETENTION_MAX_ROWS = 100_000;
 export const AUDIT_RETENTION_LOCK_KEY = '33440033001';
+const PRESERVED_OFFBOARDING_OPERATIONS = [
+  'principal_user_scope_mapped', 'principal_user_scope_acknowledgement_replaced',
+  'principal_memory_erased', 'principal_offboarded', 'principal_offboarding_repaired',
+  'principal_offboarding_access_revoked',
+] as const;
+const PRESERVED_AUDIT_SOURCE = 'audit-retention';
 
 export interface AuditRetentionOptions {
   retentionDays: number;
@@ -257,9 +263,11 @@ async function selectRows(client: pg.PoolClient, cutoff: string, limit: number):
             principal_id, action, memory_id, scope_id, query, metadata::text AS metadata_json
        FROM audit_log
       WHERE at < $1
+        AND COALESCE(metadata->>'operation', '') <> ALL($3::text[])
+        AND metadata->>'source' IS DISTINCT FROM $4::text
       ORDER BY at ASC, id ASC
       LIMIT $2`,
-    [cutoff, limit],
+    [cutoff, limit, [...PRESERVED_OFFBOARDING_OPERATIONS], PRESERVED_AUDIT_SOURCE],
   );
   return result.rows;
 }
@@ -386,8 +394,10 @@ export async function runAuditRetention(
                     WHEN min(at) = 'infinity'::timestamptz THEN 'infinity'
                     ELSE to_char(min(at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
                   END AS oldest_at
-             FROM audit_log WHERE at < $1`,
-          [cutoff],
+             FROM audit_log WHERE at < $1
+               AND COALESCE(metadata->>'operation', '') <> ALL($2::text[])
+               AND metadata->>'source' IS DISTINCT FROM $3::text`,
+          [cutoff, [...PRESERVED_OFFBOARDING_OPERATIONS], PRESERVED_AUDIT_SOURCE],
         );
         await client.query('COMMIT');
         const eligible = preview.rows[0]?.eligible ?? 0;
