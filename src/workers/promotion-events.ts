@@ -169,6 +169,8 @@ export class PromotionEventWorker implements RuntimeWorker {
   private timer?: NodeJS.Timeout;
   private leaseTimer?: NodeJS.Timeout;
   private leaseRenewal?: Promise<void>;
+  private acknowledgementRetry?: Promise<void>;
+  private acknowledgementCursor = 0;
   private readonly active = new Set<Promise<number>>();
   private readonly controllers = new Map<AbortController, ClaimedPromotionDelivery>();
   private readonly retainedLeases = new Map<string, ClaimedPromotionDelivery>();
@@ -521,9 +523,9 @@ export class PromotionEventWorker implements RuntimeWorker {
             },
           ));
         } catch (error) {
-          // The callback follower remains as an in-process fence, but a failed timeout write
-          // must not keep extending an ownership claim the database never recorded.
-          this.stopRenewingCallback(controller);
+          // Uncertainty does not prove loss. The exact owner/attempt/generation
+          // recheck can safely renew while an abort-ignoring callback is unsettled.
+          this.abortForOwnershipUncertainty(controller);
           throw error;
         }
         this.logger.warn({
@@ -614,12 +616,12 @@ export class PromotionEventWorker implements RuntimeWorker {
           this.stopLeaseRenewal(controller);
         }
       }
-      await this.retryAcknowledgements(owned);
+      this.scheduleAcknowledgements(owned);
       if (lostKeys.size === 0) return;
     } else if (result.state === 'settled') {
       const activeKeys = new Set([...this.controllers.values()].map(deliveryKey));
       if ((result.renewal as number) >= activeKeys.size) {
-        await this.retryAcknowledgements(deliveries);
+        this.scheduleAcknowledgements(deliveries);
         return;
       }
       for (const controller of [...this.controllers.keys()]) {
@@ -679,10 +681,9 @@ export class PromotionEventWorker implements RuntimeWorker {
           'promotion_delivery_shutdown_abort_abandoned',
         );
       } else if (outcome === 'failure' && abortReason === 'ownership_uncertain') {
-        await this.abandonDeliveries(
-          [delivery],
-          'promotion_delivery_renewal_unknown_abandoned',
-        );
+        // User code actually started. Only shutdown cancellation refunds an
+        // invocation; uncertainty preserves its attempt and bounded backoff.
+        await this.persistCallbackOutcome(delivery, controller, outcome);
       } else if (outcome === 'failure' && abortReason === 'ownership_loss') {
         await this.persistCallbackOutcome(delivery, controller, outcome);
       }
@@ -759,13 +760,27 @@ export class PromotionEventWorker implements RuntimeWorker {
     return true;
   }
 
+  private scheduleAcknowledgements(deliveries: readonly ClaimedPromotionDelivery[]): void {
+    if (this.acknowledgementRetry) return;
+    const pending = deliveries.filter((delivery) => this.pendingAcknowledgements.has(deliveryKey(delivery)));
+    if (pending.length === 0) return;
+    const start = this.acknowledgementCursor % pending.length;
+    // A bounded rotating cohort cannot monopolize renewal or starve later paid
+    // callbacks. Database deadlines apply concurrently, never serially per ACK.
+    const cohort = [...pending.slice(start), ...pending.slice(0, start)].slice(0, 10);
+    this.acknowledgementCursor = (start + cohort.length) % pending.length;
+    this.acknowledgementRetry = this.retryAcknowledgements(cohort).catch(() => {
+      try { this.logger.error({ event: 'promotion_worker_acknowledgement_retry_failed' }); } catch { /* optional logger */ }
+    }).finally(() => { this.acknowledgementRetry = undefined; });
+  }
+
   private async retryAcknowledgements(
     deliveries: readonly ClaimedPromotionDelivery[],
   ): Promise<void> {
-    for (const delivery of deliveries) {
+    await Promise.all(deliveries.map(async (delivery) => {
       const key = deliveryKey(delivery);
       const controller = this.pendingAcknowledgements.get(key);
-      if (!controller) continue;
+      if (!controller) return;
       try {
         const acknowledged = await this.databaseOperation(this.store.complete(
           this.pool,
@@ -793,7 +808,7 @@ export class PromotionEventWorker implements RuntimeWorker {
           retried: true,
         });
       }
-    }
+    }));
   }
 
   private finishCallback(
@@ -833,7 +848,8 @@ export class PromotionEventWorker implements RuntimeWorker {
 
   private abortForOwnershipUncertainty(controller: AbortController): void {
     this.ownershipUncertain.add(controller);
-    this.stopLeaseRenewal(controller);
+    // Retain an unsettled exact fence through recoverable failure. A later
+    // definite lost result, terminal state or callback settlement removes it.
     controller.abort();
   }
 
