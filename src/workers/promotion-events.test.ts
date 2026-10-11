@@ -333,6 +333,8 @@ describe('PromotionEventWorker', () => {
     const siblingEntered = deferred();
     const releaseSibling = deferred();
     const firstPersistenceFailed = deferred();
+    const failureRecorded = deferred();
+    let failedOnce = false;
     const secondDelivery: ClaimedPromotionDelivery = {
       ...claimedDelivery,
       event: { ...claimedDelivery.event, eventId: 'event-2' },
@@ -352,12 +354,15 @@ describe('PromotionEventWorker', () => {
     const store = mockStore({
       claim: vi.fn().mockResolvedValue([claimedDelivery, secondDelivery]),
       fail: vi.fn(async (_pool, eventId) => {
-        if (eventId === 'event-1') {
+        if (eventId === 'event-1' && !failedOnce) {
+          failedOnce = true;
           firstPersistenceFailed.resolve();
           throw new Error('fail write failed');
         }
+        if (eventId === 'event-1') failureRecorded.resolve();
         return 'pending';
       }),
+      renew: vi.fn(async (_pool, _owner, deliveries) => ({ renewed: deliveries, terminalOwned: [], lost: [] })),
     });
     const instance = new PromotionEventWorker(
       pool,
@@ -366,22 +371,38 @@ describe('PromotionEventWorker', () => {
       store,
     );
 
-    const draining = instance.drainOnce();
-    let drainSettled = false;
-    void draining.finally(() => { drainSettled = true; }).catch(() => undefined);
-    await siblingEntered.promise;
-    await firstPersistenceFailed.promise;
-    await new Promise<void>((resolve) => { setImmediate(resolve); });
-    expect(drainSettled).toBe(false);
-    const stopping = instance.stop('SIGTERM');
-    await new Promise<void>((resolve) => { setImmediate(resolve); });
+    vi.useFakeTimers();
+    try {
+      const draining = instance.drainOnce();
+      let drainSettled = false;
+      void draining.finally(() => { drainSettled = true; }).catch(() => undefined);
+      await siblingEntered.promise;
+      await firstPersistenceFailed.promise;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(drainSettled).toBe(false);
+      // Preserve the original rejection while settling its paid negative write
+      // before shutdown. A permanent outage intentionally retains the global key.
+      await vi.advanceTimersByTimeAsync(6_667);
+      await failureRecorded.promise;
+      expect(drainSettled).toBe(false);
+      expect(store.fail).toHaveBeenCalledTimes(2);
+      const stopping = instance.stop('SIGTERM');
+      await vi.advanceTimersByTimeAsync(0);
 
-    expect(store.release).not.toHaveBeenCalled();
-    releaseSibling.resolve();
-    await expect(draining).rejects.toThrow('fail write failed');
-    await expect(stopping).resolves.toBeUndefined();
-    expect(store.complete).toHaveBeenCalledWith(pool, 'event-2', 'hook', 'worker-test', 1, 1);
-    expect(store.complete).toHaveBeenCalledBefore(store.release as ReturnType<typeof vi.fn>);
+      expect(store.release).not.toHaveBeenCalled();
+      releaseSibling.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(draining).rejects.toThrow('fail write failed');
+      await expect(stopping).resolves.toBeUndefined();
+      expect(store.complete).toHaveBeenCalledWith(pool, 'event-2', 'hook', 'worker-test', 1, 1);
+      expect(store.complete).toHaveBeenCalledBefore(store.release as ReturnType<typeof vi.fn>);
+    } finally {
+      releaseSibling.resolve();
+      await vi.advanceTimersByTimeAsync(6_667);
+      const stopping = instance.stop('test-finished');
+      await vi.advanceTimersByTimeAsync(5_001); await stopping;
+      vi.useRealTimers();
+    }
   });
 
   it('abandons a claimed delivery when its webhook is unavailable', async () => {
