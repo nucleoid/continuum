@@ -128,4 +128,81 @@ describe('promotion recovery review', () => {
       await vi.advanceTimersByTimeAsync(20); await stopping;
     }
   });
+  for (const failure of ['error', 'timeout'] as const) {
+    it(`refunds an aged unstarted claim when fresh ownership admission ends in ${failure}`, async () => {
+      let charged = 0;
+      const later = Promise.withResolvers<ClaimedPromotionDelivery[]>();
+      const registry = new PromotionWebhookRegistry();
+      const callback = vi.fn(async () => undefined);
+      registry.register({ id: 'alpha', onPromoted: callback });
+      registry.register({ id: 'zeta', onPromoted: callback });
+      const store = persistence({
+        claim: vi.fn(async (_pool, input) => {
+          if (input.webhookIds.includes('alpha')) { charged = 1; return [first]; }
+          return later.promise;
+        }),
+        renew: vi.fn(async () => {
+          if (failure === 'error') throw new Error('expected admission refresh failure');
+          return new Promise<number>(() => undefined);
+        }),
+        abandon: vi.fn(async (_pool, owner, claims) => {
+          for (const claim of claims) if (owner === 'recovery-review' && claim.attemptCount === 1
+            && claim.leaseGeneration === 1 && claim.event.eventId === first.event.eventId) charged -= 1;
+          return claims.length;
+        }),
+      });
+      const worker = new Worker(pool, registry, settings({ databaseTimeoutMs: 60 }), store);
+      try {
+        const outcome = worker.drainOnce().then(() => undefined, (error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(40);
+        later.resolve([]);
+        await vi.advanceTimersByTimeAsync(60);
+        expect(await outcome).toBeInstanceOf(Error);
+        expect(callback).not.toHaveBeenCalled();
+        expect(charged).toBe(0);
+      } finally {
+        later.resolve([]); const stopping = worker.stop('test-finished');
+        await vi.advanceTimersByTimeAsync(20); await stopping;
+      }
+    });
+  }
+
+  it('rearms ACK reconciliation when an ownership-uncertain callback later succeeds', async () => {
+    const callbackDone = Promise.withResolvers<void>();
+    let recovered = false;
+    let delivered = false;
+    let claimed = false;
+    const registry = new PromotionWebhookRegistry();
+    const callback = vi.fn(() => callbackDone.promise);
+    registry.register({ id: 'alpha', onPromoted: callback });
+    const store = persistence({
+      claim: vi.fn(async () => { if (claimed) return []; claimed = true; return [first]; }),
+      renew: vi.fn(async (_pool, _owner, claims) => {
+        if (!recovered) throw new Error('expected ownership uncertainty');
+        return { renewed: claims, terminalOwned: [], lost: [] };
+      }),
+      complete: vi.fn(async () => {
+        if (!recovered) throw new Error('expected late callback ACK failure');
+        delivered = true; return true;
+      }),
+    });
+    const worker = new Worker(pool, registry, settings(), store);
+    try {
+      const draining = worker.drainOnce();
+      await vi.advanceTimersByTimeAsync(30);
+      await draining;
+      expect(store.renew).toHaveBeenCalledOnce();
+      callbackDone.resolve();
+      await vi.advanceTimersByTimeAsync(15);
+      expect(store.complete).toHaveBeenCalledOnce();
+      recovered = true;
+      await vi.advanceTimersByTimeAsync(120);
+      expect(callback).toHaveBeenCalledOnce();
+      expect(delivered).toBe(true);
+    } finally {
+      callbackDone.resolve(); const stopping = worker.stop('test-finished');
+      await vi.advanceTimersByTimeAsync(20); await stopping;
+    }
+  });
+
 });
