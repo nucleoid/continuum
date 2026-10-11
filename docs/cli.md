@@ -154,6 +154,11 @@ resumes pending 0081 work even when its SQL filename is ledgered. A migration
 ledger entry alone does not prove backfill completion. Runtime and dedicated
 operator roles cannot substitute for the owner-only repair or provenance
 inspection. Keep admin commands on their operator connection after this step.
+REST and MCP startup verify the trusted 0081 readiness capability after the
+provider profile check and refuse startup if it is absent or repair is pending.
+The standalone provider verifier and identity sync retain their separate
+provider checks. `/health/ready` remains a database connectivity check, so it
+does not replace owner migration and backfill verification.
 
 ## Exit codes
 

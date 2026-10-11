@@ -637,6 +637,22 @@ a genuinely missing grant. Do not grant schema `CREATE`, provider
 ownership, a provider role, or blanket database privileges to the application
 role.
 
+The provider verifier ignores profile rows whose role OID no longer exists;
+it does not prune registry rows or change grants during startup. If desired,
+the migration owner can remove that obsolete metadata explicitly after review:
+
+```sql
+DELETE FROM application_data.continuum_pgvector_role_profiles AS profile
+WHERE NOT EXISTS (
+  SELECT 1 FROM pg_catalog.pg_roles AS role
+  WHERE role.oid = profile.database_role_oid
+);
+```
+
+Replace `application_data` with the quoted actual tenant schema. This optional
+owner-only cleanup is not a runtime prerequisite and does not revoke provider
+ACLs or decommission the provider.
+
 Migration `0080` recognizes exact application, operator, and registered sync
 profiles plus explicitly registered reporting profiles; `SELECT` on
 `memories` alone is not a provider profile. It records profile OIDs, grants
