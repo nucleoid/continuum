@@ -170,6 +170,15 @@ const paths: Array<{
 ];
 
 describe('operator boundary database errors', () => {
+  it('preserves the original lock failure when the offboarding preview also fails', async () => {
+    const original = databaseFailure('could not obtain lock', '55P03');
+    const previewFailure = databaseFailure('preview connection lost', '08006');
+    const pool = { connect: vi.fn()
+      .mockRejectedValueOnce(original).mockRejectedValueOnce(previewFailure) } as unknown as pg.Pool;
+    await expect(offboardPrincipal(pool, actor, TARGET_ID, {
+      confirmationScopeId: SCOPE_ID,
+    })).rejects.toBe(original);
+  });
   it('returns a sanitized upgrade dependency when the paged discovery helper is missing', async () => {
     const original = databaseFailure('function private_schema.secret_page(uuid,uuid,integer) does not exist', '42883');
     const fixture = guardedPool(/continuum_operator_list_coordination_privacy_repair_page/, original);

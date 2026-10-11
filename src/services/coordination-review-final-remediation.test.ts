@@ -129,6 +129,69 @@ describe('coordination final review remediation', () => {
     )).rows[0].count).toBe(0);
   }, 60_000);
 
+  it('contract offboarding review: resumes an owned scope reopened by the contract backfill before claiming completion', async () => {
+    const value = await fixture('reopened-owned-scope');
+    let result = await offboardPrincipal(pool, value.operator, value.target.id, {
+      confirmationScopeId: value.owned.id,
+    });
+    for (let attempt = 0; attempt < 12 && !result.complete; attempt += 1) {
+      result = await offboardPrincipal(pool, value.operator, value.target.id, {
+        confirmationScopeId: value.owned.id,
+      });
+    }
+    expect(result.complete).toBe(true);
+    // Reconstruct a pre-0081 completed scope with a leftover plaintext key.
+    // Owner-only transactional fixture setup restores all triggers atomically.
+    const setup = await pool.connect();
+    try {
+      await setup.query('BEGIN');
+      await setup.query('ALTER TABLE coordination_resources DISABLE TRIGGER USER');
+      await setup.query(
+        "INSERT INTO coordination_resources(scope_id, resource) VALUES($1, 'legacy-personal-resource')",
+        [value.owned.id],
+      );
+      await setup.query('ALTER TABLE coordination_resources ENABLE TRIGGER USER');
+      await setup.query(
+        `INSERT INTO coordination_scope_usage(scope_id, resource_count) VALUES($1, 1)
+         ON CONFLICT(scope_id) DO UPDATE SET resource_count = 1`, [value.owned.id],
+      );
+      await setup.query("UPDATE coordination_contract_backfill_state SET phase = 'scopes', scope_cursor = NULL WHERE singleton");
+      await setup.query('COMMIT');
+    } catch (error) {
+      await setup.query('ROLLBACK');
+      throw error;
+    } finally { setup.release(); }
+    try {
+      let ready = false;
+      for (let attempt = 0; attempt < 12 && !ready; attempt += 1) {
+        ready = (await pool.query('SELECT continuum_backfill_coordination_contract(100) AS ready')).rows[0].ready;
+      }
+      expect(ready).toBe(true);
+      expect((await pool.query(
+        'SELECT completed_at FROM coordination_scope_privacy_progress WHERE scope_id = $1', [value.owned.id],
+      )).rows[0].completed_at).toBeNull();
+      result = await offboardPrincipal(pool, value.operator, value.target.id, {
+        confirmationScopeId: value.owned.id,
+      });
+      // Either bounded work has removed the key, or completion must be false.
+      const remaining = (await pool.query(
+        'SELECT count(*)::int AS count FROM coordination_resources WHERE scope_id = $1', [value.owned.id],
+      )).rows[0].count;
+      expect(result.complete && remaining > 0).toBe(false);
+      for (let attempt = 0; attempt < 12 && !result.complete; attempt += 1) {
+        result = await offboardPrincipal(pool, value.operator, value.target.id, {
+          confirmationScopeId: value.owned.id,
+        });
+      }
+      expect(result.complete).toBe(true);
+      expect((await pool.query(
+        'SELECT count(*)::int AS count FROM coordination_resources WHERE scope_id = $1', [value.owned.id],
+      )).rows[0].count).toBe(0);
+    } finally {
+      await pool.query("UPDATE coordination_contract_backfill_state SET phase = 'complete' WHERE singleton");
+    }
+  });
+
   async function adminCli(
     operator: Awaited<ReturnType<typeof fixture>>['operator'], args: string[], timeout = 30_000,
   ): Promise<{ exitCode: number; payload: Record<string, unknown>; stderr: string }> {
