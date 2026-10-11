@@ -1455,9 +1455,13 @@ describe('sync database identity rotation security', () => {
       continuum_sync_role: oldRole, continuum_principal_id: fixture.service.id,
     });
     const oldConnection = await loginRolePool(pool, oldRole);
+    let oldClient: pg.PoolClient | undefined;
     await pool.query('CREATE ROLE ' + quoteRole(newRole) + ' LOGIN');
     try {
-      await expect(oldConnection.query('SELECT body FROM memories LIMIT 1'))
+      // Pool.query discards clients after query errors. Hold this authenticated
+      // session across rotation to test revocation on an existing connection.
+      oldClient = await oldConnection.connect();
+      await expect(oldClient.query('SELECT body FROM memories LIMIT 1'))
         .rejects.toThrow(/permission denied/i);
       await fixture.operator.query(
         'SELECT continuum_rotate_sync_database_identity($1, $2, $3)',
@@ -1466,16 +1470,17 @@ describe('sync database identity rotation security', () => {
       await grantOwnerRetirementAuthority(pool, newRole);
       const newConnection = await loginRolePool(pool, newRole);
       try {
-        for (const connection of [oldConnection, newConnection]) {
+        for (const connection of [oldClient, newConnection]) {
           await expect(connection.query('SELECT body FROM public.memories LIMIT 1'))
             .rejects.toThrow(/permission denied/i);
         }
-        await expect(oldConnection.query('SELECT external_id FROM public.principals LIMIT 1'))
+        await expect(oldClient.query('SELECT external_id FROM public.principals LIMIT 1'))
           .rejects.toThrow(/permission denied/i);
         await expect(newConnection.query('SELECT external_id FROM public.entra_groups LIMIT 1'))
           .resolves.toBeDefined();
       } finally { await newConnection.end(); }
     } finally {
+      oldClient?.release();
       await oldConnection.end();
       await fixture.operator.end();
       await dropRoles(pool, [oldRole, newRole, fixture.operatorRole]);
