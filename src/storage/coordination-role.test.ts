@@ -418,13 +418,13 @@ describe('coordination database role profiles', () => {
       expect((await pool.query(
         'SELECT resource_limit FROM coordination_scope_usage WHERE scope_id = $1',
         [scope.id],
-      )).rows[0]?.resource_limit).toBe(12000);
+      )).rows[0]?.resource_limit).toBe(10000);
       expect((await pool.query(
         `SELECT acquire_receipt_limit, contended_receipt_limit
            FROM coordination_principal_usage WHERE principal_id = $1`,
         [operatorPrincipal.id],
       )).rows[0]).toEqual({
-        acquire_receipt_limit: 12000, contended_receipt_limit: 2000,
+        acquire_receipt_limit: 10000, contended_receipt_limit: 2000,
       });
       expect((await pool.query(
         `SELECT metadata->>'operation' AS operation FROM audit_log
