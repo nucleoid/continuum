@@ -41,17 +41,25 @@ async function isolated(run: (context: {
   const root = new pg.Pool({ connectionString: databaseUrl, max: 1 });
   const database = name('provider_regrant');
   const pools: pg.Pool[] = [];
+  const clientClosures: Promise<void>[] = [];
+  const track = (pool: pg.Pool) => {
+    pool.on('connect', (client) => {
+      clientClosures.push(new Promise<void>((resolve) => client.once('end', resolve)));
+    });
+    pools.push(pool);
+    return pool;
+  };
   const roles: string[] = [];
   const directories: string[] = [];
   await root.query(`CREATE DATABASE ${q(database)}`);
   const url = new URL(databaseUrl); url.pathname = `/${database}`;
-  const admin = new pg.Pool({ connectionString: url.toString(), max: 1 }); pools.push(admin);
+  const admin = track(new pg.Pool({ connectionString: url.toString(), max: 1 }));
   try {
     await run({ admin,
       async tenant(schema) {
         await admin.query(`CREATE SCHEMA IF NOT EXISTS ${q(schema)}`);
         const pool = new pg.Pool({ connectionString: url.toString(), max: 1, options: `-c search_path=${schema}` });
-        pools.push(pool); return pool;
+        return track(pool);
       },
       async role() {
         const role = name('provider_role'); roles.push(role);
@@ -68,7 +76,25 @@ async function isolated(run: (context: {
     });
   } finally {
     await Promise.all(pools.map((pool) => pool.end()));
-    await root.query(`DROP DATABASE ${q(database)} WITH (FORCE)`);
+    // pg-pool ending is distinct from the underlying client's end event.
+    // Wait for the fixture's actual sockets before removing its database;
+    // FORCE could terminate an ending idle client and emit uncaught 57P01.
+    let closeTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([Promise.all(clientClosures), new Promise<never>((_, reject) => {
+        closeTimer = setTimeout(() => reject(new Error('Fixture database clients did not close within 5 seconds')), 5_000);
+      })]);
+    } finally { if (closeTimer) clearTimeout(closeTimer); }
+    const drainDeadline = Date.now() + 5_000;
+    for (;;) {
+      const sessions = (await root.query<{ sessions: number }>(
+        'SELECT count(*)::int AS sessions FROM pg_catalog.pg_stat_activity WHERE datname=$1', [database],
+      )).rows[0].sessions;
+      if (sessions === 0) break;
+      if (Date.now() >= drainDeadline) throw new Error(`Fixture database still has ${sessions} sessions after client shutdown`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    await root.query(`DROP DATABASE ${q(database)}`);
     for (const role of roles) await root.query(`DROP ROLE IF EXISTS ${q(role)}`);
     await root.end();
     for (const directory of directories) await rm(directory, { recursive: true, force: true });

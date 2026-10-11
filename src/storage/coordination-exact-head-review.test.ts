@@ -461,8 +461,7 @@ describe('coordination exact-head review regressions', () => {
       let offboardingWaiting = false;
       for (let attempt = 0; attempt < 50 && !offboardingWaiting; attempt += 1) {
         offboardingWaiting = Boolean((await pool.query(
-          `SELECT $2::int = ANY(pg_blocking_pids(pid))
-                    AND query LIKE '%FOR UPDATE%' AS waiting
+          `SELECT $2::int = ANY(pg_blocking_pids(pid)) AS waiting
              FROM pg_stat_activity WHERE pid = $1`, [operatorPid, applicationPid],
         )).rows[0]?.waiting);
         if (!offboardingWaiting) await new Promise((resolve) => setTimeout(resolve, 10));
