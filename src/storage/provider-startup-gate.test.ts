@@ -27,6 +27,34 @@ async function fixture(run: (pool: pg.Pool, admin: pg.Pool, schema: string, shad
 }
 
 describe('qualified provider startup gate', () => {
+  it('refuses caller-owned planted memories and hardened no-op startup helpers before the tenant', async () => {
+    await fixture(async (pool, admin, schema, shadow) => {
+      const role = `shadow_runtime_${randomUUID().replaceAll('-', '').slice(0,12)}`;
+      try {
+        await admin.query(`CREATE ROLE "${role}" NOLOGIN;
+          ALTER SCHEMA "${shadow}" OWNER TO "${role}";
+          GRANT USAGE ON SCHEMA "${schema}" TO "${role}";
+          GRANT SELECT ON "${schema}".memories TO "${role}";`);
+        await pool.query(`SET ROLE "${role}"`);
+        await pool.query(`CREATE TABLE "${shadow}".memories(id integer);
+          CREATE TABLE "${shadow}"._continuum_migrations(name text PRIMARY KEY);
+          INSERT INTO "${shadow}"._continuum_migrations VALUES('0080_pgvector_provider_grants.sql');
+          CREATE FUNCTION "${shadow}".continuum_assert_current_pgvector_profile() RETURNS void
+          LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,"${shadow}",pg_temp
+          AS $$ BEGIN RETURN; END $$;
+          REVOKE ALL ON FUNCTION "${shadow}".continuum_assert_current_pgvector_profile() FROM PUBLIC;
+          CREATE FUNCTION "${shadow}".continuum_coordination_contract_is_ready() RETURNS BOOLEAN
+          LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,"${shadow}",pg_temp AS 'SELECT TRUE';
+          REVOKE ALL ON FUNCTION "${shadow}".continuum_coordination_contract_is_ready() FROM PUBLIC;`);
+        await expect(reconcilePgvectorProviderGrants(pool)).rejects.toThrow(/runtime application schema.*trust/i);
+        await expect(requireCoordinationContractReady(pool)).rejects.toThrow(/runtime application schema.*trust/i);
+      } finally {
+        await pool.query('RESET ROLE');
+        await admin.query(`DROP OWNED BY "${role}"; DROP ROLE IF EXISTS "${role}"`);
+      }
+    });
+  });
+
   it('resolves contract readiness in the actual memories namespace and rejects untrusted helpers', async () => {
     await fixture(async (pool, admin, schema, shadow) => {
       await admin.query(`CREATE FUNCTION "${schema}".continuum_coordination_contract_is_ready()
