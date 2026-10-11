@@ -211,8 +211,10 @@ BEGIN
     $floors$ INTO item USING progress.resource_scope_cursor,progress.resource_key_cursor,batch_limit;
     selected_count:=item.selected_count;
     UPDATE coordination_contract_backfill_state SET
-      resource_scope_cursor=COALESCE(item.scope_id,resource_scope_cursor),
-      resource_key_cursor=COALESCE(item.resource,resource_key_cursor),
+      resource_scope_cursor=CASE WHEN selected_count<batch_limit THEN NULL
+        ELSE COALESCE(item.scope_id,resource_scope_cursor) END,
+      resource_key_cursor=CASE WHEN selected_count<batch_limit THEN NULL
+        ELSE COALESCE(item.resource,resource_key_cursor) END,
       resource_rows_processed=resource_rows_processed+selected_count,
       phase=CASE WHEN selected_count<batch_limit THEN 'scopes' ELSE phase END WHERE singleton;
   ELSIF progress.phase = 'scopes' THEN
