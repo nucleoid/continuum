@@ -131,7 +131,12 @@ not settle. `stop()` uses the same wall-clock deadline for callback drain,
 renewal, and release, so a stuck database operation cannot extend shutdown.
 Claim, acknowledgement, failure, timeout, and abandonment writes also use the
 configured database deadline, so one unavailable database operation cannot
-stop later polling cycles. Every post-claim mutation is fenced by event ID,
+stop later polling cycles. Storage also gives owned pool transactions a 5-second
+statement limit and 1-second lock limit, retaining stricter existing limits.
+These are per-statement bounds, not a whole-transaction or connection-acquisition
+guarantee. Commit or rollback restores the pool session settings; failed
+rollback discards that connection. A caller-supplied transaction client keeps
+its existing transaction and settings and must supply its own SQL containment. Every post-claim mutation is fenced by event ID,
 webhook ID, lease owner, attempt number, and a monotonic lease generation that
 is not reset by manual retry. A late write from an older claim cannot mutate a
 newer claim held by the same process owner, even when manual retry reuses the
@@ -187,7 +192,11 @@ payload or have sent it downstream. Losing its durable ownership fence stops
 future acknowledgement or retry writes; the next ownership check signals
 abort. JavaScript cannot retract a payload or force an abort-ignoring consumer
 to stop. Operators must arrange downstream erasure separately when required.
-Core makes no downstream deletion promise.
+Core makes no downstream deletion promise. To clear live consumer snapshots,
+quiesce producers, stop every worker replica through bounded shutdown and
+confirm process exit for callbacks that ignore abort. Stored-state completion
+alone does not prove that a consumer process or downstream system has erased
+its copy.
 
 ## Migration history and branch builds
 
