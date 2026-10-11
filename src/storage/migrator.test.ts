@@ -171,7 +171,7 @@ describe('runMigrations', () => {
     ['single-batch', 1, 10],
     ['multi-batch', 3, 1],
   ] as const)(
-    'refuses current-binary 0064 offboarding before upgrade for %s privacy work',
+    'refuses 0064 offboarding then completes after upgrade for %s privacy work',
     async (label, leaseCount, repairBatchSize) => {
       // Keep the schema below PostgreSQL's 63-byte identifier limit. A silently
       // truncated CREATE SCHEMA name must not masquerade as a valid search_path.
@@ -208,32 +208,6 @@ describe('runMigrations', () => {
         })).rejects.toMatchObject({
           code: 'CONFLICT', message: expect.stringMatching(/finish migrations/i),
         });
-        return;
-        let completed: Awaited<ReturnType<typeof offboardPrincipal>>;
-        const finishHistoricalScopePhase = async () => {
-          const privacyReady = (await pool.query(
-            `SELECT principal.completed_at IS NOT NULL
-                    AND scope.completed_at IS NOT NULL AS ready
-               FROM coordination_principal_privacy_progress principal
-               JOIN coordination_scope_privacy_progress scope ON scope.scope_id = $2
-              WHERE principal.principal_id = $1`,
-            [target.id, owned.id],
-          )).rows[0]?.ready === true;
-          if (privacyReady) {
-            await pool.query(
-              `SELECT continuum_operator_write_offboarding_run($1, $2, 'scope_complete', '{}'::jsonb)`,
-              [target.id, operator.id],
-            );
-          }
-        };
-        if (!completed.complete) await finishHistoricalScopePhase();
-        for (let attempt = 0; !completed.complete && attempt < 100; attempt += 1) {
-          completed = await offboardPrincipal(pool, operator, target.id, {
-            confirmationScopeId: owned.id, batchSize: 100,
-          });
-          if (!completed.complete) await finishHistoricalScopePhase();
-        }
-        expect(completed.complete, JSON.stringify(completed)).toBe(true);
         if (leaseCount > 0) {
           await pool.query('ALTER TABLE audit_log DISABLE TRIGGER reject_offboarded_principal_audit');
           try {
@@ -252,10 +226,10 @@ describe('runMigrations', () => {
             await pool.query('ALTER TABLE audit_log ENABLE TRIGGER reject_offboarded_principal_audit');
           }
         }
-        const immutableBefore = (await pool.query(
+        expect((await pool.query(
           `SELECT phase, evidence FROM principal_offboarding_run_events
             WHERE principal_id = $1 ORDER BY id`, [target.id],
-        )).rows;
+        )).rows).toEqual([]);
 
         const disabledOnly = await createPrincipal(pool, {
           externalId: `disabled:${suffix}`, kind: 'user', displayName: 'Disabled direct scrub',
@@ -264,13 +238,7 @@ describe('runMigrations', () => {
           kind: 'user', name: `disabled-owned-${suffix}`,
         });
         await addMembership(pool, disabledOnly.id, disabledOwned.id, 'writer');
-        await pool.query(
-          `INSERT INTO principal_user_scopes
-             (principal_id, scope_id, mapped_by, acknowledged_principal_ids,
-              acknowledged_evidence_hash)
-           VALUES ($1, $2, $3, '{}'::uuid[], repeat('d', 64))`,
-          [disabledOnly.id, disabledOwned.id, operator.id],
-        );
+        await mapOwnedUserScope(pool, operator, disabledOnly.id, disabledOwned.id);
         await pool.query(
           'UPDATE principals SET disabled_at = clock_timestamp() WHERE id = $1',
           [disabledOnly.id],
@@ -306,15 +274,10 @@ describe('runMigrations', () => {
           [target.id],
         )).rows).toEqual([{ persisted: true, privacy_version: 3 }]);
         expect((await pool.query(
-          `SELECT phase, evidence FROM principal_offboarding_run_events
-            WHERE principal_id = $1 AND phase <> 'started' AND phase <> 'completed'
-            ORDER BY id`, [target.id],
-        )).rows).toEqual([]);
-        expect((await pool.query(
-          `SELECT phase, evidence FROM principal_offboarding_run_events
+          `SELECT phase FROM principal_offboarding_run_events
             WHERE principal_id = $1 AND phase IN ('started', 'completed') ORDER BY id`,
           [target.id],
-        )).rows).toEqual(immutableBefore);
+        )).rows).toEqual([{ phase: 'started' }, { phase: 'completed' }]);
         expect((await pool.query(
           `SELECT completed_at IS NULL AS reopened
              FROM coordination_principal_privacy_progress WHERE principal_id = $1`,
