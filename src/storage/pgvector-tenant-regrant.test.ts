@@ -44,7 +44,7 @@ async function isolated(run: (context: {
   const clientClosures: Promise<void>[] = [];
   const track = (pool: pg.Pool) => {
     pool.on('connect', (client) => {
-      clientClosures.push(new Promise<void>((resolve) => client.once('end', resolve)));
+      clientClosures.push(new Promise<void>((resolve) => client.once('end', () => resolve())));
     });
     pools.push(pool);
     return pool;
@@ -85,6 +85,7 @@ async function isolated(run: (context: {
         closeTimer = setTimeout(() => reject(new Error('Fixture database clients did not close within 5 seconds')), 5_000);
       })]);
     } finally { if (closeTimer) clearTimeout(closeTimer); }
+    await root.query("SET statement_timeout='1s'");
     const drainDeadline = Date.now() + 5_000;
     for (;;) {
       const sessions = (await root.query<{ sessions: number }>(
@@ -94,6 +95,7 @@ async function isolated(run: (context: {
       if (Date.now() >= drainDeadline) throw new Error(`Fixture database still has ${sessions} sessions after client shutdown`);
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
+    await root.query("SET statement_timeout='5s'");
     await root.query(`DROP DATABASE ${q(database)}`);
     for (const role of roles) await root.query(`DROP ROLE IF EXISTS ${q(role)}`);
     await root.end();
