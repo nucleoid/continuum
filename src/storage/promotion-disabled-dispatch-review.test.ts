@@ -40,7 +40,10 @@ describe('promotion disabled dispatch review', () => {
         'enabled-control', { maxAttempts: 1, retryDelayMs: 1000, error: new Error('actual consumer failure'),
           attemptCount: delivery.attemptCount, leaseGeneration: delivery.leaseGeneration })).toBe('dead_letter');
     } else {
-      expect(await abandonPromotionDeliveries(pool, 'enabled-control', active)).toBe(3);
+      // Preserve a genuine oldest private row: refund its unstarted claim
+      // before refunding the later shared/unmapped controls in a second write.
+      expect(await abandonPromotionDeliveries(pool, 'enabled-control', active.filter((delivery) => delivery.event.eventId === events[0]))).toBe(1);
+      expect(await abandonPromotionDeliveries(pool, 'enabled-control', active.filter((delivery) => delivery.event.eventId !== events[0]))).toBe(2);
     }
     await pool.query("UPDATE coordination_contract_backfill_state SET phase='usage' WHERE singleton");
     const pending = await offboardPrincipal(pool, admin, target.id, { confirmationScopeId: owned.id });
@@ -78,4 +81,18 @@ describe('promotion disabled dispatch review', () => {
       expect(claimed.some((delivery) => delivery.event.destinationScope.name === value.owned.name)).toBe(false);
     } finally { await pool.query("UPDATE coordination_contract_backfill_state SET phase='complete' WHERE singleton"); }
   });
+  it('serves a healthy same-hook tail with quota one behind a disabled mapped oldest row', async () => {
+    try {
+      const value = await fixture(false);
+      expect((await pool.query(`SELECT event_id FROM promotion_event_deliveries
+        WHERE webhook_id='dispatch-hook' ORDER BY available_at,event_id LIMIT 1`)).rows)
+        .toEqual([{ event_id: value.events[0] }]);
+      const claimed = await claimPromotionDeliveries(pool, { owner: 'healthy-tail', webhookIds: ['dispatch-hook'],
+        limit: 1, perWebhookLimit: 1, leaseMs: 60_000 });
+      expect(claimed).toHaveLength(1);
+      expect(value.events.slice(1)).toContain(claimed[0].event.eventId);
+      expect(claimed[0].event.destinationScope.name).not.toBe(value.owned.name);
+    } finally { await pool.query("UPDATE coordination_contract_backfill_state SET phase='complete' WHERE singleton"); }
+  });
+
 });
