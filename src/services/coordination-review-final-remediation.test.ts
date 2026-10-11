@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import pg, { type PoolConfig } from 'pg';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { addMembership } from '../storage/memberships.js';
@@ -39,6 +41,79 @@ describe('coordination final review remediation', () => {
     await mapOwnedUserScope(pool, operator, target.id, owned.id);
     return { operator, target, owned, shared };
   }
+
+  async function pendingAccessEvidence(label: string) {
+    const value = await fixture(label);
+    await pool.query("UPDATE coordination_contract_backfill_state SET phase = 'usage' WHERE singleton");
+    await offboardPrincipal(pool, value.operator, value.target.id, { confirmationScopeId: value.owned.id });
+    const event = (await pool.query(
+      `SELECT metadata FROM audit_log WHERE metadata->>'operation' = 'principal_offboarding_access_revoked'
+         AND metadata->>'principal_id' = $1`, [value.target.id],
+    )).rows[0];
+    return { ...value, metadata: event.metadata as Record<string, unknown> };
+  }
+
+  it.each(['application', 'sync'] as const)('access evidence review: rejects a canonical forged %s insert', async (profile) => {
+    const value = await pendingAccessEvidence(`forged-access-${profile}`);
+    const role = `continuum_access_evidence_${randomUUID().replaceAll('-', '')}`;
+    const password = randomUUID();
+    const quoteRole = (name: string) => `"${name.replaceAll('"', '""')}"`;
+    let connection: pg.Pool | undefined;
+    await pool.query(`CREATE ROLE ${quoteRole(role)} LOGIN PASSWORD '${password}'`);
+    try {
+      const syncActor = profile === 'sync' ? await createPrincipal(pool, {
+        externalId: `access-evidence-sync:${randomUUID()}`, kind: 'service', displayName: 'Sync',
+      }) : null;
+      if (syncActor) {
+        await pool.query(`GRANT ${quoteRole(role)} TO CURRENT_USER WITH ADMIN OPTION, SET FALSE, INHERIT FALSE`);
+      }
+      const schema = (await pool.query('SELECT current_schema() AS name')).rows[0].name as string;
+      const file = profile === 'sync' ? 'grant-sync-role.sql' : 'grant-application-role.sql';
+      let sql = (await readFile(join(process.cwd(), 'scripts', file), 'utf8'))
+        .split(/\r?\n/).filter((line) => !line.trimStart().startsWith('\\')).join('\n');
+      for (const [name, text] of Object.entries({ continuum_schema: schema,
+        continuum_app_role: role, continuum_sync_role: role, continuum_principal_id: syncActor?.id ?? '' })) {
+        sql = sql.replaceAll(`:"${name}"`, quoteRole(text))
+          .replaceAll(`:'${name}'`, `'${text.replaceAll("'", "''")}'`);
+      }
+      const grant = await pool.connect();
+      let discardGrant = false;
+      try { await grant.query(sql); }
+      catch (error) {
+        try { await grant.query('ROLLBACK'); } catch { discardGrant = true; }
+        throw error;
+      } finally { grant.release(discardGrant); }
+      const base = (pool as unknown as { options: PoolConfig }).options;
+      const url = new URL(base.connectionString!);
+      url.username = role; url.password = password;
+      connection = new pg.Pool({ connectionString: url.toString(), ssl: base.ssl, max: 1 });
+      await expect(connection.query(
+        `INSERT INTO audit_log(principal_id, action, scope_id, metadata)
+         VALUES($1, 'archive', $2, $3::jsonb)`, [value.operator.id, value.owned.id, JSON.stringify(value.metadata)],
+      )).rejects.toThrow();
+    } finally {
+      await connection?.end();
+      await pool.query("UPDATE coordination_contract_backfill_state SET phase = 'complete' WHERE singleton");
+      await pool.query('DELETE FROM continuum_pgvector_role_profiles WHERE database_role_oid = $1::regrole::oid', [role]);
+      await pool.query('DELETE FROM continuum_trusted_database_identities WHERE database_role = $1::name', [role]);
+      await pool.query(`DROP OWNED BY ${quoteRole(role)}`);
+      await pool.query(`REVOKE ${quoteRole(role)} FROM CURRENT_USER`);
+      await pool.query(`DROP ROLE ${quoteRole(role)}`);
+    }
+  });
+
+  it.each(['approval_id', 'run_id'] as const)('access evidence review: rejects an operator event with mismatched %s', async (field) => {
+    const value = await pendingAccessEvidence(`mismatched-access-${field}`);
+    try {
+      const metadata = { ...value.metadata, [field]: field === 'approval_id' ? '999999999' : randomUUID() };
+      await expect(pool.query(
+        `INSERT INTO audit_log(principal_id, action, scope_id, metadata)
+         VALUES($1, 'archive', $2, $3::jsonb)`, [value.operator.id, value.owned.id, JSON.stringify(metadata)],
+      )).rejects.toThrow();
+    } finally {
+      await pool.query("UPDATE coordination_contract_backfill_state SET phase = 'complete' WHERE singleton");
+    }
+  });
 
   it('contract offboarding review: durably revokes access while backfill is pending and resumes after readiness', async () => {
     const value = await fixture('pending-contract-access');
