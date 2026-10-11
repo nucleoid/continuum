@@ -4,6 +4,70 @@ This document is the privacy, security, and operator runbook for application
 offboarding. Review it with the organization's retention and incident-response
 owners before enabling the workflow.
 
+## Promotion outbox and consumer copies
+
+Current offboarding includes the promotion outbox installed by migration 0089.
+The destination scope UUID, not the promoter's display name or event author,
+selects its owned-scope event snapshots and deliveries. The operator-only scrub
+requires the current bound approval identity, manual org-admin authority,
+approved disabled-user mapping and authorized lifecycle run. In bounded
+batches it replaces retained destination scope-name snapshots with the
+canonical erased scope name and clears callback errors. Event, memory, scope
+and principal UUIDs remain for accounting. Related deliveries become
+`privacy_cancelled`, lose their lease owner and expiry, and advance their lease
+generation. Old generations cannot acknowledge or retry them; manual retry
+cannot reopen cancellation. Required privacy audit evidence commits with the
+changes and is protected from ordinary mutation and retention.
+
+The current lifecycle predicate checks physical event and delivery state in
+addition to the existing memory, audit and coordination proof. A previous
+completion receipt alone is insufficient. Each retry can commit bounded
+progress, then rechecks retained snapshots and cancellation state. A locked
+row may leave the proof incomplete; do not bypass guards or grant broad table
+privileges to force completion. The CLI's continuation and typed-block rules
+are documented in [the CLI guide](./cli.md). Coordination-only repair does not
+substitute for full offboarding or close its lifecycle run.
+
+A callback may already hold its original event snapshot or have sent it to an
+external system. Durable cancellation fences future acknowledgement and retry
+writes, and ownership checks request abort, but JavaScript cannot retract that
+payload or force an abort-ignoring consumer to stop. Stored-state completion
+is not proof that a consumer process or downstream system erased its copy.
+Quiesce producers, stop every worker replica through bounded shutdown, and
+confirm process exit when callbacks ignore abort. Apply downstream erasure and
+backup policies separately. See [extensions](./extensions.md) for deduplication,
+worker recovery and shutdown limits.
+
+## Outbox rollout and mixed versions
+
+Before migration 0089, quiesce promotion producers, offboarding processes and
+all consumer replicas. Back up the database and migration ledgers, run the
+complete packaged chain as migration owner with database TEMPORARY privilege,
+and explicitly regrant APP and OP profiles. SYNC and reporting receive no
+outbox privileges. Configure the durable webhook ID set through the audited
+bound-operator function before enabling consumers. Current REST and MCP verify
+outbox readiness at startup even with empty local registries; neither repairs
+missing schema or grants. Health readiness remains a database-connectivity
+check rather than a consumer-delivery health check.
+
+Do not mix old producers or old offboarding runtimes with the current schema.
+Old producers can omit deliveries, which current workers cannot reconstruct.
+Old offboarding code cannot scrub the outbox, and the installed physical
+predicate can leave it incomplete. Binary-only rollback neither restores
+producer parity nor reverses erasure. Assess retained events and downstream
+copies, keep incompatible processes stopped, and use reviewed forward recovery
+or the verified pre-upgrade backup with deliberate replay of subsequent work.
+Do not delete migration ledgers or turn privacy-cancelled deliveries back into
+pending work.
+
+Low-level storage exports such as `manualRetryPromotionDelivery` have no actor,
+authorization check or mandatory audit. They are not authenticated operator
+commands. Use trusted database connections only after replica quiescence;
+a user-facing recovery surface must add authorization and required audit in its
+own transaction. Ordinary APP/OP table grants are a trusted raw-storage boundary,
+not proof that arbitrary SQL is an approved offboarding workflow.
+
+## Authorization and execution
 Offboarding is an explicit org-administrator operation. It is not inferred from
 principal names, scope names, or memory authorship. Before offboarding, map the
 immutable principal UUID to exactly one existing `user` scope UUID:
@@ -534,7 +598,7 @@ mutation markers.
 
 The following paragraphs describe the historical 0049-0053 identity foundation.
 They are not the current migration stopping point. Apply the complete packaged
-chain, including 0080 and 0081, under the current rollout procedure below.
+chain through 0089, including completed 0081 repair, under the current rollout procedure below.
 Migration `0049_offboarding_review_remediation.sql` makes principal disablement
 create bounded transaction-local guards for its existing membership cascade,
 binds owned-scope access cleanup to a started incomplete run and its mapped
@@ -1126,7 +1190,7 @@ retryable.
 Rollback is forward-only and requires the verified pre-migration backup for any
 data that bounded legacy cleanup has removed. Application rollback is supported
 only to a binary independently verified against every applied migration and
-current capability/profile contract, including completed 0081 repair. A
+current capability/profile contract, including completed 0081 repair and the 0089 outbox. A
 0053-aware or 0063-aware binary alone is insufficient. Stop all processes;
 inventory incomplete lifecycle runs and paged coordination privacy repairs;
 then use a compatible binary, reapply all three grant profiles, verify identities
