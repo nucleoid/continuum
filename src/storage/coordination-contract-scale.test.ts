@@ -227,6 +227,23 @@ describe('coordination contract scale and recovery', () => {
         resource_key_cursor:null,receipt_principal_cursor:null,receipt_operation_cursor:null,receipt_request_cursor:null}]);
   },60_000);
 
+  it('rejects a misleading separate contention quota without storing limits or audit effects', async () => {
+    const actor=await createPrincipal(pool,{externalId:randomUUID(),kind:'user',displayName:'Quota operator'});
+    const target=await createPrincipal(pool,{externalId:randomUUID(),kind:'service',displayName:'Quota target'});
+    const org=(await getScopeByRef(pool,{kind:'org',name:''}))!;
+    await addMembership(pool,actor.id,org.id,'admin');
+    const auditBefore=(await pool.query('SELECT count(*)::int AS count FROM audit_log')).rows[0].count;
+    await expect(pool.query('SELECT continuum_operator_set_coordination_principal_quota($1,$2,3,2)',[actor.id,target.id]))
+      .rejects.toMatchObject({code:'22023'});
+    expect((await pool.query('SELECT principal_id FROM coordination_principal_usage WHERE principal_id=$1',[target.id])).rows)
+      .toEqual([]);
+    expect((await pool.query('SELECT count(*)::int AS count FROM audit_log')).rows[0].count).toBe(auditBefore);
+    await expect(pool.query('SELECT continuum_operator_set_coordination_principal_quota($1,$2,3,3)',[actor.id,target.id]))
+      .resolves.toBeDefined();
+    expect((await pool.query('SELECT acquire_receipt_limit,contended_receipt_limit FROM coordination_principal_usage WHERE principal_id=$1',[target.id])).rows)
+      .toEqual([{acquire_receipt_limit:3,contended_receipt_limit:3}]);
+  });
+
   it('backfills receipts as the non-superuser function owner with database TEMP revoked', async () => {
     const database = `contract_temp_${randomUUID().replaceAll('-', '')}`;
     const owner = `contract_owner_${randomUUID().replaceAll('-', '')}`;
