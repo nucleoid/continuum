@@ -188,7 +188,7 @@ export async function coordinationAuthorizationIsCurrent(
             OR EXISTS (
               SELECT 1 FROM entra_sync_state e
                WHERE e.singleton
-                 AND clock_timestamp() < e.last_success_at + e.max_staleness
+                 AND pg_catalog.clock_timestamp() < e.last_success_at + e.max_staleness
             )
           )
      ) AS authorized`,
@@ -212,7 +212,7 @@ export async function preparePrincipalReceipts(
           FROM coordination_leases candidate
          WHERE candidate.principal_id = $1
            AND candidate.cleanup_eligible_at
-               <= clock_timestamp() - interval '24 hours'
+               <= pg_catalog.clock_timestamp() - interval '24 hours'
            AND NOT EXISTS (
              SELECT 1 FROM coordination_operation_receipts receipt
               WHERE receipt.lease_id = candidate.lease_id
@@ -241,15 +241,15 @@ export async function lockReceiptRequest(
   requestId: string,
 ): Promise<void> {
   await client.query(
-    `SELECT pg_advisory_xact_lock(
-       hashtextextended($1 || ':' || $2 || ':' || $3, 604692071)
+    `SELECT pg_catalog.pg_advisory_xact_lock(
+       pg_catalog.hashtextextended($1 || ':' || $2 || ':' || $3, 604692071::bigint)
      )`,
     [principalId, operation, requestId],
   );
   const removed = await client.query<{ operation: CoordinationOperation }>(
     `DELETE FROM coordination_operation_receipts
       WHERE principal_id = $1 AND operation = $2 AND request_id = $3
-        AND retain_until <= clock_timestamp()
+        AND retain_until <= pg_catalog.clock_timestamp()
       RETURNING operation`,
     [principalId, operation, requestId],
   );
@@ -280,8 +280,8 @@ const RECEIPT_COLUMNS = `
   scope_id, resource, lease_id, run_id,
   fencing_token::text AS fencing_token,
   CASE WHEN expires_at IS NULL THEN NULL
-       ELSE to_char(expires_at AT TIME ZONE 'UTC', '${UTC}') END AS expires_at,
-  to_char(server_time AT TIME ZONE 'UTC', '${UTC}') AS server_time,
+       ELSE pg_catalog.to_char(expires_at AT TIME ZONE 'UTC', '${UTC}') END AS expires_at,
+  pg_catalog.to_char(server_time AT TIME ZONE 'UTC', '${UTC}') AS server_time,
   retry_after_seconds`;
 
 export async function getReceipt(
@@ -293,10 +293,11 @@ export async function getReceipt(
   const result = await client.query(
     `SELECT ${RECEIPT_COLUMNS}
        FROM coordination_operation_receipts
-      WHERE principal_id = $1 AND operation = $2 AND request_id = $3
-        AND retain_until > clock_timestamp()`,
+      WHERE principal_id = $1 AND operation = $2 AND request_id = $3`,
     [principalId, operation, requestId],
   );
+  // lockReceiptRequest already made the expiry decision under the request lock.
+  // A surviving row stays authoritative even if its clock boundary passes here.
   return result.rows[0] ? receiptFromRow(result.rows[0]) : null;
 }
 
@@ -327,7 +328,7 @@ export async function discoverReceipt(
     `SELECT scope_id, resource, lease_id
        FROM coordination_operation_receipts
       WHERE principal_id = $1 AND operation = $2 AND request_id = $3
-        AND retain_until > clock_timestamp()`,
+        AND retain_until > pg_catalog.clock_timestamp()`,
     [principalId, operation, requestId],
   );
   const row = result.rows[0];
@@ -348,7 +349,7 @@ export async function insertReceipt(
        scope_id, resource, lease_id, run_id, fencing_token,
        expires_at, server_time, retry_after_seconds, retain_until
      ) VALUES (
-       $1, $2, $3, decode($4, 'hex'), $5,
+       $1, $2, $3, pg_catalog.decode($4, 'hex'), $5,
        $6, $7, $8, $9, $10::bigint,
        $11::timestamptz, $12::timestamptz, $13,
        $12::timestamptz + interval '24 hours'
@@ -376,7 +377,7 @@ export async function ensureAndLockResource(
   if (existing.rowCount) return;
 
   await client.query(
-    `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 604692072))`,
+    `SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1::text, 604692072::bigint))`,
     [scopeId],
   );
   const raced = await client.query(
@@ -428,7 +429,7 @@ export async function lockExistingResource(
 
 export async function sampleServerTime(client: pg.PoolClient): Promise<string> {
   const result = await client.query<{ server_time: string }>(
-    `SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', '${UTC}') AS server_time`,
+    `SELECT pg_catalog.to_char(pg_catalog.clock_timestamp() AT TIME ZONE 'UTC', '${UTC}') AS server_time`,
   );
   return result.rows[0]!.server_time;
 }
@@ -441,9 +442,9 @@ export async function getCurrentLease(
 ): Promise<CurrentLeaseRow | null> {
   const result = await client.query(
     `SELECT l.lease_id, l.principal_id, l.run_id, l.fencing_token::text AS fencing_token,
-            to_char(l.expires_at AT TIME ZONE 'UTC', '${UTC}') AS expires_at,
+            pg_catalog.to_char(l.expires_at AT TIME ZONE 'UTC', '${UTC}') AS expires_at,
             CASE WHEN l.released_at IS NULL THEN NULL
-                 ELSE to_char(l.released_at AT TIME ZONE 'UTC', '${UTC}') END AS released_at
+                 ELSE pg_catalog.to_char(l.released_at AT TIME ZONE 'UTC', '${UTC}') END AS released_at
        FROM coordination_resources r
        JOIN coordination_leases l ON l.lease_id = r.current_lease_id
       WHERE r.scope_id = $1 AND r.resource = $2
@@ -468,7 +469,7 @@ export async function contentionRetryAfter(
   serverTime: string,
 ): Promise<number> {
   const result = await client.query<{ seconds: number }>(
-    `SELECT greatest(0, ceil(extract(epoch FROM
+    `SELECT greatest(0, pg_catalog.ceil(extract(epoch FROM
        ($1::timestamptz - $2::timestamptz))))::int AS seconds`,
     [expiresAt, serverTime],
   );
@@ -489,7 +490,7 @@ export async function createLeaseGeneration(
 ): Promise<{ fencingToken: string; expiresAt: string }> {
   const next = await client.query<{ fencing_token: string }>(
     `UPDATE coordination_resources
-        SET fencing_token = fencing_token + 1, updated_at = clock_timestamp()
+        SET fencing_token = fencing_token + 1, updated_at = pg_catalog.clock_timestamp()
       WHERE scope_id = $1 AND resource = $2
         AND fencing_token < 9223372036854775807
       RETURNING fencing_token::text AS fencing_token`,
@@ -503,9 +504,9 @@ export async function createLeaseGeneration(
        acquired_at, expires_at
      ) VALUES (
        $1, $2, $3, $4, $5, $6::bigint,
-       $7::timestamptz, $7::timestamptz + make_interval(secs => $8)
+       $7::timestamptz, $7::timestamptz + pg_catalog.make_interval(secs => $8::double precision)
      )
-     RETURNING to_char(expires_at AT TIME ZONE 'UTC', '${UTC}') AS expires_at`,
+     RETURNING pg_catalog.to_char(expires_at AT TIME ZONE 'UTC', '${UTC}') AS expires_at`,
     [
       input.leaseId, input.scopeId, input.resource, input.principalId,
       input.runId, fencingToken, input.serverTime, input.ttlSeconds,
@@ -513,7 +514,7 @@ export async function createLeaseGeneration(
   );
   await client.query(
     `UPDATE coordination_resources
-        SET current_lease_id = $3, updated_at = clock_timestamp()
+        SET current_lease_id = $3, updated_at = pg_catalog.clock_timestamp()
       WHERE scope_id = $1 AND resource = $2`,
     [input.scopeId, input.resource, input.leaseId],
   );
@@ -528,9 +529,9 @@ export async function renewLeaseGeneration(
 ): Promise<string> {
   const result = await client.query<{ expires_at: string }>(
     `UPDATE coordination_leases
-        SET expires_at = $2::timestamptz + make_interval(secs => $3)
+        SET expires_at = $2::timestamptz + pg_catalog.make_interval(secs => $3::double precision)
       WHERE lease_id = $1
-      RETURNING to_char(expires_at AT TIME ZONE 'UTC', '${UTC}') AS expires_at`,
+      RETURNING pg_catalog.to_char(expires_at AT TIME ZONE 'UTC', '${UTC}') AS expires_at`,
     [leaseId, serverTime, ttlSeconds],
   );
   return result.rows[0]!.expires_at;
@@ -550,7 +551,7 @@ export async function releaseLeaseGeneration(
   );
   await client.query(
     `UPDATE coordination_resources
-        SET current_lease_id = NULL, updated_at = clock_timestamp()
+        SET current_lease_id = NULL, updated_at = pg_catalog.clock_timestamp()
       WHERE scope_id = $1 AND resource = $2 AND current_lease_id = $3`,
     [scopeId, resource, leaseId],
   );
@@ -564,7 +565,7 @@ export async function inspectCurrentLease(
 ): Promise<CurrentLeaseRow | null> {
   const result = await client.query(
     `SELECT l.lease_id, l.principal_id, l.run_id, l.fencing_token::text AS fencing_token,
-            to_char(l.expires_at AT TIME ZONE 'UTC', '${UTC}') AS expires_at,
+            pg_catalog.to_char(l.expires_at AT TIME ZONE 'UTC', '${UTC}') AS expires_at,
             NULL::text AS released_at
        FROM coordination_resources r
        JOIN coordination_leases l ON l.lease_id = r.current_lease_id
