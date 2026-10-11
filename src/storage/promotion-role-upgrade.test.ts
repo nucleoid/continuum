@@ -19,7 +19,7 @@ const databaseUrl = process.env.CONTINUUM_TEST_DATABASE_URL
 const quote = (value: string) => `"${value.replaceAll('"', '""')}"`;
 const literal = (value: string) => `'${value.replaceAll("'", "''")}'`;
 
-async function roleUpgradeAcceptance(review?: 'poison' | 'null' | 'regrant') {
+async function roleUpgradeAcceptance(review?: 'poison' | 'null' | 'regrant' | 'event-identity' | 'hook-identity') {
   const suffix = randomUUID().replaceAll('-', '').slice(0, 16);
   const schema = `promotion_roles_${suffix}`;
   const roles = ['app', 'operator', 'sync', 'report'].map((kind) => `promotion_${kind}_${suffix}`);
@@ -262,6 +262,25 @@ async function roleUpgradeAcceptance(review?: 'poison' | 'null' | 'regrant') {
       privacy = await offboardPrincipal(operator, admin, target.id, { confirmationScopeId: personal.id });
     }
     expect(privacy.complete).toBe(true);
+    if (review === 'event-identity' || review === 'hook-identity') {
+      // Legitimate active promotion plus an owner-imported pending delivery.
+      // Normal triggers remain enabled and its destination is not disabled.
+      await owner.query(`INSERT INTO promotion_event_deliveries(event_id,webhook_id)
+        VALUES($1::uuid,'identity-hook')`, [promoted.promotionEvent.eventId]);
+      const before = (await owner.query('SELECT * FROM promotion_event_deliveries ORDER BY event_id,webhook_id')).rows;
+      if (review === 'event-identity') {
+        await expect(app.query(`UPDATE promotion_event_deliveries SET event_id=$1::uuid
+          WHERE event_id=$2::uuid AND webhook_id='identity-hook'`,
+          [privatePromotion.promotionEvent.eventId, promoted.promotionEvent.eventId]))
+          .rejects.toMatchObject({ code: '23514' });
+      } else {
+        await expect(app.query(`UPDATE promotion_event_deliveries SET webhook_id='moved-hook'
+          WHERE event_id=$1::uuid AND webhook_id='identity-hook'`, [promoted.promotionEvent.eventId]))
+          .rejects.toMatchObject({ code: '23514' });
+      }
+      expect((await owner.query('SELECT * FROM promotion_event_deliveries ORDER BY event_id,webhook_id')).rows).toEqual(before);
+    }
+
     const receipt = (await owner.query(`SELECT id,metadata FROM audit_log WHERE scope_id=$1::uuid
       AND metadata->>'operation'='principal_promotion_privacy_repaired' ORDER BY id DESC LIMIT 1`, [personal.id])).rows[0];
     expect(receipt.metadata).toMatchObject({ operation: 'principal_promotion_privacy_repaired', principal_id: target.id,
@@ -368,3 +387,8 @@ it('promotion privacy boundary review: rejects NULL and out-of-range batch limit
   () => roleUpgradeAcceptance('null'), 180_000);
 it('promotion operator regrant review: reapplies APP then OP then APP on the same bound role OID',
   () => roleUpgradeAcceptance('regrant'), 180_000);
+
+it('promotion delivery identity review: cannot move a pending APP delivery onto an erased event',
+  () => roleUpgradeAcceptance('event-identity'), 180_000);
+it('promotion delivery identity review: cannot rewrite a pending APP delivery webhook identity',
+  () => roleUpgradeAcceptance('hook-identity'), 180_000);
