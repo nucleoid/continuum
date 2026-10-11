@@ -11,6 +11,7 @@ import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { acquireLease } from './coordination.js';
 import { reactivatePrincipal } from './principal-admin.js';
+import { runAuditRetention } from '../maintenance/audit-retention.js';
 import {
   listCoordinationPrivacyRepairs, mapOwnedUserScope, offboardPrincipal, repairCoordinationPrivacy,
 } from './offboarding.js';
@@ -134,6 +135,33 @@ describe('coordination final review remediation', () => {
         `INSERT INTO audit_log(principal_id, action, scope_id, metadata)
          VALUES($1, 'archive', $2, $3::jsonb)`, [value.operator.id, value.owned.id, JSON.stringify(metadata)],
       )).rejects.toThrow();
+    } finally {
+      await pool.query("UPDATE coordination_contract_backfill_state SET phase = 'complete' WHERE singleton");
+    }
+  });
+
+  it('access evidence review: retention skips approved historical access evidence and deletes ordinary eligible rows', async () => {
+    const value = await pendingAccessEvidence('access-retention');
+    try {
+      // Trusted owner import of a retained historical event, with current
+      // approved canonical linkage. Never alter an immutable existing event.
+      const protectedRow = (await pool.query(
+        `INSERT INTO audit_log(at, principal_id, action, scope_id, metadata)
+         VALUES(clock_timestamp() - interval '200 days', $1, 'archive', $2, $3::jsonb) RETURNING id::text`,
+        [value.operator.id, value.owned.id, JSON.stringify(value.metadata)],
+      )).rows[0];
+      const ordinary = (await pool.query(
+        `INSERT INTO audit_log(at, principal_id, action, query, metadata)
+         VALUES(clock_timestamp() - interval '200 days', $1, 'read', 'ordinary historical query', '{}'::jsonb)
+         RETURNING id::text`, [value.operator.id],
+      )).rows[0];
+      const options = { retentionDays: 30, principalExternalId: value.operator.externalId!,
+        batchSize: 1, maxBatches: 2, maxRows: 2 };
+      expect(await runAuditRetention(pool, { ...options, dryRun: true })).toMatchObject({ eligible: 1 });
+      expect(await runAuditRetention(pool, options)).toMatchObject({ status: 'completed', deleted: 1 });
+      expect((await pool.query('SELECT metadata FROM audit_log WHERE id = $1', [protectedRow.id]))
+        .rows[0]?.metadata).toEqual(value.metadata);
+      expect((await pool.query('SELECT id FROM audit_log WHERE id = $1', [ordinary.id])).rowCount).toBe(0);
     } finally {
       await pool.query("UPDATE coordination_contract_backfill_state SET phase = 'complete' WHERE singleton");
     }
