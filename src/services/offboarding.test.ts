@@ -990,18 +990,32 @@ describe('offboarding and erasure', () => {
     )).rows[0].count).toBe(1);
   });
 
-  it('serializes with membership sync and refuses removal of the final manual org admin', async () => {
+  it('reports membership sync contention, resumes after release, and protects the final manual org admin', async () => {
     const value = await fixture();
     const blocker = await pool.connect();
-    await blocker.query('BEGIN');
-    await blocker.query(`SELECT pg_advisory_xact_lock(834641726154302119::bigint)`);
-    let settled = false;
-    const pending = offboardPrincipal(pool, value.admin, value.target.id).finally(() => { settled = true; });
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(settled).toBe(false);
-    await blocker.query('COMMIT');
-    blocker.release();
-    await pending;
+    let discardBlocker = false;
+    try {
+      await blocker.query('BEGIN');
+      await blocker.query(`SELECT pg_catalog.pg_advisory_xact_lock(834641726154302119::bigint)`);
+      expect(await offboardPrincipal(pool, value.admin, value.target.id)).toMatchObject({
+        dryRun: false, complete: false, alreadyOffboarded: false,
+        progressed: false, blockedUntil: null, reason: 'lock_busy',
+      });
+      expect((await pool.query(
+        'SELECT disabled_at,offboarded_at FROM principals WHERE id=$1', [value.target.id],
+      )).rows[0]).toEqual({ disabled_at: null, offboarded_at: null });
+      expect((await pool.query(
+        'SELECT active FROM scope_memberships WHERE principal_id=$1 AND scope_id=$2',
+        [value.target.id, value.personal.id],
+      )).rows[0].active).toBe(true);
+      expect((await pool.query(
+        'SELECT title,state FROM memories WHERE id=$1', [value.personalMemory.id],
+      )).rows[0]).toEqual({ title: 'Private title', state: 'live' });
+    } finally {
+      try { await blocker.query('ROLLBACK'); } catch { discardBlocker = true; }
+      blocker.release(discardBlocker);
+    }
+    expect((await offboardPrincipal(pool, value.admin, value.target.id)).complete).toBe(true);
 
     await resetData(pool);
     const onlyAdmin = await createPrincipal(pool, {
