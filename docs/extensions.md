@@ -163,6 +163,14 @@ ordinary end-user requests.
 - `CONTINUUM_PROMOTION_BASE_BACKOFF_MS`, default `1000`
 - `CONTINUUM_PROMOTION_MAX_BACKOFF_MS`, default `300000`
 
+For renewal margin, keep `CONTINUUM_PROMOTION_DATABASE_TIMEOUT_MS` at most one
+quarter of `CONTINUUM_PROMOTION_LEASE_MS`; the default 5s/30s combination meets
+that recommendation. Larger allowed budgets can leave room for only one retry
+before expiry. Multiple slow renewals or a prolonged database outage can exhaust
+the lease margin. A JavaScript abort cannot stop a noncooperative consumer; use
+bounded process shutdown/restart and stable-event idempotency rather than treating
+an expired deadline as proof that the old consumer stopped.
+
 Worker owners are unique process-instance identifiers. On shutdown the worker
 stops claiming new rows and waits for any claim already in flight before
 deciding whether callbacks may start. It renews only the exact deliveries with
@@ -360,6 +368,11 @@ application roles cannot update event snapshots or invoke the erasure helper.
 The helper requires a bound approval identity, current manual organization
 administrator, immutable approved disabled-user mapping and its authorized
 run. Audit failure rolls the transaction back.
+New claims and raw manual retries also exclude destinations mapped to a disabled
+user, including the access-only interval before privacy repair. The delivery row
+and its original name may still await scrub, but that disabled destination is not
+newly dispatched through those paths. A disabled event author alone does not
+suppress eligible shared or unmapped destination deliveries.
 
 Completion waits for actual outbox state, rather than an old erasure receipt.
 Retries commit bounded progress and check the current physical state again.
