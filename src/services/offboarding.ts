@@ -1552,31 +1552,38 @@ async function offboardPrincipalCore(
           ? 'owned_live_lease' : 'migration_pending';
         await client.query('ROLLBACK TO SAVEPOINT offboarding_coordination_privacy');
         await client.query('RELEASE SAVEPOINT offboarding_coordination_privacy');
-        const progressUpdate = await writeOffboardingRun(
-          client, principalId, actor.id, 'add_progress', {
-            memories: 0, audit_rows: 0, embeddings: 0,
-            memberships: membershipCount, aliases: aliasCount,
-            entra_bindings: entraCount, audit_queries: 0,
-          },
-        );
-        await client.query(
-          `INSERT INTO audit_log(principal_id, action, scope_id, metadata)
-           VALUES($1, 'archive', $2, $3::jsonb)`,
-          [actor.id, scopeId, JSON.stringify({
-            operation: 'principal_offboarding_access_revoked', principal_id: principalId,
-            approval_id: approvalId, acknowledged_evidence_hash: acknowledgedEvidenceHash,
-            run_id: run.rows[0].run_id, privacy_pending: true,
-            reason,
-            memberships: membershipCount, aliases: aliasCount, entra_bindings: entraCount,
-          })],
-        );
+        const accessRevoked = target.rows[0].disabled_at === null || membershipCount > 0
+          || aliasCount > 0 || entraCount > 0;
+        let batch = Number(run.rows[0].batches);
+        // Preserve one atomic receipt for actual revocation. An unchanged
+        // blocked retry must not mint permanent evidence or another batch.
+        if (accessRevoked) {
+          const progressUpdate = await writeOffboardingRun(
+            client, principalId, actor.id, 'add_progress', {
+              memories: 0, audit_rows: 0, embeddings: 0,
+              memberships: membershipCount, aliases: aliasCount,
+              entra_bindings: entraCount, audit_queries: 0,
+            },
+          );
+          await client.query(
+            `INSERT INTO audit_log(principal_id, action, scope_id, metadata)
+             VALUES($1, 'archive', $2, $3::jsonb)`,
+            [actor.id, scopeId, JSON.stringify({
+              operation: 'principal_offboarding_access_revoked', principal_id: principalId,
+              approval_id: approvalId, acknowledged_evidence_hash: acknowledgedEvidenceHash,
+              run_id: run.rows[0].run_id, privacy_pending: true,
+              reason,
+              memberships: membershipCount, aliases: aliasCount, entra_bindings: entraCount,
+            })],
+          );
+          batch = Number(progressUpdate.rows[0].batches);
+          }
         await client.query('COMMIT');
         return {
           ...baseResult, dryRun: false, alreadyOffboarded: false, complete: false,
-          progressed: target.rows[0].disabled_at === null || membershipCount > 0
-            || aliasCount > 0 || entraCount > 0,
+          progressed: accessRevoked,
           blockedUntil: reason === 'owned_live_lease' ? ownedLiveLeaseUntil : null, reason,
-          progress: { ...previewProgress, batch: Number(progressUpdate.rows[0].batches) },
+          progress: { ...previewProgress, batch },
         };
       }
     } else {
