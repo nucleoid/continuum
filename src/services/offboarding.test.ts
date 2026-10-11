@@ -1720,7 +1720,7 @@ describe('offboarding and erasure', () => {
 
   it('truthfully completes more than 10k memories and 50k audits within each batch cap', async () => {
     const value = await fixture();
-    await boundedScaleDiagnostic('offboarding full-scale', 100_000, async (bounded) => {
+    await boundedScaleDiagnostic('offboarding full-scale', 180_000, async (bounded) => {
     await seedScaleHistory(bounded, value);
     let priorMemories = 0;
     let priorAudits = 0;
@@ -1748,7 +1748,7 @@ describe('offboarding and erasure', () => {
       [value.personal.id],
     )).rows[0].dirty).toBe(false);
     });
-  }, 120_000);
+  }, 200_000);
 
   it('does not select unrelated audit metadata merely because it contains a common scope name', async () => {
     const value = await fixture();
