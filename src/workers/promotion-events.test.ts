@@ -634,6 +634,7 @@ describe('PromotionEventWorker', () => {
       const store = mockStore({
         claim: vi.fn().mockResolvedValueOnce([claimedDelivery]).mockResolvedValue([]),
         timeout: vi.fn().mockRejectedValue(new Error('timeout write failed')),
+        renew: vi.fn().mockResolvedValue({ renewed: [claimedDelivery], terminalOwned: [], lost: [] }),
       });
       const instance = new PromotionEventWorker(
         pool,
@@ -646,7 +647,8 @@ describe('PromotionEventWorker', () => {
       await vi.advanceTimersByTimeAsync(20);
       await expect(draining).rejects.toThrow('timeout write failed');
       await vi.advanceTimersByTimeAsync(100);
-      expect(store.renew).not.toHaveBeenCalled();
+      expect((store.renew as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(1);
+      expect(store.renew).toHaveBeenLastCalledWith(pool, 'worker-test', [claimedDelivery], 90);
 
       const contenderStore = mockStore();
       const contender = new PromotionEventWorker(
@@ -986,7 +988,7 @@ describe('PromotionEventWorker', () => {
     }
   });
 
-  it('bounds a hung renewal and aborts callbacks fail-closed without rearming', async () => {
+  it('bounds each hung renewal and retains the exact unsettled fence after signalling abort', async () => {
     vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
     const releaseCallback = deferred();
     try {
@@ -1022,9 +1024,14 @@ describe('PromotionEventWorker', () => {
       await expect(draining).resolves.toBe(1);
 
       await vi.advanceTimersByTimeAsync(300);
-      expect(store.renew).toHaveBeenCalledOnce();
+      expect((store.renew as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(1);
+      expect((store.renew as ReturnType<typeof vi.fn>).mock.calls.every((args) =>
+        args[1] === 'worker-test' && args[2].length === 1
+        && args[2][0] === claimedDelivery && args[3] === 90)).toBe(true);
       await expect(instance.drainOnce()).resolves.toBe(1);
       expect(store.claim).toHaveBeenCalledTimes(2);
+      expect((store.claim as ReturnType<typeof vi.fn>).mock.calls[1][1].excluded).toEqual([claimedDelivery]);
+      expect(store.abandon).toHaveBeenCalledWith(pool, 'worker-test', [claimedDelivery]);
     } finally {
       releaseCallback.resolve();
       await vi.runAllTimersAsync();
@@ -1032,7 +1039,7 @@ describe('PromotionEventWorker', () => {
     }
   });
 
-  it('abandons an uncertain last-attempt renewal without consuming or dead-lettering it', async () => {
+  it('charges a started last-attempt rejection after uncertain renewal and records dead-letter persistence', async () => {
     vi.useFakeTimers({ now: new Date('2026-01-01T00:00:00.000Z') });
     try {
       const entered = deferred();
@@ -1051,6 +1058,7 @@ describe('PromotionEventWorker', () => {
       const store = mockStore({
         claim: vi.fn().mockResolvedValue([{ ...claimedDelivery, attemptCount: 3 }]),
         renew: vi.fn().mockRejectedValue(new Error('database unavailable')),
+        fail: vi.fn().mockResolvedValue('dead_letter'),
       });
       const instance = new PromotionEventWorker(
         pool,
@@ -1065,8 +1073,10 @@ describe('PromotionEventWorker', () => {
       await expect(draining).resolves.toBe(1);
       await vi.runAllTicks();
 
-      expect(store.abandon).toHaveBeenCalledOnce();
-      expect(store.fail).not.toHaveBeenCalled();
+      expect(store.abandon).not.toHaveBeenCalled();
+      expect(store.fail).toHaveBeenCalledOnce();
+      expect(store.fail).toHaveBeenCalledWith(pool, claimedDelivery.event.eventId, 'hook', 'worker-test',
+        { maxAttempts: 3, retryDelayMs: 40, error: expect.any(Error), attemptCount: 3, leaseGeneration: 1 });
       expect(store.timeout).not.toHaveBeenCalled();
     } finally {
       await vi.runAllTimersAsync();
