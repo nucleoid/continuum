@@ -437,37 +437,57 @@ export async function repairCoordinationPrivacy(
         'CONFLICT', 'offboarded principals must resume the confirmed offboarding command',
       );
     }
-    if (ownedRepairPending) {
-      if (!ownedBefore.pseudonym) {
-        throw new ServiceError('CONFLICT', 'existing owned-scope privacy repair lacks its authorized pseudonym');
+    await client.query('SAVEPOINT repair_coordination_privacy');
+    try {
+      if (ownedRepairPending) {
+        if (!ownedBefore.pseudonym) {
+          throw new ServiceError('CONFLICT', 'existing owned-scope privacy repair lacks its authorized pseudonym');
+        }
+        // An existing approved scope phase is authority to resume its work.
+        // Mere disablement or an erased-looking scope name is not authority.
+        await client.query('SELECT continuum_operator_pseudonymize_scope_v2($1, $2, $3)', [
+          actor.id, scopeId, ownedBefore.pseudonym,
+        ]);
       }
-      // An existing approved scope phase is authority to resume its work.
-      // Mere disablement or an erased-looking scope name is not authority.
-      await client.query('SELECT continuum_operator_pseudonymize_scope_v2($1, $2, $3)', [
-        actor.id, scopeId, ownedBefore.pseudonym,
-      ]);
-    }
-    const scrub = await client.query<{
-      privacy: {
-        complete?: boolean; progressed?: boolean; blocked_until?: string | null;
-        reason?: CoordinationPrivacyBlockReason;
+      const scrub = await client.query<{
+        privacy: {
+          complete?: boolean; progressed?: boolean; blocked_until?: string | null;
+          reason?: CoordinationPrivacyBlockReason;
+        };
+      }>(
+        `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, $4) AS privacy`,
+        [actor.id, principalId, scopeId, Math.min(batchSize, 1_000)],
+      );
+      const ownedAfter = await ownedScopePrivacyState(client, actor.id, scopeId);
+      await client.query('RELEASE SAVEPOINT repair_coordination_privacy');
+      await client.query('COMMIT');
+      return {
+        principalId, scopeId, state,
+        complete: scrub.rows[0]?.privacy?.complete === true
+          && (!ownedBefore.repair_exists || ownedScopeIsClean(ownedAfter)),
+        progressed: scrub.rows[0]?.privacy?.progressed === true
+          || (ownedRepairPending && ownedScopeProgressed(ownedBefore, ownedAfter)),
+        blockedUntil: scrub.rows[0]?.privacy?.blocked_until
+          ? new Date(scrub.rows[0].privacy.blocked_until) : null,
+        reason: scrub.rows[0]?.privacy?.reason ?? null,
       };
-    }>(
-      `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, $4) AS privacy`,
-      [actor.id, principalId, scopeId, Math.min(batchSize, 1_000)],
-    );
-    const ownedAfter = await ownedScopePrivacyState(client, actor.id, scopeId);
-    await client.query('COMMIT');
-    return {
-      principalId, scopeId, state,
-      complete: scrub.rows[0]?.privacy?.complete === true
-        && (!ownedBefore.repair_exists || ownedScopeIsClean(ownedAfter)),
-      progressed: scrub.rows[0]?.privacy?.progressed === true
-        || (ownedRepairPending && ownedScopeProgressed(ownedBefore, ownedAfter)),
-      blockedUntil: scrub.rows[0]?.privacy?.blocked_until
-        ? new Date(scrub.rows[0].privacy.blocked_until) : null,
-      reason: scrub.rows[0]?.privacy?.reason ?? null,
-    };
+    } catch (error) {
+      if (!isCoordinationContractPending(error) && !isOwnedScopeLiveLease(error)) throw error;
+      const reason: CoordinationPrivacyBlockReason = isOwnedScopeLiveLease(error)
+        ? 'owned_live_lease' : 'migration_pending';
+      await client.query('ROLLBACK TO SAVEPOINT repair_coordination_privacy');
+      await client.query('RELEASE SAVEPOINT repair_coordination_privacy');
+      await record(client, {
+        principalId: actor.id, action: 'read',
+        metadata: { operation: 'coordination_privacy_repair', outcome: reason },
+      });
+      await client.query('COMMIT');
+      return {
+        principalId, scopeId, state, complete: false, progressed: false,
+        blockedUntil: reason === 'owned_live_lease' ? ownedBefore.live_lease_until : null,
+        reason,
+      };
+    }
   } catch (error) {
     try { await client.query('ROLLBACK'); } catch { destroyClient = true; }
     if (!destroyClient && isCoordinationPrivacyLockBusy(error)) {
