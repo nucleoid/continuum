@@ -130,7 +130,7 @@ export async function ensureExecutionLedger(client: pg.PoolClient): Promise<bool
           CROSS JOIN LATERAL aclexplode(COALESCE(namespace.nspacl,acldefault('n',namespace.nspowner))) privilege
           WHERE namespace.nspname=current_schema() AND privilege.privilege_type='CREATE'
             AND privilege.grantee<>namespace.nspowner) THEN
-          RAISE EXCEPTION 'migration provenance application schema has untrusted CREATE grants';
+          RAISE EXCEPTION 'migration provenance application schema has untrusted CREATE grants; revoke CREATE as the schema owner before retrying';
         END IF;
         IF EXISTS(SELECT 1 FROM pg_class WHERE oid=to_regclass(format('%I._continuum_migration_execution',current_schema()))
           AND (relkind<>'r' OR relowner<>(SELECT oid FROM pg_catalog.pg_roles WHERE rolname=current_user))) THEN

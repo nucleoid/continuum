@@ -1600,7 +1600,15 @@ describe('pgvector rollout remediation', () => {
         GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA continuum_extensions
           TO ${quoteIdentifier(secondOwnerRole)} WITH GRANT OPTION;
       `);
-      await runMigrations(secondOwner, through0079);
+      // This deliberately tenant-owned provider is a reviewed legacy topology;
+      // ordinary shared installations use an independent provider owner.
+      const previousShared=process.env.CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA;
+      process.env.CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA='1';
+      try { await runMigrations(secondOwner, through0079); }
+      finally {
+        if(previousShared===undefined) delete process.env.CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA;
+        else process.env.CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA=previousShared;
+      }
       await grantApplicationRole(firstOwner, firstSchema, firstAppRole);
       await grantApplicationRole(secondOwner, secondSchema, secondAppRole);
 
