@@ -649,6 +649,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0080_pgvector_provider_grants.sql' }),
         expect.objectContaining({ name: '0081_coordination_public_contract.sql' }),
         expect.objectContaining({ name: '0082_coordination_linkable_audit_v7_index.sql' }),
+        expect.objectContaining({ name: '0083_tag_vocabularies.sql' }),
       ]);
       await grantApplicationRole(pool, applicationSchema, appRole);
       await expect(pool.query(
@@ -685,6 +686,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0080_pgvector_provider_grants.sql' }),
         expect.objectContaining({ name: '0081_coordination_public_contract.sql' }),
         expect.objectContaining({ name: '0082_coordination_linkable_audit_v7_index.sql' }),
+        expect.objectContaining({ name: '0083_tag_vocabularies.sql' }),
       ]);
       await grantApplicationRole(pool, applicationSchema, appRole);
       await expect(pool.query(
@@ -857,6 +859,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0080_pgvector_provider_grants.sql' }),
         expect.objectContaining({ name: '0081_coordination_public_contract.sql' }),
         expect.objectContaining({ name: '0082_coordination_linkable_audit_v7_index.sql' }),
+        expect.objectContaining({ name: '0083_tag_vocabularies.sql' }),
       ]);
       await grantApplicationRole(pool, applicationSchema, appRole);
       await expect(pool.query(
@@ -909,6 +912,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0080_pgvector_provider_grants.sql' }),
         expect.objectContaining({ name: '0081_coordination_public_contract.sql' }),
         expect.objectContaining({ name: '0082_coordination_linkable_audit_v7_index.sql' }),
+        expect.objectContaining({ name: '0083_tag_vocabularies.sql' }),
       ]);
       await grantApplicationRole(owner, applicationSchema, appRole);
       await expect(owner.query(
@@ -1194,6 +1198,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0080_pgvector_provider_grants.sql' }),
         expect.objectContaining({ name: '0081_coordination_public_contract.sql' }),
         expect.objectContaining({ name: '0082_coordination_linkable_audit_v7_index.sql' }),
+        expect.objectContaining({ name: '0083_tag_vocabularies.sql' }),
       ]);
       await grantApplicationRole(owner, applicationSchema, appRole);
       await expect(owner.query(
