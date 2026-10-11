@@ -76,7 +76,10 @@ describe('coordination review remediation contract', () => {
     expect(docs).toMatch(/re-?run.+grant-application-role\.sql/is);
     expect(docs).toMatch(/mixed[- ]version/is);
     expect(docs).toMatch(/reclaim/is);
-    expect(docs).toMatch(/rollback[\s\S]+re-enable/is);
+    expect(docs).toMatch(/rollback leaves coordination tables[\s\S]+Do not drop or truncate/i);
+    expect(docs).toMatch(/not approval for a 0061-aware rollback of the current 0081 package/i);
+    expect(docs).toMatch(/Keep offboarding disabled during any\s+rollback until the current capabilities and exact profiles are restored/i);
+    expect(docs).toMatch(/fresh mutation, including renewal and release[\s\S]+COORDINATION_QUOTA_EXCEEDED/i);
   });
 
   it('pins coordination migration bytes and requires the forward remediation', async () => {

@@ -826,7 +826,8 @@ describe('runMigrations', () => {
     expect(completionTrigger.match(/continuum_offboarding_actual_state_is_erased\s*\(/gi))
       .toHaveLength(1);
     const docs = await readFile(join(process.cwd(), 'docs/offboarding.md'), 'utf8');
-    expect(docs).toMatch(/through[\s\S]*`0053_offboarding_restore_contract\.sql`/i);
+    expect(docs).toMatch(/Apply the complete packaged\s+chain, including 0080 and 0081/i);
+    expect(docs).toMatch(/finish the owner-only 0081 backfill[\s\S]+regrant[\s\S]+verify/i);
     expect(docs).not.toMatch(/all nineteen offboarding migrations/i);
   });
   it('applies round-seven integrity and online cursor-index migrations from a fresh schema', async () => {

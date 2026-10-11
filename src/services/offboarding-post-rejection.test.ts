@@ -426,7 +426,7 @@ describe('post-rejection database authority remediation', () => {
     expect(migration52).toMatch(/pg_depend[\s\S]*deptype\s*=\s*'e'/i);
   });
 
-  it('forward-repairs edited migration shapes and documents migration 0053', async () => {
+  it('preserves historical repair shapes and documents the complete current rollout', async () => {
     const migration = await readFile(
       join(process.cwd(), 'migrations/0052_offboarding_review_repair.sql'), 'utf8',
     );
@@ -436,7 +436,8 @@ describe('post-rejection database authority remediation', () => {
     expect(migration).toMatch(/DROP TRIGGER IF EXISTS[\s\S]*ON entra_groups/i);
     expect(migration).toMatch(/VALIDATE CONSTRAINT/i);
     const docs = await readFile(join(process.cwd(), 'docs/offboarding.md'), 'utf8');
-    expect(docs).toMatch(/0053_offboarding_restore_contract\.sql/);
-    expect(docs).toMatch(/53 migrations|migration count[^\n]*53/i);
+    expect(docs).toMatch(/Migration `0053` is the forward-only restore contract/i);
+    expect(docs).toMatch(/historical 0049-0053 identity foundation[\s\S]+not the current migration stopping point/i);
+    expect(docs).toMatch(/Apply the complete packaged\s+chain, including 0080 and 0081/i);
   });
 });
