@@ -104,6 +104,62 @@ describe('embedding recall review', () => {
     });
   }
 
+  it('finishes borrowed vector timeout cleanup before full-text fallback uses the caller transaction', async () => {
+    const value = await seed(pool, 'borrowed-timeout', 'Unique fallback needle');
+    const caller = await pool.connect();
+    const blocker = await pool.connect();
+    const observer = await pool.connect();
+    const sentinel = '00000000-0000-4000-8000-000000000099';
+    let released = false;
+    let distanceTimedOut = false;
+    let timeoutDelivery: Promise<void> | undefined;
+    const borrowed = new Proxy(caller, { get(target, property) {
+      if (property === 'release') return (destroy?: boolean) => {
+        released = true; target.release(destroy);
+      };
+      if (property === 'query') return async (...args: unknown[]) => {
+        try { return await Reflect.apply(target.query, target, args); }
+        catch (error) {
+          if (typeof args[0] === 'string' && args[0].includes('WITH provider_embeddings AS MATERIALIZED')
+            && (error as { code?: string }).code === '57014') {
+            distanceTimedOut = true;
+            // SQL has failed, but its promise can reach cleanup after the outer timer.
+            timeoutDelivery = new Promise((resolve) => setTimeout(resolve, 50));
+            await timeoutDelivery;
+          }
+          throw error;
+        }
+      };
+      const member = Reflect.get(target, property);
+      return typeof member === 'function' ? member.bind(target) : member;
+    } });
+    try {
+      await blocker.query('BEGIN');
+      await blocker.query('LOCK TABLE memory_embeddings IN ACCESS EXCLUSIVE MODE');
+      await caller.query('BEGIN');
+      await caller.query("SET LOCAL statement_timeout='1s'");
+      await caller.query(`INSERT INTO principals(id,external_id,kind,display_name)
+        VALUES($1::uuid,$1::uuid::text,'service','Uncommitted caller')`, [sentinel]);
+      const result = await recall(borrowed, { query: 'needle', scopeIds: [value.scope.id], limit: 1,
+        embeddingGroups: [{ scopeIds: [value.scope.id], provider }], embeddingDeadlineMs: 100 });
+      expect(distanceTimedOut).toBe(true);
+      expect(result.diagnostics.vector).toBe('failed');
+      expect(result.results.map((hit) => hit.memory.id)).toEqual([value.memory.id]);
+      expect(released).toBe(false);
+      expect((await caller.query('SELECT count(*)::int AS count FROM principals WHERE id=$1::uuid', [sentinel])).rows)
+        .toEqual([{ count: 1 }]);
+      expect((await observer.query('SELECT count(*)::int AS count FROM principals WHERE id=$1::uuid', [sentinel])).rows)
+        .toEqual([{ count: 0 }]);
+      expect((await caller.query("SELECT pg_catalog.current_setting('statement_timeout') AS timeout")).rows)
+        .toEqual([{ timeout: '1s' }]);
+    } finally {
+      await timeoutDelivery;
+      await blocker.query('ROLLBACK');
+      blocker.release(); observer.release();
+      if (!released) { await caller.query('ROLLBACK'); caller.release(); }
+    }
+  }, 5_000);
+
   it('reserves only the remaining vector budget for distance SQL after a slow catalog lookup', async () => {
     const value = await seed(pool, 'shared-query-budget', 'Unique fallback needle');
     const base = (pool as unknown as { options: pg.PoolConfig }).options;
