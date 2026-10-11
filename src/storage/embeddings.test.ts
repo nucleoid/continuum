@@ -59,27 +59,27 @@ describe('embedding dimension compatibility', () => {
 
 describe('provider-qualified storage', () => {
   it('upserts only the matching provider identity', async () => {
-    const db = queryable();
-    vi.mocked(db.query).mockResolvedValue({ rows: [] } as never);
+    const db = vectorQueryable();
     await storeMemoryEmbeddingVector(db, 'memory-id', Array(768).fill(0), {
       id: 'ollama:model-b', dim: 768,
     });
-    const [sql] = vi.mocked(db.query).mock.calls[0] as [string, unknown[]];
+    const [sql] = vi.mocked(db.query).mock.calls[1] as [string, unknown[]];
     expect(sql).toContain('ON CONFLICT (memory_id, provider, dim)');
+    expect(sql).toContain('$4::"provider extensions".vector');
   });
 
   it('locks the memory before writing and requires it to remain live and unexpired', async () => {
-    const db = queryable();
-    vi.mocked(db.query).mockResolvedValue({ rows: [], rowCount: 0 } as never);
+    const db = vectorQueryable();
 
     await expect(storeMemoryEmbeddingVector(db, 'memory-id', Array(768).fill(0), {
       id: 'ollama:model-b', dim: 768,
     })).resolves.toBe(false);
 
-    const [sql] = vi.mocked(db.query).mock.calls[0] as [string, unknown[]];
+    const [sql] = vi.mocked(db.query).mock.calls[1] as [string, unknown[]];
     expect(sql).toContain("m.state = 'live'");
-    expect(sql).toContain('m.expires_at IS NULL OR m.expires_at > clock_timestamp()');
-    expect(sql).toContain('FOR SHARE OF m');
+    expect(sql).toContain('m.expires_at IS NULL OR m.expires_at > pg_catalog.clock_timestamp()');
+    expect(sql).toContain('WITH locked_memory AS MATERIALIZED');
+    expect(sql).toContain('FOR UPDATE OF m');
     expect(sql).toContain('RETURNING memory_id');
   });
 });
@@ -110,12 +110,11 @@ describe('vector search filters', () => {
   });
 
   it('materializes the provider-qualified candidate set before vector ordering', async () => {
-    const db = queryable();
-    vi.mocked(db.query).mockResolvedValue({ rows: [] } as never);
+    const db = vectorQueryable();
 
     await vectorSearchMemoryIds(db, vector, scopeIds, provider, 10);
 
-    const [sql] = vi.mocked(db.query).mock.calls[0] as [string, unknown[]];
+    const [sql] = vi.mocked(db.query).mock.calls[1] as [string, unknown[]];
     expect(sql).toMatch(/WITH provider_embeddings AS MATERIALIZED/i);
     expect(sql.indexOf('e.provider = $3')).toBeLessThan(sql.indexOf('ORDER BY'));
     const materializedEnd = sql.indexOf('\n     )');
@@ -126,8 +125,7 @@ describe('vector search filters', () => {
   });
 
   it('scope-filters related-memory candidates inside the materialized exact scan', async () => {
-    const db = queryable();
-    vi.mocked(db.query).mockResolvedValue({ rows: [] } as never);
+    const db = vectorQueryable();
 
     await vectorSearchRelatedMemories(db, vector, scopeIds, provider, {
       threshold: 0.75,
@@ -135,7 +133,7 @@ describe('vector search filters', () => {
       limit: 5,
     });
 
-    const [sql] = vi.mocked(db.query).mock.calls[0] as [string, unknown[]];
+    const [sql] = vi.mocked(db.query).mock.calls[1] as [string, unknown[]];
     const materializedEnd = sql.indexOf('\n     )');
     expect(sql).toMatch(/WITH provider_embeddings AS MATERIALIZED/i);
     expect(sql.indexOf('JOIN memories m')).toBeLessThan(materializedEnd);

@@ -292,7 +292,7 @@ describe('embedding backfill', () => {
         WHERE metadata->>'operation' = 'embedding_backfill'`,
     );
     await runAuditRetention(pool, {
-      retentionDays: 1,
+      retentionDays: 30,
       principalExternalId: admin.externalId!,
       runId: '11111111-1111-4111-8111-111111111111',
     });
