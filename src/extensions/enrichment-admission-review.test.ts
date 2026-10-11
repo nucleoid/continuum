@@ -120,4 +120,31 @@ describe('enrichment admission review', () => {
     expect(enrich).toHaveBeenCalledOnce();
   });
 
+  it('serves two overlapping healthy recalls for one ID without cross-principal suppression', async () => {
+    const ready = Promise.withResolvers<void>();
+    const registry = new RetrievalEnricherRegistry();
+    const enrich = vi.fn(async (_results: readonly Readonly<RecallResult>[], context: { readonly principalId: string }) => {
+      await ready.promise; return [{ principal: context.principalId }];
+    });
+    registry.register({ id: 'healthy-overlap', enrich });
+    const first = [result()]; const second = [result()];
+    const warn = vi.fn();
+    const a = applyRetrievalEnrichers(first, 'principal-a', registry,
+      { timeoutMs: 50, maxBytes: 1024, logger: { warn } });
+    const b = applyRetrievalEnrichers(second, 'principal-b', registry,
+      { timeoutMs: 50, maxBytes: 1024, logger: { warn } });
+    try {
+      await vi.advanceTimersByTimeAsync(1);
+      expect(enrich).toHaveBeenCalledTimes(2);
+      ready.resolve();
+      const [one, two] = await Promise.all([a, b]);
+      expect(one[0].enrichments?.['healthy-overlap']).toEqual({ principal: 'principal-a' });
+      expect(two[0].enrichments?.['healthy-overlap']).toEqual({ principal: 'principal-b' });
+      expect(warn).not.toHaveBeenCalled();
+      expect(first[0].enrichments).toBeUndefined(); expect(second[0].enrichments).toBeUndefined();
+    } finally {
+      ready.resolve(); await vi.advanceTimersByTimeAsync(0); await Promise.all([a, b]);
+    }
+  });
+
 });
