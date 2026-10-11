@@ -1155,6 +1155,31 @@ describe('pgvector rollout remediation', () => {
     });
   }, 240_000);
 
+  it('runs the owner preflight as a real mixed-case login despite a distinct lowercase role', async () => {
+    const ownerRole=identifier('Mixed_TenantOwner'); const collision=ownerRole.toLowerCase();
+    const password=randomUUID(); roles.push(ownerRole,collision);
+    await withFreshDatabase(async(root,target,url)=>{
+      const schema=identifier('quoted_preflight');
+      await root.query(`CREATE ROLE ${quoteIdentifier(ownerRole)} LOGIN PASSWORD ${quoteLiteral(password)};
+        CREATE ROLE ${quoteIdentifier(collision)} NOLOGIN`);
+      await target.query(`CREATE SCHEMA ${quoteIdentifier(schema)} AUTHORIZATION ${quoteIdentifier(ownerRole)};
+        CREATE SCHEMA continuum_extensions; CREATE EXTENSION vector WITH SCHEMA continuum_extensions;
+        GRANT USAGE ON SCHEMA continuum_extensions TO ${quoteIdentifier(ownerRole)};
+        GRANT USAGE ON SCHEMA ${quoteIdentifier(schema)} TO ${quoteIdentifier(collision)}`);
+      const ownerUrl=new URL(url); ownerUrl.username=ownerRole; ownerUrl.password=password;
+      const owner=migrationPool(ownerUrl.toString(),schema);
+      await runMigrations(owner,await migrationDirectoryThrough('0001_init.sql'));
+      expect((await owner.query('SELECT session_user AS role,current_user AS effective')).rows)
+        .toEqual([{role:ownerRole,effective:ownerRole}]);
+      const script=(await readFile(join(process.cwd(),'scripts/preflight-pgvector-role-profiles.sql'),'utf8'))
+        .split(/\r?\n/).filter(line=>!line.trimStart().startsWith('\\')).join('\n')
+        .replaceAll(":'continuum_schema'",quoteLiteral(schema));
+      await expect(owner.query(script)).resolves.toBeDefined();
+      const wrongOwner=migrationPool(url,schema,collision);
+      await expect(wrongOwner.query(script)).rejects.toThrow(/requires the tenant migration owner/i);
+    });
+  },60_000);
+
   it('provider review: inventories non-profile readers without granting application authority', async () => {
     const readerRole = identifier('continuum_reader_preflight');
     roles.push(readerRole);

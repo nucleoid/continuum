@@ -20,7 +20,7 @@ DECLARE
 BEGIN
   memory_relation_oid := format('%I.memories', schema_name)::regclass;
   SELECT relowner INTO application_owner_oid FROM pg_class WHERE oid = memory_relation_oid;
-  IF application_owner_oid <> current_user::regrole::oid THEN
+  IF application_owner_oid <> (SELECT oid FROM pg_catalog.pg_roles WHERE rolname=current_user) THEN
     RAISE EXCEPTION 'pgvector profile preflight requires the tenant migration owner';
   END IF;
   FOR candidate IN
