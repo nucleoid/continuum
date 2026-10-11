@@ -191,6 +191,16 @@ same schema, for example `PGOPTIONS='-c search_path=application_data'` with
 in an earlier namespace cannot replace the configured tenant. Library callers
 that omit the optional expected schema retain namespace ownership checks but
 do not receive this configuration anchor.
+migrations in filename order, and exits nonzero on failure. Run it as a trusted
+operator before starting a newly installed application version. Lock acquisition
+is bounded to 30 seconds by default; a timeout is fail-fast deployment failure,
+not permission to start the new binary against a partially upgraded schema.
+
+`npm run embed-backfill -- --count` scans candidate IDs and metadata without
+loading memory bodies. Write runs checkpoint `(provider, dim, scope_filter,
+cursor, updated_at)` progress and isolate failures in
+`(memory_id, provider, dim, disposition, reason, failed_at)`. See
+`docs/embedding-backfill.md` for retry, cursor, no-wrap, and rollout details.
 
 ## Exit codes
 

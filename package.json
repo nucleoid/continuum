@@ -25,6 +25,7 @@
     "docs/audit-retention.md",
     "docs/cli.md",
     "docs/coordination.md",
+    "docs/embedding-backfill.md",
     "docs/knowledge-gap-insights.md",
     "docs/lifecycle.md",
     "docs/offboarding.md",
@@ -61,7 +62,9 @@
     "admin:dev": "tsx src/identity/admin-cli.ts",
     "smoke:cli-package": "node scripts/cli-package-smoke.mjs",
     "tags": "node dist/cli/tag-vocabularies.js",
-    "tags:dev": "tsx src/cli/tag-vocabularies.ts"
+    "tags:dev": "tsx src/cli/tag-vocabularies.ts",
+    "embed-backfill": "node dist/maintenance/embed-backfill-cli.js",
+    "embed-backfill:dev": "tsx src/maintenance/embed-backfill-cli.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",

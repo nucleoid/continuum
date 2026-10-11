@@ -102,6 +102,8 @@ export async function resetData(pool: pg.Pool): Promise<void> {
         principal_user_scope_approvals,
         principal_user_scopes,
         tag_vocabularies,
+        embedding_backfill_failures,
+        embedding_backfill_checkpoints,
         memory_embeddings,
         memories,
         scope_memberships,

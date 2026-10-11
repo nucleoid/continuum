@@ -3,6 +3,7 @@ import type pg from 'pg';
 import { z } from 'zod';
 import type { EmbeddingRouting } from '../../embeddings/router.js';
 import { recallForPrincipal } from '../../services/recall.js';
+import type { OperationalLogger } from '../server.js';
 
 const recallSchema = z.object({
   query: z.string().min(1).max(2000),
@@ -16,6 +17,7 @@ const recallSchema = z.object({
 export function recallRouter(
   pool: pg.Pool,
   embeddingProvider: EmbeddingRouting = null,
+  logger?: OperationalLogger,
 ): Router {
   const router = Router();
 
@@ -25,12 +27,13 @@ export function recallRouter(
       res.status(400).json({ code: 'INVALID_INPUT', error: 'Invalid request' });
       return;
     }
-    const { results, accessible } = await recallForPrincipal(
+    const { results, accessible, diagnostics } = await recallForPrincipal(
       pool,
       embeddingProvider,
       req.principal!,
       parsed.data,
       { transport: 'rest' },
+      logger,
     );
     res.json({
       results: results.map((r) => ({
@@ -45,6 +48,7 @@ export function recallRouter(
         ...(r.memory.supersedesId ? { supersedesId: r.memory.supersedesId } : {}),
         createdAt: r.memory.createdAt,
       })),
+      diagnostics,
     });
   });
 
