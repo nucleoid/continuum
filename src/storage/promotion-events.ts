@@ -227,6 +227,12 @@ export async function claimPromotionDeliveries(
                AND delivery.available_at<=pg_catalog.statement_timestamp()
                AND (delivery.lease_expires_at IS NULL OR delivery.lease_expires_at<=pg_catalog.clock_timestamp())
                AND delivery.attempt_count<$5
+               AND NOT EXISTS (
+                 SELECT 1 FROM promotion_events private_event
+                 JOIN principal_user_scopes ownership ON ownership.scope_id=private_event.destination_scope_id
+                 JOIN principals private_owner ON private_owner.id=ownership.principal_id
+                 WHERE private_event.id=delivery.event_id AND private_owner.disabled_at IS NOT NULL
+               )
                AND (delivery.event_id,delivery.webhook_id) NOT IN (SELECT * FROM unnest($6::uuid[],$7::text[]))
              ORDER BY delivery.available_at,delivery.event_id LIMIT $8
            ) d
