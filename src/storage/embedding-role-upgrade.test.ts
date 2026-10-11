@@ -179,6 +179,7 @@ it('adds embedding state grants to live application and operator profiles withou
       expect(drifted.code).toBe(1);
       expect(drifted.stdout).toBe('');
       expect(drifted.stderr).toMatch(/^continuum-embed-backfill:/);
+      expect(drifted.stderr).toMatch(/exact.*profile|profile.*drift/i);
       expect((await owner.query('SELECT pg_catalog.has_table_privilege($1::name,$2::text,\'SELECT\') AS allowed',
         [applicationRole, `${schema}.continuum_tag_write_policy`])).rows).toEqual([{ allowed: true }]);
     } finally {
