@@ -147,6 +147,13 @@ async function roleUpgradeAcceptance(review?: 'poison' | 'null' | 'regrant') {
     await addMembership(owner, administrator, destinationScope.id, 'writer');
     const memory = await createMemory(owner, { scopeId: sourceScope.id, scopeKind: sourceScope.kind,
       authorId: administrator, type: 'decision', title: 'Role upgrade', body: 'Actual application promotion.', source: 'manual' });
+    await logins.get(operatorRole)!.query(
+      'SELECT continuum_operator_set_promotion_webhook_ids($1::uuid,$2::text[])',
+      [administrator, ['upgrade-hook']],
+    );
+    await expect(app.query('SELECT * FROM promotion_webhook_registry')).rejects.toMatchObject({ code: '42501' });
+    await expect(app.query('SELECT continuum_operator_set_promotion_webhook_ids($1::uuid,$2::text[])',
+      [administrator, ['forged-hook']])).rejects.toMatchObject({ code: '42501' });
     const promoted = await promoteMemoryWithAudit(app, administrator, memory.id,
       { kind: destinationScope.kind, name: destinationScope.name }, {}, ['upgrade-hook']);
     const claimed = await claimPromotionDeliveries(app, { owner: 'ordinary-application-worker',
@@ -169,6 +176,8 @@ async function roleUpgradeAcceptance(review?: 'poison' | 'null' | 'regrant') {
     await mapOwnedUserScope(operator, admin, target.id, personal.id);
     const privateSource = await createMemory(owner, { scopeId: sourceScope.id, scopeKind: 'team', authorId: target.id,
       type: 'fact', title: 'Owned destination', body: 'Normal role-bound promotion.', source: 'manual' });
+    await operator.query('SELECT continuum_operator_set_promotion_webhook_ids($1::uuid,$2::text[])',
+      [administrator, ['private-hook']]);
     const privatePromotion = await promoteMemoryWithAudit(app, target.id, privateSource.id,
       { kind: 'user', name: personal.name }, {}, ['private-hook']);
     await expect(operator.query('UPDATE promotion_events SET destination_scope_name=destination_scope_name WHERE id=$1::uuid',
