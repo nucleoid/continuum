@@ -6,7 +6,7 @@ import pg from 'pg';
 import { expect, it } from 'vitest';
 import { runMigrations } from './migrator.js';
 
-it('refuses explicitly late pg_catalog behind a foreign-owned schema before published migration DDL',async()=>{
+it('pins ordinary migration DDL to its trusted application schema and restores an explicitly late catalog caller path',async()=>{
   const suffix=randomUUID().replaceAll('-',''),database='late_catalog_'+suffix,attacker='late_attacker_'+suffix;
   const baseUrl=process.env.CONTINUUM_TEST_DATABASE_URL??'postgres://continuum:continuum@localhost:5433/continuum';
   const admin=new pg.Pool({connectionString:baseUrl,max:1});
@@ -38,12 +38,17 @@ it('refuses explicitly late pg_catalog behind a foreign-owned schema before publ
     // catalog entry suppresses PostgreSQL's ordinary implicit-first catalog.
     expect((await pool.query('SELECT pg_catalog.current_schema() AS schema')).rows)
       .toEqual([{schema:'application_data'}]);
-    await expect(runMigrations(pool)).rejects.toThrow(/search_path.*(?:pg_catalog|unsafe|trusted)|(?:unsafe|untrusted).*search_path/i);
+    await expect(runMigrations(pool)).resolves.toBeDefined();
     expect((await pool.query('SELECT is_called FROM later_hostile.intercept_probe')).rows)
       .toEqual([{is_called:false}]);
     expect((await pool.query(`SELECT name FROM application_data._continuum_migrations WHERE name LIKE '0055%'`)).rows)
-      .toEqual([]);
-    await pool.query('SET search_path=application_data,later_hostile');
+      .toEqual([{name:'0055_coordination_review_remediation.sql'}]);
+    expect((await pool.query('SHOW search_path')).rows)
+      .toEqual([{search_path:'application_data, later_hostile, pg_catalog'}]);
+    expect((await pool.query(`SELECT variant FROM application_data._continuum_migration_execution
+      WHERE migration_name='0055_coordination_review_remediation.sql' AND phase='file' AND state='completed'`)).rows)
+      .toEqual([{variant:'canonical-lf-lock1s-statement30s-v2-app-path-v1'}]);
+    await pool.query('SET search_path=application_data');
     await expect(runMigrations(pool)).resolves.toBeDefined();
     expect((await pool.query('SELECT is_called FROM later_hostile.intercept_probe')).rows)
       .toEqual([{is_called:false}]);

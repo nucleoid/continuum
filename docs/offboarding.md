@@ -706,8 +706,17 @@ ledgers. The migrator rejects the drift before migration and provenance DDL.
 The migration owner needs `USAGE` on the installed extension schema.
 `runMigrations` reports the exact missing grant before applying `0001`. It
 temporarily sets the exact application/provider path only while applying
-`0001_init.sql`, then restores the caller's path immediately after `0001`
-commits or rolls back. Later migrations never inherit the provider schema.
+`0001_init.sql`, then restores the trusted application-only path immediately
+after `0001` commits or rolls back. Ordinary packaged migration work uses only
+that quoted application schema with `pg_catalog` implicit first. Caller suffix
+schemas do not participate in migration function or type resolution. Initial
+catalog inspection, advisory locking and path restoration use explicit catalog
+calls. The original caller path is restored only after migration and cleanup,
+before releasing the connection; restoration failure discards the connection.
+Execution evidence identifies the application-path variant with the
+`-app-path-v1` suffix. An unfinished older execution recipe can therefore require
+owner investigation before retrying; do not delete evidence to bypass that
+guard. Later migrations never inherit the provider schema.
 Runtime embedding queries infer the vector type from the
 `memory_embeddings.embedding` column and schema-qualify the distance operator,
 so the provider schema does not need to remain on the runtime `search_path`.
