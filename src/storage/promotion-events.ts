@@ -101,6 +101,31 @@ async function boundOwnedPromotionTransaction(client: pg.PoolClient): Promise<vo
       ELSE 1000 END)::text || 'ms', TRUE)`);
 }
 
+async function boundedPromotionWrite<Row extends pg.QueryResultRow = pg.QueryResultRow>(
+  queryable: Queryable, sql: string, values: unknown[],
+): Promise<pg.QueryResult<Row>> {
+  const pool = queryable as Partial<pg.Pool>;
+  // PoolClient/Client values belong to their caller. They neither expose pool
+  // counts nor transfer transaction ownership merely by accepting a query.
+  if (typeof pool.connect !== 'function' || typeof pool.totalCount !== 'number') {
+    return queryable.query<Row>(sql, values);
+  }
+  const client = await (queryable as pg.Pool).connect();
+  let discard = false;
+  try {
+    await client.query('BEGIN');
+    await boundOwnedPromotionTransaction(client);
+    const result = await client.query<Row>(sql, values);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch { discard = true; }
+    throw error;
+  } finally {
+    client.release(discard);
+  }
+}
+
 export async function claimPromotionDeliveries(
   pool: pg.Pool,
   input: {
@@ -246,7 +271,7 @@ export async function completePromotionDelivery(
   attemptCount: number,
   leaseGeneration: number,
 ): Promise<boolean> {
-  const result = await queryable.query(
+  const result = await boundedPromotionWrite(queryable,
     `UPDATE promotion_event_deliveries
         SET state = 'delivered', delivered_at = now(),
             lease_owner = NULL, lease_expires_at = NULL, last_error = NULL
@@ -271,7 +296,7 @@ export async function failPromotionDelivery(
     leaseGeneration: number;
   },
 ): Promise<'pending' | 'dead_letter' | 'lost_lease'> {
-  const { rows } = await queryable.query<{ state: 'pending' | 'dead_letter' }>(
+  const { rows } = await boundedPromotionWrite<{ state: 'pending' | 'dead_letter' }>(queryable,
     `UPDATE promotion_event_deliveries
         SET state = CASE WHEN attempt_count >= $4 THEN 'dead_letter' ELSE 'pending' END,
             available_at = CASE WHEN attempt_count >= $4 THEN available_at
@@ -303,7 +328,7 @@ export async function timeoutPromotionDelivery(
     leaseGeneration: number;
   },
 ): Promise<'pending' | 'dead_letter' | 'lost_lease'> {
-  const { rows } = await queryable.query<{ state: 'pending' | 'dead_letter' }>(
+  const { rows } = await boundedPromotionWrite<{ state: 'pending' | 'dead_letter' }>(queryable,
     `UPDATE promotion_event_deliveries
         SET state = CASE WHEN attempt_count >= $4 THEN 'dead_letter' ELSE 'pending' END,
             available_at = CASE WHEN attempt_count >= $4 THEN available_at
@@ -329,7 +354,7 @@ export async function manualRetryPromotionDelivery(
   eventId: string,
   webhookId: string,
 ): Promise<boolean> {
-  const result = await queryable.query(
+  const result = await boundedPromotionWrite(queryable,
     `UPDATE promotion_event_deliveries
         SET state = 'pending', available_at = now(), attempt_count = 0,
             lease_owner = NULL, lease_expires_at = NULL,
@@ -352,7 +377,7 @@ export async function releasePromotionDeliveries(
   const retainedWebhookIds = retained.map((delivery) => delivery.webhookId);
   const retainedAttemptCounts = retained.map((delivery) => delivery.attemptCount);
   const retainedLeaseGenerations = retained.map((delivery) => delivery.leaseGeneration);
-  const result = await queryable.query(
+  const result = await boundedPromotionWrite(queryable,
     `UPDATE promotion_event_deliveries
         SET lease_owner = NULL, lease_expires_at = NULL,
             available_at = GREATEST(available_at, now())
@@ -384,7 +409,7 @@ export async function abandonPromotionDeliveries(
   const webhookIds = deliveries.map((delivery) => delivery.webhookId);
   const attemptCounts = deliveries.map((delivery) => delivery.attemptCount);
   const leaseGenerations = deliveries.map((delivery) => delivery.leaseGeneration);
-  const result = await queryable.query(
+  const result = await boundedPromotionWrite(queryable,
     `UPDATE promotion_event_deliveries AS target
         SET attempt_count = GREATEST(target.attempt_count - 1, 0),
             lease_owner = NULL,
