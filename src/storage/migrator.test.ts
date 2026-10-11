@@ -2556,7 +2556,7 @@ describe('runMigrations', () => {
       await expect(runMigrations({ connect: vi.fn(async () => client) } as unknown as pg.Pool, directory))
         .resolves.toHaveLength(1);
       expect(sizes).toEqual([1000, 500, 500]);
-      expect(recipes).toEqual(['online-cleanup-adaptive-max1000-lock1s-statement5s-v2']);
+      expect(recipes).toEqual(['online-cleanup-adaptive-max1000-lock1s-statement5s-progress-v3']);
       expect(queries).toContain("SET lock_timeout = '1s'");
       expect(queries).toContain("SET statement_timeout = '5s'");
       expect(queries).toContain('RESET lock_timeout');
