@@ -208,7 +208,7 @@ async function roleUpgradeAcceptance(review?: 'poison' | 'null' | 'regrant') {
         const deadline = Date.now() + 1_000;
         let blocked = false;
         while (!blocked && Date.now() < deadline) {
-          blocked = (await owner.query('SELECT $1::integer=ANY(pg_catalog.pg_blocking_pids($2::integer)) AS blocked',
+          blocked = (await maintenance.query('SELECT $1::integer=ANY(pg_catalog.pg_blocking_pids($2::integer)) AS blocked',
             [readerPid, operatorPid])).rows[0].blocked;
           if (!blocked) await new Promise((resolve) => setTimeout(resolve, 5));
         }
