@@ -61,7 +61,14 @@ describe('coordination final review remediation', () => {
         `SELECT disabled_at IS NOT NULL AS disabled, offboarded_at
            FROM principals WHERE id = $1`, [value.target.id],
       )).rows[0]).toEqual({ disabled: true, offboarded_at: null });
-      await expect(reactivatePrincipal(pool, value.operator, value.target.id)).rejects.toThrow();
+      expect((await pool.query(`SELECT
+        (SELECT count(*)::int FROM coordination_resources) AS resources,
+        (SELECT count(*)::int FROM coordination_leases) AS leases,
+        (SELECT count(*)::int FROM coordination_operation_receipts) AS receipts`)).rows[0])
+        .toEqual({ resources: 0, leases: 0, receipts: 0 });
+      await expect(reactivatePrincipal(pool, value.operator, value.target.id)).rejects.toMatchObject({
+        code: 'P0001', message: 'principal offboarding is incomplete',
+      });
       expect((await pool.query(
         'SELECT disabled_at IS NOT NULL AS disabled FROM principals WHERE id = $1', [value.target.id],
       )).rows[0].disabled).toBe(true);
