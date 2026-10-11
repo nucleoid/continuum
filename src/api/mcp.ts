@@ -11,7 +11,7 @@ import type { Principal, ScopeKind } from '../types.js';
 import { getPool } from '../storage/pool.js';
 import { makeEmbeddingRouterFromEnv } from '../embeddings/factory.js';
 import { isDirectEntrypoint } from './entrypoint.js';
-import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoordinationContractReady } from '../storage/provider-lifecycle.js';
+import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoordinationContractReady, requirePromotionOutboxReady } from '../storage/provider-lifecycle.js';
 import { accessibleScopes } from '../services/access.js';
 import { captureMemory } from '../services/capture.js';
 import { recallForPrincipal } from '../services/recall.js';
@@ -868,6 +868,7 @@ async function main(): Promise<void> {
   const schemaOptions = { expectedSchema: applicationSchemaFromEnv() };
   await reconcilePgvectorProviderGrants(pool, schemaOptions);
   await requireCoordinationContractReady(pool, schemaOptions);
+  await requirePromotionOutboxReady(pool, schemaOptions);
   const authMode = authModeFromEnv();
   warnOnDevAuthMode(authMode);
   const authenticator = createAuthenticator(

@@ -130,6 +130,8 @@ export async function resetData(pool: pg.Pool): Promise<void> {
     `);
   }
 
+  await pool.query("UPDATE promotion_webhook_registry SET webhook_ids='{}'::text[] WHERE singleton");
+
   // All business rows are gone, so no prior repair cursor or pending phase
   // belongs to the next test. These are the completed states for empty data.
   await pool.query(`

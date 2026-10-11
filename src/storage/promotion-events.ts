@@ -51,6 +51,10 @@ function parseLeaseGeneration(value: string | number): number {
   return parsed;
 }
 
+export class PromotionRegistryMismatchError extends Error {
+  constructor() { super('Promotion webhook registration does not match the operator configuration'); }
+}
+
 export async function enqueuePromotionEvent(
   queryable: Queryable,
   input: {
@@ -62,6 +66,18 @@ export async function enqueuePromotionEvent(
     webhookIds: readonly string[];
   },
 ): Promise<PromotionEvent> {
+  // The definer holds the singleton row through this promotion transaction.
+  // Callback implementations are local; delivery identities are installation-wide.
+  const registry = await queryable.query<{ webhook_ids: string[] }>(
+    'SELECT continuum_promotion_webhook_ids() AS webhook_ids',
+  );
+  const webhookIds = registry.rows[0]?.webhook_ids;
+  if (!webhookIds) throw new Error('Promotion webhook registry is unavailable');
+  const configured = [...new Set(input.webhookIds)].sort();
+  if (configured.length > 0 && (configured.length !== webhookIds.length
+    || configured.some((id, index) => id !== webhookIds[index]))) {
+    throw new PromotionRegistryMismatchError();
+  }
   const { rows } = await queryable.query<PromotionEventRow>(
     `INSERT INTO promotion_events
        (source_memory_id, destination_memory_id, destination_scope_id,
@@ -77,7 +93,6 @@ export async function enqueuePromotionEvent(
       input.principalId,
     ],
   );
-  const webhookIds = [...new Set(input.webhookIds)].sort();
   if (webhookIds.length > 0) {
     await queryable.query(
       `INSERT INTO promotion_event_deliveries (event_id, webhook_id)

@@ -1,3 +1,4 @@
+import { PromotionRegistryMismatchError } from '../storage/promotion-events.js';
 import type pg from 'pg';
 import type { Memory, Principal, ScopeRef } from '../types.js';
 import {
@@ -93,6 +94,9 @@ export async function verifyForPrincipal(
 }
 
 function mapLifecycleError(error: unknown): ServiceError {
+  if (error instanceof PromotionRegistryMismatchError) {
+    return new ServiceError('CONFLICT', error.message);
+  }
   const databaseError = error as { code?: string; constraint?: string };
   if (databaseError.code === '23514' && databaseError.constraint === 'promotion_destination_disabled') {
     return new ServiceError('FORBIDDEN', 'Target scope is unavailable for promotion');

@@ -25,6 +25,8 @@ describe('promotion registry parity review', () => {
     const memories = [];
     for (let index = 0; index < 2; index += 1) memories.push(await createMemory(pool, { scopeId: source.id, scopeKind: 'team',
       type: 'fact', title: `Registry source ${index}`, body: 'Normal promotion.', authorId: principal.id, source: 'manual' }));
+    // Owner fixture configures the durable producer contract before either transport runs.
+    await pool.query("UPDATE promotion_webhook_registry SET webhook_ids=ARRAY['expected-hook']::text[] WHERE singleton");
     const registry = new PromotionWebhookRegistry();
     registry.register({ id: 'expected-hook', onPromoted: async () => undefined });
     const app = createApp(pool, { promotionWebhooks: registry, embeddingProvider: null });
@@ -60,7 +62,7 @@ describe('promotion registry parity review', () => {
     const response = await request(app).post(`/api/v0/memories/${value.memories[1].id}/promote`)
       .set('Authorization', `Bearer ${value.principal.externalId}`).send(value.input);
     expect(response.status).toBe(409);
-    expect(response.body.error.code).toBe('CONFLICT');
+    expect(response.body.code).toBe('CONFLICT');
     expect(await getMemory(pool, value.memories[1].id)).toMatchObject({ state: 'live', promotedToId: null });
     expect((await pool.query('SELECT count(*)::int AS count FROM promotion_events')).rows).toEqual(before);
   });

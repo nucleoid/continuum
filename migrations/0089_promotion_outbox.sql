@@ -10,7 +10,9 @@ BEGIN
     BEGIN
       PERFORM continuum_assert_application_role_allowlist(candidate.rolname,candidate.profile_kind='operator');
       INSERT INTO continuum_extension_upgrade_roles VALUES(candidate.database_role_oid,candidate.rolname,candidate.profile_kind='operator');
-    EXCEPTION WHEN OTHERS THEN CONTINUE;
+    EXCEPTION WHEN OTHERS THEN
+      RAISE NOTICE 'Continuum skipped outbox grants for role OID % (SQLSTATE %); explicit regrant and startup validation are required',candidate.database_role_oid,SQLSTATE;
+      CONTINUE;
     END;
   END LOOP;
 END;
@@ -274,3 +276,80 @@ BEGIN
   EXECUTE format('ALTER FUNCTION %I.continuum_guard_promotion_privacy_audit() SET search_path=pg_catalog,%I,pg_temp',schema_name,schema_name);
 END;
 $privacy_audit$;
+
+-- Canonical operator-owned registration decouples producers from callback code.
+CREATE FUNCTION continuum_valid_promotion_webhook_ids(ids TEXT[]) RETURNS BOOLEAN
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT ids IS NOT NULL AND cardinality(ids)<=1024 AND COALESCE(array_ndims(ids),1)=1
+    AND NOT EXISTS(SELECT 1 FROM unnest(ids) value WHERE value IS NULL OR value!~'^[a-z][a-z0-9.-]{0,63}$')
+    AND ids IS NOT DISTINCT FROM ARRAY(SELECT value FROM (SELECT DISTINCT value FROM unnest(ids) value) unique_ids ORDER BY value COLLATE "C");
+$$;
+REVOKE ALL ON FUNCTION continuum_valid_promotion_webhook_ids(TEXT[]) FROM PUBLIC;
+CREATE TABLE promotion_webhook_registry(singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK(singleton),
+  webhook_ids TEXT[] NOT NULL DEFAULT '{}'::text[] CHECK(continuum_valid_promotion_webhook_ids(webhook_ids)));
+INSERT INTO promotion_webhook_registry(singleton) VALUES(TRUE);
+REVOKE ALL ON TABLE promotion_webhook_registry FROM PUBLIC;
+
+CREATE FUNCTION continuum_promotion_webhook_ids() RETURNS TEXT[] LANGUAGE plpgsql SECURITY DEFINER
+SET statement_timeout='5s' SET lock_timeout='1s' AS $$
+DECLARE ids TEXT[];
+BEGIN
+  SELECT webhook_ids INTO ids FROM promotion_webhook_registry WHERE singleton FOR SHARE;
+  IF ids IS NULL THEN RAISE EXCEPTION 'promotion webhook registry is unavailable' USING ERRCODE='55000'; END IF;
+  RETURN ids;
+END;
+$$;
+REVOKE ALL ON FUNCTION continuum_promotion_webhook_ids() FROM PUBLIC;
+CREATE FUNCTION continuum_operator_set_promotion_webhook_ids(authorization_principal_id UUID,ids TEXT[])
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET statement_timeout='5s' SET lock_timeout='1s' AS $$
+DECLARE normalized TEXT[];
+BEGIN
+  PERFORM continuum_require_trusted_database_identity(authorization_principal_id,'approve');
+  IF NOT EXISTS(SELECT 1 FROM principals actor JOIN scope_memberships membership ON membership.principal_id=actor.id
+    WHERE actor.id=authorization_principal_id AND actor.disabled_at IS NULL AND membership.scope_id=continuum_org_scope_id()
+      AND membership.active AND membership.role='admin' AND membership.source_kind='manual' AND membership.source_id='manual') THEN
+    RAISE insufficient_privilege USING MESSAGE='promotion registry requires a current manual org administrator';
+  END IF;
+  IF ids IS NULL OR cardinality(ids)>1024 OR COALESCE(array_ndims(ids),1)<>1
+    OR EXISTS(SELECT 1 FROM unnest(ids) value WHERE value IS NULL OR value!~'^[a-z][a-z0-9.-]{0,63}$') THEN
+    RAISE check_violation USING MESSAGE='promotion registry IDs are outside the supported bounds';
+  END IF;
+  normalized:=ARRAY(SELECT value FROM (SELECT DISTINCT value FROM unnest(ids) value) unique_ids ORDER BY value COLLATE "C");
+  UPDATE promotion_webhook_registry SET webhook_ids=normalized WHERE singleton;
+  IF NOT FOUND THEN RAISE EXCEPTION 'promotion webhook registry is unavailable' USING ERRCODE='55000'; END IF;
+  INSERT INTO audit_log(principal_id,action,scope_id,metadata) VALUES(authorization_principal_id,'write',continuum_org_scope_id(),
+    jsonb_build_object('operation','promotion_webhook_registry_configured','webhook_ids',normalized));
+END;
+$$;
+REVOKE ALL ON FUNCTION continuum_operator_set_promotion_webhook_ids(UUID,TEXT[]) FROM PUBLIC;
+CREATE FUNCTION continuum_promotion_outbox_is_ready() RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER AS $$
+  SELECT EXISTS(SELECT 1 FROM promotion_webhook_registry WHERE singleton AND continuum_valid_promotion_webhook_ids(webhook_ids))
+    AND to_regclass('promotion_events') IS NOT NULL AND to_regclass('promotion_event_deliveries') IS NOT NULL;
+$$;
+REVOKE ALL ON FUNCTION continuum_promotion_outbox_is_ready() FROM PUBLIC;
+DO $registry_roles$
+DECLARE definition TEXT; revised TEXT; schema_name TEXT:=current_schema(); candidate RECORD; function_record RECORD;
+BEGIN
+  FOR function_record IN SELECT proname,pg_catalog.pg_get_function_identity_arguments(oid) arguments FROM pg_catalog.pg_proc
+    WHERE pronamespace=(SELECT namespace.oid FROM pg_catalog.pg_namespace namespace WHERE namespace.nspname=schema_name)
+      AND proname=ANY(ARRAY['continuum_valid_promotion_webhook_ids','continuum_promotion_webhook_ids',
+        'continuum_operator_set_promotion_webhook_ids','continuum_promotion_outbox_is_ready']) LOOP
+    EXECUTE format('ALTER FUNCTION %I.%I(%s) SET search_path=pg_catalog,%I,pg_temp',schema_name,function_record.proname,function_record.arguments,schema_name);
+  END LOOP;
+  definition:=pg_catalog.pg_get_functiondef('continuum_assert_application_role_allowlist(name,boolean)'::regprocedure);
+  revised:=replace(definition,'(''continuum_coordination_contract_is_ready()'')',
+    '(''continuum_coordination_contract_is_ready()''),(''continuum_promotion_webhook_ids()''),(''continuum_promotion_outbox_is_ready()'')');
+  IF revised=definition THEN RAISE EXCEPTION 'unable to extend promotion registry reader allowlist'; END IF;
+  definition:=revised;
+  revised:=replace(definition,'(''continuum_operator_scrub_promotion_scope(uuid,uuid,uuid,integer)''),',
+    '(''continuum_operator_scrub_promotion_scope(uuid,uuid,uuid,integer)''),(''continuum_operator_set_promotion_webhook_ids(uuid,text[])''),');
+  IF revised=definition THEN RAISE EXCEPTION 'unable to extend promotion registry operator allowlist'; END IF;
+  EXECUTE revised;
+  FOR candidate IN SELECT * FROM continuum_extension_upgrade_roles LOOP
+    IF NOT EXISTS(SELECT 1 FROM pg_catalog.pg_roles WHERE oid=candidate.role_oid AND rolname=candidate.role_name) THEN CONTINUE; END IF;
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_promotion_webhook_ids(),%I.continuum_promotion_outbox_is_ready() TO %I',schema_name,schema_name,candidate.role_name);
+    IF candidate.operator THEN EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_operator_set_promotion_webhook_ids(UUID,TEXT[]) TO %I',schema_name,candidate.role_name); END IF;
+    PERFORM continuum_assert_application_role_allowlist(candidate.role_name,candidate.operator);
+  END LOOP;
+END;
+$registry_roles$;

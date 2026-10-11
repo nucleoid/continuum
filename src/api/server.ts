@@ -38,7 +38,7 @@ import { cliSupportRouter } from './routes/cli.js';
 import { supersedeRouter } from './routes/supersede.js';
 import { offboardingRouter } from './routes/offboarding.js';
 import { locksRouter } from './routes/locks.js';
-import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoordinationContractReady } from '../storage/provider-lifecycle.js';
+import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoordinationContractReady, requirePromotionOutboxReady } from '../storage/provider-lifecycle.js';
 import { tagVocabulariesRouter } from './routes/tag-vocabularies.js';
 import type { CaptureRegistry } from '../capture/plugin.js';
 import {
@@ -390,6 +390,7 @@ async function main(): Promise<void> {
   const schemaOptions = { expectedSchema: applicationSchemaFromEnv() };
   await reconcilePgvectorProviderGrants(pool, schemaOptions);
   await requireCoordinationContractReady(pool, schemaOptions);
+  await requirePromotionOutboxReady(pool, schemaOptions);
   const authMode = authModeFromEnv();
   warnOnDevAuthMode(authMode);
   const authenticator = createAuthenticator(
