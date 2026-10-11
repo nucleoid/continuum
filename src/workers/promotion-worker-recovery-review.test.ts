@@ -37,7 +37,7 @@ describe('promotion recovery review', () => {
       let claimedFirst = false;
       let claimedSecond = false;
       const lateAck = Promise.withResolvers<boolean>();
-      const callback = vi.fn(async () => undefined);
+      const callback = vi.fn(async (_event: ClaimedPromotionDelivery['event']) => undefined);
       const registry = new PromotionWebhookRegistry();
       registry.register({ id: 'alpha', onPromoted: callback });
       const store = persistence({
