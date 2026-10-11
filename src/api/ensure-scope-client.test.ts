@@ -4,6 +4,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import type pg from 'pg';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
+import { reconcilePgvectorProviderGrants } from '../storage/provider-lifecycle.js';
 import { createPrincipal } from '../storage/principals.js';
 import { getScopeByRef } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
@@ -50,6 +51,10 @@ describe('ensure-scope operator client', () => {
       externalId: 'b'.repeat(64), kind: 'service', displayName: 'Not Admin',
     });
     await addMembership(pool, admin.id, org.id, 'admin');
+
+    // Surface the exact database startup error before the child CLI sanitizes
+    // it into its public transport/startup failure message.
+    await reconcilePgvectorProviderGrants(pool);
 
     const success = await execFileAsync(process.execPath, [
       script, 'project', 'client-smoke',
