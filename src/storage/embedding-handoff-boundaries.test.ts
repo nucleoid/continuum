@@ -121,13 +121,24 @@ describe('embedding handoff storage boundaries', () => {
       const writer = await boundedWorker();
       let write: Promise<boolean> | undefined;
       try {
+        if (change === 'expiry') {
+          await client.query("UPDATE memories SET expires_at=pg_catalog.clock_timestamp()+INTERVAL '300 milliseconds' WHERE id=$1::uuid", [value.id]);
+        }
         await client.query('BEGIN');
         await client.query('SELECT id FROM memories WHERE id=$1::uuid FOR UPDATE', [value.id]);
         write = storeMemoryEmbeddingVector(writer.worker, value.id, firstVector, { id: 'test:late-provider', dim: 768 });
         void write.catch(() => undefined);
         await waitForBlocked([writer.pid]);
         if (change === 'expiry') {
-          await client.query("UPDATE memories SET expires_at=pg_catalog.clock_timestamp()-INTERVAL '1 second' WHERE id=$1::uuid", [value.id]);
+          const deadline = Date.now() + 750;
+          let expired = false;
+          while (Date.now() < deadline) {
+            expired = (await client.query('SELECT expires_at<=pg_catalog.clock_timestamp() AS expired FROM memories WHERE id=$1::uuid',
+              [value.id])).rows[0].expired;
+            if (expired) break;
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+          expect(expired).toBe(true);
         } else {
           await client.query("UPDATE memories SET state='archived' WHERE id=$1::uuid", [value.id]);
         }
