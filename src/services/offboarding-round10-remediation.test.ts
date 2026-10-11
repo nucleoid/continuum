@@ -16,6 +16,7 @@ async function applyApplicationRoleGrants(pool: pg.Pool, role: string): Promise<
     .filter((line) => !line.trimStart().startsWith('\\'))
     .join('\n')
     .replaceAll(':"continuum_schema"', '"public"')
+    .replaceAll(":'continuum_schema'", "'public'")
     .replaceAll(':"continuum_app_role"', `"${role}"`)
     .replaceAll(":'continuum_app_role'", `'${role}'`);
   await pool.query(sql);
@@ -46,6 +47,7 @@ async function syncRolePool(
     .filter((line) => !line.trimStart().startsWith('\\'))
     .join('\n')
     .replaceAll(':"continuum_schema"', '"public"')
+    .replaceAll(":'continuum_schema'", "'public'")
     .replaceAll(':"continuum_sync_role"', `"${role}"`)
     .replaceAll(":'continuum_principal_id'", `'${principalId}'`)
     .replaceAll(":'continuum_sync_role'", `'${role}'`);

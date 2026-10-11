@@ -17,7 +17,8 @@ async function grantScript(
 ): Promise<void> {
   const source = await readFile(join(process.cwd(), 'scripts', filename), 'utf8');
   let sql = source.split(/\r?\n/).filter((line) => !line.trimStart().startsWith('\\'))
-    .join('\n').replaceAll(':"continuum_schema"', quote(schema));
+    .join('\n').replaceAll(':"continuum_schema"', quote(schema))
+    .replaceAll(":'continuum_schema'", "'" + schema.replaceAll("'", "''") + "'");
   for (const [name, value] of Object.entries(variables)) {
     sql = sql.replaceAll(':"' + name + '"', quote(value));
     sql = sql.replaceAll(":'" + name + "'", "'" + value.replaceAll("'", "''") + "'");

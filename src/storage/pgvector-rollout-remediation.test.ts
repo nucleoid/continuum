@@ -92,6 +92,7 @@ async function grantApplicationRole(
     .filter((line) => !line.trimStart().startsWith('\\'))
     .join('\n')
     .replaceAll(':"continuum_schema"', quoteIdentifier(schema))
+    .replaceAll(":'continuum_schema'", "'" + schema.replaceAll("'", "''") + "'")
     .replaceAll(':"continuum_app_role"', quoteIdentifier(role))
     .replaceAll(
       ":'continuum_app_role'",
@@ -113,6 +114,7 @@ async function grantSyncRole(
     .filter((line) => !line.trimStart().startsWith('\\'))
     .join('\n')
     .replaceAll(':"continuum_schema"', quoteIdentifier(schema))
+    .replaceAll(":'continuum_schema'", "'" + schema.replaceAll("'", "''") + "'")
     .replaceAll(':"continuum_sync_role"', quoteIdentifier(role))
     .replaceAll(
       ":'continuum_sync_role'",

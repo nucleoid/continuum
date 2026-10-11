@@ -24,7 +24,8 @@ async function applyGrantScript(
   let sql = source.split(/\r?\n/)
     .filter((line) => !line.trimStart().startsWith('\\'))
     .join('\n')
-    .replaceAll(':"continuum_schema"', quoteRole(schema));
+    .replaceAll(':"continuum_schema"', quoteRole(schema))
+    .replaceAll(":'continuum_schema'", "'" + schema.replaceAll("'", "''") + "'");
   for (const [name, value] of Object.entries(variables)) {
     sql = sql.replaceAll(':"' + name + '"', quoteRole(value));
     sql = sql.replaceAll(":'" + name + "'", "'" + value.replaceAll("'", "''") + "'");

@@ -37,6 +37,7 @@ describe('membership sync CLI runner', () => {
     let sql = await readFile(join(process.cwd(), 'scripts/grant-sync-role.sql'), 'utf8');
     sql = sql.split(/\r?\n/).filter((line) => !line.trimStart().startsWith('\\')).join('\n')
       .replaceAll(':"continuum_schema"', '"public"')
+      .replaceAll(":'continuum_schema'", "'public'")
       .replaceAll(':"continuum_sync_role"', `"${role}"`)
       .replaceAll(":'continuum_sync_role'", `'${role}'`)
       .replaceAll(":'continuum_principal_id'", `'${principalId}'`);

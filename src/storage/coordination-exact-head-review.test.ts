@@ -18,7 +18,8 @@ async function applyGrantScript(
   const source = await readFile(join(process.cwd(), 'scripts', filename), 'utf8');
   const schema = String((await pool.query('SELECT current_schema() AS schema')).rows[0].schema);
   let sql = source.split(/\r?\n/).filter((line) => !line.trimStart().startsWith('\\'))
-    .join('\n').replaceAll(':"continuum_schema"', quoteRole(schema));
+    .join('\n').replaceAll(':"continuum_schema"', quoteRole(schema))
+    .replaceAll(":'continuum_schema'", "'" + schema.replaceAll("'", "''") + "'");
   for (const [name, value] of Object.entries(variables)) {
     sql = sql.replaceAll(':"' + name + '"', quoteRole(value));
     sql = sql.replaceAll(":'" + name + "'", "'" + value.replaceAll("'", "''") + "'");
