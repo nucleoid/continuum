@@ -261,6 +261,11 @@ status-3 blocks; an owned lease may provide an expiry witness or a null
 `blockedUntil`. The command drives bounded coordination scrubbing and existing
 approved scope erasure. It never sets `offboarded_at`, starts user pseudonymization,
 erases memories or deactivates scope access.
+Membership synchronization holds the installation's global sync lock. An
+overlapping offboarding or privacy-repair command can return `lock_busy` and
+exit 3 with no expiry-based resume time. Wait for synchronization to finish,
+then rerun the same confirmed command; the CLI does not spin until that global
+lock is released.
 Migrations 0066 and 0067 reopen completed version-2 rows and reset only their
 audit cursor so the same bounded command can apply the narrower 0065 lock-audit
 classifier without changing unrelated immutable evidence. Migration 0067 also
@@ -696,6 +701,15 @@ commits or rolls back. Later migrations never inherit the provider schema.
 Runtime embedding queries infer the vector type from the
 `memory_embeddings.embedding` column and schema-qualify the distance operator,
 so the provider schema does not need to remain on the runtime `search_path`.
+Current REST, MCP and identity-sync entrypoints require the resolved explicit
+runtime path to contain exactly `CONTINUUM_APPLICATION_SCHEMA`, defaulting to
+`public`. For example, a custom tenant uses
+`PGOPTIONS='-c search_path=application_data'` with
+`CONTINUUM_APPLICATION_SCHEMA=application_data`. Keep `pg_catalog` implicit,
+not explicitly later in the path, and omit provider and co-tenant schemas.
+A separately DBA-owned provider is still supported with its reviewed narrow
+grants; it does not have to share the application schema's owner. This runtime
+restriction does not change 0001's temporary application/provider path.
 
 If pgvector is absent, `runMigrations` creates the provider schema and attempts
 `CREATE EXTENSION vector WITH SCHEMA continuum_extensions` before opening the
@@ -720,6 +734,34 @@ before delegation is considered; the refresher asks for grant option only for
 a genuinely missing grant. Do not grant schema `CREATE`, provider
 ownership, a provider role, or blanket database privileges to the application
 role.
+
+Plain provider `USAGE` without grant option cannot delegate missing target
+access: PostgreSQL can warn instead of rejecting `GRANT`. The refresher checks
+effective target `USAGE` after the attempt and fails with the provider-owner
+action rather than registering a broken reporting profile. Have the provider
+owner grant the missing target access directly, or explicitly delegate the
+narrow grant option to the tenant owner. Rerunning the application grant script
+alone cannot supply authority the tenant owner lacks.
+
+If a generic exact-profile classification error obscures the underlying drift,
+run the precise allow-list diagnostic as the actual tenant migration owner:
+
+```sql
+BEGIN;
+SET LOCAL lock_timeout = '1s';
+SET LOCAL statement_timeout = '5s';
+SELECT application_data.continuum_assert_application_role_allowlist(
+  'continuum_app'::name, FALSE
+);
+COMMIT;
+```
+
+Replace the schema and role with the reviewed actual identifiers; use `TRUE`
+for an operator profile. This diagnostic changes no grants. Preserve its exact
+error before fixing the reviewed drift. On `55P03`, roll back, wait for the
+conflicting operation to drain, then retry the complete diagnostic transaction.
+Do not repeat a statement inside an aborted transaction or loosen the allow-list
+to make the provider classifier succeed.
 
 The provider verifier ignores profile rows whose role OID no longer exists;
 it does not prune registry rows or change grants during startup. If desired,
