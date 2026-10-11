@@ -63,10 +63,25 @@ export function enrichmentConfigFromEnv(
 
 function cloneAndFreeze<T>(value: T): T {
   const clone = structuredClone(value);
-  const freeze = (candidate: unknown): void => {
-    if (candidate === null || typeof candidate !== 'object' || Object.isFrozen(candidate)) return;
-    for (const child of Object.values(candidate)) freeze(child);
-    Object.freeze(candidate);
+  const freeze = (candidate: unknown): unknown => {
+    if (candidate === null || typeof candidate !== 'object') return candidate;
+    if (candidate instanceof Date) {
+      Object.freeze(candidate);
+      return new Proxy(candidate, {
+        get(target, key) {
+          const member: unknown = Reflect.get(target, key, target);
+          if (typeof member !== 'function') return member;
+          if (typeof key === 'string' && key.startsWith('set')) {
+            return () => { throw new TypeError('Enricher input dates are read-only'); };
+          }
+          return member.bind(target);
+        },
+      });
+    }
+    for (const [key, child] of Object.entries(candidate)) {
+      (candidate as Record<string, unknown>)[key] = freeze(child);
+    }
+    return Object.freeze(candidate);
   };
   freeze(clone);
   return clone;

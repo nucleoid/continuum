@@ -161,6 +161,8 @@ const GLOBAL_CALLBACK_LIMIT = 100;
 type CallbackOutcome = 'success' | 'failure' | 'not_started';
 
 export class PromotionEventWorker implements RuntimeWorker {
+  private readonly claimStartedAt = new WeakMap<ClaimedPromotionDelivery, number>();
+  private admissionCursor = 0;
   private stopped = false;
   private started = false;
   private stopPromise?: Promise<void>;
@@ -253,7 +255,7 @@ export class PromotionEventWorker implements RuntimeWorker {
       GLOBAL_CALLBACK_LIMIT - inFlightCallbacks.size - reserved,
     );
     if (globalAvailable === 0) return 0;
-    const eligible = webhookIds
+    const eligibleById = webhookIds
       .map((webhookId) => ({
         webhookId,
         occupied:
@@ -267,7 +269,11 @@ export class PromotionEventWorker implements RuntimeWorker {
         ),
       }))
       .filter(({ available }) => available > 0);
-    if (eligible.length === 0) return 0;
+    if (eligibleById.length === 0) return 0;
+    const start = this.admissionCursor % eligibleById.length;
+    const eligible = [...eligibleById.slice(start), ...eligibleById.slice(0, start)];
+    // Rotate bounded admission even when earlier hooks have no durable backlog.
+    this.admissionCursor = (start + globalAvailable) % eligible.length;
     let remainingGlobal = globalAvailable;
     const allocations = new Map<string, number>();
     while (remainingGlobal > 0) {
@@ -301,7 +307,8 @@ export class PromotionEventWorker implements RuntimeWorker {
     const deliveries: ClaimedPromotionDelivery[] = [];
     try {
       for (const { webhookId, limit } of admissions) {
-        deliveries.push(...await this.databaseOperation(this.store.claim(this.pool, {
+        const claimStarted = Date.now();
+        const claiming = this.store.claim(this.pool, {
           owner: this.options.owner,
           webhookIds: [webhookId],
           limit,
@@ -309,8 +316,22 @@ export class PromotionEventWorker implements RuntimeWorker {
           maxAttempts: this.options.maxAttempts,
           perWebhookLimit: limit,
           excluded: [...inFlightCallbacks.values(), ...deliveries],
-        })));
+        });
+        try {
+          const claimed = await this.databaseOperation(claiming);
+          for (const delivery of claimed) this.claimStartedAt.set(delivery, claimStarted);
+          deliveries.push(...claimed);
+        } catch (error) {
+          // A timed-out claim can still commit. Refund only its exact, never-started fences.
+          void claiming.then((late) => this.abandonDeliveries(
+            late, 'promotion_delivery_late_claim_abandoned',
+          )).catch(() => { this.logger.error({ event: 'promotion_delivery_late_claim_cleanup_failed' }); });
+          throw error;
+        }
       }
+    } catch (error) {
+      await this.abandonDeliveries(deliveries, 'promotion_delivery_sibling_claim_abandoned');
+      throw error;
     } finally {
       for (const { webhookId, limit } of admissions) {
         const remaining = (callbackReservations.get(webhookId) ?? 0) - limit;
@@ -393,6 +414,23 @@ export class PromotionEventWorker implements RuntimeWorker {
     if (!webhook) {
       await this.abandonDeliveries([delivery], 'promotion_delivery_webhook_unavailable');
       return;
+    }
+    // A serial sibling claim may consume the earlier claim's lease before delivery begins.
+    // Require fresh exact ownership after a material admission delay, before invoking user code.
+    const claimStarted = this.claimStartedAt.get(delivery) ?? Date.now();
+    if (Date.now() - claimStarted >= Math.max(1, Math.floor(this.options.leaseMs / 3))) {
+      const ownership = await this.databaseOperation(this.store.renew(
+        this.pool, this.options.owner, [delivery], this.options.leaseMs,
+      ));
+      const owned = typeof ownership === 'number'
+        ? ownership >= 1
+        : ownership.renewed.some((current) => deliveryKey(current) === deliveryKey(delivery)
+          && current.attemptCount === delivery.attemptCount
+          && current.leaseGeneration === delivery.leaseGeneration);
+      if (!owned) {
+        await this.abandonDeliveries([delivery], 'promotion_delivery_stale_admission_abandoned');
+        return;
+      }
     }
     const event = Object.freeze({
       ...delivery.event,
@@ -507,7 +545,10 @@ export class PromotionEventWorker implements RuntimeWorker {
         this.followLateCallback(delivery, controller, callback, abortReason);
         return;
       }
-      if (outcome === 'not_started') return;
+      if (outcome === 'not_started') {
+        await this.abandonDeliveries([delivery], 'promotion_delivery_not_started_abandoned');
+        return;
+      }
       await this.persistCallbackOutcome(delivery, controller, outcome);
     } finally {
       if (timer) clearTimeout(timer);
@@ -582,7 +623,11 @@ export class PromotionEventWorker implements RuntimeWorker {
       void operation.catch(() => undefined);
       for (const [controller, delivery] of [...this.controllers]) {
         this.retainLease(delivery);
-        this.abortForOwnershipUncertainty(controller);
+        // Successful user code needs ACK reconciliation, not another callback follower.
+        // Keep its controller registered so database recovery rearms bounded reconciliation.
+        if (!this.pendingAcknowledgements.has(deliveryKey(delivery))) {
+          this.abortForOwnershipUncertainty(controller);
+        }
       }
     }
     this.logger.error({
@@ -653,14 +698,22 @@ export class PromotionEventWorker implements RuntimeWorker {
     const webhookId = delivery.webhookId;
     if (outcome === 'success') {
       let acknowledged: boolean;
+      const acknowledging = Promise.resolve().then(() => this.store.complete(
+        this.pool, eventId, webhookId, this.options.owner,
+        delivery.attemptCount, delivery.leaseGeneration,
+      ));
       try {
-        acknowledged = await this.databaseOperation(this.store.complete(
-          this.pool, eventId, webhookId, this.options.owner,
-          delivery.attemptCount, delivery.leaseGeneration,
-        ));
+        acknowledged = await this.databaseOperation(acknowledging);
       } catch {
         this.retainLease(delivery);
-        this.pendingAcknowledgements.set(deliveryKey(delivery), controller);
+        const key = deliveryKey(delivery);
+        this.pendingAcknowledgements.set(key, controller);
+        // Observe a late committed ACK even when the deadline race has already returned.
+        void acknowledging.then(() => {
+          if (this.pendingAcknowledgements.get(key) === controller) {
+            this.finishCallback(delivery, controller);
+          }
+        }, () => undefined);
         this.ensureLeaseRenewal();
         this.logger.error({
           event: 'promotion_delivery_acknowledgement_failed', eventId, webhookId,
@@ -739,9 +792,9 @@ export class PromotionEventWorker implements RuntimeWorker {
   ): void {
     const key = deliveryKey(delivery);
     this.stopRenewingCallback(controller);
-    this.pendingAcknowledgements.delete(key);
-    this.retainedLeases.delete(key);
-    inFlightCallbacks.delete(key);
+    if (this.pendingAcknowledgements.get(key) === controller) this.pendingAcknowledgements.delete(key);
+    if (this.retainedLeases.get(key) === delivery) this.retainedLeases.delete(key);
+    if (inFlightCallbacks.get(key) === delivery) inFlightCallbacks.delete(key);
   }
 
   private stopRenewingCallback(controller: AbortController): void {
