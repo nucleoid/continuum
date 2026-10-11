@@ -133,7 +133,8 @@ describe('coordination contract scale and recovery', () => {
     // Replay the forward upgrade's repair against this historical snapshot.
     await pool.query(`UPDATE coordination_contract_backfill_state SET phase='usage',
       principal_cursor=NULL,scope_cursor=NULL,receipt_principal_cursor=NULL,
-      receipt_operation_cursor=NULL,receipt_request_cursor=NULL`);
+      receipt_operation_cursor=NULL,receipt_request_cursor=NULL,
+      resource_scope_cursor=NULL,resource_key_cursor=NULL,resource_rows_processed=0`);
     let complete = false;
     for (let calls = 0; !complete && calls < 10; calls += 1) {
       complete = (await pool.query('SELECT continuum_backfill_coordination_contract(1000) AS complete')).rows[0].complete;
@@ -166,6 +167,29 @@ describe('coordination contract scale and recovery', () => {
       await login?.end();
       await pool.query(`DROP OWNED BY ${quoted(role)}; DROP ROLE ${quoted(role)}`);
     }
+  });
+
+  it('commits historical floors with a capped key cursor and preserves a higher existing floor', async () => {
+    const scope = await createScope(pool, { kind: 'project', name: 'bounded-historical-floors' });
+    await pool.query(`INSERT INTO coordination_resources(scope_id,resource,fencing_token)
+      SELECT $1,'legacy-'||lpad(value::text,5,'0'),value FROM generate_series(1,1001) value`, [scope.id]);
+    await pool.query('INSERT INTO coordination_scope_fencing_floors(scope_id,fencing_floor) VALUES($1,2000)', [scope.id]);
+    await pool.query(`UPDATE coordination_contract_backfill_state SET phase='floors',
+      resource_scope_cursor=NULL,resource_key_cursor=NULL,resource_rows_processed=0`);
+    expect((await pool.query('SELECT continuum_backfill_coordination_contract(5000) AS complete')).rows)
+      .toEqual([{ complete: false }]);
+    expect((await pool.query(`SELECT phase,resource_scope_cursor,resource_key_cursor,resource_rows_processed::int
+      FROM coordination_contract_backfill_state`)).rows)
+      .toEqual([{ phase: 'floors', resource_scope_cursor: scope.id,
+        resource_key_cursor: 'legacy-01000', resource_rows_processed: 1000 }]);
+    await pool.query('SELECT continuum_backfill_coordination_contract(5000)');
+    expect((await pool.query(`SELECT phase,resource_key_cursor,resource_rows_processed::int
+      FROM coordination_contract_backfill_state`)).rows)
+      .toEqual([{ phase: 'scopes', resource_key_cursor: 'legacy-01001', resource_rows_processed: 1001 }]);
+    expect((await pool.query('SELECT fencing_floor::text AS floor FROM coordination_scope_fencing_floors WHERE scope_id=$1', [scope.id])).rows)
+      .toEqual([{ floor: '2000' }]);
+    expect((await pool.query('SELECT continuum_coordination_contract_is_ready() AS ready')).rows)
+      .toEqual([{ ready: false }]);
   });
 
   it('backfills receipts as the non-superuser function owner with database TEMP revoked', async () => {

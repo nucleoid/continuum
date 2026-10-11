@@ -393,7 +393,13 @@ for dedicated operators. The exact role verifier deliberately rejects both
 missing coordination grants and broader manual grants.
 
 The 0081 repair rebuilds all receipt counters and extends remaining historical
-short receipts in durable, bounded keyset batches. Fresh coordination mutations
+receipt retention. It also advances a bounded `(scope_id,resource)` cursor to
+preserve each scope's maximum surviving resource generation, including renamed
+0055-era keys with no privacy progress. Each call processes at most 1,000 rows;
+floor writes, processed counts and the cursor commit together. Completion is
+gated on this phase as well as the usage, scope and receipt phases. No surviving
+resource scan is added to ordinary acquisition.
+Short receipts are extended in durable, bounded keyset batches. Fresh coordination mutations
 return `DEPENDENCY_UNAVAILABLE` while the repair is pending; retained authorized
 replays remain available. An interrupted repair resumes from its saved cursors,
 including after the migration file has been ledgered. Finish repair before
