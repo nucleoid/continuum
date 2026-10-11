@@ -174,7 +174,8 @@ async function roleUpgradeAcceptance(review?: 'poison' | 'null') {
     await expect(operator.query('UPDATE promotion_events SET destination_scope_name=destination_scope_name WHERE id=$1::uuid',
       [privatePromotion.promotionEvent.eventId])).rejects.toMatchObject({ code: '42501' });
     await expect(operator.query('SELECT continuum_operator_scrub_promotion_scope($1::uuid,$2::uuid,$3::uuid,1::integer)',
-      [target.id, target.id, personal.id])).rejects.toMatchObject({ code: '42501' });
+      [target.id, target.id, personal.id])).rejects.toMatchObject({ code: 'P0001',
+        message: expect.stringMatching(/DB-bound trusted approve identity|role-name\/OID-bound trusted approve identity/i) });
     if (review === 'poison') {
       await expect(app.query(`UPDATE promotion_event_deliveries SET state='privacy_cancelled',
         last_error='private poisoning payload',lease_owner='unstarted-poison',lease_expires_at=pg_catalog.clock_timestamp()+interval '1 minute'
