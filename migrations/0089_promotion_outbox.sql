@@ -191,7 +191,7 @@ DO $privacy_roles$
 DECLARE definition TEXT; revised TEXT; candidate RECORD; schema_name TEXT:=current_schema(); function_record RECORD;
 BEGIN
   FOR function_record IN SELECT proname,pg_catalog.pg_get_function_identity_arguments(oid) arguments FROM pg_catalog.pg_proc
-    WHERE pronamespace=pg_catalog.to_regnamespace(schema_name) AND proname=ANY(ARRAY[
+    WHERE pronamespace=(SELECT namespace.oid FROM pg_catalog.pg_namespace namespace WHERE namespace.nspname=schema_name) AND proname=ANY(ARRAY[
       'continuum_operator_scrub_promotion_scope','continuum_offboarding_lifecycle_state_is_erased',
       'continuum_offboarding_lifecycle_state_is_erased_pre_extensions','continuum_guard_promotion_privacy','continuum_guard_promotion_cancellation']) LOOP
     EXECUTE format('ALTER FUNCTION %I.%I(%s) SET search_path=pg_catalog,%I,pg_temp',schema_name,function_record.proname,function_record.arguments,schema_name);
