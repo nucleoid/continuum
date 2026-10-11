@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
@@ -15,12 +16,25 @@ async function applyGrantScript(
 ): Promise<void> {
   const source = await readFile(join(process.cwd(), 'scripts', filename), 'utf8');
   let sql = source.split(/\r?\n/).filter((line) => !line.trimStart().startsWith('\\')).join('\n')
-    .replaceAll(':"continuum_schema"', '"public"');
+    .replaceAll(':"continuum_schema"', '"public"')
+    .replaceAll(":'continuum_schema'", "'public'");
   for (const [name, value] of Object.entries(variables)) {
     sql = sql.replaceAll(':"' + name + '"', quoteRole(value));
     sql = sql.replaceAll(":'" + name + "'", "'" + value.replaceAll("'", "''") + "'");
   }
-  await pool.query(sql);
+  const client = await pool.connect();
+  let discard = false;
+  try {
+    await client.query(sql);
+  } catch (error) {
+    // A rejected psql script may leave BEGIN open or aborted. Clean up on
+    // the same connection before returning it to the shared fixture pool.
+    try { await client.query('ROLLBACK'); }
+    catch { discard = true; }
+    throw error;
+  } finally {
+    client.release(discard);
+  }
 }
 
 async function rolePool(pool: pg.Pool, role: string): Promise<pg.Pool> {
@@ -29,6 +43,21 @@ async function rolePool(pool: pg.Pool, role: string): Promise<pg.Pool> {
     max: 1,
     options: '-c role=' + role,
   });
+}
+
+async function loginRolePool(pool: pg.Pool, role: string): Promise<pg.Pool> {
+  expect((await pool.query(
+    'SELECT rolcanlogin FROM pg_roles WHERE rolname = $1', [role],
+  )).rows[0]?.rolcanlogin).toBe(true);
+  const password = randomUUID();
+  // Set only a password: an attacker or retired NOLOGIN role must not gain
+  // LOGIN merely because a fixture requests an authenticated connection.
+  await pool.query('ALTER ROLE ' + quoteRole(role) + " PASSWORD '" + password + "'");
+  const base = (pool as unknown as { options: PoolConfig }).options;
+  const directUrl = new URL(base.connectionString!);
+  directUrl.username = role;
+  directUrl.password = password;
+  return new pg.Pool({ connectionString: directUrl.toString(), ssl: base.ssl, max: 1 });
 }
 
 async function grantOwnerRetirementAuthority(pool: pg.Pool, role: string): Promise<void> {
@@ -378,7 +407,7 @@ describe('sync database identity rotation security', () => {
     await pool.query('DROP ROLE ' + quoteRole(role));
     await pool.query('CREATE ROLE ' + quoteRole(role) + ' LOGIN');
     await grantOwnerRetirementAuthority(pool, role);
-    const replacement = await rolePool(pool, role);
+    const replacement = await loginRolePool(pool, role);
     try {
       const binding = (await pool.query(
         'SELECT database_role_oid::oid AS oid FROM continuum_trusted_database_identities WHERE database_role = $1::name',
@@ -1425,7 +1454,7 @@ describe('sync database identity rotation security', () => {
     await applyGrantScript(pool, 'grant-sync-role.sql', {
       continuum_sync_role: oldRole, continuum_principal_id: fixture.service.id,
     });
-    const oldConnection = await rolePool(pool, oldRole);
+    const oldConnection = await loginRolePool(pool, oldRole);
     await pool.query('CREATE ROLE ' + quoteRole(newRole) + ' LOGIN');
     try {
       await expect(oldConnection.query('SELECT body FROM memories LIMIT 1'))
@@ -1435,7 +1464,7 @@ describe('sync database identity rotation security', () => {
         [fixture.admin.id, newRole, fixture.service.id],
       );
       await grantOwnerRetirementAuthority(pool, newRole);
-      const newConnection = await rolePool(pool, newRole);
+      const newConnection = await loginRolePool(pool, newRole);
       try {
         for (const connection of [oldConnection, newConnection]) {
           await expect(connection.query('SELECT body FROM public.memories LIMIT 1'))
@@ -1589,7 +1618,7 @@ describe('sync database identity rotation security', () => {
         WHERE database_role = $2::name`,
       [recordedRole, liveRole],
     );
-    const collidingRole = await rolePool(pool, liveRole);
+    const collidingRole = await loginRolePool(pool, liveRole);
     try {
       await expect(collidingRole.query(
         "SELECT continuum_require_trusted_database_identity($1, 'sync')",
@@ -1746,7 +1775,7 @@ describe('sync database identity rotation security', () => {
          (database_role_oid, database_role) VALUES ($1::oid, $2::name)`,
       [retiredOid, retired],
     );
-    const retiredConnection = await rolePool(pool, retired);
+    const retiredConnection = await loginRolePool(pool, retired);
     try {
       await expect(retiredConnection.query('SELECT body FROM public.memories LIMIT 1'))
         .resolves.toBeDefined();
