@@ -2644,117 +2644,113 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS exact_idx ON exact_table (id);
     ))).toBe(false);
   });
 
-  it('repairs the provider scan index when the original 0010 was already recorded', async () => {
+  async function embeddingMigrationPrefix(last: string): Promise<string> {
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-embedding-prefix-'));
+    directories.push(directory);
+    const source = new URL('../../migrations/', import.meta.url);
+    const files = (await readdir(source)).filter((name) => name.endsWith('.sql') && name <= last).sort();
+    await Promise.all(files.map((name) => copyFile(new URL(name, source), join(directory, name))));
+    return directory;
+  }
+
+  it('repairs the provider scan index after the canonical 0084 is recorded and retries a ledger crash', async () => {
     const schema = `migrator_embedding_scan_repair_${Date.now()}_${Math.random().toString(16).slice(2)}`;
     const admin = new pg.Pool({ connectionString: DATABASE_URL });
     pools.push(admin);
     await admin.query(`CREATE SCHEMA ${schema}`);
     const pool = schemaPool(schema);
-    const directory = await mkdtemp(join(tmpdir(), 'continuum-migrator-upgrade-'));
-    directories.push(directory);
-    const originalMigration = '0084_provider_embeddings_backfill.sql';
+    const before = await embeddingMigrationPrefix('0086_embedding_backfill_failure_disposition.sql');
+    const forward = await embeddingMigrationPrefix('0087_embedding_provider_scan_index.sql');
     const repairMigration = '0087_embedding_provider_scan_index.sql';
-    const repairSql = await readFile(
-      new URL(`../../migrations/${repairMigration}`, import.meta.url),
-      'utf8',
-    );
-    await writeFile(join(directory, originalMigration), 'SELECT 1;');
-    await writeFile(join(directory, repairMigration), repairSql);
-
     try {
-      await pool.query(`
-        CREATE TABLE memory_embeddings (
-          memory_id UUID NOT NULL,
-          provider TEXT NOT NULL,
-          dim INT NOT NULL,
-          PRIMARY KEY (memory_id, provider, dim)
-        );
-        CREATE TABLE _continuum_migrations (
-          name TEXT PRIMARY KEY,
-          applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-        );
-        INSERT INTO _continuum_migrations (name) VALUES ('${originalMigration}');
-      `);
-
-      const applied = await runMigrations(pool, directory);
-      expect(applied.map(({ name }) => name)).toEqual([repairMigration]);
-      const indexes = await pool.query<{ indexname: string; indexdef: string }>(`
-        SELECT indexname, indexdef
-          FROM pg_indexes
-         WHERE schemaname = current_schema()
-           AND tablename = 'memory_embeddings'
-           AND indexname = 'memory_embeddings_provider_dim_memory_idx'
-      `);
-      expect(indexes.rows).toHaveLength(1);
-      expect(indexes.rows[0].indexdef).toMatch(/\(provider, dim, memory_id\)$/i);
-      await expect(runMigrations(pool, directory)).resolves.toHaveLength(0);
-
-      // Simulate a crash after the retry-safe DDL but before its ledger write.
-      await pool.query('DELETE FROM _continuum_migrations WHERE name = $1', [repairMigration]);
-      await expect(runMigrations(pool, directory)).resolves.toHaveLength(1);
-      expect((await pool.query(`
-        SELECT count(*)::int AS count
-          FROM pg_indexes
-         WHERE schemaname = current_schema()
-           AND indexname = 'memory_embeddings_provider_dim_memory_idx'
-      `)).rows[0].count).toBe(1);
+      await runMigrations(pool, before);
+      expect((await pool.query('SELECT name FROM _continuum_migrations WHERE name=$1',
+        ['0084_provider_embeddings_backfill.sql'])).rows).toHaveLength(1);
+      expect((await pool.query("SELECT pg_catalog.to_regclass('memory_embeddings_provider_dim_memory_idx') AS index")).rows)
+        .toEqual([{ index: null }]);
+      let interrupted = false;
+      const failingPool = { connect: async () => {
+        const client = await pool.connect();
+        return new Proxy(client, { get(target, key) {
+          if (key === 'query') return async (...args: unknown[]) => {
+            if (!interrupted && typeof args[0] === 'string'
+              && args[0].includes('INSERT INTO _continuum_migrations (name)')
+              && (args[1] as unknown[] | undefined)?.[0] === repairMigration) {
+              interrupted = true;
+              throw new Error('injected failure before canonical scan-index ledger write');
+            }
+            return Reflect.apply(target.query, target, args);
+          };
+          const member = Reflect.get(target, key);
+          return typeof member === 'function' ? member.bind(target) : member;
+        } });
+      } } as unknown as pg.Pool;
+      await expect(runMigrations(failingPool, forward)).rejects.toThrow(/injected failure/);
+      expect(interrupted).toBe(true);
+      expect((await pool.query('SELECT name FROM _continuum_migrations WHERE name=$1', [repairMigration])).rows)
+        .toHaveLength(0);
+      const index = await pool.query(`SELECT indisvalid, pg_catalog.pg_get_indexdef(indexrelid) AS definition
+        FROM pg_catalog.pg_index WHERE indexrelid='memory_embeddings_provider_dim_memory_idx'::regclass`);
+      expect(index.rows).toEqual([{ indisvalid: true, definition: expect.stringMatching(/\(provider, dim, memory_id\)$/i) }]);
+      const oid = (await pool.query("SELECT 'memory_embeddings_provider_dim_memory_idx'::regclass::oid AS oid")).rows[0].oid;
+      expect((await runMigrations(pool, forward)).map(({ name }) => name)).toEqual([repairMigration]);
+      await expect(runMigrations(pool, forward)).resolves.toHaveLength(0);
+      expect((await pool.query("SELECT 'memory_embeddings_provider_dim_memory_idx'::regclass::oid AS oid")).rows[0].oid).toBe(oid);
     } finally {
       await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
     }
-  });
+  }, 180_000);
 
-  it('rebuilds a same-named invalid provider scan index before recording the repair', async () => {
+  it('rebuilds an interrupted matching provider scan index after the complete canonical 0087 chain', async () => {
     const schema = `migrator_embedding_invalid_repair_${Date.now()}_${Math.random().toString(16).slice(2)}`;
     const admin = new pg.Pool({ connectionString: DATABASE_URL });
     pools.push(admin);
     await admin.query(`CREATE SCHEMA ${schema}`);
     const pool = schemaPool(schema);
-    const directory = await mkdtemp(join(tmpdir(), 'continuum-migrator-invalid-index-'));
-    directories.push(directory);
-    const repairMigration = '0088_embedding_provider_scan_index_rebuild.sql';
-    const repairSql = await readFile(
-      new URL(`../../migrations/${repairMigration}`, import.meta.url),
-      'utf8',
-    );
-    await writeFile(join(directory, repairMigration), repairSql);
-
+    const before = await embeddingMigrationPrefix('0087_embedding_provider_scan_index.sql');
+    const forward = await embeddingMigrationPrefix('0088_embedding_provider_scan_index_rebuild.sql');
+    const blocker = schemaPool(schema);
+    const builder = schemaPool(schema);
+    let build: Promise<unknown> | undefined;
+    let builderPid: number | undefined;
     try {
-      await pool.query(`
-        CREATE TABLE memory_embeddings (
-          memory_id UUID NOT NULL,
-          provider TEXT NOT NULL,
-          dim INT NOT NULL,
-          PRIMARY KEY (memory_id, provider, dim)
-        );
-        INSERT INTO memory_embeddings (memory_id, provider, dim) VALUES
-          ('00000000-0000-0000-0000-000000000001', 'provider:test', 768),
-          ('00000000-0000-0000-0000-000000000002', 'provider:test', 768);
-      `);
-      await expect(pool.query(`
-        CREATE UNIQUE INDEX CONCURRENTLY memory_embeddings_provider_dim_memory_idx
-          ON memory_embeddings (provider, dim)
-      `)).rejects.toThrow();
-      expect((await pool.query<{ indisvalid: boolean }>(`
-        SELECT indisvalid
-          FROM pg_index
-         WHERE indexrelid = 'memory_embeddings_provider_dim_memory_idx'::regclass
-      `)).rows).toEqual([{ indisvalid: false }]);
-
-      const applied = await runMigrations(pool, directory);
-      expect(applied.map(({ name }) => name)).toEqual([repairMigration]);
-      expect((await pool.query<{ indisvalid: boolean; indexdef: string }>(`
-        SELECT i.indisvalid, pg_get_indexdef(i.indexrelid) AS indexdef
-          FROM pg_index i
-         WHERE i.indexrelid = 'memory_embeddings_provider_dim_memory_idx'::regclass
-      `)).rows).toEqual([{
-        indisvalid: true,
-        indexdef: expect.stringMatching(/\(provider, dim, memory_id\)$/i),
-      }]);
-      await expect(runMigrations(pool, directory)).resolves.toHaveLength(0);
+      await runMigrations(pool, before);
+      await pool.query('DROP INDEX memory_embeddings_provider_dim_memory_idx');
+      await blocker.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
+      await blocker.query('SELECT count(*) FROM memory_embeddings');
+      builderPid = (await builder.query('SELECT pg_catalog.pg_backend_pid() AS pid')).rows[0].pid;
+      await builder.query("SET statement_timeout='10s'");
+      build = builder.query('CREATE INDEX CONCURRENTLY memory_embeddings_provider_dim_memory_idx ON memory_embeddings(provider,dim,memory_id)');
+      const outcome = build.then(() => undefined, (error: unknown) => error);
+      const deadline = Date.now() + 5_000;
+      let waiting = false;
+      while (Date.now() < deadline) {
+        waiting = (await pool.query(`SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_index index
+          JOIN pg_catalog.pg_stat_activity activity ON activity.pid=$1::integer
+          WHERE index.indexrelid=pg_catalog.to_regclass('memory_embeddings_provider_dim_memory_idx')
+            AND NOT index.indisvalid AND activity.wait_event_type='Lock') AS waiting`, [builderPid])).rows[0].waiting;
+        if (waiting) break;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(waiting).toBe(true);
+      await pool.query('SELECT pg_catalog.pg_cancel_backend($1::integer)', [builderPid]);
+      expect(await outcome).toMatchObject({ code: '57014' });
+      await blocker.query('ROLLBACK');
+      expect((await pool.query(`SELECT indisvalid FROM pg_catalog.pg_index
+        WHERE indexrelid='memory_embeddings_provider_dim_memory_idx'::regclass`)).rows).toEqual([{ indisvalid: false }]);
+      expect((await runMigrations(pool, forward)).map(({ name }) => name))
+        .toEqual(['0088_embedding_provider_scan_index_rebuild.sql']);
+      expect((await pool.query(`SELECT indisvalid, pg_catalog.pg_get_indexdef(indexrelid) AS definition
+        FROM pg_catalog.pg_index WHERE indexrelid='memory_embeddings_provider_dim_memory_idx'::regclass`)).rows)
+        .toEqual([{ indisvalid: true, definition: expect.stringMatching(/\(provider, dim, memory_id\)$/i) }]);
+      await expect(runMigrations(pool, forward)).resolves.toHaveLength(0);
     } finally {
+      if (builderPid !== undefined) await pool.query('SELECT pg_catalog.pg_cancel_backend($1::integer)', [builderPid]);
+      await blocker.query('ROLLBACK');
+      await build?.catch(() => undefined);
       await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
     }
-  });
+  }, 180_000);
 
   it('rolls back an embedded transaction before unlocking after no-transaction DDL fails', async () => {
     const queries: string[] = [];
