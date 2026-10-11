@@ -2666,7 +2666,8 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS exact_idx ON exact_table (id);
       await runMigrations(pool, before);
       expect((await pool.query('SELECT name FROM _continuum_migrations WHERE name=$1',
         ['0084_provider_embeddings_backfill.sql'])).rows).toHaveLength(1);
-      expect((await pool.query("SELECT pg_catalog.to_regclass('memory_embeddings_provider_dim_memory_idx') AS index")).rows)
+      expect((await pool.query("SELECT pg_catalog.to_regclass($1::text) AS index",
+        [`${schema}.memory_embeddings_provider_dim_memory_idx`])).rows)
         .toEqual([{ index: null }]);
       let interrupted = false;
       const failingPool = { connect: async () => {
