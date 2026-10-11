@@ -209,7 +209,15 @@ describe('operator boundary database errors', () => {
   ])('does not map unrelated %s errors to FORBIDDEN', async (_label, failure) => {
     for (const path of paths) {
       const { pool, guardedCalls } = guardedPool(path.guardedCall, failure);
-      await expect(path.invoke(pool), path.name).rejects.toBe(failure);
+      if (failure.code === '57014' && (
+        path.name === 'owned-scope offboarding administration' || path.name === 'principal offboarding'
+      )) {
+        await expect(path.invoke(pool), path.name).rejects.toMatchObject({
+          code: 'COORDINATION_TIMEOUT', status: 503,
+        });
+      } else {
+        await expect(path.invoke(pool), path.name).rejects.toBe(failure);
+      }
       expect(guardedCalls(), path.name).toBe(1);
     }
   });

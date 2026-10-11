@@ -68,6 +68,12 @@ async function grantOwnerRetirementAuthority(pool: pg.Pool, role: string): Promi
 }
 
 async function dropRoles(pool: pg.Pool, roles: string[]): Promise<void> {
+  for (const role of roles) {
+    await pool.query(
+      `DELETE FROM continuum_pgvector_role_profiles
+        WHERE database_role_oid = (SELECT oid FROM pg_roles WHERE rolname = $1)`, [role],
+    );
+  }
   for (const role of roles) await pool.query('DROP OWNED BY ' + quoteRole(role));
   for (const role of roles) await pool.query('REVOKE ' + quoteRole(role) + ' FROM CURRENT_USER');
   for (const role of [...roles].reverse()) await pool.query('DROP ROLE ' + quoteRole(role));
