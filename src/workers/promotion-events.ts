@@ -504,12 +504,13 @@ export class PromotionEventWorker implements RuntimeWorker {
       const outcome = await Promise.race([callback, timeout, shutdown]);
       if (timer) clearTimeout(timer);
 
-      const timeoutDisposition = Promise.withResolvers<boolean>();
+      let resolveTimeoutDisposition!: (committed: boolean) => void;
+      const timeoutDisposition = new Promise<boolean>((resolve) => { resolveTimeoutDisposition = resolve; });
       if (outcome === 'timeout') {
         controller.abort();
         this.retainLease(delivery);
         lateFollower = true;
-        this.followLateCallback(delivery, controller, callback, 'timeout', timeoutDisposition.promise);
+        this.followLateCallback(delivery, controller, callback, 'timeout', timeoutDisposition);
       }
 
       if (outcome === 'success') {
@@ -534,9 +535,9 @@ export class PromotionEventWorker implements RuntimeWorker {
               leaseGeneration: delivery.leaseGeneration,
             },
           ));
-          timeoutDisposition.resolve(true);
+          resolveTimeoutDisposition(true);
         } catch (error) {
-          timeoutDisposition.resolve(false);
+          resolveTimeoutDisposition(false);
           // Uncertainty does not prove loss. The exact owner/attempt/generation
           // recheck can safely renew while an abort-ignoring callback is unsettled.
           this.abortForOwnershipUncertainty(controller);
