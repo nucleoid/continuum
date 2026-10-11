@@ -34,12 +34,20 @@ RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER AS $$
 BEGIN
   IF NOT EXISTS(SELECT 1 FROM coordination_contract_backfill_state WHERE singleton AND phase = 'complete')
     AND NOT (COALESCE(current_setting('continuum.coordination_contract_repair', TRUE), '') = 'on'
-      AND continuum_invoking_database_role()::regrole = (SELECT relowner FROM pg_class WHERE oid = 'coordination_contract_backfill_state'::regclass)) THEN
-    RAISE object_not_in_prerequisite_state USING MESSAGE = 'coordination contract repair is incomplete';
+      AND (SELECT oid FROM pg_roles WHERE rolname=continuum_invoking_database_role()) =
+        (SELECT relowner FROM pg_class WHERE oid = 'coordination_contract_backfill_state'::regclass)) THEN
+    RAISE object_not_in_prerequisite_state USING MESSAGE = 'coordination contract repair is incomplete',
+      CONSTRAINT = 'coordination_contract_pending';
   END IF;
 END;
 $$;
 REVOKE ALL ON FUNCTION continuum_coordination_require_contract_ready() FROM PUBLIC;
+
+CREATE FUNCTION continuum_coordination_contract_is_ready()
+RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER AS $$
+  SELECT EXISTS(SELECT 1 FROM coordination_contract_backfill_state WHERE singleton AND phase='complete')
+$$;
+REVOKE ALL ON FUNCTION continuum_coordination_contract_is_ready() FROM PUBLIC;
 
 CREATE OR REPLACE FUNCTION continuum_coordination_compatibility_guard()
 RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
@@ -149,53 +157,78 @@ BEGIN
   IF progress.phase = 'complete' THEN RETURN TRUE; END IF;
   PERFORM set_config('continuum.coordination_contract_repair', 'on', TRUE);
   IF progress.phase = 'usage' THEN
-    WITH candidates AS MATERIALIZED (
+    EXECUTE $usage$ WITH candidates AS MATERIALIZED (
       SELECT principal_id FROM coordination_principal_usage
-      WHERE progress.principal_cursor IS NULL OR principal_id > progress.principal_cursor ORDER BY principal_id LIMIT batch_limit
+      WHERE principal_id >= COALESCE($1,'00000000-0000-0000-0000-000000000000'::uuid)
+        AND ($1 IS NULL OR principal_id>$1) ORDER BY principal_id LIMIT $2
     ), updated AS (
       UPDATE coordination_principal_usage usage SET acquire_receipt_count = 0, contended_receipt_count = 0,
         mutation_receipt_count = 0, acquire_receipt_limit = LEAST(acquire_receipt_limit,10000),
         contended_receipt_limit = LEAST(contended_receipt_limit,10000)
       FROM candidates WHERE usage.principal_id = candidates.principal_id RETURNING usage.principal_id
-    ) SELECT count(*)::int, (array_agg(principal_id ORDER BY principal_id DESC))[1] INTO selected_count,next_id FROM updated;
+    ) SELECT count(*)::int, (array_agg(principal_id ORDER BY principal_id DESC))[1] FROM updated
+    $usage$ INTO selected_count,next_id USING progress.principal_cursor,batch_limit;
     UPDATE coordination_contract_backfill_state SET principal_cursor = COALESCE(next_id,principal_cursor),
       phase = CASE WHEN selected_count < batch_limit THEN 'scopes' ELSE phase END WHERE singleton;
   ELSIF progress.phase = 'scopes' THEN
-    WITH candidates AS MATERIALIZED (
-      SELECT scope_id FROM coordination_scope_usage WHERE progress.scope_cursor IS NULL OR scope_id > progress.scope_cursor ORDER BY scope_id LIMIT batch_limit
+    EXECUTE $scopes$ WITH candidates AS MATERIALIZED (
+      SELECT scope_id FROM coordination_scope_usage
+      WHERE scope_id >= COALESCE($1,'00000000-0000-0000-0000-000000000000'::uuid)
+        AND ($1 IS NULL OR scope_id>$1) ORDER BY scope_id LIMIT $2
     ), reopened AS (
       UPDATE coordination_scope_privacy_progress privacy SET phase='receipts',completed_at=NULL,updated_at=clock_timestamp()
       FROM candidates WHERE privacy.scope_id=candidates.scope_id AND privacy.phase='complete'
         AND EXISTS(SELECT 1 FROM coordination_resources resource WHERE resource.scope_id=privacy.scope_id)
       RETURNING privacy.scope_id
+    ), pending AS (
+      INSERT INTO coordination_principal_privacy_progress(principal_id,detached_principal_id,privacy_version,completed_at)
+      SELECT mapping.principal_id,'00000000-0000-4000-8000-000000000012'::uuid,3,NULL
+      FROM reopened JOIN principal_user_scopes mapping ON mapping.scope_id=reopened.scope_id
+      JOIN principals principal ON principal.id=mapping.principal_id AND principal.disabled_at IS NOT NULL
+      ON CONFLICT(principal_id) DO UPDATE SET completed_at=NULL,updated_at=clock_timestamp()
+      RETURNING principal_id
+    ), marked AS (
+      INSERT INTO coordination_privacy_dirty_principals(principal_id)
+      SELECT principal_id FROM pending ON CONFLICT(principal_id) DO UPDATE SET dirty_at=clock_timestamp()
     ), updated AS (
       UPDATE coordination_scope_usage usage SET resource_limit = LEAST(resource_limit,10000)
       FROM candidates WHERE usage.scope_id = candidates.scope_id RETURNING usage.scope_id
-    ) SELECT count(*)::int, (array_agg(scope_id ORDER BY scope_id DESC))[1] INTO selected_count,next_id FROM updated;
+    ) SELECT count(*)::int, (array_agg(scope_id ORDER BY scope_id DESC))[1] FROM updated
+    $scopes$ INTO selected_count,next_id USING progress.scope_cursor,batch_limit;
     UPDATE coordination_contract_backfill_state SET scope_cursor = COALESCE(next_id,scope_cursor),
       phase = CASE WHEN selected_count < batch_limit THEN 'receipts' ELSE phase END WHERE singleton;
   ELSE
-    CREATE TEMP TABLE IF NOT EXISTS coordination_contract_batch(principal_id UUID,operation TEXT,request_id UUID,outcome TEXT,
-      PRIMARY KEY(principal_id,operation,request_id)) ON COMMIT DELETE ROWS;
-    TRUNCATE coordination_contract_batch;
-    INSERT INTO coordination_contract_batch SELECT principal_id,operation,request_id,outcome FROM coordination_operation_receipts
-      WHERE progress.receipt_principal_cursor IS NULL OR (principal_id,operation,request_id) >
-        (progress.receipt_principal_cursor,progress.receipt_operation_cursor,progress.receipt_request_cursor)
-      ORDER BY principal_id,operation,request_id LIMIT batch_limit;
-    GET DIAGNOSTICS selected_count = ROW_COUNT;
-    UPDATE coordination_operation_receipts receipt SET retain_until = GREATEST(receipt.retain_until,receipt.server_time + interval '24 hours')
-      FROM coordination_contract_batch batch WHERE (receipt.principal_id,receipt.operation,receipt.request_id) = (batch.principal_id,batch.operation,batch.request_id);
-    FOR item IN SELECT principal_id,
+    EXECUTE $receipts$ WITH batch AS MATERIALIZED (
+      SELECT principal_id,operation,request_id,outcome FROM coordination_operation_receipts
+      WHERE (principal_id,operation,request_id) >=
+        (COALESCE($1,'00000000-0000-0000-0000-000000000000'::uuid),COALESCE($2,''),
+         COALESCE($3,'00000000-0000-0000-0000-000000000000'::uuid))
+        AND ($1 IS NULL OR (principal_id,operation,request_id)>($1,$2,$3))
+      ORDER BY principal_id,operation,request_id LIMIT $4
+    ), retained AS (
+      UPDATE coordination_operation_receipts receipt SET retain_until=GREATEST(receipt.retain_until,receipt.server_time+interval '24 hours')
+      FROM batch WHERE (receipt.principal_id,receipt.operation,receipt.request_id)=(batch.principal_id,batch.operation,batch.request_id)
+      RETURNING receipt.principal_id
+    ), counts AS (
+      SELECT principal_id,
       count(*) FILTER(WHERE operation='acquire' AND outcome='acquired')::int acquired,
       count(*) FILTER(WHERE outcome='contended')::int contended,
       count(*) FILTER(WHERE operation IN ('renew','release'))::int mutation
-      FROM coordination_contract_batch GROUP BY principal_id ORDER BY principal_id LOOP
-      INSERT INTO coordination_principal_usage(principal_id) VALUES(item.principal_id) ON CONFLICT DO NOTHING;
-      UPDATE coordination_principal_usage SET acquire_receipt_count=acquire_receipt_count+item.acquired,
-        contended_receipt_count=contended_receipt_count+item.contended,mutation_receipt_count=mutation_receipt_count+item.mutation
-      WHERE principal_id=item.principal_id;
-    END LOOP;
-    SELECT principal_id,operation,request_id INTO item FROM coordination_contract_batch ORDER BY principal_id DESC,operation DESC,request_id DESC LIMIT 1;
+      FROM batch GROUP BY principal_id
+    ), counted AS (
+      INSERT INTO coordination_principal_usage(principal_id,acquire_receipt_count,contended_receipt_count,mutation_receipt_count)
+      SELECT principal_id,acquired,contended,mutation FROM counts ORDER BY principal_id
+      ON CONFLICT(principal_id) DO UPDATE SET
+        acquire_receipt_count=coordination_principal_usage.acquire_receipt_count+EXCLUDED.acquire_receipt_count,
+        contended_receipt_count=coordination_principal_usage.contended_receipt_count+EXCLUDED.contended_receipt_count,
+        mutation_receipt_count=coordination_principal_usage.mutation_receipt_count+EXCLUDED.mutation_receipt_count
+    ) SELECT count(*)::int AS selected_count,
+      (array_agg(principal_id ORDER BY principal_id DESC,operation DESC,request_id DESC))[1] AS principal_id,
+      (array_agg(operation ORDER BY principal_id DESC,operation DESC,request_id DESC))[1] AS operation,
+      (array_agg(request_id ORDER BY principal_id DESC,operation DESC,request_id DESC))[1] AS request_id FROM batch
+    $receipts$ INTO item USING progress.receipt_principal_cursor,progress.receipt_operation_cursor,
+      progress.receipt_request_cursor,batch_limit;
+    selected_count:=item.selected_count;
     UPDATE coordination_contract_backfill_state SET
       receipt_principal_cursor = COALESCE(item.principal_id,receipt_principal_cursor),
       receipt_operation_cursor = COALESCE(item.operation,receipt_operation_cursor),
@@ -215,40 +248,98 @@ LANGUAGE plpgsql STABLE SECURITY DEFINER AS $$
 BEGIN
   PERFORM continuum_require_trusted_database_identity(authorization_principal_id,'approve');
   IF row_limit NOT BETWEEN 1 AND 1000 THEN RAISE EXCEPTION 'coordination privacy repair page limit must be between 1 and 1000'; END IF;
-  RETURN QUERY WITH eligible AS MATERIALIZED (
+  RETURN QUERY EXECUTE $page$ WITH eligible AS MATERIALIZED (
     SELECT progress.principal_id FROM coordination_principal_privacy_progress progress
     WHERE progress.repair_eligible IS TRUE AND (progress.privacy_version < 3 OR progress.completed_at IS NULL)
-      AND (after_principal_id IS NULL OR progress.principal_id > after_principal_id)
-    ORDER BY progress.principal_id LIMIT row_limit+1
+      AND progress.principal_id>=COALESCE($1,'00000000-0000-0000-0000-000000000000'::uuid)
+      AND ($1 IS NULL OR progress.principal_id>$1)
+    ORDER BY progress.principal_id LIMIT $2+1
   ), legacy AS MATERIALIZED (
     SELECT progress.principal_id FROM coordination_principal_privacy_progress progress
     WHERE progress.repair_eligible IS NOT TRUE AND (progress.privacy_version < 3 OR progress.completed_at IS NULL)
-      AND (after_principal_id IS NULL OR progress.principal_id > after_principal_id)
-    ORDER BY progress.principal_id LIMIT row_limit+1
+      AND progress.principal_id>=COALESCE($1,'00000000-0000-0000-0000-000000000000'::uuid)
+      AND ($1 IS NULL OR progress.principal_id>$1)
+    ORDER BY progress.principal_id LIMIT $2+1
   ), dirty AS MATERIALIZED (
     SELECT marker.principal_id FROM coordination_privacy_dirty_principals marker
-    WHERE after_principal_id IS NULL OR marker.principal_id > after_principal_id
-    ORDER BY marker.principal_id LIMIT row_limit+1
+    WHERE marker.principal_id>=COALESCE($1,'00000000-0000-0000-0000-000000000000'::uuid)
+      AND ($1 IS NULL OR marker.principal_id>$1)
+    ORDER BY marker.principal_id LIMIT $2+1
   ), raw AS MATERIALIZED (
     SELECT principal_id FROM eligible UNION SELECT principal_id FROM legacy UNION SELECT principal_id FROM dirty
   ), lookahead AS MATERIALIZED (
-    SELECT principal_id FROM raw ORDER BY principal_id LIMIT row_limit+1
+    SELECT principal_id FROM raw ORDER BY principal_id LIMIT $2+1
   ), consumed AS MATERIALIZED (
-    SELECT principal_id FROM lookahead ORDER BY principal_id LIMIT row_limit
+    SELECT principal_id FROM lookahead ORDER BY principal_id LIMIT $2
   ), filtered AS MATERIALIZED (
     SELECT principal.id AS principal_id,mapping.scope_id,
       CASE WHEN principal.offboarded_at IS NOT NULL THEN 'offboarded' ELSE 'disabled_only' END AS repair_state
     FROM consumed JOIN principals principal ON principal.id=consumed.principal_id AND principal.disabled_at IS NOT NULL
     JOIN principal_user_scopes mapping ON mapping.principal_id=principal.id
   ), page AS (
-    SELECT count(*) > row_limit AS more FROM lookahead
+    SELECT count(*) > $2 AS more FROM lookahead
   ) SELECT COALESCE((SELECT jsonb_agg(jsonb_build_object('principal_id',filtered.principal_id,
       'scope_id',filtered.scope_id,'repair_state',filtered.repair_state) ORDER BY filtered.principal_id) FROM filtered),'[]'::jsonb),
     CASE WHEN page.more THEN (SELECT principal_id FROM consumed ORDER BY principal_id DESC LIMIT 1) END,
-    page.more,(SELECT count(*)::int FROM consumed) FROM page;
+    page.more,(SELECT count(*)::int FROM consumed) FROM page
+    $page$ USING after_principal_id,row_limit;
 END;
 $$;
 REVOKE ALL ON FUNCTION continuum_operator_list_coordination_privacy_repair_page(UUID,UUID,INTEGER) FROM PUBLIC;
+
+-- A completed shared scrub must not hide an incomplete owned-scope repair.
+DO $owned_dirty$
+DECLARE definition TEXT; revised TEXT;
+BEGIN
+  definition:=pg_get_functiondef('continuum_refresh_coordination_privacy_dirty(uuid)'::regprocedure);
+  revised:=replace(definition,
+    '    IF EXISTS (' || chr(10) || '      SELECT 1 FROM audit_log audit',
+    '    IF EXISTS (SELECT 1 FROM coordination_scope_privacy_progress owned ' ||
+    'WHERE owned.scope_id=owned_scope_id AND (owned.phase<>''complete'' OR owned.completed_at IS NULL)) OR EXISTS (' ||
+      chr(10) || '      SELECT 1 FROM audit_log audit');
+  IF revised=definition THEN RAISE EXCEPTION 'unable to include owned scope privacy in dirty discovery'; END IF;
+  EXECUTE revised;
+END;
+$owned_dirty$;
+
+CREATE FUNCTION continuum_operator_coordination_scope_privacy_state(
+  authorization_principal_id UUID,target_scope_id UUID
+) RETURNS TABLE(repair_exists BOOLEAN,phase TEXT,pseudonym TEXT,rows_processed BIGINT,
+  scope_complete BOOLEAN,resources_remain BOOLEAN,receipts_remain BOOLEAN,
+  leases_remain BOOLEAN,live_lease_until TIMESTAMPTZ)
+LANGUAGE plpgsql STABLE SECURITY DEFINER AS $$
+BEGIN
+  PERFORM continuum_require_trusted_database_identity(authorization_principal_id,'approve');
+  IF NOT EXISTS(SELECT 1 FROM principals actor JOIN scope_memberships membership ON membership.principal_id=actor.id
+    WHERE actor.id=authorization_principal_id AND actor.disabled_at IS NULL
+      AND membership.scope_id=continuum_org_scope_id() AND membership.active AND membership.role='admin'
+      AND membership.source_kind='manual' AND membership.source_id='manual') THEN
+    RAISE insufficient_privilege USING MESSAGE='scope privacy state requires a current manual org administrator';
+  END IF;
+  IF NOT EXISTS(SELECT 1 FROM principal_user_scopes mapping
+    JOIN principals principal ON principal.id=mapping.principal_id AND principal.disabled_at IS NOT NULL AND principal.kind='user'
+    JOIN scopes scope ON scope.id=mapping.scope_id AND scope.kind='user'
+    WHERE mapping.scope_id=target_scope_id AND EXISTS(
+      SELECT 1 FROM principal_user_scope_approvals approval WHERE approval.principal_id=mapping.principal_id
+        AND approval.scope_id=mapping.scope_id AND approval.acknowledged_evidence_hash=mapping.acknowledged_evidence_hash
+        AND approval.acknowledged_principal_ids=mapping.acknowledged_principal_ids)) THEN
+    RAISE insufficient_privilege USING MESSAGE='scope privacy state requires an approved disabled user mapping';
+  END IF;
+  RETURN QUERY WITH physical AS (
+    SELECT EXISTS(SELECT 1 FROM coordination_resources resource WHERE resource.scope_id=target_scope_id) AS resources,
+      EXISTS(SELECT 1 FROM coordination_operation_receipts receipt WHERE receipt.scope_id=target_scope_id) AS receipts,
+      EXISTS(SELECT 1 FROM coordination_leases lease WHERE lease.scope_id=target_scope_id) AS leases
+  ) SELECT progress.scope_id IS NOT NULL,progress.phase,progress.pseudonym,COALESCE(progress.rows_processed,0),
+    NOT physical.resources AND NOT physical.receipts AND NOT physical.leases
+      AND (progress.scope_id IS NULL OR (progress.phase='complete' AND progress.completed_at IS NOT NULL)),
+    physical.resources,physical.receipts,physical.leases,
+    (SELECT lease.expires_at FROM coordination_resources resource JOIN coordination_leases lease ON lease.lease_id=resource.current_lease_id
+      WHERE resource.scope_id=target_scope_id AND lease.released_at IS NULL AND lease.expires_at>clock_timestamp()
+      ORDER BY resource.resource COLLATE "C" LIMIT 1)
+    FROM physical LEFT JOIN coordination_scope_privacy_progress progress ON progress.scope_id=target_scope_id;
+END;
+$$;
+REVOKE ALL ON FUNCTION continuum_operator_coordination_scope_privacy_state(UUID,UUID) FROM PUBLIC;
 
 CREATE OR REPLACE FUNCTION continuum_coordination_resource_counter()
 RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
@@ -339,13 +430,15 @@ BEGIN
     '        (''continuum_coordination_lock_entra_freshness()'')',
     '        (''continuum_coordination_lock_entra_freshness()''),' || chr(10) ||
     '        (''continuum_coordination_lock_principal_usage(uuid)''),' || chr(10) ||
-    '        (''continuum_coordination_cleanup_expired_receipts(uuid)'')');
+    '        (''continuum_coordination_cleanup_expired_receipts(uuid)''),' || chr(10) ||
+    '        (''continuum_coordination_contract_is_ready()'')');
   IF revised = definition THEN RAISE EXCEPTION 'unable to extend coordination quota lock allow-list'; END IF;
   definition := revised;
   revised := replace(definition,
     '        (''continuum_operator_list_coordination_privacy_repairs(uuid,uuid,uuid,integer)''),',
     '        (''continuum_operator_list_coordination_privacy_repairs(uuid,uuid,uuid,integer)''),' || chr(10) ||
-    '        (''continuum_operator_list_coordination_privacy_repair_page(uuid,uuid,integer)''),');
+    '        (''continuum_operator_list_coordination_privacy_repair_page(uuid,uuid,integer)''),' || chr(10) ||
+    '        (''continuum_operator_coordination_scope_privacy_state(uuid,uuid)''),');
   IF revised = definition THEN RAISE EXCEPTION 'unable to extend coordination repair page allow-list'; END IF;
   EXECUTE revised;
 END;
@@ -461,7 +554,8 @@ BEGIN
     JOIN coordination_leases lease ON lease.lease_id = resource.current_lease_id
      WHERE resource.scope_id = target_scope_id
        AND lease.released_at IS NULL AND lease.expires_at > clock_timestamp()
-  ) THEN RAISE EXCEPTION 'scope has live coordination leases'; END IF;
+  ) THEN RAISE check_violation USING MESSAGE='scope has live coordination leases',
+    CONSTRAINT='coordination_scope_live_lease'; END IF;
 
   INSERT INTO coordination_scope_privacy_progress (scope_id, pseudonym)
   VALUES (target_scope_id, pseudonym)
@@ -654,12 +748,12 @@ BEGIN
   FOR function_record IN SELECT function.proname,pg_get_function_identity_arguments(function.oid) arguments
     FROM pg_proc function WHERE function.pronamespace=quote_ident(current_schema())::regnamespace
       AND function.proname=ANY(ARRAY[
-        'continuum_coordination_require_contract_ready','continuum_coordination_compatibility_guard',
+        'continuum_coordination_require_contract_ready','continuum_coordination_contract_is_ready','continuum_coordination_compatibility_guard',
         'continuum_coordination_lock_principal_usage','continuum_coordination_cleanup_expired_receipts','continuum_coordination_receipt_counter',
         'continuum_coordination_receipt_reassign_counter','continuum_backfill_coordination_contract',
         'continuum_coordination_resource_counter','continuum_operator_set_coordination_scope_quota',
         'continuum_operator_set_coordination_principal_quota','continuum_operator_reclaim_coordination_resource',
-        'continuum_operator_list_coordination_privacy_repair_page','continuum_operator_pseudonymize_scope_v2_legacy',
+        'continuum_operator_list_coordination_privacy_repair_page','continuum_operator_coordination_scope_privacy_state','continuum_operator_pseudonymize_scope_v2_legacy',
         'continuum_operator_scrub_coordination_principal_v3'
       ]) LOOP
     EXECUTE format('ALTER FUNCTION %I.%I(%s) SET search_path=pg_catalog,%I,pg_temp',schema_name,function_record.proname,function_record.arguments,schema_name);
