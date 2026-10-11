@@ -95,8 +95,8 @@ async function smokeMcpValidation() {
   process.stdout.write('MCP compiled entrypoint reached principal validation\n');
 }
 
-async function runToExit(relativePath, env) {
-  const child = spawnEntrypoint(relativePath, env);
+async function runToExit(relativePath, env, args = []) {
+  const child = spawnEntrypoint(relativePath, env, args);
   const output = captureOutput(child);
   let timeout;
   try {
@@ -145,13 +145,10 @@ async function smokeWindowsAuditExportRejection() {
 async function smokeTagCliValidation() {
   const env = { ...process.env };
   delete env.CONTINUUM_BEARER;
-  const child = spawnEntrypoint('dist/cli/tag-vocabularies.js', env, ['list', 'project']);
-  const output = captureOutput(child);
-  child.stdin?.end();
-  const [code] = await once(child, 'exit');
-  if (code === 0 || !output.stderr.includes('CONTINUUM_BEARER is required')) {
+  const result = await runToExit('dist/cli/tag-vocabularies.js', env, ['list', 'project']);
+  if (result.code === 0 || !result.stderr.includes('CONTINUUM_BEARER is required')) {
     throw new Error(
-      `Tag CLI did not execute credential validation (code=${code}). stdout=${JSON.stringify(output.stdout)} stderr=${JSON.stringify(output.stderr)}`,
+      `Tag CLI did not execute credential validation: ${JSON.stringify(result)}`,
     );
   }
   process.stdout.write('Tag CLI compiled entrypoint reached credential validation\n');
