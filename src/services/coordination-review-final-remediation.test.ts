@@ -43,7 +43,7 @@ describe('coordination final review remediation', () => {
   it('contract offboarding review: durably revokes access while backfill is pending and resumes after readiness', async () => {
     const value = await fixture('pending-contract-access');
     try {
-      await pool.query("UPDATE coordination_contract_backfill_state SET phase = 'principals' WHERE singleton");
+      await pool.query("UPDATE coordination_contract_backfill_state SET phase = 'usage' WHERE singleton");
       const pending = await offboardPrincipal(pool, value.operator, value.target.id, {
         confirmationScopeId: value.owned.id,
       });
@@ -93,7 +93,7 @@ describe('coordination final review remediation', () => {
       CREATE TRIGGER fail_contract_access_audit BEFORE INSERT ON audit_log
       FOR EACH ROW EXECUTE FUNCTION fail_contract_access_audit()`);
     try {
-      await pool.query("UPDATE coordination_contract_backfill_state SET phase = 'principals' WHERE singleton");
+      await pool.query("UPDATE coordination_contract_backfill_state SET phase = 'usage' WHERE singleton");
       await expect(offboardPrincipal(pool, value.operator, value.target.id, {
         confirmationScopeId: value.owned.id,
       })).rejects.toThrow('contract access audit unavailable');
