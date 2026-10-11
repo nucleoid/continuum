@@ -21,6 +21,7 @@ it('prevents implicit-catalog variadic FORMAT takeover during actual published00
     }
     owner=new pg.Pool({connectionString:baseUrl,max:1,options:`-c search_path=${schema}`});
     await runMigrations(owner,directory);
+    const migrationRole=String((await admin.query('SELECT current_user AS role')).rows[0].role).replaceAll('"','""');
     const creator=await admin.connect();
     try{
       await creator.query(`SET ROLE "${attacker}"`);
@@ -33,6 +34,8 @@ it('prevents implicit-catalog variadic FORMAT takeover during actual published00
           PERFORM pg_catalog.nextval('"${hostile}".calls');
           RAISE EXCEPTION 'hostile migration FORMAT overload executed'; END $$`);
       }
+      await creator.query(`GRANT USAGE ON SCHEMA "${hostile}" TO "${migrationRole}";
+        GRANT USAGE ON SEQUENCE "${hostile}".calls TO "${migrationRole}"`);
     }finally{await creator.query('RESET ROLE');creator.release();}
     await copyFile(join(process.cwd(),'migrations/0055_coordination_review_remediation.sql'),
       join(directory,'0055_coordination_review_remediation.sql'));
