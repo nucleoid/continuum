@@ -118,8 +118,8 @@ describe('controlled tag provenance boundary', () => {
     await owner.query(enable);
     try {
       const inserted = await application.query(
-        `INSERT INTO memories(scope_id,type,title,body,author_id,source,tags,metadata)
-         VALUES($1::uuid,'fact','Legacy writer','Ordinary body',$2::uuid,'manual',
+        `INSERT INTO memories(id,scope_id,type,title,body,author_id,source,tags,metadata)
+         VALUES(pg_catalog.gen_random_uuid(),$1::uuid,'fact','Legacy writer','Ordinary body',$2::uuid,'manual',
            ARRAY['Branch','private-state'], '{"ordinary":true}'::jsonb)
          RETURNING tags,metadata`, [scope.id, principal.id],
       );
@@ -129,8 +129,8 @@ describe('controlled tag provenance boundary', () => {
       } });
       for (const key of protectedKeys) {
         await expect(application.query(
-          `INSERT INTO memories(scope_id,type,title,body,author_id,source,tags,metadata)
-           VALUES($1::uuid,'fact','Forged','Ordinary body',$2::uuid,'manual','{}'::text[],$3::jsonb)`,
+          `INSERT INTO memories(id,scope_id,type,title,body,author_id,source,tags,metadata)
+           VALUES(pg_catalog.gen_random_uuid(),$1::uuid,'fact','Forged','Ordinary body',$2::uuid,'manual','{}'::text[],$3::jsonb)`,
           [scope.id, principal.id, JSON.stringify({ [key]: { forged: true } })],
         )).rejects.toMatchObject({ code: '23514', constraint: 'memories_tag_provenance' });
       }
@@ -150,8 +150,8 @@ describe('controlled tag provenance boundary', () => {
        SELECT 'project',tag,$1::uuid FROM unnest($2::text[]) requested(tag)`, [principal.id, tags],
     );
     await expect(application.query(
-      `INSERT INTO memories(scope_id,type,title,body,author_id,source,tags)
-       VALUES($1::uuid,'fact','Too many','Ordinary body',$2::uuid,'manual',$3::text[])`,
+      `INSERT INTO memories(id,scope_id,type,title,body,author_id,source,tags)
+       VALUES(pg_catalog.gen_random_uuid(),$1::uuid,'fact','Too many','Ordinary body',$2::uuid,'manual',$3::text[])`,
       [scope.id, principal.id, tags],
     )).rejects.toMatchObject({ code: '23514', constraint: 'memories_tags_controlled_vocabulary' });
   });
