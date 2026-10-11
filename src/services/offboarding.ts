@@ -194,7 +194,7 @@ async function ownedScopePrivacyState(
   let result: pg.QueryResult<OwnedScopePrivacyState>;
   try {
     result = await client.query<OwnedScopePrivacyState>(
-      'SELECT * FROM continuum_operator_coordination_scope_privacy_state($1, $2)',
+      'SELECT * FROM continuum_operator_coordination_scope_privacy_state($1::uuid, $2::uuid)',
       [actorId, scopeId],
     );
   } catch (error) {
@@ -291,7 +291,7 @@ export async function listCoordinationPrivacyRepairs(
     await requireOrgAdmin(client, actor.id);
     const result = await client.query(
       `SELECT principal_id::text, scope_id::text, repair_state
-         FROM continuum_operator_list_coordination_privacy_repairs($1, $2, NULL, $3)`,
+         FROM continuum_operator_list_coordination_privacy_repairs($1::uuid, $2::uuid, NULL::uuid, $3::integer)`,
       [actor.id, cursor, limit],
     );
     await client.query('COMMIT');
@@ -336,7 +336,7 @@ export async function listCoordinationPrivacyRepairPage(
       scanned_count: number;
     }>(
       `SELECT repairs, next_cursor::text, has_more, scanned_count
-         FROM continuum_operator_list_coordination_privacy_repair_page($1, $2, $3)`,
+         FROM continuum_operator_list_coordination_privacy_repair_page($1::uuid, $2::uuid, $3::integer)`,
       [actor.id, cursor, limit],
     );
     const row = result.rows[0];
@@ -431,7 +431,7 @@ export async function repairCoordinationPrivacy(
       target.rows[0].offboarded_at === null ? 'disabled_only' : 'offboarded';
     const candidate = await client.query(
       `SELECT repair_state
-         FROM continuum_operator_list_coordination_privacy_repairs($1, $2, 1)`,
+         FROM continuum_operator_list_coordination_privacy_repairs($1::uuid, $2::uuid, 1::integer)`,
       [actor.id, principalId],
     );
     if (state === 'offboarded') {
@@ -449,7 +449,7 @@ export async function repairCoordinationPrivacy(
     }
     const privacy = await client.query(
       `SELECT privacy_version, principal_complete
-         FROM continuum_coordination_privacy_state($1, $2)`,
+         FROM continuum_coordination_privacy_state($1::uuid, $2::uuid)`,
       [principalId, scopeId],
     );
     const ownedBefore = await ownedScopePrivacyState(client, actor.id, scopeId);
@@ -479,12 +479,12 @@ export async function repairCoordinationPrivacy(
         }
         // An existing approved scope phase is authority to resume its work.
         // Mere disablement or an erased-looking scope name is not authority.
-        await client.query('SELECT continuum_operator_pseudonymize_scope_v2($1, $2, $3)', [
+        await client.query('SELECT continuum_operator_pseudonymize_scope_v2($1::uuid, $2::uuid, $3::text)', [
           actor.id, scopeId, ownedBefore.pseudonym,
         ]);
       }
       const scrub = await client.query<{ privacy: CoordinationPrivacyBatch }>(
-        `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, $4) AS privacy`,
+        `SELECT continuum_operator_scrub_coordination_principal($1::uuid, $2::uuid, $3::uuid, $4::integer) AS privacy`,
         [actor.id, principalId, scopeId, Math.min(batchSize, 1_000)],
       );
       const ownedAfter = await ownedScopePrivacyState(client, actor.id, scopeId);
@@ -721,9 +721,7 @@ export async function mapOwnedUserScope(
     }
     if (acknowledgementChanged) {
       const approval = await client.query(
-        `SELECT continuum_create_user_scope_approval(
-           $1, $2, $3, $4::uuid[], $5
-         )::text AS id`,
+        `SELECT continuum_create_user_scope_approval($1::uuid, $2::uuid, $3::uuid, $4::uuid[], $5::text)::text AS id`,
         [actor.id, principalId, scopeId, acknowledgedPrincipalIds, acknowledgedEvidenceHash],
       );
       await client.query(
@@ -821,7 +819,7 @@ async function writeOffboardingRun(
   details: Record<string, unknown> = {},
 ): Promise<pg.QueryResult> {
   return client.query(
-    `SELECT * FROM continuum_operator_write_offboarding_run($1, $2, $3, $4::jsonb)`,
+    `SELECT * FROM continuum_operator_write_offboarding_run($1::uuid, $2::uuid, $3::text, $4::jsonb)`,
     [principalId, actorId, command, JSON.stringify(details)],
   );
 }
@@ -1026,7 +1024,7 @@ async function startOffboardingRunEvent(
 ): Promise<void> {
   // phase started: immutable authorization exists before the first fence/write.
   await client.query(
-    `SELECT continuum_operator_start_offboarding_run($1, $2, $3::jsonb)`,
+    `SELECT continuum_operator_start_offboarding_run($1::uuid, $2::uuid, $3::jsonb)`,
     [run.run_id, initiatedBy, JSON.stringify(evidence)],
   );
 }
@@ -1038,7 +1036,7 @@ async function finalizeOffboardingRun(
   completionEvidence: Record<string, unknown>,
 ): Promise<void> {
   const completed = await client.query(
-    `SELECT continuum_operator_complete_offboarding_run($1, $2, $3::jsonb) AS completed`,
+    `SELECT continuum_operator_complete_offboarding_run($1::uuid, $2::uuid, $3::jsonb) AS completed`,
     [run.run_id, finalizedBy, JSON.stringify(completionEvidence)],
   );
   if (!completed.rows[0]?.completed) {
@@ -1176,7 +1174,7 @@ async function offboardPrincipalCore(
         'SELECT * FROM principal_offboarding_runs WHERE principal_id = $1', [principalId],
       )
       : await client.query(
-        'SELECT * FROM continuum_operator_get_offboarding_run($1, $2)', [principalId, actor.id],
+        'SELECT * FROM continuum_operator_get_offboarding_run($1::uuid, $2::uuid)', [principalId, actor.id],
       );
     const completedEvidence = run.rowCount ? await client.query(
       `SELECT 1 FROM principal_offboarding_run_events
@@ -1319,7 +1317,7 @@ async function offboardPrincipalCore(
     const scopePseudonym = erasedScopePseudonym(scopeId);
     const privacyState = await client.query(
       `SELECT privacy_version, principal_complete, scope_complete
-         FROM continuum_coordination_privacy_state($1, $2)`,
+         FROM continuum_coordination_privacy_state($1::uuid, $2::uuid)`,
       [principalId, scopeId],
     );
     let coordinationPrivacyComplete = Number(privacyState.rows[0]?.privacy_version) >= 3
@@ -1338,7 +1336,7 @@ async function offboardPrincipalCore(
         && !coordinationPrivacyComplete) {
       const pendingDisabledRepair = await client.query(
         `SELECT 1
-           FROM continuum_operator_list_coordination_privacy_repairs($1, $2, 1)
+           FROM continuum_operator_list_coordination_privacy_repairs($1::uuid, $2::uuid, 1::integer)
           WHERE repair_state = 'disabled_only'`,
         [actor.id, principalId],
       );
@@ -1359,14 +1357,12 @@ async function offboardPrincipalCore(
       try {
         const ownedBefore = initialOwnedPrivacy ?? await ownedScopePrivacyState(client, actor.id, scopeId);
         if (!ownedScopeIsClean(ownedBefore)) {
-          await client.query('SELECT continuum_operator_pseudonymize_scope_v2($1, $2, $3)', [
+          await client.query('SELECT continuum_operator_pseudonymize_scope_v2($1::uuid, $2::uuid, $3::text)', [
             actor.id, scopeId, ownedBefore.pseudonym ?? scopePseudonym,
           ]);
         }
         const privacyRepair = await client.query<{ privacy: CoordinationPrivacyBatch }>(
-          `SELECT continuum_operator_scrub_coordination_principal(
-             $1, $2, $3, $4
-           ) AS privacy`,
+          `SELECT continuum_operator_scrub_coordination_principal($1::uuid, $2::uuid, $3::uuid, $4::integer) AS privacy`,
           [actor.id, principalId, scopeId, Math.min(batchSize, 1_000)],
         );
         const ownedAfter = await ownedScopePrivacyState(client, actor.id, scopeId);
@@ -1402,7 +1398,7 @@ async function offboardPrincipalCore(
         [`${verificationTimeoutMs}ms`],
       );
       actualStateErased = (await client.query<{ erased: boolean }>(
-        `SELECT continuum_operator_offboarding_actual_state_is_erased($1, $2) AS erased`,
+        `SELECT continuum_operator_offboarding_actual_state_is_erased($1::uuid, $2::uuid) AS erased`,
         [actor.id, run.rows[0].run_id],
       )).rows[0]?.erased === true;
       await client.query("SET LOCAL statement_timeout = '30s'");
@@ -1456,7 +1452,7 @@ async function offboardPrincipalCore(
         [`${verificationTimeoutMs}ms`],
       );
       run = await client.query(
-        `SELECT * FROM continuum_operator_restart_offboarding_run($1, $2, $3::jsonb)`,
+        `SELECT * FROM continuum_operator_restart_offboarding_run($1::uuid, $2::uuid, $3::jsonb)`,
         [principalId, actor.id, JSON.stringify({
           approval_id: approvalId, approval_evidence_hash: acknowledgedEvidenceHash,
           initial_memories: memories, initial_embeddings: embeddings,
@@ -1479,7 +1475,7 @@ async function offboardPrincipalCore(
     }
 
     if (resumedRun) {
-      await client.query('SELECT continuum_operator_resume_offboarding_run($1, $2)', [
+      await client.query('SELECT continuum_operator_resume_offboarding_run($1::uuid, $2::uuid)', [
         run.rows[0].run_id, actor.id,
       ]);
     } else {
@@ -1501,7 +1497,7 @@ async function offboardPrincipalCore(
         bindings_quarantined: number;
       }>(
         `SELECT memberships_deactivated, bindings_quarantined
-           FROM continuum_operator_offboard_scope_access($1, $2)`,
+           FROM continuum_operator_offboard_scope_access($1::uuid, $2::uuid)`,
         [actor.id, scopeId],
       );
       const aliasDelete = await client.query(
@@ -1521,18 +1517,16 @@ async function offboardPrincipalCore(
         const ownedBefore = await ownedScopePrivacyState(client, actor.id, scopeId);
         ownedLiveLeaseUntil = ownedBefore.live_lease_until;
         await client.query(
-          'SELECT continuum_operator_pseudonymize_scope_v2($1, $2, $3)',
+          'SELECT continuum_operator_pseudonymize_scope_v2($1::uuid, $2::uuid, $3::text)',
           [actor.id, scopeId, scopePseudonym],
         );
         const coordinationPrivacy = await client.query<{ privacy: CoordinationPrivacyBatch }>(
-          `SELECT continuum_operator_scrub_coordination_principal(
-             $1, $2, $3, $4
-           ) AS privacy`,
+          `SELECT continuum_operator_scrub_coordination_principal($1::uuid, $2::uuid, $3::uuid, $4::integer) AS privacy`,
           [actor.id, principalId, scopeId, Math.min(batchSize, 1_000)],
         );
         const currentPrivacyState = await client.query(
           `SELECT principal_complete, scope_complete
-             FROM continuum_coordination_privacy_state($1, $2)`,
+             FROM continuum_coordination_privacy_state($1::uuid, $2::uuid)`,
           [principalId, scopeId],
         );
         const ownedAfter = await ownedScopePrivacyState(client, actor.id, scopeId);
@@ -1705,7 +1699,7 @@ async function offboardPrincipalCore(
     }
     const redaction = await client.query(
       `SELECT * FROM continuum_operator_redact_offboarding_audit(
-         $1, $2,
+         $1::uuid, $2::uuid,
          ARRAY(SELECT id FROM offboarding_audit_targets ORDER BY id)::bigint[]
        )`,
       [principalId, actor.id],
@@ -1770,7 +1764,7 @@ async function offboardPrincipalCore(
         audit_queries_processed: Number(progressRow.audit_queries_processed),
         batches: Number(progressRow.batches),
       });
-      await client.query('SELECT continuum_operator_record_offboarding_event($1)', [progressRow.run_id]);
+      await client.query('SELECT continuum_operator_record_offboarding_event($1::uuid)', [progressRow.run_id]);
       await client.query(
         `INSERT INTO audit_log (principal_id, action, scope_id, metadata)
          VALUES ($1, 'archive', $2, $3::jsonb)`,

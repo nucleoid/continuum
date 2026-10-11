@@ -67,7 +67,7 @@ async function requireManualSyncActor(
   actorId: string,
 ): Promise<void> {
   try {
-    await client.query('SELECT continuum_require_sync_session($1)', [actorId]);
+    await client.query('SELECT continuum_require_sync_session($1::uuid)', [actorId]);
   } catch (error) {
     if (isSyncAuthorizationError(error)) {
       throw new ServiceError(
@@ -151,7 +151,7 @@ export async function provisionEntraGroupBinding(
       }
     }
     await client.query(
-      `SELECT continuum_upsert_entra_group_binding($1, $2, $3, $4, $5)`,
+      `SELECT continuum_upsert_entra_group_binding($1::uuid, $2::text, $3::text, $4::uuid, $5::text)`,
       [actor.id, externalId, displayName, scopeId, input.role],
     );
     await client.query(
@@ -199,7 +199,7 @@ export async function revokeEntraGroupBinding(
       memberships_deactivated: number;
     }>(
       `SELECT scope_id, binding_role, memberships_deactivated
-         FROM continuum_operator_revoke_entra_group_binding($1, $2)`,
+         FROM continuum_operator_revoke_entra_group_binding($1::uuid, $2::text)`,
       [actor.id, externalId],
     );
     if (!binding.rowCount) {
@@ -253,14 +253,13 @@ async function quarantineBinding(
   reason: string,
 ): Promise<number> {
   const memberships = await client.query<{ count: number }>(
-    `SELECT continuum_sync_deactivate_entra_memberships(
-       $1, ARRAY[$2]::text[], NULL::uuid[])::int AS count`,
+    `SELECT continuum_sync_deactivate_entra_memberships($1::uuid, ARRAY[$2]::text[], NULL::uuid[])::int AS count`,
     [actorId, externalId],
   );
   const count = Number(memberships.rows[0]?.count ?? 0);
   result.membershipsDeactivated += count;
   const group = await client.query<{ changed: boolean }>(
-    `SELECT continuum_sync_quarantine_entra_group($1, $2, $3) AS changed`,
+    `SELECT continuum_sync_quarantine_entra_group($1::uuid, $2::text, $3::text) AS changed`,
     [actorId, externalId, reason],
   );
   result.groupsDeactivated += group.rows[0]?.changed ? 1 : 0;
@@ -321,7 +320,7 @@ async function recordRejectedAttempt(
   quarantine: Pick<MembershipSyncResult, 'groupsDeactivated' | 'membershipsDeactivated' | 'skipCodes'>,
 ): Promise<void> {
   await requireManualSyncActor(client, actor.id);
-  await client.query('SELECT continuum_record_entra_sync_failure($1, $2, $3)', [
+  await client.query('SELECT continuum_record_entra_sync_failure($1::uuid, $2::text, $3::integer)', [
     actor.id, rejectionReason(error), maxStalenessHours,
   ]);
   const state = await client.query<{ last_success_at: Date; stale: boolean }>(
@@ -330,8 +329,7 @@ async function recordRejectedAttempt(
   );
   if (!state.rows[0]) throw new Error('Entra sync freshness state is missing');
   const staleDeactivated = state.rows[0].stale ? Number((await client.query<{ count: number }>(
-    `SELECT continuum_sync_deactivate_entra_memberships(
-       $1, NULL::text[], NULL::uuid[])::int AS count`, [actor.id],
+    `SELECT continuum_sync_deactivate_entra_memberships($1::uuid, NULL::text[], NULL::uuid[])::int AS count`, [actor.id],
   )).rows[0]?.count ?? 0) : 0;
   await client.query(
     `INSERT INTO audit_log (principal_id, action, metadata)
@@ -549,7 +547,7 @@ export async function syncEntraMemberships(
       if (!binding || binding.approval_revoked_at || binding.quarantined_at
         || quarantined.has(snapshot.id)) continue;
       const reactivated = await client.query<{ changed: boolean }>(
-        `SELECT continuum_sync_observe_entra_group($1, $2, $3) AS changed`,
+        `SELECT continuum_sync_observe_entra_group($1::uuid, $2::text, $3::text) AS changed`,
         [actor.id, snapshot.id, snapshot.displayName],
       );
       if (!candidate.binding.active && reactivated.rows[0]?.changed) result.groupsReactivated += 1;
@@ -583,14 +581,13 @@ export async function syncEntraMemberships(
         .map((row) => row.id as string);
       if (principalIds.length > 0) {
         const activated = await client.query<{ count: number }>(
-          `SELECT continuum_activate_entra_memberships($1, $2, $3::uuid[])::int AS count`,
+          `SELECT continuum_activate_entra_memberships($1::uuid, $2::text, $3::uuid[])::int AS count`,
           [actor.id, snapshot.id, principalIds],
         );
         result.membershipsActive += Number(activated.rows[0]?.count ?? 0);
       }
       const deactivated = await client.query<{ count: number }>(
-        `SELECT continuum_sync_deactivate_entra_memberships(
-           $1, ARRAY[$2]::text[], $3::uuid[])::int AS count`,
+        `SELECT continuum_sync_deactivate_entra_memberships($1::uuid, ARRAY[$2]::text[], $3::uuid[])::int AS count`,
         [actor.id, snapshot.id, principalIds],
       );
       const removed = Number(deactivated.rows[0]?.count ?? 0);
@@ -611,15 +608,14 @@ export async function syncEntraMemberships(
     }
     if (missingActive.length > 0) {
       const memberships = await client.query<{ count: number }>(
-        `SELECT continuum_sync_deactivate_entra_memberships(
-           $1, $2::text[], NULL::uuid[])::int AS count`,
+        `SELECT continuum_sync_deactivate_entra_memberships($1::uuid, $2::text[], NULL::uuid[])::int AS count`,
         [actor.id, missingActive],
       );
       const removed = Number(memberships.rows[0]?.count ?? 0);
       result.membershipsDeactivated += removed;
       authoritativeDeactivations += removed;
       const disappeared = await client.query<{ count: number }>(
-        `SELECT continuum_sync_deactivate_entra_groups($1, $2::text[])::int AS count`,
+        `SELECT continuum_sync_deactivate_entra_groups($1::uuid, $2::text[])::int AS count`,
         [actor.id, missingActive],
       );
       result.groupsDeactivated += Number(disappeared.rows[0]?.count ?? 0);
@@ -645,7 +641,7 @@ export async function syncEntraMemberships(
     if ((admins.rows[0]?.count ?? 0) < 1) {
       throw new ServiceError('CONFLICT', 'membership sync cannot remove the last org administrator');
     }
-    await client.query('SELECT continuum_record_entra_sync_success($1, $2)', [
+    await client.query('SELECT continuum_record_entra_sync_success($1::uuid, $2::integer)', [
       actor.id, maxStalenessHours,
     ]);
     await client.query(
