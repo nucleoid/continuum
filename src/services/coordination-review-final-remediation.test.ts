@@ -9,7 +9,7 @@ import { addMembership } from '../storage/memberships.js';
 import { createPrincipal } from '../storage/principals.js';
 import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
-import { acquireLease } from './coordination.js';
+import { acquireLease, releaseLease } from './coordination.js';
 import { reactivatePrincipal } from './principal-admin.js';
 import { runAuditRetention } from '../maintenance/audit-retention.js';
 import {
@@ -213,6 +213,15 @@ describe('coordination final review remediation', () => {
       );
       try {
         if (reason === 'migration_pending') {
+          for (let index = 0; index < 3; index += 1) {
+            const runId = randomUUID();
+            const lease = await acquireLease(pool, value.target, {
+              scope: { kind: 'project', name: value.shared.name }, resource: `pending-history-${index}`,
+              runId, requestId: randomUUID(), ttlSeconds: 900,
+            });
+            expect(lease.acquired).toBe(true);
+            await releaseLease(pool, value.target, { leaseId: lease.leaseId!, runId, requestId: randomUUID() });
+          }
           // Establish a real open run with durable scope cleanup and lifecycle
           // work still pending, then simulate the upgrade reopening privacy.
           const first = await offboardPrincipal(pool, value.operator, value.target.id, {
@@ -222,10 +231,13 @@ describe('coordination final review remediation', () => {
           expect((await pool.query(
             'SELECT scope_cleanup_complete FROM principal_offboarding_runs WHERE principal_id=$1', [value.target.id],
           )).rows[0].scope_cleanup_complete).toBe(true);
-          await pool.query(
-            'UPDATE coordination_principal_privacy_progress SET privacy_version=2, completed_at=NULL WHERE principal_id=$1',
-            [value.target.id],
-          );
+          const residual = (await pool.query(
+            `SELECT EXISTS(SELECT 1 FROM coordination_operation_receipts WHERE principal_id=$1::uuid AND scope_id=$2::uuid)
+                OR EXISTS(SELECT 1 FROM coordination_leases WHERE holder_principal_id=$1::uuid AND scope_id=$2::uuid) AS remains,
+               NOT principal_complete AS incomplete FROM continuum_coordination_privacy_state($1::uuid,$3::uuid)`,
+            [value.target.id, value.shared.id, value.owned.id],
+          )).rows[0];
+          expect(residual).toEqual({ remains: true, incomplete: true });
           await pool.query("UPDATE coordination_contract_backfill_state SET phase='usage' WHERE singleton");
         } else {
           await pool.query('SELECT continuum_operator_set_coordination_principal_quota($1,$2,1,1)',
