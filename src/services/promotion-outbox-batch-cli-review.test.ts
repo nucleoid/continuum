@@ -92,8 +92,8 @@ describe('promotion outbox batch progress reaches the compiled offboarding CLI',
     // Compact ordinary source records. Every event below is produced by the
     // unchanged authorized promotion service, not a fabricated outbox row.
     const sources = await owner.query<{ id: string }>(`INSERT INTO memories
-      (scope_id,type,title,body,author_id,source,expires_at)
-      SELECT $1::uuid,'fact','Batch source','x',$2::uuid,'manual',clock_timestamp()+interval '90 days'
+      (id,scope_id,type,title,body,author_id,source,expires_at)
+      SELECT pg_catalog.gen_random_uuid(),$1::uuid,'fact','Batch source','x',$2::uuid,'manual',clock_timestamp()+interval '90 days'
       FROM generate_series(1,$3::integer) RETURNING id`, [shared.id, target.id, EVENT_COUNT]);
     const deadline = Date.now() + 180_000;
     for (let index = 0; index < sources.rows.length; index += 4) {
