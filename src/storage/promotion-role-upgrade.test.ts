@@ -200,6 +200,18 @@ async function roleUpgradeAcceptance(review?: 'poison' | 'null') {
       privacy = await offboardPrincipal(operator, admin, target.id, { confirmationScopeId: personal.id });
     }
     expect(privacy.complete).toBe(true);
+    const receipt = (await owner.query(`SELECT id,metadata FROM audit_log WHERE scope_id=$1::uuid
+      AND metadata->>'operation'='principal_promotion_privacy_repaired' ORDER BY id DESC LIMIT 1`, [personal.id])).rows[0];
+    expect(receipt.metadata).toMatchObject({ operation: 'principal_promotion_privacy_repaired', principal_id: target.id,
+      approval_id: expect.any(String), run_id: expect.any(String), rows_processed: expect.any(Number) });
+    for (const forger of [app, operator]) {
+      await expect(forger.query(`INSERT INTO audit_log(principal_id,action,scope_id,metadata)
+        VALUES($1::uuid,'archive',$2::uuid,$3::jsonb)`, [administrator, personal.id, JSON.stringify(receipt.metadata)]))
+        .rejects.toMatchObject({ code: '42501' });
+    }
+    await expect(owner.query(`UPDATE audit_log SET metadata=metadata WHERE id=$1::bigint`, [receipt.id]))
+      .rejects.toMatchObject({ code: '23514' });
+
     if (review === 'poison') expect((await owner.query(`SELECT state,last_error,lease_owner,lease_expires_at FROM promotion_event_deliveries
       WHERE event_id=$1::uuid AND webhook_id='historical-dirty'`, [privatePromotion.promotionEvent.eventId])).rows)
       .toEqual([{ state: 'privacy_cancelled', last_error: null, lease_owner: null, lease_expires_at: null }]);
