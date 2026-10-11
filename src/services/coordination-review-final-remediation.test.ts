@@ -120,6 +120,32 @@ describe('coordination final review remediation', () => {
     }
   });
 
+  it.each([false, true])('schema dependency review: sanitizes missing owned-scope helper for disabled=%s before mutation', async (disabled) => {
+    const value = await fixture(`missing-scope-helper-${disabled}`);
+    if (disabled) {
+      await pool.query('SELECT continuum_disable_principal($1, $2)', [value.operator.id, value.target.id]);
+    }
+    const before = (await pool.query(
+      'SELECT disabled_at, offboarded_at, display_name FROM principals WHERE id = $1', [value.target.id],
+    )).rows[0];
+    await pool.query(`ALTER FUNCTION continuum_operator_coordination_scope_privacy_state(UUID, UUID)
+      RENAME TO fixture_missing_coordination_scope_privacy_state`);
+    try {
+      await expect(offboardPrincipal(pool, value.operator, value.target.id, {
+        confirmationScopeId: value.owned.id,
+      })).rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE', status: 503 });
+      expect((await pool.query(
+        'SELECT disabled_at, offboarded_at, display_name FROM principals WHERE id = $1', [value.target.id],
+      )).rows[0]).toEqual(before);
+      expect((await pool.query(
+        'SELECT count(*)::int AS count FROM principal_offboarding_runs WHERE principal_id = $1', [value.target.id],
+      )).rows[0].count).toBe(0);
+    } finally {
+      await pool.query(`ALTER FUNCTION fixture_missing_coordination_scope_privacy_state(UUID, UUID)
+        RENAME TO continuum_operator_coordination_scope_privacy_state`);
+    }
+  });
+
   it('contract offboarding review: CLI continues while bounded owned-scope batches delete resources', async () => {
     const value = await fixture('owned-coordination-progress');
     await pool.query(
