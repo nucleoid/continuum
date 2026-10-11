@@ -220,6 +220,10 @@ describe('controlled tag provenance boundary', () => {
       authorId: target.id, type: 'fact', title: 'Private history', body: 'Private body', source: 'manual',
       tags: ['session'], metadata: { continuum_legacy_tags: ['private-state'],
         continuum_tag_migration: { version: 1, original_tags: ['session', 'private-state'] } } });
+    const shared = await createScope(owner, { kind: 'team', name: `tag-survivor:${randomUUID()}` });
+    await addMembership(owner, target.id, shared.id, 'writer');
+    const promoted = await promoteMemory(application, target.id, memory.id,
+      { kind: shared.kind, name: shared.name });
     await expect(application.query('UPDATE memories SET metadata=\'{}\'::jsonb WHERE id=$1::uuid', [memory.id]))
       .rejects.toMatchObject({ code: '23514', constraint: 'memories_tag_provenance' });
 
@@ -257,6 +261,11 @@ describe('controlled tag provenance boundary', () => {
       expect(result.complete).toBe(true);
       expect((await owner.query('SELECT metadata,tags,type,title,body,state FROM memories WHERE id=$1::uuid', [memory.id])).rows)
         .toEqual([{ metadata: {}, tags: [], type: 'context', title: '[erased]', body: '[erased]', state: 'archived' }]);
+      const changed = await application.query(
+        `UPDATE memories SET metadata=metadata||'{"ordinary_note":"after-erasure"}'::jsonb
+          WHERE id=$1::uuid RETURNING metadata`, [promoted.destination.id],
+      );
+      expect(changed.rows[0].metadata).toEqual({ ...promoted.destination.metadata, ordinary_note: 'after-erasure' });
     } finally {
       await operator?.end();
       await owner.query('DELETE FROM continuum_pgvector_role_profiles WHERE database_role_oid=(SELECT oid FROM pg_catalog.pg_roles WHERE rolname=$1)', [operatorRole]);
