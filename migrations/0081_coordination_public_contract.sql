@@ -806,7 +806,7 @@ BEGIN
   FOREACH signature IN ARRAY ARRAY[
     'continuum_redact_offboarding_audit(uuid,uuid,bigint[])',
     'continuum_protect_offboarded_audit_tombstone()',
-    'continuum_apply_audit_retention(uuid,timestamp with time zone,integer,uuid,integer,jsonb,text,text)'
+    'continuum_apply_audit_retention_internal_v44(uuid,timestamp with time zone,integer,uuid,integer,jsonb,text,text)'
   ] LOOP
     definition:=pg_get_functiondef(signature::regprocedure);
     revised:=replace(definition,'''principal_offboarding_repaired''',

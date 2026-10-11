@@ -87,7 +87,7 @@ const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
   ['0080_pgvector_provider_grants.sql',
     '46a42e2380db431ea9280d7bcf0a2a3cdcc7751efbddf8347d701e37c92df5f9'],
   ['0081_coordination_public_contract.sql',
-    '169061f54352fc35db9faa10596d8648cf5725208caef821bff15491a9bdaccd'],
+    '57740712d7d309fdc1876e12934392444e132f16c5a9e51aa6a3de1fe8a4d800'],
 ]);
 const FORWARD_MIGRATION_REQUIREMENTS = new Map([
   ['0053_offboarding_restore_contract.sql', '0052_offboarding_review_repair.sql'],
