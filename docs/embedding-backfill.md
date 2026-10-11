@@ -115,11 +115,18 @@ concurrently, then attaches it as the primary key in a short transaction with a
 bounded lock timeout. The migrator runs the mixed online DDL file through its
 no-transaction path because PostgreSQL forbids concurrent index creation in a
 transaction block.
+The migration owner must own the application schema and have database
+TEMPORARY for the role snapshot in 0085. Migration DDL uses five-second lock
+and 60-second statement limits; these do not bound the whole transaction or
+deployment. Rehearse under a finite outer process deadline and retain a backup.
 
 Migration `0085_embedding_backfill_failures.sql` creates the durable state table
 without scanning `audit_log`. No released version emitted embedding-backfill
 failure audits before this feature's supported upgrade path, so a whole-audit
 seed index and scan would add rollout cost without recoverable supported data.
+Valid registered APP and OP profiles gain CRUD on both durable backfill tables
+after both exist. SYNC and reporting roles gain no access. Use the current grant
+scripts for explicit profile regrants and verify runtime startup before serving.
 
 The installed migrator takes one deployment-wide advisory lock and gives up
 after its bounded acquisition deadline (30 seconds by default). It does not
