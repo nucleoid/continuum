@@ -7,6 +7,8 @@ import { expect, it } from 'vitest';
 import { runMigrations } from './migrator.js';
 import { reconcilePgvectorProviderGrants, requireCoordinationContractReady } from './provider-lifecycle.js';
 import { createScope } from './scopes.js';
+import { createPrincipal, getPrincipal } from './principals.js';
+import { mapOwnedUserScope, offboardPrincipal } from '../services/offboarding.js';
 import { addMembership } from './memberships.js';
 import { createMemory } from './memories.js';
 import { promoteMemoryWithAudit } from './promote.js';
@@ -111,6 +113,12 @@ it('upgrades canonical 88 to 89 with exact live login profiles and preserves ord
       logins.set(role, connection);
       expect((await connection.query('SELECT current_user AS role')).rows).toEqual([{ role }]);
       await reconcilePgvectorProviderGrants(connection, { expectedSchema: schema });
+      expect((await connection.query(`SELECT pg_catalog.has_function_privilege(
+        'continuum_operator_scrub_promotion_scope(uuid,uuid,uuid,integer)','EXECUTE') AS allowed`)).rows)
+        .toEqual([{ allowed: role === operatorRole }]);
+      if (role !== operatorRole) await expect(connection.query(
+        'SELECT continuum_operator_scrub_promotion_scope($1::uuid,$2::uuid,$3::uuid,1::integer)',
+        [administrator, administrator, randomUUID()])).rejects.toMatchObject({ code: '42501' });
       for (const table of ['promotion_events', 'promotion_event_deliveries']) {
         const expected = role === appRole || role === operatorRole
           ? table === 'promotion_events' ? ['SELECT', 'INSERT'] : ['SELECT', 'INSERT', 'UPDATE'] : [];
@@ -151,6 +159,39 @@ it('upgrades canonical 88 to 89 with exact live login profiles and preserves ord
       .toEqual([{ state: 'delivered' }]);
     await expect(reconcilePgvectorProviderGrants(app, { expectedSchema: 'public' }))
       .rejects.toThrow(/Runtime application schema is not trusted/);
+
+    const operator = logins.get(operatorRole)!;
+    const admin = (await getPrincipal(owner, administrator))!;
+    const target = await createPrincipal(owner, { externalId: `promotion-private-${suffix}`, kind: 'user', displayName: 'Private Person' });
+    const personal = await createScope(owner, { kind: 'user', name: `personal-${suffix}` });
+    await addMembership(owner, target.id, sourceScope.id, 'writer');
+    await addMembership(owner, target.id, personal.id, 'writer');
+    await mapOwnedUserScope(operator, admin, target.id, personal.id);
+    const privateSource = await createMemory(owner, { scopeId: sourceScope.id, scopeKind: 'team', authorId: target.id,
+      type: 'fact', title: 'Owned destination', body: 'Normal role-bound promotion.', source: 'manual' });
+    const privatePromotion = await promoteMemoryWithAudit(app, target.id, privateSource.id,
+      { kind: 'user', name: personal.name }, {}, ['private-hook']);
+    await expect(operator.query('UPDATE promotion_events SET destination_scope_name=destination_scope_name WHERE id=$1::uuid',
+      [privatePromotion.promotionEvent.eventId])).rejects.toMatchObject({ code: '42501' });
+    await expect(operator.query('SELECT continuum_operator_scrub_promotion_scope($1::uuid,$2::uuid,$3::uuid,1::integer)',
+      [target.id, target.id, personal.id])).rejects.toMatchObject({ code: '42501' });
+    let privacy = await offboardPrincipal(operator, admin, target.id, { confirmationScopeId: personal.id });
+    for (let attempt = 0; !privacy.complete && attempt < 5; attempt += 1) {
+      privacy = await offboardPrincipal(operator, admin, target.id, { confirmationScopeId: personal.id });
+    }
+    expect(privacy.complete).toBe(true);
+    expect((await owner.query('SELECT destination_scope_name FROM promotion_events WHERE id=$1::uuid',
+      [privatePromotion.promotionEvent.eventId])).rows[0].destination_scope_name).not.toBe(personal.name);
+    // A trusted historical restore can dirty a completed receipt. The actual
+    // physical predicate must reject that receipt and the next approved retry
+    // must commit bounded repair before claiming completion again.
+    await owner.query('UPDATE promotion_events SET destination_scope_name=$1::text WHERE id=$2::uuid',
+      [personal.name, privatePromotion.promotionEvent.eventId]);
+    const reopened = await offboardPrincipal(operator, admin, target.id, { confirmationScopeId: personal.id });
+    expect(reopened).toMatchObject({ complete: false, progressed: true });
+    expect((await offboardPrincipal(operator, admin, target.id, { confirmationScopeId: personal.id })).complete).toBe(true);
+    await expect(operator.query('SELECT continuum_operator_scrub_promotion_scope($1::uuid,$2::uuid,$3::uuid,1::integer)',
+      [administrator, target.id, destinationScope.id])).rejects.toMatchObject({ code: '42501' });
 
     await owner.query(`GRANT DELETE ON promotion_events TO ${quote(appRole)}`);
     try {
