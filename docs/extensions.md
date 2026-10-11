@@ -378,8 +378,12 @@ run. Audit failure rolls the transaction back.
 New claims and raw manual retries also exclude destinations mapped to a disabled
 user, including the access-only interval before privacy repair. The delivery row
 and its original name may still await scrub, but that disabled destination is not
-newly dispatched through those paths. A disabled event author alone does not
-suppress eligible shared or unmapped destination deliveries.
+newly dispatched through a claim statement that observes committed disablement.
+A disabled event author alone does not suppress eligible shared or unmapped
+destination deliveries. These checks use the statement's database snapshot;
+claims or retries already in flight before disablement can complete afterward.
+They do not retract an already loaded payload. Quiesce replicas and confirm
+process exit when a strict downstream cutoff is required.
 
 Completion waits for actual outbox state, rather than an old erasure receipt.
 Retries commit bounded progress and check the current physical state again.
