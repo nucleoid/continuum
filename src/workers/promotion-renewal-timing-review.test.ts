@@ -64,7 +64,7 @@ describe('promotion renewal timing review', () => {
     }
   });
 
-  for (const stale of ['lost', 'terminalOwned'] as const) {
+  for (const stale of ['lost', 'terminalOwned', 'renewed'] as const) {
     it(`ignores old ${stale} renewal results after the same key starts a newer exact fence`, async () => {
       const oldResult = Promise.withResolvers<{ renewed: ClaimedPromotionDelivery[];
         terminalOwned: ClaimedPromotionDelivery[]; lost: ClaimedPromotionDelivery[] }>();
@@ -78,11 +78,22 @@ describe('promotion renewal timing review', () => {
       } });
       let claims = 0;
       let renewals = 0;
+      let acknowledgements = 0;
+      let delivered = false;
       const store = persistence({
         claim: vi.fn(async () => { claims += 1; return claims === 1 ? [first] : claims === 2 ? [newer] : []; }),
         renew: vi.fn(async (_pool, _owner, deliveries) => {
           renewals += 1; if (renewals === 1) return oldResult.promise;
           return { renewed: deliveries, terminalOwned: [], lost: [] };
+        }),
+        complete: vi.fn(async (_pool, _eventId, _hookId, _owner, attempt, generation) => {
+          if (stale === 'renewed') {
+            if (attempt !== 2 || generation !== 2) return false;
+            acknowledgements += 1;
+            if (acknowledgements === 1) throw new Error('expected newer ACK uncertainty');
+            delivered = true;
+          }
+          return true;
         }),
       });
       const worker = new Worker(pool, registry, settings({ leaseMs: 300, callbackTimeoutMs: 200,
@@ -98,14 +109,21 @@ describe('promotion renewal timing review', () => {
         expect(store.fail).toHaveBeenCalledOnce();
         secondDrain = worker.drainOnce(); await vi.advanceTimersByTimeAsync(1);
         expect(signals).toHaveLength(2);
-        oldResult.resolve({ renewed: [], terminalOwned: stale === 'terminalOwned' ? [first] : [],
+        if (stale === 'renewed') {
+          newCallback.resolve(); await vi.advanceTimersByTimeAsync(1);
+          expect(store.complete).toHaveBeenCalledOnce();
+        }
+        oldResult.resolve({ renewed: stale === 'renewed' ? [first] : [], terminalOwned: stale === 'terminalOwned' ? [first] : [],
           lost: stale === 'lost' ? [first] : [] });
         await vi.advanceTimersByTimeAsync(1);
         expect(signals[1].aborted).toBe(false);
+        if (stale === 'renewed') expect(vi.mocked(store.complete).mock.calls.every((call) =>
+          call[4] === 2 && call[5] === 2)).toBe(true);
         await vi.advanceTimersByTimeAsync(110);
         expect(vi.mocked(store.renew).mock.calls.some((call) => call[2].some((delivery) =>
           delivery.attemptCount === 2 && delivery.leaseGeneration === 2))).toBe(true);
         expect(store.fail).toHaveBeenCalledOnce();
+        if (stale === 'renewed') expect(delivered).toBe(true);
       } finally {
         oldResult.resolve({ renewed: [], terminalOwned: [], lost: [] });
         oldCallback.resolve(); newCallback.resolve();
