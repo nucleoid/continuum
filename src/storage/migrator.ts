@@ -1063,10 +1063,10 @@ export async function runMigrations(
       // Bound DDL waits when upgrading a parked early coordination schema,
       // without changing the published migration files. This exact prefix is
       // part of the effective SQL and the atomically recorded execution digest.
-      const earlyTransactional = /^005[4-9]_/.test(file);
+      const online = canonicalSql.trimStart().startsWith(NO_TRANSACTION_MARKER);
+      const earlyTransactional = /^005[4-9]_/.test(file) && !online;
       const sql = earlyTransactional
         ? "SET LOCAL lock_timeout = '1s';\n" + transformedSql : transformedSql;
-      const online = sql.trimStart().startsWith(NO_TRANSACTION_MARKER);
       const deferCleanup = file === '0060_coordination_online_finish.sql'
         && files.includes('0061_coordination_forward_security_repair.sql');
       const adaptiveCleanup = online && !deferCleanup
