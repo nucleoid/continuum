@@ -46,8 +46,13 @@ CREATE TABLE promotion_event_deliveries (
 );
 
 CREATE INDEX promotion_event_deliveries_claim_idx
-  ON promotion_event_deliveries (available_at, lease_expires_at)
+  ON promotion_event_deliveries (webhook_id, available_at, event_id)
+  INCLUDE(lease_expires_at,attempt_count)
   WHERE state = 'pending';
+CREATE INDEX promotion_event_deliveries_exhausted_idx
+  ON promotion_event_deliveries(webhook_id,attempt_count,available_at,event_id)
+  INCLUDE(lease_expires_at,lease_generation)
+  WHERE state='pending' AND attempt_count>0;
 
 REVOKE ALL ON promotion_events,promotion_event_deliveries FROM PUBLIC;
 DO $extend$

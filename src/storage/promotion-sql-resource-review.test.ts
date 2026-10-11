@@ -12,7 +12,7 @@ import { claimPromotionDeliveries, completePromotionDelivery } from './promotion
 type ClaimOutcome = { status: 'fulfilled'; value: unknown }
   | { status: 'rejected'; error: unknown };
 
-it('bounds blocked promotion normalization SQL and restores or discards its owned session before reuse', async () => {
+it('skips blocked promotion normalization SQL and restores its owned session before reuse', async () => {
   const pool = await makeTestPool();
   const claims = new pg.Pool({
     connectionString: process.env.CONTINUUM_TEST_DATABASE_URL
@@ -64,30 +64,18 @@ it('bounds blocked promotion normalization SQL and restores or discards its owne
     }).then((value): ClaimOutcome => ({ status: 'fulfilled', value }),
       (error: unknown): ClaimOutcome => ({ status: 'rejected', error }));
     void pending.then(() => { settled = true; });
-    const blockingDeadline = started + 750;
-    let blocked = false;
-    while (Date.now() < blockingDeadline) {
-      blocked = (await pool.query<{ blocked: boolean }>(
-        `SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_stat_activity
-          WHERE pid=$1::int AND state='active' AND wait_event_type='Lock'
-            AND query LIKE '%UPDATE promotion_event_deliveries%'
-            AND $2::int=ANY(pg_catalog.pg_blocking_pids(pid))) AS blocked`,
-        [claimPid, controllerPid],
-      )).rows[0].blocked;
-      if (blocked) break;
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    expect(blocked, 'the real normalization UPDATE must be waiting on the controller row lock').toBe(true);
     const outcome = await Promise.race([pending, new Promise<{ status: 'still-running' }>((resolve) => {
       timer = setTimeout(() => resolve({ status: 'still-running' }), Math.max(1, started + 2_000 - Date.now()));
     })]);
     if (timer) { clearTimeout(timer); timer = undefined; }
-    // A worker-side Promise race is insufficient: storage must stop its actual
-    // SQL while the controller still owns the row, then release safely.
-    expect(outcome.status, 'storage SQL must fail on its server lock bound before the finite watch expires')
-      .toBe('rejected');
-    if (outcome.status !== 'rejected') throw new Error('Storage SQL outlived its bounded watch');
-    expect(outcome.error).toMatchObject({ code: '55P03' });
+    // Exhausted normalization now skips the actually held row. The separate
+    // Pool-backed ACK case below retains the real server 55P03 containment proof.
+    expect(outcome.status).toBe('fulfilled');
+    if (outcome.status !== 'fulfilled') throw new Error('Normalization did not skip its locked row');
+    expect(outcome.value).toEqual([]);
+    expect((await controller.query(`SELECT state,lease_owner,attempt_count FROM promotion_event_deliveries
+      WHERE event_id=$1::uuid AND webhook_id=$2::text`, [first[0].event.eventId, first[0].webhookId])).rows)
+      .toEqual([{ state: 'pending', lease_owner: 'previous-owner', attempt_count: 1 }]);
     expect(Date.now() - started).toBeLessThan(2_000);
     expect((await pool.query(`SELECT pid FROM pg_catalog.pg_stat_activity
       WHERE pid=$1::int AND state='active'`, [claimPid])).rows).toEqual([]);

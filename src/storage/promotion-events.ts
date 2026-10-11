@@ -162,18 +162,29 @@ export async function claimPromotionDeliveries(
     await client.query('BEGIN');
     await boundOwnedPromotionTransaction(client);
     await client.query(
-      `UPDATE promotion_event_deliveries
-          SET state = 'dead_letter', dead_lettered_at = pg_catalog.clock_timestamp(),
-              last_error = 'maximum attempts exhausted after interrupted delivery',
-              lease_owner = NULL, lease_expires_at = NULL
-        WHERE state = 'pending'
-          AND available_at <= pg_catalog.clock_timestamp()
-          AND (lease_expires_at IS NULL OR lease_expires_at <= pg_catalog.clock_timestamp())
-          AND webhook_id = ANY($1::text[])
-          AND attempt_count >= $2
-          AND (event_id, webhook_id) NOT IN (
-            SELECT * FROM unnest($3::uuid[], $4::text[])
-          )`,
+      `WITH exhausted AS MATERIALIZED (
+         SELECT d.event_id,d.webhook_id,d.attempt_count,d.lease_generation
+         FROM pg_catalog.unnest($1::text[]) requested(webhook_id)
+         CROSS JOIN LATERAL (
+           SELECT delivery.event_id,delivery.webhook_id,delivery.attempt_count,delivery.lease_generation
+           FROM promotion_event_deliveries delivery
+           WHERE delivery.webhook_id=requested.webhook_id AND delivery.state='pending'
+             AND delivery.attempt_count>0 AND delivery.attempt_count >= $2
+             AND delivery.available_at <= pg_catalog.clock_timestamp()
+             AND (delivery.lease_expires_at IS NULL OR delivery.lease_expires_at <= pg_catalog.clock_timestamp())
+             AND (delivery.event_id,delivery.webhook_id) NOT IN (SELECT * FROM unnest($3::uuid[],$4::text[]))
+           ORDER BY delivery.attempt_count,delivery.available_at,delivery.event_id
+           LIMIT 100 FOR UPDATE OF delivery SKIP LOCKED
+         ) d LIMIT 100
+       ) UPDATE promotion_event_deliveries delivery
+         SET state='dead_letter',dead_lettered_at=pg_catalog.clock_timestamp(),
+             last_error='maximum attempts exhausted after interrupted delivery',lease_owner=NULL,lease_expires_at=NULL
+         FROM exhausted candidate
+         WHERE delivery.event_id=candidate.event_id AND delivery.webhook_id=candidate.webhook_id
+           AND delivery.state='pending' AND delivery.attempt_count=candidate.attempt_count
+           AND delivery.lease_generation=candidate.lease_generation
+           AND delivery.available_at<=pg_catalog.clock_timestamp()
+           AND (delivery.lease_expires_at IS NULL OR delivery.lease_expires_at<=pg_catalog.clock_timestamp())`,
       [
         [...new Set(input.webhookIds)].sort(),
         maxAttempts,
@@ -193,15 +204,17 @@ export async function claimPromotionDeliveries(
                   PARTITION BY d.webhook_id
                   ORDER BY d.available_at, d.event_id
                 ) AS webhook_rank
-           FROM promotion_event_deliveries d
-          WHERE d.state = 'pending'
-            AND d.available_at <= pg_catalog.clock_timestamp()
-            AND (d.lease_expires_at IS NULL OR d.lease_expires_at <= pg_catalog.clock_timestamp())
-            AND d.webhook_id = ANY($2::text[])
-            AND d.attempt_count < $5
-            AND (d.event_id, d.webhook_id) NOT IN (
-              SELECT * FROM unnest($6::uuid[], $7::text[])
-            )
+           FROM pg_catalog.unnest($2::text[]) requested(webhook_id)
+           CROSS JOIN LATERAL (
+             SELECT delivery.event_id,delivery.webhook_id,delivery.available_at
+             FROM promotion_event_deliveries delivery
+             WHERE delivery.webhook_id=requested.webhook_id AND delivery.state='pending'
+               AND delivery.available_at<=pg_catalog.clock_timestamp()
+               AND (delivery.lease_expires_at IS NULL OR delivery.lease_expires_at<=pg_catalog.clock_timestamp())
+               AND delivery.attempt_count<$5
+               AND (delivery.event_id,delivery.webhook_id) NOT IN (SELECT * FROM unnest($6::uuid[],$7::text[]))
+             ORDER BY delivery.available_at,delivery.event_id LIMIT $8
+           ) d
        ), candidates AS (
          SELECT d.event_id, d.webhook_id,
                 d.attempt_count AS prior_attempt_count, d.lease_generation AS prior_generation,
