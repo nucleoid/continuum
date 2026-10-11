@@ -147,6 +147,37 @@ describe('qualified provider startup gate', () => {
     });
   });
 
+
+  it('uses the exact mixed-case LOGIN OID despite a lowercase collision and owner changes', async () => {
+    await fixture(async (_pool, admin, schema) => {
+      const role = `Quoted-Startup-${randomUUID().slice(0, 8)}`;
+      const collision = role.toLowerCase(); const password = randomUUID();
+      let runtime: pg.Pool | undefined;
+      try {
+        await admin.query(`CREATE ROLE "${role}" LOGIN PASSWORD '${password}';
+          CREATE ROLE "${collision}" NOLOGIN;
+          GRANT USAGE, CREATE ON SCHEMA "${schema}" TO "${role}","${collision}";
+          GRANT SELECT ON "${schema}".memories,"${schema}"._continuum_migrations TO "${role}";`);
+        const url = new URL(databaseUrl); url.username = role; url.password = password;
+        runtime = new pg.Pool({ connectionString: url.toString(), max: 1,
+          options: `-c search_path=${schema}` });
+        expect((await runtime.query(`SELECT pg_typeof(current_user)::text AS input_type,
+          current_user::regrole::oid=(SELECT oid FROM pg_roles WHERE rolname=current_user) AS exact,
+          current_user::regrole::oid<>(SELECT oid FROM pg_roles WHERE rolname=$1) AS distinct_collision`,
+        [collision])).rows).toEqual([{ input_type: 'name', exact: true, distinct_collision: true }]);
+        await admin.query(`ALTER TABLE "${schema}".memories OWNER TO "${collision}"`);
+        await expect(reconcilePgvectorProviderGrants(runtime, { expectedSchema: schema }))
+          .rejects.toThrow('Pgvector startup verifier is missing');
+        await admin.query(`ALTER TABLE "${schema}".memories OWNER TO "${role}"`);
+        await expect(reconcilePgvectorProviderGrants(runtime, { expectedSchema: schema })).resolves.toBeUndefined();
+      } finally {
+        await runtime?.end();
+        await admin.query(`DROP OWNED BY "${role}","${collision}";
+          DROP ROLE IF EXISTS "${role}"; DROP ROLE IF EXISTS "${collision}";`);
+      }
+    });
+  });
+
   it('runs the verifier in the actual memories namespace despite an earlier no-op', async () => {
     await fixture(async (pool, admin, schema, shadow) => {
       await admin.query(`INSERT INTO "${schema}"._continuum_migrations VALUES('0080_pgvector_provider_grants.sql');
