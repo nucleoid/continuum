@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import pg from 'pg';
 import { describe, expect, it } from 'vitest';
 import { runMigrations } from './migrator.js';
+import { reconcilePgvectorProviderGrants } from './provider-lifecycle.js';
 import { createPrincipal } from './principals.js';
 import { getScopeByRef } from './scopes.js';
 import { addMembership } from './memberships.js';
@@ -68,7 +69,7 @@ async function isolated(run: (context: {
   } finally {
     await Promise.all(pools.map((pool) => pool.end()));
     await root.query(`DROP DATABASE ${q(database)} WITH (FORCE)`);
-    for (const role of roles) await root.query(`DROP ROLE ${q(role)}`);
+    for (const role of roles) await root.query(`DROP ROLE IF EXISTS ${q(role)}`);
     await root.end();
     for (const directory of directories) await rm(directory, { recursive: true, force: true });
   }
@@ -83,6 +84,74 @@ async function providerAccess(pool: pg.Pool, role: string) {
 }
 
 describe('pgvector tenant-scoped explicit regrant', () => {
+  it.each(['dedicated', 'legacy-public'])('accepts sync startup with preserved PUBLIC provider USAGE in %s layout', async (layout) => {
+    await isolated(async ({ admin, tenant, role }) => {
+      const provider = layout === 'dedicated' ? 'continuum_extensions' : 'public';
+      if (provider !== 'public') await admin.query(`CREATE SCHEMA ${q(provider)}`);
+      await admin.query(`CREATE EXTENSION vector WITH SCHEMA ${q(provider)}`);
+      await admin.query(`GRANT USAGE ON SCHEMA ${q(provider)} TO PUBLIC`);
+      await admin.query(`REVOKE CREATE ON SCHEMA ${q(provider)} FROM PUBLIC`);
+      const schema = name('tenant_sync_public'); const pool = await tenant(schema);
+      const previous = process.env.CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA;
+      try {
+        if (layout === 'legacy-public') process.env.CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA = '1';
+        await runMigrations(pool);
+      } finally {
+        if (previous === undefined) delete process.env.CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA;
+        else process.env.CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA = previous;
+      }
+      const sync = await role(); await admin.query(`ALTER ROLE ${q(sync)} LOGIN`);
+      const actor = await createPrincipal(pool, { externalId: name('sync_public'), kind: 'service', displayName: 'Sync' });
+      await pool.query('SELECT continuum_register_trusted_database_identity($1::name,$2::uuid,FALSE,TRUE)', [sync, actor.id]);
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN'); await client.query(`SET LOCAL ROLE ${q(sync)}`);
+        await expect(client.query('SELECT continuum_assert_current_pgvector_profile()')).resolves.toBeDefined();
+        expect((await client.query(`SELECT has_schema_privilege(current_user,$1,'USAGE') AS usage,
+          has_schema_privilege(current_user,$1,'CREATE') AS create,
+          has_table_privilege(current_user,'memories','SELECT') AS memory_read`, [provider])).rows)
+          .toEqual([{ usage: true, create: false, memory_read: false }]);
+      } finally { await client.query('ROLLBACK'); client.release(); }
+      await expect(reconcilePgvectorProviderGrants(pool)).resolves.toBeUndefined();
+      await admin.query(`GRANT USAGE ON SCHEMA ${q(provider)} TO ${q(sync)}`);
+      await expect(reconcilePgvectorProviderGrants(pool)).rejects.toThrow(/sync profile drift/i);
+    });
+  }, 180_000);
+
+  it('lets owner startup share verification while still excluding a migration writer', async () => {
+    await isolated(async ({ tenant }) => {
+      const schema = name('tenant_concurrent'); const owner = await tenant(schema);
+      await runMigrations(owner); const startup = await tenant(schema);
+      const blocker = await owner.connect();
+      try {
+        await blocker.query('BEGIN');
+        await blocker.query('SELECT pg_advisory_xact_lock_shared(7215328273579717613::bigint)');
+        await expect(reconcilePgvectorProviderGrants(startup)).resolves.toBeUndefined();
+        await blocker.query('COMMIT');
+        await blocker.query('BEGIN');
+        await blocker.query('SELECT pg_advisory_xact_lock(7215328273579717613::bigint)');
+        await expect(reconcilePgvectorProviderGrants(startup)).rejects.toMatchObject({ code: '55P03' });
+      } finally { await blocker.query('ROLLBACK'); blocker.release(); }
+    });
+  }, 180_000);
+
+  it('ignores dropped-role profiles read-only while rejecting live profile drift', async () => {
+    await isolated(async ({ admin, tenant, role }) => {
+      const schema = name('tenant_orphan'); const owner = await tenant(schema); await runMigrations(owner);
+      const retired = await role(); const live = await role();
+      await grants(owner, schema, retired); await grants(owner, schema, live);
+      const retiredOid = (await admin.query('SELECT oid FROM pg_roles WHERE rolname=$1', [retired])).rows[0].oid;
+      await admin.query(`DROP OWNED BY ${q(retired)}`); await admin.query(`DROP ROLE ${q(retired)}`);
+      await expect(reconcilePgvectorProviderGrants(owner)).resolves.toBeUndefined();
+      expect((await owner.query('SELECT profile_kind FROM continuum_pgvector_role_profiles WHERE database_role_oid=$1', [retiredOid])).rows)
+        .toEqual([{ profile_kind: 'application' }]);
+      await admin.query(`REVOKE USAGE ON SCHEMA continuum_extensions FROM ${q(live)}`);
+      await expect(reconcilePgvectorProviderGrants(owner)).rejects.toThrow(/missing effective USAGE|profile drift/i);
+      expect((await admin.query(`SELECT has_schema_privilege($1,'continuum_extensions','USAGE') AS usage`, [live])).rows)
+        .toEqual([{ usage: false }]);
+    });
+  }, 180_000);
+
   it.each(['public', 'custom'])('keeps new sync registration grants on the target role in a %s schema', async (layout) => {
     await isolated(async ({ admin, tenant, role }) => {
       const schema = layout === 'public' ? 'public' : name('tenant_sync');
