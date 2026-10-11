@@ -28,36 +28,6 @@ function captureOutput(child) {
   return output;
 }
 
-async function waitForApiReady(child, output) {
-  await new Promise((resolveReady, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`API readiness timed out. stdout=${JSON.stringify(output.stdout)} stderr=${JSON.stringify(output.stderr)}`));
-    }, timeoutMs);
-
-    const finish = (callback) => {
-      clearTimeout(timer);
-      child.stdout.off('data', onData);
-      child.off('error', onError);
-      child.off('exit', onExit);
-      callback();
-    };
-    const onData = () => {
-      if (output.stdout.includes('Continuum API listening on :0')) {
-        finish(resolveReady);
-      }
-    };
-    const onError = (error) => finish(() => reject(error));
-    const onExit = (code, signal) => finish(() => reject(new Error(
-      `API exited before readiness (code=${code}, signal=${signal}). stdout=${JSON.stringify(output.stdout)} stderr=${JSON.stringify(output.stderr)}`,
-    )));
-
-    child.stdout.on('data', onData);
-    child.once('error', onError);
-    child.once('exit', onExit);
-    onData();
-  });
-}
-
 async function terminate(child) {
   if (child.exitCode !== null || child.signalCode !== null) return;
 
@@ -78,19 +48,22 @@ async function terminate(child) {
 }
 
 async function smokeApi() {
-  const child = spawnEntrypoint('dist/api/server.js', {
+  // This platform job has no PostgreSQL service. Startup must execute its
+  // database preflight and fail closed, rather than listen without verification.
+  const result = await runToExit('dist/api/server.js', {
     ...process.env,
     CONTINUUM_AUTH_MODE: 'dev',
     CONTINUUM_API_PORT: '0',
     CONTINUUM_DATABASE_URL: 'postgres://continuum:continuum@127.0.0.1:1/continuum',
   });
-  const output = captureOutput(child);
-  try {
-    await waitForApiReady(child, output);
-  } finally {
-    await terminate(child);
+  const failure = result.stderr.split(/\r?\n/).filter(Boolean).map((line) => {
+    try { return JSON.parse(line); } catch { return null; }
+  }).find((event) => event?.event === 'startup_failed');
+  if (result.code !== 1 || result.signal !== null || failure?.error?.code !== 'ECONNREFUSED'
+    || result.stdout.includes('Continuum API listening')) {
+    throw new Error(`API did not fail its database preflight clearly: ${JSON.stringify(result)}`);
   }
-  process.stdout.write('API compiled entrypoint reached readiness\n');
+  process.stdout.write('API compiled entrypoint failed closed during database preflight\n');
 }
 
 async function smokeMcpValidation() {
@@ -125,8 +98,19 @@ async function smokeMcpValidation() {
 async function runToExit(relativePath, env) {
   const child = spawnEntrypoint(relativePath, env);
   const output = captureOutput(child);
-  const [code, signal] = await once(child, 'exit');
-  return { code, signal, ...output };
+  let timeout;
+  try {
+    const result = await Promise.race([
+      once(child, 'close').then(([code, signal]) => ({ code, signal, ...output })),
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(`Entrypoint ${relativePath} timed out`)), timeoutMs);
+      }),
+    ]);
+    return result;
+  } finally {
+    clearTimeout(timeout);
+    await terminate(child);
+  }
 }
 
 async function smokeDisabledAuditRetention() {
