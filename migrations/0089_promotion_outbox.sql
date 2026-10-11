@@ -55,6 +55,8 @@ CREATE INDEX promotion_event_deliveries_exhausted_idx
   ON promotion_event_deliveries(webhook_id,attempt_count,available_at,event_id)
   INCLUDE(lease_expires_at,lease_generation)
   WHERE state='pending' AND attempt_count>0;
+CREATE INDEX promotion_event_deliveries_owner_idx
+  ON promotion_event_deliveries(lease_owner) WHERE lease_owner IS NOT NULL;
 
 REVOKE ALL ON promotion_events,promotion_event_deliveries FROM PUBLIC;
 DO $extend$
@@ -166,6 +168,14 @@ FOR EACH ROW EXECUTE FUNCTION continuum_guard_promotion_privacy();
 CREATE FUNCTION continuum_guard_promotion_cancellation() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER AS $$
 DECLARE trusted_owner BOOLEAN;
 BEGIN
+  IF TG_OP='UPDATE' AND (NEW.event_id IS DISTINCT FROM OLD.event_id
+    OR NEW.webhook_id IS DISTINCT FROM OLD.webhook_id) THEN
+    SELECT relation.relowner=role.oid INTO trusted_owner FROM pg_catalog.pg_class relation
+      JOIN pg_catalog.pg_roles role ON role.rolname=current_user WHERE relation.oid=TG_RELID;
+    IF NOT COALESCE(trusted_owner,FALSE) THEN
+      RAISE check_violation USING MESSAGE='promotion delivery identity is immutable for runtime writers';
+    END IF;
+  END IF;
   IF TG_OP='UPDATE' AND NEW IS NOT DISTINCT FROM OLD THEN RETURN NEW; END IF;
   IF NEW.state='privacy_cancelled' OR (TG_OP='UPDATE' AND OLD.state='privacy_cancelled') THEN
     SELECT relation.relowner=role.oid INTO trusted_owner FROM pg_catalog.pg_class relation
