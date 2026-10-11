@@ -503,6 +503,10 @@ CREATE OR REPLACE FUNCTION continuum_operator_set_coordination_principal_quota(
 BEGIN
   PERFORM continuum_require_trusted_database_identity(
     authorization_principal_id, 'approve');
+  IF acquire_limit IS DISTINCT FROM contended_limit THEN
+    RAISE invalid_parameter_value USING MESSAGE =
+      'coordination principal quota requires equal acquire and contended compatibility limits';
+  END IF;
   IF acquire_limit NOT BETWEEN 1 AND 10000
       OR contended_limit NOT BETWEEN 1 AND 10000 THEN
     RAISE EXCEPTION 'coordination principal quota must be between 1 and 10000';
