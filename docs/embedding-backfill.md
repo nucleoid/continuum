@@ -25,6 +25,11 @@ hard-capped at 30 seconds. Provider-local timeouts still apply. Vector SQL is an
 exact provider-and-dimension-qualified scan under the same deadline; deployments
 that outgrow it require provider-specific partitioning or indexes. ANN redesign
 is outside this feature.
+The remaining shared budget is recomputed before each vector catalog and
+distance query. Borrowed clients keep their caller transaction, settings, and
+locks; their recall SQL is serialized across calls and bounded cleanup finishes
+before full-text fallback hydration. Provider IO remains independent of that
+SQL queue.
 
 ## Operator backfill procedure
 
@@ -41,6 +46,10 @@ never loads title/body, so memory does not grow with the aggregate candidate
 body set. A single title/body pair larger than the 4 MiB hydration budget is
 recorded as a durable `EMBEDDING_INPUT_TOO_LARGE` failure without loading or
 sending the text. Cursor progress remains in stable UUID order.
+The 4 MiB aggregate limit uses current database sizes at hydration, including
+rows that grew after the ID scan. Deferred rows are rebatched without replaying
+successfully stored prefixes. Manual `--mark-failed` reads only ID and routing
+metadata, never title or body.
 
 Useful controls are `--provider`, `--batch-size`, `--max-rows`, `--scope`, and
 `--max-errors`. Deterministic input rejections are bisected to a single memory,
@@ -71,6 +80,11 @@ fields aggregate retryable suspects across providers. Provider-local
 database and advisory-lock failures do not prevent later routed providers from
 running. Any incomplete provider or provider error makes the CLI exit nonzero
 after printing the report.
+Each provider's database work uses a five-second statement limit and one-second
+lock limit, retaining stricter existing session limits. Prior settings are
+restored before the backfill-owned connection is released; a failed restoration
+discards that owned connection. These are per-statement limits, not a total
+backfill run duration. Keep a finite outer process deadline for operational runs.
 
 `--cursor UUID` requires `--provider`. Saved and explicit cursors wrap once at
 the end of the UUID range, and completion is reported only after the lower
