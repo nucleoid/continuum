@@ -8,6 +8,9 @@ import { createPrincipal } from '../storage/principals.js';
 import { createScope } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import { createMemory } from '../storage/memories.js';
+import { promoteMemory } from '../storage/promote.js';
+import { getScopeByRef } from '../storage/scopes.js';
+import { mapOwnedUserScope, offboardPrincipal } from './offboarding.js';
 import { captureMemory } from './capture.js';
 
 const protectedKeys = [
@@ -167,4 +170,97 @@ describe('controlled tag provenance boundary', () => {
       [scope.id, principal.id, tags],
     )).rejects.toMatchObject({ code: '23514', constraint: 'memories_tags_controlled_vocabulary' });
   });
+
+  it('real application promotion carries owner-imported provenance with reciprocal committed lineage', async () => {
+    const { principal, scope } = await fixture();
+    const destination = await createScope(owner, { kind: 'team', name: `tag-destination:${randomUUID()}` });
+    await addMembership(owner, principal.id, destination.id, 'writer');
+    const metadata = { continuum_legacy_tags: ['private-state'],
+      continuum_tag_migration: { version: 1, original_tags: ['Branch', 'private-state'] } };
+    const source = await createMemory(owner, { scopeId: scope.id, scopeKind: scope.kind,
+      authorId: principal.id, type: 'fact', title: 'Historical source', body: 'Ordinary body',
+      source: 'manual', tags: ['branch'], metadata });
+    const result = await promoteMemory(application, principal.id, source.id,
+      { kind: destination.kind, name: destination.name });
+    expect(result.source).toMatchObject({ state: 'promoted', promotedToId: result.destination.id });
+    expect(result.destination.metadata).toEqual({ ...metadata, promoted_from: source.id });
+    await expect(application.query('UPDATE memories SET metadata=$2::jsonb WHERE id=$1::uuid',
+      [result.destination.id, JSON.stringify({ ...metadata, promoted_from: randomUUID() })],
+    )).rejects.toMatchObject({ code: '23514', constraint: 'memories_tag_provenance' });
+  });
+
+  it('real application cannot copy provenance without committing the source reciprocal pointer', async () => {
+    const { principal, scope } = await fixture();
+    const destination = await createScope(owner, { kind: 'team', name: `tag-forgery:${randomUUID()}` });
+    const metadata = { continuum_legacy_tags: ['private-state'] };
+    const source = await createMemory(owner, { scopeId: scope.id, scopeKind: scope.kind,
+      authorId: principal.id, type: 'fact', title: 'Historical source', body: 'Ordinary body',
+      source: 'manual', tags: ['branch'], metadata });
+    const before = await effects();
+    await expect(application.query(
+      `INSERT INTO memories(id,scope_id,type,title,body,author_id,source,tags,metadata)
+       VALUES(pg_catalog.gen_random_uuid(),$1::uuid,'fact','Copied','Ordinary body',$2::uuid,
+         'promote:manual',ARRAY['branch'],$3::jsonb)`,
+      [destination.id, principal.id, JSON.stringify({ ...metadata, promoted_from: source.id })],
+    )).rejects.toMatchObject({ code: '23514', constraint: 'memories_tag_provenance' });
+    expect(await effects()).toEqual(before);
+    expect((await owner.query('SELECT state,promoted_to_id FROM memories WHERE id=$1::uuid', [source.id])).rows)
+      .toEqual([{ state: 'live', promoted_to_id: null }]);
+  });
+
+  it('a bound operator canonically erases protected history that the application cannot remove', async () => {
+    const actor = await createPrincipal(owner, { externalId: randomUUID(), kind: 'user', displayName: 'Administrator' });
+    const target = await createPrincipal(owner, { externalId: randomUUID(), kind: 'user', displayName: 'Private author' });
+    const org = (await getScopeByRef(owner, { kind: 'org', name: '' }))!;
+    const owned = await createScope(owner, { kind: 'user', name: `tag-erasure:${randomUUID()}` });
+    await addMembership(owner, actor.id, org.id, 'admin');
+    await addMembership(owner, target.id, owned.id, 'writer');
+    await mapOwnedUserScope(owner, actor, target.id, owned.id);
+    const memory = await createMemory(owner, { scopeId: owned.id, scopeKind: 'user',
+      authorId: target.id, type: 'fact', title: 'Private history', body: 'Private body', source: 'manual',
+      tags: ['session'], metadata: { continuum_legacy_tags: ['private-state'],
+        continuum_tag_migration: { version: 1, original_tags: ['session', 'private-state'] } } });
+    await expect(application.query('UPDATE memories SET metadata=\'{}\'::jsonb WHERE id=$1::uuid', [memory.id]))
+      .rejects.toMatchObject({ code: '23514', constraint: 'memories_tag_provenance' });
+
+    const operatorRole = `tag_erasure_${randomUUID().replaceAll('-', '').slice(0, 16)}`;
+    const password = randomUUID();
+    let operator: pg.Pool | undefined;
+    await owner.query(`CREATE ROLE ${quote(operatorRole)} LOGIN PASSWORD '${password}'`);
+    try {
+      const schema = String((await owner.query('SELECT pg_catalog.current_schema() AS schema')).rows[0].schema);
+      for (const filename of ['grant-application-role.sql', 'grant-operator-role.sql']) {
+        let sql = (await readFile(path.join(process.cwd(), 'scripts', filename), 'utf8'))
+          .split(/\r?\n/).filter((line) => !line.trimStart().startsWith('\\')).join('\n');
+        for (const [name, value] of Object.entries({ continuum_schema: schema, continuum_app_role: operatorRole,
+          continuum_operator_role: operatorRole, continuum_principal_id: actor.id })) {
+          sql = sql.replaceAll(':"' + name + '"', quote(value))
+            .replaceAll(":'" + name + "'", "'" + value.replaceAll("'", "''") + "'");
+        }
+        const client = await owner.connect();
+        let discard = false;
+        try { await client.query(sql); }
+        catch (error) { try { await client.query('ROLLBACK'); } catch { discard = true; } throw error; }
+        finally { client.release(discard); }
+      }
+      const base = (owner as unknown as { options: PoolConfig }).options;
+      const url = new URL(base.connectionString!);
+      url.username = operatorRole; url.password = password;
+      operator = new pg.Pool({ connectionString: url.toString(), ssl: base.ssl, max: 1,
+        options: `${base.options ?? ''} -c statement_timeout=30000 -c lock_timeout=1000` });
+      let result = await offboardPrincipal(operator, actor, target.id,
+        { confirmationScopeId: owned.id, batchSize: 100 });
+      for (let attempt = 0; attempt < 10 && !result.complete; attempt++) {
+        result = await offboardPrincipal(operator, actor, target.id,
+          { confirmationScopeId: owned.id, batchSize: 100 });
+      }
+      expect(result.complete).toBe(true);
+      expect((await owner.query('SELECT metadata,tags,type,title,body,state FROM memories WHERE id=$1::uuid', [memory.id])).rows)
+        .toEqual([{ metadata: {}, tags: [], type: 'context', title: '[erased]', body: '[erased]', state: 'archived' }]);
+    } finally {
+      await operator?.end();
+      await owner.query('DELETE FROM continuum_pgvector_role_profiles WHERE database_role_oid=(SELECT oid FROM pg_catalog.pg_roles WHERE rolname=$1)', [operatorRole]);
+      await owner.query(`DROP OWNED BY ${quote(operatorRole)}; DROP ROLE ${quote(operatorRole)}`);
+    }
+  }, 60_000);
 });
