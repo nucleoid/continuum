@@ -1058,7 +1058,10 @@ export async function offboardPrincipal(
     if (!isCoordinationPrivacyLockBusy(error)) throw error;
     let preview: OffboardingResult;
     try { preview = await previewOffboarding(pool, actor, principalId, options); }
-    catch { throw error; }
+    catch (previewError) {
+      if (previewError instanceof ServiceError && previewError.code === 'FORBIDDEN') throw previewError;
+      throw error;
+    }
     return {
       ...preview, dryRun: false, complete: false, alreadyOffboarded: false,
       progressed: false, blockedUntil: null, reason: 'lock_busy',
@@ -1093,6 +1096,7 @@ async function offboardPrincipalCore(
     if (!dryRun) await requireCurrentCoordinationPrivacySchema(client);
     await setCoordinationPrivacyClientVersion(client);
     if (!dryRun) {
+      await requireOrgAdmin(client, actor.id);
       await tryAdvisoryXactLock(
         client, 'SELECT pg_try_advisory_xact_lock($1::bigint) AS locked', [SYNC_LOCK_ID],
       );
@@ -1125,7 +1129,7 @@ async function offboardPrincipalCore(
                 WHERE mapping.principal_id = $1
              )
           ORDER BY principal.id
-          FOR UPDATE`,
+          FOR NO KEY UPDATE`,
         [principalId],
       );
     }
