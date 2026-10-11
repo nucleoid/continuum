@@ -452,7 +452,10 @@ rollout requires every node to use matching schema and grant capabilities.
 An old offboarding worker cannot be retained: the database refuses its completed-run restart when
 coordination privacy is the only dirty state. This refusal preserves immutable
 lifecycle completion; it is not a signal to retry the old command. Route the
-principal to a current node and use `repair-coordination-privacy`. A binary
+principal to a current node and resume the ordinary confirmed offboarding
+command. `repair-coordination-privacy` returns `offboarding_required` for an
+offboarded target so coordination-only completion cannot stand in for full
+lifecycle verification. A binary
 rollback therefore leaves offboarding traffic disabled until a current binary
 and the exact application/operator grant profiles are restored.
 
@@ -551,7 +554,11 @@ Migrations 0063 and 0064 perform no installation-wide recount. Their privacy
 work is restartable, keyset-bounded, and backed by concurrently built indexes.
 
 Offboarding first deactivates every owned-scope membership and disables the
-principal in the same transaction. The owned user scope is then erased in
+principal in the same transaction. If contract repair or a live owned lease
+blocks privacy, this access revocation and its audit commit durably while the
+privacy savepoint rolls back. The result remains incomplete with
+`migration_pending` or `owned_live_lease`; a live-lease expiry witness is optional
+and must be followed by a scope recheck. The owned user scope is then erased in
 bounded receipt, lease, and resource phases. Each call processes at most 1,000
 rows across all phases and records durable progress; the maximum fencing token is
 derived from the resource rows actually deleted by `DELETE ... RETURNING` and
@@ -596,7 +603,9 @@ resume without rescanning completed pages.
 `list-coordination-privacy-repairs` operator command instead. It distinguishes
 completed offboarding from disabled-only direct scrub state. Resume an
 offboarded row with the ordinary confirmed offboarding command; resume a
-disabled-only row only with `repair-coordination-privacy`. Runtime roles receive
+disabled-only row only with `repair-coordination-privacy`. An offboarded target
+passed to that repair command receives the audited `offboarding_required`
+pointer to the full confirmed command. Runtime roles receive
 only least-privilege discovery and repair functions and no direct
 progress-table privileges.
 The 0081 scope backfill also reopens mapped principal repair markers when a
@@ -604,6 +613,10 @@ previously completed owned scope still has resource rows. Those markers remain
 discoverable until owned-scope erasure completes. Disabled-only repair resumes
 the existing scope progress with its recorded pseudonym; it does not invent
 ownership or create a fresh scope erasure request.
+Owned progress is measured by phase changes, processed-row counts and physical
+exhaustion. A final empty page can therefore count as progress. Disabled-only
+repair completion requires shared principal privacy plus physical exhaustion of
+any existing owned phase; it does not claim full lifecycle offboarding.
 
 Historical incomplete user-scope progress can also lack an approved principal
 mapping. It is deliberately absent from principal-based discovery. The migration

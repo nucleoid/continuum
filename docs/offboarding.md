@@ -144,8 +144,19 @@ short `SKIP LOCKED` page from claiming completion. A live owned-scope lease
 stops erasure. Quiesce and release it while the holder is still enabled,
 authenticated, and authorized. After disablement or revocation the holder
 cannot release or renew; cleanup must wait for TTL expiry. There is no forced
-admin release. Owned-scope failure does not promise the shared-scope
-`blockedUntil` response.
+admin release. The service returns `complete: false`, `reason: owned_live_lease`
+and an optional `blockedUntil` expiry witness. That witness is one observed live
+lease, not proof that every lease expires by that time; recheck the scope.
+
+If 0081 contract repair is pending, the result instead has
+`reason: migration_pending`. After the usual confirmation, mapping approval and
+last-admin checks, the initial offboarding transaction still disables the
+principal, deactivates owned-scope memberships, quarantines Entra bindings and
+removes principal aliases. It records the durable run progress and an audited
+`principal_offboarding_access_revoked` event before committing the incomplete
+result. Only the blocked coordination privacy work rolls back to its savepoint.
+These access changes do not mean erasure is complete; finish owner repair or
+wait for the live lease, then resume the same confirmed offboarding operation.
 
 During rollout, complete every forward migration and exact application/operator
 grant-profile convergence before enabling Entra-sourced coordination or
@@ -154,6 +165,12 @@ migration chain completes. Provider additions tolerate pre-0080 schemas, but
 this does not make the full operator profile safe on historical schema versions.
 Rehearse the current binaries, full migration chain, and matching grant scripts
 together on an isolated copy.
+Current REST and MCP startup check the trusted 0081 readiness capability after
+provider verification and refuse an absent or pending contract. This startup
+check performs no repair. Standalone provider verification and identity sync
+keep their provider-specific compatibility behavior. `/health/ready` checks
+database connectivity and runtime shutdown state; it does not rerun contract
+verification or prove erasure completion.
 
 Team, project, role, organization, and other users' resources remain intact. Their historical
 leases and receipts are detached from the departing principal in batches of at
@@ -203,24 +220,36 @@ cannot indicate whether filtered candidates remain. Bulk consumers must use
 For `offboarded` rows, rerun the normal `offboard-principal --confirm-scope`
 command. For `disabled_only` rows, run the non-lifecycle
 `repair-coordination-privacy <principal-id> --confirm-scope <scope-id>` command
-until it returns `complete: true`. A live shared lease returns its
+until it returns `complete: true`. It may also resume an existing incomplete,
+explicitly approved owned-scope phase using its recorded pseudonym. It cannot
+infer ownership or start a fresh scope erasure merely because the principal is
+disabled. A live shared lease returns its
 `blockedUntil` time and stops the CLI run with exit status 3. Detached quota or
 concurrent privacy-lock contention is also a typed status-3 block. The CLI caps
 one invocation at 100 progressing batches with bounded backoff. `--once`
 returns status 2 for an unblocked incomplete batch; typed blocks remain status 3
-even with `--once`. That command only drives bounded
-coordination metadata scrubbing and never sets `offboarded_at`, pseudonymizes
-the user or scope, erases memories, or deactivates scope access.
+even with `--once`. `migration_pending` and `owned_live_lease` are also typed
+status-3 blocks; an owned lease may provide an expiry witness or a null
+`blockedUntil`. The command drives bounded coordination scrubbing and existing
+approved scope erasure. It never sets `offboarded_at`, starts user pseudonymization,
+erases memories or deactivates scope access.
 Migrations 0066 and 0067 reopen completed version-2 rows and reset only their
 audit cursor so the same bounded command can apply the narrower 0065 lock-audit
 classifier without changing unrelated immutable evidence. Migration 0067 also
 includes disabled principals completed through direct scrubbing. The destructive
 offboarding command refuses those pending disabled-only repairs and directs the
 operator to the dedicated repair command. For a previously completed
-offboarding, each repair call commits its bounded privacy page without reopening
-the immutable lifecycle run; repeat until the command returns `complete: true`.
-A response is complete only when coordination privacy and the full
-database-verified lifecycle state are both clean.
+offboarding, `repair-coordination-privacy` returns an audited
+`complete: false`, `reason: offboarding_required` pointer. Use the ordinary
+confirmed offboarding command for bounded privacy work and exact full-state
+verification. That command commits a newly completed privacy phase before its
+next invocation verifies the lifecycle state. It claims completion only after
+coordination privacy and the full database-verified lifecycle state are clean.
+For disabled-only repair, `complete` describes coordination privacy rather than
+full offboarding; an existing owned phase must be complete and have no remaining
+resource, receipt or lease rows. Progress includes a phase change, an increased
+processed-row count, or transition to a physically clean scope, even if the
+final page deletes no rows.
 
 The ordinary `offboard-principal` loop treats durable cursor movement and phase
 completion as progress even when a page contains only already-canonical or
