@@ -444,11 +444,19 @@ function positiveIntegerEnv(name: string, fallback: number): number {
 }
 
 if (isDirectEntrypoint(import.meta.url)) {
-  void main().catch((error: unknown) => {
+  void main().catch(async (error: unknown) => {
     console.error(JSON.stringify({
       event: 'startup_failed',
       error: formatOperationalError(error),
     }));
     process.exitCode = 1;
+    // A rejected pre-listening readiness check still opened the shared pool.
+    // Drain its sockets so exitCode can terminate startup without forced exit.
+    try { await closePool(); } catch (cleanupError) {
+      console.error(JSON.stringify({
+        event: 'startup_cleanup_failed',
+        error: formatOperationalError(cleanupError),
+      }));
+    }
   });
 }
