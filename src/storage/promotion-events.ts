@@ -123,12 +123,12 @@ export async function claimPromotionDeliveries(
     await client.query('BEGIN');
     await client.query(
       `UPDATE promotion_event_deliveries
-          SET state = 'dead_letter', dead_lettered_at = now(),
+          SET state = 'dead_letter', dead_lettered_at = pg_catalog.clock_timestamp(),
               last_error = 'maximum attempts exhausted after interrupted delivery',
               lease_owner = NULL, lease_expires_at = NULL
         WHERE state = 'pending'
-          AND available_at <= now()
-          AND (lease_expires_at IS NULL OR lease_expires_at <= now())
+          AND available_at <= pg_catalog.clock_timestamp()
+          AND (lease_expires_at IS NULL OR lease_expires_at <= pg_catalog.clock_timestamp())
           AND webhook_id = ANY($1::text[])
           AND attempt_count >= $2
           AND (event_id, webhook_id) NOT IN (
@@ -155,8 +155,8 @@ export async function claimPromotionDeliveries(
                 ) AS webhook_rank
            FROM promotion_event_deliveries d
           WHERE d.state = 'pending'
-            AND d.available_at <= now()
-            AND (d.lease_expires_at IS NULL OR d.lease_expires_at <= now())
+            AND d.available_at <= pg_catalog.clock_timestamp()
+            AND (d.lease_expires_at IS NULL OR d.lease_expires_at <= pg_catalog.clock_timestamp())
             AND d.webhook_id = ANY($2::text[])
             AND d.attempt_count < $5
             AND (d.event_id, d.webhook_id) NOT IN (
@@ -164,21 +164,31 @@ export async function claimPromotionDeliveries(
             )
        ), candidates AS (
          SELECT d.event_id, d.webhook_id,
+                d.attempt_count AS prior_attempt_count, d.lease_generation AS prior_generation,
                 (d.lease_expires_at IS NOT NULL) AS lease_recovered
            FROM promotion_event_deliveries d
            JOIN ranked r USING (event_id, webhook_id)
           WHERE r.webhook_rank <= $8
+            AND d.state = 'pending'
+            AND d.available_at <= pg_catalog.clock_timestamp()
+            AND (d.lease_expires_at IS NULL OR d.lease_expires_at <= pg_catalog.clock_timestamp())
+            AND d.attempt_count < $5
           ORDER BY r.webhook_rank, d.available_at, d.event_id, d.webhook_id
           FOR UPDATE OF d SKIP LOCKED
           LIMIT $3
        ), claimed AS (
          UPDATE promotion_event_deliveries d
             SET lease_owner = $1,
-                lease_expires_at = now() + ($4 * interval '1 millisecond'),
+                lease_expires_at = pg_catalog.clock_timestamp() + ($4 * interval '1 millisecond'),
                 attempt_count = d.attempt_count + 1,
                 lease_generation = d.lease_generation + 1
            FROM candidates c
           WHERE d.event_id = c.event_id AND d.webhook_id = c.webhook_id
+            AND d.state = 'pending'
+            AND d.available_at <= pg_catalog.clock_timestamp()
+            AND (d.lease_expires_at IS NULL OR d.lease_expires_at <= pg_catalog.clock_timestamp())
+            AND d.attempt_count = c.prior_attempt_count AND d.lease_generation = c.prior_generation
+            AND d.attempt_count < $5
           RETURNING d.event_id, d.webhook_id, d.attempt_count, d.lease_generation,
                     c.lease_recovered
        )
@@ -429,7 +439,7 @@ export async function renewPromotionDeliveries(
     if (renewed.length > 0) {
       await client.query(
         `UPDATE promotion_event_deliveries
-            SET lease_expires_at = now() + ($2 * interval '1 millisecond')
+            SET lease_expires_at = pg_catalog.clock_timestamp() + ($2 * interval '1 millisecond')
           WHERE state = 'pending' AND lease_owner = $1
             AND (event_id, webhook_id) IN (
               SELECT * FROM unnest($3::uuid[], $4::text[])
