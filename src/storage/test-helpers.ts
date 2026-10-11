@@ -76,6 +76,20 @@ export async function resetData(pool: pg.Pool): Promise<void> {
         ENABLE TRIGGER preserve_coordination_operator_event_truncate;
     `);
   }
+
+  // All business rows are gone, so no prior repair cursor or pending phase
+  // belongs to the next test. These are the completed states for empty data.
+  await pool.query(`
+    UPDATE coordination_contract_backfill_state SET phase='complete',
+      principal_cursor=NULL,resource_scope_cursor=NULL,resource_key_cursor=NULL,
+      resource_rows_processed=0,scope_cursor=NULL,receipt_principal_cursor=NULL,
+      receipt_operation_cursor=NULL,receipt_request_cursor=NULL,updated_at=clock_timestamp()
+      WHERE singleton;
+    UPDATE coordination_v4_backfill_state SET completed=TRUE,last_principal_id=NULL,
+      updated_at=clock_timestamp() WHERE singleton;
+    UPDATE coordination_v5_backfill_state SET completed=TRUE,last_principal_id=NULL,
+      updated_at=clock_timestamp() WHERE singleton;
+  `);
   // Re-seed static rows inserted by migrations.
   await pool.query(
     `INSERT INTO scopes (id, kind, name) VALUES (gen_random_uuid(), 'org', '')`,
