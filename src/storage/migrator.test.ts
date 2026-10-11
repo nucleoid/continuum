@@ -2397,6 +2397,7 @@ describe('runMigrations', () => {
     const source = join(process.cwd(),'migrations');
     const name = '0054_coordination_leases.sql';
     const canonical = (await readFile(join(source,name),'utf8')).replaceAll('\r\n','\n');
+    const timerTrigger=`early_budget_${randomUUID().replaceAll('-','')}`;
     const lock = await blocker.connect();
     try {
       const files = (await readdir(source)).filter(file=>file.endsWith('.sql') && file<'0054').sort();
@@ -2414,8 +2415,20 @@ describe('runMigrations', () => {
         .toEqual([{ relation:null }]);
       await lock.query('ROLLBACK');
       await pool.query('RESET statement_timeout');
+      // Check the effective PostgreSQL deadline during the actual historical
+      // DDL, without sleeping for thirty seconds or rewriting its pinned bytes.
+      await admin.query(`CREATE FUNCTION ${schema}.require_early_statement_budget() RETURNS event_trigger
+        LANGUAGE plpgsql AS $$ BEGIN
+          IF EXISTS(SELECT 1 FROM pg_event_trigger_ddl_commands() command
+            WHERE command.object_identity='${schema}.coordination_resources')
+            AND current_setting('statement_timeout')<>'30s' THEN
+            RAISE EXCEPTION 'early migration DDL requires a thirty-second statement budget';
+          END IF;
+        END $$;
+        CREATE EVENT TRIGGER ${timerTrigger} ON ddl_command_end WHEN TAG IN ('CREATE TABLE')
+        EXECUTE FUNCTION ${schema}.require_early_statement_budget()`);
       await runMigrations(pool,forward);
-      const effective = "SET LOCAL lock_timeout = '1s';\n"+canonical;
+      const effective = "SET LOCAL lock_timeout = '1s';\nSET LOCAL statement_timeout = '30s';\n"+canonical;
       const hash = createHash('sha256');
       for (const value of [effective,'[]']) {
         const bytes = Buffer.from(value,'utf8'); const length = Buffer.alloc(4); length.writeUInt32BE(bytes.length);
@@ -2423,12 +2436,13 @@ describe('runMigrations', () => {
       }
       expect((await pool.query(`SELECT variant,source_sha256,effective_sql_sha256,executed_sql_sha256,
         statement_count,state FROM _continuum_migration_execution WHERE migration_name=$1 AND phase='file'`,[name])).rows)
-        .toEqual([{ variant:'canonical-lf-lock1s-v1',source_sha256:createHash('sha256').update(canonical).digest('hex'),
+        .toEqual([{ variant:'canonical-lf-lock1s-statement30s-v2',source_sha256:createHash('sha256').update(canonical).digest('hex'),
           effective_sql_sha256:createHash('sha256').update(effective).digest('hex'),executed_sql_sha256:hash.digest('hex'),
           statement_count:1,state:'completed' }]);
     } finally {
       await lock.query('ROLLBACK').catch(()=>undefined); lock.release();
       await pool.query('RESET statement_timeout');
+      await admin.query(`DROP EVENT TRIGGER IF EXISTS ${timerTrigger}`);
       await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
     }
   },120_000);

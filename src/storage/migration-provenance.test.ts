@@ -112,6 +112,29 @@ describe('migration execution provenance', () => {
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
+  it('discards a failed online client with a leaked session timeout while preserving its original error', async () => {
+    const directory=await mkdtemp(join(tmpdir(),'continuum-online-session-failure-'));
+    await writeFile(join(directory,'001_online.sql'),
+      "-- continuum:no-transaction\nSET statement_timeout = '30s';\nSELECT fixture_failure;\n");
+    const failure=Object.assign(new Error('controlled online execution failure'),{code:'XX000'});
+    let timeoutInstalled=false;
+    const client={query:vi.fn(async(sql:string)=>{
+      if(sql.includes('pg_try_advisory_lock')) return {rows:[{locked:true}],rowCount:1};
+      if(sql.includes('pg_advisory_unlock')) return {rows:[{unlocked:true}],rowCount:1};
+      if(sql.startsWith('SET statement_timeout')) timeoutInstalled=true;
+      if(sql.includes('SELECT fixture_failure')) throw failure;
+      return {rows:[],rowCount:0};
+    }),release:vi.fn()};
+    try {
+      await expect(runMigrations({connect:vi.fn(async()=>client)} as unknown as pg.Pool,directory))
+        .rejects.toMatchObject({cause:failure});
+      expect(timeoutInstalled).toBe(true);
+      expect(client.release).toHaveBeenCalledOnce();
+      expect(client.release.mock.calls[0]?.[0]).toBeInstanceOf(Error);
+      expect((client.release.mock.calls[0]?.[0] as unknown as Error).cause).toBe(failure);
+    } finally { await rm(directory,{recursive:true,force:true}); }
+  });
+
   it('executes the verified source snapshot when the file changes after verification', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'continuum-provenance-race-'));
     const name = '0052_offboarding_review_repair.sql';
