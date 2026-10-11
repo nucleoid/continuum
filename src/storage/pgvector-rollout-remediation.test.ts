@@ -1199,6 +1199,9 @@ describe('pgvector rollout remediation', () => {
       await owner.query('SELECT continuum_operator_set_coordination_scope_quota($1,$2,50000)',[actor.id,scope.id]);
       // Valid pre81 stored rows go through the installed counter/retention
       // triggers; no counter values, constraints or triggers are manufactured.
+      // The old INSERT counter purges already-expired acquire receipts before
+      // each insert. Insert the live row first so the final expired row remains
+      // physically stored without bypassing that published cleanup behavior.
       await owner.query("INSERT INTO coordination_resources(scope_id,resource) VALUES($1,'legacy')",[scope.id]);
       await owner.query(`WITH moment AS MATERIALIZED(SELECT clock_timestamp() AS at), times AS (
         SELECT CASE WHEN value=1 THEN moment.at-interval '1 hour' ELSE moment.at END AS at
@@ -1206,8 +1209,16 @@ describe('pgvector rollout remediation', () => {
         INSERT INTO coordination_operation_receipts(principal_id,operation,request_id,payload_hash,outcome,
           scope_id,resource,expires_at,retry_after_seconds,server_time,retain_until)
         SELECT $1,'acquire',gen_random_uuid(),decode(repeat('a',64),'hex'),'contended',$2,'legacy',
-          at+interval '1 hour',1,at,at+interval '90 seconds' FROM times`,[lower.id,scope.id]);
+          at+interval '1 hour',1,at,at+interval '90 seconds' FROM times ORDER BY at DESC`,[lower.id,scope.id]);
+      const physicalBefore=(await owner.query(`SELECT count(*)::int AS stored_rows,
+        count(*) FILTER(WHERE outcome='contended')::int AS contended_rows,
+        count(*) FILTER(WHERE retain_until<=clock_timestamp()
+          AND server_time>clock_timestamp()-interval '24 hours')::int AS recent_expired_rows
+        FROM coordination_operation_receipts WHERE principal_id=$1`,[lower.id])).rows;
+      expect(physicalBefore).toEqual([{stored_rows:2,contended_rows:2,recent_expired_rows:1}]);
       const before=(await owner.query('SELECT to_jsonb(usage) AS value FROM coordination_principal_usage usage ORDER BY principal_id')).rows;
+      const receiptsBefore=(await owner.query(`SELECT to_jsonb(receipt) AS value
+        FROM coordination_operation_receipts receipt ORDER BY principal_id,operation,request_id`)).rows;
       const source=await readFile(join(process.cwd(),'scripts/preflight-coordination-contract.sql'),'utf8');
       const sql=source.split(/\r?\n/).filter(line=>!line.trimStart().startsWith('\\')).join('\n')
         .replaceAll(":'continuum_schema'",quoteLiteral(schema))
@@ -1230,6 +1241,9 @@ describe('pgvector rollout remediation', () => {
         configured_resource_limit:50000,proposed_resource_limit:10000,stored_keys:1});
       expect((await owner.query('SELECT to_jsonb(usage) AS value FROM coordination_principal_usage usage ORDER BY principal_id')).rows)
         .toEqual(before);
+      expect((await owner.query(`SELECT to_jsonb(receipt) AS value
+        FROM coordination_operation_receipts receipt ORDER BY principal_id,operation,request_id`)).rows)
+        .toEqual(receiptsBefore);
       expect((await owner.query("SELECT name FROM _continuum_migrations WHERE name='0081_coordination_public_contract.sql'")).rows)
         .toEqual([]);
     });
