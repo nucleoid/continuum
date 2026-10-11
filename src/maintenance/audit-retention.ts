@@ -17,6 +17,7 @@ const PRESERVED_OFFBOARDING_OPERATIONS = [
   'principal_memory_erased', 'principal_offboarded', 'principal_offboarding_repaired',
   'principal_offboarding_access_revoked',
 ] as const;
+const PRESERVED_AUDIT_SOURCE = 'audit-retention';
 
 export interface AuditRetentionOptions {
   retentionDays: number;
@@ -263,9 +264,10 @@ async function selectRows(client: pg.PoolClient, cutoff: string, limit: number):
        FROM audit_log
       WHERE at < $1
         AND COALESCE(metadata->>'operation', '') <> ALL($3::text[])
+        AND metadata->>'source' IS DISTINCT FROM $4::text
       ORDER BY at ASC, id ASC
       LIMIT $2`,
-    [cutoff, limit, [...PRESERVED_OFFBOARDING_OPERATIONS]],
+    [cutoff, limit, [...PRESERVED_OFFBOARDING_OPERATIONS], PRESERVED_AUDIT_SOURCE],
   );
   return result.rows;
 }
@@ -393,8 +395,9 @@ export async function runAuditRetention(
                     ELSE to_char(min(at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
                   END AS oldest_at
              FROM audit_log WHERE at < $1
-               AND COALESCE(metadata->>'operation', '') <> ALL($2::text[])`,
-          [cutoff, [...PRESERVED_OFFBOARDING_OPERATIONS]],
+               AND COALESCE(metadata->>'operation', '') <> ALL($2::text[])
+               AND metadata->>'source' IS DISTINCT FROM $3::text`,
+          [cutoff, [...PRESERVED_OFFBOARDING_OPERATIONS], PRESERVED_AUDIT_SOURCE],
         );
         await client.query('COMMIT');
         const eligible = preview.rows[0]?.eligible ?? 0;
