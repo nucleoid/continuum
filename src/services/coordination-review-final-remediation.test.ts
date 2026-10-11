@@ -198,7 +198,7 @@ describe('coordination final review remediation', () => {
     )).rows[0].count).toBe(0);
   }, 60_000);
 
-  it('blocked privacy CLI review: continues when an expired detached receipt purge frees the blocked quota', async () => {
+  it.each([true, false])('blocked privacy CLI review: retries only when detached purge frees quota, expired=%s', async (expired) => {
     const value = await fixture('detached-quota-purge');
     await pool.query('SELECT continuum_disable_principal($1, $2)', [value.operator.id, value.target.id]);
     await pool.query(
@@ -216,18 +216,22 @@ describe('coordination final review remediation', () => {
            outcome, scope_id, resource, expires_at, server_time, retry_after_seconds, retain_until, created_at)
          VALUES($1::uuid, 'acquire', gen_random_uuid(), sha256(convert_to(($1::uuid)::text, 'UTF8')),
            'contended', $2, 'quota-shared', clock_timestamp() - interval '2 days',
-           clock_timestamp() - interval '2 days', 0, clock_timestamp() - interval '1 day',
-           clock_timestamp() - interval '2 days')`, [principalId, value.shared.id],
+           clock_timestamp() - interval '2 days', 0,
+           CASE WHEN $3::boolean THEN clock_timestamp() - interval '1 day'
+                ELSE clock_timestamp() + interval '1 day' END,
+           clock_timestamp() - interval '2 days')`,
+        [principalId, value.shared.id, principalId !== detachedPrincipalId || expired],
       );
     }
     const result = await adminCli(value.operator, [
       'repair-coordination-privacy', value.target.id, '--confirm-scope', value.owned.id, '--batch-size', '1',
     ], 60_000);
-    expect(result).toMatchObject({ exitCode: 0, payload: { complete: true } });
-    expect(Number(result.payload.attempts)).toBeGreaterThan(1);
+    expect(result).toMatchObject({ exitCode: expired ? 0 : 3, payload: { complete: expired } });
+    if (expired) expect(Number(result.payload.attempts)).toBeGreaterThan(1);
+    else expect(result.payload).toMatchObject({ attempts: 1, reason: 'detached_quota', incompleteReason: 'blocked' });
     expect((await pool.query(
       'SELECT count(*)::int AS count FROM coordination_operation_receipts WHERE principal_id = $1', [value.target.id],
-    )).rows[0].count).toBe(0);
+    )).rows[0].count).toBe(expired ? 0 : 1);
   }, 60_000);
 
   it('contract offboarding review: durably revokes access while backfill is pending and resumes after readiness', async () => {
