@@ -22,8 +22,14 @@ input-size estimate before cloning: 1 MiB per snapshot and 8 MiB retained across
 snapshots, with finite depth and node limits. These are input accounting limits,
 not measured process memory. An oversized or saturated input fails open to core
 results. Timeout does not free an unsettled extension's slot or retained input;
-actual settlement does, so an abort-ignoring extension cannot accumulate clones
-across requests.
+actual settlement does. Before the first deadline, up to four overlapping calls
+for one ID can hang and retain snapshots; the limits prevent unbounded accumulation.
+Four IDs with four detached calls each can fill all16 process slots, and retained
+near1MiB snapshots can exhaust the8MiB input budget. Later requests then fail open
+with `saturated` warnings, possibly omitting all enrichment across principals.
+If those promises never settle, fix or disable the extension and restart every
+affected REST/MCP process to clear the process-local fences and snapshots.
+Creating a fresh registry instance or changing an ID is not a recovery mechanism.
 
 Each admitted call shares the request deadline. The default is 250
 milliseconds and `CONTINUUM_ENRICHER_TIMEOUT_MS` accepts values from 1 through
@@ -131,6 +137,16 @@ quiesce its worker replicas and confirm the old callback has settled or its
 process has exited. Manual retry does not retract a running callback; clearing
 its durable lease can otherwise admit an overlapping consumer on another
 replica. Privacy-cancelled deliveries cannot be manually retried.
+
+`manualRetryPromotionDelivery` is a low-level, unaudited raw-database capability.
+It carries no principal identity and performs no human authorization or audit
+insert. It is not a REST/MCP retry endpoint. Both trusted APP and OP database
+roles already have delivery-table UPDATE rights for storage operations. Use this
+helper only through trusted database administration after the quiescence above;
+it does not provide attributed operator-action auditing. A deployment that adds
+a principal-facing retry surface must enforce authorization and a mandatory audit
+record in the same transaction itself. Do not expose the raw helper directly to
+ordinary end-user requests.
 
 ### Worker settings
 
