@@ -188,6 +188,14 @@ guarantee. Commit or rollback restores the pool session settings; failed
 rollback discards that connection. A caller-supplied transaction client keeps
 its existing transaction and settings and must supply its own SQL containment.
 Claims seek indexed eligible prefixes for the requested webhook IDs.
+A locked oldest eligible row can delay a poll when that hook receives only one
+slot: the bounded prefix is chosen before candidate locking. Skipping a locked
+exhausted normalization row or a row outside the selected prefix does not imply
+that every locked head can be bypassed. If an operator lowers the attempt budget,
+normalization can temporarily inspect index ranges covering future backoff entries.
+Its returned-row and buffer measurements do not prove a bound on all internal
+index tuples examined. The default backoff cap is 300 seconds; raised settings can
+extend that transient range cost. Server SQL budgets still bound each statement.
 Interrupted-delivery normalization changes at most 100 exhausted rows per
 claim and skips locked rows, so available work for the same ID can continue.
 Several polls can be needed to normalize a large exhausted backlog.

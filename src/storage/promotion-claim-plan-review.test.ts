@@ -202,7 +202,7 @@ describe('promotion claim plan review', () => {
     }
   }, 15_000);
 
-  it('bounds limit-one scans with a registered future backoff tail and live leased front', async () => {
+  it('measures limit-one row and buffer work with a future backoff tail and live leased front', async () => {
     const promote = await producer();
     const tail = 1024;
     const hook = 'plan-backoff';
@@ -235,8 +235,9 @@ describe('promotion claim plan review', () => {
     expect(await claimPromotionDeliveries(measured.pool, { owner: 'no-due-work', webhookIds: [hook],
       limit: 1, perWebhookLimit: 1, leaseMs: 60_000, maxAttempts: 10 })).toEqual([]);
     // A valid reduction in retry allowance also makes the normalization lookup
-    // consider the same future tail; it must wait for availability without
-    // walking every future row or changing any of their durable failures.
+    // consider the same future tail without changing durable failures. These
+    // metrics measure returned/filtered rows and shared buffers, not tuples
+    // rejected inside an index condition; internal range work is not proved bounded.
     expect(await claimPromotionDeliveries(measured.pool, { owner: 'lowered-attempt-budget', webhookIds: [hook],
       limit: 1, perWebhookLimit: 1, leaseMs: 60_000, maxAttempts: 1 })).toEqual([]);
     const metrics = measured.metrics();
