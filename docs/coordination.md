@@ -213,13 +213,15 @@ Acquire, contention, renew, and release receipts are retained for at least
 24 hours from the operation's database server time:
 
 - acquire success replays its original response only while that generation is
-  still current and unexpired;
+  still current and unexpired. An expired, released or displaced acquire
+  generation returns `LEASE_LOST`; inspect it and use a new request UUID;
 - acquire contention replays the original contention, even if the holder has
   since changed;
 - renew success replays its original conservative timestamps without extending
   again, and only while the generation remains current and unexpired;
 - release success replays with `alreadyReleased` or `already_released`, even
-  if a successor now exists.
+  if a successor now exists, while the caller remains authorized and privacy
+  erasure has not removed that receipt.
 
 Authorization is revalidated before any receipt result or conflict is exposed.
 Replay adds no duplicate audit row.
@@ -579,6 +581,46 @@ offboarded row with the ordinary confirmed offboarding command; resume a
 disabled-only row only with `repair-coordination-privacy`. Runtime roles receive
 only least-privilege discovery and repair functions and no direct
 progress-table privileges.
+The 0081 scope backfill also reopens mapped principal repair markers when a
+previously completed owned scope still has resource rows. Those markers remain
+discoverable until owned-scope erasure completes. Disabled-only repair resumes
+the existing scope progress with its recorded pseudonym; it does not invent
+ownership or create a fresh scope erasure request.
+
+Historical incomplete user-scope progress can also lack an approved principal
+mapping. It is deliberately absent from principal-based discovery. The migration
+owner must review those scopes separately, with a bounded cursor query against
+the actual application schema, for example:
+
+```sql
+SELECT progress.scope_id, progress.pseudonym, progress.phase
+FROM application_data.coordination_scope_privacy_progress AS progress
+JOIN application_data.scopes AS scope ON scope.id = progress.scope_id
+WHERE progress.scope_id > '00000000-0000-0000-0000-000000000000'::uuid
+  AND progress.phase <> 'complete' AND scope.kind = 'user'
+  AND NOT EXISTS (
+    SELECT 1 FROM application_data.principal_user_scopes AS mapping
+    WHERE mapping.scope_id = progress.scope_id
+  )
+ORDER BY progress.scope_id LIMIT 100;
+```
+
+Use the last returned scope UUID as the next lower bound. Do not grant progress
+table reads to runtime roles or infer an owner from the scope name. After
+reviewing the existing erasure authorization, inactive memberships and live
+lease expiry, the owner can resume the existing request using a current manual
+org-admin actor and the exact recorded pseudonym:
+
+```sql
+SELECT application_data.continuum_operator_pseudonymize_scope_v2_legacy(
+  'approved-admin-uuid'::uuid, 'reviewed-scope-uuid'::uuid, 'recorded-pseudonym'
+);
+```
+
+Each call processes at most 1,000 rows. Commit each call and recheck that scope's
+progress until its phase is `complete` and no resource, lease or receipt rows
+remain. Stop on authorization or live-lease refusal; do not disable the guards
+or manufacture a principal mapping to make the scope discoverable.
 Version 3 canonicalizes lock metadata in owned and shared scopes. Completion
 uses one shared lifecycle predicate plus a full coordination-state predicate;
 the non-coordination repair check and full offboarding check cannot drift.
@@ -604,7 +646,8 @@ mapped owned user scope; it does not restore detached historical identities.
 
 Release requires an unexpired current generation, current authorization, and
 space for its receipt. Exact replay remains
-available for every release receipt throughout its documented 24-hour horizon.
+available during its documented 24-hour horizon while current authorization
+holds and authorized privacy erasure has not removed the receipt.
 
 ## Harness guidance
 
