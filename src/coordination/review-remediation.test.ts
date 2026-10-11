@@ -45,7 +45,7 @@ describe('coordination review remediation contract', () => {
   it('serializes idempotency keys and removes an exact expired receipt before reuse', async () => {
     const storage = await source('src/storage/coordination.ts');
     expect(storage).toMatch(/pg_advisory_xact_lock/i);
-    expect(storage).toMatch(/retain_until <= clock_timestamp\(\)[\s\S]+request_id = \$3/i);
+    expect(storage).toMatch(/retain_until <= pg_catalog\.clock_timestamp\(\)[\s\S]+request_id = \$3/i);
   });
 
   it('uses shared strict coordination input validation', async () => {

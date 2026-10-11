@@ -908,6 +908,11 @@ describe('coordination final review remediation', () => {
            FROM generate_series(1, 50000) n`,
         [`clean-completed-scope:${randomUUID()}`],
       );
+      // The owner-mapping validator was warmed on the tiny initial fixture.
+      // Refresh both referenced tables before its 50k PK lookups so stale
+      // cached plans do not model the new dataset as a tiny sequential scan.
+      await query('ANALYZE principals');
+      await query('ANALYZE scopes');
       for (let first = 1; first <= 50_000; first += 5_000) {
         const last = Math.min(first + 4_999, 50_000);
         await query(
