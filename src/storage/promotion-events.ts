@@ -88,6 +88,19 @@ export async function enqueuePromotionEvent(
   return rowToEvent(rows[0]);
 }
 
+async function boundOwnedPromotionTransaction(client: pg.PoolClient): Promise<void> {
+  // SET LOCAL is reverted by COMMIT/ROLLBACK; retain any stricter caller limit.
+  await client.query(`SELECT
+    pg_catalog.set_config('statement_timeout', (CASE
+      WHEN pg_catalog.current_setting('statement_timeout')::interval > interval '0'
+      THEN LEAST(5000, pg_catalog.date_part('epoch',pg_catalog.current_setting('statement_timeout')::interval)*1000)
+      ELSE 5000 END)::text || 'ms', TRUE),
+    pg_catalog.set_config('lock_timeout', (CASE
+      WHEN pg_catalog.current_setting('lock_timeout')::interval > interval '0'
+      THEN LEAST(1000, pg_catalog.date_part('epoch',pg_catalog.current_setting('lock_timeout')::interval)*1000)
+      ELSE 1000 END)::text || 'ms', TRUE)`);
+}
+
 export async function claimPromotionDeliveries(
   pool: pg.Pool,
   input: {
@@ -119,8 +132,10 @@ export async function claimPromotionDeliveries(
   const excludedEventIds = (input.excluded ?? []).map((delivery) => delivery.event.eventId);
   const excludedWebhookIds = (input.excluded ?? []).map((delivery) => delivery.webhookId);
   const client = await pool.connect();
+  let discard = false;
   try {
     await client.query('BEGIN');
+    await boundOwnedPromotionTransaction(client);
     await client.query(
       `UPDATE promotion_event_deliveries
           SET state = 'dead_letter', dead_lettered_at = pg_catalog.clock_timestamp(),
@@ -216,10 +231,10 @@ export async function claimPromotionDeliveries(
       leaseRecovered: row.lease_recovered,
     }));
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    try { await client.query('ROLLBACK'); } catch { discard = true; }
     throw error;
   } finally {
-    client.release();
+    client.release(discard);
   }
 }
 
@@ -401,8 +416,10 @@ export async function renewPromotionDeliveries(
   const eventIds = deliveries.map((delivery) => delivery.event.eventId);
   const webhookIds = deliveries.map((delivery) => delivery.webhookId);
   const client = await pool.connect();
+  let discard = false;
   try {
     await client.query('BEGIN');
+    await boundOwnedPromotionTransaction(client);
     const { rows } = await client.query<{
       event_id: string;
       webhook_id: string;
@@ -455,9 +472,9 @@ export async function renewPromotionDeliveries(
     await client.query('COMMIT');
     return { renewed, terminalOwned, lost };
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    try { await client.query('ROLLBACK'); } catch { discard = true; }
     throw error;
   } finally {
-    client.release();
+    client.release(discard);
   }
 }
