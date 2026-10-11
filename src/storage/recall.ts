@@ -78,6 +78,17 @@ function connectable(pool: Queryable): pool is Queryable & Pick<pg.Pool, 'connec
 }
 
 let vectorSavepointSequence = 0;
+const borrowedSqlTails = new WeakMap<Queryable, Promise<void>>();
+
+function queueBorrowedSql<T>(client: Queryable, work: () => Promise<T>): Promise<T> {
+  const current = (borrowedSqlTails.get(client) ?? Promise.resolve()).then(work);
+  const tail = current.then(() => undefined, () => undefined);
+  borrowedSqlTails.set(client, tail);
+  void tail.then(() => {
+    if (borrowedSqlTails.get(client) === tail) borrowedSqlTails.delete(client);
+  });
+  return current;
+}
 
 async function connectBeforeDeadline(
   pool: Queryable & Pick<pg.Pool, 'connect'>,
@@ -358,7 +369,9 @@ export async function recall(
   }
 
   const overFetch = Math.min(opts.limit * 5, 100);
-  const fts = await ftsHits(pool, opts.query, opts.scopeIds, opts.types, overFetch);
+  const borrowed = !connectable(pool);
+  const searchText = () => ftsHits(pool, opts.query, opts.scopeIds, opts.types, overFetch);
+  const fts = await (borrowed ? queueBorrowedSql(pool, searchText) : searchText());
 
   const groups = opts.embeddingGroups
     ?? (opts.embeddingProvider
@@ -382,10 +395,8 @@ export async function recall(
       resolve('deadline');
     }, deadlineMs);
   });
-  // Provider IO may overlap, but a borrowed session has one transaction and
-  // savepoint stack. Serialize its SQL and retain only SQL work for cleanup.
-  const borrowed = !connectable(pool);
-  let borrowedSqlTail: Promise<void> = Promise.resolve();
+  // Provider IO may overlap, but concurrent calls share a borrowed session's
+  // transaction and savepoint stack. Retain only initiated SQL for cleanup.
   const vectorSqlWork = new Set<Promise<Array<{ id: string; distance: number }>>>();
   const tasks = groups.map(async (group): Promise<GroupResult> => {
     const work = (async (): Promise<GroupResult> => {
@@ -410,8 +421,7 @@ export async function recall(
           pool, deadlineAt, queryVec, group.scopeIds,
           group.provider, overFetch, opts.types, controller.signal,
         );
-        const sql = borrowed ? borrowedSqlTail.then(execute) : execute();
-        if (borrowed) borrowedSqlTail = sql.then(() => undefined, () => undefined);
+        const sql = borrowed ? queueBorrowedSql(pool, execute) : execute();
         vectorSqlWork.add(sql);
         let hits: Array<{ id: string; distance: number }>;
         try { hits = await sql; } finally { vectorSqlWork.delete(sql); }
@@ -487,8 +497,9 @@ export async function recall(
     : failed === 0
       ? 'used'
       : used === 0 ? 'failed' : 'partial';
+  const hydrateResults = () => hydrate(pool, ranked, opts.query, fused, opts.scopeIds, opts.types);
   return {
-    results: await hydrate(pool, ranked, opts.query, fused, opts.scopeIds, opts.types),
+    results: await (borrowed ? queueBorrowedSql(pool, hydrateResults) : hydrateResults()),
     diagnostics: { vector, groups: diagnosticGroups },
   };
 }
