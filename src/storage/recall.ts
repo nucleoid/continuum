@@ -68,6 +68,8 @@ class VectorSearchTimeoutError extends Error {
   readonly code = 'EMBEDDING_TIMEOUT';
 }
 
+class CallerVectorCleanupError extends Error {}
+
 function connectable(pool: Queryable): pool is Queryable & Pick<pg.Pool, 'connect'> {
   // PoolClient inherits Client.connect, which must not be called a second time.
   return !(pool instanceof pg.Client)
@@ -211,6 +213,7 @@ async function boundedVectorSearch(
     }
     return hits;
   } catch (error) {
+    let cleanupError: unknown;
     if (transactionStarted) {
       try { await client.query('ROLLBACK'); } catch { discard = true; }
     } else if (savepoint !== undefined) {
@@ -218,7 +221,12 @@ async function boundedVectorSearch(
         await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
         await client.query(`RELEASE SAVEPOINT ${savepoint}`);
         previousTimeout = undefined;
-      } catch { discard = true; }
+      } catch (failure) { discard = true; cleanupError = failure; }
+    }
+    if (!owned && cleanupError !== undefined) {
+      throw new CallerVectorCleanupError('Could not restore the caller vector savepoint', {
+        cause: new AggregateError([error, cleanupError]),
+      });
     }
     if ((error as { code?: unknown })?.code === '57014') {
       throw new VectorSearchTimeoutError('Vector search deadline exceeded');
@@ -230,14 +238,12 @@ async function boundedVectorSearch(
         await client.query(
           "SELECT pg_catalog.set_config('statement_timeout',$1::text,false)", [previousTimeout],
         );
-      } catch { discard = true; }
-    }
-    if (owned || discard) {
-      if (typeof (client as Partial<pg.PoolClient>).release === 'function') {
-        (client as pg.PoolClient).release(discard);
-      } else if (client instanceof pg.Client && discard) {
-        await client.end();
+      } catch (error) {
+        throw new CallerVectorCleanupError('Could not restore the caller statement timeout', { cause: error });
       }
+    }
+    if (owned) {
+      (client as pg.PoolClient).release(discard);
     }
   }
 }
@@ -376,6 +382,11 @@ export async function recall(
       resolve('deadline');
     }, deadlineMs);
   });
+  // Provider IO may overlap, but a borrowed session has one transaction and
+  // savepoint stack. Serialize its SQL and retain only SQL work for cleanup.
+  const borrowed = !connectable(pool);
+  let borrowedSqlTail: Promise<void> = Promise.resolve();
+  const vectorSqlWork = new Set<Promise<Array<{ id: string; distance: number }>>>();
   const tasks = groups.map(async (group): Promise<GroupResult> => {
     const work = (async (): Promise<GroupResult> => {
       let queryVec: number[];
@@ -395,10 +406,15 @@ export async function recall(
         };
       }
       try {
-        const hits = await boundedVectorSearch(
+        const execute = () => boundedVectorSearch(
           pool, deadlineAt, queryVec, group.scopeIds,
           group.provider, overFetch, opts.types, controller.signal,
         );
+        const sql = borrowed ? borrowedSqlTail.then(execute) : execute();
+        if (borrowed) borrowedSqlTail = sql.then(() => undefined, () => undefined);
+        vectorSqlWork.add(sql);
+        let hits: Array<{ id: string; distance: number }>;
+        try { hits = await sql; } finally { vectorSqlWork.delete(sql); }
         return {
           list: hits.map((hit, index) => ({
             id: hit.id, rank: index + 1, distance: hit.distance,
@@ -408,6 +424,7 @@ export async function recall(
           },
         };
       } catch (error) {
+        if (error instanceof CallerVectorCleanupError) throw error;
         return {
           list: [],
           diagnostic: {
@@ -432,8 +449,20 @@ export async function recall(
     }
     return settled;
   });
-  const settledGroups = await Promise.all(tasks);
-  if (deadlineTimer) clearTimeout(deadlineTimer);
+  let settledGroups: GroupResult[];
+  try {
+    settledGroups = await Promise.all(tasks);
+    // A deadline may win while PostgreSQL is unwinding a timed-out statement.
+    // Hydration must follow that cleanup, but must never join stalled provider IO.
+    const cleaned = await Promise.allSettled([...vectorSqlWork]);
+    for (const result of cleaned) {
+      if (result.status === 'rejected' && result.reason instanceof CallerVectorCleanupError) {
+        throw result.reason;
+      }
+    }
+  } finally {
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+  }
   const vectorLists = settledGroups.map((result) => result.list);
   const diagnosticGroups = settledGroups.map((result, index) => {
     const group = groups[index]!;
