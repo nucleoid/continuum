@@ -185,8 +185,8 @@ identifiers. Every non-owned scope kind follows this shared-scope detachment
 policy; scope kind does not exempt retained coordination history.
 `scope_cleanup_complete` is written only after both owned-scope erasure and
 shared-scope detachment report durable completion. Preserved `lock_*` audit
-metadata retains only `operation`, `outcome`, `fencing_token`,
-`resource_bytes`, `transport`, and `own_lease`. It removes request, run, lease,
+metadata retains only `operation`, `outcome`, `transport`, and `own_lease`.
+It removes fencing tokens, byte counts, request, run, lease,
 resource, resource-digest, and unknown metadata keys. This canonical shape is
 also the only update accepted by the immutable offboarded-audit tombstone
 guard. Unrelated audit-retention and offboarding evidence keeps its own

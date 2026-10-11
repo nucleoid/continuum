@@ -364,6 +364,13 @@ records. Unknown history or interrupted attempts without matching completed
 evidence cannot use that skip; changed recipes and a reopened pending singleton
 also require operative repair.
 
+The usage phase scans a bounded common UUID window of usage and existing privacy
+progress rows. For disabled or offboarded principals it reopens completed audit
+privacy and resets its audit cursor, including inspection-only principals with
+no usage row. Run the paged privacy-repair discovery after migration and finish
+those repairs to apply the narrower post-erasure audit shape. Ordinary lock
+mutation audits retain their operational fields until privacy erasure.
+
 Adaptive backfill treats PostgreSQL `57014` as a retryable cancellation category.
 That SQLSTATE covers both statement deadlines and an administrator's
 `pg_cancel_backend`; the driver does not provide a portable distinction. Batch
@@ -654,8 +661,8 @@ and reactivation does not restore the erased request identities.
 Shared-scope handling is independent of scope kind: team, project, role,
 organization, and another user's scope are all retained while the departing
 principal's lease/receipt identity is detached. Lock audit metadata is reduced
-to `operation`, `outcome`, `fencing_token`, `resource_bytes`, `transport`, and
-`own_lease`; request, run, lease, resource, resource digest, and unknown keys
+to `operation`, `outcome`, `transport`, and `own_lease`; fencing tokens, byte
+counts, request, run, lease, resource, resource digest, and unknown keys
 are removed. Unrelated immutable retention/offboarding evidence is untouched.
 Privacy version 2 reopens progress previously completed by 0059 or 0060, and
 migrations 0066 and 0067 reopen completed version-2 rows after the 0065
@@ -739,8 +746,8 @@ the non-coordination repair check and full offboarding check cannot drift.
 Completion is not recorded until owned-scope erasure and shared-scope
 detachment are both complete. Append-only coordination operator events survive
 audit retention and offboarding. Lock audit metadata retains operation evidence
-but removes the resource digest, which could otherwise disclose low-entropy
-resource names by brute force.
+but removes resource digests, fencing tokens and byte counts. The latter two
+fields could otherwise join the erased principal back to a shared plaintext key.
 
 Direct scope pseudonymization requires zero active memberships and zero live
 leases. Direct principal scrubbing additionally requires a disabled or
