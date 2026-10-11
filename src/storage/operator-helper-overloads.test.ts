@@ -33,6 +33,8 @@ it('selects the approved UUID get-run helper instead of a later hostile text ove
       }
       await owner.query(script);
     }
+    // Composite return-type resolution needs namespace visibility only.
+    await owner.query(`GRANT USAGE ON SCHEMA public TO "${attacker}"`);
     const creator=await owner.connect();
     try {
       await creator.query(`SET ROLE "${attacker}"`);
