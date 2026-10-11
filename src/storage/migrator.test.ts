@@ -2429,6 +2429,44 @@ describe('runMigrations', () => {
     expect(queries.slice(ledger + 1)).toContain('COMMIT');
   });
 
+  it('halves the 0062 cleanup directive batch after lock refusal and resets both timeouts', async () => {
+    const queries: string[] = [];
+    const sizes: unknown[] = [];
+    const client = {
+      query: vi.fn(async (query: string, values?: unknown[]) => {
+        queries.push(query.trim());
+        if (query.includes('pg_try_advisory_lock')) return { rowCount: 1, rows: [{ locked: true }] };
+        if (query.includes('pg_advisory_unlock')) return { rowCount: 1, rows: [{ unlocked: true }] };
+        if (query.includes('SELECT 1 FROM _continuum_migrations')
+          || (query.includes('SELECT 1 FROM _continuum_migration_execution') && query.includes("state='started'"))) {
+          return { rowCount: 0, rows: [] };
+        }
+        if (query.includes('SELECT continuum_backfill_coordination_cleanup(')) {
+          sizes.push(values?.[0]);
+          if (sizes.length === 1) throw Object.assign(new Error('controlled row lock refusal'), { code: '55P03' });
+          return { rowCount: 1, rows: [{ completed: sizes.length === 3 }] };
+        }
+        return { rowCount: 1, rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    const directory = await migrationDirectory('-- continuum:no-transaction\n-- continuum:backfill-coordination-repair;');
+    const previous = process.env.CONTINUUM_COORDINATION_V4_BACKFILL_BATCH_SIZE;
+    process.env.CONTINUUM_COORDINATION_V4_BACKFILL_BATCH_SIZE = '1000';
+    try {
+      await expect(runMigrations({ connect: vi.fn(async () => client) } as unknown as pg.Pool, directory))
+        .resolves.toHaveLength(1);
+      expect(sizes).toEqual([1000, 500, 500]);
+      expect(queries).toContain("SET lock_timeout = '1s'");
+      expect(queries).toContain("SET statement_timeout = '5s'");
+      expect(queries).toContain('RESET lock_timeout');
+      expect(queries).toContain('RESET statement_timeout');
+    } finally {
+      if (previous === undefined) delete process.env.CONTINUUM_COORDINATION_V4_BACKFILL_BATCH_SIZE;
+      else process.env.CONTINUUM_COORDINATION_V4_BACKFILL_BATCH_SIZE = previous;
+    }
+  });
+
   it('runs a commented selector-backfill directive until its watermark completes', async () => {
     let batches = 0;
     const queries: string[] = [];
