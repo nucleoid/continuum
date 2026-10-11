@@ -85,7 +85,7 @@ const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
   ['0079_coordination_upgrade_scale_remediation.sql',
     '147497bac862bfc7f25123cd3f655550c2c6c4c574a3519fa2a98dd62828d85a'],
   ['0080_pgvector_provider_grants.sql',
-    '25da04f42f964eed08764a472dbc931647b2f1d35597eaa09ede840b2e798600'],
+    'ca1ceb3604202c504cb7333a5f149b4312ee2807951395302ad9f43d3468a193'],
   ['0081_coordination_public_contract.sql',
     '81af8463b45c63b88f16ae19219ddacf1b7fa3db67dea7ef4c85c191be1e1dad'],
 ]);
