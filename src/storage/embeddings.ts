@@ -7,6 +7,24 @@ function toPgVector(v: number[]): string {
   return `[${v.join(',')}]`;
 }
 
+function quoteIdentifier(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`;
+}
+
+async function cosineDistanceOperator(pool: Queryable): Promise<string> {
+  const { rows } = await pool.query(
+    `SELECT namespace.nspname AS schema
+       FROM pg_extension extension
+       JOIN pg_namespace namespace ON namespace.oid = extension.extnamespace
+      WHERE extension.extname = 'vector'`,
+  );
+  const schema = rows[0]?.schema as string | undefined;
+  if (schema === undefined) {
+    throw new Error('The vector extension is not installed');
+  }
+  return `OPERATOR(${quoteIdentifier(schema)}.<=>)`;
+}
+
 export async function storeMemoryEmbedding(
   pool: Queryable,
   memoryId: string,
@@ -26,7 +44,7 @@ export async function storeMemoryEmbeddingVector(
   assertEmbeddingVectorDimension(vector, provider);
   await pool.query(
     `INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
-     VALUES ($1, $2, $3, $4::vector)
+     VALUES ($1, $2, $3, $4)
      ON CONFLICT (memory_id) DO UPDATE
        SET provider = EXCLUDED.provider,
            dim = EXCLUDED.dim,
@@ -59,8 +77,9 @@ export async function vectorSearchMemoryIds(
   }
   params.push(limit);
   const limitIdx = params.length;
+  const distanceOperator = await cosineDistanceOperator(pool);
   const { rows } = await pool.query(
-    `SELECT m.id, e.embedding <=> $1::vector AS distance
+    `SELECT m.id, e.embedding ${distanceOperator} $1 AS distance
        FROM memory_embeddings e
        JOIN memories m ON m.id = e.memory_id
       WHERE m.scope_id = ANY($2::uuid[])
@@ -69,7 +88,7 @@ export async function vectorSearchMemoryIds(
         AND e.provider = $3
         AND e.dim = $4
         ${typeFilter}
-      ORDER BY e.embedding <=> $1::vector
+      ORDER BY e.embedding ${distanceOperator} $1
       LIMIT $${limitIdx}`,
     params,
   );
@@ -93,9 +112,10 @@ export async function vectorSearchRelatedMemories(
 ): Promise<RelatedMemorySearchHit[]> {
   if (scopeIds.length === 0) return [];
   assertEmbeddingVectorDimension(queryVector, provider);
+  const distanceOperator = await cosineDistanceOperator(pool);
   const { rows } = await pool.query(
     `SELECT m.id, m.type, m.title, m.body,
-            e.embedding <=> $1::vector AS distance
+            e.embedding ${distanceOperator} $1 AS distance
        FROM memory_embeddings e
        JOIN memories m ON m.id = e.memory_id
       WHERE m.scope_id = ANY($2::uuid[])
@@ -104,7 +124,7 @@ export async function vectorSearchRelatedMemories(
         AND e.provider = $3
         AND e.dim = $4
         AND m.id <> $5::uuid
-        AND 1 - (e.embedding <=> $1::vector) >= $6
+        AND 1 - (e.embedding ${distanceOperator} $1) >= $6
       ORDER BY distance ASC, m.id ASC
       LIMIT $7`,
     [

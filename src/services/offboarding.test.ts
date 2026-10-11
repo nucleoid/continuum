@@ -1,4 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import type pg from 'pg';
 import { createAuthenticator } from '../api/auth.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
@@ -18,6 +20,8 @@ import {
 import { provisionEntraGroupBinding } from './membership-sync.js';
 import { disablePrincipal, reactivatePrincipal } from './principal-admin.js';
 import { recallForPrincipal } from './recall.js';
+
+const execFileAsync = promisify(execFile);
 
 async function offboardPrincipal(
   pool: pg.Pool, actor: Parameters<typeof serviceOffboardPrincipal>[1], principalId: string,
@@ -71,6 +75,66 @@ describe('offboarding and erasure', () => {
       pool, personalMemory.id, Array(768).fill(0), { id: 'test', dim: 768 },
     );
     return { admin, target, personal, shared, personalMemory, sharedMemory };
+  }
+
+  async function boundedScaleDiagnostic<T>(label: string, budgetMs: number,
+    operation: (bounded: pg.Pool) => Promise<T>): Promise<T> {
+    const client = await pool.connect();
+    const started = Date.now();
+    const deadline = started + budgetMs;
+    let discard = false;
+    const boundedQuery = async (sql: string, values?: unknown[]) => {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error(`${label}: bounded diagnostic deadline exhausted`);
+      // Use server cancellation, so a failed test cannot leave SQL running into
+      // the next test's TRUNCATE. Keep the actual service and all row triggers.
+      if (!/^ROLLBACK\b/i.test(sql.trim())) {
+        await client.query("SELECT set_config('statement_timeout', $1, FALSE), set_config('lock_timeout', '1s', FALSE)",
+          [`${Math.min(15_000, remaining)}ms`]);
+      }
+      const queryStarted = Date.now();
+      try { return await client.query(sql, values); }
+      finally {
+        const elapsed = Date.now() - queryStarted;
+        if (elapsed >= 250) console.info(JSON.stringify({ label, elapsedMs: elapsed,
+          totalMs: Date.now() - started, sql: sql.trim().replace(/\s+/g, ' ').slice(0, 160) }));
+      }
+    };
+    const boundedClient = { query: boundedQuery,
+      release: (error?: boolean | Error) => { if (error) discard = true; } } as unknown as pg.PoolClient;
+    const bounded = { query: boundedQuery, connect: async () => boundedClient } as unknown as pg.Pool;
+    try { return await operation(bounded); }
+    finally {
+      try { await client.query('ROLLBACK'); await client.query('RESET statement_timeout');
+        await client.query('RESET lock_timeout'); }
+      catch { discard = true; }
+      client.release(discard);
+      console.info(JSON.stringify({ label, elapsedMs: Date.now() - started }));
+    }
+  }
+
+  async function seedScaleHistory(bounded: pg.Pool, value: Awaited<ReturnType<typeof fixture>>) {
+    await bounded.query('BEGIN');
+    try {
+      await bounded.query(
+        `INSERT INTO memories(id, scope_id, type, title, body, author_id, source)
+         SELECT gen_random_uuid(), $1, 'context', 'bulk ' || n, 'private ' || n, $2, 'manual'
+           FROM generate_series(1, $3) n`, [value.personal.id, value.target.id, MAX_OFFBOARD_MEMORIES],
+      );
+      for (let first = 1; first <= MAX_OFFBOARD_AFFECTED_ROWS + 1; first += 1_000) {
+        await bounded.query(
+          `INSERT INTO audit_log(principal_id, action, scope_id, query, metadata)
+           SELECT $1, 'read', $2, 'bounded secret ' || n, '{}'::jsonb FROM generate_series($3::integer, $4::integer) n`,
+          [value.admin.id, value.personal.id, first, Math.min(first + 999, MAX_OFFBOARD_AFFECTED_ROWS + 1)],
+        );
+      }
+      await bounded.query('COMMIT');
+    } catch (error) { await bounded.query('ROLLBACK'); throw error; }
+    // Refresh the real seeded cardinalities before service SQL is planned.
+    // Prior tiny or truncated fixture statistics are not this scale workload.
+    for (const relation of ['memories', 'audit_log', 'audit_log_offboarding_scopes', 'principal_user_scopes']) {
+      await bounded.query(`ANALYZE ${relation}`);
+    }
   }
 
   it('previews, atomically redacts the owned scope, preserves shared memory, and retries safely', async () => {
@@ -129,6 +193,178 @@ describe('offboarding and erasure', () => {
     await expect(upsertPrincipalByExternalId(pool, {
       externalId: value.target.externalId, kind: 'user', displayName: 'Restored silently',
     })).rejects.toThrow('principal kind conflicts');
+  });
+
+  it('offboarding review: waits for an in-flight principal audit lock within the server deadline', async () => {
+    const value = await fixture();
+    const blocker = await pool.connect();
+    let pending: ReturnType<typeof offboardPrincipal> | undefined;
+    try {
+      await blocker.query('BEGIN');
+      await blocker.query('SELECT id FROM principals WHERE id = $1 FOR KEY SHARE', [value.target.id]);
+      const blockerPid = Number((await blocker.query('SELECT pg_catalog.pg_backend_pid() AS pid')).rows[0].pid);
+      let settled = false;
+      pending = offboardPrincipal(pool, value.admin, value.target.id);
+      pending.finally(() => { settled = true; }).catch(() => undefined);
+      let waiting = false;
+      for (let attempt = 0; !settled && !waiting && attempt < 100; attempt += 1) {
+        waiting = (await pool.query(
+          `SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity
+                           WHERE datname = pg_catalog.current_database() AND wait_event_type = 'Lock'
+                             AND $1::integer = ANY(pg_catalog.pg_blocking_pids(pid))) AS waiting`,
+          [blockerPid],
+        )).rows[0].waiting === true;
+        if (!waiting && !settled) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await blocker.query('COMMIT');
+      expect((await pending).complete).toBe(true);
+      expect(waiting).toBe(true);
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => undefined);
+      await pending?.catch(() => undefined);
+      blocker.release();
+    }
+  });
+
+  it('offboarding review: executes one bounded privacy scrub in a resumed historical run', async () => {
+    const value = await fixture();
+    const definition = (await pool.query(
+      `SELECT pg_get_functiondef(
+        'continuum_operator_scrub_coordination_principal(uuid,uuid,uuid,integer)'::regprocedure
+      ) AS definition`,
+    )).rows[0].definition as string;
+    await pool.query('CREATE TABLE offboarding_review_scrub_calls (batch_limit INTEGER NOT NULL)');
+    try {
+      // A bounded unfinished scrub keeps scope cleanup open. Count invocations
+      // at the database boundary, where each call owns a separate batch budget.
+      await pool.query(`CREATE OR REPLACE FUNCTION continuum_operator_scrub_coordination_principal(
+                        authorization_principal_id UUID, target_principal_id UUID,
+                        owned_scope_id UUID, batch_limit INTEGER DEFAULT 1000)
+                        RETURNS JSONB LANGUAGE plpgsql AS $$
+                        BEGIN
+                          INSERT INTO offboarding_review_scrub_calls VALUES (batch_limit);
+                          RETURN '{"complete":false,"progressed":true,"reason":null}'::jsonb;
+                        END; $$`);
+      const first = await offboardPrincipal(pool, value.admin, value.target.id, { batchSize: 1 });
+      expect(first.complete).toBe(false);
+      // Historical repaired runs can be in progress while the old offboarding
+      // marker is retained. This fixture emulates that imported state only.
+      await pool.query('ALTER TABLE principals DISABLE TRIGGER USER');
+      try {
+        await pool.query('UPDATE principals SET offboarded_at = clock_timestamp() WHERE id = $1', [value.target.id]);
+      } finally {
+        await pool.query('ALTER TABLE principals ENABLE TRIGGER USER');
+      }
+      await pool.query('TRUNCATE offboarding_review_scrub_calls');
+      await offboardPrincipal(pool, value.admin, value.target.id, { batchSize: 1 });
+      expect((await pool.query('SELECT batch_limit FROM offboarding_review_scrub_calls')).rows)
+        .toEqual([{ batch_limit: 1 }]);
+    } finally {
+      await pool.query(definition);
+      await pool.query('DROP TABLE offboarding_review_scrub_calls');
+    }
+  });
+
+  it('offboarding review: commits a privacy batch before full-state verification and honors its timeout', async () => {
+    const value = await fixture();
+    expect((await offboardPrincipal(pool, value.admin, value.target.id)).complete).toBe(true);
+    await pool.query(
+      `UPDATE coordination_principal_privacy_progress
+          SET privacy_version = 2, audit_cursor_id = 0, completed_at = NULL
+        WHERE principal_id = $1`, [value.target.id],
+    );
+    const definition = (await pool.query(
+      `SELECT pg_get_functiondef(
+        'continuum_operator_offboarding_actual_state_is_erased(uuid,uuid)'::regprocedure
+      ) AS definition`,
+    )).rows[0].definition as string;
+    try {
+      await pool.query(`CREATE OR REPLACE FUNCTION
+                        continuum_operator_offboarding_actual_state_is_erased(
+                          authorization_principal_id UUID, target_run_id UUID)
+                        RETURNS BOOLEAN LANGUAGE plpgsql AS $$
+                        BEGIN
+                          IF current_setting('statement_timeout') <> '20ms' THEN
+                            RAISE EXCEPTION 'verification budget was not installed';
+                          END IF;
+                          PERFORM pg_sleep(0.1);
+                          RETURN TRUE;
+                        END; $$`);
+      // No expensive verification is allowed to undo this bounded scrub.
+      let batch = await offboardPrincipal(pool, value.admin, value.target.id, {
+        verificationTimeoutMs: 20, batchSize: 1,
+      });
+      expect(batch).toMatchObject({ complete: false, progressed: true });
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        const privacy = (await pool.query(
+          `SELECT privacy_version, completed_at IS NOT NULL AS complete
+             FROM coordination_principal_privacy_progress WHERE principal_id = $1`,
+          [value.target.id],
+        )).rows[0];
+        if (privacy.privacy_version >= 3 && privacy.complete) break;
+        batch = await offboardPrincipal(pool, value.admin, value.target.id, {
+          verificationTimeoutMs: 20, batchSize: 1,
+        });
+        expect(batch.complete).toBe(false);
+      }
+      expect((await pool.query(
+        `SELECT privacy_version, completed_at IS NOT NULL AS complete
+           FROM coordination_principal_privacy_progress WHERE principal_id = $1`,
+        [value.target.id],
+      )).rows).toEqual([{ privacy_version: 3, complete: true }]);
+      await expect(offboardPrincipal(pool, value.admin, value.target.id, {
+        verificationTimeoutMs: 20,
+      })).rejects.toMatchObject({ code: 'COORDINATION_TIMEOUT' });
+      expect((await pool.query(
+        'SELECT completed_at IS NOT NULL AS complete FROM coordination_principal_privacy_progress WHERE principal_id = $1',
+        [value.target.id],
+      )).rows).toEqual([{ complete: true }]);
+      await expect(offboardPrincipal(pool, value.admin, value.target.id, {
+        dryRun: true,
+      })).resolves.toMatchObject({ dryRun: true, complete: false, alreadyOffboarded: false });
+      const connectionString = (pool as unknown as {
+        options: { connectionString: string };
+      }).options.connectionString;
+      await expect(execFileAsync(process.execPath, [
+        'dist/identity/admin-cli.js', 'offboard-principal', value.target.id,
+        '--confirm-scope', value.personal.id, '--verification-timeout-ms', '20', '--once',
+      ], {
+        cwd: process.cwd(), timeout: 10_000,
+        env: {
+          ...process.env, CONTINUUM_DATABASE_URL: connectionString,
+          CONTINUUM_ADMIN_ACTOR: value.admin.externalId, CONTINUUM_DB_POOL_MAX: '1',
+        },
+      })).rejects.toMatchObject({ code: 2 });
+    } finally {
+      await pool.query(definition);
+    }
+    expect((await offboardPrincipal(pool, value.admin, value.target.id)).complete).toBe(true);
+  });
+
+  it('provider review: completes privacy erasure when provider verification is unavailable', async () => {
+    const value = await fixture();
+    const definition = (await pool.query(
+      `SELECT pg_get_functiondef('continuum_assert_current_pgvector_profile()'::regprocedure)
+                AS definition`,
+    )).rows[0].definition as string;
+    try {
+      // Simulate provider catalog/ACL failure without touching identity,
+      // membership, or the operator's erasure capabilities.
+      await pool.query(`CREATE OR REPLACE FUNCTION continuum_assert_current_pgvector_profile()
+                        RETURNS VOID LANGUAGE plpgsql AS $$
+                        BEGIN RAISE EXCEPTION 'provider unavailable'; END; $$`);
+      const result = await offboardPrincipal(pool, value.admin, value.target.id);
+      expect(result.complete).toBe(true);
+      expect((await pool.query(
+        'SELECT title, body, state FROM memories WHERE id = $1', [value.personalMemory.id],
+      )).rows).toEqual([{ title: '[erased]', body: '[erased]', state: 'archived' }]);
+      expect((await pool.query(
+        'SELECT count(*)::int AS count FROM memory_embeddings WHERE memory_id = $1',
+        [value.personalMemory.id],
+      )).rows).toEqual([{ count: 0 }]);
+    } finally {
+      await pool.query(definition);
+    }
   });
 
   it('fully erases again after explicit reactivation, membership restoration, and new capture', async () => {
@@ -198,7 +434,7 @@ describe('offboarding and erasure', () => {
     await pool.query('ALTER TABLE memory_embeddings DISABLE TRIGGER require_embeddable_memory');
     await pool.query(
       `INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
-       VALUES ($1, 'test', 768, $3::vector), ($2, 'test', 768, $3::vector)`,
+       VALUES ($1, 'test', 768, $3), ($2, 'test', 768, $3)`,
       [dirty.id, canonical.id, `[${Array(768).fill(0).join(',')}]`],
     );
     await pool.query('ALTER TABLE memory_embeddings ENABLE TRIGGER require_embeddable_memory');
@@ -468,7 +704,7 @@ describe('offboarding and erasure', () => {
     )).rows[0].run_id as string;
     const verifierSource = (await pool.query(
       `SELECT prosrc FROM pg_proc
-        WHERE oid = 'continuum_offboarding_actual_state_is_erased(uuid)'::regprocedure`,
+        WHERE oid = 'continuum_offboarding_lifecycle_state_is_erased(uuid)'::regprocedure`,
     )).rows[0].prosrc as string;
     expect(verifierSource.match(/target_run_id/g)).toHaveLength(1);
     const exactVerifierQuery = verifierSource.replace('target_run_id', '$1::uuid');
@@ -759,18 +995,32 @@ describe('offboarding and erasure', () => {
     )).rows[0].count).toBe(1);
   });
 
-  it('serializes with membership sync and refuses removal of the final manual org admin', async () => {
+  it('reports membership sync contention, resumes after release, and protects the final manual org admin', async () => {
     const value = await fixture();
     const blocker = await pool.connect();
-    await blocker.query('BEGIN');
-    await blocker.query(`SELECT pg_advisory_xact_lock(834641726154302119::bigint)`);
-    let settled = false;
-    const pending = offboardPrincipal(pool, value.admin, value.target.id).finally(() => { settled = true; });
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(settled).toBe(false);
-    await blocker.query('COMMIT');
-    blocker.release();
-    await pending;
+    let discardBlocker = false;
+    try {
+      await blocker.query('BEGIN');
+      await blocker.query(`SELECT pg_catalog.pg_advisory_xact_lock(834641726154302119::bigint)`);
+      expect(await offboardPrincipal(pool, value.admin, value.target.id)).toMatchObject({
+        dryRun: false, complete: false, alreadyOffboarded: false,
+        progressed: false, blockedUntil: null, reason: 'lock_busy',
+      });
+      expect((await pool.query(
+        'SELECT disabled_at,offboarded_at FROM principals WHERE id=$1', [value.target.id],
+      )).rows[0]).toEqual({ disabled_at: null, offboarded_at: null });
+      expect((await pool.query(
+        'SELECT active FROM scope_memberships WHERE principal_id=$1 AND scope_id=$2',
+        [value.target.id, value.personal.id],
+      )).rows[0].active).toBe(true);
+      expect((await pool.query(
+        'SELECT title,state FROM memories WHERE id=$1', [value.personalMemory.id],
+      )).rows[0]).toEqual({ title: 'Private title', state: 'live' });
+    } finally {
+      try { await blocker.query('ROLLBACK'); } catch { discardBlocker = true; }
+      blocker.release(discardBlocker);
+    }
+    expect((await offboardPrincipal(pool, value.admin, value.target.id)).complete).toBe(true);
 
     await resetData(pool);
     const onlyAdmin = await createPrincipal(pool, {
@@ -840,12 +1090,26 @@ describe('offboarding and erasure', () => {
     )).rows[0];
     expect(durable).toMatchObject({ memories: 1, embeddings: 1, memberships: 1 });
     expect(durable.evidence).toMatchObject({ memberPrincipalIds: [] });
+    expect((await pool.query(
+      `SELECT metadata->>'phase' AS phase FROM coordination_operator_events
+        WHERE scope_id = $1 ORDER BY id`, [value.personal.id],
+    )).rows).toEqual([
+      { phase: 'started' }, { phase: 'completed' },
+      { phase: 'started' }, { phase: 'completed' },
+    ]);
     await pool.query('DELETE FROM audit_log');
     const retry = await offboardPrincipal(pool, value.admin, value.target.id);
     expect(retry.alreadyOffboarded).toBe(true);
     expect(retry.originalOffboarding).toMatchObject({
       memories: 1, embeddings: 1, memberships: 1,
     });
+    expect((await pool.query(
+      `SELECT metadata->>'phase' AS phase FROM coordination_operator_events
+        WHERE scope_id = $1 ORDER BY id`, [value.personal.id],
+    )).rows).toEqual([
+      { phase: 'started' }, { phase: 'completed' },
+      { phase: 'started' }, { phase: 'completed' },
+    ]);
   });
 
   it('orders embedding writes with archive and removes either race winner', async () => {
@@ -1119,20 +1383,9 @@ describe('offboarding and erasure', () => {
 
   it('starts a bounded fenced batch when more than the former affected-row cap is selected', async () => {
     const value = await fixture();
-    await pool.query(
-      `INSERT INTO memories
-         (id, scope_id, type, title, body, author_id, source)
-       SELECT gen_random_uuid(), $1, 'context', 'bulk ' || n, 'private ' || n, $2, 'manual'
-         FROM generate_series(1, $3) n`,
-      [value.personal.id, value.target.id, MAX_OFFBOARD_MEMORIES],
-    );
-    await pool.query(
-      `INSERT INTO audit_log (principal_id, action, scope_id, query, metadata)
-       SELECT $1, 'read', $2, 'bounded secret', '{}'::jsonb
-         FROM generate_series(1, $3)`,
-      [value.admin.id, value.personal.id, MAX_OFFBOARD_AFFECTED_ROWS + 1],
-    );
-    const preview = await offboardPrincipal(pool, value.admin, value.target.id, true);
+    await boundedScaleDiagnostic('offboarding former-cap', 45_000, async (bounded) => {
+    await seedScaleHistory(bounded, value);
+    const preview = await offboardPrincipal(bounded, value.admin, value.target.id, true);
     expect(preview.memories).toBe(DEFAULT_OFFBOARD_BATCH_SIZE);
     expect(preview.auditRows).toBe(DEFAULT_OFFBOARD_BATCH_SIZE);
     expect(preview.countEvidence).toMatchObject({
@@ -1140,19 +1393,20 @@ describe('offboarding and erasure', () => {
       limit: DEFAULT_OFFBOARD_BATCH_SIZE,
       truncated: expect.arrayContaining(['memories', 'auditRows']),
     });
-    const first = await offboardPrincipal(pool, value.admin, value.target.id, { batchSize: 10 });
+    const first = await offboardPrincipal(bounded, value.admin, value.target.id, { batchSize: 10 });
     expect(first).toMatchObject({ complete: false, progress: { memoriesProcessed: 10 } });
     expect(first.progress.auditRowsProcessed).toBeGreaterThan(0);
     expect(first.progress.auditRowsProcessed).toBeLessThanOrEqual(10);
-    expect((await pool.query(
+    expect((await bounded.query(
       `SELECT disabled_at IS NOT NULL AS disabled, offboarded_at IS NOT NULL AS fenced
          FROM principals WHERE id = $1`, [value.target.id],
     )).rows[0]).toEqual({ disabled: true, fenced: true });
-    expect((await pool.query(
+    expect((await bounded.query(
       `SELECT count(*)::int AS count FROM memories
         WHERE scope_id = $1 AND title = '[erased]'`, [value.personal.id],
     )).rows[0].count).toBe(10);
-  });
+    });
+  }, 60_000);
 
   it('preserves UUID-only administrative audit integrity for the departing actor', async () => {
     const value = await fixture();
@@ -1466,25 +1720,18 @@ describe('offboarding and erasure', () => {
 
   it('truthfully completes more than 10k memories and 50k audits within each batch cap', async () => {
     const value = await fixture();
-    await pool.query(
-      `INSERT INTO memories (id, scope_id, type, title, body, author_id, source)
-       SELECT gen_random_uuid(), $1, 'context', 'bulk ' || n, 'private ' || n, $2, 'manual'
-         FROM generate_series(1, $3) n`,
-      [value.personal.id, value.target.id, MAX_OFFBOARD_MEMORIES],
-    );
-    await pool.query(
-      `INSERT INTO audit_log (principal_id, action, scope_id, query, metadata)
-       SELECT $1, 'read', $2, 'bounded secret ' || n, '{}'::jsonb
-         FROM generate_series(1, $3) n`,
-      [value.admin.id, value.personal.id, MAX_OFFBOARD_AFFECTED_ROWS + 1],
-    );
+    await boundedScaleDiagnostic('offboarding full-scale', 180_000, async (bounded) => {
+    await seedScaleHistory(bounded, value);
     let priorMemories = 0;
     let priorAudits = 0;
     let result;
     for (let attempt = 0; attempt < 40; attempt += 1) {
-      result = await offboardPrincipal(pool, value.admin, value.target.id, {
+      const batchStarted = Date.now();
+      result = await offboardPrincipal(bounded, value.admin, value.target.id, {
         confirmationScopeId: value.personal.id, batchSize: 5_000,
       });
+      console.info(JSON.stringify({ label: 'offboarding full-scale batch', attempt,
+        elapsedMs: Date.now() - batchStarted, complete: result.complete, progress: result.progress }));
       expect(result.progress.memoriesProcessed - priorMemories).toBeLessThanOrEqual(5_000);
       expect(result.progress.auditRowsProcessed - priorAudits).toBeLessThanOrEqual(5_000);
       priorMemories = result.progress.memoriesProcessed;
@@ -1492,15 +1739,16 @@ describe('offboarding and erasure', () => {
       if (result.complete) break;
     }
     expect(result?.complete).toBe(true);
-    expect((await pool.query(
+    expect((await bounded.query(
       `SELECT EXISTS (SELECT 1 FROM memories WHERE scope_id = $1 AND title <> '[erased]') AS dirty`,
       [value.personal.id],
     )).rows[0].dirty).toBe(false);
-    expect((await pool.query(
+    expect((await bounded.query(
       `SELECT EXISTS (SELECT 1 FROM audit_log WHERE scope_id = $1 AND query IS NOT NULL) AS dirty`,
       [value.personal.id],
     )).rows[0].dirty).toBe(false);
-  }, 120_000);
+    });
+  }, 200_000);
 
   it('does not select unrelated audit metadata merely because it contains a common scope name', async () => {
     const value = await fixture();

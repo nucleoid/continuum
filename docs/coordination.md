@@ -1,0 +1,859 @@
+# Coordination leases
+
+Continuum exposes a dedicated coordination domain for exclusive, non-reentrant
+leases. Coordination shares Continuum authentication, explicit scope
+membership, PostgreSQL durability, REST, MCP, and audit infrastructure. It is
+not semantic memory: lease data is never embedded, recalled, promoted, rendered
+into generated AGENTS.md output, or sent to an embedding provider.
+
+This document describes the API contract shipped by the package. It does not
+claim that any particular deployment has applied the complete migration chain
+through 0081 and finished its owner-only contract backfill, upgraded its servers, or integrated a
+production agent harness.
+
+## Authorization
+
+Every operation requires an enabled principal and a currently active, explicit `writer` or `admin`
+membership on the exact scope. These do not grant coordination access:
+
+- implicit readability of the organization scope;
+- explicit `reader` membership;
+- administrator membership on a different scope;
+- a lease ID, run ID, request ID, or fencing token by itself.
+
+Continuum locks the relevant principal, membership, and Entra freshness rows
+inside the operation transaction. It rechecks effective membership with a fresh
+database clock immediately before commit. Unknown and unauthorized scopes are
+both reported as `SCOPE_NOT_FOUND` for acquire and inspect. Unknown, expired,
+released, replaced, wrong-owner, wrong-run, or no-longer-authorized lease
+generations are all reported as `LEASE_LOST` for renew and release.
+
+REST authentication checks credential validity on new requests. Stdio MCP
+caches token validation for up to 30 seconds, so credential revocation can take
+that long to reject subsequent MCP calls. Neither silently deletes an already
+issued lease. Coordination still rechecks principal status and current scope
+membership inside each operation. Revoking membership prevents later lease
+operations. Disablement also prevents renewal and release without forcibly
+changing the lease. Quiesce and release while the holder is still enabled and
+authorized, before revoking credentials/membership or disabling it. After that
+point, cleanup waits for TTL expiry; there is no administrative forced release.
+
+## Exact resource identity
+
+A resource is an opaque, case-sensitive Unicode string:
+
+- well-formed Unicode only;
+- 1 through 512 UTF-8 bytes;
+- no C0 or C1 control code points (the Unicode Cc ranges U+0000-U+001F and U+007F-U+009F);
+- no leading or trailing ECMAScript whitespace.
+
+Continuum does not trim, case-fold, normalize Unicode, resolve paths, infer
+parents, or perform overlap matching. For example, composed `é` and
+`e` plus a combining accent are distinct keys.
+
+The canonical issue key for harnesses is:
+
+```text
+github:<owner>/<repo>:issue:<number>
+```
+
+Use a separate exact key such as `schema-migrations` for project-wide schema
+serialization. Keys must not contain secrets or personal text.
+
+## Lease lifecycle
+
+Acquisition is exclusive, non-blocking, and non-reentrant. PostgreSQL row locks
+serialize all server processes for one exact `(scope, resource)` pair.
+
+- A free, released, or expired resource produces `acquired: true`.
+- An unexpired lease produces successful contention with
+  `acquired: false` and `reason: "LOCK_HELD"`.
+- A fresh request from the current owner and run still contends.
+- Only an exact idempotent replay can return the original result.
+- Expired means `expires_at <= clock_timestamp()`.
+- Server time is sampled after row-lock waits.
+- Renew resets expiry to fresh server time plus the requested TTL.
+- Release clears only the exact current generation.
+- A stale renew or release can never affect a successor.
+
+TTL is an integer from 30 through 900 seconds and defaults to 300 seconds.
+
+Each successful takeover increments a durable PostgreSQL `BIGINT` fencing
+counter. Tokens are canonical decimal strings end-to-end and are never parsed
+as JavaScript numbers. Resource rows are never automatically deleted by
+application traffic, so fencing history survives release, expiry, receipt
+cleanup, server restart, and binary rollback. An approval-bound operator may
+reclaim an inactive key; the owner-only scope-level fencing floor seeds any
+later recreation, so the next token remains strictly greater without retaining
+a dictionary-attackable resource digest. At
+`9223372036854775807`, later acquisition fails permanently
+with `FENCING_TOKEN_EXHAUSTED`; the counter never wraps or resets.
+
+## MCP
+
+The four MCP tools use snake_case fields:
+
+- `continuum.lock_acquire`
+- `continuum.lock_renew`
+- `continuum.lock_release`
+- `continuum.lock_inspect`
+
+### Acquire
+
+```json
+{
+  "scope": "project:continuum",
+  "resource": "github:nucleoid/continuum:issue:7",
+  "run_id": "3fde8850-90ac-4c4d-9460-b83cb78d8aaf",
+  "request_id": "96edcd85-7ee4-43d0-8708-c33320d49015",
+  "ttl_seconds": 300
+}
+```
+
+Successful acquisition:
+
+```json
+{
+  "acquired": true,
+  "scope": "project:continuum",
+  "resource": "github:nucleoid/continuum:issue:7",
+  "lease_id": "79c47cef-146a-4445-87a8-0d3cbd5b617e",
+  "run_id": "3fde8850-90ac-4c4d-9460-b83cb78d8aaf",
+  "fencing_token": "42",
+  "expires_at": "2026-10-07T12:05:00.000000Z",
+  "server_time": "2026-10-07T12:00:00.000000Z"
+}
+```
+
+Contention is a successful MCP result, not an application error:
+
+```json
+{
+  "acquired": false,
+  "reason": "LOCK_HELD",
+  "scope": "project:continuum",
+  "resource": "github:nucleoid/continuum:issue:7",
+  "expires_at": "2026-10-07T12:05:00.000000Z",
+  "retry_after_seconds": 180,
+  "server_time": "2026-10-07T12:02:00.000000Z"
+}
+```
+
+Contention never reveals the holder's principal, run ID, lease ID, or token.
+
+### Renew
+
+```json
+{
+  "lease_id": "79c47cef-146a-4445-87a8-0d3cbd5b617e",
+  "run_id": "3fde8850-90ac-4c4d-9460-b83cb78d8aaf",
+  "request_id": "b9e01faa-7f26-49c2-82cd-0277d7b56527",
+  "ttl_seconds": 300
+}
+```
+
+Success returns `renewed`, the lease and run IDs, the unchanged decimal
+fencing token, `expires_at`, and `server_time`.
+
+### Release
+
+```json
+{
+  "lease_id": "79c47cef-146a-4445-87a8-0d3cbd5b617e",
+  "run_id": "3fde8850-90ac-4c4d-9460-b83cb78d8aaf",
+  "request_id": "e76fa9a5-18bf-4f73-8183-2fd89154ba88"
+}
+```
+
+First success returns `{"released":true}`. Exact retained replay returns
+`{"released":true,"already_released":true}` and never touches a successor.
+
+### Inspect
+
+```json
+{
+  "scope": "project:continuum",
+  "resource": "github:nucleoid/continuum:issue:7"
+}
+```
+
+Inspect always returns `held`, `scope`, `resource`, and `server_time`.
+It adds `expires_at` when held. It adds `lease_id`, `run_id`, and
+`fencing_token` only when the caller's principal owns the current lease.
+Another holder is represented only by `held: true` and expiry.
+
+Application errors use the existing JSON text envelope and set `isError: true`.
+
+## REST
+
+REST uses equivalent camelCase fields:
+
+- `POST /api/v0/locks/acquire`
+- `POST /api/v0/locks/renew`
+- `POST /api/v0/locks/release`
+- `GET /api/v0/locks?scope=...&resource=...`
+
+Success, including contention, is HTTP 200. Status mappings are:
+
+| Status | Codes |
+|---|---|
+| 400 | `INVALID_INPUT`, `INVALID_SCOPE` |
+| 404 | `SCOPE_NOT_FOUND` |
+| 409 | `LEASE_LOST`, `IDEMPOTENCY_CONFLICT`, `COORDINATION_QUOTA_EXCEEDED`, `FENCING_TOKEN_EXHAUSTED` |
+| 503 | `COORDINATION_TIMEOUT`, `DEPENDENCY_UNAVAILABLE` |
+
+REST request bodies are strict. Unknown fields are rejected.
+
+## Idempotency and ambiguous responses
+
+Acquire, renew, and release require a request UUID. The durable key is
+authenticated principal plus operation plus request UUID. Continuum hashes a
+canonical length-prefixed tuple of normalized semantic input after defaults are
+applied. Reusing a key with different input returns
+`IDEMPOTENCY_CONFLICT` without mutating lease state.
+
+Acquire, contention, renew, and release receipts are retained for at least
+24 hours from the operation's database server time:
+
+- acquire success replays its original response only while that generation is
+  still current and unexpired. An expired, released or displaced acquire
+  generation returns `LEASE_LOST`; inspect it and use a new request UUID;
+- acquire contention replays the original contention, even if the holder has
+  since changed;
+- renew success replays its original conservative timestamps without extending
+  again, and only while the generation remains current and unexpired;
+- release success replays with `alreadyReleased` or `already_released`, even
+  if a successor now exists, while the caller remains authorized and privacy
+  erasure has not removed that receipt.
+
+Authorization is revalidated before any receipt result or conflict is exposed.
+Replay adds no duplicate audit row.
+
+Once a receipt expires, bounded cleanup may remove it and its idempotency
+guarantee ends. Do not blindly retry beyond the 24-hour horizon. Inspect,
+reconcile local ownership state, and use a new
+request ID.
+
+Server-side `lock_timeout` is one second and `statement_timeout` is five
+seconds. Timeout maps to `COORDINATION_TIMEOUT`. Request cancellation is
+checked before work, after blocking stages, and immediately before commit.
+Continuum does not use a local query timeout that could reject while a mutating
+statement continues unseen. If the network makes commit versus response
+uncertain, retry the exact request within the receipt horizon.
+
+## Limits and cleanup
+
+V1 hard limits are:
+
+- 10,000 unreclaimed resource keys per scope; operators may lower the limit,
+  but cannot raise it above 10,000;
+- at most 100 newly created resource keys per principal per fixed hourly window;
+- 10,000 total retained receipts per principal across successful acquisitions,
+  contention, renewals, and releases. Every receipt consumes this budget;
+  retained replay evidence is never evicted to admit another operation;
+- at most 100 expired receipts and terminal lease histories reclaimed by an
+  application operation, and at most 1,000 of each by operator maintenance.
+
+An existing resource remains usable when its scope reaches the key limit,
+subject to the principal's receipt quota. Receipt saturation rejects every
+fresh mutation, including renewal and release, with
+`COORDINATION_QUOTA_EXCEEDED`. Exact authorized replays remain available.
+Plan fleet size and renewal cadence for the full 24-hour receipt budget; a
+necessary planning bound is
+`leases * 86400 / renewal_interval_seconds + contention_polls_per_day <= 10000`.
+Leave additional space for acquisitions, releases, retries with new request IDs
+and delayed cleanup of expired receipts. A 300-second lease renewed every 100
+seconds uses 864 renewal receipts per day; 11 such leases leave only 496 slots
+before other operations. A 900-second lease renewed every 300 seconds uses 288
+per day. Select TTL and concurrency from that budget and recovery requirements.
+Pollers must honor `retry_after_seconds` and back off rather than poll at a fixed
+short interval; a five-second fresh contention poll would consume 17,280
+receipts per day by itself. At saturation fresh renew and release can both
+fail, and the held lease remains until TTL expiry. Stop side effects when
+renewal cannot be confirmed; backoff does not extend lease ownership.
+A harness must stop dispatch and reconcile if it cannot renew before its deadline.
+Continuum never automatically evicts resource rows or fencing history. Quota, lease state,
+receipt, usage counters, and audit metadata commit atomically.
+
+Coordination operations lock authorization first, then the exact receipt and
+resource state. Offboarding locks active memberships in deterministic principal
+and source order before it reads any coordination state. A PostgreSQL deadlock
+or lock timeout maps to `COORDINATION_TIMEOUT`; retry the complete idempotent
+operation, never a statement inside the aborted transaction. Fresh mutations
+briefly serialize on the principal usage row before resource and lease locks.
+This is required to enforce the combined receipt cap, including renewals.
+Cleanup skips expired receipt rows already held by a peer, but counter updates
+can still wait and time out. Membership sync also briefly blocks coordination
+while it holds authorization rows. Shared-principal fleets should account for
+these bounded waits when scheduling renewal before the conservative deadline.
+
+Global receipt sweeping uses `coordination_receipts_global_sweep_idx`.
+Terminal leases receive `cleanup_eligible_at` only after release or displacement
+from `coordination_resources.current_lease_id`. Current expired generations are
+therefore not rescanned on every sweep. Global and per-principal cleanup use
+`coordination_leases_cleanup_ready_idx` and
+`coordination_leases_principal_cleanup_idx` respectively. Upgrade backfill uses
+the durable `last_lease_id` cursor and the
+`coordination_leases_cleanup_pending_idx` partial index. Completion requires a
+final non-`SKIP LOCKED` check, so a locked low key cannot be skipped forever or
+cause false completion.
+
+Operator maintenance is exposed only through the approval-bound database role:
+`continuum_operator_reclaim_coordination_resource` removes at most 1,000
+expired receipts plus at most 1,000 lease generations, refuses a live lease or any
+retained receipt, preserves the scope fencing floor, and frees one key slot.
+`continuum_operator_sweep_coordination_state` performs indexed cleanup in
+up to 1,000 expired receipts plus up to 1,000 eligible terminal lease histories
+per call. It includes active principals; disablement is not a sweep predicate.
+Quota changes, reclaim, and sweeps write operator audit events. Operators must
+set transaction-level `lock_timeout` and `statement_timeout` before invoking
+maintenance; PostgreSQL function `SET` clauses do not bound the already-running
+calling statement, so Continuum does not claim a function-local deadline.
+`continuum_operator_set_coordination_scope_quota` adjusts a reviewed scope
+limit within the hard ceiling. The principal quota setter's `acquire_limit`
+parameter now sets the combined receipt budget, capped at 10,000. Its legacy
+`contended_limit` is a compatibility alias: new setter calls must pass the same
+value as `acquire_limit`, or fail with SQLSTATE `22023` before changing quotas.
+Previously stored contended limits are ignored by quota enforcement. Lowering a
+budget preserves existing receipts and authorized
+replays and refuses fresh growth until cleanup frees space.
+Before applying 0081 to an existing lease installation, run the owner-only
+read-only quota baseline with writers paused:
+
+```sh
+psql "$CONTINUUM_MIGRATION_OWNER_URL" -v continuum_schema=public \
+  -f scripts/preflight-coordination-contract.sql
+```
+
+Replace `public` with the actual tenant schema. The script emits bounded JSON
+notices for configured acquisition/legacy contention limits, proposed combined
+limits, stored operation totals, recently expired rows and scope key limits.
+Limits above 10,000 will be clamped; a lowered acquisition limit will instead
+cap acquisitions, contention, renewals and releases together. The contention
+argument no longer protects a separate budget. Review every configured limit
+against renewal/polling demand, not only whether existing rows fit today.
+Pages default to 100; pass each non-null `principal_page` or `scope_page`
+`next_cursor` back as `continuum_after_principal_id` or
+`continuum_after_scope_id` until both are null. The script changes no values or
+ACLs and has a five-second statement bound. A timeout is not a clean report;
+reduce the page limit or investigate the measured maintenance workload.
+After owner backfill, sweep expired detached history in bounded operator batches
+before privacy repair; do not evict retained ordinary receipts to admit growth.
+The shared application role cannot execute these operator
+functions, directly update usage/counter tables, or update protected lease and
+resource identity columns; owner-owned triggers and narrow `SECURITY DEFINER`
+helpers maintain counters.
+
+Audit metadata is bounded and server-generated. It includes operation, outcome,
+owned request/run/lease IDs where applicable, owned token, resource UTF-8
+length. It never contains a resource digest, resource text,
+credentials, request bodies, another holder's identifiers, memory bodies, or
+vectors. Audit failure rolls back the whole operation.
+
+## Deployment, mixed versions, and rollback
+
+The public-contract migration carries a bounded owner-only backfill directive.
+The migrator commits its schema work, then calls
+`continuum_backfill_coordination_contract(integer)` in batches of at most 1000,
+with a 1-second lock wait and 5-second statement deadline. Lock/deadline failures
+reduce the batch down to one before failing. Each successful call durably advances
+its cursor. A ledgered SQL filename does not imply completion: the current
+migrator retries this directive on subsequent runs even when schema work is
+already ledgered. Runtime write gates remain closed until the backfill finishes.
+After function-body and owner verification, a matching completed backfill record
+and a singleton phase of `complete` skip further operative calls and attempt
+records. Unknown history or interrupted attempts without matching completed
+evidence cannot use that skip; changed recipes and a reopened pending singleton
+also require operative repair.
+
+The usage phase scans a bounded common UUID window of usage and existing privacy
+progress rows. For disabled or offboarded principals it reopens completed audit
+privacy and resets its audit cursor, including inspection-only principals with
+no usage row. Run the paged privacy-repair discovery after migration and finish
+those repairs to apply the narrower post-erasure audit shape. Ordinary lock
+mutation audits retain their operational fields until privacy erasure.
+
+Adaptive backfill treats PostgreSQL `57014` as a retryable cancellation category.
+That SQLSTATE covers both statement deadlines and an administrator's
+`pg_cancel_backend`; the driver does not provide a portable distinction. Batch
+halving is deterministic and stops with failure at one: at most 10 consecutive
+failed calls from the contract's maximum 1000 batch, or 13 from the legacy
+maximum 5000. A successful batch advances durable progress. To stop the entire
+job, stop the migrator process; a single backend cancellation may be retried.
+Resume later with a smaller configured batch when operator control requires it.
+
+The migrator's owner-only `_continuum_migration_execution` sidecar distinguishes
+canonical source, transformed SQL and separately committed repair phases. It
+stores named variants, SHA-256 digests and statement counts, never raw SQL or
+bound values. Transactional effects, completed evidence and the migration-name
+ledger commit together. Online DDL cannot share that transaction: an interrupted
+attempt remains `started` with unknown partial effects, and retry-safe work reruns
+before completed evidence and the ledger commit together. A changed recipe on an
+unfinished attempt requires operator reconciliation.
+An old `started` attempt may remain after a later successful retry. Matching
+completed evidence and a complete singleton permit the current recipe to skip
+work safely. A future different recipe can still fail closed on that older
+attempt; investigate its recorded source/variant and catalog effects with the
+owner before adopting a new recipe. Do not erase history to make admission pass.
+
+Already-ledgered files without historical execution evidence are recorded as
+`history-unknown`. Current checksums do not retroactively prove which SQL ran.
+Earlier unrestricted carriage-return repairs may have altered unrelated function
+bodies; this record cannot discover or undo that historical damage. The current
+contract's directly defined ready/backfill functions are checked against verified
+source bodies, owner, SECURITY DEFINER, pinned search path and PUBLIC revocation.
+Matching those functions does not certify every historical function or prove
+against database-owner changes. Only a trusted migration owner may inspect this
+bookkeeping; runtime, operator and sync roles gain no new capability.
+
+The 0082 index is built concurrently after the 0081 contract backfill. It matches
+the current private-field predicate, including fencing tokens and resource byte
+lengths; the published 0070 five-field index remains unchanged. Invalid-index
+repair and valid-index verification make interrupted online builds retryable.
+This index is not a prerequisite for the earlier bounded 0081 repair phases.
+
+Published migration history through 0079 is preserved. The current unreleased
+forward repairs are 0080 for provider profiles, 0081 for the public contract,
+and 0082 for the matching seven-field privacy audit index.
+Apply every packaged migration in order through 0082 using the migration/schema
+owner's connection, finish its backfill, then converge exact grants and verify
+before starting current binaries. For the installed command:
+
+```sh
+CONTINUUM_DATABASE_URL="$CONTINUUM_MIGRATION_OWNER_URL" continuum-migrate
+```
+
+The executable reads only `CONTINUUM_DATABASE_URL`; the private owner-URL variable
+is a convenience, not a separate program setting. Runtime and dedicated operator
+connections cannot perform this owner-only work. Select the reviewed application
+schema first in the owner connection's `search_path`.
+
+Current REST/MCP and membership-sync processes anchor the application namespace
+with `CONTINUUM_APPLICATION_SCHEMA`, which defaults to `public`. Their resolved
+explicit `search_path` must contain exactly that schema, with `pg_catalog`
+remaining implicit. Putting the application schema first while retaining later
+schemas is insufficient. An explicitly listed `pg_catalog`, a caller-owned
+`$user` schema, or any later resolved schema makes configured startup fail closed.
+Nonexistent `$user` entries do not appear in the resolved path.
+
+For a custom tenant, set `CONTINUUM_APPLICATION_SCHEMA=tenant_app` and configure
+the connection's `search_path` as `tenant_app` only. A separate DBA-owned
+pgvector provider remains supported: current runtime queries resolve its types
+and operators without adding that provider schema to the runtime path. The
+historical 0001 bootstrap can temporarily use an application/provider path for
+its unqualified extension DDL; that migration-only exception does not permit
+such a path in current runtime startup. Application-local pgvector also remains
+supported with the same single application namespace.
+
+Standalone library calls may omit the optional `expectedSchema` gate argument
+for compatibility. In that mode the caller must supply a trusted connection
+path; relation/helper ownership checks do not establish an independent schema
+anchor. REST/MCP and membership-sync entrypoints always pass the configured
+anchor. Coordination
+SQL additionally selects catalog primitives explicitly and types UUID helper
+arguments to prevent differently typed overloads from redirecting those calls.
+
+For owner inspection, replace `public` with the quoted application schema:
+
+```sql
+SELECT phase, principal_cursor, scope_cursor
+FROM public.coordination_contract_backfill_state WHERE singleton;
+SELECT phase, variant, state, source_sha256, effective_sql_sha256,
+       executed_sql_sha256, statement_count
+FROM public._continuum_migration_execution
+WHERE migration_name = '0081_coordination_public_contract.sql'
+ORDER BY started_at DESC LIMIT 20;
+```
+
+Resume pending repair by rerunning the same packaged owner migration command.
+Do not delete evidence, reset cursors, or mark completion by hand.
+
+After the complete chain and owner repair finish (0064 and 0070 remain
+concurrent-index steps), **re-run
+`scripts/grant-application-role.sql`** for every application and dedicated
+operator role. Re-run `scripts/grant-operator-role.sql` immediately afterward
+for dedicated operators. The exact role verifier deliberately rejects both
+missing coordination grants and broader manual grants.
+
+The 0081 repair rebuilds all receipt counters and extends remaining historical
+receipt retention. It also advances a bounded `(scope_id,resource)` cursor to
+preserve each scope's maximum surviving resource generation, including renamed
+0055-era keys with no privacy progress. Each call processes at most 1,000 rows;
+floor writes, processed counts and the cursor commit together. Completion is
+gated on this phase as well as the usage, scope and receipt phases. No surviving
+resource scan is added to ordinary acquisition. On floor-phase completion,
+both resource cursor fields are cleared in that same transaction; the processed
+count and persistent fencing floors remain.
+Short receipts are extended in durable, bounded keyset batches. Fresh coordination mutations
+return `DEPENDENCY_UNAVAILABLE` while the repair is pending. Already-running
+nodes can still serve retained authorized replays; new REST/MCP processes
+refuse startup until the trusted 0081 readiness gate reports complete. Plan
+maintenance and restarts around that boundary. An interrupted repair resumes from its saved cursors,
+including after the migration file has been ledgered. Finish repair before
+enabling current mutation or offboarding traffic. Only the actual schema owner
+may execute the repair capability; a client-supplied repair flag grants no access.
+Upgrades parked before 0060 also apply transaction-local one-second lock waits
+and thirty-second statement deadlines to transactional published files 0054
+through 0059, recorded as the
+`canonical-lf-lock1s-statement30s-v2` execution variant. Their canonical source bytes remain
+unchanged. The no-transaction 0058 online indexes retain their original execution
+mode and receive no transactional prefix. Schedule owner maintenance and drain
+long transactions before retrying lock refusal. Each cancelled transactional
+file rolls back atomically. The operative thirty-second statement deadline
+overrides a longer `PGOPTIONS` default; the packaged runner has no unbounded
+override. If the same full-scan plan and data volume repeatedly exceed that
+budget, stop retrying. Draining traffic does not make a volume-bound plan finish.
+Preserve the unchanged data and recorded source/effective SQL hashes, measure
+the failing plan, and obtain an owner-reviewed optimized forward execution
+recipe before continuing. The default budget supports the validated upgrade
+paths; very large parked histories can require that measured repair. It does
+not guarantee every historical installation fits the deadline.
+Failed online execution clients are discarded after advisory-lock cleanup so
+session settings installed by a partly executed file cannot leak into later work.
+The 0081 schema transaction also validates a principal CHECK and installs
+principal/membership/key/identity/audit triggers. Their table locks can stall
+authentication and ordinary reads for up to the statement budget, not just
+lease mutations. The maintenance drain must include REST/MCP, webhook intake,
+jobs, sync and other serving readers/writers; do not promise uninterrupted
+memory or authentication traffic during this step.
+The 0062 cleanup directive uses adaptive batches of at most 1,000 with one-second
+lock and five-second statement bounds. Its historical final exhaustion query
+still examines pending current leases; a slow installation may fail again at
+batch size one and needs measured operator investigation before retrying.
+
+The current offboarding binary needs the complete packaged chain, including
+the 0079 readiness capability and completed 0081 contract repair. A historical
+0063 privacy-state function alone is insufficient. Finish migration, repair and
+exact application/operator/sync grant convergence before enabling coordination
+mutations or offboarding on any current node.
+
+The forward repair enforces a minimum 24-hour receipt horizon even for older
+writers. Previously deleted or evicted receipts cannot be reconstructed.
+Historical receipt rows still present in storage are extended from their
+original server time, including recent short-horizon rows that had already
+expired under the old policy. If their original server time is less than
+24 hours ago, they can become replayable again and consume receipt budget.
+Avoid reusing recent request IDs and include these rows in rollout capacity
+planning. While repair is pending, fresh renewals fail and held leases can
+expire; quiesce harness dispatch before applying 0081. Preserve retained rows and
+fencing history when upgrading, including historical usage above a new limit;
+growth is refused until bounded cleanup brings usage below the hard ceiling.
+Older nodes still return the generic
+API `NOT_FOUND` for lock routes while upgraded nodes return coordination codes.
+Harnesses must branch on the response `code`, never HTTP 404 alone, and must
+fail closed until all target nodes advertise the coordination surface. Freeze
+offboarding throughout mixed-version deployment and resume only after every
+node runs the current binary and migrations and exact grants have converged.
+
+A binary rollback leaves coordination tables, receipts, quota counters, and
+fencing floors in place. Do not drop or truncate them. Migration 0061 gates the
+old unversioned pseudonymization entry point. This is a historical compatibility
+boundary, not approval for a 0061-aware rollback of the current 0081 package.
+Only a replacement verified against every applied migration and current privacy,
+quota and role contract is compatible. Keep offboarding disabled during any
+rollback until the current capabilities and exact profiles are restored.
+
+The following migration notes describe historical compatibility boundaries,
+not supported stopping points for the current package. Migrations 0068 through
+0073 are forward-only and require an offboarding drain for older workers.
+Those versions allowed older ordinary coordination writers, but current
+rollout requires every node to use matching schema and grant capabilities.
+An old offboarding worker cannot be retained: the database refuses its completed-run restart when
+coordination privacy is the only dirty state. This refusal preserves immutable
+lifecycle completion; it is not a signal to retry the old command. Route the
+principal to a current node and resume the ordinary confirmed offboarding
+command. `repair-coordination-privacy` returns `offboarding_required` for an
+offboarded target so coordination-only completion cannot stand in for full
+lifecycle verification. A binary
+rollback therefore leaves offboarding traffic disabled until a current binary
+and the exact application/operator grant profiles are restored.
+
+Migration 0069 makes completion depend on current database state as well as
+durable progress. It replays the privacy audit cursor as version 3, including
+owned-scope lock rows left by pre-0065 installations. Discovery is bounded by
+a principal UUID cursor and a partial incomplete/version index. Shared privacy
+scrubbing can return a live-lease `blockedUntil` without privacy progress.
+The ordinary offboarding CLI still continues progressing memory and audit work
+before stopping on the remaining privacy block. Coordination-only repair stops
+on that block instead of polling; no-progress attempts add no batch event.
+The database rejects offboarding run creation or start while a disabled-only
+privacy repair is pending.
+
+Migration 0070 builds the linkable-key audit index concurrently. Migrations
+0071 and 0072 preserve cursor-compatible repair discovery and least-privilege
+grants while closing completion and quota gaps. Migration 0073 replaces the
+completed-principal scan with a trigger-maintained dirty-principal table. Its
+one-time backfill starts from the linkable-audit, receipt, and lease indexes and
+applies disabled/mapped/completed eligibility before insertion. Production
+pages merge that dirty index with the partial incomplete-progress index, so
+50,000 clean completed principals do not add page work. Reactivation removes a
+marker; later eligible dirty mutations restore it; UUID cursor semantics remain
+exclusive and stable between statement snapshots.
+
+Migration 0073 also removes detached purge from the pre-scrub position. Every
+scrub follows principal, sorted shared scope, then sorted usage-row order.
+Advisory contention uses try-locks and usage rows use `NOWAIT`; the supported
+wrapper converts SQLSTATE 55P03 into `reason: lock_busy` instead of waiting for
+a caller timeout. Expired detached receipts are purged only after the scrub has
+finished taking scope locks, with `SKIP LOCKED` on receipt rows and the detached
+usage row already held. Current service calls translate typed SQLSTATE 55P03
+to `lock_busy`; direct SQL receives the SQLSTATE and must handle it explicitly.
+0073 preserves existing grants on the replaced operator entry points and adds
+no new runtime-role grant requirement.
+
+Migrations 0074 through 0077 are the forward-only repair for existing 0073
+installations. Drain every pre-0074 offboarding and privacy-repair worker before
+applying them and keep those workers drained through the 0075 index/backfill
+and 0076/0077 remediation. Migration
+`0076_coordination_review_2_remediation.sql` adds database-enforced entry
+negotiation: runtime roles without client privacy version 4 are refused before
+any mutation by the stable privacy wrapper and offboarding start/create guard.
+The guard applies only to a separate non-owner runtime role. PostgreSQL owners
+bypass it for maintenance, so a single-role installation where the application
+connects as the migration/function owner has no old-client refusal boundary.
+Use distinct migration-owner, application, and operator roles before relying on
+the guard. The current application binary also requires the schema-local version
+marker installed by `0079_coordination_upgrade_scale_remediation.sql` before any
+privacy repair or non-dry-run offboarding mutation. Reaching 0079 requires the
+ledgered 0077 reconciliation prerequisite, so a binary deployed ahead of the
+0076-0079 chain fails closed without touching tenant privacy state.
+
+0076 is transactional and uses a one-second lock timeout while replacing
+triggers on `principal_user_scopes`. Apply it in a quiet window and retry the
+complete migration if lock acquisition fails; the failed transaction leaves no
+partial 0076 state. 0077 is restartable and safe to retry. The historical
+environment name `CONTINUUM_COORDINATION_V4_BACKFILL_BATCH_SIZE` controls both
+the v4 and v5 reconciliation batches despite its name. 0076 also preserves
+completed scrub work when only detached cleanup is busy.
+0078 builds the legacy-incomplete discovery index concurrently and is safe to
+retry. 0079 installs range-bounded NULL-cursor, shallow-cursor, and targeted
+discovery plus contention-safe dirty-marker and detached-receipt handling. Apply
+0078 and 0079 as prerequisites within the full packaged chain through 0081;
+those steps alone are insufficient for the current binary. Rollback remains
+forward-only.
+The packaged migrator applies lock and statement timeouts to the restartable
+backfill, reduces a contended batch adaptively, and accepts
+`CONTINUUM_COORDINATION_V4_BACKFILL_BATCH_SIZE` from 1 through 5,000. Re-run
+the exact grant profiles before restart. Binary rollback to a pre-0074 worker
+is unsupported and is refused on the protected mutation paths. Rollback is
+forward-only: restore a current binary or ship another migration; never remove
+the negotiation guard or mark a partial repair complete.
+
+The packaged migrator verifies every pinned published checksum before any
+fresh or upgrade SQL executes. It defers 0073's historical in-transaction
+backfill and performs that work after the 0074 trigger and lifecycle repair
+through 0075's concurrent index and restartable batches. Migration 0077 runs
+the bounded eligibility reconciliation introduced by 0076. Use the packaged
+migrator for fresh installs and upgrades. Applying 0073 directly with `psql`
+retains its published historical blocking behavior and is unsupported.
+
+The migrator executes SQL using canonical LF line endings while published
+migration verification continues hashing original bytes with only Git CRLF
+materialization canonicalized. `.gitattributes` also pins `*.sql` to LF. A
+fresh CRLF checkout therefore completes the full chain, while lone CR bytes,
+extra CR bytes, and substantive published migration changes still fail closed.
+Stored-function repair converts only CRLF pairs. A lone CR inside a string
+literal remains data, including inside an owner-owned function whose name starts
+with `continuum_`; foreign-owner, co-tenant non-Continuum, and extension-member
+functions remain outside the repair boundary.
+
+Migration 0061 contains the historical installation-wide receipt-counter
+recount and takes coordination table locks. An installation upgrading from
+0060 or earlier must apply 0061 in a maintenance window with coordination
+traffic stopped; later migrations cannot make already executed DDL online.
+Migrations 0063 and 0064 perform no installation-wide recount. Their privacy
+work is restartable, keyset-bounded, and backed by concurrently built indexes.
+
+Offboarding first deactivates every owned-scope membership and disables the
+principal in the same transaction. If contract repair or a live owned lease
+blocks privacy, this access revocation and its audit commit durably while the
+privacy savepoint rolls back. The result remains incomplete with
+`migration_pending` or `owned_live_lease`; a live-lease expiry witness is optional
+and must be followed by a scope recheck. The owned user scope is then erased in
+bounded receipt, lease, and resource phases. Each call processes at most 1,000
+rows across all phases and records durable progress; the maximum fencing token is
+derived from the resource rows actually deleted by `DELETE ... RETURNING` and
+raised in the owner-only scope floor atomically with that deletion. Locked rows
+keep the phase incomplete until a remaining-row check proves exhaustion. All non-owned
+scopes, including team, project, organization, role, and another user's scope,
+remain shared state, but retained leases and receipts are moved to an
+installation-wide detached principal and their run IDs and payload hashes are
+independently randomized in bounded batches. The detached identity is disabled.
+It is reserved for storage: 0081 prevents enabling it or changing its kind from
+service, and refuses memberships, API keys and trusted database identity
+bindings. Ordinary disabled service principals retain their normal approved
+reactivation and key workflows. Migration refuses pre-existing sink authority
+drift: the owner must review and remove any memberships, key material or trusted
+bindings and restore its disabled service state before retrying. This repair
+does not delete anonymous lease or receipt history, rotate global roles or
+change provider ACLs automatically.
+Detachment uses the same combined receipt budget across acquire, contention,
+renew, and release. It freezes a bounded candidate page, then rechecks available
+space under the detached usage lock. A full budget leaves the repair incomplete
+with a bounded quota block; it never evicts unexpired anonymous evidence for
+space. Eligible lease or audit work can still progress independently.
+
+Authorized privacy erasure ends the departing principal's authenticated replay
+guarantee. Owned-scope receipts are erased; shared receipts lose their original
+principal, request/run identity, payload hash, and operation timestamps.
+Anonymous timestamps use January 1, 2000, with retention through January 2,
+2000, satisfying the 24-hour interval while making these erased receipts
+eligible for the existing bounded anonymous cleanup. This explicit privacy
+operation is the exception to ordinary receipt retention and replay. It does
+not shorten another principal's unexpired receipts to admit new operations,
+and reactivation does not restore the erased request identities.
+Shared-scope handling is independent of scope kind: team, project, role,
+organization, and another user's scope are all retained while the departing
+principal's lease/receipt identity is detached. Lock audit metadata is reduced
+to `operation`, `outcome`, `transport`, and `own_lease`; fencing tokens, byte
+counts, request, run, lease, resource, resource digest, and unknown keys
+are removed. Unrelated immutable retention/offboarding evidence is untouched.
+Privacy version 2 reopens progress previously completed by 0059 or 0060, and
+migrations 0066 and 0067 reopen completed version-2 rows after the 0065
+lock-audit classifier change, including disabled direct-scrub principals. The
+ordinary bounded scrub re-scrubs every shared kind,
+including role and another user's scope. Audit
+metadata advances on a durable `(principal_id,id)` cursor and completion is
+recorded only after an empty page proves exhaustion. Operators may restart the
+same offboarding command after timeout or interruption; counters and cursors
+resume without rescanning completed pages.
+`list-incomplete-offboarding` does not discover a completed historical run that
+0063 reopened only for privacy v2. Use the bounded
+`list-coordination-privacy-repairs` operator command instead. It distinguishes
+completed offboarding from disabled-only direct scrub state. Resume an
+offboarded row with the ordinary confirmed offboarding command; resume a
+disabled-only row only with `repair-coordination-privacy`. An offboarded target
+passed to that repair command receives the audited `offboarding_required`
+pointer to the full confirmed command. Runtime roles receive
+only least-privilege discovery and repair functions and no direct
+progress-table privileges.
+Legacy flat-array discovery and the four-argument
+`continuum_operator_list_coordination_privacy_repairs` overload remain for
+compatibility. Their results omit the raw-window resume cursor, and filtering
+after the candidate limit can return an empty array while eligible principals
+remain beyond that window. They are unsuitable for proving bulk exhaustion.
+Use `list-coordination-privacy-repairs` or `listCoordinationPrivacyRepairPage`
+and follow `nextCursor` until it is null, including after empty result pages.
+If dirty-marker refresh encounters a concurrent refresh, 0081 conservatively
+upserts the marker instead of silently dropping evidence. The fallback has a
+one-second lock wait bound. If contention prevents it, direct principal or
+mapping writes raise PostgreSQL `55P03` and their transaction must roll back.
+The guarded operator scrub rolls back its attempted work and returns
+`lock_busy`; previously committed v3 progress and dirty evidence remain intact.
+Retry the whole operation after the competing transaction settles. Cancellation
+also leaves the attempted mutation uncommitted.
+A conservative marker can be a false positive, so repair still verifies the
+actual privacy state before claiming completion.
+The 0081 scope backfill also reopens mapped principal repair markers when a
+previously completed owned scope still has resource rows. Those markers remain
+discoverable until owned-scope erasure completes. Disabled-only repair resumes
+the existing scope progress with its recorded pseudonym; it does not invent
+ownership or create a fresh scope erasure request.
+Owned progress is measured by phase changes, processed-row counts and physical
+exhaustion. A final empty page can therefore count as progress. Disabled-only
+repair completion requires shared principal privacy plus physical exhaustion of
+any existing owned phase; it does not claim full lifecycle offboarding.
+
+Historical incomplete user-scope progress can also lack an approved principal
+mapping. It is deliberately absent from principal-based discovery. The migration
+owner must review those scopes separately, with a bounded cursor query against
+the actual application schema, for example:
+
+```sql
+SELECT progress.scope_id, progress.pseudonym, progress.phase
+FROM application_data.coordination_scope_privacy_progress AS progress
+JOIN application_data.scopes AS scope ON scope.id = progress.scope_id
+WHERE progress.scope_id > '00000000-0000-0000-0000-000000000000'::uuid
+  AND progress.phase <> 'complete' AND scope.kind = 'user'
+  AND NOT EXISTS (
+    SELECT 1 FROM application_data.principal_user_scopes AS mapping
+    WHERE mapping.scope_id = progress.scope_id
+  )
+ORDER BY progress.scope_id LIMIT 100;
+```
+
+Use the last returned scope UUID as the next lower bound. Do not grant progress
+table reads to runtime roles or infer an owner from the scope name. After
+reviewing the existing erasure authorization, inactive memberships and live
+lease expiry, the owner can resume the existing request using a current manual
+org-admin actor and the exact recorded pseudonym:
+
+```sql
+SELECT application_data.continuum_operator_pseudonymize_scope_v2_legacy(
+  'approved-admin-uuid'::uuid, 'reviewed-scope-uuid'::uuid, 'recorded-pseudonym'
+);
+```
+
+Each call processes at most 1,000 rows. Commit each call and recheck that scope's
+progress until its phase is `complete` and no resource, lease or receipt rows
+remain. Stop on authorization or live-lease refusal; do not disable the guards
+or manufacture a principal mapping to make the scope discoverable.
+Version 3 canonicalizes lock metadata in owned and shared scopes. Completion
+uses one shared lifecycle predicate plus a full coordination-state predicate;
+the non-coordination repair check and full offboarding check cannot drift.
+Completion is not recorded until owned-scope erasure and shared-scope
+detachment are both complete. Append-only coordination operator events survive
+audit retention and offboarding. Lock audit metadata retains operation evidence
+but removes resource digests, fencing tokens and byte counts. The latter two
+fields could otherwise join the erased principal back to a shared plaintext key.
+
+Direct scope pseudonymization requires zero active memberships and zero live
+leases. Direct principal scrubbing additionally requires a disabled or
+offboarded target, its exact mapped owned user scope, and never reassigns a live
+lease. Started, per-batch, and completed evidence is written to immutable
+operator events. Principal lifecycle serialization precedes scope serialization.
+Membership insertion, activation, deactivation, disablement, offboarding,
+reactivation, pseudonymization, and shared-history scrubbing all follow
+principal-before-scope order. Membership writes take the per-scope advisory lock
+only when principal or scope privacy progress exists; an ordered scope-row gate
+closes the progress creation race without consuming one transaction advisory
+lock per ordinary membership write. No-op active updates do not lock. An
+explicit principal reactivation may reopen its
+mapped owned user scope; it does not restore detached historical identities.
+
+Release requires an unexpired current generation, current authorization, and
+space for its receipt. Exact replay remains
+available during its documented 24-hour horizon while current authorization
+holds and authorized privacy erasure has not removed the receipt.
+
+## Harness guidance
+
+A harness should:
+
+1. Acquire before provisioning or dispatching a worker.
+2. Store lease ID, decimal fencing token, run ID, and conservative deadline in
+   its local run manifest.
+3. For a 300-second lease, renew about every 100 seconds (roughly TTL divided
+   by three), provided the fleet's receipt budget supports that cadence. A
+   900-second lease renewed every 300 seconds reduces daily renewal receipts.
+   Use a deterministic scheduler and a fresh request ID. Preserve
+   that request ID across transport retries.
+4. Interpret the server deadline using local monotonic elapsed time and a
+   safety margin. Never extend locally based only on wall-clock guesses.
+5. If renewal or ownership becomes uncertain, stop dispatch and publication,
+   pause affected workers before the last confirmed deadline, and reconcile.
+6. Release only after the worker and task-owned child processes are quiescent.
+7. Fail closed if Continuum is unavailable. Do not fall back to GitHub labels
+   or process-local locks as ownership authority.
+
+V1 has no atomic multi-resource acquisition. Sort exact `(scope, resource)`
+pairs lexically, acquire in that global order, and release the acquired prefix
+if any acquisition fails. Do not dispatch while only a partial required set is
+held.
+
+GitHub labels may mirror status for people, but they are not ownership
+authority.
+
+## Fencing guarantee boundary
+
+A lease does not terminate an expired worker and does not make GitHub,
+filesystem, database, or deployment side effects transactional. A fencing token
+is effective only when the downstream target validates it. A monotonic token
+alone cannot reject an expired holder before the target has observed a newer
+one, and GitHub does not natively enforce Continuum tokens.
+
+For repository publication, retain orchestrator-only credentials, exact-head
+checks, branch protection, and normal review gates. There remains a
+check-to-action race. Do not advertise linearizable end-to-end GitHub writes,
+exactly-once publication, general filesystem fencing, force-steal, shared
+leases, hierarchy, fairness, or atomic multi-resource batches.

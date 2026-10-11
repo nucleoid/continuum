@@ -11,6 +11,7 @@ import type { Principal, ScopeKind } from '../types.js';
 import { getPool } from '../storage/pool.js';
 import { makeEmbeddingRouterFromEnv } from '../embeddings/factory.js';
 import { isDirectEntrypoint } from './entrypoint.js';
+import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoordinationContractReady } from '../storage/provider-lifecycle.js';
 import { accessibleScopes } from '../services/access.js';
 import { captureMemory } from '../services/capture.js';
 import { recallForPrincipal } from '../services/recall.js';
@@ -55,6 +56,12 @@ import {
 import type { MemoryReadRecord } from '../storage/memory-reads.js';
 import type { MemoryState, MemoryType } from '../types.js';
 import { decisionHistoryForPrincipal, supersedeForPrincipal } from '../services/supersede.js';
+import {
+  acquireLease,
+  inspectLease,
+  releaseLease,
+  renewLease,
+} from '../services/coordination.js';
 
 const SCOPE_KINDS = ['org', 'team', 'project', 'user', 'role'] as const;
 const MEMORY_TYPES = ['fact', 'decision', 'context', 'playbook', 'relationship'] as const;
@@ -120,6 +127,37 @@ function serviceErrorResult(error: unknown, logger: ServiceLogger): {
   return { ...jsonResult(body), isError: true };
 }
 
+const acquireCoordinationInputSchema = z.object({
+  scope: z.string(), resource: z.string(), run_id: z.string(), request_id: z.string(),
+  ttl_seconds: z.number().int().optional(),
+}).strict();
+const mutationCoordinationInputSchema = z.object({
+  lease_id: z.string(), run_id: z.string(), request_id: z.string(),
+  ttl_seconds: z.number().int().optional(),
+}).strict();
+const releaseCoordinationInputSchema = mutationCoordinationInputSchema.omit({
+  ttl_seconds: true,
+});
+const inspectCoordinationInputSchema = z.object({
+  scope: z.string(), resource: z.string(),
+}).strict();
+
+function strictCoordinationInput(
+  value: unknown, schema: z.ZodTypeAny,
+): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)
+    || Object.hasOwn(value, '__proto__')
+    || (Object.getPrototypeOf(value) !== Object.prototype
+        && Object.getPrototypeOf(value) !== null)) {
+    throw new ServiceError('INVALID_INPUT', 'Invalid coordination input');
+  }
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) {
+    throw new ServiceError('INVALID_INPUT', 'Invalid coordination input');
+  }
+  return parsed.data as Record<string, unknown>;
+}
+
 export function buildMcpServer(deps: McpDeps): McpServer {
   const { pool, embeddingProvider, principal } = deps;
   const relationThreshold = validateRelationThreshold(
@@ -140,6 +178,133 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     name: 'continuum',
     version: '0.1.0',
   });
+
+  server.registerTool(
+    'continuum.lock_acquire',
+    {
+      description: 'Acquire one exclusive, non-reentrant scoped coordination lease.',
+      inputSchema: acquireCoordinationInputSchema,
+    },
+    async (args, extra) => {
+      try {
+        const input = strictCoordinationInput(args, acquireCoordinationInputSchema);
+        const result = await acquireLease(pool, principal, {
+          scope: input.scope as string,
+          resource: input.resource as string,
+          runId: input.run_id as string,
+          requestId: input.request_id as string,
+          ttlSeconds: input.ttl_seconds as number | undefined,
+        }, { signal: extra.signal, transport: 'mcp' });
+        return jsonResult(result.acquired ? {
+          acquired: true,
+          scope: result.scope,
+          resource: result.resource,
+          lease_id: result.leaseId,
+          run_id: result.runId,
+          fencing_token: result.fencingToken,
+          expires_at: result.expiresAt,
+          server_time: result.serverTime,
+        } : {
+          acquired: false,
+          reason: result.reason,
+          scope: result.scope,
+          resource: result.resource,
+          expires_at: result.expiresAt,
+          retry_after_seconds: result.retryAfterSeconds,
+          server_time: result.serverTime,
+        });
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'continuum.lock_renew',
+    {
+      description: 'Renew the current lease generation owned by this principal and run.',
+      inputSchema: mutationCoordinationInputSchema,
+    },
+    async (args, extra) => {
+      try {
+        const input = strictCoordinationInput(args, mutationCoordinationInputSchema);
+        const result = await renewLease(pool, principal, {
+          leaseId: input.lease_id as string,
+          runId: input.run_id as string,
+          requestId: input.request_id as string,
+          ttlSeconds: input.ttl_seconds as number | undefined,
+        }, { signal: extra.signal, transport: 'mcp' });
+        return jsonResult({
+          renewed: true,
+          lease_id: result.leaseId,
+          run_id: result.runId,
+          fencing_token: result.fencingToken,
+          expires_at: result.expiresAt,
+          server_time: result.serverTime,
+        });
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'continuum.lock_release',
+    {
+      description: 'Release the current lease generation owned by this principal and run.',
+      inputSchema: releaseCoordinationInputSchema,
+    },
+    async (args, extra) => {
+      try {
+        const input = strictCoordinationInput(args, releaseCoordinationInputSchema);
+        const result = await releaseLease(pool, principal, {
+          leaseId: input.lease_id as string,
+          runId: input.run_id as string,
+          requestId: input.request_id as string,
+        }, { signal: extra.signal, transport: 'mcp' });
+        return jsonResult({
+          released: true,
+          ...(result.alreadyReleased ? { already_released: true } : {}),
+        });
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'continuum.lock_inspect',
+    {
+      description: 'Inspect a scoped resource while masking any other holder identity.',
+      inputSchema: inspectCoordinationInputSchema,
+    },
+    async (args, extra) => {
+      try {
+        const input = strictCoordinationInput(args, inspectCoordinationInputSchema);
+        const result = await inspectLease(pool, principal, {
+          scope: input.scope as string,
+          resource: input.resource as string,
+        }, {
+          signal: extra.signal,
+          transport: 'mcp',
+        });
+        return jsonResult({
+          held: result.held,
+          scope: result.scope,
+          resource: result.resource,
+          server_time: result.serverTime,
+          ...(result.expiresAt ? { expires_at: result.expiresAt } : {}),
+          ...(result.leaseId ? {
+            lease_id: result.leaseId,
+            run_id: result.runId,
+            fencing_token: result.fencingToken,
+          } : {}),
+        });
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+  );
 
   server.registerTool(
     'continuum.list_scopes',
@@ -623,6 +788,47 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     },
   );
 
+  // Advertise object schemas to MCP clients, while preserving the shared
+  // INVALID_INPUT envelope before the SDK converts schema failures to text.
+  // Validate original arguments here: SDK z.record() parsing drops __proto__.
+  const coordinationSchemas = new Map<string, z.ZodTypeAny>([
+    ['continuum.lock_acquire', acquireCoordinationInputSchema],
+    ['continuum.lock_renew', mutationCoordinationInputSchema],
+    ['continuum.lock_release', releaseCoordinationInputSchema],
+    ['continuum.lock_inspect', inspectCoordinationInputSchema],
+  ]);
+  const sdkConnect = server.connect.bind(server);
+  server.connect = async (transport) => {
+    await sdkConnect(transport);
+    const sdkOnMessage = transport.onmessage;
+    transport.onmessage = async (message, extra) => {
+      const request = message as {
+        jsonrpc?: unknown;
+        id?: unknown;
+        method?: unknown;
+        params?: { name?: unknown; arguments?: unknown };
+      };
+      if (request.jsonrpc === '2.0' && request.method === 'tools/call'
+        && (typeof request.id === 'string' || typeof request.id === 'number')
+        && typeof request.params?.name === 'string') {
+        const schema = coordinationSchemas.get(request.params.name);
+        if (schema) {
+          try {
+            strictCoordinationInput(request.params.arguments, schema);
+          } catch (error) {
+            try {
+              await transport.send({ jsonrpc: '2.0', id: request.id, result: errorResult(error) });
+            } catch (sendError) {
+              transport.onerror?.(sendError instanceof Error ? sendError : new Error('MCP response failed'));
+            }
+            return;
+          }
+        }
+      }
+      sdkOnMessage?.(message, extra);
+    };
+  };
+
   return server;
 }
 
@@ -636,6 +842,9 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   const pool = getPool();
+  const schemaOptions = { expectedSchema: applicationSchemaFromEnv() };
+  await reconcilePgvectorProviderGrants(pool, schemaOptions);
+  await requireCoordinationContractReady(pool, schemaOptions);
   const authMode = authModeFromEnv();
   warnOnDevAuthMode(authMode);
   const authenticator = createAuthenticator(

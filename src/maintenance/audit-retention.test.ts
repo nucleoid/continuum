@@ -63,6 +63,7 @@ describe('audit retention', () => {
       .filter((line) => !line.trimStart().startsWith('\\'))
       .join('\n')
       .replaceAll(':"continuum_schema"', '"public"')
+      .replaceAll(":'continuum_schema'", "'public'")
       .replaceAll(':"continuum_app_role"', `"${role}"`)
       .replaceAll(":'continuum_app_role'", `'${role}'`);
     await pool.query(sql);
@@ -76,6 +77,7 @@ describe('audit retention', () => {
       .filter((line) => !line.trimStart().startsWith('\\'))
       .join('\n')
       .replaceAll(':"continuum_schema"', '"public"')
+      .replaceAll(":'continuum_schema'", "'public'")
       .replaceAll(':"continuum_operator_role"', `"${role}"`)
       .replaceAll(":'continuum_operator_role'", `'${role}'`)
       .replaceAll(":'continuum_principal_id'", `'${principalId}'`);
@@ -566,6 +568,28 @@ describe('audit retention', () => {
       deleted_count: 1, retention_days: 30, export_mode: 'none', batch_number: 1,
     });
     expect(JSON.stringify(summaries.rows[0].metadata)).not.toContain('secret');
+  });
+
+  it('aged summary review: preserves historical retention summaries while deleting ordinary rows', async () => {
+    const admin = await seedPrincipal('svc:retention', 'admin');
+    await insertAudit(admin.id, new Date(cutoff.getTime() - 86_400_000));
+    expect(await runAuditRetention(pool, options())).toMatchObject({ status: 'completed', deleted: 1 });
+    // Copy an actual canonical summary as historical owner import. Never age
+    // an immutable existing summary through UPDATE or disable its protection.
+    const historical = (await pool.query<{ id: string; metadata: unknown }>(
+      `INSERT INTO audit_log(at,principal_id,action,memory_id,scope_id,query,metadata)
+       SELECT $1::timestamptz,principal_id,action,memory_id,scope_id,query,metadata
+         FROM audit_log WHERE metadata->>'source'='audit-retention' ORDER BY id DESC LIMIT 1
+       RETURNING id::text,metadata`, [new Date(cutoff.getTime() - 2 * 86_400_000)],
+    )).rows[0];
+    expect(historical).toBeDefined();
+    const ordinary = await insertAudit(admin.id, new Date(cutoff.getTime() - 86_400_000));
+    expect(await runAuditRetention(pool, { ...options(), dryRun: true }))
+      .toMatchObject({ status: 'dry-run', eligible: 1, deletable: 1 });
+    expect(await runAuditRetention(pool, options())).toMatchObject({ status: 'completed', deleted: 1 });
+    expect((await pool.query('SELECT metadata FROM audit_log WHERE id=$1', [historical.id])).rows[0]?.metadata)
+      .toEqual(historical.metadata);
+    expect((await pool.query('SELECT 1 FROM audit_log WHERE id=$1', [ordinary])).rowCount).toBe(0);
   });
 
   it('returns busy when the dedicated advisory lock is already held', async () => {

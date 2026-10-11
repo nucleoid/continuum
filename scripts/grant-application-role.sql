@@ -62,6 +62,140 @@ GRANT SELECT ON TABLE
   :"continuum_schema".principal_offboarding_takeover_events
 TO :"continuum_app_role";
 
+-- Upgrade rehearsals may profile a role before 0054 exists. Defer these exact
+-- grants until the coordination schema is present; the final allow-list call
+-- still rejects missing or broader privileges after 0055.
+SELECT set_config('continuum.application_grant_target', :'continuum_app_role', TRUE);
+SELECT set_config('continuum.application_grant_schema', namespace.nspname, TRUE)
+FROM :"continuum_schema".scopes scope
+JOIN pg_catalog.pg_class relation ON relation.oid = scope.tableoid
+JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+LIMIT 1;
+DO $coordination_grants$
+DECLARE schema_name TEXT := current_setting('continuum.application_grant_schema');
+        target_role NAME := current_setting('continuum.application_grant_target')::name;
+        function_signature TEXT;
+BEGIN
+  IF to_regclass(format('%I.coordination_resources', schema_name)) IS NOT NULL
+      AND to_regprocedure(format(
+        '%I.continuum_operator_set_coordination_principal_quota(uuid,uuid,integer,integer)',
+        schema_name
+      )) IS NOT NULL THEN
+    -- A 0060-era profile granted table-wide UPDATE. PostgreSQL table grants
+    -- subsume column grants, so remove the old capability before regranting
+    -- the exact lifecycle columns.
+    EXECUTE format('REVOKE UPDATE ON TABLE %I.coordination_resources FROM %I',
+      schema_name, target_role);
+    EXECUTE format('REVOKE UPDATE ON TABLE %I.coordination_leases FROM %I',
+      schema_name, target_role);
+    EXECUTE format('GRANT SELECT, INSERT ON TABLE %I.coordination_resources TO %I',
+      schema_name, target_role);
+    EXECUTE format('GRANT UPDATE (fencing_token, current_lease_id, updated_at) ON TABLE %I.coordination_resources TO %I',
+      schema_name, target_role);
+    EXECUTE format('GRANT SELECT, INSERT, DELETE ON TABLE %I.coordination_leases TO %I',
+      schema_name, target_role);
+    EXECUTE format('GRANT UPDATE (expires_at, released_at) ON TABLE %I.coordination_leases TO %I',
+      schema_name, target_role);
+    EXECUTE format('GRANT SELECT, INSERT, DELETE ON TABLE %I.coordination_operation_receipts TO %I',
+      schema_name, target_role);
+    EXECUTE format('REVOKE UPDATE, TRUNCATE ON TABLE %I.coordination_operation_receipts FROM %I',
+      schema_name, target_role);
+    EXECUTE format('GRANT SELECT ON TABLE %I.coordination_scope_usage, %I.coordination_principal_usage TO %I',
+      schema_name, schema_name, target_role);
+    EXECUTE format('REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE %I.coordination_scope_usage, %I.coordination_principal_usage FROM %I',
+      schema_name, schema_name, target_role);
+    IF to_regclass(format('%I.coordination_scope_fencing_floors', schema_name)) IS NOT NULL THEN
+      EXECUTE format('REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE %I.coordination_scope_fencing_floors FROM %I',
+        schema_name, target_role);
+    END IF;
+    FOREACH function_signature IN ARRAY ARRAY[
+      'continuum_coordination_reserve_resource_creation(uuid)',
+      'continuum_coordination_scope_fencing_floor(uuid)',
+      'continuum_coordination_privacy_state(uuid,uuid)',
+      'continuum_coordination_lock_entra_freshness()',
+      'continuum_coordination_lock_principal_usage(uuid)',
+      'continuum_coordination_cleanup_expired_receipts(uuid)',
+      'continuum_coordination_contract_is_ready()'
+    ] LOOP
+      IF to_regprocedure(format('%I.%s', schema_name, function_signature)) IS NOT NULL THEN
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %I.%s TO %I',
+          schema_name, function_signature, target_role);
+      END IF;
+    END LOOP;
+    FOREACH function_signature IN ARRAY ARRAY[
+      'continuum_operator_reclaim_coordination_resource(uuid,uuid,text)',
+      'continuum_operator_set_coordination_scope_quota(uuid,uuid,integer)',
+      'continuum_operator_sweep_coordination_state(uuid,integer)',
+      'continuum_operator_scrub_coordination_principal(uuid,uuid,uuid,integer)'
+    ] LOOP
+      IF to_regprocedure(format('%I.%s', schema_name, function_signature)) IS NOT NULL THEN
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.%s FROM %I',
+          schema_name, function_signature, target_role);
+      END IF;
+    END LOOP;
+    IF to_regprocedure(format(
+      '%I.continuum_operator_pseudonymize_scope_v2_legacy(uuid,uuid,text)', schema_name
+    )) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.continuum_operator_pseudonymize_scope_v2_legacy(UUID, UUID, TEXT) FROM %I',
+        schema_name, target_role);
+    END IF;
+    IF to_regprocedure(format(
+      '%I.continuum_operator_pseudonymize_scope_v2(uuid,uuid,text)', schema_name
+    )) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.continuum_operator_pseudonymize_scope_v2(UUID, UUID, TEXT) FROM %I',
+        schema_name, target_role);
+    END IF;
+    IF to_regprocedure(format(
+      '%I.continuum_operator_set_coordination_principal_quota(uuid,uuid,integer,integer)',
+      schema_name
+    )) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.continuum_operator_set_coordination_principal_quota(UUID, UUID, INTEGER, INTEGER) FROM %I',
+        schema_name, target_role);
+    END IF;
+  ELSIF to_regprocedure(format(
+    '%I.continuum_coordination_reserve_resource_creation(uuid)', schema_name
+  )) IS NOT NULL THEN
+    -- Schemas 0056 through 0060 use their published table-wide UPDATE profile.
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE ON TABLE %I.coordination_resources TO %I',
+      schema_name, target_role);
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.coordination_leases TO %I',
+      schema_name, target_role);
+    EXECUTE format('GRANT SELECT, INSERT, DELETE ON TABLE %I.coordination_operation_receipts TO %I',
+      schema_name, target_role);
+    IF to_regprocedure(format(
+      '%I.continuum_coordination_fencing_nondecreasing()', schema_name
+    )) IS NULL THEN
+      EXECUTE format('GRANT UPDATE ON TABLE %I.coordination_operation_receipts TO %I',
+        schema_name, target_role);
+    ELSE
+      EXECUTE format('REVOKE UPDATE ON TABLE %I.coordination_operation_receipts FROM %I',
+        schema_name, target_role);
+    END IF;
+    EXECUTE format('GRANT SELECT ON TABLE %I.coordination_scope_usage, %I.coordination_principal_usage TO %I',
+      schema_name, schema_name, target_role);
+    EXECUTE format('REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE %I.coordination_scope_usage, %I.coordination_principal_usage FROM %I',
+      schema_name, schema_name, target_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_coordination_reserve_resource_creation(UUID), %I.continuum_coordination_scope_fencing_floor(UUID) TO %I',
+      schema_name, schema_name, target_role);
+  ELSIF to_regprocedure(format(
+    '%I.continuum_operator_reclaim_coordination_resource(uuid,uuid,text)', schema_name
+  )) IS NOT NULL THEN
+    -- Schema 0055 used the original coordination profile before helper-owned counters.
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE ON TABLE %I.coordination_resources TO %I',
+      schema_name, target_role);
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.coordination_leases, %I.coordination_operation_receipts TO %I',
+      schema_name, schema_name, target_role);
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE ON TABLE %I.coordination_scope_usage, %I.coordination_principal_usage TO %I',
+      schema_name, schema_name, target_role);
+    EXECUTE format('GRANT SELECT ON TABLE %I.coordination_fencing_floors TO %I',
+      schema_name, target_role);
+  END IF;
+END;
+$coordination_grants$;
+
 GRANT USAGE, SELECT ON SEQUENCE
   :"continuum_schema".audit_log_id_seq,
   :"continuum_schema".principal_user_scope_approvals_id_seq,
@@ -75,11 +209,6 @@ GRANT EXECUTE ON FUNCTION
   :"continuum_schema".continuum_membership_is_effective(BOOLEAN, TEXT),
   :"continuum_schema".continuum_disable_principal(UUID, UUID)
 TO :"continuum_app_role";
-
--- PUBLIC function execution is closed across the application schema. Restore
--- only pgvector extension routines directly to roles with the application
--- profile; the owner-only helper discovers this role from its memories grant.
-SELECT :"continuum_schema".continuum_grant_application_vector_functions();
 
 REVOKE ALL ON FUNCTION
   :"continuum_schema".continuum_create_user_scope_approval(UUID, UUID, UUID, UUID[], TEXT),
@@ -124,6 +253,32 @@ REVOKE ALL ON FUNCTION
   :"continuum_schema".continuum_register_trusted_database_identity(NAME, UUID, BOOLEAN, BOOLEAN)
 FROM :"continuum_app_role";
 
+SELECT set_config('continuum.application_grant_target', :'continuum_app_role', TRUE);
+SELECT set_config('continuum.application_grant_schema', namespace.nspname, TRUE)
+FROM :"continuum_schema".scopes scope
+JOIN pg_catalog.pg_class relation ON relation.oid = scope.tableoid
+JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+LIMIT 1;
+DO $repair_function_revokes$
+DECLARE schema_name TEXT := current_setting('continuum.application_grant_schema');
+        target_role NAME := current_setting('continuum.application_grant_target')::name;
+        signature TEXT;
+BEGIN
+  FOREACH signature IN ARRAY ARRAY[
+    'continuum_operator_list_coordination_privacy_repairs(uuid,uuid,integer)',
+    'continuum_operator_list_coordination_privacy_repairs(uuid,uuid,uuid,integer)',
+    'continuum_operator_list_coordination_privacy_repair_page(uuid,uuid,integer)',
+    'continuum_operator_coordination_scope_privacy_state(uuid,uuid)',
+    'continuum_operator_offboarding_actual_state_is_erased(uuid,uuid)'
+  ] LOOP
+    IF to_regprocedure(format('%I.%s', schema_name, signature)) IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.%s FROM %I',
+        schema_name, signature, target_role);
+    END IF;
+  END LOOP;
+END;
+$repair_function_revokes$;
+
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE
   :"continuum_schema".principal_offboarding_runs,
   :"continuum_schema".principal_offboarding_run_events,
@@ -163,6 +318,26 @@ REVOKE ALL ON TABLE
   :"continuum_schema".continuum_offboarding_restart_requests
 FROM :"continuum_app_role";
 
+DO $provider_runtime_gate$
+DECLARE schema_name TEXT := current_setting('continuum.application_grant_schema');
+        target_role NAME := current_setting('continuum.application_grant_target')::name;
+BEGIN
+  IF to_regprocedure(format(
+    '%I.continuum_assert_current_pgvector_profile()', schema_name
+  )) IS NOT NULL THEN
+    EXECUTE format(
+      'GRANT EXECUTE ON FUNCTION %I.continuum_assert_current_pgvector_profile() TO %I',
+      schema_name, target_role);
+    EXECUTE format('SELECT %I.continuum_grant_application_vector_functions($1::name)', schema_name) USING target_role;
+  ELSIF to_regprocedure(format('%I.continuum_grant_application_vector_functions()',schema_name)) IS NOT NULL THEN
+    EXECUTE format('SELECT %I.continuum_grant_application_vector_functions()',schema_name);
+  END IF;
+END;
+$provider_runtime_gate$;
+
+-- Reconcile provider access only after the exact application profile is in
+-- place. This explicit regrant leaves unrelated role registrations and shared
+-- provider/PUBLIC privileges unchanged.
 SELECT :"continuum_schema".continuum_assert_application_role_allowlist(
   :'continuum_app_role'::name
 );

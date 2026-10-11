@@ -23,6 +23,10 @@ describe('membership sync CLI runner', () => {
   afterAll(async () => {
     await Promise.all(rolePools.splice(0).map((connection) => connection.end()));
     for (const role of roles.reverse()) {
+      await pool.query(
+        `DELETE FROM continuum_pgvector_role_profiles
+          WHERE database_role_oid = (SELECT oid FROM pg_roles WHERE rolname = $1)`, [role],
+      );
       await pool.query(`DROP OWNED BY "${role}"`);
       await pool.query(`REVOKE "${role}" FROM CURRENT_USER`);
       await pool.query(`DROP ROLE "${role}"`);
@@ -37,6 +41,7 @@ describe('membership sync CLI runner', () => {
     let sql = await readFile(join(process.cwd(), 'scripts/grant-sync-role.sql'), 'utf8');
     sql = sql.split(/\r?\n/).filter((line) => !line.trimStart().startsWith('\\')).join('\n')
       .replaceAll(':"continuum_schema"', '"public"')
+      .replaceAll(":'continuum_schema'", "'public'")
       .replaceAll(':"continuum_sync_role"', `"${role}"`)
       .replaceAll(":'continuum_sync_role'", `'${role}'`)
       .replaceAll(":'continuum_principal_id'", `'${principalId}'`);
@@ -61,7 +66,15 @@ describe('membership sync CLI runner', () => {
     Object.assign(new Error('operation requires a role-name/OID-bound trusted sync identity'), { code: 'XX000' }),
     Object.assign(new Error('permission denied'), { code: '42501' }),
   ])('maps a supported database identity authorization failure to FORBIDDEN', async (failure) => {
-    const query = vi.fn(async (sql: string) => {
+    const query = vi.fn(async (sql: string, parameters?: unknown[]) => {
+      if (sql.includes('current_schemas(FALSE)')) {
+        return { rowCount: 1, rows: [{ anchored: parameters?.[0] === 'public' }] };
+      }
+      if (sql.includes('namespace.nspname AS schema')) {
+        return { rowCount: 1, rows: [{
+          owner: false, schema: 'public', helper: true, trusted: true,
+        }] };
+      }
       if (sql.includes('continuum_verify_sync_database_identity')) throw failure;
       return { rowCount: 1, rows: [{
         id: '50000000-0000-4000-8000-000000000001',
@@ -69,12 +82,16 @@ describe('membership sync CLI runner', () => {
         created_at: new Date('2026-01-01T00:00:00Z'), disabled_at: null,
       }] };
     });
-    const fakePool = { query } as unknown as pg.Pool;
+    const release = vi.fn();
+    const fakePool = { query, connect: vi.fn(async () => ({ query, release })) } as unknown as pg.Pool;
     await expect(runMembershipSync(fakePool, {
       CONTINUUM_ENTRA_MEMBERSHIP_SYNC: 'true',
       CONTINUUM_GRAPH_ACCESS_TOKEN: 'x'.repeat(32),
       CONTINUUM_MEMBERSHIP_SYNC_ACTOR: 'sync-service',
     })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('current_schemas(FALSE)'), ['public']);
+    expect(release).toHaveBeenCalledOnce();
+    expect(query.mock.calls.some(([sql]) => sql.includes('continuum_verify_sync_database_identity'))).toBe(true);
   });
 
   it.each([
@@ -82,7 +99,15 @@ describe('membership sync CLI runner', () => {
     Object.assign(new Error('canceling statement due to timeout'), { code: '57014' }),
     Object.assign(new Error('connection terminated unexpectedly'), { code: '08006' }),
   ])('does not reclassify an unrelated database identity failure', async (failure) => {
-    const query = vi.fn(async (sql: string) => {
+    const query = vi.fn(async (sql: string, parameters?: unknown[]) => {
+      if (sql.includes('current_schemas(FALSE)')) {
+        return { rowCount: 1, rows: [{ anchored: parameters?.[0] === 'public' }] };
+      }
+      if (sql.includes('namespace.nspname AS schema')) {
+        return { rowCount: 1, rows: [{
+          owner: false, schema: 'public', helper: true, trusted: true,
+        }] };
+      }
       if (sql.includes('continuum_verify_sync_database_identity')) throw failure;
       return { rowCount: 1, rows: [{
         id: '50000000-0000-4000-8000-000000000001',
@@ -90,12 +115,16 @@ describe('membership sync CLI runner', () => {
         created_at: new Date('2026-01-01T00:00:00Z'), disabled_at: null,
       }] };
     });
-    const fakePool = { query } as unknown as pg.Pool;
+    const release = vi.fn();
+    const fakePool = { query, connect: vi.fn(async () => ({ query, release })) } as unknown as pg.Pool;
     await expect(runMembershipSync(fakePool, {
       CONTINUUM_ENTRA_MEMBERSHIP_SYNC: 'true',
       CONTINUUM_GRAPH_ACCESS_TOKEN: 'x'.repeat(32),
       CONTINUUM_MEMBERSHIP_SYNC_ACTOR: 'sync-service',
     })).rejects.toBe(failure);
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('current_schemas(FALSE)'), ['public']);
+    expect(release).toHaveBeenCalledOnce();
+    expect(query.mock.calls.some(([sql]) => sql.includes('continuum_verify_sync_database_identity'))).toBe(true);
   });
 
   it('audits a production Graph overflow and fail-closes stale access before surfacing its code', async () => {

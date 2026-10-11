@@ -9,6 +9,14 @@ function queryable() {
   return { query: vi.fn() } as unknown as Queryable;
 }
 
+function vectorQueryable() {
+  const db = queryable();
+  vi.mocked(db.query)
+    .mockResolvedValueOnce({ rows: [{ schema: 'provider extensions' }] } as never)
+    .mockResolvedValueOnce({ rows: [] } as never);
+  return db;
+}
+
 describe('embedding dimension compatibility', () => {
   it('rejects a provider dimension that cannot fit the database schema before writing', async () => {
     const db = queryable();
@@ -57,13 +65,13 @@ describe('vector search filters', () => {
     ['undefined', undefined],
     ['empty', []],
   ])('leaves search unfiltered for %s types', async (_label, types) => {
-    const db = queryable();
-    vi.mocked(db.query).mockResolvedValue({ rows: [] } as never);
+    const db = vectorQueryable();
 
     await vectorSearchMemoryIds(db, vector, scopeIds, provider, 10, types);
 
-    const [sql, params] = vi.mocked(db.query).mock.calls[0] as [string, unknown[]];
+    const [sql, params] = vi.mocked(db.query).mock.calls[1] as [string, unknown[]];
     expect(sql).not.toContain('m.type = ANY');
+    expect(sql).toContain('OPERATOR("provider extensions".<=>)');
     expect(params).toEqual([
       expect.any(String),
       scopeIds,
@@ -74,8 +82,7 @@ describe('vector search filters', () => {
   });
 
   it('combines multiple requested types with provider and dimension filters', async () => {
-    const db = queryable();
-    vi.mocked(db.query).mockResolvedValue({ rows: [] } as never);
+    const db = vectorQueryable();
 
     await vectorSearchMemoryIds(
       db,
@@ -86,7 +93,7 @@ describe('vector search filters', () => {
       ['decision', 'playbook'],
     );
 
-    const [sql, params] = vi.mocked(db.query).mock.calls[0] as [string, unknown[]];
+    const [sql, params] = vi.mocked(db.query).mock.calls[1] as [string, unknown[]];
     expect(sql).toContain('m.type = ANY($5::text[])');
     expect(sql).toContain('e.provider = $3');
     expect(sql).toContain('e.dim = $4');

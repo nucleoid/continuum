@@ -64,11 +64,21 @@ try {
     'migrations/0007_decision_supersession_constraints.sql',
     'migrations/0008_decision_supersession_validation.sql',
     'migrations/0009_decision_supersession_unique_index.sql',
+    'migrations/0073_coordination_bounded_discovery_and_locking.sql',
+    'migrations/0074_coordination_compatibility_and_upgrade_repair.sql',
+    'migrations/0075_coordination_online_repair_finish.sql',
+    'migrations/0076_coordination_review_2_remediation.sql',
+    'migrations/0077_coordination_review_2_online_finish.sql',
+    'migrations/0078_coordination_upgrade_scale_indexes.sql',
+    'migrations/0079_coordination_upgrade_scale_remediation.sql',
+    'migrations/0080_pgvector_provider_grants.sql',
+    'migrations/0081_coordination_public_contract.sql',
     'bin/continuum-migrate.mjs',
     'scripts/ensure-scope.mjs',
     'scripts/create-scope-operator.sql',
     'scripts/retire-scope-operator.sql',
     'docs/audit-retention.md',
+    'docs/coordination.md',
     'docs/memory-api.md',
   ]) {
     if (!existsSync(join(installedRoot, required))) {
@@ -88,20 +98,115 @@ try {
   const { runMigrations } = await import(
     pathToFileURL(join(installedRoot, 'dist', 'storage', 'migrator.js')).href
   );
-  let ledgerChecks = 0;
+  const migrationNames = packed[0].files
+    .filter(({ path }) => /^migrations\/[^/]+\.sql$/.test(path))
+    .map(({ path }) => path.slice('migrations/'.length));
+  const discoveredMigrations = new Set();
+  const contractSource = readFileSync(join(installedRoot,
+    'migrations/0081_coordination_public_contract.sql'), 'utf8').replaceAll('\r\n', '\n');
+  const contractBodies = new Map();
+  for (const name of ['continuum_coordination_require_contract_ready',
+    'continuum_backfill_coordination_contract']) {
+    const definition = contractSource.match(new RegExp(
+      `CREATE OR REPLACE FUNCTION ${name}\\([\\s\\S]*?AS \\$\\$([\\s\\S]*?)\\$\\$;`,
+    ));
+    if (!definition) throw new Error(`Packaged contract function definition is missing: ${name}`);
+    contractBodies.set(name, definition[1]);
+  }
+  let verifiedContractBodies = 0;
+  let contractBackfillCalls = 0;
+  let completedContractAttempts = 0;
+  let vectorExtensionCreated = false;
   const client = {
-    async query(sql) {
-      if (String(sql).includes('FROM _continuum_migrations')) {
-        ledgerChecks += 1;
+    async query(sql, values = []) {
+      // Catalog qualification changes resolution, not the mocked query shape.
+      // Match both forms while the migrator retains the original SQL evidence.
+      const statement = String(sql).replace(/\bpg_catalog\./g, '');
+      if (statement.includes('pg_try_advisory_lock')) {
+        return { rowCount: 1, rows: [{ locked: true }] };
+      }
+      if (statement.includes("current_setting('search_path') AS path")
+          && statement.includes('LEFT JOIN pg_namespace')) {
+        return {
+          rowCount: 1,
+          rows: [{
+            path: 'public',
+            schema: 'public',
+            owned: true,
+            unsafeCreate: false,
+            userSchemaExists: false,
+          }],
+        };
+      }
+      if (statement.includes("extension.extname = 'vector'")) {
+        return vectorExtensionCreated
+          ? { rowCount: 1, rows: [{ schema: 'continuum_extensions' }] }
+          : { rowCount: 0, rows: [] };
+      }
+      if (statement.includes("to_regclass(format('%I._continuum_migrations'")) {
+        return { rowCount: 1, rows: [{ exists: false }] };
+      }
+      if (statement.includes('namespace.nspowner = role.oid AS owned')) {
+        return { rowCount: 1, rows: [{ owned: true, unsafeCreate: false }] };
+      }
+      if (statement.includes("to_regnamespace($1) IS NOT NULL AS exists")) {
+        return { rowCount: 1, rows: [{ exists: false }] };
+      }
+      if (statement.includes('CREATE EXTENSION vector')) {
+        vectorExtensionCreated = true;
+        return { rowCount: 0, rows: [] };
+      }
+      if (statement.includes("has_schema_privilege(current_user, $1, 'USAGE')")) {
+        return { rowCount: 1, rows: [{ allowed: true, role: 'continuum_smoke' }] };
+      }
+      if (statement.includes('AS "tenantObjects"')) {
+        return { rowCount: 1, rows: [{ tenantObjects: false }] };
+      }
+      if (statement.includes('AS "vectorType"')) {
+        return { rowCount: 1, rows: [{ vectorType: false, vectorOpclass: false }] };
+      }
+      if (statement.includes("current_setting('search_path') AS path")) {
+        return { rowCount: 1, rows: [{ path: 'public' }] };
+      }
+      // This fixture represents an already migrated package database. Supply
+      // catalog bodies from the installed SQL, not invented verifier output.
+      if (statement.includes('SELECT function.prosrc')
+          && statement.includes('to_regprocedure')) {
+        const body = contractBodies.get(values[0]);
+        if (body === undefined) throw new Error('Unexpected packaged function verification');
+        verifiedContractBodies += 1;
+        return { rowCount: 1, rows: [{ prosrc: body, owner: true, language: 'plpgsql',
+          prosecdef: true, hardened: true, publicExecute: false }] };
+      }
+      if (statement.startsWith('SELECT continuum_backfill_coordination_contract($1)')) {
+        if (!Number.isInteger(values[0]) || values[0] < 1 || values[0] > 1000) {
+          throw new Error('Packaged contract backfill exceeded its bounded batch');
+        }
+        contractBackfillCalls += 1;
+        return { rowCount: 1, rows: [{ completed: true }] };
+      }
+      if (statement.includes('UPDATE _continuum_migration_execution SET state=\'completed\'')) {
+        completedContractAttempts += 1;
         return { rowCount: 1, rows: [] };
       }
-      if (String(sql).includes('pg_advisory_unlock')) return { rows: [{ unlocked: true }] };
+      if (statement.includes('FROM _continuum_migrations')) {
+        if (statement.includes('SELECT 1 FROM _continuum_migrations WHERE name = $1')) {
+          discoveredMigrations.add(values[0]);
+        }
+        return { rowCount: 1, rows: [] };
+      }
+      if (statement.includes('pg_advisory_unlock')) return { rows: [{ unlocked: true }] };
       return { rowCount: 0, rows: [] };
     },
     release() {},
   };
   await runMigrations({ connect: async () => client });
-  if (ledgerChecks < 8) throw new Error('Packed migrator did not discover packaged migrations');
+  if (migrationNames.some((name) => !discoveredMigrations.has(name))) {
+    throw new Error('Packed migrator did not discover every packaged migration');
+  }
+  if (verifiedContractBodies !== 4 || contractBackfillCalls !== 1 || completedContractAttempts !== 1) {
+    throw new Error('Packed migrator did not verify and finish the ledgered contract backfill');
+  }
   process.stdout.write('Packed continuum CLI entrypoint passed\n');
 } finally {
   rmSync(temporary, { recursive: true, force: true });

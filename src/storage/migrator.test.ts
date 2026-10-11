@@ -1,9 +1,13 @@
 import { copyFile, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pg from 'pg';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mapOwnedUserScope, offboardPrincipal } from '../services/offboarding.js';
+import { addMembership } from './memberships.js';
+import { createPrincipal } from './principals.js';
+import { createScope, getScopeByRef } from './scopes.js';
 import { runMigrations } from './migrator.js';
 
 const DATABASE_URL =
@@ -42,6 +46,7 @@ async function grantApplicationRole(
     .filter((line) => !line.trimStart().startsWith('\\'))
     .join('\n')
     .replaceAll(':"continuum_schema"', `"${schema}"`)
+    .replaceAll(":'continuum_schema'", "'" + schema.replaceAll("'", "''") + "'")
     .replaceAll(':"continuum_app_role"', `"${role}"`)
     .replaceAll(":'continuum_app_role'", `'${role}'`);
   await pool.query(sql);
@@ -57,6 +62,505 @@ afterEach(async () => {
 });
 
 describe('runMigrations', () => {
+  it('serializes pgvector bootstrap when concurrent fresh migrations use different public-less schemas', async () => {
+    const database = `continuum_vector_bootstrap_${randomUUID().replaceAll('-', '')}`;
+    const firstSchema = 'first_migration_schema';
+    const secondSchema = 'second_migration_schema';
+    const migrationLockId = '7215328273579717613';
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-vector-bootstrap-'));
+    directories.push(directory);
+    await copyFile(
+      join(process.cwd(), 'migrations/0001_init.sql'),
+      join(directory, '0001_init.sql'),
+    );
+
+    const admin = new pg.Pool({ connectionString: DATABASE_URL, max: 1 });
+    const databaseUrl = new URL(DATABASE_URL);
+    databaseUrl.pathname = `/${database}`;
+    let blocker: pg.Pool | undefined;
+    let first: pg.Pool | undefined;
+    let second: pg.Pool | undefined;
+    let lockHeld = false;
+    let firstRun: Promise<unknown> | undefined;
+    let secondRun: Promise<unknown> | undefined;
+
+    const waitUntilConnected = async (applicationName: string) => {
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        const connected = await blocker!.query<{ connected: boolean }>(
+          `SELECT EXISTS (
+             SELECT 1 FROM pg_stat_activity
+              WHERE datname = current_database()
+                AND application_name = $1
+           ) AS connected`,
+          [applicationName],
+        );
+        if (connected.rows[0]?.connected === true) return;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      throw new Error(`${applicationName} did not connect for migration locking`);
+    };
+
+    try {
+      await admin.query(`CREATE DATABASE "${database}"`);
+      blocker = new pg.Pool({ connectionString: databaseUrl.toString(), max: 1 });
+      blocker.on('error', () => undefined);
+      await blocker.query(`CREATE SCHEMA ${firstSchema}`);
+      await blocker.query(`CREATE SCHEMA ${secondSchema}`);
+      await blocker.query('SELECT pg_advisory_lock($1::bigint)', [migrationLockId]);
+      lockHeld = true;
+
+      first = new pg.Pool({
+        connectionString: databaseUrl.toString(),
+        max: 1,
+        application_name: 'continuum-vector-bootstrap-first',
+        options: `-c search_path=${firstSchema}`,
+      });
+      first.on('error', () => undefined);
+      second = new pg.Pool({
+        connectionString: databaseUrl.toString(),
+        max: 1,
+        application_name: 'continuum-vector-bootstrap-second',
+        options: `-c search_path=${secondSchema}`,
+      });
+      second.on('error', () => undefined);
+
+      firstRun = runMigrations(first, directory);
+      await waitUntilConnected('continuum-vector-bootstrap-first');
+      secondRun = runMigrations(second, directory);
+      await waitUntilConnected('continuum-vector-bootstrap-second');
+      await blocker.query('SELECT pg_advisory_unlock($1::bigint)', [migrationLockId]);
+      lockHeld = false;
+
+      await expect(Promise.all([firstRun, secondRun])).resolves.toHaveLength(2);
+      expect((await blocker.query(
+        `SELECT namespace.nspname AS schema
+           FROM pg_extension extension
+           JOIN pg_namespace namespace ON namespace.oid = extension.extnamespace
+          WHERE extension.extname = 'vector'`,
+      )).rows).toEqual([{ schema: 'continuum_extensions' }]);
+    } finally {
+      if (lockHeld) {
+        await blocker?.query(
+          'SELECT pg_advisory_unlock($1::bigint)', [migrationLockId],
+        ).catch(() => undefined);
+      }
+      const runs = Promise.allSettled([firstRun, secondRun].filter(
+        (run): run is Promise<unknown> => run !== undefined,
+      ));
+      await Promise.race([
+        runs,
+        new Promise((resolve) => setTimeout(resolve, 5_000)),
+      ]);
+      const endings = Promise.allSettled(
+        [first, second, blocker].filter((pool): pool is pg.Pool => pool !== undefined)
+          .map((pool) => pool.end()),
+      );
+      await Promise.race([
+        endings,
+        new Promise((resolve) => setTimeout(resolve, 5_000)),
+      ]);
+      await admin.query(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`);
+      await endings;
+      await admin.end();
+    }
+  }, 60_000);
+
+  it.each([
+    ['zero-stale-row', 0, 10],
+    ['single-batch', 1, 10],
+    ['multi-batch', 3, 1],
+  ] as const)(
+    'refuses 0064 offboarding then completes after upgrade for %s privacy work',
+    async (label, leaseCount, repairBatchSize) => {
+      // Keep the schema below PostgreSQL's 63-byte identifier limit. A silently
+      // truncated CREATE SCHEMA name must not masquerade as a valid search_path.
+      const suffix = `${label.slice(0, 5).replaceAll('-', '_')}_${randomUUID().slice(0, 8)}`;
+      const schema = `coordination_service_upgrade_${suffix}`;
+      const admin = new pg.Pool({ connectionString: DATABASE_URL });
+      pools.push(admin);
+      await admin.query(`CREATE SCHEMA ${schema}`);
+      const pool = schemaPool(schema);
+      const before = await mkdtemp(join(tmpdir(), 'continuum-service-before-0065-'));
+      directories.push(before);
+      const source = new URL('../../migrations/', import.meta.url);
+      const files = (await readdir(source)).filter((name) => name.endsWith('.sql')).sort();
+      await Promise.all(files
+        .filter((name) => name <= '0064_coordination_final_online_indexes.sql')
+        .map((name) => copyFile(new URL(name, source), join(before, name))));
+      try {
+        await runMigrations(pool, before);
+        const operator = await createPrincipal(pool, {
+          externalId: `operator:${suffix}`, kind: 'user', displayName: 'Upgrade operator',
+        });
+        const target = await createPrincipal(pool, {
+          externalId: `target:${suffix}`, kind: 'user', displayName: 'Upgrade target',
+        });
+        const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+        const owned = await createScope(pool, { kind: 'user', name: `owned-${suffix}` });
+        const shared = await createScope(pool, { kind: 'project', name: `shared-${suffix}` });
+        await addMembership(pool, operator.id, org.id, 'admin');
+        await addMembership(pool, target.id, owned.id, 'writer');
+        await addMembership(pool, target.id, shared.id, 'writer');
+        await mapOwnedUserScope(pool, operator, target.id, owned.id);
+        await expect(offboardPrincipal(pool, operator, target.id, {
+          confirmationScopeId: owned.id, batchSize: 100,
+        })).rejects.toMatchObject({
+          code: 'CONFLICT', message: expect.stringMatching(/finish migrations/i),
+        });
+        if (leaseCount > 0) {
+          await pool.query('ALTER TABLE audit_log DISABLE TRIGGER reject_offboarded_principal_audit');
+          try {
+            await pool.query(
+              `INSERT INTO audit_log (principal_id, action, scope_id, metadata)
+               SELECT $1, 'write', $2, jsonb_build_object(
+                 'operation', 'lock_acquire', 'outcome', 'acquired',
+                 'request_id', gen_random_uuid(), 'run_id', gen_random_uuid(),
+                 'lease_id', gen_random_uuid(), 'fencing_token', n::text,
+                 'resource', 'upgrade-' || n, 'resource_sha256', repeat('c', 64),
+                 'resource_bytes', 9, 'transport', 'rest', 'own_lease', TRUE)
+                 FROM generate_series(1, $3::int) n`,
+              [target.id, shared.id, leaseCount],
+            );
+          } finally {
+            await pool.query('ALTER TABLE audit_log ENABLE TRIGGER reject_offboarded_principal_audit');
+          }
+        }
+        expect((await pool.query(
+          `SELECT phase, evidence FROM principal_offboarding_run_events
+            WHERE principal_id = $1 ORDER BY id`, [target.id],
+        )).rows).toEqual([]);
+
+        const disabledOnly = await createPrincipal(pool, {
+          externalId: `disabled:${suffix}`, kind: 'user', displayName: 'Disabled direct scrub',
+        });
+        const disabledOwned = await createScope(pool, {
+          kind: 'user', name: `disabled-owned-${suffix}`,
+        });
+        await addMembership(pool, disabledOnly.id, disabledOwned.id, 'writer');
+        await mapOwnedUserScope(pool, operator, disabledOnly.id, disabledOwned.id);
+        await pool.query(
+          'UPDATE principals SET disabled_at = clock_timestamp() WHERE id = $1',
+          [disabledOnly.id],
+        );
+        await pool.query(
+          `INSERT INTO coordination_principal_privacy_progress
+             (principal_id, detached_principal_id, privacy_version, audit_cursor_id, completed_at)
+           VALUES ($1, '00000000-0000-4000-8000-000000000012', 2, 0, clock_timestamp())`,
+          [disabledOnly.id],
+        );
+
+        await runMigrations(pool, join(process.cwd(), 'migrations'));
+        let repaired = await offboardPrincipal(pool, operator, target.id, {
+          confirmationScopeId: owned.id, batchSize: repairBatchSize,
+        });
+        let calls = 1;
+        for (; !repaired.complete && calls < 100; calls += 1) {
+          repaired = await offboardPrincipal(pool, operator, target.id, {
+            confirmationScopeId: owned.id, batchSize: repairBatchSize,
+          });
+        }
+        expect(repaired.complete).toBe(true);
+        if (label === 'multi-batch') expect(calls).toBeGreaterThan(1);
+        expect((await pool.query(
+          `SELECT count(*)::int AS stale FROM audit_log
+            WHERE principal_id = $1 AND metadata->>'operation' LIKE 'lock_%'
+              AND metadata ?| ARRAY['request_id','run_id','lease_id','resource','resource_sha256']`,
+          [target.id],
+        )).rows).toEqual([{ stale: 0 }]);
+        expect((await pool.query(
+          `SELECT completed_at IS NOT NULL AS persisted, privacy_version
+             FROM coordination_principal_privacy_progress WHERE principal_id = $1`,
+          [target.id],
+        )).rows).toEqual([{ persisted: true, privacy_version: 3 }]);
+        expect((await pool.query(
+          `SELECT phase FROM principal_offboarding_run_events
+            WHERE principal_id = $1 AND phase IN ('started', 'completed') ORDER BY id`,
+          [target.id],
+        )).rows).toEqual([{ phase: 'started' }, { phase: 'completed' }]);
+        expect((await pool.query(
+          `SELECT completed_at IS NULL AS reopened
+             FROM coordination_principal_privacy_progress WHERE principal_id = $1`,
+          [disabledOnly.id],
+        )).rows).toEqual([{ reopened: true }]);
+        let disabledComplete = false;
+        for (let attempt = 0; !disabledComplete && attempt < 5; attempt += 1) {
+          const scrub = await pool.query<{ privacy: { complete?: boolean } }>(
+            `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 1) AS privacy`,
+            [operator.id, disabledOnly.id, disabledOwned.id],
+          );
+          disabledComplete = scrub.rows[0]?.privacy?.complete === true;
+        }
+        expect(disabledComplete).toBe(true);
+        await expect(pool.query(
+          `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 1) AS privacy`,
+          [operator.id, disabledOnly.id, disabledOwned.id],
+        )).resolves.toMatchObject({ rows: [{ privacy: { complete: true } }] });
+      } finally {
+        await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined);
+      }
+    },
+    120_000,
+  );
+
+  it('ships coordination tables and review repair as ordinary transactional migrations', async () => {
+    const files = (await readdir(join(process.cwd(), 'migrations')))
+      .filter((name) => name.endsWith('.sql'))
+      .sort();
+    expect(files.filter((name) => Number(name.slice(0,4)) >= 54 && Number(name.slice(0,4)) <= 82)).toEqual([
+      '0054_coordination_leases.sql',
+      '0055_coordination_review_remediation.sql',
+      '0056_coordination_final_remediation.sql',
+      '0057_coordination_privacy_race_remediation.sql',
+      '0058_coordination_online_prep.sql',
+      '0059_coordination_bounded_privacy.sql',
+      '0060_coordination_online_finish.sql',
+      '0061_coordination_forward_security_repair.sql',
+      '0062_coordination_forward_online_finish.sql',
+      '0063_coordination_final_privacy_repair.sql',
+      '0064_coordination_final_online_indexes.sql',
+      '0065_coordination_review_remediation.sql',
+      '0066_coordination_upgrade_privacy_repair.sql',
+      '0067_coordination_rollout_repair.sql',
+      '0068_coordination_production_repair.sql',
+      '0069_coordination_independent_review.sql',
+      '0070_coordination_linkable_audit_index.sql',
+      '0071_coordination_review_completion.sql',
+      '0072_coordination_final_review_remediation.sql',
+      '0073_coordination_bounded_discovery_and_locking.sql',
+      '0074_coordination_compatibility_and_upgrade_repair.sql',
+      '0075_coordination_online_repair_finish.sql',
+      '0076_coordination_review_2_remediation.sql',
+      '0077_coordination_review_2_online_finish.sql',
+      '0078_coordination_upgrade_scale_indexes.sql',
+      '0079_coordination_upgrade_scale_remediation.sql',
+      '0080_pgvector_provider_grants.sql',
+      '0081_coordination_public_contract.sql',
+      '0082_coordination_linkable_audit_v7_index.sql',
+    ]);
+    const migration = await readFile(
+      join(process.cwd(), 'migrations/0054_coordination_leases.sql'),
+      'utf8',
+    );
+    expect(migration.trimStart()).not.toMatch(/^-- continuum:no-transaction/);
+    for (const table of [
+      'coordination_resources', 'coordination_leases',
+      'coordination_operation_receipts', 'coordination_scope_usage',
+      'coordination_principal_usage',
+    ]) {
+      expect(migration).toContain(`CREATE TABLE ${table}`);
+    }
+    expect(migration).toMatch(/DEFERRABLE INITIALLY DEFERRED/);
+    expect(migration).toMatch(/fencing_token\s+BIGINT/);
+  });
+
+  it('reopens a 0064-complete offboarding and re-scrubs lock audit under the narrowed rule', async () => {
+    const suffix = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const schema = `coordination_v1_rescrub_${suffix}`;
+    const role = `coordination_v1_operator_${suffix}`;
+    const quotedRole = `"${role}"`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    await admin.query(`CREATE ROLE ${quotedRole} NOLOGIN`);
+    const pool = schemaPool(schema);
+    const before = await mkdtemp(join(tmpdir(), 'continuum-before-0065-'));
+    directories.push(before);
+    const source = new URL('../../migrations/', import.meta.url);
+    const files = (await readdir(source)).filter((name) => name.endsWith('.sql')).sort();
+    await Promise.all(files
+      .filter((name) => name <= '0064_coordination_final_online_indexes.sql')
+      .map((name) => copyFile(new URL(name, source), join(before, name))));
+    try {
+      await runMigrations(pool, before);
+      const operatorId = randomUUID();
+      const targetId = randomUUID();
+      const ownedId = randomUUID();
+      const sharedId = randomUUID();
+      const auditRequestId = randomUUID();
+      const auditRunId = randomUUID();
+      await pool.query(
+        `INSERT INTO principals (id, external_id, kind, display_name) VALUES
+         ($1, $2, 'user', 'Upgrade operator'),
+         ($3, $4, 'user', 'Upgrade target')`,
+        [operatorId, `operator:${suffix}`, targetId, `target:${suffix}`],
+      );
+      await pool.query(
+        `INSERT INTO scopes (id, kind, name) VALUES
+         ($1, 'user', $2), ($3, 'project', $4)`,
+        [ownedId, `owned-${suffix}`, sharedId, `shared-${suffix}`],
+      );
+      await pool.query(
+        `INSERT INTO scope_memberships (principal_id, scope_id, role, active) VALUES
+         ($1, continuum_org_scope_id(), 'admin', TRUE),
+         ($2, $3, 'writer', FALSE), ($2, $4, 'writer', FALSE)`,
+        [operatorId, targetId, ownedId, sharedId],
+      );
+      await pool.query(
+        `INSERT INTO principal_user_scopes
+           (principal_id, scope_id, mapped_by, acknowledged_principal_ids,
+            acknowledged_evidence_hash)
+         VALUES ($1, $2, $3, '{}'::uuid[], repeat('a', 64))`,
+        [targetId, ownedId, operatorId],
+      );
+      const auditId = String((await pool.query(
+        `INSERT INTO audit_log (principal_id, action, scope_id, metadata)
+         VALUES ($1, 'write', $2, jsonb_build_object(
+           'operation', 'lock_acquire', 'outcome', 'acquired',
+           'request_id', $3::uuid, 'run_id', $4::uuid,
+           'lease_id', gen_random_uuid(), 'fencing_token', '8',
+           'resource_bytes', 12, 'transport', 'rest', 'own_lease', TRUE,
+           'resource_sha256', repeat('c', 64))) RETURNING id`,
+        [targetId, sharedId, auditRequestId, auditRunId],
+      )).rows[0].id);
+      await pool.query(
+        `UPDATE audit_log
+            SET metadata = continuum_offboarding_expected_audit_metadata(metadata)
+          WHERE id = $1`, [auditId],
+      );
+      await pool.query(
+        `UPDATE principals SET disabled_at = clock_timestamp(),
+                offboarded_at = clock_timestamp(),
+                display_name = 'erased-' || left(replace(id::text, '-', ''), 12)
+          WHERE id = $1`, [targetId],
+      );
+      await pool.query(
+        `UPDATE scopes SET name = 'erased-user-' || id::text WHERE id = $1`, [ownedId],
+      );
+      const approvalId = String((await pool.query(
+        `INSERT INTO principal_user_scope_approvals
+           (principal_id, scope_id, approved_by, acknowledged_principal_ids,
+            acknowledged_evidence_hash)
+         VALUES ($1, $2, $3, '{}'::uuid[], repeat('a', 64)) RETURNING id`,
+        [targetId, ownedId, operatorId],
+      )).rows[0].id);
+      const completedRunId = String((await pool.query(
+        `INSERT INTO principal_offboarding_runs
+           (principal_id, scope_id, initiated_by, approval_id,
+            initial_memories, initial_embeddings, initial_memberships,
+            initial_aliases, initial_entra_bindings, initial_audit_rows,
+            initial_audit_queries, approval_evidence_hash,
+            initial_count_truncated, audit_fence_id, audit_memory_complete,
+            audit_linked_request_exhausted, audit_linked_complete,
+            memory_complete, scope_cleanup_complete, completed_at)
+         VALUES ($1, $2, $3, $4, 0, 0, 0, 0, 0, 1, 0, repeat('a', 64),
+                 '{}'::text[], $5, TRUE, TRUE, TRUE, TRUE, TRUE, clock_timestamp())
+         RETURNING run_id`,
+        [targetId, ownedId, operatorId, approvalId, auditId],
+      )).rows[0].run_id);
+      await pool.query(
+        `INSERT INTO coordination_principal_privacy_progress
+           (principal_id, detached_principal_id, privacy_version, audit_cursor_id,
+            completed_at)
+         VALUES ($1, '00000000-0000-4000-8000-000000000012', 2, $2,
+                 clock_timestamp())`,
+        [targetId, auditId],
+      );
+      expect((await pool.query(
+        'SELECT continuum_offboarding_actual_state_is_erased($1::uuid) AS erased',
+        [completedRunId],
+      )).rows).toEqual([{ erased: true }]);
+      await pool.query(
+        'SELECT continuum_register_trusted_database_identity($1::name, $2, TRUE, FALSE)',
+        [role, operatorId],
+      );
+      await pool.query(`GRANT USAGE ON SCHEMA ${schema} TO ${quotedRole}`);
+      await pool.query(
+        `GRANT EXECUTE ON FUNCTION continuum_operator_scrub_coordination_principal(
+           UUID, UUID, UUID, INTEGER
+         ) TO ${quotedRole}`,
+      );
+      await admin.query(
+        `GRANT ${quotedRole} TO CURRENT_USER WITH ADMIN OPTION, SET FALSE, INHERIT FALSE`,
+      );
+
+      await runMigrations(pool, join(process.cwd(), 'migrations'));
+      expect((await pool.query(
+        `SELECT privacy_version, completed_at IS NULL AS reopened,
+                audit_cursor_id::text AS audit_cursor_id
+           FROM coordination_principal_privacy_progress WHERE principal_id = $1`,
+        [targetId],
+      )).rows).toEqual([{ privacy_version: 2, reopened: true, audit_cursor_id: '0' }]);
+      expect((await pool.query(
+        'SELECT continuum_offboarding_actual_state_is_erased($1::uuid) AS erased',
+        [completedRunId],
+      )).rows).toEqual([{ erased: false }]);
+      const rolePool = new pg.Pool({
+        connectionString: DATABASE_URL,
+        max: 1,
+        options: `-c search_path=${schema},public -c role=${role}`,
+      });
+      pools.push(rolePool);
+      await rolePool.query("SET continuum.client_coordination_privacy_version = '4'");
+      let privacyComplete = false;
+      for (let attempt = 0; !privacyComplete && attempt < 5; attempt += 1) {
+        const scrub = await rolePool.query<{ privacy: { complete?: boolean } }>(
+          `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 1) AS privacy`,
+          [operatorId, targetId, ownedId],
+        );
+        privacyComplete = scrub.rows[0]?.privacy?.complete === true;
+      }
+      expect(privacyComplete).toBe(true);
+      const scrubbedMetadata = (await pool.query(
+        'SELECT metadata FROM audit_log WHERE id = $1', [auditId],
+      )).rows[0].metadata;
+      expect(scrubbedMetadata).toEqual({
+        operation: 'lock_acquire', outcome: 'acquired', transport: 'rest', own_lease: true,
+      });
+      expect(scrubbedMetadata).not.toHaveProperty('fencing_token');
+      expect(scrubbedMetadata).not.toHaveProperty('resource_bytes');
+      expect((await pool.query(
+        'SELECT continuum_offboarding_actual_state_is_erased($1::uuid) AS erased',
+        [completedRunId],
+      )).rows).toEqual([{ erased: true }]);
+    } finally {
+      await admin.query(`REVOKE ${quotedRole} FROM CURRENT_USER`).catch(() => undefined);
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined);
+      await admin.query(`DROP ROLE IF EXISTS ${quotedRole}`).catch(() => undefined);
+    }
+  }, 60_000);
+
+  it('profiles coordination grants against the configured custom schema', async () => {
+    const suffix = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const schema = `coordination_custom_${suffix}`;
+    const role = `coordination_custom_app_${suffix}`;
+    const quotedRole = `"${role}"`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    await admin.query(`CREATE ROLE ${quotedRole} NOLOGIN`);
+    const pool = schemaPool(schema);
+    try {
+      await runMigrations(pool, join(process.cwd(), 'migrations'));
+      await grantApplicationRole(pool, schema, role);
+      await expect(pool.query(
+        'SELECT continuum_assert_application_role_allowlist($1::name)', [role],
+      )).resolves.toBeDefined();
+      const privileges = await pool.query(
+        `SELECT
+           has_table_privilege($1, format('%I.coordination_scope_usage', $2::text), 'UPDATE')
+             AS scope_update,
+           has_table_privilege($1, format('%I.coordination_principal_usage', $2::text), 'UPDATE')
+             AS principal_update,
+           has_table_privilege($1, format('%I.coordination_scope_fencing_floors', $2::text), 'SELECT')
+             AS floor_select,
+           has_function_privilege($1,
+             format('%I.continuum_coordination_scope_fencing_floor(uuid)', $2::text), 'EXECUTE')
+             AS floor_execute`,
+        [role, schema],
+      );
+      expect(privileges.rows[0]).toEqual({
+        scope_update: false,
+        principal_update: false,
+        floor_select: false,
+        floor_execute: true,
+      });
+    } finally {
+      await admin.query(`DROP OWNED BY ${quotedRole}`);
+      await admin.query(`DROP ROLE ${quotedRole}`);
+    }
+  }, 30_000);
+
   it('pins the published 0052 bytes and rejects a modified ledgered copy', async () => {
     const published = await readFile(
       join(process.cwd(), 'migrations/0052_offboarding_review_repair.sql'), 'utf8',
@@ -100,7 +604,7 @@ describe('runMigrations', () => {
     directories.push(directory);
     await writeFile(join(directory, '0052_offboarding_review_repair.sql'), windowsCheckout);
     await writeFile(
-      join(directory, '0053_offboarding_restore_contract.sql'),
+      join(directory, '0081_crlf_checksum_probe.sql'),
       'CREATE TABLE continuum_crlf_checksum_probe (applied boolean NOT NULL);\r\n',
     );
     const schema = `migrator_published_checksum_crlf_${Date.now()}`;
@@ -118,7 +622,7 @@ describe('runMigrations', () => {
     `);
 
     await expect(runMigrations(pool, directory)).resolves.toEqual([
-      expect.objectContaining({ name: '0053_offboarding_restore_contract.sql' }),
+      expect.objectContaining({ name: '0081_crlf_checksum_probe.sql' }),
     ]);
 
     const invalidCheckouts = [
@@ -138,7 +642,66 @@ describe('runMigrations', () => {
     }
   });
 
-  it('applies 0053 when the published 0052 is already ledgered', async () => {
+  it('applies the complete migration chain from a CRLF checkout', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-full-chain-crlf-'));
+    directories.push(directory);
+    const source = join(process.cwd(), 'migrations');
+    const files = (await readdir(source)).filter((name) => name.endsWith('.sql')).sort();
+    for (const name of files) {
+      const sql = await readFile(join(source, name), 'utf8');
+      await writeFile(join(directory, name), sql.replaceAll(/(?<!\r)\n/g, '\r\n'));
+    }
+    const schema = `migrator_full_chain_crlf_${Date.now()}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    try {
+      const applied = await runMigrations(pool, directory);
+      expect(applied.map(({ name }) => name)).toContain(
+        '0072_coordination_final_review_remediation.sql',
+      );
+      expect((await pool.query(
+        `SELECT position(chr(13) IN pg_get_functiondef(
+           'continuum_operator_scrub_coordination_principal_v3(uuid,uuid,uuid,integer)'::regprocedure
+         )) AS carriage_return_position`,
+      )).rows).toEqual([{ carriage_return_position: 0 }]);
+      await expect(runMigrations(pool, directory)).resolves.toEqual([]);
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  }, 120_000);
+
+  it('rejects tampering in every ledgered issue-7 migration', async () => {
+    const names = (await readdir(join(process.cwd(), 'migrations')))
+      .filter((name) => /^(?:005[2-9]|006\d|007\d|008[01])_.*\.sql$/.test(name))
+      .sort();
+    expect(names).toHaveLength(30);
+    const schema = `migrator_issue7_checksums_${Date.now()}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    await pool.query(`
+      CREATE TABLE _continuum_migrations (
+        name TEXT PRIMARY KEY,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    for (const name of names) {
+      const directory = await mkdtemp(join(tmpdir(), 'continuum-issue7-checksum-'));
+      directories.push(directory);
+      const published = await readFile(join(process.cwd(), 'migrations', name), 'utf8');
+      await writeFile(join(directory, name), `${published}\n-- tampered\n`);
+      await pool.query('TRUNCATE _continuum_migrations');
+      await pool.query('INSERT INTO _continuum_migrations (name) VALUES ($1)', [name]);
+      await expect(runMigrations(pool, directory)).rejects.toThrow(
+        new RegExp(`${name.slice(0, 4)}.*checksum|published migration.*modified`, 'i'),
+      );
+    }
+  });
+
+  it('applies a forward migration when the published 0052 is already ledgered', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'continuum-forward-0053-'));
     directories.push(directory);
     await copyFile(
@@ -146,7 +709,7 @@ describe('runMigrations', () => {
       join(directory, '0052_offboarding_review_repair.sql'),
     );
     await writeFile(
-      join(directory, '0053_offboarding_restore_contract.sql'),
+      join(directory, '0081_forward_probe.sql'),
       `CREATE TABLE continuum_0053_forward_probe (applied boolean NOT NULL);\n`,
     );
     const schema = `migrator_forward_0053_${Date.now()}`;
@@ -164,7 +727,7 @@ describe('runMigrations', () => {
     `);
 
     await expect(runMigrations(pool, directory)).resolves.toEqual([
-      expect.objectContaining({ name: '0053_offboarding_restore_contract.sql' }),
+      expect.objectContaining({ name: '0081_forward_probe.sql' }),
     ]);
     expect((await pool.query(
       `SELECT namespace.nspname AS schema
@@ -177,9 +740,9 @@ describe('runMigrations', () => {
   it('refuses to apply 0053 before 0052 is ledgered', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'continuum-forward-0053-prerequisite-'));
     directories.push(directory);
-    await writeFile(
+    await copyFile(
+      join(process.cwd(), 'migrations/0053_offboarding_restore_contract.sql'),
       join(directory, '0053_offboarding_restore_contract.sql'),
-      'SELECT 1;\n',
     );
     const schema = `migrator_forward_0053_prerequisite_${Date.now()}`;
     const admin = new pg.Pool({ connectionString: DATABASE_URL });
@@ -266,7 +829,8 @@ describe('runMigrations', () => {
     expect(completionTrigger.match(/continuum_offboarding_actual_state_is_erased\s*\(/gi))
       .toHaveLength(1);
     const docs = await readFile(join(process.cwd(), 'docs/offboarding.md'), 'utf8');
-    expect(docs).toMatch(/through[\s\S]*`0053_offboarding_restore_contract\.sql`/i);
+    expect(docs).toMatch(/Apply the complete packaged\s+chain, including 0080 and 0081/i);
+    expect(docs).toMatch(/finish the owner-only 0081 backfill[\s\S]+regrant[\s\S]+verify/i);
     expect(docs).not.toMatch(/all nineteen offboarding migrations/i);
   });
   it('applies round-seven integrity and online cursor-index migrations from a fresh schema', async () => {
@@ -283,9 +847,7 @@ describe('runMigrations', () => {
         $$;
       `);
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-24).map((migration) => migration.name)).toEqual([
-        '0030_offboarding_round7_integrity.sql',
-        '0031_offboarding_round7_indexes.sql',
+      expect(applied.filter((migration) => Number(migration.name.slice(0,4)) >= 32 && Number(migration.name.slice(0,4)) <= 82).map((migration) => migration.name)).toEqual([
         '0032_offboarding_round7_compatibility.sql',
         '0033_offboarding_bounded_selectors.sql',
         '0034_offboarding_completion_invariants.sql',
@@ -308,7 +870,40 @@ describe('runMigrations', () => {
         '0051_offboarding_security_contract.sql',
         '0052_offboarding_review_repair.sql',
         '0053_offboarding_restore_contract.sql',
+        '0054_coordination_leases.sql',
+        '0055_coordination_review_remediation.sql',
+        '0056_coordination_final_remediation.sql',
+        '0057_coordination_privacy_race_remediation.sql',
+        '0058_coordination_online_prep.sql',
+        '0059_coordination_bounded_privacy.sql',
+        '0060_coordination_online_finish.sql',
+        '0061_coordination_forward_security_repair.sql',
+        '0062_coordination_forward_online_finish.sql',
+        '0063_coordination_final_privacy_repair.sql',
+        '0064_coordination_final_online_indexes.sql',
+        '0065_coordination_review_remediation.sql',
+        '0066_coordination_upgrade_privacy_repair.sql',
+        '0067_coordination_rollout_repair.sql',
+        '0068_coordination_production_repair.sql',
+        '0069_coordination_independent_review.sql',
+        '0070_coordination_linkable_audit_index.sql',
+        '0071_coordination_review_completion.sql',
+        '0072_coordination_final_review_remediation.sql',
+        '0073_coordination_bounded_discovery_and_locking.sql',
+        '0074_coordination_compatibility_and_upgrade_repair.sql',
+        '0075_coordination_online_repair_finish.sql',
+        '0076_coordination_review_2_remediation.sql',
+        '0077_coordination_review_2_online_finish.sql',
+        '0078_coordination_upgrade_scale_indexes.sql',
+        '0079_coordination_upgrade_scale_remediation.sql',
+        '0080_pgvector_provider_grants.sql',
+        '0081_coordination_public_contract.sql',
+        '0082_coordination_linkable_audit_v7_index.sql',
       ]);
+      expect((await pool.query(
+        `SELECT disabled_at IS NOT NULL AS disabled FROM principals
+          WHERE id = '00000000-0000-4000-8000-000000000012'`,
+      )).rows).toEqual([{ disabled: true }]);
       expect((await pool.query(
         `SELECT indisvalid AS valid FROM pg_index
           WHERE indexrelid = 'memories_scope_id_cursor_idx'::regclass`,
@@ -533,22 +1128,7 @@ describe('runMigrations', () => {
     directories.push(directory);
     const source = new URL('../../migrations/', import.meta.url);
     const files = (await readdir(source)).filter((file) => file.endsWith('.sql')).sort();
-    for (const file of files.filter((name) =>
-      name !== '0039_offboarding_completion_state.sql'
-      && name !== '0040_offboarding_post_completion_integrity.sql'
-      && name !== '0041_offboarding_completion_trust.sql'
-      && name !== '0042_offboarding_final_remediation.sql'
-      && name !== '0043_audit_retention_selection_order.sql'
-      && name !== '0044_offboarding_restart_evidence.sql'
-      && name !== '0045_offboarding_trust_boundary.sql'
-      && name !== '0046_offboarding_authority_remediation.sql'
-      && name !== '0047_offboarding_role_boundary.sql'
-      && name !== '0048_offboarding_independent_review.sql'
-      && name !== '0049_offboarding_review_remediation.sql'
-      && name !== '0050_offboarding_startup_verification_fix.sql'
-      && name !== '0051_offboarding_security_contract.sql'
-      && name !== '0052_offboarding_review_repair.sql'
-      && name !== '0053_offboarding_restore_contract.sql')) {
+    for (const file of files.filter((name) => Number(name.slice(0,4)) <= 38)) {
       if (file === '0038_offboarding_search_path_hardening.sql') {
         await copyFile(
           new URL(
@@ -971,11 +1551,25 @@ describe('runMigrations', () => {
           WHERE pronamespace = quote_ident(current_schema())::regnamespace
             AND (proname LIKE 'continuum\\_%' ESCAPE '\\'
                  OR proname = 'reject_lifecycle_principal_membership')
+            AND proname <> 'continuum_coordination_privacy_repair_candidates'
             AND proowner = current_user::regrole
             AND NOT COALESCE(proconfig @> ARRAY[$1], FALSE)`,
         [expected],
       );
       expect(unsafe.rows).toEqual([]);
+      expect((await pool.query(
+        `SELECT function.proconfig,
+                EXISTS (
+                  SELECT 1
+                    FROM aclexplode(COALESCE(
+                      function.proacl, acldefault('f', function.proowner))) privilege
+                   WHERE privilege.grantee = 0
+                     AND upper(privilege.privilege_type) = 'EXECUTE'
+                ) AS public_execute
+           FROM pg_proc function
+          WHERE function.oid =
+            'continuum_coordination_privacy_repair_candidates(uuid,uuid,integer)'::regprocedure`,
+      )).rows).toEqual([{ proconfig: [expected], public_execute: false }]);
     } finally {
       await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
     }
@@ -1125,7 +1719,7 @@ describe('runMigrations', () => {
       )).rows[0].id;
       await pool.query(
         `INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
-         VALUES ($1, 'test', 768, $2::vector)`,
+         VALUES ($1, 'test', 768, $2)`,
         [memoryId, `[${Array(768).fill(0).join(',')}]`],
       );
       await copyFile(
@@ -1572,11 +2166,291 @@ describe('runMigrations', () => {
     }
   });
 
+  it('recounts zero-receipt principals during the 0057 forward repair', async () => {
+    const suffix = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const schema = `coordination_0057_recount_${suffix}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const directory = await mkdtemp(join(tmpdir(), 'continuum-before-0057-'));
+    directories.push(directory);
+    const source = new URL('../../migrations/', import.meta.url);
+    const files = (await readdir(source))
+      .filter((name) => name.endsWith('.sql')
+        && name < '0057_coordination_privacy_race_remediation.sql')
+      .sort();
+    await Promise.all(files.map((name) => copyFile(
+      new URL(name, source), join(directory, name),
+    )));
+    await runMigrations(pool, directory);
+    const principalId = '00000000-0000-4000-8000-000000005057';
+    await pool.query(
+      `INSERT INTO principals (id, external_id, kind, display_name)
+       VALUES ($1, 'service:0057-zero-recount', 'service', '0057 recount')`,
+      [principalId],
+    );
+    await pool.query(
+      `INSERT INTO coordination_principal_usage (
+         principal_id, acquire_receipt_count, mutation_receipt_count
+       ) VALUES ($1, 9, 8)`,
+      [principalId],
+    );
+    await runMigrations(pool, join(process.cwd(), 'migrations'));
+    expect((await pool.query(
+      `SELECT acquire_receipt_count, contended_receipt_count, mutation_receipt_count
+         FROM coordination_principal_usage WHERE principal_id = $1`,
+      [principalId],
+    )).rows).toEqual([{
+      acquire_receipt_count: 0, contended_receipt_count: 0, mutation_receipt_count: 0,
+    }]);
+  });
+
+  it('upgrades mixed 0057 rows and resumes 0062 cleanup state', async () => {
+    const suffix = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const schema = `coordination_issue7_upgrade_${suffix}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL });
+    pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const blocker = schemaPool(schema);
+    const before = await mkdtemp(join(tmpdir(), 'continuum-issue7-before-'));
+    const forward = await mkdtemp(join(tmpdir(), 'continuum-issue7-forward-'));
+    directories.push(before, forward);
+    const source = new URL('../../migrations/', import.meta.url);
+    const files = (await readdir(source)).filter((name) => name.endsWith('.sql')).sort();
+    await Promise.all(files.filter((name) => name <= '0057_coordination_privacy_race_remediation.sql')
+      .map((name) => copyFile(new URL(name, source), join(before, name))));
+    await Promise.all(files.filter((name) => name <= '0062_coordination_forward_online_finish.sql')
+      .map((name) => copyFile(new URL(name, source), join(forward, name))));
+    try {
+      await runMigrations(pool, before);
+      const principalId = (await pool.query(
+        `INSERT INTO principals (id, external_id, kind, display_name)
+         VALUES (gen_random_uuid(), $1, 'service', 'large upgrade writer')
+         RETURNING id`, [`service:large-upgrade-${suffix}`],
+      )).rows[0].id as string;
+      const scopeId = (await pool.query(
+        `INSERT INTO scopes (id, kind, name)
+         VALUES (gen_random_uuid(), 'project', $1) RETURNING id`,
+        [`large-upgrade-${suffix}`],
+      )).rows[0].id as string;
+      await pool.query(
+        `INSERT INTO coordination_resources (scope_id, resource, fencing_token)
+         VALUES ($1, 'large-upgrade-history', 5000)`, [scopeId],
+      );
+      await pool.query(
+        `INSERT INTO coordination_leases (
+           lease_id, scope_id, resource, principal_id, run_id, fencing_token,
+           acquired_at, expires_at, released_at
+         ) SELECT gen_random_uuid(), $1, 'large-upgrade-history', $2,
+                  gen_random_uuid(), series, clock_timestamp() - interval '3 days',
+                  clock_timestamp() - interval '2 days',
+                  clock_timestamp() - interval '2 days'
+             FROM generate_series(1, 5000) series`,
+        [scopeId, principalId],
+      );
+      await pool.query(
+        `UPDATE coordination_resources resource SET current_lease_id = lease.lease_id
+          FROM coordination_leases lease
+         WHERE resource.scope_id = $1 AND lease.scope_id = resource.scope_id
+           AND lease.resource = resource.resource AND lease.fencing_token = 5000`,
+        [scopeId],
+      );
+
+      const locked = await blocker.connect();
+      try {
+        await locked.query('BEGIN');
+        await locked.query(
+          'LOCK TABLE coordination_leases IN SHARE UPDATE EXCLUSIVE MODE',
+        );
+        await pool.query(
+          `INSERT INTO coordination_resources (scope_id, resource, fencing_token)
+           VALUES ($1, 'online-lock-control', 1)`, [scopeId],
+        );
+        const writer = await pool.connect();
+        try {
+          await writer.query('BEGIN');
+          await writer.query("SET LOCAL lock_timeout = '500ms'");
+          await expect(writer.query(
+            `INSERT INTO coordination_leases (
+               lease_id, scope_id, resource, principal_id, run_id, fencing_token,
+               acquired_at, expires_at, released_at
+             ) VALUES (gen_random_uuid(), $1, 'online-lock-control', $2,
+                       gen_random_uuid(), 1, clock_timestamp(),
+                       clock_timestamp() + interval '1 minute', NULL)`,
+            [scopeId, principalId],
+          )).resolves.toBeDefined();
+          await writer.query('ROLLBACK');
+        } finally {
+          writer.release();
+        }
+      } finally {
+        await locked.query('ROLLBACK');
+        locked.release();
+      }
+      const started = performance.now();
+      await runMigrations(pool, forward);
+      expect(performance.now() - started).toBeLessThan(5_000);
+      expect((await pool.query(
+        `SELECT count(*)::int AS count FROM coordination_leases
+          WHERE cleanup_eligible_at IS NOT NULL`,
+      )).rows).toEqual([{ count: 4999 }]);
+      expect((await pool.query(
+        `SELECT count(*)::int AS count FROM coordination_leases
+          WHERE cleanup_eligible_at IS NULL`,
+      )).rows).toEqual([{ count: 1 }]);
+      expect((await pool.query(
+        `SELECT rows_processed::int, last_lease_id IS NOT NULL AS cursor,
+                completed_at IS NOT NULL AS complete
+           FROM coordination_migration_progress
+          WHERE name = 'issue7-cleanup-eligibility'`,
+      )).rows).toEqual([{ rows_processed: 4999, cursor: true, complete: true }]);
+      await pool.query(
+        `UPDATE coordination_resources SET current_lease_id = NULL
+          WHERE scope_id = $1`, [scopeId],
+      );
+      await pool.query(
+        `DELETE FROM _continuum_migrations
+          WHERE name = '0062_coordination_forward_online_finish.sql'`,
+      );
+      await expect(runMigrations(pool, forward)).resolves.toMatchObject([
+        expect.objectContaining({ name: '0062_coordination_forward_online_finish.sql' }),
+      ]);
+      expect((await pool.query(
+        `SELECT count(*)::int AS count FROM coordination_leases
+          WHERE cleanup_eligible_at IS NULL`,
+      )).rows).toEqual([{ count: 0 }]);
+      await pool.query('ANALYZE coordination_leases');
+      await pool.query('ANALYZE coordination_operation_receipts');
+      const plan = await pool.query(
+        `EXPLAIN (FORMAT JSON)
+         SELECT lease.lease_id FROM coordination_leases lease
+          WHERE lease.cleanup_eligible_at
+                <= clock_timestamp() - interval '24 hours'
+            AND NOT EXISTS (
+              SELECT 1 FROM coordination_operation_receipts receipt
+               WHERE receipt.lease_id = lease.lease_id)
+          ORDER BY lease.cleanup_eligible_at, lease.lease_id
+          LIMIT 1000 FOR UPDATE OF lease SKIP LOCKED`,
+      );
+      expect(JSON.stringify(plan.rows)).toContain('LockRows');
+      expect((await pool.query(
+        `SELECT indexrelid::regclass::text AS name, indisvalid AS valid
+           FROM pg_index WHERE indexrelid =
+             'coordination_leases_cleanup_ready_idx'::regclass`,
+      )).rows).toEqual([{
+        name: 'coordination_leases_cleanup_ready_idx', valid: true,
+      }]);
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  }, 60_000);
+
+  it('bounds a parked 0053 upgrade lock wait and records the operative 0054 timeout recipe', async () => {
+    const schema = `early_lock_${randomUUID().replaceAll('-', '').slice(0,16)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL }); pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const blocker = schemaPool(schema);
+    const prefix = await mkdtemp(join(tmpdir(),'continuum-early-prefix-')); directories.push(prefix);
+    const forward = await mkdtemp(join(tmpdir(),'continuum-early-forward-')); directories.push(forward);
+    const source = join(process.cwd(),'migrations');
+    const name = '0054_coordination_leases.sql';
+    const canonical = (await readFile(join(source,name),'utf8')).replaceAll('\r\n','\n');
+    const timerTrigger=`early_budget_${randomUUID().replaceAll('-','')}`;
+    const lock = await blocker.connect();
+    try {
+      const files = (await readdir(source)).filter(file=>file.endsWith('.sql') && file<'0054').sort();
+      await Promise.all(files.map(file=>copyFile(join(source,file),join(prefix,file))));
+      await runMigrations(pool,prefix);
+      await copyFile(join(source,name),join(forward,name));
+      await pool.query("SET statement_timeout='1600ms'");
+      await lock.query('BEGIN');
+      await lock.query('LOCK TABLE scopes IN ACCESS EXCLUSIVE MODE');
+      // Without a transactional lock bound, the held FK target causes 57014
+      // from the independent watchdog instead of the required 55P03 refusal.
+      await expect(runMigrations(pool,forward)).rejects.toMatchObject({ cause: { code:'55P03' } });
+      expect((await pool.query('SELECT name FROM _continuum_migrations WHERE name=$1',[name])).rows).toEqual([]);
+      expect((await pool.query("SELECT to_regclass(format('%I.coordination_resources',$1::text)) AS relation",[schema])).rows)
+        .toEqual([{ relation:null }]);
+      await lock.query('ROLLBACK');
+      await pool.query('RESET statement_timeout');
+      // Check the effective PostgreSQL deadline during the actual historical
+      // DDL, without sleeping for thirty seconds or rewriting its pinned bytes.
+      await admin.query(`CREATE FUNCTION ${schema}.require_early_statement_budget() RETURNS event_trigger
+        LANGUAGE plpgsql AS $$ BEGIN
+          IF EXISTS(SELECT 1 FROM pg_event_trigger_ddl_commands() command
+            WHERE command.object_identity='${schema}.coordination_resources')
+            AND current_setting('statement_timeout')<>'30s' THEN
+            RAISE EXCEPTION 'early migration DDL requires a thirty-second statement budget';
+          END IF;
+        END $$;
+        CREATE EVENT TRIGGER ${timerTrigger} ON ddl_command_end WHEN TAG IN ('CREATE TABLE')
+        EXECUTE FUNCTION ${schema}.require_early_statement_budget()`);
+      await runMigrations(pool,forward);
+      const effective = "SET LOCAL lock_timeout = '1s';\nSET LOCAL statement_timeout = '30s';\n"+canonical;
+      const hash = createHash('sha256');
+      for (const value of [effective,'[]']) {
+        const bytes = Buffer.from(value,'utf8'); const length = Buffer.alloc(4); length.writeUInt32BE(bytes.length);
+        hash.update(length).update(bytes);
+      }
+      expect((await pool.query(`SELECT variant,source_sha256,effective_sql_sha256,executed_sql_sha256,
+        statement_count,state FROM _continuum_migration_execution WHERE migration_name=$1 AND phase='file'`,[name])).rows)
+        .toEqual([{ variant:'canonical-lf-lock1s-statement30s-v2',source_sha256:createHash('sha256').update(canonical).digest('hex'),
+          effective_sql_sha256:createHash('sha256').update(effective).digest('hex'),executed_sql_sha256:hash.digest('hex'),
+          statement_count:1,state:'completed' }]);
+    } finally {
+      await lock.query('ROLLBACK').catch(()=>undefined); lock.release();
+      await pool.query('RESET statement_timeout');
+      await admin.query(`DROP EVENT TRIGGER IF EXISTS ${timerTrigger}`);
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  },120_000);
+
+  it('keeps published 0058 concurrent indexes outside transactions without an early timeout prefix', async () => {
+    const name='0058_coordination_online_prep.sql';
+    const directory=await mkdtemp(join(tmpdir(),'continuum-0058-online-')); directories.push(directory);
+    await copyFile(join(process.cwd(),'migrations',name),join(directory,name));
+    const canonical=(await readFile(join(directory,name),'utf8')).replaceAll('\r\n','\n');
+    const digest=createHash('sha256').update(canonical).digest('hex');
+    const queries:string[]=[]; const started:unknown[][]=[]; let inTransaction=false;
+    const client={ query:vi.fn(async(query:string,values?:unknown[])=>{
+      queries.push(query.trim());
+      if(query==='BEGIN') inTransaction=true;
+      if(query==='COMMIT'||query==='ROLLBACK') inTransaction=false;
+      if(query.includes('CREATE INDEX CONCURRENTLY')&&inTransaction) {
+        throw Object.assign(new Error('concurrent index inside transaction'),{code:'25001'});
+      }
+      if(query.includes('pg_try_advisory_lock')) return {rows:[{locked:true}],rowCount:1};
+      if(query.includes('pg_advisory_unlock')) return {rows:[{unlocked:true}],rowCount:1};
+      if(query.includes('SELECT 1 FROM _continuum_migrations')) {
+        return {rows:[],rowCount:values?.[0]===name?0:1};
+      }
+      if(query.includes('SELECT 1 FROM _continuum_migration_execution')&&query.includes("state='started'")) {
+        return {rows:[],rowCount:0};
+      }
+      if(query.includes('FROM pg_class c')&&query.includes('pg_index')) return {rows:[{schema:'public',valid:true}],rowCount:1};
+      if(query.includes('INSERT INTO _continuum_migration_execution')&&query.includes("'started'")) started.push(values??[]);
+      return {rows:[],rowCount:1};
+    }),release:vi.fn() };
+    await expect(runMigrations({connect:vi.fn(async()=>client)} as unknown as pg.Pool,directory)).resolves.toHaveLength(1);
+    expect(queries.filter(query=>query.includes('CREATE INDEX CONCURRENTLY'))).toHaveLength(2);
+    expect(queries.some(query=>query.startsWith("SET LOCAL lock_timeout = '1s';"))).toBe(false);
+    expect(started).toHaveLength(1);
+    expect(started[0].slice(1,6)).toEqual([name,'file-online','online-directives-v1',digest,digest]);
+  });
+
   it('runs marked concurrent-index migrations outside a transaction', async () => {
     const queries: string[] = [];
     const client = {
       query: vi.fn(async (query: string) => {
         queries.push(query.trim());
+        if (query.includes('pg_try_advisory_lock')) {
+          return { rowCount: 1, rows: [{ locked: true }] };
+        }
+        if (query.includes('SELECT 1 FROM _continuum_migration_execution')
+          && query.includes("state='started'")) return { rowCount: 0, rows: [] };
         if (query.includes('SELECT 1 FROM _continuum_migrations')) {
           return { rowCount: 0, rows: [] };
         }
@@ -1593,8 +2467,13 @@ describe('runMigrations', () => {
 
     await runMigrations({ connect: vi.fn(async () => client) } as unknown as pg.Pool, directory);
 
-    expect(queries).not.toContain('BEGIN');
-    expect(queries).not.toContain('COMMIT');
+    // Bookkeeping transactions are separate from the concurrent DDL itself.
+    let inTransaction = false;
+    for (const query of queries) {
+      if (query === 'BEGIN') inTransaction = true;
+      if (query === 'COMMIT' || query === 'ROLLBACK') inTransaction = false;
+      if (/^(?:CREATE|DROP) INDEX CONCURRENTLY/.test(query)) expect(inTransaction).toBe(false);
+    }
     expect(queries).not.toContain('ROLLBACK');
     const index = queries.findIndex((query) => query.includes('CREATE INDEX CONCURRENTLY'));
     const drop = queries.findIndex((query) => query.includes('DROP INDEX CONCURRENTLY'));
@@ -1602,6 +2481,49 @@ describe('runMigrations', () => {
     expect(drop).toBeGreaterThan(-1);
     expect(index).toBeGreaterThan(drop);
     expect(ledger).toBeGreaterThan(index);
+    expect(queries.slice(index + 1, ledger)).toContain('BEGIN');
+    expect(queries.slice(ledger + 1)).toContain('COMMIT');
+  });
+
+  it('halves the 0062 cleanup directive batch after lock refusal and resets both timeouts', async () => {
+    const queries: string[] = [];
+    const sizes: unknown[] = [];
+    const recipes: unknown[] = [];
+    const client = {
+      query: vi.fn(async (query: string, values?: unknown[]) => {
+        queries.push(query.trim());
+        if (query.includes('INSERT INTO _continuum_migration_execution') && query.includes("'started'")) recipes.push(values?.[3]);
+        if (query.includes('pg_try_advisory_lock')) return { rowCount: 1, rows: [{ locked: true }] };
+        if (query.includes('pg_advisory_unlock')) return { rowCount: 1, rows: [{ unlocked: true }] };
+        if (query.includes('SELECT 1 FROM _continuum_migrations')
+          || (query.includes('SELECT 1 FROM _continuum_migration_execution') && query.includes("state='started'"))) {
+          return { rowCount: 0, rows: [] };
+        }
+        if (query.includes('SELECT continuum_backfill_coordination_cleanup(')) {
+          sizes.push(values?.[0]);
+          if (sizes.length === 1) throw Object.assign(new Error('controlled row lock refusal'), { code: '55P03' });
+          return { rowCount: 1, rows: [{ completed: sizes.length === 3 }] };
+        }
+        return { rowCount: 1, rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    const directory = await migrationDirectory('-- continuum:no-transaction\n-- continuum:backfill-coordination-repair;');
+    const previous = process.env.CONTINUUM_COORDINATION_V4_BACKFILL_BATCH_SIZE;
+    process.env.CONTINUUM_COORDINATION_V4_BACKFILL_BATCH_SIZE = '1000';
+    try {
+      await expect(runMigrations({ connect: vi.fn(async () => client) } as unknown as pg.Pool, directory))
+        .resolves.toHaveLength(1);
+      expect(sizes).toEqual([1000, 500, 500]);
+      expect(recipes).toEqual(['online-cleanup-adaptive-max1000-lock1s-statement5s-progress-v3']);
+      expect(queries).toContain("SET lock_timeout = '1s'");
+      expect(queries).toContain("SET statement_timeout = '5s'");
+      expect(queries).toContain('RESET lock_timeout');
+      expect(queries).toContain('RESET statement_timeout');
+    } finally {
+      if (previous === undefined) delete process.env.CONTINUUM_COORDINATION_V4_BACKFILL_BATCH_SIZE;
+      else process.env.CONTINUUM_COORDINATION_V4_BACKFILL_BATCH_SIZE = previous;
+    }
   });
 
   it('runs a commented selector-backfill directive until its watermark completes', async () => {
@@ -1610,6 +2532,11 @@ describe('runMigrations', () => {
     const client = {
       query: vi.fn(async (query: string) => {
         queries.push(query.trim());
+        if (query.includes('pg_try_advisory_lock')) {
+          return { rowCount: 1, rows: [{ locked: true }] };
+        }
+        if (query.includes('SELECT 1 FROM _continuum_migration_execution')
+          && query.includes("state='started'")) return { rowCount: 0, rows: [] };
         if (query.includes('SELECT 1 FROM _continuum_migrations')) {
           return { rowCount: 0, rows: [] };
         }
@@ -1646,6 +2573,11 @@ describe('runMigrations', () => {
     const client = {
       query: vi.fn(async (query: string) => {
         queries.push(query.trim());
+        if (query.includes('pg_try_advisory_lock')) {
+          return { rowCount: 1, rows: [{ locked: true }] };
+        }
+        if (query.includes('SELECT 1 FROM _continuum_migration_execution')
+          && query.includes("state='started'")) return { rowCount: 0, rows: [] };
         if (query.includes('SELECT 1 FROM _continuum_migrations')) return { rowCount: 0, rows: [] };
         if (query.includes('JOIN pg_index')) {
           stateChecks += 1;
@@ -1681,6 +2613,11 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS exact_idx ON exact_table (id);
     const client = {
       query: vi.fn(async (query: string) => {
         queries.push(query.trim());
+        if (query.includes('pg_try_advisory_lock')) {
+          return { rowCount: 1, rows: [{ locked: true }] };
+        }
+        if (query.includes('SELECT 1 FROM _continuum_migration_execution')
+          && query.includes("state='started'")) return { rowCount: 0, rows: [] };
         if (query.includes('SELECT 1 FROM _continuum_migrations')) return { rowCount: 0, rows: [] };
         if (query.includes('JOIN pg_index')) {
           return { rowCount: 1, rows: [{ schema: 'tenant_exact', valid: false }] };
@@ -1711,6 +2648,9 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS exact_idx ON exact_table (id);
     const client = {
       query: vi.fn(async (query: string) => {
         queries.push(query.trim());
+        if (query.includes('pg_try_advisory_lock')) {
+          return { rowCount: 1, rows: [{ locked: true }] };
+        }
         if (query.includes('SELECT 1 FROM _continuum_migrations')) {
           return { rowCount: 0, rows: [] };
         }
@@ -1734,7 +2674,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS exact_idx ON exact_table (id);
     expect(applied).toHaveLength(1);
     expect(pool.connect).toHaveBeenCalledTimes(1);
     expect(pool.query).not.toHaveBeenCalled();
-    expect(queries[0]).toContain('pg_advisory_lock');
+    expect(queries[0]).toContain('pg_try_advisory_lock');
     expect(queries[1]).toContain('CREATE TABLE IF NOT EXISTS _continuum_migrations');
     expect(queries.at(-1)).toContain('pg_advisory_unlock');
     expect(release).toHaveBeenCalledTimes(1);
@@ -1762,6 +2702,9 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS exact_idx ON exact_table (id);
     const release = vi.fn();
     const client = {
       query: vi.fn(async (query: string) => {
+        if (query.includes('pg_try_advisory_lock')) {
+          return { rowCount: 1, rows: [{ locked: true }] };
+        }
         if (query.includes('SELECT 1 FROM _continuum_migrations')) {
           return { rowCount: 0, rows: [] };
         }

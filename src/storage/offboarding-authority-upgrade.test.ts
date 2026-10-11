@@ -100,6 +100,22 @@ describe('0048 trusted database identity upgrade', () => {
       + ' TO ' + quoteIdentifier(syncRole));
 
     await addMigration(state.directory, '0048_offboarding_independent_review.sql');
+    // Current application-schema admission rejects CREATE drift before any
+    // provenance or historical registration repair can change the schema.
+    await expect(runMigrations(state.pool, state.directory))
+      .rejects.toThrow('The application schema ' + quoteIdentifier(state.schema)
+        + ' selected by search_path must not grant CREATE to PUBLIC or a non-owner. '
+        + 'Revoke CREATE as the application schema owner before retrying');
+    expect((await state.pool.query('SELECT has_schema_privilege($1,$2,\'CREATE\') AS allowed',
+      [syncRole,state.schema])).rows).toEqual([{allowed:true}]);
+    expect((await state.pool.query("SELECT name FROM _continuum_migrations WHERE name='0048_offboarding_independent_review.sql'")).rows)
+      .toEqual([]);
+    await state.pool.query('REVOKE CREATE ON SCHEMA ' + quoteIdentifier(state.schema)
+      + ' FROM ' + quoteIdentifier(syncRole));
+    await expect(runMigrations(state.pool, state.directory))
+      .rejects.toThrow(/migration provenance privilege drift/i);
+    await state.pool.query('REVOKE ALL ON TABLE _continuum_migration_execution FROM '
+      + quoteIdentifier(syncRole));
     await expect(runMigrations(state.pool, state.directory))
       .rejects.toThrow(/operator.*provenance|re-register/i);
     expect((await state.pool.query(
@@ -357,7 +373,7 @@ describe('0048 trusted database identity upgrade', () => {
     )).rows[0].rolcanlogin).toBe(false);
   }, 60_000);
 
-  it('rejects 0052 when an inheriting role is not the direct object owner', async () => {
+  it('rejects an inherited migration runner before 0052 without changing direct object ownership', async () => {
     const state = await fixture('0051_offboarding_security_contract.sql');
     const inheritedRunner = 'upgrade_inherited_runner_' + state.suffix;
     roles.push(inheritedRunner);
@@ -379,7 +395,11 @@ describe('0048 trusted database identity upgrade', () => {
     pools.push(inheritedPool);
     await addMigration(state.directory, '0052_offboarding_review_repair.sql');
     await expect(runMigrations(inheritedPool, state.directory))
-      .rejects.toThrow(/0052 migration role must directly own every application object/i);
+      .rejects.toThrow(/migration provenance relation ownership or kind drift/i);
+    expect((await state.pool.query(
+      'SELECT count(*)::int AS count FROM _continuum_migrations WHERE name = $1',
+      ['0052_offboarding_review_repair.sql'],
+    )).rows[0].count).toBe(0);
     expect((await state.pool.query(
       `SELECT tableowner FROM pg_tables
         WHERE schemaname = current_schema()

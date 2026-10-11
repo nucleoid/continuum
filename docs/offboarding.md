@@ -8,12 +8,27 @@ Offboarding is an explicit org-administrator operation. It is not inferred from
 principal names, scope names, or memory authorship. Before offboarding, map the
 immutable principal UUID to exactly one existing `user` scope UUID:
 
-```text
-npm run admin -- map-user-scope <principal-id> <user-scope-id>
-npm run admin -- offboard-principal <principal-id> --dry-run
-npm run admin -- offboard-principal <principal-id> --confirm-scope <user-scope-id> --batch-size 1000
+```sh
+export CONTINUUM_DATABASE_URL="$CONTINUUM_OPERATOR_DATABASE_URL"
+export CONTINUUM_ADMIN_ACTOR='<bound-org-admin-external-id>'
+subject_principal_id='<principal-uuid>'
+owned_user_scope_id='<user-scope-uuid>'
+npm run admin -- map-user-scope "$subject_principal_id" "$owned_user_scope_id"
+npm run admin -- offboard-principal "$subject_principal_id" --dry-run
+npm run admin -- offboard-principal "$subject_principal_id" --confirm-scope "$owned_user_scope_id" --batch-size 1000
 npm run admin -- list-incomplete-offboarding
+npm run admin -- list-coordination-privacy-repairs --limit 100
+npm run admin -- repair-coordination-privacy "$subject_principal_id" --confirm-scope "$owned_user_scope_id" --once
 ```
+
+The private `CONTINUUM_OPERATOR_DATABASE_URL` convenience variable must contain
+the dedicated DB-bound operator connection. The program reads only
+`CONTINUUM_DATABASE_URL` and looks up `CONTINUUM_ADMIN_ACTOR` by principal
+`external_id`. That actor must match the operator's approved binding and current
+manual org-admin authority. It is distinct from the internal principal/scope
+UUIDs in arguments, and is not an Entra token or service API key. The ordinary
+HTTP CLI's host/token configuration does not configure this database command.
+Replace the example actor and UUID values before running these commands.
 
 The REST equivalents are `PUT
 /api/v0/admin/principals/:principalId/owned-user-scope` with `{ "scopeId":
@@ -59,10 +74,12 @@ rows examined before redaction-policy filtering. If a branch reaches that
 limit, `auditRows` and `auditQueries` are explicitly truncated/unknown even
 when the returned dirty-row count is zero.
 
-Execution immediately disables and pseudonymizes the principal and scope,
-deactivates owned-scope access, quarantines its Entra bindings, and deletes
-aliases in the first transaction. Those database fences remain closed while
-memories and audit rows are processed in retry-safe batches. `batchSize`
+The first authorized execution disables the principal, deactivates owned-scope
+access, quarantines its Entra bindings and deletes aliases. If migration
+readiness or an owned live lease blocks scope privacy, those audited access changes commit while the principal and
+scope names and `offboarded_at` remain unchanged. Pseudonymization and erasure
+advance only when their privacy work can proceed. The access fences remain
+closed while memories and audit rows are processed in retry-safe batches. `batchSize`
 defaults to 1,000 and accepts 1 through 5,000 through REST or CLI
 `--batch-size`; each response reports cumulative processed counts, bounded
 remaining-work indicators, batch number, and `complete`. Durable UUID and audit
@@ -83,10 +100,12 @@ is deactivated, including delegate and ingest identities. Database triggers
 reject later active memberships or bindings while its owner remains offboarded.
 Safe retries return `alreadyOffboarded: true` only when an immutable `completed`
 run event exists for the current run UUID, the principal and scope pseudonyms
-remain in place, and the database write fences remain closed. Memory, embedding,
-access, alias, binding, and historical audit cleanliness are trusted from the
-guarded immutable completion receipt and durable phase cursors; completed
-retries do not rescan clean pre-fence history. A legacy state without a run
+remain in place, and the database write fences remain closed. The completion
+receipt and durable phase cursors are necessary evidence, but a completed clean
+retry also runs the actual full-state verification before claiming success.
+This can inspect historical state again under the configured verification
+budget, defaulting to 30 seconds. A deadline returns `COORDINATION_TIMEOUT`
+instead of `alreadyOffboarded: true`. A legacy state without a run
 receipt is never accepted from a truncated preview. Rows above the fence are rejected
 at the principal/owned-scope audit boundary. Dry-run and retry output includes
 dirty-memory and dirty-audit indicators. Retry output also includes the first durable
@@ -94,6 +113,21 @@ evidence ID, timestamp, and exact cumulative processed counts from the completed
 run. A dirty
 retry resumes or repairs bounded work and records a repair event rather than
 silently reporting success.
+The retry also executes the current full-state predicate. A durable progress
+receipt alone cannot produce `alreadyOffboarded: true`; stale lock audit
+metadata, retained principal coordination rows, or incomplete version-3
+privacy progress forces bounded repair.
+
+A completed run whose coordination privacy was reopened takes the privacy
+repair path before full-state verification or any dirty lifecycle restart.
+Blocked privacy therefore prevents that completed run from restarting memory
+or audit erasure, even if later state is dirty. A successful bounded privacy
+batch commits first; a later invocation verifies or restarts lifecycle work.
+An ordinary open run still advancing erasure can continue its memory and audit
+batches while coordination privacy has a typed block. The CLI may continue
+that run while it reports progress and remaining memory or audit work, but a
+privacy-only blocked result remains incomplete. These paths deliberately have
+different ordering; completion evidence never substitutes for current privacy.
 
 Every memory in the mapped user scope has its title and body replaced with the
 fixed `[erased]` tombstone, type normalized to `context`, metadata and tags
@@ -114,6 +148,179 @@ delegate/admin summaries whose `scope_id` is null, so they cannot remain visible
 knowledge-gap output. Audit inserts lock the principal row and are rejected
 after offboarding; an in-flight recall that loses this race fails closed instead
 of returning results with an unsanitized late audit row.
+
+Coordination privacy work is bounded and resumable. After owned-scope
+memberships are deactivated and the principal is disabled, each invocation
+deletes at most 1,000 retained receipts, leases, and resources from the owned
+user scope. Resource deletion returns the fencing tokens of the locked rows
+actually deleted; their maximum raises the owner-only scope floor in the same
+transaction. Durable scope progress and an actual remaining-row check prevent a
+short `SKIP LOCKED` page from claiming completion. A live owned-scope lease
+stops erasure. Quiesce and release it while the holder is still enabled,
+authenticated, and authorized. After disablement or revocation the holder
+cannot release or renew; cleanup must wait for TTL expiry. There is no forced
+admin release. The service returns `complete: false`, `reason: owned_live_lease`
+and an optional `blockedUntil` expiry witness. That witness is one observed live
+lease, not proof that every lease expires by that time; recheck the scope.
+
+If 0081 contract repair is pending, the result instead has
+`reason: migration_pending`. After the usual confirmation, mapping approval and
+last-admin checks, the initial offboarding transaction still disables the
+principal, deactivates owned-scope memberships, quarantines Entra bindings and
+removes principal aliases. It records the durable run progress and an audited
+`principal_offboarding_access_revoked` event before committing the incomplete
+result. Only the blocked coordination privacy work rolls back to its savepoint.
+These access changes do not mean erasure is complete; finish owner repair or
+wait for the live lease, then resume the same confirmed offboarding operation.
+
+During rollout, complete every forward migration and exact application/operator
+grant-profile convergence before enabling Entra-sourced coordination or
+offboarding traffic. Apply the full operator profile only after the current
+migration chain completes. Provider additions tolerate pre-0080 schemas, but
+this does not make the full operator profile safe on historical schema versions.
+Rehearse the current binaries, full migration chain, and matching grant scripts
+together on an isolated copy.
+Current REST and MCP startup check the trusted 0081 readiness capability after
+provider verification and refuse an absent or pending contract. This startup
+check performs no repair. Standalone provider verification and identity sync
+keep their provider-specific compatibility behavior. `/health/ready` checks
+database connectivity and runtime shutdown state; it does not rerun contract
+verification or prove erasure completion.
+Retained authorized coordination replays during a pending repair are available
+only through already-running nodes. A new or restarted REST/MCP process cannot
+serve them until that startup gate succeeds; include this interruption in the
+maintenance plan.
+
+Team, project, role, organization, and other users' resources remain intact. Their historical
+leases and receipts are detached from the departing principal in batches of at
+most 1,000, moved to a noninteractive installation identity, and assigned fresh
+random run IDs and payload hashes. This preserves fencing and shared resource
+availability without retaining the principal beside plaintext coordination
+identifiers. Every non-owned scope kind follows this shared-scope detachment
+policy; scope kind does not exempt retained coordination history.
+`scope_cleanup_complete` is written only after both owned-scope erasure and
+shared-scope detachment report durable completion. Preserved `lock_*` audit
+metadata retains only `operation`, `outcome`, `transport`, and `own_lease`.
+It removes fencing tokens, byte counts, request, run, lease,
+resource, resource-digest, and unknown metadata keys. This canonical shape is
+also the only update accepted by the immutable offboarded-audit tombstone
+guard. Unrelated audit-retention and offboarding evidence keeps its own
+allowlisted request/run identifiers. Immutable coordination operator events
+record direct pseudonymization start and completion outside ordinary audit
+retention and offboarding mutation.
+
+The bounded 0081 usage/progress pass clears the original `last_lease_id` and
+`last_request_id` compatibility fields written by 0059-0061 scrubs. Current
+audit-ID progress and active resumable phases remain separate from those old
+UUIDs, and the actual erased-state predicate rejects any retained legacy UUID
+link. Detached rows already produced by the old scrub can retain historical
+timestamps. Clearing the principal's UUID link does not erase temporal
+correlation or rewrite earlier backups; treat retained installation history and
+backups under the organization's independent retention policy.
+
+The 0081 backfill also revisits fenced lock audits in bounded raw audit-ID
+windows, including another holder's rows in an approved owned scope. Its
+captured audit high-water ID bounds the pass; it rewrites only old token/byte
+metadata within an existing run's principal or owned-scope audit fence.
+Scanned counts, rewritten counts and the cursor commit atomically, and the
+cursor clears when the phase finishes. Existing run UUIDs, approvals, lifecycle
+cursors and completion events remain intact. Finish this owner migration phase
+before resuming an open run or verifying a completed one; the later privacy
+index is not a prerequisite for the bounded rewrite.
+
+Migration 0063 reopens every version-1 coordination privacy row by clearing its
+completion timestamp. `list-incomplete-offboarding` reports unfinished durable
+offboarding runs, but a previously completed run can require only this upgrade
+re-scrub and therefore is not in that list. After upgrade, use
+`list-coordination-privacy-repairs`; it returns a bounded list classified as
+`offboarded` or `disabled_only` without granting direct progress-table reads.
+Page the list with `--limit <1-1000>` and the returned `nextCursor`. Pass that
+value back with `--after <principal-id>` until `nextCursor` is null. Each command
+scans one bounded window before filtering current eligibility. `scannedCount`
+counts the consumed candidate UUIDs, and `hasMore` indicates raw candidates
+beyond that window. The deterministic, exclusive cursor is the last consumed
+raw UUID across the common window of all discovery branches. Reactivated or
+unmapped candidates can consume scan slots but never appear as repairs. Empty
+and short returned lists can therefore have a nonterminal cursor; continue
+with that cursor rather than treating the returned count as exhaustion. A
+principal that becomes ineligible after an earlier page is omitted from later
+pages; a newly eligible principal sorts after the cursor and can appear on a
+later page, while one sorting at or before the cursor is left for the next full
+discovery pass. A page is terminal only when its `nextCursor` is null. Discovery
+does not loop internally to fill a requested number of eligible results.
+Forward migration 0081 and the matching operator grant profile are required for
+this paged CLI. A missing helper fails with a sanitized `DEPENDENCY_UNAVAILABLE`
+upgrade message. Each successful page commits one query-free read audit with
+bounded counts; it does not record subject IDs or the cursor. The existing
+flat-array service and SQL point lookup remain compatible, but an array alone
+cannot indicate whether filtered candidates remain. Bulk consumers must use
+`listCoordinationPrivacyRepairPage` and its explicit paging metadata.
+For `offboarded` rows, rerun the normal `offboard-principal --confirm-scope`
+command. For `disabled_only` rows, run the non-lifecycle
+`repair-coordination-privacy <principal-id> --confirm-scope <scope-id>` command
+until it returns `complete: true`. It may also resume an existing incomplete,
+explicitly approved owned-scope phase using its recorded pseudonym. It cannot
+infer ownership or start a fresh scope erasure merely because the principal is
+disabled. In this coordination-only repair command, a live shared lease returns
+its `blockedUntil` time and stops the CLI run with exit status 3. Detached quota or
+concurrent privacy-lock contention is also a typed status-3 block. The CLI caps
+one invocation at 100 progressing batches with bounded backoff. `--once`
+returns status 2 for an unblocked incomplete batch; typed blocks remain status 3
+even with `--once`. `migration_pending` and `owned_live_lease` are also typed
+status-3 blocks; an owned lease may provide an expiry witness or a null
+`blockedUntil`. The command drives bounded coordination scrubbing and existing
+approved scope erasure. It never sets `offboarded_at`, starts user pseudonymization,
+erases memories or deactivates scope access.
+Membership synchronization holds the installation's global sync lock. An
+overlapping offboarding or privacy-repair command can return `lock_busy` and
+exit 3 with no expiry-based resume time. Wait for synchronization to finish,
+then rerun the same confirmed command; the CLI does not spin until that global
+lock is released.
+Migrations 0066 and 0067 reopen completed version-2 rows and reset only their
+audit cursor so the same bounded command can apply the narrower 0065 lock-audit
+classifier without changing unrelated immutable evidence. Migration 0067 also
+includes disabled principals completed through direct scrubbing. The destructive
+offboarding command refuses those pending disabled-only repairs and directs the
+operator to the dedicated repair command. For a previously completed
+offboarding, `repair-coordination-privacy` returns an audited
+`complete: false`, `reason: offboarding_required` pointer. Use the ordinary
+confirmed offboarding command for bounded privacy work and exact full-state
+verification. That command commits a newly completed privacy phase before its
+next invocation verifies the lifecycle state. It claims completion only after
+coordination privacy and the full database-verified lifecycle state are clean.
+For disabled-only repair, `complete` describes coordination privacy rather than
+full offboarding; an existing owned phase must be complete and have no remaining
+resource, receipt or lease rows. Progress includes a phase change, an increased
+processed-row count, or transition to a physically clean scope, even if the
+final page deletes no rows.
+An access-only first batch can leave an open lifecycle run while discovery still
+classifies its principal as `disabled_only`. Check `list-incomplete-offboarding`
+and resume that run with the full confirmed `offboard-principal` command. A
+coordination-only `complete: true` can mean shared-principal privacy is clean
+without creating a new owned-scope phase; it does not close the existing run or
+prove owned data erased. Repair must never infer a fresh scope-erasure request.
+
+The ordinary `offboard-principal` loop treats durable cursor movement and phase
+completion as progress even when a page contains only already-canonical or
+preserved rows. Without `--once`, a shared `live_lease` result does not stop
+progressing memory and audit erasure: the loop continues while that batch made
+progress and either cursor still has work. It stops with status 3 once only
+blocked privacy work remains or progress stops, without polling the lease for
+expiry. The 100-attempt cap and bounded backoff still apply. It exits 0 only for truthful completion (or a requested dry
+run), exits 3 for a typed blocking state, and exits 2 for an incomplete
+single-batch run, bounded attempt cap, or untyped no-progress state. The
+`repair-coordination-privacy` command uses the same status contract.
+Both commands count a committed positive expired-detached-receipt purge as
+progress. The service clears a stale `detached_quota` only if that purge freed
+space and no `blockedUntil` was returned; genuinely saturated capacity and live
+leases remain typed blocks.
+Migrations 0074 through 0077 require a maintenance drain of pre-0074
+offboarding workers and finish lifecycle eligibility repair online in
+restartable, timeout-bounded batches. Migration 0076 enforces explicit
+client-version negotiation at the database entry points before runtime-role
+mutation; a pre-0074 worker is refused deterministically, not only after
+contention. Resume with a current worker. Rollback is forward-only and requires
+a new migration; do not remove the negotiation guard.
 
 Offboarding is not globally atomic across all batches. Until `complete: true`,
 audit rows beyond the current keyset cursors can still contain raw query text and
@@ -325,7 +532,9 @@ operation: raw operator `UPDATE` on `entra_groups` is revoked, and revocation,
 quarantine, and deactivation triggers accept only transaction-local guarded
 mutation markers.
 
-Apply all 53 migrations through `0053_offboarding_restore_contract.sql`.
+The following paragraphs describe the historical 0049-0053 identity foundation.
+They are not the current migration stopping point. Apply the complete packaged
+chain, including 0080 and 0081, under the current rollout procedure below.
 Migration `0049_offboarding_review_remediation.sql` makes principal disablement
 create bounded transaction-local guards for its existing membership cascade,
 binds owned-scope access cleanup to a started incomplete run and its mapped
@@ -358,7 +567,7 @@ triggers, normalizes all three transient capability-table shapes, and checks col
 ACLs as well as table ACLs. Sync startup rejects owner and superuser sessions
 and rechecks operator and sync membership edges at each privileged call. The
 application grant script revokes all three marker tables and validates its exact
-direct allow-list—including schema and ambient `PUBLIC` privileges—before
+direct allow-list, including schema and ambient `PUBLIC` privileges, before
 returning success. The application role has no scope
 row update authority; the operator-only pseudonymization function owns the one
 supported user-scope name mutation, while `id`, `kind`, and the canonical
@@ -382,9 +591,16 @@ event trigger checks every memory and every audit row linked to the run's
 bounded fence before appending completion. On very large per-subject histories,
 set the supported `verificationTimeoutMs` API option or
 `--verification-timeout-ms <1-300000>` admin-CLI option from measured query plans
-and database load. The default is 30 seconds. A timeout rolls back the current
-batch and commits no completion receipt; retain the run and retry. Do not weaken
-or skip verification, and do not claim completion from progress counters alone.
+and database load. The default is 30 seconds. This configured budget also
+applies to full-state verification of an already completed run. Upgrade privacy
+re-scrub batches commit before that proof is attempted on the next invocation,
+so an expensive full-history check cannot undo bounded privacy progress.
+Finishing that privacy phase is reported as progress until the next invocation
+verifies completion or restarts dirty lifecycle work. A server deadline returns
+`COORDINATION_TIMEOUT`; the admin CLI exits 2 with a sanitized error and retains
+previously committed batches. The timed-out transaction appends no completion
+receipt. Retain the run and resume using a measured verification budget. Do not
+weaken or skip verification, or claim completion from progress counters alone.
 
 Directly setting `principals.offboarded_at` is an internal write fence, not a
 supported offboarding operation or evidence that erasure completed. It may be
@@ -405,16 +621,296 @@ Production must use separate migration-owner, shared application, dedicated
 operator, and dedicated sync login roles. The operator and sync roles must not
 be granted to the shared application role. Rollout is an explicit maintenance
 window: **stop** every API, MCP, admin, retention, and membership-sync process;
-take and verify a **backup**; **migrate** through
-`0053_offboarding_restore_contract.sql` as the owner; **regrant** the shared app,
-operator, and sync profiles; **verify** the identities; then **start** only the
-`0053`-aware binaries. Mixed pre-`0053`/`0053` binaries or grants are
-unsupported. Do not run migration
-and old binaries concurrently, because old sync code writes freshness directly
-and old application code expects shared-role offboarding authority.
+take and verify a **backup**; **migrate** every packaged file, including 0080 and
+0081, as the migration/schema owner; finish the owner-only 0081 backfill;
+**regrant** every shared app, dedicated operator, and sync profile; **verify**
+the exact identities and provider profiles; then **start** only matching current
+binaries. Published history through 0079 stays unchanged; 0080 and 0081 are the
+current unreleased forward repair files. Keep offboarding and coordination
+mutation traffic drained until the complete schema, repair and grants converge.
+Do not run old binaries or schedulers through this maintenance window.
+
+For the owner procedures and `psql "$CONTINUUM_DATABASE_URL"` examples below,
+switch to the owner connection explicitly:
+
+```sh
+export CONTINUUM_DATABASE_URL="$CONTINUUM_MIGRATION_OWNER_URL"
+continuum-migrate
+```
+
+The installed command reads `CONTINUUM_DATABASE_URL`; from a reviewed checkout
+use `npm run migrate` with that same owner connection. For a non-public tenant,
+configure the owner URL's first effective `search_path` schema as described
+below. The dedicated operator role cannot run the repair or inspect its
+provenance. After owner maintenance, restore the operator setup at the start of
+this guide before running admin commands.
 The supported and CI-tested database major is PostgreSQL 16 with pgvector.
 Qualify another major independently before migration; successful SQL parsing
 alone is not a supported rollout.
+
+Pgvector is one database-wide provider prerequisite whose objects may already
+live in `public`, an existing Continuum application schema, or a dedicated
+provider-managed schema. Existing and already-ledgered placement is preserved.
+A fresh automatic installation instead creates the dedicated
+`continuum_extensions` schema under the migration advisory lock and installs
+pgvector there. It never chooses a tenant application schema. Dropping one
+application schema therefore does not own or cascade through the provider into
+another installation. Treat `continuum_extensions` as database provider
+infrastructure: its owner controls extension upgrades and it must be dropped
+only after every dependent tenant and non-Continuum consumer has been retired
+and the provider owner has reviewed decommissioning.
+Self-bootstrap is suitable for a single tenant. Before adding another tenant,
+use independently owned provider infrastructure. A fresh binding is refused
+when a non-superuser schema or extension owner also owns another Continuum
+application schema or its migration ledger. An installer that temporarily used
+superuser authority and was later downgraded still owns its provider objects.
+Superusers retain database-wide authority; this check does not isolate tenants
+from the DBA. The existing reviewed legacy shared-provider opt-in can accept
+that ownership coupling explicitly. Continuum does not transfer ownership or
+change global provider ACLs to make the binding succeed.
+
+For a fresh application schema, Continuum refuses an existing provider schema
+that contains another Continuum ledger or application tables. Relocate that
+extension into reviewed provider infrastructure before retrying. The temporary
+escape hatch `CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA=1` is only for an
+operator-reviewed legacy topology where cascade-drop or shared-`public`
+coupling is understood and accepted; it is not a normal multi-tenant rollout
+setting. An unreviewed extension in `public` is refused before tenant ledger
+DDL. PostgreSQL grants `USAGE` and function `EXECUTE` to `PUBLIC` as effective
+privileges for every role, so compatibility mode records that truth instead of
+pretending those privileges are direct grants.
+
+The preferred shared provider is a dedicated `continuum_extensions` schema.
+It may be owned by a DBA/provider role rather than a tenant migration owner,
+may serve multiple Continuum application schemas, and must grant `CREATE` to
+neither `PUBLIC` nor any non-owner. Each tenant migration owner needs only
+`USAGE`; it does not need ownership or grant option when provider access has
+already been granted directly to every profiled runtime role. The provider
+owner controls extension install, update, and final removal. Remove it only
+after every dependent tenant and other provider consumer has been retired.
+
+The migration connection's first effective `search_path` schema is the
+application schema. It must be owner-controlled by the migration role (including
+PostgreSQL's database-owner control of `public`) and must not grant `CREATE` to
+`PUBLIC` or another role, including on an already-ledgered installation; an empty or hostile path is
+rejected before the ledger is created. During `0001`, the path is replaced by
+exactly the quoted application schema followed by the quoted provider schema.
+An application-local `vector` type or `vector_cosine_ops` shadow is rejected.
+This keeps unqualified objects in the application schema while resolving the
+published migration's vector type and opclass only from pgvector.
+If schema CREATE privileges drift after installation, the owner must review
+and explicitly revoke the non-owner grants before retrying migration. This is
+an upgrade prerequisite, not an automatic ACL rewrite or an exception for old
+ledgers. The migrator rejects the drift before migration and provenance DDL.
+
+The migration owner needs `USAGE` on the installed extension schema.
+`runMigrations` reports the exact missing grant before applying `0001`. It
+temporarily sets the exact application/provider path only while applying
+`0001_init.sql`, then restores the trusted application-only path immediately
+after `0001` commits or rolls back. Ordinary packaged migration work uses only
+that quoted application schema with `pg_catalog` implicit first. Caller suffix
+schemas do not participate in migration function or type resolution. Initial
+catalog inspection, advisory locking and path restoration use explicit catalog
+calls. The original caller path is restored only after migration and cleanup,
+before releasing the connection; restoration failure discards the connection.
+Execution evidence identifies the application-path variant with the
+`-app-path-v1` suffix. An unfinished older execution recipe can therefore require
+owner investigation before retrying; do not delete evidence to bypass that
+guard. Later migrations never inherit the provider schema.
+Runtime embedding queries infer the vector type from the
+`memory_embeddings.embedding` column and schema-qualify the distance operator,
+so the provider schema does not need to remain on the runtime `search_path`.
+Current REST, MCP and identity-sync entrypoints require the resolved explicit
+runtime path to contain exactly `CONTINUUM_APPLICATION_SCHEMA`, defaulting to
+`public`. For example, a custom tenant uses
+`PGOPTIONS='-c search_path=application_data'` with
+`CONTINUUM_APPLICATION_SCHEMA=application_data`. Keep `pg_catalog` implicit,
+not explicitly later in the path, and omit provider and co-tenant schemas.
+A separately DBA-owned provider is still supported with its reviewed narrow
+grants; it does not have to share the application schema's owner. This runtime
+restriction does not change 0001's temporary application/provider path.
+
+If pgvector is absent, `runMigrations` creates the provider schema and attempts
+`CREATE EXTENSION vector WITH SCHEMA continuum_extensions` before opening the
+`0001` transaction. Some packaged or managed installations permit only a
+database superuser or provider role to do this. In that case no application
+migration is recorded: have the DBA install pgvector in a reviewed schema,
+grant the migration owner `USAGE` on that schema, and rerun the migration. The
+provider schema and extension created by that attempt are removed when `0001`
+fails, together with an empty ledger created by the attempt. Once `0001` is
+ledgered, later migration failure retains the provider and application state so
+the forward migration can be retried. Do not move an existing extension merely
+to use the default schema.
+
+Application roles also require `USAGE` on the provider schema and `EXECUTE` on
+the extension routines used by vector operators. Migration `0080` upgrades the
+owner-only grant refresher, and `grant-application-role.sql` invokes it after
+granting the Continuum application profile. For an owner-installed extension,
+the migration owner supplies these narrow grants. For a provider-owned schema,
+either pregrant every profiled role directly or grant the migration owner the
+corresponding grant options. Existing sufficient direct grants are accepted
+before delegation is considered; the refresher asks for grant option only for
+a genuinely missing grant. Do not grant schema `CREATE`, provider
+ownership, a provider role, or blanket database privileges to the application
+role.
+
+Plain provider `USAGE` without grant option cannot delegate missing target
+access: PostgreSQL can warn instead of rejecting `GRANT`. The refresher checks
+effective target `USAGE` after the attempt and fails with the provider-owner
+action rather than registering a broken reporting profile. Have the provider
+owner grant the missing target access directly, or explicitly delegate the
+narrow grant option to the tenant owner. Rerunning the application grant script
+alone cannot supply authority the tenant owner lacks.
+
+If a generic exact-profile classification error obscures the underlying drift,
+run the precise allow-list diagnostic as the actual tenant migration owner:
+
+```sql
+BEGIN;
+SET LOCAL lock_timeout = '1s';
+SET LOCAL statement_timeout = '5s';
+SELECT application_data.continuum_assert_application_role_allowlist(
+  'continuum_app'::name, FALSE
+);
+COMMIT;
+```
+
+Replace the schema and role with the reviewed actual identifiers; use `TRUE`
+for an operator profile. This diagnostic changes no grants. Preserve its exact
+error before fixing the reviewed drift. On `55P03`, roll back, wait for the
+conflicting operation to drain, then retry the complete diagnostic transaction.
+Do not repeat a statement inside an aborted transaction or loosen the allow-list
+to make the provider classifier succeed.
+
+The provider verifier ignores profile rows whose role OID no longer exists;
+it does not prune registry rows or change grants during startup. If desired,
+the migration owner can remove that obsolete metadata explicitly after review:
+
+```sql
+DELETE FROM application_data.continuum_pgvector_role_profiles AS profile
+WHERE NOT EXISTS (
+  SELECT 1 FROM pg_catalog.pg_roles AS role
+  WHERE role.oid = profile.database_role_oid
+);
+```
+
+Replace `application_data` with the quoted actual tenant schema. This optional
+owner-only cleanup is not a runtime prerequisite and does not revoke provider
+ACLs or decommission the provider.
+
+Migration `0080` recognizes exact application, operator, and registered sync
+profiles plus explicitly registered reporting profiles; `SELECT` on
+`memories` alone is not a provider profile. It records profile OIDs, grants
+provider `USAGE` and extension-function `EXECUTE` when they are not already
+effective, and rejects forbidden provider `CREATE`. A target-scoped regrant
+repairs the selected role without pruning another role waiting for its own
+regrant. Pending or mismatched registrations remain visible and startup fails
+closed until the applicable exact profiles converge. Inherited function execution is an
+effective grant and is accepted consistently by reconciliation and assertion.
+Unregistered DBA/reporting grants are left untouched and do not affect another
+application role's assertion. When pgvector is application-local, schema
+`USAGE` belongs to the application ACL and is never revoked as provider drift.
+
+The 0080 provider migration and current regrant procedures never automatically revoke
+database-wide `PUBLIC` access or provider ACLs. Provider access is shared database
+infrastructure; a tenant-local registry is not proof of exclusive use. Even a
+schema owned by this tenant can serve other tenants or non-Continuum users.
+Existing effective `PUBLIC` access is reflected honestly in profile checks.
+Removing provider access or decommissioning the extension requires an explicit
+reviewed provider-owner action covering all consumers. Forbidden schema `CREATE`
+drift must be repaired by that owner before rollout; startup and regrant report
+it rather than silently revoke it.
+
+Register or retire a read-only reporting role only through the tenant migration
+owner, after granting or before revoking its reviewed application-schema
+`SELECT` profile:
+
+```sql
+SELECT continuum_register_pgvector_reporting_profile('continuum_reporter', TRUE);
+SELECT continuum_register_pgvector_reporting_profile('continuum_reporter', FALSE);
+```
+
+Enabling the owner-only registration repairs only that reporting role's missing
+provider grants. Existing DBA grants can remain while 0080 is applied. Disabling
+the registration removes only its local profile and tenant verifier execution;
+it does not revoke shared provider privileges or application-data access.
+Revoke reviewed application `SELECT`, login/membership authority, or provider
+ACLs separately when retiring the role. A failed local runtime gate is not proof
+that direct SQL access was removed. The provider owner must supply missing
+direct pregrants or narrow delegation and review any requested decommission.
+
+Provider verification runs during API, MCP, and membership-sync startup.
+The verifier is resolved and invoked in the namespace of the actual `memories`
+relation. A same-named function in an earlier search-path schema does not replace
+that gate. Its owner, SECURITY DEFINER setting, pinned search path and PUBLIC
+revocation must match the tenant's trusted function contract.
+A missing verifier fails current non-owner startup closed. Only the migration
+owner can establish the pre-0080 compatibility skip by reading that tenant's
+qualified migration ledger and proving 0080 is absent; a ledgered 0080 with a
+missing verifier fails closed. This requires the owner to upgrade and regrant
+profiles before starting current runtime roles, without granting them ledger
+read access. Privacy erasure remains independent of provider execution grants.
+Startup verifies registered profiles without changing live grants. Owner
+startup first confirms 0080 is ledgered, uses a nonblocking migration advisory
+lock, and checks only this tenant's registry. A busy migration fails startup
+promptly; retry after migration and grant-profile convergence. Verification
+statements have a server deadline of at most five seconds and a one-second
+lock timeout. Non-owner application, operator, sync, and reporting sessions
+call the OID-bound current-profile gate; they cannot read the owner-only registry.
+Privacy erasure keeps its operator/identity authorization but does not depend
+on provider grants or vector operators.
+
+Before applying 0080 and again before starting upgraded runtime processes, run
+`scripts/preflight-pgvector-role-profiles.sql` as the tenant migration owner.
+It lists reader roles that do not match an exact application/operator profile.
+Classify these roles; a reporting reader must not receive application authority.
+This reader inventory does not prove provider exclusivity or repair schema
+`CREATE` drift. Review provider ACLs separately with the provider owner; current
+migration and regrant checks refuse forbidden `CREATE` instead of removing it.
+After the complete migration chain, reapply `grant-application-role.sql` for
+every application and operator runtime role, then `grant-operator-role.sql` for
+the dedicated operator and `grant-sync-role.sql` for the bound sync service.
+This convergence is mandatory before restarting runtime processes. Migration
+0080 itself preserves existing OID-bound sync profiles, so it does not require
+sync rotation merely to retain startup verification access.
+The sync provider-profile gate remains fatal even though Graph reconciliation
+does not execute vector operations. A provider namespace/OID change, forbidden
+direct or inherited provider USAGE for the sync role, or a mismatched
+`CONTINUUM_APPLICATION_SCHEMA` pauses Graph membership reconciliation before
+fetching the snapshot. Group removals then have revocation latency until sync
+recovers. Entra-sourced memberships fail closed after the last successful sync's
+stored staleness bound, defaulting to 48 hours; they may remain effective before
+that deadline. Fix reviewed provider drift, reapply the exact sync grant profile
+and schema setting, then run and verify sync after provider maintenance.
+Manual administration and authorized offboarding remain independent of provider
+execution grants; use them when prompt revocation is required. Do not give sync
+vector privileges or weaken its exact role profile to restore reconciliation.
+
+Re-run the applicable role grant script after role rotation, revocation, or a
+pgvector extension update. Explicit owner regrant repairs only approved target
+access and leaves other registrations and shared provider ACLs intact; startup
+only detects drift. Final assertions check exact application/operator profiles,
+required effective provider access, and forbidden provider `CREATE`; they do
+not infer exclusive provider use. Sync registration remains durable across
+owner reconciliation, and `grant-operator-role.sql` changes an application profile to
+the explicit operator kind.
+
+Rolling back to a binary from before provider-schema support is unsafe while
+the extension schema is absent from that binary's runtime `search_path`,
+because older embedding SQL used unqualified vector casts and operators.
+Keep the current binary until a forward repair is available. An older binary
+also lacks the current 0081 contract/privacy capabilities and cannot be treated
+as compatible merely by changing its vector path. Current exact identity profiles
+reject role-level `search_path` settings and other ambient parameter drift;
+`ALTER ROLE ... SET search_path` is not a supported rollback shortcut. Any
+independently qualified historical restore needs its matching schema, binaries
+and profiles in isolation, not overlapping old and current live processes.
+
+Run exactly one migrator during a rolling deployment. New migrators use
+nonblocking advisory-lock polling so concurrent indexes can finish; older
+migrators use a blocking advisory lock and can still form the historical
+virtual-transaction/`CREATE INDEX CONCURRENTLY` cycle. Stop old migrators, run
+the complete chain once, and only then roll application replicas.
 
 Before migration, confirm the named app, operator, and sync roles have no rows
 in `pg_db_role_setting` and no explicit or inherited entries in
@@ -629,11 +1125,15 @@ retryable.
 
 Rollback is forward-only and requires the verified pre-migration backup for any
 data that bounded legacy cleanup has removed. Application rollback is supported
-only to a 0053-aware binary and its matching grant profile. Stop all processes
-and confirm there are zero incomplete runs with `list-incomplete-offboarding`;
-then deploy the selected `0053`-aware binary, reapply all three grant profiles,
-run identity verification, and restart. Pre-`0053` binaries are incompatible with the new
-approval and sync boundary and are not a supported application-first rollback.
+only to a binary independently verified against every applied migration and
+current capability/profile contract, including completed 0081 repair. A
+0053-aware or 0063-aware binary alone is insufficient. Stop all processes;
+inventory incomplete lifecycle runs and paged coordination privacy repairs;
+then use a compatible binary, reapply all three grant profiles, verify identities
+and provider profiles, and restart. Keep offboarding disabled if the replacement
+cannot drive the current privacy/version guards. An empty
+`list-incomplete-offboarding` result alone does not prove historical privacy
+repair is finished.
 Database rollback requires a separate forward migration; do not drop guards or
 regrant the shared role ad hoc. Completed offboarding erasure is irreversible
 and is never undone by binary or schema rollback.
@@ -730,6 +1230,21 @@ transactional lock for the complete role catalog, so rebind snapshots
 alter, rename, or drop makes the whole transaction fail without partial
 changes. Quiesce role administration, then retry the complete rebind command;
 do not retry individual statements from the aborted transaction.
+
+A stale retired-registry row is installation-wide and can make every later
+verification or rebind fail closed. Do not delete it ad hoc. First inspect its
+recorded name and OID against `pg_roles`. If the recorded role is genuinely
+absent in a preserved OID namespace, the complete preserved-provenance rebind
+above archives it as `superseded` in
+`continuum_unresolved_retired_sync_database_identities`. If the OID still names
+a live or renamed role, restore the recorded name or complete checked retirement
+for that exact role and OID before retrying. If a restore-pending name was
+deliberately reused, use the explicit supersede operation documented above.
+Always rerun all three grant profiles and `verify-database-identities.sql` after
+recovery. Test fixtures that create cluster-wide PostgreSQL roles must put role
+creation and retired-registry insertion inside `try` and remove both live and
+unresolved history in `finally`; truncating tenant data does not reset these
+security registries.
 
 Then reapply the application, operator, and sync profiles and run verification
 before restart. The rebind operation is owner-only, locks both registries,
