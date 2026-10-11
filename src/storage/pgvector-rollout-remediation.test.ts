@@ -647,6 +647,7 @@ describe('pgvector rollout remediation', () => {
       await expect(runMigrations(pool, full)).resolves.toEqual([
         expect.objectContaining({ name: '0080_pgvector_provider_grants.sql' }),
         expect.objectContaining({ name: '0081_coordination_public_contract.sql' }),
+        expect.objectContaining({ name: '0082_coordination_linkable_audit_v7_index.sql' }),
       ]);
       await grantApplicationRole(pool, applicationSchema, appRole);
       await expect(pool.query(
@@ -682,6 +683,7 @@ describe('pgvector rollout remediation', () => {
       await expect(runMigrations(pool, await fullMigrationDirectory())).resolves.toEqual([
         expect.objectContaining({ name: '0080_pgvector_provider_grants.sql' }),
         expect.objectContaining({ name: '0081_coordination_public_contract.sql' }),
+        expect.objectContaining({ name: '0082_coordination_linkable_audit_v7_index.sql' }),
       ]);
       await grantApplicationRole(pool, applicationSchema, appRole);
       await expect(pool.query(
@@ -853,6 +855,7 @@ describe('pgvector rollout remediation', () => {
       await expect(runMigrations(pool, await fullMigrationDirectory())).resolves.toEqual([
         expect.objectContaining({ name: '0080_pgvector_provider_grants.sql' }),
         expect.objectContaining({ name: '0081_coordination_public_contract.sql' }),
+        expect.objectContaining({ name: '0082_coordination_linkable_audit_v7_index.sql' }),
       ]);
       await grantApplicationRole(pool, applicationSchema, appRole);
       await expect(pool.query(
@@ -904,6 +907,7 @@ describe('pgvector rollout remediation', () => {
       await expect(runMigrations(owner, await fullMigrationDirectory())).resolves.toEqual([
         expect.objectContaining({ name: '0080_pgvector_provider_grants.sql' }),
         expect.objectContaining({ name: '0081_coordination_public_contract.sql' }),
+        expect.objectContaining({ name: '0082_coordination_linkable_audit_v7_index.sql' }),
       ]);
       await grantApplicationRole(owner, applicationSchema, appRole);
       await expect(owner.query(
@@ -1188,6 +1192,7 @@ describe('pgvector rollout remediation', () => {
       await expect(runMigrations(owner, await fullMigrationDirectory())).resolves.toEqual([
         expect.objectContaining({ name: '0080_pgvector_provider_grants.sql' }),
         expect.objectContaining({ name: '0081_coordination_public_contract.sql' }),
+        expect.objectContaining({ name: '0082_coordination_linkable_audit_v7_index.sql' }),
       ]);
       await grantApplicationRole(owner, applicationSchema, appRole);
       await expect(owner.query(
