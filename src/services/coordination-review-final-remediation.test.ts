@@ -65,6 +65,11 @@ describe('coordination final review remediation', () => {
           WHERE metadata->>'operation' = 'principal_offboarding_access_revoked'
             AND metadata->>'principal_id' = $1`, [value.target.id],
       )).rows[0].count).toBe(1);
+      const accessEvidence = (await pool.query(
+        `SELECT id::text, metadata FROM audit_log
+          WHERE metadata->>'operation' = 'principal_offboarding_access_revoked'
+            AND metadata->>'principal_id' = $1`, [value.target.id],
+      )).rows[0];
       await pool.query("UPDATE coordination_contract_backfill_state SET phase = 'complete' WHERE singleton");
       let result = pending;
       for (let attempt = 0; attempt < 12 && !result.complete; attempt += 1) {
@@ -73,6 +78,8 @@ describe('coordination final review remediation', () => {
         });
       }
       expect(result.complete).toBe(true);
+      expect((await pool.query('SELECT metadata FROM audit_log WHERE id = $1', [accessEvidence.id]))
+        .rows[0]?.metadata).toEqual(accessEvidence.metadata);
       expect((await pool.query(
         'SELECT count(*)::int AS count FROM coordination_resources WHERE scope_id = $1', [value.owned.id],
       )).rows[0].count).toBe(0);
