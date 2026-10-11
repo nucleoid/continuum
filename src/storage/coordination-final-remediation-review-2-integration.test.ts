@@ -177,11 +177,16 @@ describe('issue 7 final remediation review 2 PostgreSQL proofs', () => {
       await caller.query('BEGIN');
       await caller.query("SET LOCAL lock_timeout = '100ms'");
       await caller.query("SET LOCAL continuum.client_coordination_privacy_version = '4'");
-      await expect(caller.query(
+      const busy = await caller.query(
         `SELECT continuum_operator_scrub_coordination_principal($1::uuid, $2::uuid, $3::uuid, 1) AS result`,
         [value.operator.id, value.target.id, value.owned.id],
-      )).rejects.toMatchObject({ code: '55P03' });
-      await caller.query('ROLLBACK');
+      );
+      expect(busy.rows[0].result).toMatchObject({
+        complete: false, progressed: false, reason: 'lock_busy', privacy_version: 3,
+      });
+      // The wrapper rolls its nested work back and returns a typed busy result;
+      // committing the caller must preserve the previously committed evidence.
+      await caller.query('COMMIT');
       expect((await pool.query(
         `SELECT privacy_version, completed_at, audit_cursor_id
            FROM coordination_principal_privacy_progress WHERE principal_id=$1`, [value.target.id],
