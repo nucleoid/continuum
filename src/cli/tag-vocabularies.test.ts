@@ -48,4 +48,33 @@ describe('continuum-tags CLI', () => {
       token: 'private-token',
     })).rejects.toThrow('Continuum API returned HTTP 502');
   });
+
+  it('rejects oversized successful responses without printing partial output', async () => {
+    const output = vi.fn();
+    await expect(runTagVocabularyCli(['list', 'project'], {
+      fetch: vi.fn(async () => response(200, 'x'.repeat(1_048_577))) as typeof fetch,
+      token: 'private-token', stdout: output,
+    })).rejects.toThrow('Continuum API response exceeds 1 MiB');
+    expect(output).not.toHaveBeenCalled();
+  });
+
+  it('bounds a stalled response with a deadline and hides network details', async () => {
+    vi.useFakeTimers();
+    try {
+      const operation = runTagVocabularyCli(['list', 'project'], {
+        fetch: vi.fn(async (_url, init) => {
+          if (!init?.signal) throw new Error('private unbounded request detail');
+          return new Promise<Response>((_resolve, reject) => {
+            init.signal!.addEventListener('abort', () => reject(new Error('private abort detail')), { once: true });
+          });
+        }) as typeof fetch,
+        token: 'private-token',
+      });
+      const assertion = expect(operation).rejects.toThrow('Continuum API request timed out');
+      await vi.advanceTimersByTimeAsync(30_000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

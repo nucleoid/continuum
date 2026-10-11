@@ -34,7 +34,7 @@ describe('/api/v0/tag-vocabularies', () => {
   }
 
   it('lets any authenticated principal list deterministic built-in entries', async () => {
-    await actor();
+    const { principal } = await actor();
     const response = await request(app)
       .get('/api/v0/tag-vocabularies?scopeKind=project')
       .set('Authorization', 'Bearer entra:tags:none');
@@ -46,6 +46,15 @@ describe('/api/v0/tag-vocabularies', () => {
       'session', 'terminal',
     ]);
     expect(response.body.entries.every((entry: { isSystem: boolean }) => entry.isSystem)).toBe(true);
+    const reads = await pool.query(
+      `SELECT principal_id, action, metadata FROM audit_log
+        WHERE metadata->>'operation' = 'list_tag_vocabulary'`,
+    );
+    expect(reads.rows).toEqual([{
+      principal_id: principal.id,
+      action: 'read',
+      metadata: { operation: 'list_tag_vocabulary', scopeKind: 'project', count: 10 },
+    }]);
   });
 
   it('requires org admin and audits create, update, and delete atomically', async () => {
