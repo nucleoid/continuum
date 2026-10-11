@@ -53,7 +53,7 @@ export async function reconcilePgvectorProviderGrants(
     const readiness = await client.query<{
       owner: boolean; helper: boolean; trusted: boolean; schema: string;
     }>(`
-    SELECT relation.relowner = current_user::regrole::oid AS owner,
+    SELECT relation.relowner = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname=current_user) AS owner,
            namespace.nspname AS schema,
            verifier.oid IS NOT NULL AS helper,
            COALESCE(verifier.proowner=relation.relowner AND verifier.prosecdef
