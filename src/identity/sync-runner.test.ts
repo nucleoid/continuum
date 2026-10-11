@@ -66,7 +66,10 @@ describe('membership sync CLI runner', () => {
     Object.assign(new Error('operation requires a role-name/OID-bound trusted sync identity'), { code: 'XX000' }),
     Object.assign(new Error('permission denied'), { code: '42501' }),
   ])('maps a supported database identity authorization failure to FORBIDDEN', async (failure) => {
-    const query = vi.fn(async (sql: string) => {
+    const query = vi.fn(async (sql: string, parameters?: unknown[]) => {
+      if (sql.includes('current_schemas(FALSE)')) {
+        return { rowCount: 1, rows: [{ anchored: parameters?.[0] === 'public' }] };
+      }
       if (sql.includes('namespace.nspname AS schema')) {
         return { rowCount: 1, rows: [{
           owner: false, schema: 'public', helper: true, trusted: true,
@@ -86,6 +89,7 @@ describe('membership sync CLI runner', () => {
       CONTINUUM_GRAPH_ACCESS_TOKEN: 'x'.repeat(32),
       CONTINUUM_MEMBERSHIP_SYNC_ACTOR: 'sync-service',
     })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('current_schemas(FALSE)'), ['public']);
     expect(release).toHaveBeenCalledOnce();
     expect(query.mock.calls.some(([sql]) => sql.includes('continuum_verify_sync_database_identity'))).toBe(true);
   });
@@ -95,7 +99,10 @@ describe('membership sync CLI runner', () => {
     Object.assign(new Error('canceling statement due to timeout'), { code: '57014' }),
     Object.assign(new Error('connection terminated unexpectedly'), { code: '08006' }),
   ])('does not reclassify an unrelated database identity failure', async (failure) => {
-    const query = vi.fn(async (sql: string) => {
+    const query = vi.fn(async (sql: string, parameters?: unknown[]) => {
+      if (sql.includes('current_schemas(FALSE)')) {
+        return { rowCount: 1, rows: [{ anchored: parameters?.[0] === 'public' }] };
+      }
       if (sql.includes('namespace.nspname AS schema')) {
         return { rowCount: 1, rows: [{
           owner: false, schema: 'public', helper: true, trusted: true,
@@ -115,6 +122,7 @@ describe('membership sync CLI runner', () => {
       CONTINUUM_GRAPH_ACCESS_TOKEN: 'x'.repeat(32),
       CONTINUUM_MEMBERSHIP_SYNC_ACTOR: 'sync-service',
     })).rejects.toBe(failure);
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('current_schemas(FALSE)'), ['public']);
     expect(release).toHaveBeenCalledOnce();
     expect(query.mock.calls.some(([sql]) => sql.includes('continuum_verify_sync_database_identity'))).toBe(true);
   });
