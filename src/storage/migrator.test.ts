@@ -1886,6 +1886,7 @@ describe('runMigrations', () => {
     const sequenceNumbers = migrations.map((file) => file.slice(0, 4));
     expect(new Set(sequenceNumbers).size).toBe(sequenceNumbers.length);
     expect(migrations).toContain('0010_entra_auth.sql');
+    expect(migrations).toContain('0083_tag_vocabularies.sql');
 
     const constraints = await readFile(
       join(process.cwd(), 'migrations/0007_decision_supersession_constraints.sql'),

@@ -42,7 +42,11 @@ describe('ado-workitem plugin', () => {
     const ev = workItem({ 'System.Tags': 'release; Decision; reviewed' });
     const out = adoWorkItemPlugin.transform(ev);
     expect(out[0].type).toBe('decision');
-    expect(out[0].tags).toEqual(expect.arrayContaining(['ado', 'closed', 'release', 'decision', 'reviewed']));
+    expect(out[0].tags).toEqual(['ado', 'decision']);
+    expect(out[0].metadata).toMatchObject({
+      state: 'Closed',
+      adoTags: ['release', 'Decision', 'reviewed'],
+    });
   });
 
   it('includes the latest comment when comments are supplied', () => {

@@ -41,7 +41,7 @@ REST records use camelCase:
   "title": "Checkout retry policy",
   "body": "Complete stored body",
   "metadata": {},
-  "tags": ["checkout"],
+  "tags": ["decision"],
   "state": "live",
   "expiresAt": null,
   "supersedesId": null,

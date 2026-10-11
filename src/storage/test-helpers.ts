@@ -101,6 +101,7 @@ export async function resetData(pool: pg.Pool): Promise<void> {
         principal_offboarding_events,
         principal_user_scope_approvals,
         principal_user_scopes,
+        tag_vocabularies,
         memory_embeddings,
         memories,
         scope_memberships,
@@ -159,4 +160,13 @@ export async function resetData(pool: pg.Pool): Promise<void> {
      VALUES ('00000000-0000-4000-8000-000000000012', 10000, 10000)`,
   );
   await pool.query('INSERT INTO entra_sync_state (singleton) VALUES (TRUE)');
+  await pool.query(`
+    INSERT INTO tag_vocabularies (scope_kind, tag, description, is_system)
+    SELECT scope_kind, tag, 'Built-in Continuum tag', true
+      FROM unnest(ARRAY['org', 'team', 'project', 'user', 'role']) AS scope_kind
+     CROSS JOIN unnest(ARRAY[
+       'pr', 'merged', 'branch', 'github', 'ado', 'deploy', 'session', 'terminal', 'decision',
+       'knowledge-gap'
+     ]) AS tag
+  `);
 }

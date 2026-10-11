@@ -318,6 +318,16 @@ REVOKE ALL ON TABLE
   :"continuum_schema".continuum_offboarding_restart_requests
 FROM :"continuum_app_role";
 
+DO $tag_profile$
+DECLARE schema_name TEXT:=current_setting('continuum.application_grant_schema');
+        target_role NAME:=current_setting('continuum.application_grant_target')::name;
+BEGIN
+  IF to_regclass(format('%I.tag_vocabularies',schema_name)) IS NOT NULL THEN
+    EXECUTE format('GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE %I.tag_vocabularies TO %I',schema_name,target_role);
+  END IF;
+END;
+$tag_profile$;
+
 DO $provider_runtime_gate$
 DECLARE schema_name TEXT := current_setting('continuum.application_grant_schema');
         target_role NAME := current_setting('continuum.application_grant_target')::name;
