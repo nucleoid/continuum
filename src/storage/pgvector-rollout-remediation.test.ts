@@ -655,6 +655,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0086_embedding_backfill_failure_disposition.sql' }),
         expect.objectContaining({ name: '0087_embedding_provider_scan_index.sql' }),
         expect.objectContaining({ name: '0088_embedding_provider_scan_index_rebuild.sql' }),
+        expect.objectContaining({ name: '0089_promotion_outbox.sql' }),
       ]);
       await grantApplicationRole(pool, applicationSchema, appRole);
       await expect(pool.query(
@@ -697,6 +698,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0086_embedding_backfill_failure_disposition.sql' }),
         expect.objectContaining({ name: '0087_embedding_provider_scan_index.sql' }),
         expect.objectContaining({ name: '0088_embedding_provider_scan_index_rebuild.sql' }),
+        expect.objectContaining({ name: '0089_promotion_outbox.sql' }),
       ]);
       await grantApplicationRole(pool, applicationSchema, appRole);
       await expect(pool.query(
@@ -875,6 +877,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0086_embedding_backfill_failure_disposition.sql' }),
         expect.objectContaining({ name: '0087_embedding_provider_scan_index.sql' }),
         expect.objectContaining({ name: '0088_embedding_provider_scan_index_rebuild.sql' }),
+        expect.objectContaining({ name: '0089_promotion_outbox.sql' }),
       ]);
       await grantApplicationRole(pool, applicationSchema, appRole);
       await expect(pool.query(
@@ -933,6 +936,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0086_embedding_backfill_failure_disposition.sql' }),
         expect.objectContaining({ name: '0087_embedding_provider_scan_index.sql' }),
         expect.objectContaining({ name: '0088_embedding_provider_scan_index_rebuild.sql' }),
+        expect.objectContaining({ name: '0089_promotion_outbox.sql' }),
       ]);
       await grantApplicationRole(owner, applicationSchema, appRole);
       await expect(owner.query(
@@ -1224,6 +1228,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0086_embedding_backfill_failure_disposition.sql' }),
         expect.objectContaining({ name: '0087_embedding_provider_scan_index.sql' }),
         expect.objectContaining({ name: '0088_embedding_provider_scan_index_rebuild.sql' }),
+        expect.objectContaining({ name: '0089_promotion_outbox.sql' }),
       ]);
       await grantApplicationRole(owner, applicationSchema, appRole);
       await expect(owner.query(
