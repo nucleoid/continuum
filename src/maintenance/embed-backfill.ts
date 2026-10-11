@@ -270,6 +270,7 @@ async function runProvider(
   const lockName = `continuum:embed-backfill:${provider.id}:${provider.dim}`;
   let locked = false;
   let destroyClient = false;
+  let originalTimeouts: { statement: string; lock: string } | undefined;
   let cursor: string | null = options.cursor ?? null;
   let wrapCursor = cursor !== null && !options.noWrap;
   let wrapBoundary = cursor;
@@ -292,6 +293,21 @@ async function runProvider(
   };
 
   try {
+    const settings = (await client.query<{ statement: string; lock: string; statement_ms: string; lock_ms: string }>(
+      `SELECT pg_catalog.current_setting('statement_timeout') AS statement,
+              pg_catalog.current_setting('lock_timeout') AS lock,
+              (SELECT setting FROM pg_catalog.pg_settings WHERE name='statement_timeout') AS statement_ms,
+              (SELECT setting FROM pg_catalog.pg_settings WHERE name='lock_timeout') AS lock_ms`,
+    )).rows[0];
+    if (!settings) throw new Error('Backfill SQL deadline configuration is unavailable');
+    originalTimeouts = settings;
+    await client.query(
+      `SELECT pg_catalog.set_config('statement_timeout',
+         CASE WHEN $1::bigint BETWEEN 1 AND 5000 THEN $1 ELSE '5000' END || 'ms',FALSE),
+       pg_catalog.set_config('lock_timeout',
+         CASE WHEN $2::bigint BETWEEN 1 AND 1000 THEN $2 ELSE '1000' END || 'ms',FALSE)`,
+      [settings.statement_ms, settings.lock_ms],
+    );
     if (!options.dryRun && !options.countOnly) {
       const lock = await client.query<{ locked: boolean }>(
         'SELECT pg_catalog.pg_try_advisory_lock(pg_catalog.hashtextextended($1::text, 0::bigint)) AS locked',
@@ -350,9 +366,9 @@ async function runProvider(
 
     if (options.markFailed) {
       const marked = await client.query<{
-        id: string; title: string; body: string; kind: ScopeKind; name: string;
+        id: string; kind: ScopeKind; name: string;
       }>(
-        `SELECT m.id, m.title, m.body, s.kind, s.name
+        `SELECT m.id, s.kind, s.name
            FROM memories m
            JOIN scopes s ON s.id = m.scope_id
           WHERE m.id = $1
@@ -372,14 +388,10 @@ async function runProvider(
       );
       const row = marked.rows[0];
       if (!row) throw new Error('markFailed memory is not eligible for this provider');
-      const item: Candidate = {
-        id: row.id, title: row.title, body: row.body,
-        scope: { kind: row.kind, name: row.name },
-      };
-      if (!sameProvider(router.resolve(item.scope).provider, provider)) {
+      if (!sameProvider(router.resolve({ kind: row.kind, name: row.name }).provider, provider)) {
         throw new Error('markFailed memory is not routed to this provider');
       }
-      await recordFailure(client, provider, item);
+      await recordFailure(client, provider, { id: row.id });
       failed = 1;
       return {
         scanned: 1, eligible: 1, embedded, failed, failuresCleared,
@@ -397,18 +409,15 @@ async function runProvider(
     const hydrate = async (refs: CandidateRef[]): Promise<{
       items: Candidate[];
       oversizedIds: Set<string>;
+      deferredIds: Set<string>;
     }> => {
-      if (refs.length === 0) return { items: [], oversizedIds: new Set() };
+      if (refs.length === 0) return { items: [], oversizedIds: new Set(), deferredIds: new Set() };
       const hydrated = await client.query<{
         id: string; title: string | null; body: string | null;
         text_bytes: string; kind: ScopeKind; name: string;
       }>(
-        `SELECT m.id,
-                CASE WHEN octet_length(m.title) + octet_length(m.body) <= $4
-                  THEN m.title END AS title,
-                CASE WHEN octet_length(m.title) + octet_length(m.body) <= $4
-                  THEN m.body END AS body,
-                octet_length(m.title) + octet_length(m.body) AS text_bytes,
+        `WITH sizes AS MATERIALIZED (
+           SELECT m.id,octet_length(m.title)+octet_length(m.body) AS text_bytes,
                 s.kind, s.name
            FROM memories m
            JOIN scopes s ON s.id = m.scope_id
@@ -423,12 +432,23 @@ async function runProvider(
               SELECT 1 FROM embedding_backfill_failures f
                WHERE f.memory_id = m.id AND f.provider = $2 AND f.dim = $3
                  AND f.disposition = 'durable'
-            )`,
+            )
+         ), admitted AS MATERIALIZED (
+           SELECT sizes.*,sum(CASE WHEN text_bytes<=$4 THEN text_bytes ELSE 0 END)
+             OVER(ORDER BY id) AS running_bytes FROM sizes
+         )
+         SELECT admitted.id,admitted.text_bytes,admitted.kind,admitted.name,
+           CASE WHEN admitted.text_bytes<=$4 AND running_bytes<=$4 THEN m.title END AS title,
+           CASE WHEN admitted.text_bytes<=$4 AND running_bytes<=$4 THEN m.body END AS body
+           FROM admitted JOIN memories m ON m.id=admitted.id ORDER BY admitted.id`,
         [refs.map((ref) => ref.id), provider.id, provider.dim, MAX_HYDRATED_TEXT_BYTES],
       );
       const byId = new Map(hydrated.rows.map((row) => [row.id, row]));
       const oversizedIds = new Set(hydrated.rows
         .filter((row) => Number(row.text_bytes) > MAX_HYDRATED_TEXT_BYTES)
+        .map((row) => row.id));
+      const deferredIds = new Set(hydrated.rows
+        .filter((row) => !oversizedIds.has(row.id) && (row.title === null || row.body === null))
         .map((row) => row.id));
       const items = refs.flatMap((ref) => {
         const row = byId.get(ref.id);
@@ -441,7 +461,7 @@ async function runProvider(
           ? [candidate]
           : [];
       });
-      return { items, oversizedIds };
+      return { items, oversizedIds, deferredIds };
     };
 
     const mark = async (
@@ -631,29 +651,37 @@ async function runProvider(
       const batchUnsafeIds = new Set<string>();
       activeBatchUnsafeIds = batchUnsafeIds;
       try {
-        const { items, oversizedIds } = await hydrate(refs);
-        const byId = new Map(items.map((item) => [item.id, item]));
-        let pending: Candidate[] = [];
-        let canContinue = true;
-        const flush = async (): Promise<void> => {
-          if (pending.length === 0 || !canContinue) return;
-          canContinue = await processItems(pending);
-          pending = [];
-        };
-        for (const ref of refs) {
-          if (oversizedIds.has(ref.id)) {
-            await flush();
-            if (!canContinue) break;
-            canContinue = await mark(ref, 'EMBEDDING_INPUT_TOO_LARGE');
-            if (!canContinue) break;
-            continue;
+        let remaining = refs;
+        while (remaining.length > 0) {
+          const { items, oversizedIds, deferredIds } = await hydrate(remaining);
+          const byId = new Map(items.map((item) => [item.id, item]));
+          let pending: Candidate[] = [];
+          let canContinue = true;
+          const flush = async (): Promise<void> => {
+            if (pending.length === 0 || !canContinue) return;
+            canContinue = await processItems(pending);
+            pending = [];
+          };
+          const firstDeferred = remaining.findIndex((ref) => deferredIds.has(ref.id));
+          const admittedPrefix = firstDeferred < 0 ? remaining : remaining.slice(0, firstDeferred);
+          for (const ref of admittedPrefix) {
+            if (oversizedIds.has(ref.id)) {
+              await flush();
+              if (!canContinue) break;
+              canContinue = await mark(ref, 'EMBEDDING_INPUT_TOO_LARGE');
+              if (!canContinue) break;
+              continue;
+            }
+            const item = byId.get(ref.id);
+            if (item) pending.push(item);
           }
-          const item = byId.get(ref.id);
-          if (item) pending.push(item);
+          await flush();
+          if (!canContinue) return false;
+          if (firstDeferred === 0) throw new Error('Hydration admission made no bounded progress');
+          cursor = admittedPrefix.at(-1)!.id;
+          remaining = firstDeferred < 0 ? [] : remaining.slice(firstDeferred);
         }
-        await flush();
-        if (canContinue) cursor = refs.at(-1)!.id;
-        return canContinue;
+        return true;
       } finally {
         if (batchUnsafeIds.size > 0 && checkpointCap === undefined) {
           const first = refs.findIndex((ref) => batchUnsafeIds.has(ref.id));
@@ -799,16 +827,22 @@ async function runProvider(
     }
     throw error;
   } finally {
-    if (locked) {
+    if (locked && !destroyClient) {
       try {
         const unlock = await client.query<{ unlocked: boolean }>(
           'SELECT pg_catalog.pg_advisory_unlock(pg_catalog.hashtextextended($1::text, 0::bigint)) AS unlocked',
           [lockName],
         );
-        destroyClient = unlock.rows[0]?.unlocked !== true;
+        destroyClient ||= unlock.rows[0]?.unlocked !== true;
       } catch {
         destroyClient = true;
       }
+    }
+    if (originalTimeouts && !destroyClient) {
+      try {
+        await client.query("SELECT pg_catalog.set_config('statement_timeout',$1,FALSE), pg_catalog.set_config('lock_timeout',$2,FALSE)",
+          [originalTimeouts.statement, originalTimeouts.lock]);
+      } catch { destroyClient = true; }
     }
     client.release(destroyClient);
   }
