@@ -7,6 +7,7 @@ import { createPrincipal } from './principals.js';
 import { createScope, getScopeByRef } from './scopes.js';
 import { addMembership } from './memberships.js';
 import { mapOwnedUserScope } from '../services/offboarding.js';
+import { acquireLease } from '../services/coordination.js';
 
 const databaseUrl = process.env.CONTINUUM_TEST_DATABASE_URL
   ?? 'postgres://continuum:continuum@localhost:5433/continuum';
@@ -115,6 +116,47 @@ describe('coordination contract scale and recovery', () => {
       .toEqual([{ phase: 'receipts' }]);
     const page = (await pool.query('SELECT * FROM continuum_operator_list_coordination_privacy_repair_page($1,NULL,100)', [operator.id])).rows[0];
     expect(page.repairs).toContainEqual({ principal_id: target.id, scope_id: owned.id, repair_state: 'disabled_only' });
+  });
+
+  it('keeps a 0055-shaped renamed resource generation above its old fencing token on reactivation', async () => {
+    const writer = await createPrincipal(pool, { externalId: 'historical-writer', kind: 'user', displayName: 'Writer' });
+    const scope = await createScope(pool, { kind: 'user', name: 'historical-reactivation' });
+    await addMembership(pool, writer.id, scope.id, 'writer');
+    // 0055 renamed resource keys without recording a scope floor or privacy
+    // progress. A historical snapshot can still contain precisely this shape.
+    await pool.query(`INSERT INTO coordination_resources(scope_id,resource,fencing_token)
+      VALUES($1,$2,901)`, [scope.id, `offboarded:${randomUUID()}`]);
+    expect((await pool.query('SELECT count(*)::int AS count FROM coordination_scope_fencing_floors WHERE scope_id=$1', [scope.id])).rows)
+      .toEqual([{ count: 0 }]);
+    expect((await pool.query('SELECT count(*)::int AS count FROM coordination_scope_privacy_progress WHERE scope_id=$1', [scope.id])).rows)
+      .toEqual([{ count: 0 }]);
+    const acquired = await acquireLease(pool, writer, { scope: 'user:historical-reactivation',
+      resource: 'original-key', runId: randomUUID(), requestId: randomUUID(), ttlSeconds: 300 });
+    expect(acquired.acquired).toBe(true);
+    if (!acquired.acquired) throw new Error('historical scope acquisition unexpectedly contended');
+    expect(BigInt(acquired.fencingToken)).toBeGreaterThan(901n);
+  });
+
+  it('accepts privacy negotiation from a direct quoted login without parsing its name as regrole', async () => {
+    const role = `Quoted-Operator@${randomUUID().slice(0, 8)}`;
+    const password = randomUUID();
+    const namespace = (await pool.query('SELECT current_schema() AS name')).rows[0].name as string;
+    let login: pg.Pool | undefined;
+    try {
+      await pool.query(`CREATE ROLE ${quoted(role)} LOGIN PASSWORD '${password}'`);
+      await pool.query(`GRANT USAGE ON SCHEMA ${quoted(namespace)} TO ${quoted(role)};
+        GRANT EXECUTE ON FUNCTION ${quoted(namespace)}.continuum_require_coordination_privacy_client_v4() TO ${quoted(role)}`);
+      const url = new URL(databaseUrl); url.username = role; url.password = password;
+      login = new pg.Pool({ connectionString: url.toString(), max: 1 });
+      await login.query("SELECT set_config('continuum.client_coordination_privacy_version','4',false)");
+      expect((await login.query('SELECT session_user AS name,current_setting(\'role\') AS selected')).rows)
+        .toEqual([{ name: role, selected: 'none' }]);
+      await expect(login.query(`SELECT ${quoted(namespace)}.continuum_require_coordination_privacy_client_v4()`))
+        .resolves.toMatchObject({ rowCount: 1 });
+    } finally {
+      await login?.end();
+      await pool.query(`DROP OWNED BY ${quoted(role)}; DROP ROLE ${quoted(role)}`);
+    }
   });
 
   it('backfills receipts as the non-superuser function owner with database TEMP revoked', async () => {
