@@ -556,7 +556,7 @@ export async function syncEntraMemberships(
       if (externalIds.length > 0) {
         await client.query(
           `INSERT INTO principals (id, external_id, kind, display_name)
-           SELECT gen_random_uuid(), external_id, 'user', external_id
+           SELECT pg_catalog.gen_random_uuid(), external_id, 'user', external_id
              FROM pg_catalog.unnest($1::text[]) external_id
            ON CONFLICT (external_id) DO NOTHING`,
           [externalIds],
