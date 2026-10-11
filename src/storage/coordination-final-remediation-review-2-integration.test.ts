@@ -149,7 +149,7 @@ describe('issue 7 final remediation review 2 PostgreSQL proofs', () => {
     }
   }, 30_000);
 
-  it('preserves completed v3 audit progress when the dirty marker is locked', async () => {
+  it('rolls back a busy dirty-marker refresh and preserves committed v3 progress until retry', async () => {
     const value = await fixture('dirty-marker-contention');
     const auditId = await makeIncomplete(value);
     await pool.query(
@@ -162,6 +162,10 @@ describe('issue 7 final remediation review 2 PostgreSQL proofs', () => {
        VALUES ($1) ON CONFLICT (principal_id) DO NOTHING`, [value.target.id],
     );
 
+    const committedProgress = (await pool.query(
+      `SELECT privacy_version, completed_at, audit_cursor_id
+         FROM coordination_principal_privacy_progress WHERE principal_id=$1`, [value.target.id],
+    )).rows;
     const blocker = await pool.connect();
     const caller = await pool.connect();
     try {
@@ -173,16 +177,37 @@ describe('issue 7 final remediation review 2 PostgreSQL proofs', () => {
       await caller.query('BEGIN');
       await caller.query("SET LOCAL lock_timeout = '100ms'");
       await caller.query("SET LOCAL continuum.client_coordination_privacy_version = '4'");
-      const result = await caller.query(
-        `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, 1) AS result`,
+      await expect(caller.query(
+        `SELECT continuum_operator_scrub_coordination_principal($1::uuid, $2::uuid, $3::uuid, 1) AS result`,
+        [value.operator.id, value.target.id, value.owned.id],
+      )).rejects.toMatchObject({ code: '55P03' });
+      await caller.query('ROLLBACK');
+      expect((await pool.query(
+        `SELECT privacy_version, completed_at, audit_cursor_id
+           FROM coordination_principal_privacy_progress WHERE principal_id=$1`, [value.target.id],
+      )).rows).toEqual(committedProgress);
+      expect((await pool.query(
+        `SELECT metadata ? 'request_id' AS raw_request FROM audit_log WHERE id=$1`, [auditId],
+      )).rows).toEqual([{ raw_request: true }]);
+      expect((await pool.query(
+        `SELECT principal_id::text FROM coordination_privacy_dirty_principals WHERE principal_id=$1`, [value.target.id],
+      )).rows).toEqual([{ principal_id: value.target.id }]);
+      await blocker.query('COMMIT');
+      await caller.query('BEGIN');
+      await caller.query("SET LOCAL continuum.client_coordination_privacy_version = '4'");
+      const retry = await caller.query(
+        `SELECT continuum_operator_scrub_coordination_principal($1::uuid, $2::uuid, $3::uuid, 1) AS result`,
         [value.operator.id, value.target.id, value.owned.id],
       );
-      expect(result.rows[0].result).toMatchObject({ progressed: true, reason: null });
+      expect(retry.rows[0].result).toMatchObject({ progressed: true, reason: null });
       await caller.query('COMMIT');
       expect((await pool.query(
-        `SELECT metadata ? 'request_id' AS raw_request FROM audit_log WHERE id = $1`,
-        [auditId],
+        `SELECT metadata ? 'request_id' AS raw_request FROM audit_log WHERE id=$1`, [auditId],
       )).rows).toEqual([{ raw_request: false }]);
+      expect((await pool.query(
+        `SELECT privacy_version, completed_at IS NOT NULL AS complete
+           FROM coordination_principal_privacy_progress WHERE principal_id=$1`, [value.target.id],
+      )).rows).toEqual([{ privacy_version: 3, complete: true }]);
     } finally {
       await caller.query('ROLLBACK').catch(() => undefined);
       await blocker.query('ROLLBACK').catch(() => undefined);
