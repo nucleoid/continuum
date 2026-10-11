@@ -1,11 +1,10 @@
 import type pg from 'pg';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import { makeTestPool, resetData } from '../storage/test-helpers.js';
+import { makeTestPool, resetData, promoteWithConfiguredWebhooksForTest } from '../storage/test-helpers.js';
 import { createPrincipal } from '../storage/principals.js';
 import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import { createMemory } from '../storage/memories.js';
-import { promoteMemoryWithAudit } from '../storage/promote.js';
 import { claimPromotionDeliveries, releasePromotionDeliveries, completePromotionDelivery, manualRetryPromotionDelivery } from '../storage/promotion-events.js';
 import { mapOwnedUserScope, offboardPrincipal } from './offboarding.js';
 import { PromotionEventWorker } from '../workers/promotion-events.js';
@@ -31,7 +30,7 @@ describe('promotion outbox privacy review', () => {
       const source = await createMemory(pool, { scopeId: sourceScope.id, scopeKind: 'team',
         type: 'fact', title: 'Promote into owned scope', body: 'Shared source remains.',
         authorId: target.id, source: 'manual' });
-      const promoted = await promoteMemoryWithAudit(pool, target.id, source.id,
+      const promoted = await promoteWithConfiguredWebhooksForTest(pool, target.id, source.id,
         { kind: 'user', name: personal.name }, {}, ['privacy-review']);
       const initial = await pool.query('SELECT destination_scope_name FROM promotion_events WHERE id=$1::uuid', [promoted.promotionEvent.eventId]);
       expect(initial.rows[0].destination_scope_name).toBe(personal.name);
@@ -80,7 +79,7 @@ describe('promotion outbox privacy review', () => {
     await mapOwnedUserScope(pool, admin, target.id, personal.id);
     const source = await createMemory(pool, { scopeId: shared.id, scopeKind: 'team', type: 'fact',
       title: 'Audit rollback', body: 'Normal promoted memory.', authorId: target.id, source: 'manual' });
-    const promoted = await promoteMemoryWithAudit(pool, target.id, source.id, { kind: 'user', name: personal.name }, {}, ['privacy-audit']);
+    const promoted = await promoteWithConfiguredWebhooksForTest(pool, target.id, source.id, { kind: 'user', name: personal.name }, {}, ['privacy-audit']);
     await pool.query(`CREATE FUNCTION reject_promotion_privacy_audit() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN IF NEW.action='archive' AND NEW.metadata->>'operation'='principal_promotion_privacy_repaired' THEN
         RAISE EXCEPTION 'expected mandatory promotion privacy audit failure'; END IF; RETURN NEW; END; $$;
@@ -115,7 +114,7 @@ describe('promotion outbox privacy review', () => {
     await mapOwnedUserScope(pool, admin, target.id, personal.id);
     const source = await createMemory(pool, { scopeId: shared.id, scopeKind: 'team', type: 'fact',
       title: 'Running consumer', body: 'Normal promotion.', authorId: target.id, source: 'manual' });
-    const promoted = await promoteMemoryWithAudit(pool, target.id, source.id, { kind: 'user', name: personal.name }, {}, ['running-hook']);
+    const promoted = await promoteWithConfiguredWebhooksForTest(pool, target.id, source.id, { kind: 'user', name: personal.name }, {}, ['running-hook']);
     const entered = Promise.withResolvers<PromotionEvent>();
     const aborted = Promise.withResolvers<void>();
     const callbackDone = Promise.withResolvers<void>();
@@ -172,7 +171,7 @@ describe('promotion outbox privacy review', () => {
     await mapOwnedUserScope(pool, admin, target.id, personal.id);
     const source = await createMemory(pool, { scopeId: shared.id, scopeKind: 'team', type: 'fact',
       title: 'Locked privacy row', body: 'Normal promotion.', authorId: target.id, source: 'manual' });
-    const promoted = await promoteMemoryWithAudit(pool, target.id, source.id, { kind: 'user', name: personal.name }, {}, ['locked-hook']);
+    const promoted = await promoteWithConfiguredWebhooksForTest(pool, target.id, source.id, { kind: 'user', name: personal.name }, {}, ['locked-hook']);
     const holder = await pool.connect();
     try {
       await holder.query("BEGIN; SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='1s'");

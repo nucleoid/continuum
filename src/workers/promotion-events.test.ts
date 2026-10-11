@@ -1,11 +1,10 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type pg from 'pg';
-import { makeTestPool, resetData } from '../storage/test-helpers.js';
+import { makeTestPool, resetData, promoteWithConfiguredWebhooksForTest } from '../storage/test-helpers.js';
 import { createPrincipal } from '../storage/principals.js';
 import { createScope } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import { createMemory } from '../storage/memories.js';
-import { promoteMemoryWithAudit } from '../storage/promote.js';
 import { PromotionWebhookRegistry } from '../extensions/promotion.js';
 import type {
   ClaimedPromotionDelivery,
@@ -98,7 +97,7 @@ describe('PromotionEventWorker', () => {
       scopeId: sourceScope.id, scopeKind: sourceScope.kind, type: 'fact',
       title: 'Worker event', body: 'Deliver me.', authorId: principal.id, source: 'manual',
     });
-    return promoteMemoryWithAudit(
+    return promoteWithConfiguredWebhooksForTest(
       pool, principal.id, source.id,
       { kind: destinationScope.kind, name: destinationScope.name }, {}, webhookIds,
     );

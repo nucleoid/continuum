@@ -1,11 +1,10 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import type pg from 'pg';
-import { makeTestPool, resetData } from './test-helpers.js';
+import { makeTestPool, resetData, promoteWithConfiguredWebhooksForTest } from './test-helpers.js';
 import { createPrincipal } from './principals.js';
 import { createScope } from './scopes.js';
 import { addMembership } from './memberships.js';
 import { createMemory, getMemory } from './memories.js';
-import { promoteMemoryWithAudit } from './promote.js';
 import {
   abandonPromotionDeliveries,
   claimPromotionDeliveries,
@@ -44,7 +43,7 @@ describe('promotion outbox', () => {
 
   it('atomically creates one stable event and one delivery per sorted webhook', async () => {
     const { principal, source, destinationScope } = await seed();
-    const promoted = await promoteMemoryWithAudit(
+    const promoted = await promoteWithConfiguredWebhooksForTest(
       pool, principal.id, source.id, { kind: 'project', name: 'destination' }, {},
       ['zeta', 'alpha'],
     );
@@ -77,7 +76,7 @@ describe('promotion outbox', () => {
       FOR EACH ROW EXECUTE FUNCTION reject_issue26_delivery();
     `);
     try {
-      await expect(promoteMemoryWithAudit(
+      await expect(promoteWithConfiguredWebhooksForTest(
         pool, principal.id, source.id, { kind: 'project', name: 'destination' }, {}, ['hook'],
       )).rejects.toThrow('expected delivery failure');
     } finally {
@@ -95,7 +94,7 @@ describe('promotion outbox', () => {
 
   it('claims each delivery once across workers and reclaims expired leases with the same event ID', async () => {
     const { principal, source } = await seed();
-    await promoteMemoryWithAudit(
+    await promoteWithConfiguredWebhooksForTest(
       pool, principal.id, source.id, { kind: 'project', name: 'destination' }, {}, ['hook'],
     );
     const [first, second] = await Promise.all([
@@ -131,7 +130,7 @@ describe('promotion outbox', () => {
       title: 'Promote again', body: 'Also transactional.', authorId: principal.id, source: 'manual',
     });
     for (const memory of [source, secondSource]) {
-      await promoteMemoryWithAudit(
+      await promoteWithConfiguredWebhooksForTest(
         pool, principal.id, memory.id, { kind: 'project', name: 'destination' }, {},
         ['healthy', 'hung'],
       );
@@ -157,7 +156,7 @@ describe('promotion outbox', () => {
       }));
     }
     for (const memory of sources) {
-      await promoteMemoryWithAudit(
+      await promoteWithConfiguredWebhooksForTest(
         pool, principal.id, memory.id, { kind: 'project', name: 'destination' }, {}, ['slow'],
       );
     }
@@ -165,7 +164,7 @@ describe('promotion outbox', () => {
       scopeId: sourceScope.id, scopeKind: sourceScope.kind, type: 'decision',
       title: 'Healthy delivery', body: 'Must not starve.', authorId: principal.id, source: 'manual',
     });
-    await promoteMemoryWithAudit(
+    await promoteWithConfiguredWebhooksForTest(
       pool, principal.id, healthySource.id, { kind: 'project', name: 'destination' }, {}, ['healthy'],
     );
     await pool.query(
@@ -184,7 +183,7 @@ describe('promotion outbox', () => {
 
   it('abandons unusable claims without consuming an attempt and honors in-flight exclusions', async () => {
     const { principal, source } = await seed();
-    await promoteMemoryWithAudit(
+    await promoteWithConfiguredWebhooksForTest(
       pool, principal.id, source.id, { kind: 'project', name: 'destination' }, {}, ['hook'],
     );
     const [claimed] = await claimPromotionDeliveries(pool, {
@@ -216,7 +215,7 @@ describe('promotion outbox', () => {
 
   it('completes independently, dead-letters safely, and supports explicit manual retry', async () => {
     const { principal, source } = await seed();
-    await promoteMemoryWithAudit(
+    await promoteWithConfiguredWebhooksForTest(
       pool, principal.id, source.id, { kind: 'project', name: 'destination' }, {},
       ['good', 'bad'],
     );
@@ -251,7 +250,7 @@ describe('promotion outbox', () => {
 
   it('renews only leases owned by the stopping worker', async () => {
     const { principal, source } = await seed();
-    await promoteMemoryWithAudit(
+    await promoteWithConfiguredWebhooksForTest(
       pool, principal.id, source.id,
       { kind: 'project', name: 'destination' }, {}, ['hook', 'other'],
     );
@@ -286,7 +285,7 @@ describe('promotion outbox', () => {
 
   it('records timeout retry state without releasing the active lease', async () => {
     const { principal, source } = await seed();
-    await promoteMemoryWithAudit(
+    await promoteWithConfiguredWebhooksForTest(
       pool, principal.id, source.id, { kind: 'project', name: 'destination' }, {}, ['hook'],
     );
     const [delivery] = await claimPromotionDeliveries(pool, {
@@ -319,7 +318,7 @@ describe('promotion outbox', () => {
 
   it('preserves timeout backoff when shutdown releases the owned lease', async () => {
     const { principal, source } = await seed();
-    await promoteMemoryWithAudit(
+    await promoteWithConfiguredWebhooksForTest(
       pool, principal.id, source.id, { kind: 'project', name: 'destination' }, {}, ['hook'],
     );
     const [delivery] = await claimPromotionDeliveries(pool, {
@@ -349,7 +348,7 @@ describe('promotion outbox', () => {
 
   it('classifies a final-attempt timeout as terminal but still owned', async () => {
     const { principal, source } = await seed();
-    await promoteMemoryWithAudit(
+    await promoteWithConfiguredWebhooksForTest(
       pool, principal.id, source.id, { kind: 'project', name: 'destination' }, {}, ['hook'],
     );
     const [delivery] = await claimPromotionDeliveries(pool, {
@@ -372,7 +371,7 @@ describe('promotion outbox', () => {
 
   it('durably acknowledges a late success while the expired lease owner is unchanged', async () => {
     const { principal, source } = await seed();
-    await promoteMemoryWithAudit(
+    await promoteWithConfiguredWebhooksForTest(
       pool, principal.id, source.id, { kind: 'project', name: 'destination' }, {}, ['hook'],
     );
     const [delivery] = await claimPromotionDeliveries(pool, {
@@ -396,7 +395,7 @@ describe('promotion outbox', () => {
     'fences a stale %s write after the same owner reclaims a newer attempt',
     async (operation) => {
       const { principal, source } = await seed();
-      await promoteMemoryWithAudit(
+      await promoteWithConfiguredWebhooksForTest(
         pool, principal.id, source.id, { kind: 'project', name: 'destination' }, {}, ['hook'],
       );
       const [first] = await claimPromotionDeliveries(pool, {
@@ -449,7 +448,7 @@ describe('promotion outbox', () => {
     'does not let a stale retained attempt %s a newer lease held by the same owner',
     async (operation) => {
       const { principal, source } = await seed();
-      await promoteMemoryWithAudit(
+      await promoteWithConfiguredWebhooksForTest(
         pool, principal.id, source.id, { kind: 'project', name: 'destination' }, {}, ['hook'],
       );
       const [first] = await claimPromotionDeliveries(pool, {
@@ -481,7 +480,7 @@ describe('promotion outbox', () => {
 
   it('fences a stale write when manual retry reuses the same owner and attempt number', async () => {
     const { principal, source } = await seed();
-    await promoteMemoryWithAudit(
+    await promoteWithConfiguredWebhooksForTest(
       pool, principal.id, source.id, { kind: 'project', name: 'destination' }, {}, ['hook'],
     );
     const [first] = await claimPromotionDeliveries(pool, {
@@ -517,7 +516,7 @@ describe('promotion outbox', () => {
 
   it('dead-letters crash-recovered deliveries at the configured attempt bound', async () => {
     const { principal, source } = await seed();
-    await promoteMemoryWithAudit(
+    await promoteWithConfiguredWebhooksForTest(
       pool, principal.id, source.id, { kind: 'project', name: 'destination' }, {}, ['hook'],
     );
     const first = await claimPromotionDeliveries(pool, {
@@ -551,7 +550,7 @@ describe('promotion outbox', () => {
 
   it('leaves deliveries for unregistered webhook IDs pending and observable', async () => {
     const { principal, source } = await seed();
-    await promoteMemoryWithAudit(
+    await promoteWithConfiguredWebhooksForTest(
       pool, principal.id, source.id, { kind: 'project', name: 'destination' }, {}, ['missing'],
     );
     expect(await claimPromotionDeliveries(pool, {

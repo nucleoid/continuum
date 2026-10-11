@@ -240,6 +240,7 @@ describe('REST/MCP semantic parity matrix', () => {
       title: 'MCP promotion', body: 'Promote through MCP.', authorId: principal.id,
       source: 'manual',
     });
+    await pool.query('UPDATE promotion_webhook_registry SET webhook_ids=$1::text[] WHERE singleton', [registry.ids()]);
     const parityServer = buildMcpServer({
       pool, embeddingProvider: null, principal, promotionWebhooks: registry,
     });

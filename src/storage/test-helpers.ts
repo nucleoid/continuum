@@ -1,5 +1,6 @@
 import pg from 'pg';
 import { runMigrations } from './migrator.js';
+import { promoteMemoryWithAudit } from './promote.js';
 
 const DEFAULT_URL = 'postgres://continuum:continuum@localhost:5433/continuum';
 
@@ -175,4 +176,14 @@ export async function resetData(pool: pg.Pool): Promise<void> {
        'knowledge-gap'
      ]) AS tag
   `);
+}
+
+/** Owner-only fixture setup, followed by the unchanged production promotion.
+ * Real-role tests configure IDs through the bound OP helper instead. */
+export async function promoteWithConfiguredWebhooksForTest(
+  ...args: Parameters<typeof promoteMemoryWithAudit>
+): ReturnType<typeof promoteMemoryWithAudit> {
+  const ids = [...new Set(args[5] ?? [])].sort();
+  await args[0].query('UPDATE promotion_webhook_registry SET webhook_ids=$1::text[] WHERE singleton', [ids]);
+  return promoteMemoryWithAudit(...args);
 }

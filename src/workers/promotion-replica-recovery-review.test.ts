@@ -1,11 +1,10 @@
 import type pg from 'pg';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import { makeTestPool, resetData } from '../storage/test-helpers.js';
+import { makeTestPool, resetData, promoteWithConfiguredWebhooksForTest } from '../storage/test-helpers.js';
 import { createPrincipal } from '../storage/principals.js';
 import { createScope } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import { createMemory } from '../storage/memories.js';
-import { promoteMemoryWithAudit } from '../storage/promote.js';
 import { PromotionWebhookRegistry } from '../extensions/promotion.js';
 import { PromotionEventWorker, type PromotionWorkerStore } from './promotion-events.js';
 import { abandonPromotionDeliveries, claimPromotionDeliveries, completePromotionDelivery,
@@ -44,7 +43,7 @@ describe('promotion replica recovery review', () => {
     for (const hook of hooks) {
       const source = await createMemory(pool, { scopeId: sourceScope.id, scopeKind: 'team', type: 'fact',
         title: hook, body: 'Normal promotion.', authorId: principal.id, source: 'manual' });
-      const promoted = await promoteMemoryWithAudit(pool, principal.id, source.id,
+      const promoted = await promoteWithConfiguredWebhooksForTest(pool, principal.id, source.id,
         { kind: 'project', name: destination.name }, {}, [hook]);
       events.set(hook, promoted.promotionEvent.eventId);
     }

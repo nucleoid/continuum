@@ -1,12 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import type pg from 'pg';
-import { makeTestPool, resetData } from './test-helpers.js';
+import { makeTestPool, resetData, promoteWithConfiguredWebhooksForTest } from './test-helpers.js';
 import { createPrincipal } from './principals.js';
 import { createScope } from './scopes.js';
 import { addMembership } from './memberships.js';
 import { createMemory } from './memories.js';
-import { promoteMemoryWithAudit } from './promote.js';
 import {
   claimPromotionDeliveries, completePromotionDelivery, renewPromotionDeliveries,
   type ClaimedPromotionDelivery,
@@ -39,7 +38,7 @@ describe('promotion claim eligibility review', () => {
       title: 'Claim eligibility', body: 'A committed promotion.',
       authorId: principal.id, source: 'manual',
     });
-    await promoteMemoryWithAudit(
+    await promoteWithConfiguredWebhooksForTest(
       pool, principal.id, source.id, { kind: 'project', name: destinationScope.name }, {}, ['review-hook'],
     );
     const claims = await claimPromotionDeliveries(pool, {

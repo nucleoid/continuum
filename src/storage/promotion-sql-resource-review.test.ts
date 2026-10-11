@@ -1,12 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { expect, it } from 'vitest';
-import { makeTestPool, resetData } from './test-helpers.js';
+import { makeTestPool, resetData, promoteWithConfiguredWebhooksForTest } from './test-helpers.js';
 import { createPrincipal } from './principals.js';
 import { createScope } from './scopes.js';
 import { addMembership } from './memberships.js';
 import { createMemory } from './memories.js';
-import { promoteMemoryWithAudit } from './promote.js';
 import { claimPromotionDeliveries, completePromotionDelivery } from './promotion-events.js';
 
 type ClaimOutcome = { status: 'fulfilled'; value: unknown }
@@ -36,7 +35,7 @@ it('skips blocked promotion normalization SQL and restores its owned session bef
     await addMembership(pool, principal.id, destinationScope.id, 'writer');
     const source = await createMemory(pool, { scopeId: sourceScope.id, scopeKind: sourceScope.kind,
       authorId: principal.id, type: 'decision', title: 'SQL wait', body: 'Committed event.', source: 'manual' });
-    await promoteMemoryWithAudit(pool, principal.id, source.id,
+    await promoteWithConfiguredWebhooksForTest(pool, principal.id, source.id,
       { kind: destinationScope.kind, name: destinationScope.name }, {}, ['sql-review-hook']);
     const first = await claimPromotionDeliveries(pool, {
       owner: 'previous-owner', webhookIds: ['sql-review-hook'], limit: 1, leaseMs: 60_000, maxAttempts: 1,
@@ -136,7 +135,7 @@ async function seedAcknowledgement(pool: pg.Pool) {
   await addMembership(pool, principal.id, destinationScope.id, 'writer');
   const source = await createMemory(pool, { scopeId: sourceScope.id, scopeKind: sourceScope.kind,
     authorId: principal.id, type: 'decision', title: 'Acknowledgement', body: 'Actual committed event.', source: 'manual' });
-  await promoteMemoryWithAudit(pool, principal.id, source.id,
+  await promoteWithConfiguredWebhooksForTest(pool, principal.id, source.id,
     { kind: destinationScope.kind, name: destinationScope.name }, {}, ['ack-review-hook']);
   const deliveries = await claimPromotionDeliveries(pool, {
     owner: 'ack-owner', webhookIds: ['ack-review-hook'], limit: 1, leaseMs: 60_000,

@@ -1,12 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import { makeTestPool, resetData } from './test-helpers.js';
+import { makeTestPool, resetData, promoteWithConfiguredWebhooksForTest } from './test-helpers.js';
 import { createPrincipal } from './principals.js';
 import { createScope } from './scopes.js';
 import { addMembership } from './memberships.js';
 import { createMemory } from './memories.js';
-import { promoteMemoryWithAudit } from './promote.js';
 import { claimPromotionDeliveries } from './promotion-events.js';
 
 interface PlanNode {
@@ -52,7 +51,7 @@ describe('promotion claim plan review', () => {
     return async (hook: string) => {
       const memory = await createMemory(pool, { scopeId: source.id, scopeKind: source.kind,
         authorId: principal.id, type: 'decision', title: 'Pending promotion', body: 'Small fixture body.', source: 'manual' });
-      return promoteMemoryWithAudit(pool, principal.id, memory.id,
+      return promoteWithConfiguredWebhooksForTest(pool, principal.id, memory.id,
         { kind: destination.kind, name: destination.name }, {}, [hook]);
     };
   }
