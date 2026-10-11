@@ -151,6 +151,10 @@ function deliveryKey(delivery: Pick<ClaimedPromotionDelivery, 'webhookId' | 'eve
   return `${delivery.event.eventId}\u0000${delivery.webhookId}`;
 }
 
+function exactDeliveryKey(delivery: ClaimedPromotionDelivery): string {
+  return `${deliveryKey(delivery)}\u0000${delivery.attemptCount}\u0000${delivery.leaseGeneration}`;
+}
+
 // Multiple workers can briefly coexist in one process during shutdown/startup handoff. Keep the
 // callback fence process-wide so a lease expiry cannot start a second local callback while the
 // first callback is still ignoring its AbortSignal.
@@ -163,6 +167,9 @@ type CallbackOutcome = 'success' | 'failure' | 'not_started';
 export class PromotionEventWorker implements RuntimeWorker {
   private readonly claimStartedAt = new WeakMap<ClaimedPromotionDelivery, number>();
   private admissionCursor = 0;
+  private readonly renewedAt = new WeakMap<ClaimedPromotionDelivery, number>();
+  private renewalRetryAt?: number;
+  private lastRetainedFences = 0;
   private stopped = false;
   private started = false;
   private stopPromise?: Promise<void>;
@@ -243,6 +250,7 @@ export class PromotionEventWorker implements RuntimeWorker {
   }
 
   private async drainCycle(): Promise<number> {
+    this.reportRetainedCapacity();
     const webhookIds = this.registry.ids();
     const inFlightByWebhook = new Map<string, number>();
     for (const delivery of inFlightCallbacks.values()) {
@@ -420,8 +428,10 @@ export class PromotionEventWorker implements RuntimeWorker {
     // A serial sibling claim may consume the earlier claim's lease before delivery begins.
     // Require fresh exact ownership after a material admission delay, before invoking user code.
     const claimStarted = this.claimStartedAt.get(delivery) ?? Date.now();
+    let renewalAnchor = claimStarted;
     if (Date.now() - claimStarted >= Math.max(1, Math.floor(this.options.leaseMs / 3))) {
       let ownership: PromotionLeaseRenewalResult | number;
+      renewalAnchor = Date.now();
       try {
         ownership = await this.databaseOperation(this.store.renew(
           this.pool, this.options.owner, [delivery], this.options.leaseMs,
@@ -454,6 +464,7 @@ export class PromotionEventWorker implements RuntimeWorker {
     }
     const controller = new AbortController();
     this.controllers.set(controller, delivery);
+    this.renewedAt.set(delivery, renewalAnchor);
     inFlightCallbacks.set(key, delivery);
     this.ensureLeaseRenewal();
     this.logger.info({
@@ -493,11 +504,12 @@ export class PromotionEventWorker implements RuntimeWorker {
       const outcome = await Promise.race([callback, timeout, shutdown]);
       if (timer) clearTimeout(timer);
 
+      const timeoutDisposition = Promise.withResolvers<boolean>();
       if (outcome === 'timeout') {
         controller.abort();
         this.retainLease(delivery);
         lateFollower = true;
-        this.followLateCallback(delivery, controller, callback, 'timeout');
+        this.followLateCallback(delivery, controller, callback, 'timeout', timeoutDisposition.promise);
       }
 
       if (outcome === 'success') {
@@ -522,7 +534,9 @@ export class PromotionEventWorker implements RuntimeWorker {
               leaseGeneration: delivery.leaseGeneration,
             },
           ));
+          timeoutDisposition.resolve(true);
         } catch (error) {
+          timeoutDisposition.resolve(false);
           // Uncertainty does not prove loss. The exact owner/attempt/generation
           // recheck can safely renew while an abort-ignoring callback is unsettled.
           this.abortForOwnershipUncertainty(controller);
@@ -566,19 +580,35 @@ export class PromotionEventWorker implements RuntimeWorker {
     }
   }
 
+  private reportRetainedCapacity(): void {
+    const retainedFences = [...this.retainedLeases.values()].filter((delivery) => {
+      const held = inFlightCallbacks.get(deliveryKey(delivery));
+      return held && exactDeliveryKey(held) === exactDeliveryKey(delivery)
+        && !this.pendingAcknowledgements.has(deliveryKey(delivery));
+    }).length;
+    if (retainedFences === 0 && this.lastRetainedFences === 0) return;
+    this.lastRetainedFences = retainedFences;
+    try {
+      this.logger.info({ event: 'promotion_worker_capacity', retainedFences,
+        processInFlight: inFlightCallbacks.size, processCapacity: GLOBAL_CALLBACK_LIMIT });
+    } catch { /* optional operational signal cannot prevent draining */ }
+  }
+
   private ensureLeaseRenewal(): void {
-    if (this.stopped || this.leaseTimer || this.leaseRenewal) return;
-    const renewalMs = Math.max(1, Math.floor(this.options.leaseMs / 3));
+    if (this.stopped || this.controllers.size === 0 || this.leaseTimer || this.leaseRenewal) return;
+    const interval = Math.max(1, Math.floor(this.options.leaseMs / 3));
+    const now = Date.now();
+    const due = Math.min(...[...this.controllers.values()].map((delivery) =>
+      (this.renewedAt.get(delivery) ?? now) + interval));
+    const delay = Math.max(1, (this.renewalRetryAt ?? due) - now);
     this.leaseTimer = setTimeout(() => {
       this.leaseTimer = undefined;
       const deliveries = [...this.controllers.values()];
-      this.leaseRenewal = this.renewLeases(deliveries, renewalMs).finally(() => {
+      this.leaseRenewal = this.renewLeases(deliveries, Math.min(this.options.databaseTimeoutMs, interval)).finally(() => {
         this.leaseRenewal = undefined;
-        if (!this.stopped && this.controllers.size > 0) {
-          this.ensureLeaseRenewal();
-        }
+        if (!this.stopped && this.controllers.size > 0) this.ensureLeaseRenewal();
       });
-    }, renewalMs);
+    }, delay);
   }
 
   private async renewLeases(
@@ -586,67 +616,64 @@ export class PromotionEventWorker implements RuntimeWorker {
     timeoutMs: number,
   ): Promise<void> {
     if (deliveries.length === 0) return;
+    const started = Date.now();
+    const snapshot = new Set(deliveries.map(exactDeliveryKey));
     let timer: NodeJS.Timeout | undefined;
     const operation = Promise.resolve().then(() => this.store.renew(
-      this.pool,
-      this.options.owner,
-      deliveries,
-      this.options.leaseMs,
+      this.pool, this.options.owner, deliveries, this.options.leaseMs,
     ));
     const result = await Promise.race([
-      operation.then(
-        (renewal) => ({ state: 'settled' as const, renewal }),
-        () => ({ state: 'failed' as const }),
-      ),
+      operation.then((renewal) => ({ state: 'settled' as const, renewal }), () => ({ state: 'failed' as const })),
       new Promise<{ state: 'timeout' }>((resolve) => {
         timer = setTimeout(() => resolve({ state: 'timeout' }), timeoutMs);
       }),
     ]);
     if (timer) clearTimeout(timer);
+    const current = [...this.controllers].filter(([, delivery]) => snapshot.has(exactDeliveryKey(delivery)));
     if (result.state === 'settled' && typeof result.renewal !== 'number') {
-      const owned = [...result.renewal.renewed, ...result.renewal.terminalOwned];
-      const terminalKeys = new Set(result.renewal.terminalOwned.map(deliveryKey));
-      const lostKeys = new Set(result.renewal.lost.map(deliveryKey));
-      for (const [controller, delivery] of [...this.controllers]) {
-        const key = deliveryKey(delivery);
-        if (lostKeys.has(key)) {
-          if (this.pendingAcknowledgements.has(key)) this.finishCallback(delivery, controller);
+      const renewed = new Set(result.renewal.renewed.map(exactDeliveryKey));
+      const terminal = new Set(result.renewal.terminalOwned.map(exactDeliveryKey));
+      const lost = new Set(result.renewal.lost.map(exactDeliveryKey));
+      for (const [controller, delivery] of current) {
+        const key = exactDeliveryKey(delivery);
+        if (lost.has(key)) {
+          if (this.pendingAcknowledgements.get(deliveryKey(delivery)) === controller) this.finishCallback(delivery, controller);
           else this.abortForOwnershipLoss(controller);
-        } else if (terminalKeys.has(key) && !this.pendingAcknowledgements.has(key)) {
+        } else if (terminal.has(key) && this.pendingAcknowledgements.get(deliveryKey(delivery)) !== controller) {
           this.stopLeaseRenewal(controller);
+        } else if (renewed.has(key)) {
+          // Issuance is a conservative lower bound on the committed SQL clock.
+          // Using response time could overstate expiry after a slow response.
+          this.renewedAt.set(delivery, started);
         }
       }
+      this.renewalRetryAt = undefined;
+      const owned = [...result.renewal.renewed, ...result.renewal.terminalOwned]
+        .filter((delivery) => snapshot.has(exactDeliveryKey(delivery)));
       this.scheduleAcknowledgements(owned);
-      if (lostKeys.size === 0) return;
+      if (lost.size === 0) return;
     } else if (result.state === 'settled') {
-      const activeKeys = new Set([...this.controllers.values()].map(deliveryKey));
-      if ((result.renewal as number) >= activeKeys.size) {
+      this.renewalRetryAt = undefined;
+      if ((result.renewal as number) >= deliveries.length) {
+        for (const [, delivery] of current) this.renewedAt.set(delivery, started);
         this.scheduleAcknowledgements(deliveries);
         return;
       }
-      for (const controller of [...this.controllers.keys()]) {
-        this.abortForOwnershipLoss(controller);
-      }
+      for (const [controller] of current) this.abortForOwnershipLoss(controller);
     } else {
       void operation.catch(() => undefined);
-      for (const [controller, delivery] of [...this.controllers]) {
+      for (const [controller, delivery] of current) {
         this.retainLease(delivery);
-        // Successful user code needs ACK reconciliation, not another callback follower.
-        // Keep its controller registered so database recovery rearms bounded reconciliation.
-        if (!this.pendingAcknowledgements.has(deliveryKey(delivery))) {
-          this.abortForOwnershipUncertainty(controller);
-        }
+        if (this.pendingAcknowledgements.get(deliveryKey(delivery)) !== controller) this.abortForOwnershipUncertainty(controller);
       }
+      // A finite prompt retry retains a positive margin after one slow attempt.
+      this.renewalRetryAt = current.length > 0 ? Date.now()
+        + Math.max(1, Math.min(this.options.databaseTimeoutMs, Math.floor(this.options.leaseMs / 12))) : undefined;
     }
     this.logger.error({
-      event: 'promotion_worker_lease_renewal_failed',
-      reason: result.state,
-      expected: deliveries.length,
+      event: 'promotion_worker_lease_renewal_failed', reason: result.state, expected: deliveries.length,
       renewed: result.state === 'settled'
-        ? typeof result.renewal === 'number'
-          ? result.renewal
-          : result.renewal.renewed.length
-        : undefined,
+        ? typeof result.renewal === 'number' ? result.renewal : result.renewal.renewed.length : undefined,
     });
   }
 
@@ -668,10 +695,15 @@ export class PromotionEventWorker implements RuntimeWorker {
     controller: AbortController,
     callback: Promise<CallbackOutcome>,
     abortReason: 'timeout' | 'shutdown' | 'ownership_loss' | 'ownership_uncertain',
+    timeoutDisposition?: Promise<boolean>,
   ): void {
     void callback.then(async (outcome) => {
       if (outcome === 'success') {
         return !await this.persistCallbackOutcome(delivery, controller, outcome);
+      } else if (outcome === 'failure' && abortReason === 'timeout') {
+        // Wait for the bounded write disposition. A committed timeout already
+        // installed its chosen backoff; only a failed write needs charged failure.
+        if (timeoutDisposition && !await timeoutDisposition) await this.persistCallbackOutcome(delivery, controller, outcome);
       } else if (outcome === 'failure' && abortReason === 'shutdown') {
         // A callback that rejects after this worker signalled shutdown is not evidence that the
         // consumer failed. Return the owned claim without charging an attempt so another worker
@@ -762,7 +794,11 @@ export class PromotionEventWorker implements RuntimeWorker {
 
   private scheduleAcknowledgements(deliveries: readonly ClaimedPromotionDelivery[]): void {
     if (this.acknowledgementRetry) return;
-    const pending = deliveries.filter((delivery) => this.pendingAcknowledgements.has(deliveryKey(delivery)));
+    const pending = deliveries.filter((delivery) => {
+      const controller = this.pendingAcknowledgements.get(deliveryKey(delivery));
+      const current = controller && this.controllers.get(controller);
+      return current && exactDeliveryKey(current) === exactDeliveryKey(delivery);
+    });
     if (pending.length === 0) return;
     const start = this.acknowledgementCursor % pending.length;
     // A bounded rotating cohort cannot monopolize renewal or starve later paid
@@ -780,7 +816,8 @@ export class PromotionEventWorker implements RuntimeWorker {
     await Promise.all(deliveries.map(async (delivery) => {
       const key = deliveryKey(delivery);
       const controller = this.pendingAcknowledgements.get(key);
-      if (!controller) return;
+      if (!controller || !this.controllers.get(controller)
+        || exactDeliveryKey(this.controllers.get(controller)!) !== exactDeliveryKey(delivery)) return;
       try {
         const acknowledged = await this.databaseOperation(this.store.complete(
           this.pool,
@@ -815,11 +852,15 @@ export class PromotionEventWorker implements RuntimeWorker {
     delivery: ClaimedPromotionDelivery,
     controller: AbortController,
   ): void {
+    const current = this.controllers.get(controller);
+    if (current && exactDeliveryKey(current) !== exactDeliveryKey(delivery)) return;
     const key = deliveryKey(delivery);
     this.stopRenewingCallback(controller);
     if (this.pendingAcknowledgements.get(key) === controller) this.pendingAcknowledgements.delete(key);
-    if (this.retainedLeases.get(key) === delivery) this.retainedLeases.delete(key);
-    if (inFlightCallbacks.get(key) === delivery) inFlightCallbacks.delete(key);
+    const retained = this.retainedLeases.get(key);
+    if (retained && exactDeliveryKey(retained) === exactDeliveryKey(delivery)) this.retainedLeases.delete(key);
+    const held = inFlightCallbacks.get(key);
+    if (held && exactDeliveryKey(held) === exactDeliveryKey(delivery)) inFlightCallbacks.delete(key);
   }
 
   private stopRenewingCallback(controller: AbortController): void {
