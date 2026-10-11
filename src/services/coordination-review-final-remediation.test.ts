@@ -10,6 +10,7 @@ import { createPrincipal } from '../storage/principals.js';
 import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { acquireLease } from './coordination.js';
+import { reactivatePrincipal } from './principal-admin.js';
 import {
   listCoordinationPrivacyRepairs, mapOwnedUserScope, offboardPrincipal, repairCoordinationPrivacy,
 } from './offboarding.js';
@@ -52,6 +53,22 @@ describe('coordination final review remediation', () => {
     )).rows[0];
     return { ...value, metadata: event.metadata as Record<string, unknown> };
   }
+
+  it('access evidence review: an approved access-only open run fences reactivation with no existing coordination data', async () => {
+    const value = await pendingAccessEvidence('open-run-reactivation');
+    try {
+      expect((await pool.query(
+        `SELECT disabled_at IS NOT NULL AS disabled, offboarded_at
+           FROM principals WHERE id = $1`, [value.target.id],
+      )).rows[0]).toEqual({ disabled: true, offboarded_at: null });
+      await expect(reactivatePrincipal(pool, value.operator, value.target.id)).rejects.toThrow();
+      expect((await pool.query(
+        'SELECT disabled_at IS NOT NULL AS disabled FROM principals WHERE id = $1', [value.target.id],
+      )).rows[0].disabled).toBe(true);
+    } finally {
+      await pool.query("UPDATE coordination_contract_backfill_state SET phase = 'complete' WHERE singleton");
+    }
+  });
 
   it.each(['application', 'sync'] as const)('access evidence review: rejects a canonical forged %s insert', async (profile) => {
     const value = await pendingAccessEvidence(`forged-access-${profile}`);

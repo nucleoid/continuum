@@ -171,10 +171,17 @@ interface OwnedScopePrivacyState {
 async function ownedScopePrivacyState(
   client: pg.PoolClient, actorId: string, scopeId: string,
 ): Promise<OwnedScopePrivacyState> {
-  const result = await client.query<OwnedScopePrivacyState>(
-    'SELECT * FROM continuum_operator_coordination_scope_privacy_state($1, $2)',
-    [actorId, scopeId],
-  );
+  let result: pg.QueryResult<OwnedScopePrivacyState>;
+  try {
+    result = await client.query<OwnedScopePrivacyState>(
+      'SELECT * FROM continuum_operator_coordination_scope_privacy_state($1, $2)',
+      [actorId, scopeId],
+    );
+  } catch (error) {
+    if ((error as { code?: string }).code !== '42883') throw error;
+    throw new ServiceError('DEPENDENCY_UNAVAILABLE',
+      'owned-scope privacy verification requires current migrations', { cause: error });
+  }
   if (!result.rows[0]) {
     throw new ServiceError('DEPENDENCY_UNAVAILABLE', 'owned-scope privacy verification requires current migrations');
   }
@@ -218,10 +225,13 @@ async function setCoordinationPrivacyClientVersion(client: pg.PoolClient): Promi
 async function requireCurrentCoordinationPrivacySchema(
   client: pg.PoolClient,
 ): Promise<void> {
-  const contract = await client.query<{ ready: boolean }>(
+  const contract = await client.query<{ ready: boolean; owned_scope_ready: boolean }>(
     `SELECT to_regprocedure(format(
        '%I.continuum_coordination_privacy_schema_ready()', namespace.nspname
-     )) IS NOT NULL AS ready
+     )) IS NOT NULL AS ready,
+       to_regprocedure(format(
+         '%I.continuum_operator_coordination_scope_privacy_state(uuid,uuid)', namespace.nspname
+       )) IS NOT NULL AS owned_scope_ready
        FROM pg_class relation
        JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
       WHERE relation.oid = to_regclass('principals')`,
@@ -231,6 +241,10 @@ async function requireCurrentCoordinationPrivacySchema(
       'CONFLICT',
       'coordination privacy schema is incomplete; finish migrations before mutation',
     );
+  }
+  if (contract.rows[0]?.owned_scope_ready !== true) {
+    throw new ServiceError('DEPENDENCY_UNAVAILABLE',
+      'owned-scope privacy verification requires current migrations');
   }
 }
 
