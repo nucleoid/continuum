@@ -70,7 +70,7 @@ function guardedPool(
           scope_complete: false }] };
       }
       if (sql.includes('continuum_coordination_privacy_schema_ready')) {
-        return { rowCount: 1, rows: [{ ready: true }] };
+        return { rowCount: 1, rows: [{ ready: true, owned_scope_ready: true }] };
       }
       if (/FROM scopes WHERE kind = \$1 AND name = \$2/.test(sql)) {
         return { rowCount: 1, rows: [{
@@ -197,7 +197,7 @@ describe('operator boundary database errors', () => {
       query: vi.fn(async (sql: string) => {
         let rows: Record<string, unknown>[] = [];
         if (sql.includes('continuum_operator_pseudonymize_scope_v2')) throw failure;
-        if (sql.includes('to_regprocedure')) rows = [{ ready: true }];
+        if (sql.includes('to_regprocedure')) rows = [{ ready: true, owned_scope_ready: true }];
         else if (sql.includes('pg_try_advisory_xact_lock')) rows = [{ locked: true }];
         else if (/FROM scopes WHERE kind = \$1 AND name = \$2/.test(sql)) {
           rows = [{ id: SCOPE_ID, kind: 'org', name: '', created_at: new Date() }];
@@ -232,7 +232,7 @@ describe('operator boundary database errors', () => {
         let rows: Record<string, unknown>[] = [];
         if (sql.includes('SELECT principal.offboarded_at, mapping.scope_id')) throw snapshotFailure;
         if (sql.includes('continuum_operator_list_coordination_privacy_repairs')) throw original;
-        if (sql.includes('to_regprocedure')) rows = [{ ready: true }];
+        if (sql.includes('to_regprocedure')) rows = [{ ready: true, owned_scope_ready: true }];
         else if (sql.includes('pg_try_advisory_xact_lock')) rows = [{ locked: true }];
         else if (/FROM scopes WHERE kind = \$1 AND name = \$2/.test(sql)) {
           rows = [{ id: SCOPE_ID, kind: 'org', name: '', created_at: new Date() }];
@@ -255,7 +255,7 @@ describe('operator boundary database errors', () => {
       release: vi.fn(),
       query: vi.fn(async (sql: string) => {
         let rows: Record<string, unknown>[] = [];
-        if (sql.includes('to_regprocedure')) rows = [{ ready: true }];
+        if (sql.includes('to_regprocedure')) rows = [{ ready: true, owned_scope_ready: true }];
         else if (sql.includes('pg_try_advisory_xact_lock')) rows = [{ locked: true }];
         else if (/FROM scopes WHERE kind = \$1 AND name = \$2/.test(sql)) {
           rows = [{ id: SCOPE_ID, kind: 'org', name: '', created_at: new Date() }];
