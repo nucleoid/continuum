@@ -198,6 +198,68 @@ describe('coordination final review remediation', () => {
     )).rows[0].count).toBe(0);
   }, 60_000);
 
+  it.each(['detached_quota', 'migration_pending'] as const)(
+    'round5 blocked lifecycle CLI review: drains remaining erasure under %s', async (reason) => {
+      const value = await fixture(`lifecycle-${reason}`);
+      await pool.query(
+        `INSERT INTO memories(id, scope_id, type, title, body, author_id, source)
+         SELECT gen_random_uuid(), $1, 'context', 'private ' || n, 'secret ' || n, $2, 'manual'
+           FROM generate_series(1, 7) n`, [value.owned.id, value.target.id],
+      );
+      await pool.query(
+        `INSERT INTO audit_log(principal_id, action, scope_id, query, metadata)
+         SELECT $1, 'read', $2, 'secret query ' || n, '{}'::jsonb FROM generate_series(1, 7) n`,
+        [value.target.id, value.owned.id],
+      );
+      try {
+        if (reason === 'migration_pending') {
+          // Establish a real open run with durable scope cleanup and lifecycle
+          // work still pending, then simulate the upgrade reopening privacy.
+          const first = await offboardPrincipal(pool, value.operator, value.target.id, {
+            confirmationScopeId: value.owned.id, batchSize: 2,
+          });
+          expect(first.complete).toBe(false);
+          expect((await pool.query(
+            'SELECT scope_cleanup_complete FROM principal_offboarding_runs WHERE principal_id=$1', [value.target.id],
+          )).rows[0].scope_cleanup_complete).toBe(true);
+          await pool.query(
+            'UPDATE coordination_principal_privacy_progress SET privacy_version=2, completed_at=NULL WHERE principal_id=$1',
+            [value.target.id],
+          );
+          await pool.query("UPDATE coordination_contract_backfill_state SET phase='usage' WHERE singleton");
+        } else {
+          await pool.query('SELECT continuum_operator_set_coordination_principal_quota($1,$2,1,1)',
+            [value.operator.id, detachedPrincipalId]);
+          await pool.query("INSERT INTO coordination_resources(scope_id,resource) VALUES($1,'lifecycle-quota')", [value.shared.id]);
+          for (const principalId of [detachedPrincipalId, value.target.id]) {
+            await pool.query(
+              `INSERT INTO coordination_operation_receipts(principal_id,operation,request_id,payload_hash,
+                 outcome,scope_id,resource,expires_at,server_time,retry_after_seconds,retain_until)
+               VALUES($1::uuid,'acquire',gen_random_uuid(),sha256(convert_to(($1::uuid)::text,'UTF8')),
+                 'contended',$2,'lifecycle-quota',clock_timestamp()-interval '1 day',
+                 clock_timestamp()-interval '1 day',0,clock_timestamp()+interval '1 day')`,
+              [principalId, value.shared.id],
+            );
+          }
+        }
+        const blocked = await adminCli(value.operator, [
+          'offboard-principal', value.target.id, '--confirm-scope', value.owned.id, '--batch-size', '2',
+        ], 60_000);
+        expect(blocked).toMatchObject({ exitCode: 3, payload: { complete: false, reason } });
+        expect(Number(blocked.payload.attempts)).toBeGreaterThan(1);
+        expect((await pool.query(
+          "SELECT count(*)::int AS count FROM memories WHERE scope_id=$1 AND body<>'[erased]'", [value.owned.id],
+        )).rows[0].count).toBe(0);
+        expect((await pool.query(
+          'SELECT count(*)::int AS count FROM audit_log WHERE query IS NOT NULL AND (principal_id=$1 OR scope_id=$2)',
+          [value.target.id, value.owned.id],
+        )).rows[0].count).toBe(0);
+      } finally {
+        await pool.query("UPDATE coordination_contract_backfill_state SET phase='complete' WHERE singleton");
+      }
+    }, 60_000,
+  );
+
   it.each([true, false])('blocked privacy CLI review: retries only when detached purge frees quota, expired=%s', async (expired) => {
     const value = await fixture('detached-quota-purge');
     await pool.query('SELECT continuum_disable_principal($1, $2)', [value.operator.id, value.target.id]);

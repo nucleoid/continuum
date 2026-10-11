@@ -77,6 +77,59 @@ describe('offboarding and erasure', () => {
     return { admin, target, personal, shared, personalMemory, sharedMemory };
   }
 
+  async function boundedScaleDiagnostic<T>(label: string, budgetMs: number,
+    operation: (bounded: pg.Pool) => Promise<T>): Promise<T> {
+    const client = await pool.connect();
+    const started = Date.now();
+    const deadline = started + budgetMs;
+    let discard = false;
+    const boundedQuery = async (sql: string, values?: unknown[]) => {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error(`${label}: bounded diagnostic deadline exhausted`);
+      // Use server cancellation, so a failed test cannot leave SQL running into
+      // the next test's TRUNCATE. Keep the actual service and all row triggers.
+      if (!/^ROLLBACK\b/i.test(sql.trim())) {
+        await client.query("SELECT set_config('statement_timeout', $1, FALSE), set_config('lock_timeout', '1s', FALSE)",
+          [`${Math.min(15_000, remaining)}ms`]);
+      }
+      const queryStarted = Date.now();
+      try { return await client.query(sql, values); }
+      finally {
+        const elapsed = Date.now() - queryStarted;
+        if (elapsed >= 250) console.info(JSON.stringify({ label, elapsedMs: elapsed,
+          totalMs: Date.now() - started, sql: sql.trim().replace(/\s+/g, ' ').slice(0, 160) }));
+      }
+    };
+    const boundedClient = { query: boundedQuery,
+      release: (error?: boolean | Error) => { if (error) discard = true; } } as unknown as pg.PoolClient;
+    const bounded = { query: boundedQuery, connect: async () => boundedClient } as unknown as pg.Pool;
+    try { return await operation(bounded); }
+    finally {
+      try { await client.query('ROLLBACK'); await client.query('RESET statement_timeout');
+        await client.query('RESET lock_timeout'); }
+      catch { discard = true; }
+      client.release(discard);
+      console.info(JSON.stringify({ label, elapsedMs: Date.now() - started }));
+    }
+  }
+
+  async function seedScaleHistory(bounded: pg.Pool, value: Awaited<ReturnType<typeof fixture>>) {
+    await bounded.query('BEGIN');
+    try {
+      await bounded.query(
+        `INSERT INTO memories(id, scope_id, type, title, body, author_id, source)
+         SELECT gen_random_uuid(), $1, 'context', 'bulk ' || n, 'private ' || n, $2, 'manual'
+           FROM generate_series(1, $3) n`, [value.personal.id, value.target.id, MAX_OFFBOARD_MEMORIES],
+      );
+      await bounded.query(
+        `INSERT INTO audit_log(principal_id, action, scope_id, query, metadata)
+         SELECT $1, 'read', $2, 'bounded secret ' || n, '{}'::jsonb FROM generate_series(1, $3) n`,
+        [value.admin.id, value.personal.id, MAX_OFFBOARD_AFFECTED_ROWS + 1],
+      );
+      await bounded.query('COMMIT');
+    } catch (error) { await bounded.query('ROLLBACK'); throw error; }
+  }
+
   it('previews, atomically redacts the owned scope, preserves shared memory, and retries safely', async () => {
     const value = await fixture();
     const preview = await offboardPrincipal(pool, value.admin, value.target.id, true);
@@ -1307,20 +1360,9 @@ describe('offboarding and erasure', () => {
 
   it('starts a bounded fenced batch when more than the former affected-row cap is selected', async () => {
     const value = await fixture();
-    await pool.query(
-      `INSERT INTO memories
-         (id, scope_id, type, title, body, author_id, source)
-       SELECT gen_random_uuid(), $1, 'context', 'bulk ' || n, 'private ' || n, $2, 'manual'
-         FROM generate_series(1, $3) n`,
-      [value.personal.id, value.target.id, MAX_OFFBOARD_MEMORIES],
-    );
-    await pool.query(
-      `INSERT INTO audit_log (principal_id, action, scope_id, query, metadata)
-       SELECT $1, 'read', $2, 'bounded secret', '{}'::jsonb
-         FROM generate_series(1, $3)`,
-      [value.admin.id, value.personal.id, MAX_OFFBOARD_AFFECTED_ROWS + 1],
-    );
-    const preview = await offboardPrincipal(pool, value.admin, value.target.id, true);
+    await boundedScaleDiagnostic('offboarding former-cap', 45_000, async (bounded) => {
+    await seedScaleHistory(bounded, value);
+    const preview = await offboardPrincipal(bounded, value.admin, value.target.id, true);
     expect(preview.memories).toBe(DEFAULT_OFFBOARD_BATCH_SIZE);
     expect(preview.auditRows).toBe(DEFAULT_OFFBOARD_BATCH_SIZE);
     expect(preview.countEvidence).toMatchObject({
@@ -1328,7 +1370,7 @@ describe('offboarding and erasure', () => {
       limit: DEFAULT_OFFBOARD_BATCH_SIZE,
       truncated: expect.arrayContaining(['memories', 'auditRows']),
     });
-    const first = await offboardPrincipal(pool, value.admin, value.target.id, { batchSize: 10 });
+    const first = await offboardPrincipal(bounded, value.admin, value.target.id, { batchSize: 10 });
     expect(first).toMatchObject({ complete: false, progress: { memoriesProcessed: 10 } });
     expect(first.progress.auditRowsProcessed).toBeGreaterThan(0);
     expect(first.progress.auditRowsProcessed).toBeLessThanOrEqual(10);
@@ -1340,7 +1382,8 @@ describe('offboarding and erasure', () => {
       `SELECT count(*)::int AS count FROM memories
         WHERE scope_id = $1 AND title = '[erased]'`, [value.personal.id],
     )).rows[0].count).toBe(10);
-  });
+    });
+  }, 60_000);
 
   it('preserves UUID-only administrative audit integrity for the departing actor', async () => {
     const value = await fixture();
@@ -1654,25 +1697,18 @@ describe('offboarding and erasure', () => {
 
   it('truthfully completes more than 10k memories and 50k audits within each batch cap', async () => {
     const value = await fixture();
-    await pool.query(
-      `INSERT INTO memories (id, scope_id, type, title, body, author_id, source)
-       SELECT gen_random_uuid(), $1, 'context', 'bulk ' || n, 'private ' || n, $2, 'manual'
-         FROM generate_series(1, $3) n`,
-      [value.personal.id, value.target.id, MAX_OFFBOARD_MEMORIES],
-    );
-    await pool.query(
-      `INSERT INTO audit_log (principal_id, action, scope_id, query, metadata)
-       SELECT $1, 'read', $2, 'bounded secret ' || n, '{}'::jsonb
-         FROM generate_series(1, $3) n`,
-      [value.admin.id, value.personal.id, MAX_OFFBOARD_AFFECTED_ROWS + 1],
-    );
+    await boundedScaleDiagnostic('offboarding full-scale', 100_000, async (bounded) => {
+    await seedScaleHistory(bounded, value);
     let priorMemories = 0;
     let priorAudits = 0;
     let result;
     for (let attempt = 0; attempt < 40; attempt += 1) {
-      result = await offboardPrincipal(pool, value.admin, value.target.id, {
+      const batchStarted = Date.now();
+      result = await offboardPrincipal(bounded, value.admin, value.target.id, {
         confirmationScopeId: value.personal.id, batchSize: 5_000,
       });
+      console.info(JSON.stringify({ label: 'offboarding full-scale batch', attempt,
+        elapsedMs: Date.now() - batchStarted, complete: result.complete, progress: result.progress }));
       expect(result.progress.memoriesProcessed - priorMemories).toBeLessThanOrEqual(5_000);
       expect(result.progress.auditRowsProcessed - priorAudits).toBeLessThanOrEqual(5_000);
       priorMemories = result.progress.memoriesProcessed;
@@ -1688,6 +1724,7 @@ describe('offboarding and erasure', () => {
       `SELECT EXISTS (SELECT 1 FROM audit_log WHERE scope_id = $1 AND query IS NOT NULL) AS dirty`,
       [value.personal.id],
     )).rows[0].dirty).toBe(false);
+    });
   }, 120_000);
 
   it('does not select unrelated audit metadata merely because it contains a common scope name', async () => {
