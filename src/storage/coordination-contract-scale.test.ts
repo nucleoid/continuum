@@ -40,14 +40,61 @@ describe('coordination contract scale and recovery', () => {
     await seedPrincipals();
     await pool.query(`INSERT INTO coordination_principal_usage(principal_id)
       SELECT id FROM principals WHERE external_id LIKE 'scale-%';
-      ANALYZE coordination_principal_usage`);
+      INSERT INTO coordination_principal_privacy_progress(principal_id,detached_principal_id,privacy_version)
+      SELECT id,'00000000-0000-4000-8000-000000000012'::uuid,2
+      FROM principals WHERE external_id LIKE 'scale-%';
+      ANALYZE principals; ANALYZE coordination_principal_usage; ANALYZE coordination_principal_privacy_progress`);
     const client = await pool.connect();
     try {
       await client.query("UPDATE coordination_contract_backfill_state SET phase='usage',principal_cursor=$1", [uuid(49_000)]);
-      const buffers = await plan(client, 'SELECT continuum_backfill_coordination_contract($1)', [1]);
+      const coldBuffers = await plan(client, 'SELECT continuum_backfill_coordination_contract($1)', [1]);
       expect((await client.query('SELECT principal_cursor FROM coordination_contract_backfill_state')).rows[0].principal_cursor)
         .toBe(uuid(49_001));
-      expect(buffers).toBeLessThan(400);
+      // The first call includes function/trigger/catalog preparation. The
+      // observed cold call was 526 blocks after adding legacy progress repair;
+      // retain the 400 warm budget and prove cursor depth adds no prefix scan.
+      const definition=(await client.query(`SELECT pg_catalog.pg_get_functiondef(
+        'continuum_backfill_coordination_contract(integer)'::pg_catalog.regprocedure) AS definition`)).rows[0].definition as string;
+      const usage=definition.match(/EXECUTE \$usage\$([\s\S]*?)\$usage\$ INTO/)?.[1];
+      if(!usage) throw new Error('installed usage backfill SQL unavailable for plan proof');
+      const candidateSql=usage.split(/,\s*reopened AS \(/)[0]+' SELECT principal_id FROM candidates';
+      await client.query(`PREPARE contract_usage_candidates(uuid,integer) AS ${candidateSql}`);
+      const candidatePlans=[];
+      for(const cursor of [10,49_000]) {
+        const explained=await client.query(`EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON)
+          EXECUTE contract_usage_candidates('${uuid(cursor)}'::uuid,1)`);
+        const root=explained.rows[0]['QUERY PLAN'][0].Plan;
+        const nodes:Record<string,unknown>[]=[];
+        const visit=(node:Record<string,unknown>)=>{
+          nodes.push(node);for(const child of (node.Plans??[]) as Record<string,unknown>[]) visit(child);
+        };visit(root);
+        console.log('installed usage candidate plan',{cursor,indexes:nodes.filter(node=>node['Relation Name']).map(node=>({
+          relation:node['Relation Name'],index:node['Index Name'],condition:node['Index Cond'],
+          rows:node['Actual Rows'],removed:node['Rows Removed by Filter'],
+        }))});
+        for(const relation of ['coordination_principal_usage','coordination_principal_privacy_progress']) {
+          const seek=nodes.find(node=>node['Relation Name']===relation&&String(node['Index Name']).endsWith('_pkey'));
+          expect(seek,`${relation} primary-key seek at cursor${cursor}`).toBeDefined();
+          expect(String(seek?.['Index Cond'])).toContain('principal_id >=');
+          expect(Number(seek?.['Rows Removed by Filter']??0)).toBeLessThanOrEqual(1);
+          expect(Number(seek?.['Actual Rows']??0)).toBeLessThanOrEqual(1);
+        }
+        candidatePlans.push(Number(root['Shared Hit Blocks']??0)+Number(root['Shared Read Blocks']??0));
+      }
+      await client.query('DEALLOCATE contract_usage_candidates');
+      const warm=[];
+      for(const cursor of [10,49_000]) {
+        await client.query("UPDATE coordination_contract_backfill_state SET phase='usage',principal_cursor=$1",[uuid(cursor)]);
+        warm.push(await plan(client,'SELECT continuum_backfill_coordination_contract($1)',[1]));
+        expect((await client.query('SELECT principal_cursor FROM coordination_contract_backfill_state')).rows[0].principal_cursor)
+          .toBe(uuid(cursor+1));
+      }
+      console.log('usage backfill buffer proof',{coldBuffers,candidatePlans,warm});
+      expect(coldBuffers).toBeLessThan(800);
+      expect(Math.max(...candidatePlans)).toBeLessThan(50);
+      expect(candidatePlans[1]).toBeLessThanOrEqual(candidatePlans[0]+8);
+      expect(Math.max(...warm)).toBeLessThan(400);
+      expect(warm[1]).toBeLessThanOrEqual(warm[0]+32);
     } finally { await client.query('RESET plan_cache_mode'); client.release(); }
   }, 120_000);
 

@@ -307,7 +307,7 @@ describe('runMigrations', () => {
     const files = (await readdir(join(process.cwd(), 'migrations')))
       .filter((name) => name.endsWith('.sql'))
       .sort();
-    expect(files.slice(-28)).toEqual([
+    expect(files.filter((name) => Number(name.slice(0,4)) >= 54 && Number(name.slice(0,4)) <= 82)).toEqual([
       '0054_coordination_leases.sql',
       '0055_coordination_review_remediation.sql',
       '0056_coordination_final_remediation.sql',
@@ -336,6 +336,7 @@ describe('runMigrations', () => {
       '0079_coordination_upgrade_scale_remediation.sql',
       '0080_pgvector_provider_grants.sql',
       '0081_coordination_public_contract.sql',
+      '0082_coordination_linkable_audit_v7_index.sql',
     ]);
     const migration = await readFile(
       join(process.cwd(), 'migrations/0054_coordination_leases.sql'),
@@ -844,7 +845,7 @@ describe('runMigrations', () => {
         $$;
       `);
       const applied = await runMigrations(pool, join(process.cwd(), 'migrations'));
-      expect(applied.slice(-50).map((migration) => migration.name)).toEqual([
+      expect(applied.filter((migration) => Number(migration.name.slice(0,4)) >= 32 && Number(migration.name.slice(0,4)) <= 82).map((migration) => migration.name)).toEqual([
         '0032_offboarding_round7_compatibility.sql',
         '0033_offboarding_bounded_selectors.sql',
         '0034_offboarding_completion_invariants.sql',
@@ -895,6 +896,7 @@ describe('runMigrations', () => {
         '0079_coordination_upgrade_scale_remediation.sql',
         '0080_pgvector_provider_grants.sql',
         '0081_coordination_public_contract.sql',
+        '0082_coordination_linkable_audit_v7_index.sql',
       ]);
       expect((await pool.query(
         `SELECT disabled_at IS NOT NULL AS disabled FROM principals
@@ -1124,50 +1126,7 @@ describe('runMigrations', () => {
     directories.push(directory);
     const source = new URL('../../migrations/', import.meta.url);
     const files = (await readdir(source)).filter((file) => file.endsWith('.sql')).sort();
-    for (const file of files.filter((name) =>
-      name !== '0039_offboarding_completion_state.sql'
-      && name !== '0040_offboarding_post_completion_integrity.sql'
-      && name !== '0041_offboarding_completion_trust.sql'
-      && name !== '0042_offboarding_final_remediation.sql'
-      && name !== '0043_audit_retention_selection_order.sql'
-      && name !== '0044_offboarding_restart_evidence.sql'
-      && name !== '0045_offboarding_trust_boundary.sql'
-      && name !== '0046_offboarding_authority_remediation.sql'
-      && name !== '0047_offboarding_role_boundary.sql'
-      && name !== '0048_offboarding_independent_review.sql'
-      && name !== '0049_offboarding_review_remediation.sql'
-      && name !== '0050_offboarding_startup_verification_fix.sql'
-      && name !== '0051_offboarding_security_contract.sql'
-      && name !== '0052_offboarding_review_repair.sql'
-      && name !== '0053_offboarding_restore_contract.sql'
-      && name !== '0054_coordination_leases.sql'
-      && name !== '0055_coordination_review_remediation.sql'
-      && name !== '0056_coordination_final_remediation.sql'
-      && name !== '0057_coordination_privacy_race_remediation.sql'
-      && name !== '0058_coordination_online_prep.sql'
-      && name !== '0059_coordination_bounded_privacy.sql'
-      && name !== '0060_coordination_online_finish.sql'
-      && name !== '0061_coordination_forward_security_repair.sql'
-      && name !== '0062_coordination_forward_online_finish.sql'
-      && name !== '0063_coordination_final_privacy_repair.sql'
-      && name !== '0064_coordination_final_online_indexes.sql'
-      && name !== '0065_coordination_review_remediation.sql'
-      && name !== '0066_coordination_upgrade_privacy_repair.sql'
-      && name !== '0067_coordination_rollout_repair.sql'
-      && name !== '0068_coordination_production_repair.sql'
-      && name !== '0069_coordination_independent_review.sql'
-      && name !== '0070_coordination_linkable_audit_index.sql'
-      && name !== '0071_coordination_review_completion.sql'
-      && name !== '0072_coordination_final_review_remediation.sql'
-      && name !== '0073_coordination_bounded_discovery_and_locking.sql'
-      && name !== '0074_coordination_compatibility_and_upgrade_repair.sql'
-      && name !== '0075_coordination_online_repair_finish.sql'
-      && name !== '0076_coordination_review_2_remediation.sql'
-      && name !== '0077_coordination_review_2_online_finish.sql'
-      && name !== '0078_coordination_upgrade_scale_indexes.sql'
-      && name !== '0079_coordination_upgrade_scale_remediation.sql'
-      && name !== '0080_pgvector_provider_grants.sql'
-      && name !== '0081_coordination_public_contract.sql')) {
+    for (const file of files.filter((name) => Number(name.slice(0,4)) <= 38)) {
       if (file === '0038_offboarding_search_path_hardening.sql') {
         await copyFile(
           new URL(
