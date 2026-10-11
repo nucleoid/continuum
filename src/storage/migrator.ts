@@ -582,6 +582,7 @@ export async function runMigrations(
   let runFailed = false;
   let runError: unknown;
   let originalSearchPath: string | undefined;
+  let callerSearchPath: string | undefined;
   let applicationSchema: string | undefined;
   let migrationLedgerCreated = false;
   let executionLedgerCreated = false;
@@ -593,7 +594,7 @@ export async function runMigrations(
     if (originalSearchPath === undefined) return;
     const path = originalSearchPath;
     await client.query(
-      `SELECT set_config('search_path', $1, FALSE)`,
+      `SELECT pg_catalog.set_config('search_path', $1, FALSE)`,
       [path],
     );
     originalSearchPath = undefined;
@@ -605,7 +606,7 @@ export async function runMigrations(
     // transaction, producing a lock cycle. Poll without retaining a snapshot.
     while (!lockAcquired) {
       const lockResult = await client.query<{ locked: boolean }>(
-        'SELECT pg_try_advisory_lock($1::bigint) AS locked',
+        'SELECT pg_catalog.pg_try_advisory_lock($1::bigint) AS locked',
         [CONTINUUM_MIGRATION_LOCK_ID],
       );
       lockAcquired = lockResult.rows[0]?.locked === true;
@@ -635,30 +636,30 @@ export async function runMigrations(
         unsafeCreate: boolean;
         userSchemaExists: boolean;
       }>(`
-        SELECT current_setting('search_path') AS path,
+        SELECT pg_catalog.current_setting('search_path') AS path,
                namespace.nspname AS schema,
                current_user AS "currentUser",
                COALESCE(
                  namespace.nspowner = role.oid
-                   OR (namespace.nspowner = 'pg_database_owner'::regrole
+                   OR (namespace.nspowner = 'pg_database_owner'::pg_catalog.regrole
                        AND role.oid = (
-                         SELECT database.datdba FROM pg_database database
-                          WHERE database.datname = current_database()))
+                         SELECT database.datdba FROM pg_catalog.pg_database database
+                          WHERE database.datname = pg_catalog.current_database()))
                    OR (NOT role.rolsuper
-                       AND pg_has_role(role.oid, namespace.nspowner, 'USAGE')),
+                       AND pg_catalog.pg_has_role(role.oid, namespace.nspowner, 'USAGE')),
                  FALSE
                ) AS owned,
                COALESCE(EXISTS (
                  SELECT 1
-                   FROM aclexplode(COALESCE(
+                   FROM pg_catalog.aclexplode(COALESCE(
                      namespace.nspacl,
-                     acldefault('n', namespace.nspowner))) privilege
-                  WHERE upper(privilege.privilege_type) = 'CREATE'
+                     pg_catalog.acldefault('n', namespace.nspowner))) privilege
+                  WHERE pg_catalog.upper(privilege.privilege_type) = 'CREATE'
                     AND privilege.grantee <> namespace.nspowner
                ), FALSE) AS "unsafeCreate",
-               to_regnamespace(current_user) IS NOT NULL AS "userSchemaExists"
-          FROM pg_roles role
-          LEFT JOIN pg_namespace namespace ON namespace.nspname = current_schema()
+               pg_catalog.to_regnamespace(current_user) IS NOT NULL AS "userSchemaExists"
+          FROM pg_catalog.pg_roles role
+          LEFT JOIN pg_catalog.pg_namespace namespace ON namespace.nspname = pg_catalog.current_schema()
          WHERE role.rolname = current_user
       `);
       applicationSchema = pathState.rows[0]?.schema ?? undefined;
@@ -682,7 +683,7 @@ export async function runMigrations(
         );
       }
       const ledgerState = await client.query<{ exists: boolean }>(
-        `SELECT to_regclass(format('%I._continuum_migrations', $1::text)) IS NOT NULL AS exists`,
+        `SELECT pg_catalog.to_regclass(pg_catalog.format('%I._continuum_migrations', $1::text)) IS NOT NULL AS exists`,
         [applicationSchema],
       );
       ledgerAlreadyExisted = ledgerState.rows[0]?.exists === true;
@@ -693,6 +694,12 @@ export async function runMigrations(
           + 'Revoke CREATE as the application schema owner before retrying',
         );
       }
+
+      // Caller suffixes must never resolve ordinary migration functions or
+      // types. Keep the validated provider overlay limited to 0001 below.
+      callerSearchPath = pathState.rows[0]?.path;
+      await client.query('SELECT pg_catalog.set_config(\'search_path\', $1, FALSE)',
+        [quoteIdentifier(applicationSchema)]);
 
       if (!ledgerAlreadyExisted) {
         const provider = await client.query<{
@@ -1114,7 +1121,7 @@ export async function runMigrations(
         && files.includes('0061_coordination_forward_security_repair.sql');
       const adaptiveCleanup = online && !deferCleanup
         && canonicalSql.split('\n').some((line) => line.trim() === BACKFILL_COORDINATION_REPAIR + ';');
-      const variant = file === '0073_coordination_bounded_discovery_and_locking.sql'
+      const baseVariant = file === '0073_coordination_bounded_discovery_and_locking.sql'
         ? '0073-online-backfill-deferred-v1'
         : file === '0074_coordination_compatibility_and_upgrade_repair.sql'
           ? '0074-partial-upgrade-discovery-crlf-v1'
@@ -1123,6 +1130,7 @@ export async function runMigrations(
             : online ? (deferCleanup ? 'online-directives-deferred-cleanup-v1'
               : adaptiveCleanup ? 'online-cleanup-adaptive-max1000-lock1s-statement5s-progress-v3' : 'online-directives-v1')
               : earlyTransactional ? 'canonical-lf-lock1s-statement30s-v2' : 'canonical-lf-v1';
+      const variant = applicationSchema ? `${baseVariant}-app-path-v1` : baseVariant;
       const execution = new MigrationExecution(file, online ? 'file-online' : 'file',
         variant, sqlHash(canonicalSql), sqlHash(sql));
       let transactionOpen = false;
@@ -1253,12 +1261,20 @@ export async function runMigrations(
   if (lockAcquired) {
     try {
       const unlockResult = await client.query<{ unlocked: boolean }>(
-        'SELECT pg_advisory_unlock($1::bigint) AS unlocked',
+        'SELECT pg_catalog.pg_advisory_unlock($1::bigint) AS unlocked',
         [CONTINUUM_MIGRATION_LOCK_ID],
       );
       if (unlockResult.rows[0]?.unlocked !== true) {
         throw new Error('Continuum migration advisory lock was not held');
       }
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+
+  if (callerSearchPath !== undefined) {
+    try {
+      await client.query('SELECT pg_catalog.set_config(\'search_path\', $1, FALSE)', [callerSearchPath]);
     } catch (error) {
       cleanupErrors.push(error);
     }
