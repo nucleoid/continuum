@@ -177,21 +177,42 @@ async function roleUpgradeAcceptance(review?: 'poison' | 'null') {
       [target.id, target.id, personal.id])).rejects.toMatchObject({ code: 'P0001',
         message: expect.stringMatching(/DB-bound trusted approve identity|role-name\/OID-bound trusted approve identity/i) });
     if (review === 'poison') {
+      await app.query(`SELECT pg_catalog.set_config('continuum.promotion_privacy_actor',$1::text,FALSE),
+        pg_catalog.set_config('continuum.promotion_privacy_scope',$2::text,FALSE)`, [administrator, personal.id]);
       await expect(app.query(`UPDATE promotion_event_deliveries SET state='privacy_cancelled',
         last_error='private poisoning payload',lease_owner='unstarted-poison',lease_expires_at=pg_catalog.clock_timestamp()+interval '1 minute'
         WHERE event_id=$1::uuid`, [privatePromotion.promotionEvent.eventId])).rejects.toMatchObject({ code: '23514' });
+      // Trusted historical import, with ordinary triggers still enabled.
+      // The real OP capability must repair this dirty terminal shape.
+      await owner.query(`INSERT INTO promotion_event_deliveries(event_id,webhook_id,state,last_error,lease_owner,lease_expires_at)
+        VALUES($1::uuid,'historical-dirty','privacy_cancelled','private historical error','historical-owner',pg_catalog.clock_timestamp()+interval '1 minute')`,
+        [privatePromotion.promotionEvent.eventId]);
     }
-    let privacy = await offboardPrincipal(operator, admin, target.id, { confirmationScopeId: personal.id });
+    let privacy = await offboardPrincipal(operator, admin, target.id, { confirmationScopeId: personal.id,
+      ...(review === 'poison' ? { batchSize: 1 } : {}) });
+    if (review === 'poison') {
+      const bounded = (await operator.query('SELECT continuum_operator_scrub_promotion_scope($1::uuid,$2::uuid,$3::uuid,1::integer) AS privacy',
+        [administrator, target.id, personal.id])).rows[0].privacy;
+      expect(bounded.processed).toBeGreaterThan(0);
+      expect(bounded.processed).toBeLessThanOrEqual(2);
+    }
     for (let attempt = 0; !privacy.complete && attempt < 5; attempt += 1) {
       privacy = await offboardPrincipal(operator, admin, target.id, { confirmationScopeId: personal.id });
     }
     expect(privacy.complete).toBe(true);
+    if (review === 'poison') expect((await owner.query(`SELECT state,last_error,lease_owner,lease_expires_at FROM promotion_event_deliveries
+      WHERE event_id=$1::uuid AND webhook_id='historical-dirty'`, [privatePromotion.promotionEvent.eventId])).rows)
+      .toEqual([{ state: 'privacy_cancelled', last_error: null, lease_owner: null, lease_expires_at: null }]);
     if (review === 'null') {
       const before = (await owner.query('SELECT * FROM promotion_event_deliveries WHERE event_id=$1::uuid', [privatePromotion.promotionEvent.eventId])).rows;
+      const beforeEvents = (await owner.query('SELECT * FROM promotion_events ORDER BY id')).rows;
+      const beforeAudits = (await owner.query('SELECT count(*)::int AS count FROM audit_log')).rows;
       for (const limit of [0, 1001, null]) {
         await expect(operator.query('SELECT continuum_operator_scrub_promotion_scope($1::uuid,$2::uuid,$3::uuid,$4::integer)',
           [administrator, target.id, personal.id, limit])).rejects.toMatchObject({ code: '23514' });
         expect((await owner.query('SELECT * FROM promotion_event_deliveries WHERE event_id=$1::uuid', [privatePromotion.promotionEvent.eventId])).rows).toEqual(before);
+        expect((await owner.query('SELECT * FROM promotion_events ORDER BY id')).rows).toEqual(beforeEvents);
+        expect((await owner.query('SELECT count(*)::int AS count FROM audit_log')).rows).toEqual(beforeAudits);
       }
     }
     expect((await owner.query('SELECT destination_scope_name FROM promotion_events WHERE id=$1::uuid',
