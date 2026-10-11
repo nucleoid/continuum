@@ -189,7 +189,8 @@ BEGIN
       FROM candidates WHERE usage.principal_id = candidates.principal_id RETURNING usage.principal_id
     ) SELECT count(*)::int, (array_agg(principal_id ORDER BY principal_id DESC))[1] FROM updated
     $usage$ INTO selected_count,next_id USING progress.principal_cursor,batch_limit;
-    UPDATE coordination_contract_backfill_state SET principal_cursor = COALESCE(next_id,principal_cursor),
+    UPDATE coordination_contract_backfill_state SET principal_cursor = CASE WHEN selected_count<batch_limit THEN NULL
+      ELSE COALESCE(next_id,principal_cursor) END,
       phase = CASE WHEN selected_count < batch_limit THEN 'floors' ELSE phase END WHERE singleton;
   ELSIF progress.phase = 'floors' THEN
     -- Surviving 0055-era renamed keys may have no privacy progress or floor.
@@ -242,7 +243,8 @@ BEGIN
       FROM candidates WHERE usage.scope_id = candidates.scope_id RETURNING usage.scope_id
     ) SELECT count(*)::int, (array_agg(scope_id ORDER BY scope_id DESC))[1] FROM updated
     $scopes$ INTO selected_count,next_id USING progress.scope_cursor,batch_limit;
-    UPDATE coordination_contract_backfill_state SET scope_cursor = COALESCE(next_id,scope_cursor),
+    UPDATE coordination_contract_backfill_state SET scope_cursor = CASE WHEN selected_count<batch_limit THEN NULL
+      ELSE COALESCE(next_id,scope_cursor) END,
       phase = CASE WHEN selected_count < batch_limit THEN 'receipts' ELSE phase END WHERE singleton;
   ELSE
     EXECUTE $receipts$ WITH batch AS MATERIALIZED (
@@ -277,9 +279,12 @@ BEGIN
       progress.receipt_request_cursor,batch_limit;
     selected_count:=item.selected_count;
     UPDATE coordination_contract_backfill_state SET
-      receipt_principal_cursor = COALESCE(item.principal_id,receipt_principal_cursor),
-      receipt_operation_cursor = COALESCE(item.operation,receipt_operation_cursor),
-      receipt_request_cursor = COALESCE(item.request_id,receipt_request_cursor),
+      receipt_principal_cursor = CASE WHEN selected_count<batch_limit THEN NULL
+        ELSE COALESCE(item.principal_id,receipt_principal_cursor) END,
+      receipt_operation_cursor = CASE WHEN selected_count<batch_limit THEN NULL
+        ELSE COALESCE(item.operation,receipt_operation_cursor) END,
+      receipt_request_cursor = CASE WHEN selected_count<batch_limit THEN NULL
+        ELSE COALESCE(item.request_id,receipt_request_cursor) END,
       phase = CASE WHEN selected_count < batch_limit THEN 'complete' ELSE phase END WHERE singleton;
   END IF;
   UPDATE coordination_contract_backfill_state SET updated_at=clock_timestamp() WHERE singleton;
