@@ -208,7 +208,7 @@ describe('coordination issue 7 exact-head remediation', () => {
     const coordination = await readFile(join(root, 'docs/coordination.md'), 'utf8');
     const offboarding = await readFile(join(root, 'docs/offboarding.md'), 'utf8');
     expect(coordination).toMatch(
-      /grant-profile\s+convergence before enabling Entra-sourced coordination or\s+offboarding traffic/i,
+      /exact application\/operator\/sync grant convergence before enabling coordination\s+mutations or offboarding on any current node/i,
     );
     expect(offboarding).toMatch(
       /grant-profile\s+convergence before enabling Entra-sourced coordination or\s+offboarding traffic/i,

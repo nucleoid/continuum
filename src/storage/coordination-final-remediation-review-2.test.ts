@@ -119,7 +119,7 @@ describe('issue 7 final remediation review 2 contract', () => {
   it('limits CRLF repair to owned Continuum non-extension functions transactionally', async () => {
     const migrator = await readFile(join(root, 'src/storage/migrator.ts'), 'utf8');
     expect(migrator).toMatch(/proname LIKE ['"]continuum\\_%['"]/i);
-    expect(migrator).toMatch(/proowner\s*=\s*current_user::regrole/i);
+    expect(migrator).toMatch(/proowner\s*=\s*\(SELECT oid FROM pg_catalog\.pg_roles WHERE rolname=current_user\)/i);
     expect(migrator).toMatch(/pg_extension[\s\S]*deptype\s*=\s*['"]e['"]/i);
     expect(migrator).toMatch(/BEGIN[\s\S]*repairStoredCrLfFunctions[\s\S]*COMMIT/i);
     expect(migrator).not.toMatch(/replaceAll\(['"]\\r['"],\s*['"]\\n['"]\)/);
