@@ -73,4 +73,51 @@ describe('enrichment admission review', () => {
     } finally { done.resolve([{ extra: true }]); await vi.advanceTimersByTimeAsync(0); }
     expect(outstanding).toBe(0);
   });
+  it('skips oversized optional input before cloning while preserving the core result', async () => {
+    const registry = new RetrievalEnricherRegistry();
+    const enrich = vi.fn(async () => [{ extra: true }]);
+    registry.register({ id: 'oversized-input', enrich });
+    const input = [result()]; input[0].memory.body = 'x'.repeat(2 * 1024 * 1024);
+    const cloning = vi.spyOn(globalThis, 'structuredClone');
+    const warn = vi.fn();
+    try {
+      const output = await applyRetrievalEnrichers(input, input[0].memory.authorId, registry,
+        { timeoutMs: 5, maxBytes: 1024, logger: { warn } });
+      expect(output).toBe(input);
+      expect(enrich).not.toHaveBeenCalled();
+      expect(cloning.mock.calls.some((args) => args[0] === input)).toBe(false);
+      expect(warn).toHaveBeenCalledWith({ event: 'retrieval_enricher_failed', enricherId: 'oversized-input', reason: 'oversized_input' });
+    } finally { cloning.mockRestore(); }
+  });
+
+  it('bounds retained snapshot body bytes across distinct timed-out calls and releases on settlement', async () => {
+    const done = Promise.withResolvers<readonly { extra: boolean }[]>();
+    let retainedBodyBytes = 0;
+    let peakBodyBytes = 0;
+    try {
+      for (let id = 0; id < 24; id += 1) {
+        const registry = new RetrievalEnricherRegistry();
+        registry.register({ id: `byte-budget-${id}`, enrich: async (input) => {
+          const bodyBytes = input[0].memory.body.length * 2;
+          retainedBodyBytes += bodyBytes; peakBodyBytes = Math.max(peakBodyBytes, retainedBodyBytes);
+          try { return await done.promise; } finally { retainedBodyBytes -= bodyBytes; }
+        } });
+        const input = [result()]; input[0].memory.body = 'x'.repeat(384 * 1024);
+        const pending = applyRetrievalEnrichers(input, input[0].memory.authorId, registry,
+          { timeoutMs: 5, maxBytes: 1024, logger: { warn: vi.fn() } });
+        await vi.advanceTimersByTimeAsync(5); expect(await pending).toBe(input);
+      }
+      expect(peakBodyBytes).toBeGreaterThan(0);
+      expect(peakBodyBytes).toBeLessThanOrEqual(8 * 1024 * 1024);
+    } finally { done.resolve([{ extra: true }]); await vi.advanceTimersByTimeAsync(0); }
+    expect(retainedBodyBytes).toBe(0);
+    const registry = new RetrievalEnricherRegistry();
+    const enrich = vi.fn(async () => [{ restored: true }]);
+    registry.register({ id: 'after-byte-release', enrich });
+    const input = [result()]; input[0].memory.body = 'x'.repeat(384 * 1024);
+    expect((await applyRetrievalEnrichers(input, input[0].memory.authorId, registry,
+      { timeoutMs: 5, maxBytes: 1024, logger: { warn: vi.fn() } }))[0].enrichments?.['after-byte-release']).toEqual({ restored: true });
+    expect(enrich).toHaveBeenCalledOnce();
+  });
+
 });
