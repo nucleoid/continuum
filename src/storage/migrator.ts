@@ -100,6 +100,7 @@ const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
     'f9ab8aacaa5bd70bb251bea6a0323a4002dd370949e743b149687301095fc204'],
   ['0088_embedding_provider_scan_index_rebuild.sql',
     'e0f21f1cfa4a81fbc7c8fbe65e06ae31157e499dbf562b482b87099185e079e2'],
+  ['0089_promotion_outbox.sql', '9ccd899d6ea76e151cda0fd719dfc041e940d57a7aa3be0d03795d16fad100cd'],
 ]);
 const FORWARD_MIGRATION_REQUIREMENTS = new Map([
   ['0084_provider_embeddings_backfill.sql', '0083_tag_vocabularies.sql'],
@@ -107,6 +108,7 @@ const FORWARD_MIGRATION_REQUIREMENTS = new Map([
   ['0086_embedding_backfill_failure_disposition.sql', '0085_embedding_backfill_failures.sql'],
   ['0087_embedding_provider_scan_index.sql', '0086_embedding_backfill_failure_disposition.sql'],
   ['0088_embedding_provider_scan_index_rebuild.sql', '0087_embedding_provider_scan_index.sql'],
+  ['0089_promotion_outbox.sql', '0088_embedding_provider_scan_index_rebuild.sql'],
   ['0053_offboarding_restore_contract.sql', '0052_offboarding_review_repair.sql'],
   ['0056_coordination_final_remediation.sql', '0055_coordination_review_remediation.sql'],
   ['0057_coordination_privacy_race_remediation.sql',

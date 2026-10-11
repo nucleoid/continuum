@@ -62,6 +62,14 @@ import {
   releaseLease,
   renewLease,
 } from '../services/coordination.js';
+import {
+  enrichmentConfigFromEnv,
+  RetrievalEnricherRegistry,
+  type EnrichmentLogger,
+  type EnrichmentOptions,
+} from '../extensions/retrieval.js';
+import { PromotionWebhookRegistry } from '../extensions/promotion.js';
+import { defaultExtensionRegistries } from '../extensions/index.js';
 
 const SCOPE_KINDS = ['org', 'team', 'project', 'user', 'role'] as const;
 const MEMORY_TYPES = ['fact', 'decision', 'context', 'playbook', 'relationship'] as const;
@@ -76,6 +84,10 @@ export interface McpDeps {
   now?: () => Date;
   relationThreshold?: number;
   allowedSource?: string;
+  retrievalEnrichers?: RetrievalEnricherRegistry;
+  enrichment?: Omit<EnrichmentOptions, 'logger'>;
+  enrichmentLogger?: EnrichmentLogger;
+  promotionWebhooks?: PromotionWebhookRegistry;
 }
 
 function textResult(text: string): {
@@ -173,6 +185,9 @@ export function buildMcpServer(deps: McpDeps): McpServer {
   const gapConfig = deps.gapConfig ?? gapConfigFromEnv();
   const now = deps.now ?? (() => new Date());
   const errorResult = (error: unknown) => serviceErrorResult(error, logger);
+  const retrievalEnrichers = deps.retrievalEnrichers ?? new RetrievalEnricherRegistry();
+  const enrichment = deps.enrichment ?? enrichmentConfigFromEnv();
+  const promotionWebhooks = deps.promotionWebhooks ?? new PromotionWebhookRegistry();
 
   const server = new McpServer({
     name: 'continuum',
@@ -408,6 +423,10 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           args,
           { transport: 'mcp' },
           logger,
+          {
+            registry: retrievalEnrichers,
+            options: { ...enrichment, logger: deps.enrichmentLogger },
+          },
         );
         return {
           ...jsonResult(results.map((r) => ({
@@ -421,6 +440,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
             source_ref: r.memory.sourceRef,
             ...(r.memory.supersedesId ? { supersedes_id: r.memory.supersedesId } : {}),
             created_at: r.memory.createdAt,
+            ...(r.enrichments ? { enrichments: r.enrichments } : {}),
           }))),
           _meta: { diagnostics },
         };
@@ -605,6 +625,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           args.memory_id,
           { kind: args.target_scope_kind as ScopeKind, name: args.target_scope_name },
           { transport: 'mcp' },
+          promotionWebhooks.ids(),
         );
         return jsonResult({
           source_id: source.id,
@@ -881,6 +902,7 @@ async function main(): Promise<void> {
   }
   const embeddingProvider = makeEmbeddingRouterFromEnv();
   await warnOnMissingEmbeddingRoutingScopes(pool, embeddingProvider);
+  const extensions = defaultExtensionRegistries();
   const server = buildMcpServer({
     pool,
     embeddingProvider,
@@ -888,6 +910,8 @@ async function main(): Promise<void> {
     reviewHorizonDays: configuredReviewHorizonDays(),
     relationThreshold: relationThresholdFromEnv(),
     allowedSource: authenticated?.allowedSource,
+    retrievalEnrichers: extensions.retrievalEnrichers,
+    promotionWebhooks: extensions.promotionWebhooks,
   });
   const transport = new StdioServerTransport();
   await server.connect(transport);

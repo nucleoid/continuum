@@ -88,6 +88,8 @@ export async function resetData(pool: pg.Pool): Promise<void> {
         coordination_resources,
         ingest_deliveries,
         principal_aliases,
+        promotion_event_deliveries,
+        promotion_events,
         audit_log,
         service_api_keys,
         entra_sync_state,

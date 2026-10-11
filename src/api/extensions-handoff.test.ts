@@ -6,6 +6,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createApp } from './server.js';
 import { buildMcpServer } from './mcp.js';
 import type { RecallResult } from '../types.js';
+import { RetrievalEnricherRegistry } from '../extensions/retrieval.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { createPrincipal } from '../storage/principals.js';
 import { createScope } from '../storage/scopes.js';
@@ -32,10 +33,8 @@ describe('extension handoff current recall contract', () => {
     const enrich = vi.fn(async (results: readonly Readonly<RecallResult>[], context: { principalId: string }) =>
       results.map((result) => ({ principal: context.principalId, reference: result.memory.id })));
     const extension = { id: 'links', enrich };
-    // A structural request adapter keeps this RED checkpoint on existing APIs;
-    // no not-yet-implemented extension module is imported.
-    const registry = { all: () => [extension], ids: () => ['links'],
-      get: (id: string) => id === 'links' ? extension : undefined };
+    const registry = new RetrievalEnricherRegistry();
+    registry.register(extension);
     return { registry, enrich };
   }
 

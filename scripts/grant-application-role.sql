@@ -325,6 +325,11 @@ BEGIN
   IF to_regclass(format('%I.tag_vocabularies',schema_name)) IS NOT NULL THEN
     EXECUTE format('GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE %I.tag_vocabularies TO %I',schema_name,target_role);
   END IF;
+  IF to_regclass(format('%I.promotion_events',schema_name)) IS NOT NULL
+    AND to_regclass(format('%I.promotion_event_deliveries',schema_name)) IS NOT NULL THEN
+    EXECUTE format('GRANT SELECT,INSERT ON TABLE %I.promotion_events TO %I',schema_name,target_role);
+    EXECUTE format('GRANT SELECT,INSERT,UPDATE ON TABLE %I.promotion_event_deliveries TO %I',schema_name,target_role);
+  END IF;
   IF to_regclass(format('%I.embedding_backfill_checkpoints',schema_name)) IS NOT NULL
     AND to_regclass(format('%I.embedding_backfill_failures',schema_name)) IS NOT NULL THEN
     EXECUTE format('GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE %I.embedding_backfill_checkpoints,%I.embedding_backfill_failures TO %I',

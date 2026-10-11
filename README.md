@@ -38,6 +38,7 @@ v0 design in progress. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the schema, 
 - [Audit retention operations](./docs/audit-retention.md)
 - [Memory fetch and browse API](./docs/memory-api.md)
 - [Atomic scoped coordination leases](./docs/coordination.md)
+- [Retrieval and promotion extensions](./docs/extensions.md)
 
 ## CLI quick start
 
