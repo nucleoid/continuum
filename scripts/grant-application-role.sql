@@ -268,6 +268,7 @@ BEGIN
     'continuum_operator_list_coordination_privacy_repairs(uuid,uuid,integer)',
     'continuum_operator_list_coordination_privacy_repairs(uuid,uuid,uuid,integer)',
     'continuum_operator_list_coordination_privacy_repair_page(uuid,uuid,integer)',
+    'continuum_operator_coordination_scope_privacy_state(uuid,uuid)',
     'continuum_operator_offboarding_actual_state_is_erased(uuid,uuid)'
   ] LOOP
     IF to_regprocedure(format('%I.%s', schema_name, signature)) IS NOT NULL THEN
