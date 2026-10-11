@@ -186,6 +186,12 @@ BEGIN
       RAISE EXCEPTION 'provider owner must GRANT USAGE ON SCHEMA % TO % WITH GRANT OPTION before refreshing application grants',
         quote_ident(vector_schema_name),quote_ident((SELECT rolname FROM pg_roles WHERE oid=application_owner_oid));
     END;
+    -- Plain USAGE without grant option makes GRANT warn rather than raise.
+    -- Verify the target's effective access before reporting any profile success.
+    IF NOT has_schema_privilege(target_role_oid,vector_schema_oid,'USAGE') THEN
+      RAISE EXCEPTION 'provider owner must GRANT USAGE ON SCHEMA % TO % WITH GRANT OPTION before refreshing application grants',
+        quote_ident(vector_schema_name),quote_ident((SELECT rolname FROM pg_roles WHERE oid=application_owner_oid));
+    END IF;
   END IF;
   FOR vector_function IN SELECT function.oid,
       function.proowner=application_owner_oid OR EXISTS(
