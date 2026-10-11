@@ -14,7 +14,17 @@ each result. Continuum places each object under
 `result.enrichments[enricherId]`. An enricher cannot replace core fields,
 scores, excerpts, ordering, or another extension's namespace.
 
-All enrichers run concurrently under one request deadline. The default is 250
+Admitted enrichers run concurrently under one request deadline. A pre-aborted
+request invokes none. Per process, at most one unsettled call per enricher ID
+and 16 unsettled calls overall are admitted. Admission checks a conservative
+input-size estimate before cloning: 1 MiB per snapshot and 8 MiB retained across
+snapshots, with finite depth and node limits. These are input accounting limits,
+not measured process memory. An oversized or saturated input fails open to core
+results. Timeout does not free an unsettled extension's slot or retained input;
+actual settlement does, so an abort-ignoring extension cannot accumulate clones
+across requests.
+
+Each admitted call shares the request deadline. The default is 250
 milliseconds and `CONTINUUM_ENRICHER_TIMEOUT_MS` accepts values from 1 through
 5000. The combined serialized output is limited to 16 KiB. Functions, symbols,
 accessors, non-finite numbers, circular values, class instances, excessive
@@ -46,7 +56,7 @@ receive bearer tokens, request headers, or transport objects.
 ## Promotion webhooks
 
 Every committed promotion creates a stable `promotion_events.id`. One delivery
-row is created for each webhook registered at promotion time. Destination
+row is created for each webhook ID in the operator-owned registry at promotion time. Destination
 creation, source update, promotion audit, event creation, and delivery creation
 share one database transaction. A rollback leaves none of them committed.
 
@@ -65,23 +75,33 @@ acknowledgement, so consumers must deduplicate using `event.eventId`. The event
 ID remains unchanged through claims, retries, lease recovery, and manual retry.
 Webhook IDs that are not registered by a running worker remain pending.
 
-Registration is part of the producer contract, not only the worker contract.
-Every REST process (`createApp({ promotionWebhooks })`) and every MCP process
-(`buildMcpServer({ promotionWebhooks })`) that can promote memories must expose
-the same webhook ID set. Workers must use that same set. The stock API and MCP
-entrypoints intentionally create empty registries; a deployment that uses
-extensions must provide a composition entrypoint that registers them before
-constructing either transport or the worker.
+Producer delivery identities are installation-wide. A current manual organization
+administrator using a bound OP role configures them with
+`SELECT continuum_operator_set_promotion_webhook_ids($1::uuid,$2::text[])`.
+The setter accepts at most 1024 valid extension IDs, stores their sorted distinct
+set and writes a mandatory audit record. APP roles cannot configure the registry
+or read its owner-only table directly. SYNC and reporting roles receive no rights.
+Promotion reads the configured IDs under a shared row lock in the same transaction
+as its event. A nonempty local producer registry must match that set or promotion
+returns `CONFLICT` without committing any promotion writes. An empty producer
+registry uses the configured IDs, so stock REST and MCP producers enqueue the same
+deliveries without importing consumer implementations.
 
-A rolling deployment has a deliberate mixed-version gap: the process handling
-the promotion snapshots its currently registered IDs into delivery rows. If an
-old REST or MCP producer accepts a promotion before it knows a newly added ID,
-that webhook gets no row for that event, and a newer worker cannot infer or
-backfill it. Deploy the new registration to all producers, drain old producers,
-and only then allow promotions that require the new webhook. Renaming or
-removing an ID needs the same coordination; rows for removed IDs stay pending
-until a worker with that ID is restored or an operator explicitly resolves
-them.
+Workers still register callback implementations at the composition boundary.
+Every worker replica must use the same expected ID set; a stock empty worker is
+idle and unregistered IDs remain pending. Core does not initialize registration
+from application callbacks. Configure IDs through the operator before enabling
+consumers. Coordinate ID changes and consumer deployment; removing an ID does
+not delete prior pending deliveries, and consumers deduplicate by event ID.
+
+Do not mix old producers or old offboarding runtimes with this release. Older
+binaries can omit delivery rows or complete offboarding without outbox erasure,
+and new workers cannot reconstruct omitted events. Quiesce all producers and
+worker replicas, complete migration 0089, explicitly regrant every APP and OP
+role, configure IDs, then enable the new binaries. Current REST and MCP startup
+checks outbox readiness without repairing or granting it. Rolling back binaries
+requires the same quiescence and an operator assessment of retained outbox data;
+reverting only application code does not restore privacy or producer parity.
 
 Operational events report claims, pending age, attempts, lease recovery,
 success, failure, timeout, dead-letter state, and shutdown lease release. Raw
@@ -128,7 +148,11 @@ active callbacks during the configured grace period. A callback that succeeds
 during that period is durably acknowledged before its lease can be released.
 `CONTINUUM_PROMOTION_SHUTDOWN_WAIT_MS` must be strictly less than
 `CONTINUUM_PROMOTION_LEASE_MS`. This leaves a bounded lease fence after the
-shutdown deadline while callbacks receive abort and the process exits.
+shutdown deadline while callbacks receive abort and the process exits. For REST,
+keep the outer `CONTINUUM_SHUTDOWN_TIMEOUT_MS` above the worker grace if the whole
+grace is required; a shorter outer deadline can end the process and close its pool
+first. Neither deadline forcibly interrupts JavaScript. Abrupt exit can leave a
+lease to expire and a successful callback to be delivered again.
 
 At the grace deadline, the worker signals abort and detaches callbacks that do
 not settle. `stop()` uses the same wall-clock deadline for callback drain,
