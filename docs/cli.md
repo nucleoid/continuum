@@ -191,10 +191,13 @@ same schema, for example `PGOPTIONS='-c search_path=application_data'` with
 in an earlier namespace cannot replace the configured tenant. Library callers
 that omit the optional expected schema retain namespace ownership checks but
 do not receive this configuration anchor.
-migrations in filename order, and exits nonzero on failure. Run it as a trusted
-operator before starting a newly installed application version. Lock acquisition
-is bounded to 30 seconds by default; a timeout is fail-fast deployment failure,
-not permission to start the new binary against a partially upgraded schema.
+
+Run the migrator as a trusted operator before starting a newly installed
+application version. Its deployment-wide advisory lock acquisition polls until
+available and has no built-in whole acquisition deadline. Impose a finite
+external process deadline and treat expiry or any nonzero exit as deployment
+failure. Start the new binary only after all packaged migrations and required
+backfills have completed.
 
 `npm run embed-backfill -- --count` scans candidate IDs and metadata without
 loading memory bodies. Write runs checkpoint `(provider, dim, scope_filter,
