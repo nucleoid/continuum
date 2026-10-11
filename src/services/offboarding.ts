@@ -418,9 +418,11 @@ export async function repairCoordinationPrivacy(
          FROM continuum_coordination_privacy_state($1, $2)`,
       [principalId, scopeId],
     );
+    const ownedBefore = await ownedScopePrivacyState(client, actor.id, scopeId);
+    const ownedRepairPending = ownedBefore.repair_exists && !ownedScopeIsClean(ownedBefore);
     const alreadyComplete = Number(privacy.rows[0]?.privacy_version) >= 3
-      && privacy.rows[0]?.principal_complete === true;
-    if (!candidate.rowCount) {
+      && privacy.rows[0]?.principal_complete === true && !ownedRepairPending;
+    if (!candidate.rowCount && !ownedRepairPending) {
       if (!alreadyComplete) {
         throw new ServiceError('CONFLICT', 'principal has no pending coordination privacy repair');
       }
@@ -430,10 +432,20 @@ export async function repairCoordinationPrivacy(
         progressed: false, blockedUntil: null, reason: null,
       };
     }
-    if (candidate.rows[0].repair_state !== 'disabled_only') {
+    if (candidate.rowCount && candidate.rows[0].repair_state !== 'disabled_only') {
       throw new ServiceError(
         'CONFLICT', 'offboarded principals must resume the confirmed offboarding command',
       );
+    }
+    if (ownedRepairPending) {
+      if (!ownedBefore.pseudonym) {
+        throw new ServiceError('CONFLICT', 'existing owned-scope privacy repair lacks its authorized pseudonym');
+      }
+      // An existing approved scope phase is authority to resume its work.
+      // Mere disablement or an erased-looking scope name is not authority.
+      await client.query('SELECT continuum_operator_pseudonymize_scope_v2($1, $2, $3)', [
+        actor.id, scopeId, ownedBefore.pseudonym,
+      ]);
     }
     const scrub = await client.query<{
       privacy: {
@@ -444,11 +456,14 @@ export async function repairCoordinationPrivacy(
       `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, $4) AS privacy`,
       [actor.id, principalId, scopeId, Math.min(batchSize, 1_000)],
     );
+    const ownedAfter = await ownedScopePrivacyState(client, actor.id, scopeId);
     await client.query('COMMIT');
     return {
       principalId, scopeId, state,
-      complete: scrub.rows[0]?.privacy?.complete === true,
-      progressed: scrub.rows[0]?.privacy?.progressed === true,
+      complete: scrub.rows[0]?.privacy?.complete === true
+        && (!ownedBefore.repair_exists || ownedScopeIsClean(ownedAfter)),
+      progressed: scrub.rows[0]?.privacy?.progressed === true
+        || (ownedRepairPending && ownedScopeProgressed(ownedBefore, ownedAfter)),
       blockedUntil: scrub.rows[0]?.privacy?.blocked_until
         ? new Date(scrub.rows[0].privacy.blocked_until) : null,
       reason: scrub.rows[0]?.privacy?.reason ?? null,
