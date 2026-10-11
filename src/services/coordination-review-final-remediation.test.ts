@@ -129,6 +129,33 @@ describe('coordination final review remediation', () => {
     )).rows[0].count).toBe(0);
   }, 60_000);
 
+  it('contract offboarding review: retains access revocation and reports an owned live lease before resumable cleanup', async () => {
+    const value = await fixture('owned-live-lease-block');
+    const held = await acquireLease(pool, value.target, {
+      scope: `user:${value.owned.name}`, resource: 'owned-held', runId: randomUUID(),
+      requestId: randomUUID(), ttlSeconds: 300,
+    });
+    expect(held.outcome).toBe('acquired');
+    let result = await offboardPrincipal(pool, value.operator, value.target.id, {
+      confirmationScopeId: value.owned.id,
+    });
+    expect(result).toMatchObject({ complete: false, reason: 'owned_live_lease' });
+    expect((await pool.query(
+      'SELECT disabled_at IS NOT NULL AS disabled FROM principals WHERE id = $1', [value.target.id],
+    )).rows[0].disabled).toBe(true);
+    await pool.query(
+      `UPDATE coordination_leases SET acquired_at = clock_timestamp() - interval '10 minutes',
+              expires_at = clock_timestamp() - interval '1 second' WHERE lease_id = $1`,
+      [(held as { leaseId: string }).leaseId],
+    );
+    for (let attempt = 0; attempt < 12 && !result.complete; attempt += 1) {
+      result = await offboardPrincipal(pool, value.operator, value.target.id, {
+        confirmationScopeId: value.owned.id,
+      });
+    }
+    expect(result.complete).toBe(true);
+  });
+
   it('contract offboarding review: resumes an owned scope reopened by the contract backfill before claiming completion', async () => {
     const value = await fixture('reopened-owned-scope');
     let result = await offboardPrincipal(pool, value.operator, value.target.id, {
