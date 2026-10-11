@@ -77,6 +77,12 @@ try {
     'migrations/0080_pgvector_provider_grants.sql',
     'migrations/0081_coordination_public_contract.sql',
     'migrations/0083_tag_vocabularies.sql',
+    'migrations/0084_provider_embeddings_backfill.sql',
+    'migrations/0085_embedding_backfill_failures.sql',
+    'migrations/0086_embedding_backfill_failure_disposition.sql',
+    'migrations/0087_embedding_provider_scan_index.sql',
+    'migrations/0088_embedding_provider_scan_index_rebuild.sql',
+    'dist/maintenance/embed-backfill-cli.js',
     'bin/continuum-migrate.mjs',
     'scripts/ensure-scope.mjs',
     'scripts/create-scope-operator.sql',
@@ -87,6 +93,7 @@ try {
     'docs/coordination.md',
     'docs/memory-api.md',
     'docs/tag-vocabularies.md',
+    'docs/embedding-backfill.md',
   ]) {
     if (!existsSync(join(installedRoot, required))) {
       throw new Error(`Packed package is missing required runtime artifact: ${required}`);
@@ -108,6 +115,15 @@ try {
     throw new Error(
       `Installed continuum-tags launcher did not execute: ${JSON.stringify(tagResult)}`,
     );
+  }
+  const embeddingResult = spawnSync(process.execPath,
+    [join(installedRoot, 'dist/maintenance/embed-backfill-cli.js'), '--batch-size', '0'], {
+      cwd: temporary, encoding: 'utf8', timeout: 10_000, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024,
+      env: { ...process.env, CONTINUUM_DATABASE_URL: '' },
+    });
+  if (embeddingResult.error || embeddingResult.status !== 1
+    || !embeddingResult.stderr.startsWith('continuum-embed-backfill: --batch-size must be')) {
+    throw new Error('Installed embedding backfill entrypoint did not reach bounded option validation');
   }
   for (const migrationDoc of ['README.md', 'docs/cli.md']) {
     const contents = readFileSync(join(installedRoot, migrationDoc), 'utf8');

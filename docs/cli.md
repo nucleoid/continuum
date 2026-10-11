@@ -192,6 +192,19 @@ in an earlier namespace cannot replace the configured tenant. Library callers
 that omit the optional expected schema retain namespace ownership checks but
 do not receive this configuration anchor.
 
+Run the migrator as a trusted operator before starting a newly installed
+application version. Its deployment-wide advisory lock acquisition polls until
+available and has no built-in whole acquisition deadline. Impose a finite
+external process deadline and treat expiry or any nonzero exit as deployment
+failure. Start the new binary only after all packaged migrations and required
+backfills have completed.
+
+`npm run embed-backfill -- --count` scans candidate IDs and metadata without
+loading memory bodies. Write runs checkpoint `(provider, dim, scope_filter,
+cursor, updated_at)` progress and isolate failures in
+`(memory_id, provider, dim, disposition, reason, failed_at)`. See
+`docs/embedding-backfill.md` for retry, cursor, no-wrap, and rollout details.
+
 ## Exit codes
 
 These codes belong to the regular HTTP `continuum` client. The separate

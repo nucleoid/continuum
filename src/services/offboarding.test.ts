@@ -1118,19 +1118,36 @@ describe('offboarding and erasure', () => {
 
   it('orders embedding writes with archive and removes either race winner', async () => {
     const value = await fixture();
+    expect((await pool.query('SELECT count(*)::int AS count FROM memory_embeddings WHERE memory_id=$1::uuid',
+      [value.personalMemory.id])).rows[0].count).toBe(1);
     const archiver = await pool.connect();
-    await archiver.query('BEGIN');
-    await archiver.query(`UPDATE memories SET state = 'archived' WHERE id = $1`, [value.personalMemory.id]);
-    const lateEmbedding = storeMemoryEmbeddingVector(
-      pool, value.personalMemory.id, Array(768).fill(1), { id: 'test', dim: 768 },
-    );
-    await archiver.query('COMMIT');
-    archiver.release();
-    await expect(lateEmbedding).rejects.toThrow(/embedding requires a live memory/i);
-    expect((await pool.query(
-      'SELECT count(*)::int AS count FROM memory_embeddings WHERE memory_id = $1',
-      [value.personalMemory.id],
-    )).rows[0].count).toBe(0);
+    const vector = Array(768).fill(1) as number[];
+    let lateEmbedding: Promise<boolean> | undefined;
+    try {
+      await archiver.query('BEGIN');
+      await archiver.query(`UPDATE memories SET state = 'archived' WHERE id = $1`, [value.personalMemory.id]);
+      lateEmbedding = storeMemoryEmbeddingVector(
+        pool, value.personalMemory.id, vector, { id: 'test', dim: 768 },
+      );
+      void lateEmbedding.catch(() => undefined);
+      await archiver.query('COMMIT');
+      await expect(lateEmbedding).resolves.toBe(false);
+      await expect(pool.query(`INSERT INTO memory_embeddings(memory_id,provider,dim,embedding)
+        VALUES($1::uuid,'test',768,$2)`, [value.personalMemory.id, `[${vector.join(',')}]`]))
+        .rejects.toThrow(/embedding requires a live memory/i);
+      expect((await pool.query(
+        'SELECT count(*)::int AS count FROM memory_embeddings WHERE memory_id = $1',
+        [value.personalMemory.id],
+      )).rows[0].count).toBe(0);
+    } finally {
+      let discard = false;
+      try { await archiver.query('ROLLBACK'); }
+      catch (error) { discard = true; throw error; }
+      finally {
+        archiver.release(discard);
+        await lateEmbedding?.catch(() => undefined);
+      }
+    }
   });
 
   it.each([

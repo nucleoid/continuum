@@ -64,7 +64,7 @@ export interface CompletionLog {
 }
 
 export interface OperationalLogger extends ServiceLogger {
-  info?(event: CompletionLog): void;
+  info?(event: CompletionLog | Record<string, unknown>): void;
 }
 
 export interface AppOptions {
@@ -307,7 +307,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   v0.use(ingestRouter(pool, provider, ingestConfig, opts.captureRegistry, relationThreshold, authenticator));
   v0.use(bearerAuth(pool, authenticator));
   v0.use(captureRouter(pool, provider, relationThreshold));
-  v0.use(recallRouter(pool, provider));
+  v0.use(recallRouter(pool, provider, logger));
   v0.use(memoriesRouter(pool));
   v0.use(agentsMdRouter(pool));
   v0.use(auditRouter(pool));

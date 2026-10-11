@@ -325,6 +325,11 @@ BEGIN
   IF to_regclass(format('%I.tag_vocabularies',schema_name)) IS NOT NULL THEN
     EXECUTE format('GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE %I.tag_vocabularies TO %I',schema_name,target_role);
   END IF;
+  IF to_regclass(format('%I.embedding_backfill_checkpoints',schema_name)) IS NOT NULL
+    AND to_regclass(format('%I.embedding_backfill_failures',schema_name)) IS NOT NULL THEN
+    EXECUTE format('GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE %I.embedding_backfill_checkpoints,%I.embedding_backfill_failures TO %I',
+      schema_name,schema_name,target_role);
+  END IF;
 END;
 $tag_profile$;
 

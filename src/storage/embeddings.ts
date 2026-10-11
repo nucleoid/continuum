@@ -11,18 +11,19 @@ function quoteIdentifier(value: string): string {
   return `"${value.replaceAll('"', '""')}"`;
 }
 
-async function cosineDistanceOperator(pool: Queryable): Promise<string> {
+async function vectorSqlNames(pool: Queryable): Promise<{ distanceOperator: string; vectorType: string }> {
   const { rows } = await pool.query(
     `SELECT namespace.nspname AS schema
-       FROM pg_extension extension
-       JOIN pg_namespace namespace ON namespace.oid = extension.extnamespace
+       FROM pg_catalog.pg_extension extension
+       JOIN pg_catalog.pg_namespace namespace ON namespace.oid = extension.extnamespace
       WHERE extension.extname = 'vector'`,
   );
   const schema = rows[0]?.schema as string | undefined;
   if (schema === undefined) {
     throw new Error('The vector extension is not installed');
   }
-  return `OPERATOR(${quoteIdentifier(schema)}.<=>)`;
+  return { distanceOperator: `OPERATOR(${quoteIdentifier(schema)}.<=>)`,
+    vectorType: `${quoteIdentifier(schema)}.vector` };
 }
 
 export async function storeMemoryEmbedding(
@@ -30,9 +31,9 @@ export async function storeMemoryEmbedding(
   memoryId: string,
   text: string,
   provider: EmbeddingProvider,
-): Promise<void> {
+): Promise<boolean> {
   const [vector] = await provider.embed([text]);
-  await storeMemoryEmbeddingVector(pool, memoryId, vector, provider);
+  return storeMemoryEmbeddingVector(pool, memoryId, vector, provider);
 }
 
 export async function storeMemoryEmbeddingVector(
@@ -40,18 +41,25 @@ export async function storeMemoryEmbeddingVector(
   memoryId: string,
   vector: number[],
   provider: Pick<EmbeddingProvider, 'id' | 'dim'>,
-): Promise<void> {
+): Promise<boolean> {
   assertEmbeddingVectorDimension(vector, provider);
-  await pool.query(
-    `INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
-     VALUES ($1, $2, $3, $4)
-     ON CONFLICT (memory_id) DO UPDATE
-       SET provider = EXCLUDED.provider,
-           dim = EXCLUDED.dim,
-           embedding = EXCLUDED.embedding,
-           embedded_at = now()`,
+  const { vectorType } = await vectorSqlNames(pool);
+  const result = await pool.query(
+    `WITH locked_memory AS MATERIALIZED (
+       SELECT m.id,m.state,m.expires_at FROM memories m WHERE m.id=$1::uuid FOR UPDATE OF m
+     )
+     INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
+     SELECT m.id, $2::text, $3::integer, $4::${vectorType}
+       FROM locked_memory m
+      WHERE m.state = 'live'
+        AND (m.expires_at IS NULL OR m.expires_at > pg_catalog.clock_timestamp())
+     ON CONFLICT (memory_id, provider, dim) DO UPDATE
+       SET embedding = EXCLUDED.embedding,
+           embedded_at = pg_catalog.clock_timestamp()
+     RETURNING memory_id`,
     [memoryId, provider.id, provider.dim, toPgVector(vector)],
   );
+  return (result.rowCount ?? result.rows.length) > 0;
 }
 
 export async function vectorSearchMemoryIds(
@@ -77,18 +85,21 @@ export async function vectorSearchMemoryIds(
   }
   params.push(limit);
   const limitIdx = params.length;
-  const distanceOperator = await cosineDistanceOperator(pool);
+  const { distanceOperator, vectorType } = await vectorSqlNames(pool);
   const { rows } = await pool.query(
-    `SELECT m.id, e.embedding ${distanceOperator} $1 AS distance
-       FROM memory_embeddings e
-       JOIN memories m ON m.id = e.memory_id
-      WHERE m.scope_id = ANY($2::uuid[])
-        AND m.state = 'live'
-        AND (m.expires_at IS NULL OR m.expires_at > now())
-        AND e.provider = $3
-        AND e.dim = $4
-        ${typeFilter}
-      ORDER BY e.embedding ${distanceOperator} $1
+    `WITH provider_embeddings AS MATERIALIZED (
+       SELECT m.id AS memory_id, e.embedding
+         FROM memory_embeddings e
+         JOIN memories m ON m.id = e.memory_id
+        WHERE e.provider = $3 AND e.dim = $4
+          AND m.scope_id = ANY($2::uuid[])
+          AND m.state = 'live'
+          AND (m.expires_at IS NULL OR m.expires_at > pg_catalog.clock_timestamp())
+          ${typeFilter}
+     )
+     SELECT e.memory_id AS id, e.embedding ${distanceOperator} $1::${vectorType} AS distance
+       FROM provider_embeddings e
+      ORDER BY e.embedding ${distanceOperator} $1::${vectorType}
       LIMIT $${limitIdx}`,
     params,
   );
@@ -112,21 +123,28 @@ export async function vectorSearchRelatedMemories(
 ): Promise<RelatedMemorySearchHit[]> {
   if (scopeIds.length === 0) return [];
   assertEmbeddingVectorDimension(queryVector, provider);
-  const distanceOperator = await cosineDistanceOperator(pool);
+  const { distanceOperator, vectorType } = await vectorSqlNames(pool);
   const { rows } = await pool.query(
-    `SELECT m.id, m.type, m.title, m.body,
-            e.embedding ${distanceOperator} $1 AS distance
-       FROM memory_embeddings e
-       JOIN memories m ON m.id = e.memory_id
-      WHERE m.scope_id = ANY($2::uuid[])
-        AND m.state = 'live'
-        AND (m.expires_at IS NULL OR m.expires_at > now())
-        AND e.provider = $3
-        AND e.dim = $4
-        AND m.id <> $5::uuid
-        AND 1 - (e.embedding ${distanceOperator} $1) >= $6
-      ORDER BY distance ASC, m.id ASC
-      LIMIT $7`,
+    `WITH provider_embeddings AS MATERIALIZED (
+       SELECT m.id AS memory_id, e.embedding
+         FROM memory_embeddings e
+         JOIN memories m ON m.id = e.memory_id
+        WHERE e.provider = $3 AND e.dim = $4
+          AND m.scope_id = ANY($2::uuid[])
+          AND m.state = 'live'
+          AND (m.expires_at IS NULL OR m.expires_at > pg_catalog.clock_timestamp())
+          AND m.id <> $5::uuid
+     )
+     SELECT ranked.memory_id AS id, m.type, m.title, m.body, ranked.distance
+       FROM (
+         SELECT e.memory_id, e.embedding ${distanceOperator} $1::${vectorType} AS distance
+           FROM provider_embeddings e
+          WHERE 1 - (e.embedding ${distanceOperator} $1::${vectorType}) >= $6
+          ORDER BY distance ASC, e.memory_id ASC
+          LIMIT $7
+       ) ranked
+       JOIN memories m ON m.id = ranked.memory_id
+      ORDER BY ranked.distance ASC, ranked.memory_id ASC`,
     [
       toPgVector(queryVector), scopeIds, provider.id, provider.dim,
       options.excludeMemoryId, options.threshold, options.limit,

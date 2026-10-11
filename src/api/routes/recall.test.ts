@@ -258,7 +258,8 @@ describe('POST /api/v0/recall', () => {
       id: 'test:failing', dim: 768,
       async embed() { throw new Error(privateMessage); },
     };
-    app = createApp(pool, { embeddingProvider: failingProvider });
+    const logger = { info: vi.fn(), error: vi.fn() };
+    app = createApp(pool, { embeddingProvider: failingProvider, logger });
     await seedWorld();
 
     const res = await request(app)
@@ -268,6 +269,10 @@ describe('POST /api/v0/recall', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.results.length).toBeGreaterThan(0);
+    expect(res.body.diagnostics).toEqual({
+      vector: 'failed',
+      groups: [{ provider: 'test:failing', dim: 768, status: 'failed', errorCode: 'EMBEDDING_FAILED' }],
+    });
     expect(JSON.stringify(res.body)).not.toContain(privateMessage);
     const { rows } = await pool.query(
       `SELECT metadata::text AS metadata
@@ -279,8 +284,12 @@ describe('POST /api/v0/recall', () => {
     expect(JSON.parse(rows[0].metadata)).toMatchObject({
       embedded: false,
       embedding_groups: [{ provider: 'test:failing', dim: 768, scopes: expect.any(Number), status: 'failed' }],
+      vector_status: 'failed',
     });
     expect(rows[0].metadata).not.toContain(privateMessage);
+    expect(logger.info).toHaveBeenCalledWith(expect.objectContaining({
+      event: 'embedding_recall_fallback', vectorStatus: 'failed', failedGroups: 1,
+    }));
   });
 
   it('audits local-only unavailability as degraded rather than not-requested', async () => {

@@ -1,9 +1,13 @@
+import pg from 'pg';
 import type { MemoryType, RecallResult } from '../types.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import { vectorSearchMemoryIds } from './embeddings.js';
 import { assertEmbeddingVectorDimension } from './schema.js';
 import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
 import type { Queryable } from './queryable.js';
+
+export const DEFAULT_RECALL_EMBEDDING_DEADLINE_MS = 10_000;
+export const MAX_RECALL_EMBEDDING_DEADLINE_MS = 30_000;
 
 export interface RecallOptions {
   query: string;
@@ -17,12 +21,241 @@ export interface RecallOptions {
     scopeIds: string[];
     status: 'succeeded' | 'failed';
   }) => void;
+  /** One wall-clock budget shared by all routed embedding groups. */
+  embeddingDeadlineMs?: number;
+}
+
+export type VectorDiagnosticStatus = 'used' | 'disabled' | 'failed' | 'partial';
+export type VectorErrorCode = 'EMBEDDING_TIMEOUT' | 'EMBEDDING_FAILED' | 'VECTOR_SEARCH_FAILED';
+
+export interface RecallDiagnostics {
+  vector: VectorDiagnosticStatus;
+  groups: Array<{
+    provider: string;
+    dim: number;
+    status: 'used' | 'failed';
+    errorCode?: VectorErrorCode;
+  }>;
+}
+
+export interface RecallOutput {
+  results: RecallResult[];
+  diagnostics: RecallDiagnostics;
 }
 
 export class EmbeddingProviderUnavailableError extends Error {
   constructor(cause: unknown) {
     super('embedding provider unavailable', { cause });
     this.name = 'EmbeddingProviderUnavailableError';
+  }
+}
+
+export function routedEmbeddingDeadlineMs(
+  groups: Array<{ provider: EmbeddingProvider }>,
+): number {
+  const routedTimeouts = groups
+    .map((group) => group.provider.timeoutMs)
+    .filter((timeout): timeout is number => Number.isSafeInteger(timeout) && timeout! > 0);
+  return Math.min(
+    MAX_RECALL_EMBEDDING_DEADLINE_MS,
+    routedTimeouts.length > 0
+      ? Math.max(...routedTimeouts)
+      : DEFAULT_RECALL_EMBEDDING_DEADLINE_MS,
+  );
+}
+
+class VectorSearchTimeoutError extends Error {
+  readonly code = 'EMBEDDING_TIMEOUT';
+}
+
+class CallerVectorCleanupError extends Error {}
+
+function connectable(pool: Queryable): pool is Queryable & Pick<pg.Pool, 'connect'> {
+  // PoolClient inherits Client.connect, which must not be called a second time.
+  return !(pool instanceof pg.Client)
+    && typeof (pool as Partial<pg.PoolClient>).release !== 'function'
+    && typeof (pool as Partial<pg.Pool>).connect === 'function';
+}
+
+let vectorSavepointSequence = 0;
+const borrowedSqlTails = new WeakMap<Queryable, Promise<void>>();
+
+function queueBorrowedSql<T>(client: Queryable, work: () => Promise<T>): Promise<T> {
+  const current = (borrowedSqlTails.get(client) ?? Promise.resolve()).then(work);
+  const tail = current.then(() => undefined, () => undefined);
+  borrowedSqlTails.set(client, tail);
+  void tail.then(() => {
+    if (borrowedSqlTails.get(client) === tail) borrowedSqlTails.delete(client);
+  });
+  return current;
+}
+
+async function connectBeforeDeadline(
+  pool: Queryable & Pick<pg.Pool, 'connect'>,
+  deadlineAt: number,
+  signal: AbortSignal,
+): Promise<pg.PoolClient> {
+  const remainingMs = deadlineAt - Date.now();
+  if (remainingMs < 1 || signal.aborted) {
+    throw new VectorSearchTimeoutError('Vector search deadline exceeded');
+  }
+  return new Promise<pg.PoolClient>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+    };
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new VectorSearchTimeoutError('Vector search deadline exceeded'));
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new VectorSearchTimeoutError('Vector search deadline exceeded'));
+    }, remainingMs);
+    signal.addEventListener('abort', onAbort, { once: true });
+    void pool.connect().then(
+      (client) => {
+        if (settled || signal.aborted || Date.now() >= deadlineAt) {
+          client.release();
+          if (!settled) {
+            settled = true;
+            cleanup();
+            reject(new VectorSearchTimeoutError('Vector search deadline exceeded'));
+          }
+          return;
+        }
+        settled = true;
+        cleanup();
+        resolve(client);
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
+async function boundedVectorSearch(
+  pool: Queryable,
+  deadlineAt: number,
+  queryVec: number[],
+  scopeIds: string[],
+  provider: EmbeddingProvider,
+  limit: number,
+  types: MemoryType[] | undefined,
+  signal: AbortSignal,
+): Promise<Array<{ id: string; distance: number }>> {
+  const remaining = () => {
+    const ms = deadlineAt - Date.now();
+    if (ms < 1 || signal.aborted) {
+      throw new VectorSearchTimeoutError('Vector search deadline exceeded');
+    }
+    return ms;
+  };
+  remaining();
+  const owned = connectable(pool);
+  const client = owned ? await connectBeforeDeadline(pool, deadlineAt, signal) : pool;
+  const physicalClient = owned || client instanceof pg.Client
+    || typeof (client as Partial<pg.PoolClient>).release === 'function';
+  let transactionStarted = false;
+  let savepoint: string | undefined;
+  let previousTimeout: string | undefined;
+  let previousTimeoutMs = 0;
+  let discard = false;
+  try {
+    remaining();
+    if (owned) {
+      await client.query('BEGIN');
+      transactionStarted = true;
+    } else if (physicalClient) {
+      const name = `continuum_vector_${++vectorSavepointSequence}`;
+      try {
+        await client.query(`SAVEPOINT ${name}`);
+        savepoint = name;
+      } catch (error) {
+        // Outside a caller transaction SAVEPOINT changes no session state.
+        if ((error as { code?: unknown })?.code !== '25P01') throw error;
+      }
+    }
+    if (physicalClient) {
+      remaining();
+      const settings = await client.query(
+        `SELECT pg_catalog.current_setting('statement_timeout') AS timeout,
+                setting::bigint AS timeout_ms
+           FROM pg_catalog.pg_settings WHERE name='statement_timeout'`,
+      );
+      previousTimeout = String(settings.rows[0].timeout);
+      previousTimeoutMs = Number(settings.rows[0].timeout_ms);
+    }
+    const bounded: Queryable = { query: (async (sql: string, values?: unknown[]) => {
+      let budget = remaining();
+      if (physicalClient) {
+        if (previousTimeoutMs > 0) budget = Math.min(budget, previousTimeoutMs);
+        await client.query(
+          "SELECT pg_catalog.set_config('statement_timeout',$1::text,$2::boolean)",
+          [`${budget}ms`, transactionStarted || savepoint !== undefined],
+        );
+      }
+      // The settings round trip also consumes the shared wall-clock budget.
+      remaining();
+      return client.query(sql, values);
+    }) as Queryable['query'] };
+    const hits = await vectorSearchMemoryIds(
+      bounded, queryVec, scopeIds, provider, limit, types,
+    );
+    if (transactionStarted) {
+      await client.query('COMMIT');
+      transactionStarted = false;
+    } else if (savepoint !== undefined) {
+      await client.query(
+        "SELECT pg_catalog.set_config('statement_timeout',$1::text,true)", [previousTimeout],
+      );
+      previousTimeout = undefined;
+      await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+      savepoint = undefined;
+    }
+    return hits;
+  } catch (error) {
+    let cleanupError: unknown;
+    if (transactionStarted) {
+      try { await client.query('ROLLBACK'); } catch { discard = true; }
+    } else if (savepoint !== undefined) {
+      try {
+        await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+        await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+        previousTimeout = undefined;
+      } catch (failure) { discard = true; cleanupError = failure; }
+    }
+    if (!owned && cleanupError !== undefined) {
+      throw new CallerVectorCleanupError('Could not restore the caller vector savepoint', {
+        cause: new AggregateError([error, cleanupError]),
+      });
+    }
+    if ((error as { code?: unknown })?.code === '57014') {
+      throw new VectorSearchTimeoutError('Vector search deadline exceeded');
+    }
+    throw error;
+  } finally {
+    if (!owned && !discard && previousTimeout !== undefined) {
+      try {
+        await client.query(
+          "SELECT pg_catalog.set_config('statement_timeout',$1::text,false)", [previousTimeout],
+        );
+      } catch (error) {
+        throw new CallerVectorCleanupError('Could not restore the caller statement timeout', { cause: error });
+      }
+    }
+    if (owned) {
+      (client as pg.PoolClient).release(discard);
+    }
   }
 }
 
@@ -65,7 +298,7 @@ async function ftsHits(
        FROM memories
       WHERE scope_id = ANY($2::uuid[])
         AND state = 'live'
-        AND (expires_at IS NULL OR expires_at > now())
+        AND (expires_at IS NULL OR expires_at > pg_catalog.clock_timestamp())
         AND to_tsvector('english', title || ' ' || body) @@ plainto_tsquery('english', $1)
         ${typeFilter}
       ORDER BY score DESC
@@ -109,7 +342,7 @@ async function hydrate(
       WHERE id = ANY($1::uuid[])
         AND scope_id = ANY($2::uuid[])
         AND state = 'live'
-        AND (expires_at IS NULL OR expires_at > now())
+        AND (expires_at IS NULL OR expires_at > pg_catalog.clock_timestamp())
         ${typeFilter}`,
     params,
   );
@@ -130,40 +363,126 @@ async function hydrate(
 export async function recall(
   pool: Queryable,
   opts: RecallOptions,
-): Promise<RecallResult[]> {
-  if (opts.scopeIds.length === 0) return [];
+): Promise<RecallOutput> {
+  if (opts.scopeIds.length === 0) {
+    return { results: [], diagnostics: { vector: 'disabled', groups: [] } };
+  }
 
   const overFetch = Math.min(opts.limit * 5, 100);
-  const fts = await ftsHits(pool, opts.query, opts.scopeIds, opts.types, overFetch);
+  const borrowed = !connectable(pool);
+  const searchText = () => ftsHits(pool, opts.query, opts.scopeIds, opts.types, overFetch);
+  const fts = await (borrowed ? queueBorrowedSql(pool, searchText) : searchText());
 
   const groups = opts.embeddingGroups
     ?? (opts.embeddingProvider
       ? [{ scopeIds: opts.scopeIds, provider: opts.embeddingProvider }]
       : []);
-  const vectorLists: Array<Array<{ id: string; rank: number; distance: number }>> = [];
-  for (const group of groups) {
-    let queryVec: number[];
-    try {
-      [queryVec] = await group.provider.embed([opts.query]);
-      assertEmbeddingVectorDimension(queryVec, group.provider);
-    } catch {
-      // An outage degrades only this provider group to full-text search.
-      opts.onEmbeddingGroupResult?.({
-        provider: group.provider, scopeIds: group.scopeIds, status: 'failed',
-      });
-      vectorLists.push([]);
-      continue;
-    }
-    const hits = await vectorSearchMemoryIds(
-      pool, queryVec, group.scopeIds, group.provider, overFetch, opts.types,
-    );
-    vectorLists.push(hits.map((hit, index) => ({
-      id: hit.id, rank: index + 1, distance: hit.distance,
-    })));
-    opts.onEmbeddingGroupResult?.({
-      provider: group.provider, scopeIds: group.scopeIds, status: 'succeeded',
-    });
+  const deadlineMs = opts.embeddingDeadlineMs ?? routedEmbeddingDeadlineMs(groups);
+  if (!Number.isSafeInteger(deadlineMs) || deadlineMs < 1
+    || deadlineMs > MAX_RECALL_EMBEDDING_DEADLINE_MS) {
+    throw new Error(`embeddingDeadlineMs must be an integer from 1 to ${MAX_RECALL_EMBEDDING_DEADLINE_MS}`);
   }
+  type GroupResult = {
+    list: Array<{ id: string; rank: number; distance: number }>;
+    diagnostic: RecallDiagnostics['groups'][number];
+  };
+  const controller = new AbortController();
+  const deadlineAt = Date.now() + deadlineMs;
+  let deadlineTimer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<'deadline'>((resolve) => {
+    deadlineTimer = setTimeout(() => {
+      controller.abort(new Error('Embedding recall deadline exceeded'));
+      resolve('deadline');
+    }, deadlineMs);
+  });
+  // Provider IO may overlap, but concurrent calls share a borrowed session's
+  // transaction and savepoint stack. Retain only initiated SQL for cleanup.
+  const vectorSqlWork = new Set<Promise<Array<{ id: string; distance: number }>>>();
+  const tasks = groups.map(async (group): Promise<GroupResult> => {
+    const work = (async (): Promise<GroupResult> => {
+      let queryVec: number[];
+      try {
+        [queryVec] = await group.provider.embed([opts.query], { signal: controller.signal });
+        assertEmbeddingVectorDimension(queryVec, group.provider);
+      } catch (error) {
+        return {
+          list: [],
+          diagnostic: {
+            provider: group.provider.id, dim: group.provider.dim, status: 'failed',
+            errorCode: (error as { code?: unknown })?.code === 'EMBEDDING_TIMEOUT'
+              || controller.signal.aborted
+              ? 'EMBEDDING_TIMEOUT'
+              : 'EMBEDDING_FAILED',
+          },
+        };
+      }
+      try {
+        const execute = () => boundedVectorSearch(
+          pool, deadlineAt, queryVec, group.scopeIds,
+          group.provider, overFetch, opts.types, controller.signal,
+        );
+        const sql = borrowed ? queueBorrowedSql(pool, execute) : execute();
+        vectorSqlWork.add(sql);
+        let hits: Array<{ id: string; distance: number }>;
+        try { hits = await sql; } finally { vectorSqlWork.delete(sql); }
+        return {
+          list: hits.map((hit, index) => ({
+            id: hit.id, rank: index + 1, distance: hit.distance,
+          })),
+          diagnostic: {
+            provider: group.provider.id, dim: group.provider.dim, status: 'used',
+          },
+        };
+      } catch (error) {
+        if (error instanceof CallerVectorCleanupError) throw error;
+        return {
+          list: [],
+          diagnostic: {
+            provider: group.provider.id, dim: group.provider.dim,
+            status: 'failed',
+            errorCode: (error as { code?: unknown })?.code === 'EMBEDDING_TIMEOUT'
+              ? 'EMBEDDING_TIMEOUT'
+              : 'VECTOR_SEARCH_FAILED',
+          },
+        };
+      }
+    })();
+    const settled = await Promise.race([work, deadline]);
+    if (settled === 'deadline') {
+      return {
+        list: [],
+        diagnostic: {
+          provider: group.provider.id, dim: group.provider.dim,
+          status: 'failed', errorCode: 'EMBEDDING_TIMEOUT',
+        },
+      };
+    }
+    return settled;
+  });
+  let settledGroups: GroupResult[];
+  try {
+    settledGroups = await Promise.all(tasks);
+    // A deadline may win while PostgreSQL is unwinding a timed-out statement.
+    // Hydration must follow that cleanup, but must never join stalled provider IO.
+    const cleaned = await Promise.allSettled([...vectorSqlWork]);
+    for (const result of cleaned) {
+      if (result.status === 'rejected' && result.reason instanceof CallerVectorCleanupError) {
+        throw result.reason;
+      }
+    }
+  } finally {
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+  }
+  const vectorLists = settledGroups.map((result) => result.list);
+  const diagnosticGroups = settledGroups.map((result, index) => {
+    const group = groups[index]!;
+    opts.onEmbeddingGroupResult?.({
+      provider: group.provider,
+      scopeIds: group.scopeIds,
+      status: result.diagnostic.status === 'used' ? 'succeeded' : 'failed',
+    });
+    return result.diagnostic;
+  });
 
   const fused = fuse(fts, ...vectorLists);
   const ranked = Array.from(fused.entries())
@@ -171,5 +490,16 @@ export async function recall(
     .map(([id]) => id)
     .slice(0, opts.limit);
 
-  return hydrate(pool, ranked, opts.query, fused, opts.scopeIds, opts.types);
+  const used = diagnosticGroups.filter((group) => group.status === 'used').length;
+  const failed = diagnosticGroups.length - used;
+  const vector: VectorDiagnosticStatus = diagnosticGroups.length === 0
+    ? 'disabled'
+    : failed === 0
+      ? 'used'
+      : used === 0 ? 'failed' : 'partial';
+  const hydrateResults = () => hydrate(pool, ranked, opts.query, fused, opts.scopeIds, opts.types);
+  return {
+    results: await (borrowed ? queueBorrowedSql(pool, hydrateResults) : hydrateResults()),
+    diagnostics: { vector, groups: diagnosticGroups },
+  };
 }

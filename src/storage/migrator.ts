@@ -90,8 +90,23 @@ const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
     'f702dcb46f7d673d45ed96852d236619192ab43b9b57617e3595cad2975c4982'],
   ['0083_tag_vocabularies.sql',
     '6d7dfb4e612b699f40837698da3156166330eda3e003f67fd59f602554936d91'],
+  ['0084_provider_embeddings_backfill.sql',
+    '68e754cb35f98d637879bcb9519f3603ec6e118a7f6945c6bef4fc86e8a7ada3'],
+  ['0085_embedding_backfill_failures.sql',
+    'bf832c89bffcb3d03e33a006601f9044907779465c6e860d9db42b282d68a14d'],
+  ['0086_embedding_backfill_failure_disposition.sql',
+    '470c7a9458fedb3834987cc7a276e3ffacc2f893a39e936cea0f8a88d8687539'],
+  ['0087_embedding_provider_scan_index.sql',
+    'f9ab8aacaa5bd70bb251bea6a0323a4002dd370949e743b149687301095fc204'],
+  ['0088_embedding_provider_scan_index_rebuild.sql',
+    'e0f21f1cfa4a81fbc7c8fbe65e06ae31157e499dbf562b482b87099185e079e2'],
 ]);
 const FORWARD_MIGRATION_REQUIREMENTS = new Map([
+  ['0084_provider_embeddings_backfill.sql', '0083_tag_vocabularies.sql'],
+  ['0085_embedding_backfill_failures.sql', '0084_provider_embeddings_backfill.sql'],
+  ['0086_embedding_backfill_failure_disposition.sql', '0085_embedding_backfill_failures.sql'],
+  ['0087_embedding_provider_scan_index.sql', '0086_embedding_backfill_failure_disposition.sql'],
+  ['0088_embedding_provider_scan_index_rebuild.sql', '0087_embedding_provider_scan_index.sql'],
   ['0053_offboarding_restore_contract.sql', '0052_offboarding_review_repair.sql'],
   ['0056_coordination_final_remediation.sql', '0055_coordination_review_remediation.sql'],
   ['0057_coordination_privacy_race_remediation.sql',
@@ -1151,6 +1166,9 @@ export async function runMigrations(
               execution,
               deferCleanup,
             );
+            const command = statement.replace(/^\s*--[^\n]*(?:\n|$)/gm, '').trim();
+            if (/^(?:BEGIN|START\s+TRANSACTION)\b/i.test(command)) transactionOpen = true;
+            else if (/^(?:COMMIT|ROLLBACK)\b/i.test(command)) transactionOpen = false;
           }
           transactionOpen = true;
           await client.query('BEGIN');
