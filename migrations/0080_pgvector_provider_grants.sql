@@ -517,6 +517,7 @@ DECLARE
   invoking_role_oid OID;
   target_role_oid OID;
   vector_schema_oid OID;
+  existing_profile_kind TEXT;
 BEGIN
   SELECT relation.relowner, namespace.nspname
     INTO application_owner_oid, application_schema_name
@@ -533,6 +534,12 @@ BEGIN
     RAISE EXCEPTION 'reporting profile role % must be an existing non-owner role',
       quote_ident(target_database_role);
   END IF;
+  SELECT profile_kind INTO existing_profile_kind FROM continuum_pgvector_role_profiles
+    WHERE database_role_oid=target_role_oid FOR UPDATE;
+  IF existing_profile_kind IS NOT NULL AND existing_profile_kind <> 'reporting' THEN
+    RAISE EXCEPTION 'role is already registered with a non-reporting profile';
+  END IF;
+  IF NOT enabled AND existing_profile_kind IS NULL THEN RETURN; END IF;
   SELECT extnamespace INTO vector_schema_oid
     FROM pg_extension WHERE extname = 'vector';
   IF enabled THEN
@@ -545,14 +552,19 @@ BEGIN
     ON CONFLICT (database_role_oid) DO UPDATE
       SET provider_schema_oid = EXCLUDED.provider_schema_oid,
           profile_kind = 'reporting',
-          refreshed_at = EXCLUDED.refreshed_at;
+          refreshed_at = EXCLUDED.refreshed_at
+      WHERE continuum_pgvector_role_profiles.profile_kind='reporting';
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'role is already registered with a non-reporting profile';
+    END IF;
   ELSE
     EXECUTE format(
       'REVOKE EXECUTE ON FUNCTION %I.continuum_assert_current_pgvector_profile() FROM %I',
       application_schema_name, target_database_role);
     -- Registration/gate authority belongs to this tenant. Shared-provider ACLs
     -- do not: another tenant or an external application may still need them.
-    DELETE FROM continuum_pgvector_role_profiles WHERE database_role_oid=target_role_oid;
+    DELETE FROM continuum_pgvector_role_profiles
+      WHERE database_role_oid=target_role_oid AND profile_kind='reporting';
   END IF;
   IF enabled THEN PERFORM continuum_grant_application_vector_functions(target_database_role); END IF;
 END;

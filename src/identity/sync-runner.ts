@@ -10,7 +10,7 @@ import {
 } from './graph-membership.js';
 import { isSyncAuthorizationError } from '../services/database-authorization-errors.js';
 import { ServiceError } from '../services/errors.js';
-import { reconcilePgvectorProviderGrants } from '../storage/provider-lifecycle.js';
+import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants } from '../storage/provider-lifecycle.js';
 
 type SnapshotFetcher = (
   groupIds: readonly string[],
@@ -28,7 +28,7 @@ export async function runMembershipSync(
   const token = env.CONTINUUM_GRAPH_ACCESS_TOKEN ?? '';
   const actorExternalId = env.CONTINUUM_MEMBERSHIP_SYNC_ACTOR ?? '';
   if (!token || !actorExternalId) throw new Error('Graph token and sync actor are required');
-  await reconcilePgvectorProviderGrants(pool);
+  await reconcilePgvectorProviderGrants(pool, { expectedSchema: applicationSchemaFromEnv(env) });
   const rawStaleness = env.CONTINUUM_ENTRA_MAX_STALENESS_HOURS;
   const maxStalenessHours = rawStaleness === undefined
     ? DEFAULT_MAX_STALENESS_HOURS : Number(rawStaleness);
