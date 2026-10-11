@@ -650,6 +650,11 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0081_coordination_public_contract.sql' }),
         expect.objectContaining({ name: '0082_coordination_linkable_audit_v7_index.sql' }),
         expect.objectContaining({ name: '0083_tag_vocabularies.sql' }),
+        expect.objectContaining({ name: '0084_provider_embeddings_backfill.sql' }),
+        expect.objectContaining({ name: '0085_embedding_backfill_failures.sql' }),
+        expect.objectContaining({ name: '0086_embedding_backfill_failure_disposition.sql' }),
+        expect.objectContaining({ name: '0087_embedding_provider_scan_index.sql' }),
+        expect.objectContaining({ name: '0088_embedding_provider_scan_index_rebuild.sql' }),
       ]);
       await grantApplicationRole(pool, applicationSchema, appRole);
       await expect(pool.query(
@@ -687,6 +692,11 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0081_coordination_public_contract.sql' }),
         expect.objectContaining({ name: '0082_coordination_linkable_audit_v7_index.sql' }),
         expect.objectContaining({ name: '0083_tag_vocabularies.sql' }),
+        expect.objectContaining({ name: '0084_provider_embeddings_backfill.sql' }),
+        expect.objectContaining({ name: '0085_embedding_backfill_failures.sql' }),
+        expect.objectContaining({ name: '0086_embedding_backfill_failure_disposition.sql' }),
+        expect.objectContaining({ name: '0087_embedding_provider_scan_index.sql' }),
+        expect.objectContaining({ name: '0088_embedding_provider_scan_index_rebuild.sql' }),
       ]);
       await grantApplicationRole(pool, applicationSchema, appRole);
       await expect(pool.query(
@@ -860,6 +870,11 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0081_coordination_public_contract.sql' }),
         expect.objectContaining({ name: '0082_coordination_linkable_audit_v7_index.sql' }),
         expect.objectContaining({ name: '0083_tag_vocabularies.sql' }),
+        expect.objectContaining({ name: '0084_provider_embeddings_backfill.sql' }),
+        expect.objectContaining({ name: '0085_embedding_backfill_failures.sql' }),
+        expect.objectContaining({ name: '0086_embedding_backfill_failure_disposition.sql' }),
+        expect.objectContaining({ name: '0087_embedding_provider_scan_index.sql' }),
+        expect.objectContaining({ name: '0088_embedding_provider_scan_index_rebuild.sql' }),
       ]);
       await grantApplicationRole(pool, applicationSchema, appRole);
       await expect(pool.query(
@@ -913,6 +928,11 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0081_coordination_public_contract.sql' }),
         expect.objectContaining({ name: '0082_coordination_linkable_audit_v7_index.sql' }),
         expect.objectContaining({ name: '0083_tag_vocabularies.sql' }),
+        expect.objectContaining({ name: '0084_provider_embeddings_backfill.sql' }),
+        expect.objectContaining({ name: '0085_embedding_backfill_failures.sql' }),
+        expect.objectContaining({ name: '0086_embedding_backfill_failure_disposition.sql' }),
+        expect.objectContaining({ name: '0087_embedding_provider_scan_index.sql' }),
+        expect.objectContaining({ name: '0088_embedding_provider_scan_index_rebuild.sql' }),
       ]);
       await grantApplicationRole(owner, applicationSchema, appRole);
       await expect(owner.query(
@@ -1199,6 +1219,11 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0081_coordination_public_contract.sql' }),
         expect.objectContaining({ name: '0082_coordination_linkable_audit_v7_index.sql' }),
         expect.objectContaining({ name: '0083_tag_vocabularies.sql' }),
+        expect.objectContaining({ name: '0084_provider_embeddings_backfill.sql' }),
+        expect.objectContaining({ name: '0085_embedding_backfill_failures.sql' }),
+        expect.objectContaining({ name: '0086_embedding_backfill_failure_disposition.sql' }),
+        expect.objectContaining({ name: '0087_embedding_provider_scan_index.sql' }),
+        expect.objectContaining({ name: '0088_embedding_provider_scan_index_rebuild.sql' }),
       ]);
       await grantApplicationRole(owner, applicationSchema, appRole);
       await expect(owner.query(
@@ -1809,10 +1834,12 @@ describe('pgvector rollout remediation', () => {
            VALUES ($1, $2, 'fact', $3, 'shared provider', $4, 'test')`,
           [ids.memory, ids.scope, `Tenant ${suffix}`, ids.principal],
         );
-        await storeMemoryEmbeddingVector(
-          pool, ids.memory, [1, ...Array(767).fill(0)],
-          { id: 'test:shared-provider', dim: 768 },
-        );
+        // This deliberate pre-0080 window retains the single-memory key.
+        // Seed through its compatible INSERT and the normal live-memory trigger;
+        // exercise the current composite-key writer only after the full upgrade.
+        await pool.query(`INSERT INTO memory_embeddings(memory_id,provider,dim,embedding)
+          VALUES($1::uuid,'test:shared-provider',768,$2::continuum_extensions.vector)`,
+        [ids.memory, `[${[1, ...Array(767).fill(0)].join(',')}]`]);
       }
       const secondRuntime = new pg.Pool({
         connectionString: url,
@@ -1834,6 +1861,10 @@ describe('pgvector rollout remediation', () => {
 
       await runMigrations(secondOwner, await fullMigrationDirectory());
       const firstRuntime = migrationPool(url, firstSchema, firstAppRole);
+      for (const [runtime, ids] of [[firstRuntime, firstIds], [secondRuntime, secondIds]] as const) {
+        await expect(storeMemoryEmbeddingVector(runtime, ids.memory, [1, ...Array(767).fill(0)],
+          { id: 'test:shared-provider', dim: 768 })).resolves.toBe(true);
+      }
       await expect(vectorSearchMemoryIds(
         firstRuntime, [1, ...Array(767).fill(0)], [firstIds.scope],
         { id: 'test:shared-provider', dim: 768 }, 5,
