@@ -88,7 +88,7 @@ it('bounds0062 no-progress retries for a legitimately skipped legacy noncurrent 
     }} as unknown as pg.Pool;
     // The watchdog bounds only the test. Product code must terminate through
     // its lock budget, not a limit on legitimate successful data batches.
-    await expect(runMigrations(observedPool,directory)).rejects.toMatchObject({code:'55P03'});
+    await expect(runMigrations(observedPool,directory)).rejects.toMatchObject({cause:{code:'55P03'}});
     expect(actualCleanupCalls).toBeLessThan(50);
     expect((await pool.query("SELECT name FROM _continuum_migrations WHERE name LIKE '0062%'" )).rows).toEqual([]);
     await holder.query('ROLLBACK');holder.release();holder=undefined;

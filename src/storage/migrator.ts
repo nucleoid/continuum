@@ -377,12 +377,37 @@ async function runAdaptiveCoordinationBackfill(
   await client.query("SET lock_timeout = '1s'");
   await client.query("SET statement_timeout = '5s'");
   try {
+    const cleanup = functionName === 'continuum_backfill_coordination_cleanup';
+    const cleanupProgress = async () => {
+      const result = await execution.query<{ rows_processed: string; last_lease_id: string | null }>(client,
+        `SELECT rows_processed::text,pg_catalog.to_jsonb(progress)->>'last_lease_id' AS last_lease_id
+         FROM coordination_migration_progress progress
+         WHERE name='issue7-cleanup-eligibility'`,
+      );
+      return { rows: result.rows[0]?.rows_processed ?? '0', cursor: result.rows[0]?.last_lease_id ?? null };
+    };
+    let previous = cleanup ? await cleanupProgress() : undefined;
     for (;;) {
       try {
         const result = await execution.query<{ completed: boolean }>(client,
           `SELECT ${functionName}($1) AS completed`, [batchSize],
         );
         if (result.rows[0]?.completed === true) return;
+        if (cleanup) {
+          const next = await cleanupProgress();
+          if (previous?.rows === next.rows && previous.cursor === next.cursor) {
+            // SKIP LOCKED can return FALSE repeatedly without advancing. A
+            // bounded plain lock probe turns persistent contention into 55P03;
+            // successful batches have no arbitrary iteration limit.
+            await execution.query(client,
+              `SELECT lease.lease_id FROM coordination_leases lease
+               WHERE lease.cleanup_eligible_at IS NULL AND NOT EXISTS(
+                 SELECT 1 FROM coordination_resources resource WHERE resource.current_lease_id=lease.lease_id)
+               ORDER BY lease.lease_id LIMIT 1 FOR UPDATE`,
+            );
+          }
+          previous = next;
+        }
       } catch (error) {
         const code = (error as { code?: string }).code;
         if ((code !== '55P03' && code !== '57014') || batchSize === 1) throw error;
@@ -1096,7 +1121,7 @@ export async function runMigrations(
           : file === '0076_coordination_review_2_remediation.sql'
             ? '0076-crlf-pairs-only-v1'
             : online ? (deferCleanup ? 'online-directives-deferred-cleanup-v1'
-              : adaptiveCleanup ? 'online-cleanup-adaptive-max1000-lock1s-statement5s-v2' : 'online-directives-v1')
+              : adaptiveCleanup ? 'online-cleanup-adaptive-max1000-lock1s-statement5s-progress-v3' : 'online-directives-v1')
               : earlyTransactional ? 'canonical-lf-lock1s-statement30s-v2' : 'canonical-lf-v1';
       const execution = new MigrationExecution(file, online ? 'file-online' : 'file',
         variant, sqlHash(canonicalSql), sqlHash(sql));
