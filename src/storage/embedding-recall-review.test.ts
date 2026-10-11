@@ -104,6 +104,62 @@ describe('embedding recall review', () => {
     });
   }
 
+  for (const failSecond of [false, true]) {
+    it(`preserves caller transaction and locks across concurrent recall invocations ${failSecond ? 'with a SQL failure' : 'on success'}`, async () => {
+      const client = await pool.connect();
+      const observer = await pool.connect();
+      const key = String(Date.now());
+      const second = { ...provider, id: `${provider.id}:second` };
+      let released = false;
+      const borrowed = new Proxy(client, { get(target, property) {
+        if (property === 'release') return (destroy?: boolean) => {
+          released = true;
+          target.release(destroy);
+        };
+        if (property === 'query') return async (...args: unknown[]) => {
+          if (failSecond && typeof args[0] === 'string'
+            && args[0].includes('WITH provider_embeddings AS MATERIALIZED')
+            && (args[1] as unknown[] | undefined)?.[2] === second.id) {
+            // An actual statement error must roll back only this group's work.
+            return target.query('SELECT 1 / 0');
+          }
+          return Reflect.apply(target.query, target, args);
+        };
+        const member = Reflect.get(target, property);
+        return typeof member === 'function' ? member.bind(target) : member;
+      } });
+      try {
+        await client.query('BEGIN');
+        await client.query("SET LOCAL statement_timeout='1s'");
+        await client.query('SELECT pg_catalog.pg_advisory_xact_lock($1::bigint)', [key]);
+        const value = await seed(client, `two-calls-${failSecond}`, 'Uncommitted reference text');
+        await storeMemoryEmbeddingVector(client, value.memory.id, vector, second);
+        const results = await Promise.all([provider, second].map((selected) => recall(borrowed, {
+          query: 'semantic-only-probe', scopeIds: [value.scope.id], limit: 1,
+          embeddingGroups: [{ scopeIds: [value.scope.id], provider: selected }], embeddingDeadlineMs: 500,
+        })));
+        expect(results.map((result) => result.diagnostics.vector)).toEqual(failSecond ? ['used', 'failed'] : ['used', 'used']);
+        expect(released).toBe(false);
+        expect((await observer.query('SELECT count(*)::int AS count FROM memories WHERE id=$1::uuid', [value.memory.id])).rows)
+          .toEqual([{ count: 0 }]);
+        expect((await client.query('SELECT count(*)::int AS count FROM memories WHERE id=$1::uuid', [value.memory.id])).rows)
+          .toEqual([{ count: 1 }]);
+        expect((await client.query("SELECT pg_catalog.current_setting('statement_timeout') AS timeout")).rows)
+          .toEqual([{ timeout: '1s' }]);
+        expect((await observer.query('SELECT pg_catalog.pg_try_advisory_lock($1::bigint) AS acquired', [key])).rows)
+          .toEqual([{ acquired: false }]);
+        await client.query('ROLLBACK');
+      } finally {
+        await observer.query('SELECT pg_catalog.pg_advisory_unlock($1::bigint)', [key]);
+        observer.release();
+        if (!released) {
+          await client.query('ROLLBACK');
+          client.release();
+        }
+      }
+    });
+  }
+
   it('finishes borrowed vector timeout cleanup before full-text fallback uses the caller transaction', async () => {
     const value = await seed(pool, 'borrowed-timeout', 'Unique fallback needle');
     const caller = await pool.connect();
