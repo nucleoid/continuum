@@ -641,7 +641,7 @@ export class PromotionEventWorker implements RuntimeWorker {
           else this.abortForOwnershipLoss(controller);
         } else if (terminal.has(key) && this.pendingAcknowledgements.get(deliveryKey(delivery)) !== controller) {
           this.stopLeaseRenewal(controller);
-        } else if (renewed.has(key)) {
+        } else if (renewed.has(key) || terminal.has(key)) {
           // Issuance is a conservative lower bound on the committed SQL clock.
           // Using response time could overstate expiry after a slow response.
           this.renewedAt.set(delivery, started);
