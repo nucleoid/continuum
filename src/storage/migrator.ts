@@ -258,7 +258,7 @@ function repair0074PartialUpgradeDiscovery(sql: string): string {
        AND position(chr(13) IN function.prosrc) > 0`,
       `WHERE function.pronamespace = quote_ident(current_schema())::regnamespace
        AND function.proname LIKE 'continuum\\_%' ESCAPE '\\'
-       AND function.proowner = current_user::regrole
+       AND function.proowner = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname=current_user)
        AND position(chr(13) || chr(10) IN function.prosrc) > 0
        AND NOT EXISTS (
          SELECT 1 FROM pg_depend dependency
@@ -326,7 +326,7 @@ async function repairStoredCrLfFunctions(
        FROM pg_proc function
       WHERE function.pronamespace = quote_ident(current_schema())::regnamespace
         AND function.proname LIKE 'continuum\_%' ESCAPE '\'
-        AND function.proowner = current_user::regrole
+        AND function.proowner = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname=current_user)
         AND position(chr(13) || chr(10) IN function.prosrc) > 0
         AND NOT EXISTS (
           SELECT 1 FROM pg_depend dependency
@@ -345,7 +345,7 @@ async function repairStoredCrLfFunctions(
        FROM pg_proc function
       WHERE function.pronamespace = quote_ident(current_schema())::regnamespace
         AND function.proname LIKE 'continuum\_%' ESCAPE '\'
-        AND function.proowner = current_user::regrole
+        AND function.proowner = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname=current_user)
         AND position(chr(13) || chr(10) IN function.prosrc) > 0
         AND NOT EXISTS (
           SELECT 1 FROM pg_depend dependency
@@ -527,7 +527,7 @@ async function finishContractBackfill(
     DECLARE target OID;
     BEGIN
       target := to_regprocedure(format('%I.continuum_backfill_coordination_contract(integer)',current_schema()));
-      IF target IS NULL OR NOT EXISTS(SELECT 1 FROM pg_proc WHERE oid=target AND proowner=current_user::regrole) THEN
+      IF target IS NULL OR NOT EXISTS(SELECT 1 FROM pg_proc WHERE oid=target AND proowner=(SELECT oid FROM pg_catalog.pg_roles WHERE rolname=current_user)) THEN
         RAISE EXCEPTION 'coordination contract backfill requires its function owner';
       END IF;
     END $contract_owner$;`);

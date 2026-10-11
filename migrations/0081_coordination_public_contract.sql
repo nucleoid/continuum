@@ -7,8 +7,11 @@ LOCK TABLE coordination_operation_receipts IN SHARE ROW EXCLUSIVE MODE;
 
 CREATE TABLE coordination_contract_backfill_state (
   singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
-  phase TEXT NOT NULL DEFAULT 'usage' CHECK (phase IN ('usage','scopes','receipts','complete')),
+  phase TEXT NOT NULL DEFAULT 'usage' CHECK (phase IN ('usage','floors','scopes','receipts','complete')),
   principal_cursor UUID,
+  resource_scope_cursor UUID,
+  resource_key_cursor TEXT,
+  resource_rows_processed BIGINT NOT NULL DEFAULT 0 CHECK(resource_rows_processed >= 0),
   scope_cursor UUID,
   receipt_principal_cursor UUID,
   receipt_operation_cursor TEXT,
@@ -48,6 +51,23 @@ RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER AS $$
   SELECT EXISTS(SELECT 1 FROM coordination_contract_backfill_state WHERE singleton AND phase='complete')
 $$;
 REVOKE ALL ON FUNCTION continuum_coordination_contract_is_ready() FROM PUBLIC;
+
+-- Role names returned by session_user are exact catalog names, not quoted
+-- identifier expressions. A direct login can contain punctuation or capitals.
+CREATE OR REPLACE FUNCTION continuum_require_coordination_privacy_client_v4()
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE owner_role OID;
+BEGIN
+  SELECT function.proowner INTO owner_role FROM pg_proc function
+   WHERE function.oid='continuum_require_coordination_privacy_client_v4()'::regprocedure;
+  IF current_setting('role',TRUE)='none'
+    AND (SELECT oid FROM pg_roles WHERE rolname=session_user)=owner_role THEN RETURN; END IF;
+  IF current_setting('continuum.client_coordination_privacy_version',TRUE) IS DISTINCT FROM '4' THEN
+    RAISE feature_not_supported USING MESSAGE='pre-0074 coordination privacy client refused before mutation';
+  END IF;
+END;
+$$;
+REVOKE ALL ON FUNCTION continuum_require_coordination_privacy_client_v4() FROM PUBLIC;
 
 CREATE OR REPLACE FUNCTION continuum_coordination_compatibility_guard()
 RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
@@ -153,6 +173,7 @@ RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER AS $$
 DECLARE progress coordination_contract_backfill_state%ROWTYPE; selected_count INTEGER; next_id UUID; item RECORD;
 BEGIN
   IF batch_limit NOT BETWEEN 1 AND 5000 THEN RAISE EXCEPTION 'coordination contract batch limit must be between 1 and 5000'; END IF;
+  batch_limit:=LEAST(batch_limit,1000);
   SELECT * INTO progress FROM coordination_contract_backfill_state WHERE singleton FOR UPDATE;
   IF progress.phase = 'complete' THEN RETURN TRUE; END IF;
   PERFORM set_config('continuum.coordination_contract_repair', 'on', TRUE);
@@ -169,7 +190,31 @@ BEGIN
     ) SELECT count(*)::int, (array_agg(principal_id ORDER BY principal_id DESC))[1] FROM updated
     $usage$ INTO selected_count,next_id USING progress.principal_cursor,batch_limit;
     UPDATE coordination_contract_backfill_state SET principal_cursor = COALESCE(next_id,principal_cursor),
-      phase = CASE WHEN selected_count < batch_limit THEN 'scopes' ELSE phase END WHERE singleton;
+      phase = CASE WHEN selected_count < batch_limit THEN 'floors' ELSE phase END WHERE singleton;
+  ELSIF progress.phase = 'floors' THEN
+    -- Surviving 0055-era renamed keys may have no privacy progress or floor.
+    -- Read each physical key once; do not put a scoped aggregate on acquisition.
+    EXECUTE $floors$ WITH candidates AS MATERIALIZED (
+      SELECT scope_id,resource,fencing_token FROM coordination_resources
+      WHERE (scope_id,resource)>=
+        (COALESCE($1,'00000000-0000-0000-0000-000000000000'::uuid),COALESCE($2,''))
+        AND ($1 IS NULL OR (scope_id,resource)>($1,$2))
+      ORDER BY scope_id,resource LIMIT $3
+    ), saved AS (
+      INSERT INTO coordination_scope_fencing_floors(scope_id,fencing_floor)
+      SELECT scope_id,max(fencing_token) FROM candidates GROUP BY scope_id ORDER BY scope_id
+      ON CONFLICT(scope_id) DO UPDATE SET fencing_floor=GREATEST(
+        coordination_scope_fencing_floors.fencing_floor,EXCLUDED.fencing_floor),updated_at=clock_timestamp()
+    ) SELECT count(*)::int AS selected_count,
+      (array_agg(scope_id ORDER BY scope_id DESC,resource DESC))[1] AS scope_id,
+      (array_agg(resource ORDER BY scope_id DESC,resource DESC))[1] AS resource FROM candidates
+    $floors$ INTO item USING progress.resource_scope_cursor,progress.resource_key_cursor,batch_limit;
+    selected_count:=item.selected_count;
+    UPDATE coordination_contract_backfill_state SET
+      resource_scope_cursor=COALESCE(item.scope_id,resource_scope_cursor),
+      resource_key_cursor=COALESCE(item.resource,resource_key_cursor),
+      resource_rows_processed=resource_rows_processed+selected_count,
+      phase=CASE WHEN selected_count<batch_limit THEN 'scopes' ELSE phase END WHERE singleton;
   ELSIF progress.phase = 'scopes' THEN
     EXECUTE $scopes$ WITH candidates AS MATERIALIZED (
       SELECT scope_id FROM coordination_scope_usage
@@ -748,7 +793,7 @@ BEGIN
   FOR function_record IN SELECT function.proname,pg_get_function_identity_arguments(function.oid) arguments
     FROM pg_proc function WHERE function.pronamespace=quote_ident(current_schema())::regnamespace
       AND function.proname=ANY(ARRAY[
-        'continuum_coordination_require_contract_ready','continuum_coordination_contract_is_ready','continuum_coordination_compatibility_guard',
+        'continuum_coordination_require_contract_ready','continuum_coordination_contract_is_ready','continuum_require_coordination_privacy_client_v4','continuum_coordination_compatibility_guard',
         'continuum_coordination_lock_principal_usage','continuum_coordination_cleanup_expired_receipts','continuum_coordination_receipt_counter',
         'continuum_coordination_receipt_reassign_counter','continuum_backfill_coordination_contract',
         'continuum_coordination_resource_counter','continuum_operator_set_coordination_scope_quota',
