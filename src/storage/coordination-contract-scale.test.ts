@@ -183,9 +183,10 @@ describe('coordination contract scale and recovery', () => {
       .toEqual([{ phase: 'floors', resource_scope_cursor: scope.id,
         resource_key_cursor: 'legacy-01000', resource_rows_processed: 1000 }]);
     await pool.query('SELECT continuum_backfill_coordination_contract(5000)');
-    expect((await pool.query(`SELECT phase,resource_key_cursor,resource_rows_processed::int
+    expect((await pool.query(`SELECT phase,resource_scope_cursor,resource_key_cursor,resource_rows_processed::int
       FROM coordination_contract_backfill_state`)).rows)
-      .toEqual([{ phase: 'scopes', resource_key_cursor: 'legacy-01001', resource_rows_processed: 1001 }]);
+      .toEqual([{ phase: 'scopes', resource_scope_cursor: null,
+        resource_key_cursor: null, resource_rows_processed: 1001 }]);
     expect((await pool.query('SELECT fencing_floor::text AS floor FROM coordination_scope_fencing_floors WHERE scope_id=$1', [scope.id])).rows)
       .toEqual([{ floor: '2000' }]);
     expect((await pool.query('SELECT continuum_coordination_contract_is_ready() AS ready')).rows)
