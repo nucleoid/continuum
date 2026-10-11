@@ -643,7 +643,12 @@ describe('pgvector rollout remediation', () => {
 
       await expect(runMigrations(pool, full)).resolves.toEqual([
         expect.objectContaining({ name: '0080_pgvector_provider_grants.sql' }),
+        expect.objectContaining({ name: '0081_coordination_public_contract.sql' }),
       ]);
+      await grantApplicationRole(pool, applicationSchema, appRole);
+      await expect(pool.query(
+        'SELECT continuum_assert_application_vector_profile($1::name)', [appRole],
+      )).resolves.toBeDefined();
       expect((await target.query(
         `SELECT has_schema_privilege($1, $2, 'USAGE') AS app_usage,
                 has_schema_privilege($3, $2, 'USAGE') AS outsider_usage`,
@@ -673,7 +678,12 @@ describe('pgvector rollout remediation', () => {
 
       await expect(runMigrations(pool, await fullMigrationDirectory())).resolves.toEqual([
         expect.objectContaining({ name: '0080_pgvector_provider_grants.sql' }),
+        expect.objectContaining({ name: '0081_coordination_public_contract.sql' }),
       ]);
+      await grantApplicationRole(pool, applicationSchema, appRole);
+      await expect(pool.query(
+        'SELECT continuum_assert_application_vector_profile($1::name)', [appRole],
+      )).resolves.toBeDefined();
       expect((await target.query(
         `SELECT has_schema_privilege($1, 'public', 'USAGE') AS app_usage,
                 has_schema_privilege($2, 'public', 'USAGE') AS outsider_usage`,
@@ -682,7 +692,7 @@ describe('pgvector rollout remediation', () => {
     });
   }, 240_000);
 
-  it('reconciles exact provider grants across drift, rerun, and role revocation', async () => {
+  it('repairs target provider grants while retaining PUBLIC policy and failing closed on profile drift', async () => {
     const appRole = identifier('continuum_app');
     const outsider = identifier('continuum_reporter');
     roles.push(outsider, appRole);
@@ -714,7 +724,7 @@ describe('pgvector rollout remediation', () => {
           CROSS JOIN LATERAL aclexplode(COALESCE(
             function.proacl, acldefault('f', function.proowner))) privilege
          WHERE extension.extname = 'vector'
-      `)).rows).toEqual([{ public_usage: false, public_execute: false }]);
+      `)).rows).toEqual([{ public_usage: false, public_execute: true }]);
 
       await pool.query(
         `GRANT CREATE ON SCHEMA continuum_extensions TO ${quoteIdentifier(appRole)}`,
@@ -722,6 +732,13 @@ describe('pgvector rollout remediation', () => {
       await expect(pool.query(
         'SELECT continuum_assert_application_vector_profile($1::name)', [appRole],
       )).rejects.toThrow(/forbidden CREATE/i);
+      await expect(pool.query(
+        'SELECT continuum_grant_application_vector_functions($1::name)', [appRole],
+      )).rejects.toThrow(/forbidden CREATE/i);
+      expect((await pool.query(
+        `SELECT has_schema_privilege($1,'continuum_extensions','CREATE') AS forbidden_create`,
+        [appRole],
+      )).rows).toEqual([{ forbidden_create: true }]);
       await pool.query(
         `REVOKE CREATE ON SCHEMA continuum_extensions FROM ${quoteIdentifier(appRole)}`,
       );
@@ -732,8 +749,24 @@ describe('pgvector rollout remediation', () => {
       await expect(pool.query(
         'SELECT continuum_assert_application_vector_profile($1::name)', [appRole],
       )).rejects.toThrow(/missing effective USAGE/i);
-      await pool.query('SELECT continuum_grant_application_vector_functions()');
-      await pool.query('SELECT continuum_grant_application_vector_functions()');
+      await pool.query('SELECT continuum_grant_application_vector_functions($1::name)', [appRole]);
+      await pool.query('SELECT continuum_grant_application_vector_functions($1::name)', [appRole]);
+      await expect(pool.query(
+        'SELECT continuum_assert_application_vector_profile($1::name)', [appRole],
+      )).resolves.toBeDefined();
+
+      // Provider ACL revocation is an explicit owner action, never a regrant side effect.
+      await target.query(`
+        REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA continuum_extensions FROM PUBLIC;
+        REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA continuum_extensions FROM ${quoteIdentifier(appRole)};
+      `);
+      await expect(pool.query(
+        'SELECT continuum_assert_application_vector_profile($1::name)', [appRole],
+      )).rejects.toThrow(/missing effective EXECUTE/i);
+      await grantApplicationRole(pool, applicationSchema, appRole);
+      await expect(pool.query(
+        'SELECT continuum_assert_application_vector_profile($1::name)', [appRole],
+      )).resolves.toBeDefined();
 
       await pool.query(`
         GRANT SELECT ON memories TO ${quoteIdentifier(outsider)};
@@ -749,6 +782,9 @@ describe('pgvector rollout remediation', () => {
       )).rows).toEqual([{ usage: true }]);
 
       await pool.query(`REVOKE SELECT ON memories FROM ${quoteIdentifier(appRole)}`);
+      await expect(pool.query(
+        'SELECT continuum_grant_application_vector_functions($1::name)', [appRole],
+      )).rejects.toThrow(/exact.*profile|approved reporting/i);
       await pool.query('SELECT continuum_grant_application_vector_functions()');
       expect((await pool.query(
         `SELECT has_schema_privilege($1, 'continuum_extensions', 'USAGE') AS usage,
@@ -757,7 +793,14 @@ describe('pgvector rollout remediation', () => {
                    WHERE database_role_oid = $1::regrole::oid
                 ) AS registered`,
         [appRole],
-      )).rows).toEqual([{ usage: false, registered: false }]);
+      )).rows).toEqual([{ usage: true, registered: true }]);
+      await expect(reconcilePgvectorProviderGrants(pool)).rejects.toThrow(/exact|profile/i);
+      // Restore the approved application profile explicitly, without pruning outsiders.
+      await grantApplicationRole(pool, applicationSchema, appRole);
+      await expect(reconcilePgvectorProviderGrants(pool)).resolves.toBeUndefined();
+      expect((await pool.query(
+        `SELECT has_schema_privilege($1,'continuum_extensions','USAGE') AS usage`, [outsider],
+      )).rows).toEqual([{ usage: true }]);
     });
   }, 240_000);
 
@@ -806,7 +849,12 @@ describe('pgvector rollout remediation', () => {
 
       await expect(runMigrations(pool, await fullMigrationDirectory())).resolves.toEqual([
         expect.objectContaining({ name: '0080_pgvector_provider_grants.sql' }),
+        expect.objectContaining({ name: '0081_coordination_public_contract.sql' }),
       ]);
+      await grantApplicationRole(pool, applicationSchema, appRole);
+      await expect(pool.query(
+        'SELECT continuum_assert_application_vector_profile($1::name)', [appRole],
+      )).resolves.toBeDefined();
       expect((await target.query(
         `SELECT has_schema_privilege($1, $2, 'USAGE') AS reporter_usage,
                 has_table_privilege($1, format('%I.memories', $2), 'SELECT') AS reporter_read`,
@@ -852,7 +900,9 @@ describe('pgvector rollout remediation', () => {
 
       await expect(runMigrations(owner, await fullMigrationDirectory())).resolves.toEqual([
         expect.objectContaining({ name: '0080_pgvector_provider_grants.sql' }),
+        expect.objectContaining({ name: '0081_coordination_public_contract.sql' }),
       ]);
+      await grantApplicationRole(owner, applicationSchema, appRole);
       await expect(owner.query(
         'SELECT continuum_assert_application_vector_profile($1::name)', [appRole],
       )).resolves.toBeDefined();
@@ -1066,7 +1116,12 @@ describe('pgvector rollout remediation', () => {
 
       await expect(runMigrations(owner, await fullMigrationDirectory())).resolves.toEqual([
         expect.objectContaining({ name: '0080_pgvector_provider_grants.sql' }),
+        expect.objectContaining({ name: '0081_coordination_public_contract.sql' }),
       ]);
+      await grantApplicationRole(owner, applicationSchema, appRole);
+      await expect(owner.query(
+        'SELECT continuum_assert_application_vector_profile($1::name)', [appRole],
+      )).resolves.toBeDefined();
       expect((await target.query(
         `SELECT has_schema_privilege($1, $2, 'USAGE') AS usage,
                 bool_and(has_function_privilege($1, function.oid, 'EXECUTE')) AS executable
