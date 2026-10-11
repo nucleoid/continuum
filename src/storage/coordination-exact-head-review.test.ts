@@ -493,9 +493,13 @@ describe('coordination exact-head review regressions', () => {
         `SELECT completed_at IS NULL AS pending FROM principal_offboarding_runs
           WHERE principal_id = $1`, [value.target.id],
       )).rows).toEqual([{ pending: true }]);
-      await releaseLease(application, value.target, {
-        leaseId: acquired.leaseId, runId: acquireRunId, requestId: randomUUID(),
-      });
+      // Revocation removed this holder's membership. Advance the lease's expiry
+      // as the fixture owner, then resume without weakening release authorization.
+      await pool.query(
+        `UPDATE coordination_leases SET acquired_at=clock_timestamp()-interval '2 seconds',
+          expires_at=clock_timestamp()-interval '1 second' WHERE lease_id=$1`,
+        [acquired.leaseId],
+      );
       let result = await offboardPrincipal(pool, value.operator, value.target.id, {
         confirmationScopeId: value.owned.id, batchSize: 100,
       });

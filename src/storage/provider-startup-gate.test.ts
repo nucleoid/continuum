@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { describe, expect, it } from 'vitest';
-import { reconcilePgvectorProviderGrants } from './provider-lifecycle.js';
+import { reconcilePgvectorProviderGrants, requireCoordinationContractReady } from './provider-lifecycle.js';
 
 const databaseUrl = process.env.CONTINUUM_TEST_DATABASE_URL
   ?? 'postgres://continuum:continuum@localhost:5433/continuum';
@@ -27,6 +27,33 @@ async function fixture(run: (pool: pg.Pool, admin: pg.Pool, schema: string, shad
 }
 
 describe('qualified provider startup gate', () => {
+  it('resolves contract readiness in the actual memories namespace and rejects untrusted helpers', async () => {
+    await fixture(async (pool, admin, schema, shadow) => {
+      await admin.query(`CREATE FUNCTION "${schema}".continuum_coordination_contract_is_ready()
+        RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER
+        SET search_path=pg_catalog,"${schema}",pg_temp AS 'SELECT FALSE';
+        REVOKE ALL ON FUNCTION "${schema}".continuum_coordination_contract_is_ready() FROM PUBLIC;
+        CREATE FUNCTION "${shadow}".continuum_coordination_contract_is_ready()
+        RETURNS BOOLEAN LANGUAGE sql AS 'SELECT TRUE';`);
+      await expect(requireCoordinationContractReady(pool)).rejects.toMatchObject({
+        code: 'DEPENDENCY_UNAVAILABLE', message: expect.stringContaining('repair is incomplete'),
+      });
+      await admin.query(`CREATE OR REPLACE FUNCTION "${schema}".continuum_coordination_contract_is_ready()
+        RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER
+        SET search_path=pg_catalog,"${schema}",pg_temp AS 'SELECT TRUE'`);
+      await expect(requireCoordinationContractReady(pool)).resolves.toBeUndefined();
+      await admin.query(`GRANT EXECUTE ON FUNCTION "${schema}".continuum_coordination_contract_is_ready() TO PUBLIC`);
+      await expect(requireCoordinationContractReady(pool)).rejects.toMatchObject({
+        code: 'DEPENDENCY_UNAVAILABLE', message: expect.stringContaining('readiness is unavailable'),
+      });
+      await admin.query(`REVOKE ALL ON FUNCTION "${schema}".continuum_coordination_contract_is_ready() FROM PUBLIC;
+        ALTER FUNCTION "${schema}".continuum_coordination_contract_is_ready() SECURITY INVOKER`);
+      await expect(requireCoordinationContractReady(pool)).rejects.toMatchObject({
+        code: 'DEPENDENCY_UNAVAILABLE', message: expect.stringContaining('readiness is unavailable'),
+      });
+    });
+  });
+
   it('verifies startup under a direct quoted LOGIN role without parsing its name as regrole', async () => {
     await fixture(async (_pool, admin, schema, shadow) => {
       const role = `startup-role-${randomUUID().slice(0, 8)}`;
