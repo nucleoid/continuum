@@ -29,6 +29,7 @@ const DATABASE_URL =
 const pools: pg.Pool[] = [];
 const directories: string[] = [];
 const roles: string[] = [];
+const databases = new Set<string>();
 
 function identifier(prefix: string): string {
   return `${prefix}_${randomUUID().replaceAll('-', '')}`;
@@ -135,37 +136,38 @@ async function withFreshDatabase(
   const root = new pg.Pool({ connectionString: DATABASE_URL, max: 1 });
   pools.push(root);
   await root.query(`CREATE DATABASE ${quoteIdentifier(database)}`);
+  databases.add(database);
   const url = databaseUrl(database);
   const target = new pg.Pool({ connectionString: url, max: 1 });
   target.on('error', () => undefined);
   pools.push(target);
-  try {
-    await run(root, target, url, database);
-  } finally {
-    const databasePools = pools.filter((pool) => pool !== root && pool !== target);
-    await Promise.all(databasePools.map((pool) => pool.end()));
-    for (const pool of databasePools) pools.splice(pools.indexOf(pool), 1);
-    await target.end();
-    pools.splice(pools.indexOf(target), 1);
-    await dropIsolatedTestDatabase(root, database);
-  }
+  // Behavior assertions retain their own test deadline. Normal pool/socket
+  // drain and disk-backed DROP belong to the separately bounded teardown hook.
+  await run(root, target, url, database);
 }
 
 afterEach(async () => {
-  await Promise.all(pools.splice(0).map((pool) => pool.end()));
-  await Promise.all(directories.splice(0).map((directory) =>
-    rm(directory, { recursive: true, force: true })));
-  if (roles.length > 0) {
-    const root = new pg.Pool({ connectionString: DATABASE_URL, max: 1 });
-    try {
-      for (const role of roles.splice(0)) {
-        await root.query(`DROP ROLE IF EXISTS ${quoteIdentifier(role)}`);
-      }
-    } finally {
-      await root.end();
+  const failures: unknown[] = [];
+  const closed = await Promise.allSettled(pools.splice(0).map((pool) => pool.end()));
+  for (const result of closed) if (result.status === 'rejected') failures.push(result.reason);
+  const root = new pg.Pool({ connectionString: DATABASE_URL, max: 1 });
+  try {
+    for (const database of [...databases]) {
+      try { await dropIsolatedTestDatabase(root, database); databases.delete(database); }
+      catch (error) { failures.push(error); }
     }
+    for (const role of roles.splice(0)) {
+      try { await root.query(`DROP ROLE IF EXISTS ${quoteIdentifier(role)}`); }
+      catch (error) { failures.push(error); }
+    }
+  } finally {
+    try { await root.end(); } catch (error) { failures.push(error); }
   }
-});
+  const removed = await Promise.allSettled(directories.splice(0).map((directory) =>
+    rm(directory, { recursive: true, force: true })));
+  for (const result of removed) if (result.status === 'rejected') failures.push(result.reason);
+  if (failures.length > 0) throw new AggregateError(failures, 'Provider fixture teardown failed');
+}, 90_000);
 
 describe('pgvector rollout remediation', () => {
   it('supports PostgreSQL database-owner control of a hardened public app schema', async () => {
