@@ -135,7 +135,7 @@ describe('coordination final review remediation', () => {
       scope: `user:${value.owned.name}`, resource: 'owned-held', runId: randomUUID(),
       requestId: randomUUID(), ttlSeconds: 300,
     });
-    expect(held.outcome).toBe('acquired');
+    expect(held.acquired).toBe(true);
     let result = await offboardPrincipal(pool, value.operator, value.target.id, {
       confirmationScopeId: value.owned.id,
     });
