@@ -84,7 +84,10 @@ async function providerAccess(pool: pg.Pool, role: string) {
 }
 
 describe('pgvector tenant-scoped explicit regrant', () => {
-  it.each(['application', 'operator', 'sync'] as const)('preserves %s identity when reporting registration is enabled or disabled', async (kind) => {
+  it.each([
+    ['application', true], ['application', false],
+    ['operator', true], ['operator', false], ['sync', true], ['sync', false],
+  ] as const)('preserves %s identity when reporting registration enabled=%s', async (kind, enabled) => {
     await isolated(async ({ admin, tenant, role }) => {
       const schema = name('tenant_kind'); const owner = await tenant(schema); await runMigrations(owner);
       const target = await role();
@@ -103,7 +106,7 @@ describe('pgvector tenant-scoped explicit regrant', () => {
       }
       const before = (await owner.query(`SELECT profile_kind, provider_schema_oid, refreshed_at
         FROM continuum_pgvector_role_profiles WHERE database_role_oid=$1::regrole::oid`, [target])).rows;
-      for (const enabled of [true, false]) {
+      {
         await expect(owner.query('SELECT continuum_register_pgvector_reporting_profile($1::name,$2)', [target, enabled]))
           .rejects.toThrow(/role is already registered with a non-reporting profile/i);
         expect((await owner.query(`SELECT profile_kind,provider_schema_oid,refreshed_at
