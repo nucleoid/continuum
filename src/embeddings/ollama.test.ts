@@ -15,6 +15,32 @@ function makeFetch(body: unknown, ok = true, status = 200): typeof fetch {
 }
 
 describe('OllamaEmbeddingProvider', () => {
+  it('embedding handoff: rejects extra vectors for a single requested embedding', async () => {
+    const provider = new OllamaEmbeddingProvider({
+      baseUrl: 'http://local.example', model: 'test-model', dim: 4,
+      fetchImpl: vi.fn(async () => new Response(JSON.stringify({
+        embeddings: [Array(4).fill(0.25), Array(4).fill(0.5)],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })) as typeof fetch,
+    });
+    await expect(provider.embed(['one input'])).rejects.toThrow();
+  });
+
+  it('embedding handoff: embeds three small inputs with one bounded provider request', async () => {
+    const texts = ['first input', 'second input', 'third input'];
+    const vector = Array(4).fill(0.25);
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { prompt?: string; input?: string[] };
+      const requested = body.input ?? [body.prompt!];
+      return new Response(JSON.stringify({ embeddings: requested.map(() => vector) }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+    const provider = new OllamaEmbeddingProvider({
+      baseUrl: 'http://local.example', model: 'test-model', dim: 4, fetchImpl,
+    });
+    expect(await provider.embed(texts)).toEqual(texts.map(() => vector));
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it('returns vectors of declared dim', async () => {
     const fetchImpl = makeFetch({ embedding: new Array(4).fill(0.1) });
     const p = new OllamaEmbeddingProvider({
