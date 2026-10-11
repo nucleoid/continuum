@@ -445,6 +445,17 @@ describe('coordination final review remediation', () => {
     expect((await pool.query(
       'SELECT disabled_at IS NOT NULL AS disabled FROM principals WHERE id = $1', [value.target.id],
     )).rows[0].disabled).toBe(true);
+    const initialBatch = result.progress.batch;
+    const retry = await offboardPrincipal(pool, value.operator, value.target.id, {
+      confirmationScopeId: value.owned.id,
+    });
+    expect(retry).toMatchObject({ complete: false, reason: 'owned_live_lease', progressed: false });
+    expect(retry.progress.batch).toBe(initialBatch);
+    expect((await pool.query(
+      `SELECT count(*)::int AS count FROM audit_log
+        WHERE metadata->>'operation'='principal_offboarding_access_revoked'
+          AND metadata->>'principal_id'=$1::text`, [value.target.id],
+    )).rows[0].count).toBe(1);
     await pool.query(
       `UPDATE coordination_leases SET acquired_at = clock_timestamp() - interval '10 minutes',
               expires_at = clock_timestamp() - interval '1 second' WHERE lease_id = $1`,
