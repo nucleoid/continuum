@@ -44,13 +44,14 @@ Completed-run privacy re-scrubs commit before the subsequent exact proof.
 A dry-run preview never claims exact completion from bounded counts and does
 not require execution of operator-only verification routines.
 `resumeAfter` is populated only when the database supplied a `blockedUntil`
-timestamp. A false `resumeRecommended` means the command is complete.
+timestamp. For non-dry-run executions, a false `resumeRecommended` means the
+command is complete. A dry-run uses false without performing completion.
 Mapping a legitimately shared personal scope requires the explicit
 `map-user-scope ... --allow-other-active-members` acknowledgement.
 
-`list-coordination-privacy-repairs --limit <1-1000> [--after <principal-id>]`
+`list-coordination-privacy-repairs [--limit <1-1000>] [--after <principal-id>]`
 returns one bounded discovery window with `repairs`, `nextCursor`, `hasMore`,
-and `scannedCount`. Follow a non-null `nextCursor` even when `repairs` is empty
+and `scannedCount`. The default limit is 100. Follow a non-null `nextCursor` even when `repairs` is empty
 or short. Filtered candidates consume scan slots; the command never fills a
 page by scanning indefinitely. Migration 0081 and the current operator profile
 are required. Missing paging support returns `DEPENDENCY_UNAVAILABLE` instead

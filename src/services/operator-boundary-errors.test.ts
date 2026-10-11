@@ -170,6 +170,43 @@ const paths: Array<{
 ];
 
 describe('operator boundary database errors', () => {
+  it.each([
+    { reason: 'migration_pending', failure: Object.assign(databaseFailure('contract pending', '55000'),
+      { constraint: 'coordination_contract_pending' }) },
+    { reason: 'owned_live_lease', failure: Object.assign(databaseFailure('owned lease', '23514'),
+      { constraint: 'coordination_scope_live_lease' }) },
+  ])('returns a truthful $reason block for an existing disabled scope repair', async ({ reason, failure }) => {
+    const client = {
+      release: vi.fn(),
+      query: vi.fn(async (sql: string) => {
+        let rows: Record<string, unknown>[] = [];
+        if (sql.includes('continuum_operator_pseudonymize_scope_v2')) throw failure;
+        if (sql.includes('to_regprocedure')) rows = [{ ready: true }];
+        else if (sql.includes('pg_try_advisory_xact_lock')) rows = [{ locked: true }];
+        else if (/FROM scopes WHERE kind = \$1 AND name = \$2/.test(sql)) {
+          rows = [{ id: SCOPE_ID, kind: 'org', name: '', created_at: new Date() }];
+        } else if (/FROM scope_memberships m JOIN principals p/.test(sql)) {
+          rows = [{ principal_id: ACTOR_ID, scope_id: SCOPE_ID, role: 'admin',
+            source_kind: 'manual', source_id: 'manual', active: true, added_at: new Date() }];
+        } else if (sql.includes('SELECT principal.id, principal.disabled_at')) {
+          rows = [{ id: TARGET_ID, scope_id: SCOPE_ID, disabled_at: new Date(), offboarded_at: null }];
+        } else if (sql.includes('continuum_operator_list_coordination_privacy_repairs')) {
+          rows = [{ repair_state: 'disabled_only' }];
+        } else if (sql.includes('FROM continuum_coordination_privacy_state')) {
+          rows = [{ privacy_version: 2, principal_complete: false }];
+        } else if (sql.includes('continuum_operator_coordination_scope_privacy_state')) {
+          rows = [{ repair_exists: true, phase: 'resources', pseudonym: 'erased-existing',
+            rows_processed: '1', scope_complete: false, resources_remain: true,
+            receipts_remain: false, leases_remain: true, live_lease_until: null }];
+        }
+        return { rowCount: rows.length, rows };
+      }),
+    };
+    const pool = { connect: vi.fn().mockResolvedValue(client) } as unknown as pg.Pool;
+    await expect(repairCoordinationPrivacy(pool, actor, TARGET_ID, {
+      confirmationScopeId: SCOPE_ID,
+    })).resolves.toMatchObject({ complete: false, progressed: false, reason });
+  });
   it('preserves the repair lock failure when its fallback snapshot also fails', async () => {
     const original = databaseFailure('could not obtain lock', '55P03');
     const snapshotFailure = databaseFailure('snapshot connection lost', '08006');

@@ -471,20 +471,26 @@ export async function repairCoordinationPrivacy(
   } catch (error) {
     try { await client.query('ROLLBACK'); } catch { destroyClient = true; }
     if (!destroyClient && isCoordinationPrivacyLockBusy(error)) {
-      const snapshot = await client.query(
-        `SELECT principal.offboarded_at, mapping.scope_id
-           FROM principals principal
-           JOIN principal_user_scopes mapping ON mapping.principal_id = principal.id
-          WHERE principal.id = $1 AND principal.kind = 'user'
-            AND principal.disabled_at IS NOT NULL`,
-        [principalId],
-      );
-      if (snapshot.rowCount && snapshot.rows[0].scope_id === confirmationScopeId) {
-        return {
-          principalId, scopeId: confirmationScopeId,
-          state: snapshot.rows[0].offboarded_at === null ? 'disabled_only' : 'offboarded',
-          complete: false, progressed: false, blockedUntil: null, reason: 'lock_busy',
-        };
+      try {
+        const snapshot = await client.query(
+          `SELECT principal.offboarded_at, mapping.scope_id
+             FROM principals principal
+             JOIN principal_user_scopes mapping ON mapping.principal_id = principal.id
+            WHERE principal.id = $1 AND principal.kind = 'user'
+              AND principal.disabled_at IS NOT NULL`,
+          [principalId],
+        );
+        if (snapshot.rowCount && snapshot.rows[0].scope_id === confirmationScopeId) {
+          return {
+            principalId, scopeId: confirmationScopeId,
+            state: snapshot.rows[0].offboarded_at === null ? 'disabled_only' : 'offboarded',
+            complete: false, progressed: false, blockedUntil: null, reason: 'lock_busy',
+          };
+        }
+      } catch {
+        // A failed fallback cannot replace the operation's original failure.
+        destroyClient = true;
+        throw error;
       }
     }
     throw operatorBoundaryError(error) ?? error;
