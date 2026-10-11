@@ -94,8 +94,10 @@ const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
     'c936d830ab9f00571a392ce72977007a6134b3d0f2237dc88a85ef850862ffd1'],
   ['0085_embedding_backfill_failures.sql',
     'bf832c89bffcb3d03e33a006601f9044907779465c6e860d9db42b282d68a14d'],
-  $1470c7a9458fedb3834987cc7a276e3ffacc2f893a39e936cea0f8a88d8687539'],
-  $16049e0743c585a73a56849812eb0740b1bb08f254963aa3650bde1622c31dea8'],
+  ['0086_embedding_backfill_failure_disposition.sql',
+    '470c7a9458fedb3834987cc7a276e3ffacc2f893a39e936cea0f8a88d8687539'],
+  ['0087_embedding_provider_scan_index.sql',
+    '6049e0743c585a73a56849812eb0740b1bb08f254963aa3650bde1622c31dea8'],
   ['0088_embedding_provider_scan_index_rebuild.sql',
     'e7e9dc8b7cb5a3266e70dcf0fe0a31221baedf182aa6356ac3a0146c7e1de39c'],
 ]);
