@@ -218,6 +218,16 @@ timestamps. Clearing the principal's UUID link does not erase temporal
 correlation or rewrite earlier backups; treat retained installation history and
 backups under the organization's independent retention policy.
 
+The 0081 backfill also revisits fenced lock audits in bounded raw audit-ID
+windows, including another holder's rows in an approved owned scope. Its
+captured audit high-water ID bounds the pass; it rewrites only old token/byte
+metadata within an existing run's principal or owned-scope audit fence.
+Scanned counts, rewritten counts and the cursor commit atomically, and the
+cursor clears when the phase finishes. Existing run UUIDs, approvals, lifecycle
+cursors and completion events remain intact. Finish this owner migration phase
+before resuming an open run or verifying a completed one; the later privacy
+index is not a prerequisite for the bounded rewrite.
+
 Migration 0063 reopens every version-1 coordination privacy row by clearing its
 completion timestamp. `list-incomplete-offboarding` reports unfinished durable
 offboarding runs, but a previously completed run can require only this upgrade
