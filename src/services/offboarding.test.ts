@@ -130,6 +130,11 @@ describe('offboarding and erasure', () => {
       }
       await bounded.query('COMMIT');
     } catch (error) { await bounded.query('ROLLBACK'); throw error; }
+    // Refresh the real seeded cardinalities before service SQL is planned.
+    // Prior tiny or truncated fixture statistics are not this scale workload.
+    for (const relation of ['memories', 'audit_log', 'audit_log_offboarding_scopes', 'principal_user_scopes']) {
+      await bounded.query(`ANALYZE ${relation}`);
+    }
   }
 
   it('previews, atomically redacts the owned scope, preserves shared memory, and retries safely', async () => {
