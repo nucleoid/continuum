@@ -214,7 +214,7 @@ describe('coordination final review remediation', () => {
       await pool.query(
         `INSERT INTO coordination_operation_receipts(principal_id, operation, request_id, payload_hash,
            outcome, scope_id, resource, expires_at, server_time, retry_after_seconds, retain_until, created_at)
-         VALUES($1, 'acquire', gen_random_uuid(), sha256(convert_to($1::text, 'UTF8')),
+         VALUES($1::uuid, 'acquire', gen_random_uuid(), sha256(convert_to(($1::uuid)::text, 'UTF8')),
            'contended', $2, 'quota-shared', clock_timestamp() - interval '2 days',
            clock_timestamp() - interval '2 days', 0, clock_timestamp() - interval '1 day',
            clock_timestamp() - interval '2 days')`, [principalId, value.shared.id],
