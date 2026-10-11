@@ -352,6 +352,13 @@ run. Audit failure rolls the transaction back.
 
 Completion waits for actual outbox state, rather than an old erasure receipt.
 Retries commit bounded progress and check the current physical state again.
+Each call scrubs at most 1000 event-name snapshots and 1000 deliveries, further
+limited by the requested batch size. Filling either phase's batch is advancing
+work, not a busy result: the normal offboarding CLI keeps batching even after
+memory and audit phases finish. An incomplete scrub that fills neither phase
+reports `lock_busy`, preserving exit 3 for skipped locked work. `--once` still
+returns after one bounded call, and unchanged blocked retries neither add a
+batch nor mint another permanent privacy receipt.
 A callback that has already received its event may retain that original
 payload or have sent it downstream. Losing its durable ownership fence stops
 future acknowledgement or retry writes; the next ownership check signals
