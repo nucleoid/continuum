@@ -62,8 +62,8 @@ Use this mixed-version webhook rollout sequence:
 
 The migration's first statement sets a five-second `lock_timeout`, so waits on
 principal foreign-key dependencies as well as the later table lock are bounded.
-It also sets a 60-second `statement_timeout` before any DDL, bounding the full
-transaction and therefore the time the exclusive lock can remain held.
+It also sets a 60-second `statement_timeout` before any DDL. This bounds each
+statement, not the complete transaction or total exclusive-lock duration.
 It then takes an `EXCLUSIVE` lock on `memories` before one materialized,
 grouped/windowed scan rewrites changed rows and installs the database trigger
 in the same transaction. `EXCLUSIVE` drains
@@ -73,7 +73,9 @@ write drain exceeds five seconds, the migration rolls back without rewriting
 rows; finish or end the long transaction and retry `continuum-migrate`. The
 lock is held for the complete historical rewrite and trigger installation, so
 operators should measure the migration benchmark against a
-production-sized snapshot during the maintenance rehearsal. The regression
+production-sized snapshot during the maintenance rehearsal, with a finite
+outer process deadline and a verified backup. Keep writers quiesced until
+the transaction finishes or rolls back. The regression
 suite bounds a 25,000-row mixed-tag rewrite.
 
 Once the migration commits, PostgreSQL rejects duplicate or out-of-vocabulary
