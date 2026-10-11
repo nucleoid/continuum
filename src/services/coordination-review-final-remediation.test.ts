@@ -167,6 +167,37 @@ describe('coordination final review remediation', () => {
     }
   });
 
+  it('blocked privacy CLI review: drains lifecycle batches before reporting a shared live lease block', async () => {
+    const value = await fixture('shared-lease-lifecycle');
+    const held = await acquireLease(pool, value.target, {
+      scope: `project:${value.shared.name}`, resource: 'held-shared', runId: randomUUID(),
+      requestId: randomUUID(), ttlSeconds: 900,
+    });
+    expect(held.acquired).toBe(true);
+    await pool.query(
+      `INSERT INTO memories(id, scope_id, type, title, body, author_id, source)
+       SELECT gen_random_uuid(), $1, 'context', 'private ' || n, 'secret ' || n, $2, 'manual'
+         FROM generate_series(1, 7) n`, [value.owned.id, value.target.id],
+    );
+    await pool.query(
+      `INSERT INTO audit_log(principal_id, action, scope_id, query, metadata)
+       SELECT $1, 'read', $2, 'secret query ' || n, '{}'::jsonb FROM generate_series(1, 7) n`,
+      [value.target.id, value.owned.id],
+    );
+    const blocked = await adminCli(value.operator, [
+      'offboard-principal', value.target.id, '--confirm-scope', value.owned.id, '--batch-size', '2',
+    ], 60_000);
+    expect(blocked).toMatchObject({ exitCode: 3, payload: { complete: false, reason: 'live_lease' } });
+    expect(Number(blocked.payload.attempts)).toBeGreaterThan(1);
+    expect((await pool.query(
+      "SELECT count(*)::int AS count FROM memories WHERE scope_id = $1 AND body <> '[erased]'", [value.owned.id],
+    )).rows[0].count).toBe(0);
+    expect((await pool.query(
+      'SELECT count(*)::int AS count FROM audit_log WHERE query IS NOT NULL AND (principal_id = $1 OR scope_id = $2)',
+      [value.target.id, value.owned.id],
+    )).rows[0].count).toBe(0);
+  }, 60_000);
+
   it('contract offboarding review: durably revokes access while backfill is pending and resumes after readiness', async () => {
     const value = await fixture('pending-contract-access');
     try {
