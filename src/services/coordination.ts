@@ -93,7 +93,14 @@ function safeCoordinationError(error: unknown): ServiceError {
       'Coordination storage quota exceeded',
     );
   }
-  if (['42501', '42P01', '3F000', '42883', '42703', '55000'].includes(String(code))) {
+  if (code === '55000') {
+    return new ServiceError(
+      'DEPENDENCY_UNAVAILABLE',
+      'Coordination contract repair is incomplete; finish migrations before starting runtimes',
+      { cause: error },
+    );
+  }
+  if (['42501', '42P01', '3F000', '42883', '42703'].includes(String(code))) {
     return new ServiceError(
       'DEPENDENCY_UNAVAILABLE',
       'Coordination storage is not provisioned for the application role',
