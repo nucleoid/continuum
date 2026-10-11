@@ -453,8 +453,10 @@ resource scan is added to ordinary acquisition. On floor-phase completion,
 both resource cursor fields are cleared in that same transaction; the processed
 count and persistent fencing floors remain.
 Short receipts are extended in durable, bounded keyset batches. Fresh coordination mutations
-return `DEPENDENCY_UNAVAILABLE` while the repair is pending; retained authorized
-replays remain available. An interrupted repair resumes from its saved cursors,
+return `DEPENDENCY_UNAVAILABLE` while the repair is pending. Already-running
+nodes can still serve retained authorized replays; new REST/MCP processes
+refuse startup until the trusted 0081 readiness gate reports complete. Plan
+maintenance and restarts around that boundary. An interrupted repair resumes from its saved cursors,
 including after the migration file has been ledgered. Finish repair before
 enabling current mutation or offboarding traffic. Only the actual schema owner
 may execute the repair capability; a client-supplied repair flag grants no access.
@@ -463,9 +465,17 @@ and thirty-second statement deadlines to transactional published files 0054
 through 0059, recorded as the
 `canonical-lf-lock1s-statement30s-v2` execution variant. Their canonical source bytes remain
 unchanged. The no-transaction 0058 online indexes retain their original execution
-mode and receive no transactional prefix. Schedule owner maintenance, drain long transactions and retry after
-lock refusal or statement cancellation. Each cancelled transactional file rolls
-back atomically and requires a later owner retry in the maintenance window.
+mode and receive no transactional prefix. Schedule owner maintenance and drain
+long transactions before retrying lock refusal. Each cancelled transactional
+file rolls back atomically. The operative thirty-second statement deadline
+overrides a longer `PGOPTIONS` default; the packaged runner has no unbounded
+override. If the same full-scan plan and data volume repeatedly exceed that
+budget, stop retrying. Draining traffic does not make a volume-bound plan finish.
+Preserve the unchanged data and recorded source/effective SQL hashes, measure
+the failing plan, and obtain an owner-reviewed optimized forward execution
+recipe before continuing. The default budget supports the validated upgrade
+paths; very large parked histories can require that measured repair. It does
+not guarantee every historical installation fits the deadline.
 Failed online execution clients are discarded after advisory-lock cleanup so
 session settings installed by a partly executed file cannot leak into later work.
 The 0081 schema transaction also validates a principal CHECK and installs
