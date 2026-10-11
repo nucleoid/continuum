@@ -661,10 +661,11 @@ export async function runMigrations(
         [applicationSchema],
       );
       ledgerAlreadyExisted = ledgerState.rows[0]?.exists === true;
-      if (!ledgerAlreadyExisted && pathState.rows[0]?.unsafeCreate) {
+      if (pathState.rows[0]?.unsafeCreate) {
         throw new Error(
           `The application schema ${quoteIdentifier(applicationSchema)} selected by `
-          + `search_path must not grant CREATE to PUBLIC or a non-owner`,
+          + `search_path must not grant CREATE to PUBLIC or a non-owner. `
+          + 'Revoke CREATE as the application schema owner before retrying',
         );
       }
 
@@ -673,6 +674,7 @@ export async function runMigrations(
           schema: string;
           unsafeCreate: boolean;
           tenantObjects: boolean;
+          tenantOwned: boolean;
           allowed: boolean;
           role: string;
         }>(`
@@ -694,12 +696,21 @@ export async function runMigrations(
                    )
                  ELSE FALSE
                END AS "tenantObjects",
+               EXISTS (
+                 SELECT 1 FROM pg_namespace application
+                 JOIN pg_class ledger ON ledger.relnamespace=application.oid
+                   AND ledger.relname='_continuum_migrations' AND ledger.relkind='r'
+                 JOIN pg_roles provider_owner ON provider_owner.oid IN
+                   (namespace.nspowner,extension.extowner)
+                 WHERE NOT provider_owner.rolsuper AND application.nspname<>$1
+                   AND (application.nspowner=provider_owner.oid OR ledger.relowner=provider_owner.oid)
+               ) AS "tenantOwned",
                has_schema_privilege(current_user, namespace.oid, 'USAGE') AS allowed,
                current_user AS role
           FROM pg_extension extension
           JOIN pg_namespace namespace ON namespace.oid = extension.extnamespace
          WHERE extension.extname = 'vector'
-      `);
+      `, [applicationSchema]);
         const providerState = provider.rows[0];
         if (providerState) {
         if (providerState.unsafeCreate) {
@@ -710,6 +721,13 @@ export async function runMigrations(
         }
         const compatibilityAccepted =
           process.env[LEGACY_SHARED_VECTOR_SCHEMA_OPT_IN] === '1';
+        if (providerState.tenantOwned && !compatibilityAccepted) {
+          throw new Error(
+            'Refusing a pgvector provider whose owner controls another Continuum application schema. '
+            + 'Use independently owned provider infrastructure, or set '
+            + `${LEGACY_SHARED_VECTOR_SCHEMA_OPT_IN}=1 only for reviewed shared-provider ownership`,
+          );
+        }
         if (providerState.schema === 'public' && applicationSchema !== 'public'
             && providerState.tenantObjects
             && !compatibilityAccepted) {

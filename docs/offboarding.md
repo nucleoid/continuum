@@ -602,6 +602,15 @@ another installation. Treat `continuum_extensions` as database provider
 infrastructure: its owner controls extension upgrades and it must be dropped
 only after every dependent tenant and non-Continuum consumer has been retired
 and the provider owner has reviewed decommissioning.
+Self-bootstrap is suitable for a single tenant. Before adding another tenant,
+use independently owned provider infrastructure. A fresh binding is refused
+when a non-superuser schema or extension owner also owns another Continuum
+application schema or its migration ledger. An installer that temporarily used
+superuser authority and was later downgraded still owns its provider objects.
+Superusers retain database-wide authority; this check does not isolate tenants
+from the DBA. The existing reviewed legacy shared-provider opt-in can accept
+that ownership coupling explicitly. Continuum does not transfer ownership or
+change global provider ACLs to make the binding succeed.
 
 For a fresh application schema, Continuum refuses an existing provider schema
 that contains another Continuum ledger or application tables. Relocate that
@@ -626,12 +635,16 @@ after every dependent tenant and other provider consumer has been retired.
 The migration connection's first effective `search_path` schema is the
 application schema. It must be owner-controlled by the migration role (including
 PostgreSQL's database-owner control of `public`) and must not grant `CREATE` to
-`PUBLIC` or another role; an empty or hostile path is
+`PUBLIC` or another role, including on an already-ledgered installation; an empty or hostile path is
 rejected before the ledger is created. During `0001`, the path is replaced by
 exactly the quoted application schema followed by the quoted provider schema.
 An application-local `vector` type or `vector_cosine_ops` shadow is rejected.
 This keeps unqualified objects in the application schema while resolving the
 published migration's vector type and opclass only from pgvector.
+If schema CREATE privileges drift after installation, the owner must review
+and explicitly revoke the non-owner grants before retrying migration. This is
+an upgrade prerequisite, not an automatic ACL rewrite or an exception for old
+ledgers. The migrator rejects the drift before migration and provenance DDL.
 
 The migration owner needs `USAGE` on the installed extension schema.
 `runMigrations` reports the exact missing grant before applying `0001`. It
