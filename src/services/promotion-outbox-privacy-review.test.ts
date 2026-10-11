@@ -133,7 +133,11 @@ describe('promotion outbox privacy review', () => {
     const draining = worker.drainOnce().then(() => undefined, (error: unknown) => error);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const snapshot = await entered.promise;
+      const snapshot = await Promise.race([entered.promise, new Promise<PromotionEvent>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('running consumer did not enter within its bounded watch')), 2_000);
+      })]);
+      if (timer) clearTimeout(timer);
+      timer = undefined;
       expect(snapshot.destinationScope.name).toBe(personal.name);
       const result = await offboardPrincipal(pool, admin, target.id, { confirmationScopeId: personal.id });
       expect(result.complete).toBe(true);
