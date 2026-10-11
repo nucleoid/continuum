@@ -2432,6 +2432,39 @@ describe('runMigrations', () => {
     }
   },120_000);
 
+  it('keeps published 0058 concurrent indexes outside transactions without an early timeout prefix', async () => {
+    const name='0058_coordination_online_prep.sql';
+    const directory=await mkdtemp(join(tmpdir(),'continuum-0058-online-')); directories.push(directory);
+    await copyFile(join(process.cwd(),'migrations',name),join(directory,name));
+    const canonical=(await readFile(join(directory,name),'utf8')).replaceAll('\r\n','\n');
+    const digest=createHash('sha256').update(canonical).digest('hex');
+    const queries:string[]=[]; const started:unknown[][]=[]; let inTransaction=false;
+    const client={ query:vi.fn(async(query:string,values?:unknown[])=>{
+      queries.push(query.trim());
+      if(query==='BEGIN') inTransaction=true;
+      if(query==='COMMIT'||query==='ROLLBACK') inTransaction=false;
+      if(query.includes('CREATE INDEX CONCURRENTLY')&&inTransaction) {
+        throw Object.assign(new Error('concurrent index inside transaction'),{code:'25001'});
+      }
+      if(query.includes('pg_try_advisory_lock')) return {rows:[{locked:true}],rowCount:1};
+      if(query.includes('pg_advisory_unlock')) return {rows:[{unlocked:true}],rowCount:1};
+      if(query.includes('SELECT 1 FROM _continuum_migrations')) {
+        return {rows:[],rowCount:values?.[0]===name?0:1};
+      }
+      if(query.includes('SELECT 1 FROM _continuum_migration_execution')&&query.includes("state='started'")) {
+        return {rows:[],rowCount:0};
+      }
+      if(query.includes('FROM pg_class c')&&query.includes('pg_index')) return {rows:[{schema:'public',valid:true}],rowCount:1};
+      if(query.includes('INSERT INTO _continuum_migration_execution')&&query.includes("'started'")) started.push(values??[]);
+      return {rows:[],rowCount:1};
+    }),release:vi.fn() };
+    await expect(runMigrations({connect:vi.fn(async()=>client)} as unknown as pg.Pool,directory)).resolves.toHaveLength(1);
+    expect(queries.filter(query=>query.includes('CREATE INDEX CONCURRENTLY'))).toHaveLength(2);
+    expect(queries.some(query=>query.startsWith("SET LOCAL lock_timeout = '1s';"))).toBe(false);
+    expect(started).toHaveLength(1);
+    expect(started[0].slice(1,6)).toEqual([name,'file-online','online-directives-v1',digest,digest]);
+  });
+
   it('runs marked concurrent-index migrations outside a transaction', async () => {
     const queries: string[] = [];
     const client = {

@@ -408,9 +408,10 @@ including after the migration file has been ledgered. Finish repair before
 enabling current mutation or offboarding traffic. Only the actual schema owner
 may execute the repair capability; a client-supplied repair flag grants no access.
 Upgrades parked before 0060 also apply a transaction-local one-second lock wait
-bound to published files 0054 through 0059, recorded as the
+bound to transactional published files 0054 through 0059, recorded as the
 `canonical-lf-lock1s-v1` execution variant. Their canonical source bytes remain
-unchanged. Schedule owner maintenance, drain long transactions and retry after
+unchanged. The no-transaction 0058 online indexes retain their original execution
+mode and receive no transactional prefix. Schedule owner maintenance, drain long transactions and retry after
 lock refusal; the lock bound does not limit the duration of unlocked data work.
 The 0062 cleanup directive uses adaptive batches of at most 1,000 with one-second
 lock and five-second statement bounds. Its historical final exhaustion query
