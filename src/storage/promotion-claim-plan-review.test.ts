@@ -6,7 +6,7 @@ import { createPrincipal } from './principals.js';
 import { createScope } from './scopes.js';
 import { addMembership } from './memberships.js';
 import { createMemory } from './memories.js';
-import { claimPromotionDeliveries } from './promotion-events.js';
+import { claimPromotionDeliveries, failPromotionDelivery, releasePromotionDeliveries } from './promotion-events.js';
 
 interface PlanNode {
   'Node Type': string;
@@ -30,6 +30,39 @@ function deliveryWork(plan: PlanNode): number {
 
 function indexes(plan: PlanNode): string[] {
   return [...(plan['Index Name'] ? [plan['Index Name']] : []), ...(plan.Plans ?? []).flatMap(indexes)];
+}
+
+function measuredWrites(pool: pg.Pool) {
+  const plans: Array<{ kind: 'claim' | 'normalization' | 'release'; plan: PlanNode }> = [];
+  const measured = new Proxy(pool, {
+    get(target, property, receiver) {
+      if (property !== 'connect') return Reflect.get(target, property, receiver);
+      return async () => {
+        const client = await target.connect();
+        return new Proxy(client, { get(connection, key) {
+          if (key === 'query') return async (...args: unknown[]) => {
+            const sql = args[0];
+            if (typeof sql === 'string' && /UPDATE\s+promotion_event_deliveries/i.test(sql)) {
+              await connection.query('SAVEPOINT promotion_tail_plan_probe');
+              const result = await Reflect.apply(connection.query, connection,
+                [`EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) ${sql}`, ...args.slice(1)]);
+              plans.push({ kind: /JOIN\s+promotion_events/i.test(sql) ? 'claim'
+                : /SET\s+lease_owner\s*=\s*NULL/i.test(sql) ? 'release' : 'normalization',
+              plan: result.rows[0]['QUERY PLAN'][0].Plan as PlanNode });
+              await connection.query('ROLLBACK TO SAVEPOINT promotion_tail_plan_probe');
+              await connection.query('RELEASE SAVEPOINT promotion_tail_plan_probe');
+            }
+            return Reflect.apply(connection.query, connection, args);
+          };
+          const value = Reflect.get(connection, key);
+          return typeof value === 'function' ? value.bind(connection) : value;
+        } });
+      };
+    },
+  });
+  return { pool: measured, metrics: () => plans.map(({ kind, plan }) => ({ kind,
+    examinedDeliveryRows: deliveryWork(plan),
+    sharedBuffers: (plan['Shared Hit Blocks'] ?? 0) + (plan['Shared Read Blocks'] ?? 0), indexes: indexes(plan) })) };
 }
 
 describe('promotion claim plan review', () => {
@@ -168,4 +201,82 @@ describe('promotion claim plan review', () => {
       if (pending) await pending.catch(() => undefined);
     }
   }, 15_000);
+
+  it('bounds limit-one scans with a registered future backoff tail and live leased front', async () => {
+    const promote = await producer();
+    const tail = 1024;
+    const hook = 'plan-backoff';
+    for (let index = 0; index < tail; index += 1) await promote(hook);
+    let failed = 0;
+    while (failed < tail) {
+      const batch = await claimPromotionDeliveries(pool, { owner: 'backoff-owner', webhookIds: [hook],
+        limit: 100, perWebhookLimit: 100, leaseMs: 60_000, maxAttempts: 10 });
+      expect(batch.length).toBeGreaterThan(0);
+      for (const delivery of batch) {
+        expect(await failPromotionDelivery(pool, delivery.event.eventId, hook, 'backoff-owner', {
+          maxAttempts: 10, retryDelayMs: 300_000, error: new Error('Backoff fixture'),
+          attemptCount: delivery.attemptCount, leaseGeneration: delivery.leaseGeneration,
+        })).toBe('pending');
+        failed += 1;
+      }
+    }
+    // These are actual live claims at the front, not manufactured lease or
+    // attempt counters. With no eligible row, limit1 must not scan future time.
+    await promote(hook); await promote(hook);
+    expect(await claimPromotionDeliveries(pool, { owner: 'leased-front', webhookIds: [hook],
+      limit: 2, perWebhookLimit: 2, leaseMs: 60_000, maxAttempts: 10 })).toHaveLength(2);
+    expect((await pool.query(`SELECT count(*)::int AS total,
+      count(*) FILTER(WHERE available_at>pg_catalog.clock_timestamp())::int AS future,
+      count(*) FILTER(WHERE lease_expires_at>pg_catalog.clock_timestamp())::int AS leased
+      FROM promotion_event_deliveries WHERE webhook_id=$1::text AND state='pending'`, [hook])).rows)
+      .toEqual([{ total: tail + 2, future: tail, leased: 2 }]);
+    await pool.query('ANALYZE promotion_events; ANALYZE promotion_event_deliveries');
+    const measured = measuredWrites(pool);
+    expect(await claimPromotionDeliveries(measured.pool, { owner: 'no-due-work', webhookIds: [hook],
+      limit: 1, perWebhookLimit: 1, leaseMs: 60_000, maxAttempts: 10 })).toEqual([]);
+    // A valid reduction in retry allowance also makes the normalization lookup
+    // consider the same future tail; it must wait for availability without
+    // walking every future row or changing any of their durable failures.
+    expect(await claimPromotionDeliveries(measured.pool, { owner: 'lowered-attempt-budget', webhookIds: [hook],
+      limit: 1, perWebhookLimit: 1, leaseMs: 60_000, maxAttempts: 1 })).toEqual([]);
+    const metrics = measured.metrics();
+    console.info(JSON.stringify({ event: 'promotion_backoff_tail_plan_review', tail, leasedFront: 2, metrics }));
+    expect(metrics.filter((metric) => metric.kind === 'claim')).toHaveLength(2);
+    expect(metrics.filter((metric) => metric.kind === 'normalization')).toHaveLength(2);
+    for (const metric of metrics) {
+      expect(metric.examinedDeliveryRows).toBeLessThanOrEqual(64);
+      expect(metric.sharedBuffers).toBeLessThanOrEqual(256);
+    }
+    expect((await pool.query(`SELECT count(*)::int AS pending FROM promotion_event_deliveries
+      WHERE webhook_id=$1::text AND state='pending' AND attempt_count=1`, [hook])).rows)
+      .toEqual([{ pending: tail + 2 }]);
+  }, 180_000);
+
+  it('bounds actual shutdown release work to its owner instead of unrelated pending IDs', async () => {
+    const promote = await producer();
+    const event = await promote('release-requested');
+    const owned = await claimPromotionDeliveries(pool, { owner: 'release-owner', webhookIds: ['release-requested'],
+      limit: 1, leaseMs: 60_000 });
+    expect(owned).toHaveLength(1);
+    const unrelated = 8192;
+    await pool.query(`INSERT INTO promotion_event_deliveries(event_id,webhook_id)
+      SELECT $1::uuid,'release-unregistered-'||pg_catalog.lpad(id::text,5,'0')
+      FROM pg_catalog.generate_series(1,$2::int) id`, [event.promotionEvent.eventId, unrelated]);
+    await pool.query('ANALYZE promotion_events; ANALYZE promotion_event_deliveries');
+    const measured = measuredWrites(pool);
+    expect(await releasePromotionDeliveries(measured.pool, 'release-owner')).toBe(1);
+    const metrics = measured.metrics();
+    console.info(JSON.stringify({ event: 'promotion_shutdown_release_plan_review', unrelated, metrics }));
+    expect(metrics).toHaveLength(1);
+    expect(metrics[0].kind).toBe('release');
+    expect(metrics[0].examinedDeliveryRows).toBeLessThanOrEqual(64);
+    expect(metrics[0].sharedBuffers).toBeLessThanOrEqual(256);
+    expect((await pool.query(`SELECT lease_owner,lease_expires_at,attempt_count,lease_generation
+      FROM promotion_event_deliveries WHERE event_id=$1::uuid AND webhook_id='release-requested'`,
+    [event.promotionEvent.eventId])).rows).toEqual([{ lease_owner: null, lease_expires_at: null,
+      attempt_count: owned[0].attemptCount, lease_generation: String(owned[0].leaseGeneration) }]);
+    expect((await pool.query(`SELECT count(*)::int AS untouched FROM promotion_event_deliveries
+      WHERE webhook_id<>'release-requested' AND state='pending' AND lease_owner IS NULL AND attempt_count=0`)).rows)
+      .toEqual([{ untouched: unrelated }]);
+  }, 30_000);
 });
