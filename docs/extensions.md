@@ -103,7 +103,11 @@ After correcting the consumer, call the exported
 `manualRetryPromotionDelivery(pool, eventId, webhookId)` function. It changes
 only a `dead_letter` row, clears its error and lease, resets its attempt count,
 and makes it immediately claimable. It returns `false` if the named delivery is
-not dead-lettered.
+not dead-lettered. Before retrying a timed-out consumer that ignores abort,
+quiesce its worker replicas and confirm the old callback has settled or its
+process has exited. Manual retry does not retract a running callback; clearing
+its durable lease can otherwise admit an overlapping consumer on another
+replica. Privacy-cancelled deliveries cannot be manually retried.
 
 ### Worker settings
 
@@ -136,12 +140,23 @@ statement limit and 1-second lock limit, retaining stricter existing limits.
 These are per-statement bounds, not a whole-transaction or connection-acquisition
 guarantee. Commit or rollback restores the pool session settings; failed
 rollback discards that connection. A caller-supplied transaction client keeps
-its existing transaction and settings and must supply its own SQL containment. Every post-claim mutation is fenced by event ID,
+its existing transaction and settings and must supply its own SQL containment.
+Claims seek indexed eligible prefixes for the requested webhook IDs.
+Interrupted-delivery normalization changes at most 100 exhausted rows per
+claim and skips locked rows, so available work for the same ID can continue.
+Several polls can be needed to normalize a large exhausted backlog.
+Every post-claim mutation is fenced by event ID,
 webhook ID, lease owner, attempt number, and a monotonic lease generation that
 is not reset by manual retry. A late write from an older claim cannot mutate a
 newer claim held by the same process owner, even when manual retry reuses the
 same attempt number.
-Leases for ambiguous deliveries are not released or renewed after stop. A
+While running, a transient renewal or timeout-write failure signals abort but
+keeps renewing an unsettled callback's exact owner, attempt and generation.
+Definite ownership loss ends renewal. Successful callbacks with a pending ACK
+use a separate rotating cohort of at most 10 concurrent reconciliation writes;
+those writes do not delay the next lease-renewal cycle. A started callback
+that rejects after ownership uncertainty keeps its attempt and bounded backoff.
+Leases for ambiguous deliveries are not released or renewed after stop returns. A
 process-wide in-flight fence excludes them from claims by replacement workers
 in the same process until the original callback settles. Admission is isolated
 per webhook ID: a webhook can retain at most the configured claim-batch count,
