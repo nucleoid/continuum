@@ -48,7 +48,7 @@ async function isolated(run: (context: {
   try {
     await run({ admin,
       async tenant(schema) {
-        await admin.query(`CREATE SCHEMA ${q(schema)}`);
+        await admin.query(`CREATE SCHEMA IF NOT EXISTS ${q(schema)}`);
         const pool = new pg.Pool({ connectionString: url.toString(), max: 1, options: `-c search_path=${schema}` });
         pools.push(pool); return pool;
       },
@@ -83,6 +83,26 @@ async function providerAccess(pool: pg.Pool, role: string) {
 }
 
 describe('pgvector tenant-scoped explicit regrant', () => {
+  it.each(['public', 'custom'])('keeps new sync registration grants on the target role in a %s schema', async (layout) => {
+    await isolated(async ({ admin, tenant, role }) => {
+      const schema = layout === 'public' ? 'public' : name('tenant_sync');
+      const pool = await tenant(schema); await runMigrations(pool);
+      const sync = await role(); await admin.query(`ALTER ROLE ${q(sync)} LOGIN`);
+      const actor = await createPrincipal(pool, { externalId: name('sync_actor'), kind: 'service', displayName: 'Sync' });
+      await expect(pool.query('SELECT continuum_register_trusted_database_identity($1::name,$2::uuid,FALSE,TRUE)', [sync, actor.id]))
+        .resolves.toBeDefined();
+      await expect(pool.query('SELECT continuum_assert_sync_role_allowlist($1::name,$2::uuid)', [sync, actor.id]))
+        .resolves.toBeDefined();
+      for (const table of ['scopes', 'principals', 'entra_groups', 'scope_memberships', 'entra_sync_state']) {
+        expect((await pool.query(`SELECT has_table_privilege($1,$2,'SELECT') AS sync_read,
+          has_table_privilege('public',$2,'SELECT') AS public_read`, [sync, `${q(schema)}.${q(table)}`])).rows)
+          .toEqual([{ sync_read: true, public_read: false }]);
+      }
+      expect((await pool.query(`SELECT has_function_privilege($1,$2,'EXECUTE') AS execute`,
+        [sync, `${q(schema)}.continuum_assert_current_pgvector_profile()`])).rows).toEqual([{ execute: true }]);
+    });
+  }, 180_000);
+
   it('does not evict a different registered role awaiting the new coordination helper grant', async () => {
     await isolated(async ({ admin, tenant, role }) => {
       const schema = name('tenant'); const pool = await tenant(schema);
