@@ -118,6 +118,17 @@ receipt alone cannot produce `alreadyOffboarded: true`; stale lock audit
 metadata, retained principal coordination rows, or incomplete version-3
 privacy progress forces bounded repair.
 
+A completed run whose coordination privacy was reopened takes the privacy
+repair path before full-state verification or any dirty lifecycle restart.
+Blocked privacy therefore prevents that completed run from restarting memory
+or audit erasure, even if later state is dirty. A successful bounded privacy
+batch commits first; a later invocation verifies or restarts lifecycle work.
+An ordinary open run still advancing erasure can continue its memory and audit
+batches while coordination privacy has a typed block. The CLI may continue
+that run while it reports progress and remaining memory or audit work, but a
+privacy-only blocked result remains incomplete. These paths deliberately have
+different ordering; completion evidence never substitutes for current privacy.
+
 Every memory in the mapped user scope has its title and body replaced with the
 fixed `[erased]` tombstone, type normalized to `context`, metadata and tags
 cleared, source identifiers and memory-to-memory links removed, lifecycle dates
@@ -175,6 +186,10 @@ check performs no repair. Standalone provider verification and identity sync
 keep their provider-specific compatibility behavior. `/health/ready` checks
 database connectivity and runtime shutdown state; it does not rerun contract
 verification or prove erasure completion.
+Retained authorized coordination replays during a pending repair are available
+only through already-running nodes. A new or restarted REST/MCP process cannot
+serve them until that startup gate succeeds; include this interruption in the
+maintenance plan.
 
 Team, project, role, organization, and other users' resources remain intact. Their historical
 leases and receipts are detached from the departing principal in batches of at
