@@ -18,7 +18,7 @@ node node_modules/vitest/vitest.mjs run --maxWorkers=1 --no-file-parallelism --h
 | --- | --- |
 | Test files passed | 150 |
 | Tests passed | 1,602 |
-| Existing platform-dependent skips | 2 |
+| Existing psql-dependent skips | 2 |
 | Failed tests | 0 |
 | Reported suite duration | 661.02 seconds |
 | Process exit status | 0 |
@@ -40,7 +40,7 @@ Additional contained runs passed the following proofs:
 - Existing APP/OP profiles retained their role/provider identities and received the intended durable-table rights. Real authenticated CRUD, startup verification and regrant passed; SYNC/reporting access remained denied. The compiled backfill main accepted valid APP/OP roles and rejected configured-schema mismatch and actual privilege drift without repairing it.
 - API and service diagnostics, deterministic AGENTS.md generation, provider validation, package installation, packaged migration artifacts, the installed backfill entrypoint and entrypoint probes passed. Package and entrypoint validation preceded the final test/documentation-only follow-ups; production and harness bytes did not change afterward.
 
-The focused core/review run passed 290 tests, the rollout suite passed all 44 cases, the storage-boundary suite passed seven cases, and the corrected offboarding/bootstrap suites passed all 59 cases. Complete independent source review and the final documentation delta review returned ship.
+The focused core/review run passed 290 tests, the rollout suite passed all 44 cases, the storage-boundary suite passed seven cases, and the corrected offboarding/bootstrap suites passed all 59 cases. Complete independent source review of `9276425f7239ee3c461861b3fcb3af6f60ca55d2` and the subsequent documentation source review of `b64b1fe3d45475554d0306e76cc699e1be581a9c` returned ship. This receipt was added afterward and is not covered by those earlier approvals.
 
 ## Historical evidence boundary
 
