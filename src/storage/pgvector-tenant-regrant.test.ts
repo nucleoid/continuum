@@ -18,13 +18,20 @@ async function grants(pool: pg.Pool, schema: string, role: string, actorId?: str
   const filename = actorId ? 'grant-operator-role.sql' : 'grant-application-role.sql';
   let source = (await readFile(join(process.cwd(), 'scripts', filename), 'utf8')).split(/\r?\n/)
     .filter((line) => !line.trimStart().startsWith('\\')).join('\n')
-    .replaceAll(':"continuum_schema"', q(schema));
+    .replaceAll(':"continuum_schema"', q(schema))
+    .replaceAll(":'continuum_schema'", literal(schema));
   for (const [key, value] of Object.entries(actorId
     ? { continuum_operator_role: role, continuum_principal_id: actorId }
     : { continuum_app_role: role })) {
     source = source.replaceAll(`:"${key}"`, q(value)).replaceAll(`:'${key}'`, literal(value));
   }
-  await pool.query(source);
+  const client = await pool.connect();
+  try {
+    await client.query(source);
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
 }
 
 async function isolated(run: (context: {
@@ -148,11 +155,23 @@ describe('pgvector tenant-scoped explicit regrant', () => {
       const schema = name('tenant'); const pool = await tenant(schema);
       await admin.query(`CREATE EXTENSION vector WITH SCHEMA ${q(schema)}`);
       await runMigrations(pool, await through79());
+      await admin.query(`REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA ${q(schema)} FROM PUBLIC`);
       const app = await role(); await grants(pool, schema, app);
       expect((await admin.query(`SELECT has_schema_privilege($1,$2,'USAGE') AS usage,
         has_function_privilege($1,$3,'EXECUTE') AS execute`,
       [app, schema, `${q(schema)}.vector_dims(${q(schema)}.vector)`])).rows)
         .toEqual([{ usage: true, execute: true }]);
+      await admin.query(`GRANT ${q(app)} TO CURRENT_USER WITH ADMIN OPTION, SET TRUE, INHERIT FALSE`);
+      const client = await admin.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(`SET LOCAL ROLE ${q(app)}`);
+        expect((await client.query(`SELECT ${q(schema)}.vector_dims('[1,2]'::${q(schema)}.vector) AS dimensions`)).rows)
+          .toEqual([{ dimensions: 2 }]);
+      } finally {
+        await client.query('ROLLBACK');
+        client.release();
+      }
     });
   }, 180_000);
 });
