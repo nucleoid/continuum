@@ -38,7 +38,7 @@ it('refuses pre81 detached credential drift and retries after owner repair witho
       FROM coordination_leases WHERE lease_id=$3`, [detached,request,lease]);
     const before = (await pool.query(`SELECT lease_id,principal_id,run_id,fencing_token FROM coordination_leases WHERE lease_id=$1`, [lease])).rows;
     await pool.query(`INSERT INTO service_api_keys(id,principal_id,key_hash,prefix,last_four)
-      VALUES($1,$2,sha256(convert_to($1::text,'UTF8')),'ctm_drift','test')`, [key,detached]);
+      VALUES($1::uuid,$2,sha256(convert_to(($1::uuid)::text,'UTF8')),'ctm_drift','test')`, [key,detached]);
     await expect(runMigrations(pool)).rejects.toThrow(/detached[\s\S]*(repair|remov|credential|key)/i);
     expect((await pool.query(`SELECT count(*)::int AS count FROM _continuum_migrations WHERE name='0081_coordination_public_contract.sql'`)).rows)
       .toEqual([{ count: 0 }]);
