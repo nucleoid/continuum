@@ -263,4 +263,25 @@ describe('controlled tag provenance boundary', () => {
       await owner.query(`DROP OWNED BY ${quote(operatorRole)}; DROP ROLE ${quote(operatorRole)}`);
     }
   }, 60_000);
+
+  it('compatibility rejects tags-only creation of protected receipts with unbound caller promotion linkage', async () => {
+    const { principal, scope } = await fixture();
+    const marker = randomUUID();
+    const inserted = await application.query(
+      `INSERT INTO memories(id,scope_id,type,title,body,author_id,source,tags,metadata)
+       VALUES(pg_catalog.gen_random_uuid(),$1::uuid,'fact','Ordinary row','Ordinary body',$2::uuid,
+         'manual',ARRAY['branch'],$3::jsonb) RETURNING id`,
+      [scope.id, principal.id, JSON.stringify({ ordinary: true, promoted_from: marker })],
+    );
+    const id = inserted.rows[0].id;
+    await owner.query(await readFile(path.join(process.cwd(), 'scripts/enable-tag-legacy-writer-compat.sql'), 'utf8'));
+    try {
+      await expect(application.query('UPDATE memories SET tags=ARRAY[\'private-state\'] WHERE id=$1::uuid', [id]))
+        .rejects.toMatchObject({ code: '23514', constraint: 'memories_tag_provenance' });
+      expect((await owner.query('SELECT tags,metadata FROM memories WHERE id=$1::uuid', [id])).rows)
+        .toEqual([{ tags: ['branch'], metadata: { ordinary: true, promoted_from: marker } }]);
+    } finally {
+      await owner.query(await readFile(path.join(process.cwd(), 'scripts/restore-tag-strict-enforcement.sql'), 'utf8'));
+    }
+  });
 });
