@@ -2432,9 +2432,11 @@ describe('runMigrations', () => {
   it('halves the 0062 cleanup directive batch after lock refusal and resets both timeouts', async () => {
     const queries: string[] = [];
     const sizes: unknown[] = [];
+    const recipes: unknown[] = [];
     const client = {
       query: vi.fn(async (query: string, values?: unknown[]) => {
         queries.push(query.trim());
+        if (query.includes('INSERT INTO _continuum_migration_execution') && query.includes("'started'")) recipes.push(values?.[3]);
         if (query.includes('pg_try_advisory_lock')) return { rowCount: 1, rows: [{ locked: true }] };
         if (query.includes('pg_advisory_unlock')) return { rowCount: 1, rows: [{ unlocked: true }] };
         if (query.includes('SELECT 1 FROM _continuum_migrations')
@@ -2457,6 +2459,7 @@ describe('runMigrations', () => {
       await expect(runMigrations({ connect: vi.fn(async () => client) } as unknown as pg.Pool, directory))
         .resolves.toHaveLength(1);
       expect(sizes).toEqual([1000, 500, 500]);
+      expect(recipes).toEqual(['online-cleanup-adaptive-max1000-lock1s-statement5s-v2']);
       expect(queries).toContain("SET lock_timeout = '1s'");
       expect(queries).toContain("SET statement_timeout = '5s'");
       expect(queries).toContain('RESET lock_timeout');

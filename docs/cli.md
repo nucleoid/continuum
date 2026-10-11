@@ -44,8 +44,9 @@ Completed-run privacy re-scrubs commit before the subsequent exact proof.
 A dry-run preview never claims exact completion from bounded counts and does
 not require execution of operator-only verification routines.
 `resumeAfter` is populated only when the database supplied a `blockedUntil`
-timestamp. For non-dry-run executions, a false `resumeRecommended` means the
-command is complete. A dry-run uses false without performing completion.
+timestamp. Check `complete` and the reason fields directly; a false
+`resumeRecommended` alone does not prove completion. A dry-run uses false
+without performing completion.
 Mapping a legitimately shared personal scope requires the explicit
 `map-user-scope ... --allow-other-active-members` acknowledgement.
 

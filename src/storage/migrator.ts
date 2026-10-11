@@ -456,17 +456,8 @@ async function runNonTransactionalStatement(
     (line) => line.trim() === BACKFILL_COORDINATION_REPAIR,
   )) {
     if (deferCoordinationBackfill) return;
-    await client.query("SET statement_timeout = '5s'");
-    try {
-      for (;;) {
-        const result = await execution.query<{ completed: boolean }>(client,
-          `SELECT continuum_backfill_coordination_cleanup(1000) AS completed`,
-        );
-        if (result.rows[0]?.completed === true) return;
-      }
-    } finally {
-      await client.query('RESET statement_timeout');
-    }
+    await runAdaptiveCoordinationBackfill(client, 'continuum_backfill_coordination_cleanup', execution, 1000);
+    return;
   }
   if (statement.split(/\r?\n/).some(
     (line) => line.trim() === BACKFILL_OFFBOARDING_SELECTORS,
@@ -1072,13 +1063,16 @@ export async function runMigrations(
       const online = sql.trimStart().startsWith(NO_TRANSACTION_MARKER);
       const deferCleanup = file === '0060_coordination_online_finish.sql'
         && files.includes('0061_coordination_forward_security_repair.sql');
+      const adaptiveCleanup = online && !deferCleanup
+        && canonicalSql.split('\n').some((line) => line.trim() === BACKFILL_COORDINATION_REPAIR + ';');
       const variant = file === '0073_coordination_bounded_discovery_and_locking.sql'
         ? '0073-online-backfill-deferred-v1'
         : file === '0074_coordination_compatibility_and_upgrade_repair.sql'
           ? '0074-partial-upgrade-discovery-crlf-v1'
           : file === '0076_coordination_review_2_remediation.sql'
             ? '0076-crlf-pairs-only-v1'
-            : online ? (deferCleanup ? 'online-directives-deferred-cleanup-v1' : 'online-directives-v1')
+            : online ? (deferCleanup ? 'online-directives-deferred-cleanup-v1'
+              : adaptiveCleanup ? 'online-cleanup-adaptive-max1000-lock1s-statement5s-v2' : 'online-directives-v1')
               : 'canonical-lf-v1';
       const execution = new MigrationExecution(file, online ? 'file-online' : 'file',
         variant, sqlHash(canonicalSql), sqlHash(sql));
