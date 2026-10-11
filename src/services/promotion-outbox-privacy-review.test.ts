@@ -160,4 +160,39 @@ describe('promotion outbox privacy review', () => {
     }
   });
 
+  it('keeps skipped locked outbox state incomplete, commits bounded progress and does not charge unchanged retries', async () => {
+    const admin = await createPrincipal(pool, { externalId: 'privacy-lock-admin', kind: 'user', displayName: 'Admin' });
+    const target = await createPrincipal(pool, { externalId: 'privacy-lock-target', kind: 'user', displayName: 'Private Person' });
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    const shared = await createScope(pool, { kind: 'team', name: 'privacy-lock-source' });
+    const personal = await createScope(pool, { kind: 'user', name: 'privacy-lock-private-owner' });
+    await addMembership(pool, admin.id, org.id, 'admin');
+    await addMembership(pool, target.id, shared.id, 'writer');
+    await addMembership(pool, target.id, personal.id, 'writer');
+    await mapOwnedUserScope(pool, admin, target.id, personal.id);
+    const source = await createMemory(pool, { scopeId: shared.id, scopeKind: 'team', type: 'fact',
+      title: 'Locked privacy row', body: 'Normal promotion.', authorId: target.id, source: 'manual' });
+    const promoted = await promoteMemoryWithAudit(pool, target.id, source.id, { kind: 'user', name: personal.name }, {}, ['locked-hook']);
+    const holder = await pool.connect();
+    try {
+      await holder.query("BEGIN; SET LOCAL statement_timeout='5s'; SET LOCAL lock_timeout='1s'");
+      await holder.query('SELECT id FROM promotion_events WHERE id=$1::uuid FOR UPDATE', [promoted.promotionEvent.eventId]);
+      const first = await offboardPrincipal(pool, admin, target.id, { confirmationScopeId: personal.id, batchSize: 2 });
+      expect(first).toMatchObject({ complete: false, progressed: true, reason: 'lock_busy' });
+      expect((await pool.query('SELECT destination_scope_name FROM promotion_events WHERE id=$1::uuid',
+        [promoted.promotionEvent.eventId])).rows[0].destination_scope_name).toBe(personal.name);
+      expect((await pool.query('SELECT state FROM promotion_event_deliveries WHERE event_id=$1::uuid',
+        [promoted.promotionEvent.eventId])).rows).toEqual([{ state: 'privacy_cancelled' }]);
+      const second = await offboardPrincipal(pool, admin, target.id, { confirmationScopeId: personal.id, batchSize: 2 });
+      expect(second).toMatchObject({ complete: false, progressed: false, reason: 'lock_busy' });
+      expect(second.progress.batch).toBe(first.progress.batch);
+      await holder.query('ROLLBACK');
+      let resumed = await offboardPrincipal(pool, admin, target.id, { confirmationScopeId: personal.id, batchSize: 2 });
+      for (let attempt = 0; !resumed.complete && attempt < 5; attempt += 1) {
+        resumed = await offboardPrincipal(pool, admin, target.id, { confirmationScopeId: personal.id, batchSize: 2 });
+      }
+      expect(resumed.complete).toBe(true);
+    } finally { await holder.query('ROLLBACK'); holder.release(); }
+  });
+
 });
