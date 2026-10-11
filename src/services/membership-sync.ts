@@ -102,7 +102,7 @@ export async function provisionEntraGroupBinding(
   let destroyClient = false;
   try {
     await client.query('BEGIN');
-    await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [SYNC_LOCK_ID]);
+    await client.query('SELECT pg_catalog.pg_advisory_xact_lock($1::bigint)', [SYNC_LOCK_ID]);
     await requireOrgAdmin(client, actor.id);
     // Scope IDs are immutable and the sync role cannot update or delete scopes,
     // so a table-level UPDATE privilege solely for FOR SHARE would widen its
@@ -136,7 +136,7 @@ export async function provisionEntraGroupBinding(
     if (changedTarget) {
       await client.query(
         `UPDATE scope_memberships
-            SET active = FALSE, deactivated_at = now(), synced_at = now()
+            SET active = FALSE, deactivated_at = pg_catalog.now(), synced_at = pg_catalog.now()
           WHERE source_kind = 'entra' AND source_id = $1 AND active`,
         [externalId],
       );
@@ -191,7 +191,7 @@ export async function revokeEntraGroupBinding(
   let destroyClient = false;
   try {
     await client.query('BEGIN');
-    await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [SYNC_LOCK_ID]);
+    await client.query('SELECT pg_catalog.pg_advisory_xact_lock($1::bigint)', [SYNC_LOCK_ID]);
     await requireOrgAdmin(client, actor.id);
     const binding = await client.query<{
       scope_id: string;
@@ -324,7 +324,7 @@ async function recordRejectedAttempt(
     actor.id, rejectionReason(error), maxStalenessHours,
   ]);
   const state = await client.query<{ last_success_at: Date; stale: boolean }>(
-    `SELECT last_success_at, now() >= last_success_at + max_staleness AS stale
+    `SELECT last_success_at, pg_catalog.now() >= last_success_at + max_staleness AS stale
        FROM entra_sync_state WHERE singleton`,
   );
   if (!state.rows[0]) throw new Error('Entra sync freshness state is missing');
@@ -367,7 +367,7 @@ export async function rejectEntraMembershipSync(
   let destroyClient = false;
   try {
     await client.query('BEGIN');
-    await client.query('SELECT pg_advisory_xact_lock($1::bigint)', [SYNC_LOCK_ID]);
+    await client.query('SELECT pg_catalog.pg_advisory_xact_lock($1::bigint)', [SYNC_LOCK_ID]);
     await recordRejectedAttempt(
       client, actor, error, maxStalenessHours,
       { groupsDeactivated: 0, membershipsDeactivated: 0, skipCodes: {} },
@@ -433,7 +433,7 @@ export async function syncEntraMemberships(
   let primaryError: unknown;
   let rollbackFailure: unknown;
   try {
-    await client.query('SELECT pg_advisory_lock($1::bigint)', [SYNC_LOCK_ID]);
+    await client.query('SELECT pg_catalog.pg_advisory_lock($1::bigint)', [SYNC_LOCK_ID]);
     lockAcquired = true;
     let membershipResults = 0;
     const exceedsMembershipLimit = normalizedSnapshots.some((snapshot) => {
@@ -556,8 +556,8 @@ export async function syncEntraMemberships(
       if (externalIds.length > 0) {
         await client.query(
           `INSERT INTO principals (id, external_id, kind, display_name)
-           SELECT gen_random_uuid(), external_id, 'user', external_id
-             FROM unnest($1::text[]) external_id
+           SELECT pg_catalog.gen_random_uuid(), external_id, 'user', external_id
+             FROM pg_catalog.unnest($1::text[]) external_id
            ON CONFLICT (external_id) DO NOTHING`,
           [externalIds],
         );
@@ -676,7 +676,7 @@ export async function syncEntraMemberships(
     if (lockAcquired && rollbackFailure === undefined) {
       try {
         const unlocked = await client.query<{ unlocked: boolean }>(
-          'SELECT pg_advisory_unlock($1::bigint) AS unlocked', [SYNC_LOCK_ID],
+          'SELECT pg_catalog.pg_advisory_unlock($1::bigint) AS unlocked', [SYNC_LOCK_ID],
         );
         if (unlocked.rows[0]?.unlocked !== true) {
           throw new Error('Entra membership sync advisory lock was not held');
