@@ -119,7 +119,9 @@ try {
   let vectorExtensionCreated = false;
   const client = {
     async query(sql, values = []) {
-      const statement = String(sql);
+      // Catalog qualification changes resolution, not the mocked query shape.
+      // Match both forms while the migrator retains the original SQL evidence.
+      const statement = String(sql).replace(/\bpg_catalog\./g, '');
       if (statement.includes('pg_try_advisory_lock')) {
         return { rowCount: 1, rows: [{ locked: true }] };
       }
