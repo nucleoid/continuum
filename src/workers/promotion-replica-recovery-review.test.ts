@@ -170,4 +170,39 @@ describe('promotion replica recovery review', () => {
     } finally { aborted.resolve(); await draining; await worker.stop('test-finished'); }
   });
 
+  it('reconciles a rejected failure write after recovery without replay or losing the charged backoff', async () => {
+    const events = await seed(['negative-write']);
+    const recorded = Promise.withResolvers<void>();
+    let writes = 0; let calls = 0;
+    const exactWrites: { attemptCount: number; leaseGeneration: number; retryDelayMs: number }[] = [];
+    const registry = new PromotionWebhookRegistry();
+    registry.register({ id: 'negative-write', onPromoted: async () => { calls += 1; throw new Error('actual consumer failure'); } });
+    const store: PromotionWorkerStore = { ...actualStore,
+      fail: async (...args) => {
+        writes += 1; exactWrites.push({ attemptCount: args[4].attemptCount,
+          leaseGeneration: args[4].leaseGeneration, retryDelayMs: args[4].retryDelayMs });
+        if (writes === 1) throw new Error('injected one failure-write outage');
+        const result = await failPromotionDelivery(...args); recorded.resolve(); return result;
+      },
+    };
+    const worker = new PromotionEventWorker(pool, registry, { ...options('negative-primary'),
+      baseBackoffMs: 1000, maxBackoffMs: 1000 }, store);
+    try {
+      await worker.drainOnce().then(() => undefined, () => undefined);
+      expect(writes).toBe(1); expect(calls).toBe(1);
+      const before = (await pool.query('SELECT pg_catalog.clock_timestamp() AS observed')).rows[0].observed as Date;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([recorded.promise, new Promise<void>((resolve) => { timer = setTimeout(resolve, 1500); })]);
+      } finally { if (timer) clearTimeout(timer); }
+      const state = (await pool.query(`SELECT attempt_count,state,last_error,lease_owner,available_at
+        FROM promotion_event_deliveries WHERE event_id=$1::uuid`, [events.get('negative-write')])).rows[0];
+      expect(state).toMatchObject({ attempt_count: 1, state: 'pending', last_error: 'callback failed', lease_owner: null });
+      expect((state.available_at as Date).getTime()).toBeGreaterThanOrEqual(before.getTime() + 1000);
+      expect(writes).toBeGreaterThan(1);
+      expect(exactWrites.every((write) => write.attemptCount === 1 && write.leaseGeneration === 1 && write.retryDelayMs === 1000)).toBe(true);
+      expect(calls).toBe(1);
+    } finally { await worker.stop('test-finished'); }
+  });
+
 });

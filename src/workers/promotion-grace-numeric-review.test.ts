@@ -103,4 +103,27 @@ describe('promotion grace and numeric recovery review', () => {
       await vi.advanceTimersByTimeAsync(20); await stopping;
     }
   });
+  it('excludes the exact paid failure fence from shutdown release while persistence is unavailable', async () => {
+    const registry = new PromotionWebhookRegistry(); const callback = vi.fn(async () => { throw new Error('actual callback failure'); });
+    registry.register({ id: 'alpha', onPromoted: callback });
+    let claimed = false;
+    const store = persistence({
+      claim: vi.fn(async () => { if (claimed) return []; claimed = true; return [first]; }),
+      fail: vi.fn().mockRejectedValue(new Error('expected failed persistence')),
+    });
+    const worker = new Worker(pool, registry, settings(), store);
+    try {
+      await worker.drainOnce().then(() => undefined, () => undefined);
+      expect(callback).toHaveBeenCalledOnce(); expect(store.fail).toHaveBeenCalledOnce();
+      const stopping = worker.stop('failure-write-shutdown');
+      await vi.advanceTimersByTimeAsync(20); await stopping;
+      expect(store.release).toHaveBeenCalledWith(pool, 'recovery-review', [expect.objectContaining({
+        webhookId: first.webhookId, event: expect.objectContaining({ eventId: first.event.eventId }),
+        attemptCount: 1, leaseGeneration: 1,
+      })]);
+      expect(store.abandon).not.toHaveBeenCalled();
+      expect(callback).toHaveBeenCalledOnce();
+    } finally { const stopping = worker.stop('test-finished'); await vi.advanceTimersByTimeAsync(20); await stopping; }
+  });
+
 });
