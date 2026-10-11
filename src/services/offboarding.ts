@@ -156,6 +156,26 @@ function isOwnedScopeLiveLease(error: unknown): boolean {
   return failure.code === '23514' && failure.constraint === 'coordination_scope_live_lease';
 }
 
+interface CoordinationPrivacyBatch {
+  complete?: boolean;
+  progressed?: boolean;
+  blocked_until?: string | null;
+  reason?: CoordinationPrivacyBlockReason;
+  expired_detached_receipts_purged?: number;
+}
+
+function privacyBatchProgressed(batch: CoordinationPrivacyBatch | undefined): boolean {
+  return batch?.progressed === true || Number(batch?.expired_detached_receipts_purged ?? 0) > 0;
+}
+
+function privacyBatchReason(batch: CoordinationPrivacyBatch | undefined): CoordinationPrivacyBlockReason {
+  // A purge that just freed capacity makes this quota result retryable. A live
+  // lease or a genuinely saturated pool remains a block, without busy polling.
+  if (batch?.reason === 'detached_quota' && !batch.blocked_until
+      && Number(batch.expired_detached_receipts_purged ?? 0) > 0) return null;
+  return batch?.reason ?? null;
+}
+
 interface OwnedScopePrivacyState {
   repair_exists: boolean;
   phase: string | null;
@@ -463,12 +483,7 @@ export async function repairCoordinationPrivacy(
           actor.id, scopeId, ownedBefore.pseudonym,
         ]);
       }
-      const scrub = await client.query<{
-        privacy: {
-          complete?: boolean; progressed?: boolean; blocked_until?: string | null;
-          reason?: CoordinationPrivacyBlockReason;
-        };
-      }>(
+      const scrub = await client.query<{ privacy: CoordinationPrivacyBatch }>(
         `SELECT continuum_operator_scrub_coordination_principal($1, $2, $3, $4) AS privacy`,
         [actor.id, principalId, scopeId, Math.min(batchSize, 1_000)],
       );
@@ -479,11 +494,11 @@ export async function repairCoordinationPrivacy(
         principalId, scopeId, state,
         complete: scrub.rows[0]?.privacy?.complete === true
           && (!ownedBefore.repair_exists || ownedScopeIsClean(ownedAfter)),
-        progressed: scrub.rows[0]?.privacy?.progressed === true
+        progressed: privacyBatchProgressed(scrub.rows[0]?.privacy)
           || (ownedRepairPending && ownedScopeProgressed(ownedBefore, ownedAfter)),
         blockedUntil: scrub.rows[0]?.privacy?.blocked_until
           ? new Date(scrub.rows[0].privacy.blocked_until) : null,
-        reason: scrub.rows[0]?.privacy?.reason ?? null,
+        reason: privacyBatchReason(scrub.rows[0]?.privacy),
       };
     } catch (error) {
       if (!isCoordinationContractPending(error) && !isOwnedScopeLiveLease(error)) throw error;
@@ -1348,10 +1363,7 @@ async function offboardPrincipalCore(
             actor.id, scopeId, ownedBefore.pseudonym ?? scopePseudonym,
           ]);
         }
-        const privacyRepair = await client.query<{ privacy: {
-          complete?: boolean; progressed?: boolean; blocked_until?: string | null;
-          reason?: CoordinationPrivacyBlockReason;
-        } }>(
+        const privacyRepair = await client.query<{ privacy: CoordinationPrivacyBatch }>(
           `SELECT continuum_operator_scrub_coordination_principal(
              $1, $2, $3, $4
            ) AS privacy`,
@@ -1361,11 +1373,11 @@ async function offboardPrincipalCore(
         coordinationPrivacyMutated = true;
         coordinationPrivacyComplete = privacyRepair.rows[0]?.privacy?.complete === true
           && ownedScopeIsClean(ownedAfter);
-        coordinationPrivacyProgressed = privacyRepair.rows[0]?.privacy?.progressed === true
+        coordinationPrivacyProgressed = privacyBatchProgressed(privacyRepair.rows[0]?.privacy)
           || ownedScopeProgressed(ownedBefore, ownedAfter);
         coordinationPrivacyBlockedUntil = privacyRepair.rows[0]?.privacy?.blocked_until
           ? new Date(privacyRepair.rows[0].privacy.blocked_until!) : null;
-        coordinationPrivacyReason = privacyRepair.rows[0]?.privacy?.reason ?? null;
+        coordinationPrivacyReason = privacyBatchReason(privacyRepair.rows[0]?.privacy);
         await client.query('RELEASE SAVEPOINT offboarding_preverification_privacy');
       } catch (error) {
         if (!isCoordinationContractPending(error) && !isOwnedScopeLiveLease(error)) throw error;
@@ -1512,12 +1524,7 @@ async function offboardPrincipalCore(
           'SELECT continuum_operator_pseudonymize_scope_v2($1, $2, $3)',
           [actor.id, scopeId, scopePseudonym],
         );
-        const coordinationPrivacy = await client.query<{
-          privacy: {
-            complete?: boolean; progressed?: boolean; blocked_until?: string | null;
-            reason?: CoordinationPrivacyBlockReason;
-          };
-        }>(
+        const coordinationPrivacy = await client.query<{ privacy: CoordinationPrivacyBatch }>(
           `SELECT continuum_operator_scrub_coordination_principal(
              $1, $2, $3, $4
            ) AS privacy`,
@@ -1535,11 +1542,11 @@ async function offboardPrincipalCore(
           coordinationPrivacy.rows[0]?.privacy?.complete === true
           && currentPrivacyState.rows[0]?.principal_complete === true;
         coordinationPrivacyProgressed =
-          coordinationPrivacy.rows[0]?.privacy?.progressed === true
+          privacyBatchProgressed(coordinationPrivacy.rows[0]?.privacy)
           || ownedScopeProgressed(ownedBefore, ownedAfter);
         coordinationPrivacyBlockedUntil = coordinationPrivacy.rows[0]?.privacy?.blocked_until
           ? new Date(coordinationPrivacy.rows[0].privacy.blocked_until!) : null;
-        coordinationPrivacyReason = coordinationPrivacy.rows[0]?.privacy?.reason ?? null;
+        coordinationPrivacyReason = privacyBatchReason(coordinationPrivacy.rows[0]?.privacy);
         aliasCount = aliasDelete.rowCount ?? 0;
         if (ownedCoordinationComplete && coordinationPrivacyComplete) {
           await writeOffboardingRun(client, principalId, actor.id, 'scope_complete');
