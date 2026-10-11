@@ -789,6 +789,90 @@ $new_anchor_3$;
 END;
 $detached_capacity$;
 
+-- Committed access revocation is protected authorization evidence, even when
+-- its independently resumable coordination privacy phase is still blocked.
+DO $access_evidence$
+DECLARE definition TEXT; revised TEXT; signature TEXT;
+BEGIN
+  definition:=pg_get_functiondef('continuum_offboarding_expected_audit_metadata(jsonb)'::regprocedure);
+  revised:=replace(definition,'  SELECT CASE', $branch$  SELECT CASE
+    WHEN audit_metadata->>'operation'='principal_offboarding_access_revoked' THEN
+      (SELECT COALESCE(jsonb_object_agg(entry.key,entry.value),'{}'::jsonb)
+       FROM jsonb_each(audit_metadata) entry WHERE entry.key=ANY(ARRAY[
+         'operation','principal_id','approval_id','acknowledged_evidence_hash','run_id',
+         'privacy_pending','reason','memberships','aliases','entra_bindings']::text[]))$branch$);
+  IF revised=definition THEN RAISE EXCEPTION 'unable to extend access revocation audit classifier'; END IF;
+  EXECUTE revised;
+  FOREACH signature IN ARRAY ARRAY[
+    'continuum_redact_offboarding_audit(uuid,uuid,bigint[])',
+    'continuum_protect_offboarded_audit_tombstone()',
+    'continuum_apply_audit_retention(uuid,timestamp with time zone,integer,uuid,integer,jsonb,text,text)'
+  ] LOOP
+    definition:=pg_get_functiondef(signature::regprocedure);
+    revised:=replace(definition,'''principal_offboarding_repaired''',
+      '''principal_offboarding_repaired'', ''principal_offboarding_access_revoked''');
+    IF revised=definition THEN RAISE EXCEPTION 'unable to protect access revocation evidence in %',signature; END IF;
+    EXECUTE revised;
+  END LOOP;
+END;
+$access_evidence$;
+
+CREATE FUNCTION continuum_guard_offboarding_access_audit()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN
+  IF TG_OP='DELETE' THEN
+    IF OLD.metadata->>'operation'='principal_offboarding_access_revoked' THEN
+      RAISE insufficient_privilege USING MESSAGE='access revocation audit evidence is immutable';
+    END IF;
+    RETURN OLD;
+  END IF;
+  IF TG_OP='UPDATE' AND OLD.metadata->>'operation'='principal_offboarding_access_revoked' THEN
+    IF NEW IS DISTINCT FROM OLD THEN
+      RAISE insufficient_privilege USING MESSAGE='access revocation audit evidence is immutable';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF NEW.metadata->>'operation' IS DISTINCT FROM 'principal_offboarding_access_revoked' THEN RETURN NEW; END IF;
+  IF TG_OP<>'INSERT' THEN
+    RAISE insufficient_privilege USING MESSAGE='access revocation audit evidence must be inserted by its approved operator';
+  END IF;
+  PERFORM continuum_require_trusted_database_identity(NEW.principal_id,'approve');
+  IF NEW.action IS DISTINCT FROM 'archive' OR NEW.memory_id IS NOT NULL OR NEW.query IS NOT NULL
+    OR NEW.metadata IS DISTINCT FROM continuum_offboarding_expected_audit_metadata(NEW.metadata)
+    OR NEW.metadata->'privacy_pending' IS DISTINCT FROM 'true'::jsonb
+    OR NOT COALESCE(NEW.metadata->>'reason' IN ('migration_pending','owned_live_lease'),FALSE)
+    OR NOT COALESCE(jsonb_typeof(NEW.metadata->'memberships')='number'
+      AND NEW.metadata->>'memberships' ~ '^[0-9]+$'
+      AND jsonb_typeof(NEW.metadata->'aliases')='number' AND NEW.metadata->>'aliases' ~ '^[0-9]+$'
+      AND jsonb_typeof(NEW.metadata->'entra_bindings')='number' AND NEW.metadata->>'entra_bindings' ~ '^[0-9]+$',FALSE)
+    OR NOT EXISTS(SELECT 1 FROM principals actor JOIN scope_memberships membership ON membership.principal_id=actor.id
+      WHERE actor.id=NEW.principal_id AND actor.disabled_at IS NULL
+        AND membership.scope_id=continuum_org_scope_id() AND membership.active AND membership.role='admin'
+        AND membership.source_kind='manual' AND membership.source_id='manual') THEN
+    RAISE insufficient_privilege USING MESSAGE='access revocation audit evidence has invalid authorization or metadata';
+  END IF;
+  IF NOT EXISTS(
+    SELECT 1 FROM principal_offboarding_runs run
+    JOIN principal_user_scope_approvals approval ON approval.id=run.approval_id
+      AND approval.principal_id=run.principal_id AND approval.scope_id=run.scope_id
+      AND approval.acknowledged_evidence_hash=run.approval_evidence_hash
+    JOIN principals target ON target.id=run.principal_id AND target.disabled_at IS NOT NULL
+    JOIN principal_offboarding_run_events started ON started.run_id=run.run_id AND started.phase='started'
+      AND started.principal_id=run.principal_id AND started.scope_id=run.scope_id
+      AND started.approval_id=run.approval_id AND started.approval_evidence_hash=run.approval_evidence_hash
+      AND started.initiated_by=run.initiated_by
+    WHERE run.completed_at IS NULL AND run.scope_id=NEW.scope_id
+      AND run.run_id::text=NEW.metadata->>'run_id' AND run.principal_id::text=NEW.metadata->>'principal_id'
+      AND run.approval_id::text=NEW.metadata->>'approval_id'
+      AND run.approval_evidence_hash=NEW.metadata->>'acknowledged_evidence_hash'
+  ) THEN RAISE insufficient_privilege USING MESSAGE='access revocation audit evidence does not match its approved run'; END IF;
+  RETURN NEW;
+END;
+$$;
+REVOKE ALL ON FUNCTION continuum_guard_offboarding_access_audit() FROM PUBLIC;
+CREATE TRIGGER guard_offboarding_access_audit BEFORE INSERT OR UPDATE OR DELETE ON audit_log
+FOR EACH ROW EXECUTE FUNCTION continuum_guard_offboarding_access_audit();
+
 DO $harden$
 DECLARE schema_name TEXT := current_schema(); function_record RECORD;
 BEGIN
@@ -801,7 +885,7 @@ BEGIN
         'continuum_coordination_resource_counter','continuum_operator_set_coordination_scope_quota',
         'continuum_operator_set_coordination_principal_quota','continuum_operator_reclaim_coordination_resource',
         'continuum_operator_list_coordination_privacy_repair_page','continuum_operator_coordination_scope_privacy_state','continuum_operator_pseudonymize_scope_v2_legacy',
-        'continuum_operator_scrub_coordination_principal_v3'
+        'continuum_operator_scrub_coordination_principal_v3','continuum_guard_offboarding_access_audit'
       ]) LOOP
     EXECUTE format('ALTER FUNCTION %I.%I(%s) SET search_path=pg_catalog,%I,pg_temp',schema_name,function_record.proname,function_record.arguments,schema_name);
     EXECUTE format('REVOKE ALL ON FUNCTION %I.%I(%s) FROM PUBLIC',schema_name,function_record.proname,function_record.arguments);

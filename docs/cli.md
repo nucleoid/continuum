@@ -168,6 +168,14 @@ The standalone provider verifier and identity sync retain their separate
 provider checks. `/health/ready` checks database connectivity and runtime
 shutdown state. It does not rerun contract verification or replace owner
 migration and backfill verification.
+REST, MCP and identity sync use `CONTINUUM_APPLICATION_SCHEMA` as their runtime
+schema anchor, defaulting to `public`. For a custom tenant, set that variable
+explicitly and make the connection's first resolved `search_path` namespace the
+same schema, for example `PGOPTIONS='-c search_path=application_data'` with
+`CONTINUUM_APPLICATION_SCHEMA=application_data`. A planted `memories` relation
+in an earlier namespace cannot replace the configured tenant. Library callers
+that omit the optional expected schema retain namespace ownership checks but
+do not receive this configuration anchor.
 
 ## Exit codes
 

@@ -7,8 +7,8 @@ not semantic memory: lease data is never embedded, recalled, promoted, rendered
 into generated AGENTS.md output, or sent to an embedding provider.
 
 This document describes the API contract shipped by the package. It does not
-claim that any particular deployment has applied migration
-`0054_coordination_leases.sql`, upgraded its servers, or integrated a
+claim that any particular deployment has applied the complete migration chain
+through 0081 and finished its owner-only contract backfill, upgraded its servers, or integrated a
 production agent harness.
 
 ## Authorization
@@ -28,8 +28,11 @@ both reported as `SCOPE_NOT_FOUND` for acquire and inspect. Unknown, expired,
 released, replaced, wrong-owner, wrong-run, or no-longer-authorized lease
 generations are all reported as `LEASE_LOST` for renew and release.
 
-Revoking a credential prevents new authenticated calls but does not silently
-delete an already issued lease. Revoking membership prevents later lease
+REST authentication checks credential validity on new requests. Stdio MCP
+caches token validation for up to 30 seconds, so credential revocation can take
+that long to reject subsequent MCP calls. Neither silently deletes an already
+issued lease. Coordination still rechecks principal status and current scope
+membership inside each operation. Revoking membership prevents later lease
 operations. Disablement also prevents renewal and release without forcibly
 changing the lease. Quiesce and release while the holder is still enabled and
 authorized, before revoking credentials/membership or disabling it. After that
@@ -244,7 +247,7 @@ V1 hard limits are:
 
 - 10,000 unreclaimed resource keys per scope; operators may lower the limit,
   but cannot raise it above 10,000;
-- at most 100 newly created resource keys per principal per rolling hour;
+- at most 100 newly created resource keys per principal per fixed hourly window;
 - 10,000 total retained receipts per principal across successful acquisitions,
   contention, renewals, and releases. Every receipt consumes this budget;
   retained replay evidence is never evicted to admit another operation;
@@ -256,7 +259,19 @@ subject to the principal's receipt quota. Receipt saturation rejects every
 fresh mutation, including renewal and release, with
 `COORDINATION_QUOTA_EXCEEDED`. Exact authorized replays remain available.
 Plan fleet size and renewal cadence for the full 24-hour receipt budget; a
-harness must stop dispatch and reconcile if it cannot renew before its deadline.
+necessary planning bound is
+`leases * 86400 / renewal_interval_seconds + contention_polls_per_day <= 10000`.
+Leave additional space for acquisitions, releases, retries with new request IDs
+and delayed cleanup of expired receipts. A 300-second lease renewed every 100
+seconds uses 864 renewal receipts per day; 11 such leases leave only 496 slots
+before other operations. A 900-second lease renewed every 300 seconds uses 288
+per day. Select TTL and concurrency from that budget and recovery requirements.
+Pollers must honor `retry_after_seconds` and back off rather than poll at a fixed
+short interval; a five-second fresh contention poll would consume 17,280
+receipts per day by itself. At saturation fresh renew and release can both
+fail, and the held lease remains until TTL expiry. Stop side effects when
+renewal cannot be confirmed; backoff does not extend lease ownership.
+A harness must stop dispatch and reconcile if it cannot renew before its deadline.
 Continuum never automatically evicts resource rows or fencing history. Quota, lease state,
 receipt, usage counters, and audit metadata commit atomically.
 
@@ -688,7 +703,9 @@ A harness should:
 2. Store lease ID, decimal fencing token, run ID, and conservative deadline in
    its local run manifest.
 3. For a 300-second lease, renew about every 100 seconds (roughly TTL divided
-   by three) using a deterministic scheduler and a fresh request ID. Preserve
+   by three), provided the fleet's receipt budget supports that cadence. A
+   900-second lease renewed every 300 seconds reduces daily renewal receipts.
+   Use a deterministic scheduler and a fresh request ID. Preserve
    that request ID across transport retries.
 4. Interpret the server deadline using local monotonic elapsed time and a
    safety margin. Never extend locally based only on wall-clock guesses.
