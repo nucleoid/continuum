@@ -1577,7 +1577,7 @@ async function offboardPrincipalCore(
             })],
           );
           batch = Number(progressUpdate.rows[0].batches);
-          }
+        }
         await client.query('COMMIT');
         return {
           ...baseResult, dryRun: false, alreadyOffboarded: false, complete: false,
