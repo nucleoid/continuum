@@ -60,6 +60,28 @@ END;
 $$;
 REVOKE ALL ON FUNCTION continuum_coordination_lock_principal_usage(UUID) FROM PUBLIC;
 
+-- The application may SELECT/INSERT/DELETE receipts, but never UPDATE them.
+-- PostgreSQL requires UPDATE for FOR UPDATE, so keep skip-locked selection
+-- behind this bounded owner capability rather than broadening table grants.
+CREATE FUNCTION continuum_coordination_cleanup_expired_receipts(target_principal_id UUID)
+RETURNS INTEGER LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE removed_count INTEGER;
+BEGIN
+  PERFORM continuum_coordination_require_contract_ready();
+  WITH doomed AS MATERIALIZED (
+    SELECT principal_id,operation,request_id FROM coordination_operation_receipts
+    WHERE principal_id=target_principal_id AND retain_until<=clock_timestamp()
+    ORDER BY retain_until,operation,request_id LIMIT 100 FOR UPDATE SKIP LOCKED
+  ), removed AS (
+    DELETE FROM coordination_operation_receipts receipt USING doomed
+    WHERE receipt.principal_id=doomed.principal_id AND receipt.operation=doomed.operation
+      AND receipt.request_id=doomed.request_id RETURNING 1
+  ) SELECT count(*)::int INTO removed_count FROM removed;
+  RETURN removed_count;
+END;
+$$;
+REVOKE ALL ON FUNCTION continuum_coordination_cleanup_expired_receipts(UUID) FROM PUBLIC;
+
 CREATE OR REPLACE FUNCTION continuum_coordination_receipt_counter()
 RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
 DECLARE changed BOOLEAN;
@@ -316,7 +338,8 @@ BEGIN
   revised := replace(definition,
     '        (''continuum_coordination_lock_entra_freshness()'')',
     '        (''continuum_coordination_lock_entra_freshness()''),' || chr(10) ||
-    '        (''continuum_coordination_lock_principal_usage(uuid)'')');
+    '        (''continuum_coordination_lock_principal_usage(uuid)''),' || chr(10) ||
+    '        (''continuum_coordination_cleanup_expired_receipts(uuid)'')');
   IF revised = definition THEN RAISE EXCEPTION 'unable to extend coordination quota lock allow-list'; END IF;
   definition := revised;
   revised := replace(definition,
@@ -632,7 +655,7 @@ BEGIN
     FROM pg_proc function WHERE function.pronamespace=quote_ident(current_schema())::regnamespace
       AND function.proname=ANY(ARRAY[
         'continuum_coordination_require_contract_ready','continuum_coordination_compatibility_guard',
-        'continuum_coordination_lock_principal_usage','continuum_coordination_receipt_counter',
+        'continuum_coordination_lock_principal_usage','continuum_coordination_cleanup_expired_receipts','continuum_coordination_receipt_counter',
         'continuum_coordination_receipt_reassign_counter','continuum_backfill_coordination_contract',
         'continuum_coordination_resource_counter','continuum_operator_set_coordination_scope_quota',
         'continuum_operator_set_coordination_principal_quota','continuum_operator_reclaim_coordination_resource',
