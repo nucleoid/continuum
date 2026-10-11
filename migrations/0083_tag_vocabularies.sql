@@ -214,7 +214,13 @@ BEGIN
   SELECT oid INTO invoking_role FROM pg_catalog.pg_roles WHERE rolname=continuum_invoking_database_role();
   IF invoking_role=owned_role THEN RETURN NEW; END IF;
   subset:=continuum_tag_metadata_subset(NEW.metadata);
-  IF subset='{}'::jsonb OR (TG_OP='UPDATE' AND subset=continuum_tag_metadata_subset(OLD.metadata)) THEN RETURN NEW; END IF;
+  IF subset='{}'::jsonb THEN RETURN NEW; END IF;
+  -- Original input was admitted by memories_tag_provenance before the
+  -- normalizer generated this receipt. Caller-supplied receipts never reach
+  -- this branch. A protected promotion always retains its reciprocal check.
+  IF jsonb_typeof(NEW.metadata->'promoted_from') IS DISTINCT FROM 'string'
+    AND NEW.metadata ? 'continuum_tag_rollback_compat'
+    AND (SELECT legacy_compat FROM continuum_tag_write_policy WHERE singleton) THEN RETURN NEW; END IF;
   BEGIN
     SELECT * INTO source_row FROM memories WHERE id=(NEW.metadata->>'promoted_from')::uuid FOR UPDATE;
   EXCEPTION WHEN invalid_text_representation THEN source_row.id:=NULL;
@@ -226,15 +232,116 @@ BEGIN
   RETURN NEW;
 END;
 $$;
-CREATE CONSTRAINT TRIGGER memories_tag_promotion AFTER INSERT OR UPDATE ON memories
+CREATE CONSTRAINT TRIGGER memories_tag_promotion AFTER INSERT ON memories
   DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION continuum_finish_tag_promotion();
 
 CREATE FUNCTION enforce_memory_tag_vocabulary() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
 DECLARE scope_kind_value TEXT; unknown_count INTEGER;
+  active_tags TEXT[]; legacy_tags JSONB; original_tags TEXT[]:=NEW.tags; original_metadata JSONB:=NEW.metadata;
 BEGIN
   SELECT kind INTO STRICT scope_kind_value FROM scopes WHERE id=NEW.scope_id;
   IF cardinality(NEW.tags)>32 THEN
     RAISE check_violation USING MESSAGE='memory tags violate the controlled vocabulary',CONSTRAINT='memories_tags_controlled_vocabulary';
+  END IF;
+  IF (SELECT legacy_compat FROM continuum_tag_write_policy WHERE singleton) THEN
+  PERFORM 1
+    FROM tag_vocabularies
+   WHERE scope_kind = scope_kind_value
+     AND tag = ANY(
+       SELECT lower(btrim(requested.tag))
+         FROM unnest(NEW.tags) AS requested(tag)
+     )
+   FOR KEY SHARE;
+
+  WITH expanded AS (
+    SELECT requested.tag,
+           requested.position,
+           lower(btrim(requested.tag)) AS normalized
+      FROM unnest(NEW.tags) WITH ORDINALITY AS requested(tag, position)
+  ), classified AS (
+    SELECT expanded.*,
+           EXISTS (
+             SELECT 1
+               FROM tag_vocabularies AS vocabulary
+              WHERE vocabulary.scope_kind = scope_kind_value
+                AND vocabulary.tag = expanded.normalized
+           ) AS allowed,
+           row_number() OVER (
+             PARTITION BY normalized ORDER BY position
+           ) AS occurrence
+      FROM expanded
+  )
+  SELECT COALESCE(
+           array_agg(normalized ORDER BY position)
+             FILTER (WHERE allowed AND occurrence = 1),
+           '{}'::text[]
+         ),
+         jsonb_agg(tag ORDER BY position)
+           FILTER (WHERE NOT allowed OR occurrence > 1)
+    INTO active_tags, legacy_tags
+    FROM classified;
+
+  -- Current writers and promotion already provide canonical, unique tags.
+  -- Leaving those rows byte-for-byte unchanged preserves trusted migration
+  -- provenance and prevents this compatibility trigger from recursively
+  -- treating its own metadata as a new conflict on unrelated updates.
+  IF original_tags IS NOT DISTINCT FROM active_tags THEN
+    RETURN NEW;
+  END IF;
+
+  NEW.tags := active_tags;
+  NEW.metadata :=
+    CASE
+      WHEN jsonb_typeof(original_metadata) = 'object' THEN
+        original_metadata
+          - 'continuum_legacy_tags'
+          - 'continuum_legacy_metadata'
+          - 'continuum_tag_migration'
+          - 'continuum_tag_rollback_compat'
+          - 'continuum_migration_conflicts'
+      ELSE '{}'::jsonb
+    END
+    || CASE WHEN jsonb_typeof(original_metadata) <> 'object'
+      THEN jsonb_build_object('continuum_legacy_metadata', original_metadata)
+      ELSE '{}'::jsonb END
+    || CASE WHEN legacy_tags IS NOT NULL
+      THEN jsonb_build_object('continuum_legacy_tags', legacy_tags)
+      ELSE '{}'::jsonb END
+    || jsonb_build_object(
+      'continuum_tag_rollback_compat',
+      jsonb_build_object('version', 1, 'original_tags', to_jsonb(original_tags))
+    )
+    || CASE WHEN jsonb_typeof(original_metadata) = 'object' AND (
+         original_metadata ? 'continuum_legacy_tags'
+      OR original_metadata ? 'continuum_legacy_metadata'
+      OR original_metadata ? 'continuum_tag_migration'
+      OR original_metadata ? 'continuum_tag_rollback_compat'
+      OR original_metadata ? 'continuum_migration_conflicts'
+    ) THEN jsonb_build_object(
+      'continuum_migration_conflicts',
+        CASE WHEN original_metadata ? 'continuum_legacy_tags'
+          THEN jsonb_build_array(jsonb_build_object(
+            'key', 'continuum_legacy_tags', 'value', original_metadata->'continuum_legacy_tags'))
+          ELSE '[]'::jsonb END
+        || CASE WHEN original_metadata ? 'continuum_legacy_metadata'
+          THEN jsonb_build_array(jsonb_build_object(
+            'key', 'continuum_legacy_metadata', 'value', original_metadata->'continuum_legacy_metadata'))
+          ELSE '[]'::jsonb END
+        || CASE WHEN original_metadata ? 'continuum_tag_migration'
+          THEN jsonb_build_array(jsonb_build_object(
+            'key', 'continuum_tag_migration', 'value', original_metadata->'continuum_tag_migration'))
+          ELSE '[]'::jsonb END
+        || CASE WHEN original_metadata ? 'continuum_tag_rollback_compat'
+          THEN jsonb_build_array(jsonb_build_object(
+            'key', 'continuum_tag_rollback_compat', 'value', original_metadata->'continuum_tag_rollback_compat'))
+          ELSE '[]'::jsonb END
+        || CASE WHEN original_metadata ? 'continuum_migration_conflicts'
+          THEN jsonb_build_array(jsonb_build_object(
+            'key', 'continuum_migration_conflicts', 'value', original_metadata->'continuum_migration_conflicts'))
+          ELSE '[]'::jsonb END
+    ) ELSE '{}'::jsonb END;
+
+  RETURN NEW;
   END IF;
   IF cardinality(NEW.tags)=0 THEN RETURN NEW; END IF;
   PERFORM 1 FROM tag_vocabularies WHERE scope_kind=scope_kind_value AND tag=ANY(NEW.tags) FOR KEY SHARE;
@@ -276,4 +383,3 @@ BEGIN
   END LOOP;
 END;
 $extend$;
-

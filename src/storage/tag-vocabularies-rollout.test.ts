@@ -41,10 +41,10 @@ describe('controlled-tag mixed-version operations', () => {
       'utf8',
     );
 
-    expect(procedure).toContain('CREATE OR REPLACE FUNCTION enforce_memory_tag_vocabulary()');
+    expect(procedure).toContain('SET legacy_compat=TRUE');
+    expect(procedure).not.toContain('CREATE OR REPLACE FUNCTION');
     expect(procedure).not.toMatch(/NEW\.source\s+IN/i);
-    expect(procedure).toContain('continuum_legacy_tags');
-    expect(procedure).toContain('FOR KEY SHARE');
+    expect(procedure).toContain('LOCK TABLE memories IN EXCLUSIVE MODE');
     expect(documentation).toContain('scripts/enable-tag-legacy-writer-compat.sql');
     expect(documentation).toMatch(/pause webhook intake[\s\S]+drain in-flight[\s\S]+application rollback/i);
     expect(documentation).toContain('$env:CONTINUUM_DATABASE_URL');
@@ -61,8 +61,8 @@ describe('controlled-tag mixed-version operations', () => {
       'utf8',
     );
 
-    expect(procedure).toContain('CREATE OR REPLACE FUNCTION enforce_memory_tag_vocabulary()');
-    expect(procedure).toContain('CREATE TRIGGER memories_tags_controlled_vocabulary');
+    expect(procedure).toContain('SET legacy_compat=FALSE');
+    expect(procedure).not.toContain('CREATE OR REPLACE FUNCTION');
     expect(procedure).toContain("SET LOCAL lock_timeout = '5s';");
     expect(procedure).toContain("SET LOCAL statement_timeout = '60s';");
     expect(documentation).toContain('scripts/restore-tag-strict-enforcement.sql');

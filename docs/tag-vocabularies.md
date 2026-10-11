@@ -93,7 +93,7 @@ exact procedure:
 
 1. Pause webhook intake and drain in-flight webhook and memory writes.
 2. From the installed Continuum package root, enable the bounded compatibility
-   trigger before the application rollback:
+   mode as the application schema owner before the application rollback:
 
    ```sh
    psql "$CONTINUUM_DATABASE_URL" -v ON_ERROR_STOP=1 \
@@ -114,13 +114,19 @@ The rollback trigger applies to every source, including REST, MCP, webhook,
 supersession, promotion, and direct legacy database writers. It normalizes
 unique allowed tags, quarantines unknown and duplicate original values, records
 the exact original array under distinct `continuum_tag_rollback_compat`
-provenance, and moves attempted
-reserved-namespace values into the conflict array. This is intentionally
-write-compatible rather than strict so no tagged write is silently dropped
-during rollback. It takes an `EXCLUSIVE` lock with the same five-second timeout,
+provenance. Caller-supplied reserved namespaces remain rejected, including
+on empty-tag and metadata-only writes. Historical conflicts imported by the
+schema owner are preserved separately from caller metadata. The input remains
+bounded to 32 tags; malformed or oversized writes fail explicitly and must be
+retained for correction and replay. No tagged write is silently dropped.
+The mode switch takes an `EXCLUSIVE` lock with the same five-second timeout,
 so reads continue and failure is atomic. Canonical unique allowed tags return
 unchanged, preserving migration and promotion provenance on current-writer and
-unrelated legacy updates.
+unrelated legacy updates. The scripts change an owner-only policy row, leaving
+the installed definer functions, pinned search paths, grants and promotion
+provenance checks intact. Application, operator, sync and reporting roles
+cannot toggle compatibility through ordinary database privileges. Keep the
+schema migration installed; reversing its data rewrite requires backup restore.
 
 ### Forward deployment after rollback
 
@@ -157,7 +163,8 @@ them directly.
 
 ## REST management
 
-Any authenticated principal can list a vocabulary:
+Any active authenticated principal can list a vocabulary. A successful list
+records a read audit with the actor, scope kind and returned count:
 
 ```text
 GET /api/v0/tag-vocabularies?scopeKind=project
@@ -187,7 +194,9 @@ vocabulary before retrying.
 
 ## CLI
 
-Set `CONTINUUM_BEARER` to the calling principal's external ID and optionally
+Set `CONTINUUM_BEARER` to a valid access token or issued `ctm_` service API key,
+following [authentication setup](authentication.md). A principal's external ID
+is not a production credential. Optionally
 set `CONTINUUM_API_URL` (default `http://localhost:4000`), then run:
 
 ```text
@@ -198,4 +207,6 @@ npm run tags -- remove project release-ready
 ```
 
 Installed packages also expose the `continuum-tags` executable with the same
-arguments.
+arguments. Requests, including response-body reads, have a 30-second deadline.
+Responses exceeding 1 MiB fail without printing partial output. Network errors
+are sanitized and do not print credentials or upstream connection details.

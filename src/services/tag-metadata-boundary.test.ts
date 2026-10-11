@@ -115,6 +115,12 @@ describe('controlled tag provenance boundary', () => {
     const { principal, scope } = await fixture();
     const enable = await readFile(path.join(process.cwd(), 'scripts/enable-tag-legacy-writer-compat.sql'), 'utf8');
     const restore = await readFile(path.join(process.cwd(), 'scripts/restore-tag-strict-enforcement.sql'), 'utf8');
+    const installedBoundary = await owner.query(
+      `SELECT proname,prosecdef,proconfig,proacl::text FROM pg_catalog.pg_proc
+        WHERE pronamespace=pg_catalog.current_schema()::regnamespace
+          AND proname IN ('continuum_check_tag_provenance','continuum_finish_tag_promotion','enforce_memory_tag_vocabulary')
+        ORDER BY proname`,
+    );
     await owner.query(enable);
     try {
       const inserted = await application.query(
@@ -139,6 +145,12 @@ describe('controlled tag provenance boundary', () => {
     } finally {
       await owner.query(restore);
     }
+    expect((await owner.query(
+      `SELECT proname,prosecdef,proconfig,proacl::text FROM pg_catalog.pg_proc
+        WHERE pronamespace=pg_catalog.current_schema()::regnamespace
+          AND proname IN ('continuum_check_tag_provenance','continuum_finish_tag_promotion','enforce_memory_tag_vocabulary')
+        ORDER BY proname`,
+    )).rows).toEqual(installedBoundary.rows);
   });
 
   it('strict restoration retains the actual application 32-tag bound', async () => {
