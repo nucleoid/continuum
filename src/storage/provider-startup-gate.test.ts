@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { describe, expect, it } from 'vitest';
-import { reconcilePgvectorProviderGrants, requireCoordinationContractReady } from './provider-lifecycle.js';
+import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoordinationContractReady } from './provider-lifecycle.js';
 
 const databaseUrl = process.env.CONTINUUM_TEST_DATABASE_URL
   ?? 'postgres://continuum:continuum@localhost:5433/continuum';
@@ -27,6 +27,16 @@ async function fixture(run: (pool: pg.Pool, admin: pg.Pool, schema: string, shad
 }
 
 describe('qualified provider startup gate', () => {
+  it('uses an explicit schema anchor and validates PostgreSQL identifier byte limits', () => {
+    expect(applicationSchemaFromEnv({})).toBe('public');
+    expect(applicationSchemaFromEnv({ CONTINUUM_APPLICATION_SCHEMA: 'Tenant-Schema' })).toBe('Tenant-Schema');
+    expect(applicationSchemaFromEnv({ CONTINUUM_APPLICATION_SCHEMA: 'é'.repeat(31) })).toBe('é'.repeat(31));
+    for (const schema of ['', 'nul\0schema', 'a'.repeat(64), 'é'.repeat(32)]) {
+      expect(() => applicationSchemaFromEnv({ CONTINUUM_APPLICATION_SCHEMA: schema }))
+        .toThrow('CONTINUUM_APPLICATION_SCHEMA must be a valid PostgreSQL schema name');
+    }
+  });
+
   it('refuses caller-owned planted memories and hardened no-op startup helpers before the tenant', async () => {
     await fixture(async (pool, admin, schema, shadow) => {
       const role = `shadow_runtime_${randomUUID().replaceAll('-', '').slice(0,12)}`;
