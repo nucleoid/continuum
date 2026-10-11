@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import pg from 'pg';
 import { expect, it } from 'vitest';
 import { runMigrations } from './migrator.js';
-import { reconcilePgvectorProviderGrants } from './provider-lifecycle.js';
+import { reconcilePgvectorProviderGrants, requireCoordinationContractReady } from './provider-lifecycle.js';
 
 const databaseUrl = process.env.CONTINUUM_TEST_DATABASE_URL
   ?? 'postgres://continuum:continuum@localhost:5433/continuum';
@@ -107,6 +107,7 @@ it('adds tag grants to live application and operator profiles without granting s
       expect((await connection.query('SELECT current_user AS role')).rows).toEqual([{ role }]);
       if (role === applicationRole || role === operatorRole) {
         await reconcilePgvectorProviderGrants(connection, { expectedSchema: schema });
+        await requireCoordinationContractReady(connection, { expectedSchema: schema });
       } else {
         await connection.query('SELECT continuum_assert_current_pgvector_profile()');
         await expect(connection.query('SELECT tag FROM tag_vocabularies LIMIT 1'))

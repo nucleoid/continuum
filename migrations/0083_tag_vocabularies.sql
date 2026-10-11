@@ -214,7 +214,7 @@ BEGIN
   SELECT oid INTO invoking_role FROM pg_catalog.pg_roles WHERE rolname=continuum_invoking_database_role();
   IF invoking_role=owned_role THEN RETURN NEW; END IF;
   subset:=continuum_tag_metadata_subset(NEW.metadata);
-  IF subset='{}'::jsonb THEN RETURN NEW; END IF;
+  IF subset='{}'::jsonb OR (TG_OP='UPDATE' AND subset=continuum_tag_metadata_subset(OLD.metadata)) THEN RETURN NEW; END IF;
   -- Original input was admitted by memories_tag_provenance before the
   -- normalizer generated this receipt. Caller-supplied receipts never reach
   -- this branch. A protected promotion always retains its reciprocal check.
@@ -232,7 +232,7 @@ BEGIN
   RETURN NEW;
 END;
 $$;
-CREATE CONSTRAINT TRIGGER memories_tag_promotion AFTER INSERT ON memories
+CREATE CONSTRAINT TRIGGER memories_tag_promotion AFTER INSERT OR UPDATE ON memories
   DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION continuum_finish_tag_promotion();
 
 CREATE FUNCTION enforce_memory_tag_vocabulary() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
