@@ -440,8 +440,14 @@ exact application/operator/sync grant convergence before enabling coordination
 mutations or offboarding on any current node.
 
 The forward repair enforces a minimum 24-hour receipt horizon even for older
-writers. Historical short-lived or evicted receipts cannot be reconstructed;
-their former replay guarantees cannot be restored. Preserve retained rows and
+writers. Previously deleted or evicted receipts cannot be reconstructed.
+Historical receipt rows still present in storage are extended from their
+original server time, including recent short-horizon rows that had already
+expired under the old policy. If their original server time is less than
+24 hours ago, they can become replayable again and consume receipt budget.
+Avoid reusing recent request IDs and include these rows in rollout capacity
+planning. While repair is pending, fresh renewals fail and held leases can
+expire; quiesce harness dispatch before applying 0081. Preserve retained rows and
 fencing history when upgrading, including historical usage above a new limit;
 growth is refused until bounded cleanup brings usage below the hard ceiling.
 Older nodes still return the generic
