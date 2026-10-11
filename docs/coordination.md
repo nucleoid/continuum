@@ -315,6 +315,28 @@ parameter now sets the combined receipt budget, capped at 10,000. Its legacy
 `contended_limit` remains a bounded compatibility field and is ignored by quota
 enforcement. Lowering a budget preserves existing receipts and authorized
 replays and refuses fresh growth until cleanup frees space.
+Before applying 0081 to an existing lease installation, run the owner-only
+read-only quota baseline with writers paused:
+
+```sh
+psql "$CONTINUUM_MIGRATION_OWNER_URL" -v continuum_schema=public \
+  -f scripts/preflight-coordination-contract.sql
+```
+
+Replace `public` with the actual tenant schema. The script emits bounded JSON
+notices for configured acquisition/legacy contention limits, proposed combined
+limits, stored operation totals, recently expired rows and scope key limits.
+Limits above 10,000 will be clamped; a lowered acquisition limit will instead
+cap acquisitions, contention, renewals and releases together. The contention
+argument no longer protects a separate budget. Review every configured limit
+against renewal/polling demand, not only whether existing rows fit today.
+Pages default to 100; pass each non-null `principal_page` or `scope_page`
+`next_cursor` back as `continuum_after_principal_id` or
+`continuum_after_scope_id` until both are null. The script changes no values or
+ACLs and has a five-second statement bound. A timeout is not a clean report;
+reduce the page limit or investigate the measured maintenance workload.
+After owner backfill, sweep expired detached history in bounded operator batches
+before privacy repair; do not evict retained ordinary receipts to admit growth.
 The shared application role cannot execute these operator
 functions, directly update usage/counter tables, or update protected lease and
 resource identity columns; owner-owned triggers and narrow `SECURITY DEFINER`
@@ -359,6 +381,11 @@ ledger commit together. Online DDL cannot share that transaction: an interrupted
 attempt remains `started` with unknown partial effects, and retry-safe work reruns
 before completed evidence and the ledger commit together. A changed recipe on an
 unfinished attempt requires operator reconciliation.
+An old `started` attempt may remain after a later successful retry. Matching
+completed evidence and a complete singleton permit the current recipe to skip
+work safely. A future different recipe can still fail closed on that older
+attempt; investigate its recorded source/variant and catalog effects with the
+owner before adopting a new recipe. Do not erase history to make admission pass.
 
 Already-ledgered files without historical execution evidence are recorded as
 `history-unknown`. Current checksums do not retroactively prove which SQL ran.
@@ -432,6 +459,12 @@ lock refusal or statement cancellation. Each cancelled transactional file rolls
 back atomically and requires a later owner retry in the maintenance window.
 Failed online execution clients are discarded after advisory-lock cleanup so
 session settings installed by a partly executed file cannot leak into later work.
+The 0081 schema transaction also validates a principal CHECK and installs
+principal/membership/key/identity/audit triggers. Their table locks can stall
+authentication and ordinary reads for up to the statement budget, not just
+lease mutations. The maintenance drain must include REST/MCP, webhook intake,
+jobs, sync and other serving readers/writers; do not promise uninterrupted
+memory or authentication traffic during this step.
 The 0062 cleanup directive uses adaptive batches of at most 1,000 with one-second
 lock and five-second statement bounds. Its historical final exhaustion query
 still examines pending current leases; a slow installation may fail again at
