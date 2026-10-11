@@ -417,18 +417,39 @@ describe('shared services', () => {
     const provider: EmbeddingProvider = {
       id: 'test:concurrency', dim: 768, async embed() { return [unitVector(1)]; },
     };
-    const synchronizedPool = poolSynchronizingRelationProbes(pool, 2);
+    const probes = poolSynchronizingRelationProbes(pool, 2);
 
-    const results = await Promise.all(['one', 'two'].map((suffix) => captureMemory(
-      synchronizedPool, provider, principal, {
+    const captures = Promise.all(['one', 'two'].map((suffix) => captureMemory(
+      probes.pool, provider, principal, {
         scope: { kind: 'team', name: 'payments' }, type: 'fact',
         title: 'Concurrent duplicate', body: 'Same content.',
         source: 'manual', sourceRef: suffix,
       },
     )));
 
-    expect(results.map((result) => result.related)).toEqual([[], []]);
-    expect(results.every((result) => result.embedded)).toBe(true);
+    void captures.catch(() => undefined);
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([probes.allRead, new Promise<never>((_resolve, reject) => {
+        deadline = setTimeout(() => reject(new Error('Both actual relation reads did not reach the barrier')), 3_000);
+      })]);
+      expect(probes.readCount()).toBe(2);
+      // Neither capture may begin its write until both real relation queries
+      // have finished against the empty candidate set. This is the supported
+      // advisory race, not a race between barrier release and query snapshots.
+      expect((await pool.query(`SELECT count(*)::int AS count FROM memories
+        WHERE title='Concurrent duplicate'`)).rows).toEqual([{ count: 0 }]);
+      probes.release();
+      const results = await captures;
+      expect(results.map((result) => result.related)).toEqual([[], []]);
+      expect(results.every((result) => result.embedded)).toBe(true);
+      expect(results.every((result) => result.relationErrorCode === undefined)).toBe(true);
+      expect(new Set(results.map((result) => result.memory.id)).size).toBe(2);
+    } finally {
+      if (deadline) clearTimeout(deadline);
+      probes.release();
+      await captures.catch(() => undefined);
+    }
   });
 
   it('recovers from an embedding storage failure and still commits memory plus audit', async () => {
@@ -1534,21 +1555,27 @@ function unitVector(similarity: number): number[] {
   return vector;
 }
 
-function poolSynchronizingRelationProbes(pool: pg.Pool, expected: number): pg.Pool {
+function poolSynchronizingRelationProbes(pool: pg.Pool, expected: number): {
+  pool: pg.Pool; allRead: Promise<void>; release(): void; readCount(): number;
+} {
   let reached = 0;
   const allReached = deferred<void>();
-  return {
+  const releaseReads = deferred<void>();
+  const wrapped = {
     connect: pool.connect.bind(pool),
     query: (async (...args: unknown[]) => {
       const sql = typeof args[0] === 'string' ? args[0] : '';
-      if (sql.includes('SELECT m.id, m.type, m.title')) {
+      const result = await Reflect.apply(pool.query, pool, args);
+      if (sql.includes('SELECT ranked.memory_id AS id, m.type, m.title')) {
         reached += 1;
         if (reached === expected) allReached.resolve();
-        await allReached.promise;
+        await releaseReads.promise;
       }
-      return (pool.query as (...queryArgs: unknown[]) => unknown)(...args);
+      return result;
     }) as pg.Pool['query'],
   } as unknown as pg.Pool;
+  return { pool: wrapped, allRead: allReached.promise,
+    release: () => releaseReads.resolve(), readCount: () => reached };
 }
 
 function poolWithClientCount(pool: pg.Pool, onCount: (count: number) => void): pg.Pool {
