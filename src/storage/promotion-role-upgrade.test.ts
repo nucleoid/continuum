@@ -19,7 +19,7 @@ const databaseUrl = process.env.CONTINUUM_TEST_DATABASE_URL
 const quote = (value: string) => `"${value.replaceAll('"', '""')}"`;
 const literal = (value: string) => `'${value.replaceAll("'", "''")}'`;
 
-it('upgrades canonical 88 to 89 with exact live login profiles and preserves ordinary outbox authority', async () => {
+async function roleUpgradeAcceptance(review?: 'poison' | 'null') {
   const suffix = randomUUID().replaceAll('-', '').slice(0, 16);
   const schema = `promotion_roles_${suffix}`;
   const roles = ['app', 'operator', 'sync', 'report'].map((kind) => `promotion_${kind}_${suffix}`);
@@ -175,11 +175,24 @@ it('upgrades canonical 88 to 89 with exact live login profiles and preserves ord
       [privatePromotion.promotionEvent.eventId])).rejects.toMatchObject({ code: '42501' });
     await expect(operator.query('SELECT continuum_operator_scrub_promotion_scope($1::uuid,$2::uuid,$3::uuid,1::integer)',
       [target.id, target.id, personal.id])).rejects.toMatchObject({ code: '42501' });
+    if (review === 'poison') {
+      await expect(app.query(`UPDATE promotion_event_deliveries SET state='privacy_cancelled',
+        last_error='private poisoning payload',lease_owner='unstarted-poison',lease_expires_at=pg_catalog.clock_timestamp()+interval '1 minute'
+        WHERE event_id=$1::uuid`, [privatePromotion.promotionEvent.eventId])).rejects.toMatchObject({ code: '23514' });
+    }
     let privacy = await offboardPrincipal(operator, admin, target.id, { confirmationScopeId: personal.id });
     for (let attempt = 0; !privacy.complete && attempt < 5; attempt += 1) {
       privacy = await offboardPrincipal(operator, admin, target.id, { confirmationScopeId: personal.id });
     }
     expect(privacy.complete).toBe(true);
+    if (review === 'null') {
+      const before = (await owner.query('SELECT * FROM promotion_event_deliveries WHERE event_id=$1::uuid', [privatePromotion.promotionEvent.eventId])).rows;
+      for (const limit of [0, 1001, null]) {
+        await expect(operator.query('SELECT continuum_operator_scrub_promotion_scope($1::uuid,$2::uuid,$3::uuid,$4::integer)',
+          [administrator, target.id, personal.id, limit])).rejects.toMatchObject({ code: '23514' });
+        expect((await owner.query('SELECT * FROM promotion_event_deliveries WHERE event_id=$1::uuid', [privatePromotion.promotionEvent.eventId])).rows).toEqual(before);
+      }
+    }
     expect((await owner.query('SELECT destination_scope_name FROM promotion_events WHERE id=$1::uuid',
       [privatePromotion.promotionEvent.eventId])).rows[0].destination_scope_name).not.toBe(personal.name);
     // A trusted historical restore can dirty a completed receipt. The actual
@@ -233,4 +246,11 @@ it('upgrades canonical 88 to 89 with exact live login profiles and preserves ord
     await maintenance.end();
     await rm(directory, { recursive: true, force: true });
   }
-}, 180_000);
+ }
+
+it('upgrades canonical 88 to 89 with exact live login profiles and preserves ordinary outbox authority',
+  () => roleUpgradeAcceptance(), 180_000);
+it('promotion privacy boundary review: rejects application poisoning of the terminal cancellation state',
+  () => roleUpgradeAcceptance('poison'), 180_000);
+it('promotion privacy boundary review: rejects NULL and out-of-range batch limits without mutation',
+  () => roleUpgradeAcceptance('null'), 180_000);
