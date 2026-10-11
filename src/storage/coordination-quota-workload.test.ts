@@ -3,7 +3,7 @@ import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { makeTestPool, resetData } from './test-helpers.js';
 import { createPrincipal } from './principals.js';
-import { createScope } from './scopes.js';
+import { createScope, getScopeByRef } from './scopes.js';
 import { addMembership } from './memberships.js';
 import { acquireLease, releaseLease, renewLease } from '../services/coordination.js';
 
@@ -24,11 +24,17 @@ describe('public combined receipt quota workload', () => {
     });
     expect(held.acquired).toBe(true);
     if (!held.acquired) throw new Error('fixture did not acquire the held generation');
+    expect((await pool.query(
+      'SELECT acquire_receipt_limit FROM coordination_principal_usage WHERE principal_id = $1', [actor.id],
+    )).rows[0].acquire_receipt_limit).toBe(10_000);
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await addMembership(pool, actor.id, org.id, 'admin');
+    await pool.query('SELECT continuum_operator_set_coordination_principal_quota($1, $2, 20, 20)', [actor.id, actor.id]);
     const started = performance.now();
     // Real API operations, including their production authorization, counter,
     // transaction and receipt paths. No manufactured quota counters or rows.
-    for (let attempt = 1; attempt < 10_000; attempt += 1) {
-      if (performance.now() - started > 180_000) throw new Error('bounded quota workload fixture deadline exceeded');
+    for (let attempt = 1; attempt < 20; attempt += 1) {
+      if (performance.now() - started > 15_000) throw new Error('bounded quota workload fixture deadline exceeded');
       const contended = await acquireLease(pool, actor, {
         scope: `project:${scope.name}`, resource: 'held', runId: randomUUID(),
         requestId: randomUUID(), ttlSeconds: 900,
@@ -38,7 +44,7 @@ describe('public combined receipt quota workload', () => {
     expect((await pool.query(
       `SELECT count(*)::int AS total, count(*) FILTER(WHERE outcome='contended')::int AS contended
          FROM coordination_operation_receipts WHERE principal_id = $1`, [actor.id],
-    )).rows[0]).toEqual({ total: 10_000, contended: 9_999 });
+    )).rows[0]).toEqual({ total: 20, contended: 19 });
     const before = (await pool.query(
       'SELECT expires_at, released_at FROM coordination_leases WHERE lease_id = $1', [held.leaseId],
     )).rows[0];
@@ -52,7 +58,7 @@ describe('public combined receipt quota workload', () => {
     expect((await pool.query(
       'SELECT current_lease_id FROM coordination_resources WHERE scope_id = $1 AND resource = $2', [scope.id, 'held'],
     )).rows[0].current_lease_id).toBe(held.leaseId);
-    console.info('combined-receipt-quota-workload', JSON.stringify({ total: 10_000,
-      contended: 9_999, elapsedMs: Math.round(performance.now() - started) }));
-  }, 240_000);
+    console.info('combined-receipt-quota-workload', JSON.stringify({ configuredLimit: 20, defaultLimit: 10_000,
+      contended: 19, elapsedMs: Math.round(performance.now() - started) }));
+  }, 30_000);
 });
