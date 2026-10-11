@@ -198,7 +198,7 @@ export async function claimPromotionDeliveries(
          WHERE delivery.event_id=candidate.event_id AND delivery.webhook_id=candidate.webhook_id
            AND delivery.state='pending' AND delivery.attempt_count=candidate.attempt_count
            AND delivery.lease_generation=candidate.lease_generation
-           AND delivery.available_at<=pg_catalog.statement_timestamp()
+           AND delivery.available_at<=pg_catalog.clock_timestamp()
            AND (delivery.lease_expires_at IS NULL OR delivery.lease_expires_at<=pg_catalog.clock_timestamp())`,
       [
         [...new Set(input.webhookIds)].sort(),
@@ -224,7 +224,7 @@ export async function claimPromotionDeliveries(
              SELECT delivery.event_id,delivery.webhook_id,delivery.available_at
              FROM promotion_event_deliveries delivery
              WHERE delivery.webhook_id=requested.webhook_id AND delivery.state='pending'
-               AND delivery.available_at<=pg_catalog.clock_timestamp()
+               AND delivery.available_at<=pg_catalog.statement_timestamp()
                AND (delivery.lease_expires_at IS NULL OR delivery.lease_expires_at<=pg_catalog.clock_timestamp())
                AND delivery.attempt_count<$5
                AND (delivery.event_id,delivery.webhook_id) NOT IN (SELECT * FROM unnest($6::uuid[],$7::text[]))
