@@ -62,10 +62,13 @@ receive bearer tokens, request headers, or transport objects.
 
 ## Promotion webhooks
 
-Every committed promotion creates a stable `promotion_events.id`. One delivery
+The authenticated promotion service creates a stable `promotion_events.id`. One delivery
 row is created for each webhook ID in the operator-owned registry at promotion time. Destination
 creation, source update, promotion audit, event creation, and delivery creation
-share one database transaction. A rollback leaves none of them committed.
+share one database transaction. A rollback leaves none of them committed. The
+low-level `promoteMemory` export also enqueues the outbox but does not write the
+required service audit; it is not the audited service boundary. Use the shared
+service or `promoteMemoryWithAudit` when that audit contract is required.
 
 The promotion worker claims rows with `FOR UPDATE SKIP LOCKED` and a bounded
 lease, commits that claim, then invokes callbacks outside the transaction.
