@@ -209,6 +209,20 @@ describe('issue 7 final remediation review 2 PostgreSQL proofs', () => {
       expect((await pool.query(
         `SELECT metadata ? 'request_id' AS raw_request FROM audit_log WHERE id=$1`, [auditId],
       )).rows).toEqual([{ raw_request: false }]);
+      let privacy = retry.rows[0].result;
+      expect(privacy.privacy_version).toBe(3);
+      for (let page = 0; page < 10 && !privacy.complete; page += 1) {
+        await caller.query('BEGIN');
+        await caller.query("SET LOCAL continuum.client_coordination_privacy_version = '4'");
+        privacy = (await caller.query(
+          `SELECT continuum_operator_scrub_coordination_principal($1::uuid, $2::uuid, $3::uuid, 1) AS result`,
+          [value.operator.id, value.target.id, value.owned.id],
+        )).rows[0].result;
+        expect(privacy.privacy_version).toBe(3);
+        expect(privacy.progressed || privacy.complete).toBe(true);
+        await caller.query('COMMIT');
+      }
+      expect(privacy.complete).toBe(true);
       expect((await pool.query(
         `SELECT privacy_version, completed_at IS NOT NULL AS complete
            FROM coordination_principal_privacy_progress WHERE principal_id=$1`, [value.target.id],
