@@ -629,6 +629,13 @@ passed to that repair command receives the audited `offboarding_required`
 pointer to the full confirmed command. Runtime roles receive
 only least-privilege discovery and repair functions and no direct
 progress-table privileges.
+Legacy flat-array discovery and the four-argument
+`continuum_operator_list_coordination_privacy_repairs` overload remain for
+compatibility. Their results omit the raw-window resume cursor, and filtering
+after the candidate limit can return an empty array while eligible principals
+remain beyond that window. They are unsuitable for proving bulk exhaustion.
+Use `list-coordination-privacy-repairs` or `listCoordinationPrivacyRepairPage`
+and follow `nextCursor` until it is null, including after empty result pages.
 The 0081 scope backfill also reopens mapped principal repair markers when a
 previously completed owned scope still has resource rows. Those markers remain
 discoverable until owned-scope erasure completes. Disabled-only repair resumes
