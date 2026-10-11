@@ -197,15 +197,17 @@ describe('offboarding and erasure', () => {
     try {
       await blocker.query('BEGIN');
       await blocker.query('SELECT id FROM principals WHERE id = $1 FOR KEY SHARE', [value.target.id]);
+      const blockerPid = Number((await blocker.query('SELECT pg_catalog.pg_backend_pid() AS pid')).rows[0].pid);
       let settled = false;
       pending = offboardPrincipal(pool, value.admin, value.target.id);
       pending.finally(() => { settled = true; }).catch(() => undefined);
       let waiting = false;
       for (let attempt = 0; !settled && !waiting && attempt < 100; attempt += 1) {
         waiting = (await pool.query(
-          `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-                           WHERE datname = current_database() AND wait_event_type = 'Lock'
-                             AND query LIKE '%FROM principals principal%') AS waiting`,
+          `SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity
+                           WHERE datname = pg_catalog.current_database() AND wait_event_type = 'Lock'
+                             AND $1::integer = ANY(pg_catalog.pg_blocking_pids(pid))) AS waiting`,
+          [blockerPid],
         )).rows[0].waiting === true;
         if (!waiting && !settled) await new Promise((resolve) => setTimeout(resolve, 10));
       }
