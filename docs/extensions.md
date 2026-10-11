@@ -33,9 +33,9 @@ const extensions = defaultExtensionRegistries();
 extensions.retrievalEnrichers.register({
   id: 'work-items',
   async enrich(results, { principalId, signal }) {
-    return results.map((result) => ({
+    return Promise.all(results.map(async (result) => ({
       links: await lookupLinks(result.memory.id, principalId, signal),
-    }));
+    })));
   },
 });
 ```
