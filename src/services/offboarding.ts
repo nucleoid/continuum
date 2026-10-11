@@ -752,6 +752,7 @@ const PRESERVED_AUDIT_OPERATIONS = [
   'principal_memory_erased',
   'principal_offboarded',
   'principal_offboarding_repaired',
+  'principal_offboarding_access_revoked',
 ] as const;
 
 const AUDIT_EXPECTED_METADATA =
