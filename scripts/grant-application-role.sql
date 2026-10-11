@@ -325,14 +325,16 @@ BEGIN
     EXECUTE format(
       'GRANT EXECUTE ON FUNCTION %I.continuum_assert_current_pgvector_profile() TO %I',
       schema_name, target_role);
-    EXECUTE format('SELECT %I.continuum_grant_application_vector_functions()', schema_name);
+    EXECUTE format('SELECT %I.continuum_grant_application_vector_functions($1::name)', schema_name) USING target_role;
+  ELSIF to_regprocedure(format('%I.continuum_grant_application_vector_functions()',schema_name)) IS NOT NULL THEN
+    EXECUTE format('SELECT %I.continuum_grant_application_vector_functions()',schema_name);
   END IF;
 END;
 $provider_runtime_gate$;
 
 -- Reconcile provider access only after the exact application profile is in
--- place. The owner-only helper also removes provider grants retained by roles
--- that no longer match the application/operator profile.
+-- place. This explicit regrant leaves unrelated role registrations and shared
+-- provider/PUBLIC privileges unchanged.
 SELECT :"continuum_schema".continuum_assert_application_role_allowlist(
   :'continuum_app_role'::name
 );
