@@ -62,6 +62,10 @@ describe('offboarding and erasure', () => {
     await addMembership(pool, target.id, personal.id, 'writer');
     await addMembership(pool, target.id, shared.id, 'writer');
     await mapOwnedUserScope(pool, admin, target.id, personal.id);
+    await pool.query(
+      `INSERT INTO tag_vocabularies(scope_kind,tag,description,created_by)
+       VALUES('user','private','Custom erasure fixture tag',$1::uuid)`, [admin.id],
+    );
     const personalMemory = await createMemory(pool, {
       scopeId: personal.id, scopeKind: 'user', type: 'fact', title: 'Private title',
       body: 'Private body', metadata: { private: 'value' }, tags: ['private'],
