@@ -9,7 +9,7 @@ import { addMembership } from '../storage/memberships.js';
 import { createPrincipal } from '../storage/principals.js';
 import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
-import { acquireLease, releaseLease } from './coordination.js';
+import { acquireLease } from './coordination.js';
 import { reactivatePrincipal } from './principal-admin.js';
 import { runAuditRetention } from '../maintenance/audit-retention.js';
 import {
@@ -199,7 +199,7 @@ describe('coordination final review remediation', () => {
   }, 60_000);
 
   it.each(['detached_quota', 'migration_pending'] as const)(
-    'round5 blocked lifecycle CLI review: drains remaining erasure under %s', async (reason) => {
+    'round5 blocked lifecycle CLI review: preserves reachable work boundaries under %s', async (reason) => {
       const value = await fixture(`lifecycle-${reason}`);
       await pool.query(
         `INSERT INTO memories(id, scope_id, type, title, body, author_id, source)
@@ -213,32 +213,8 @@ describe('coordination final review remediation', () => {
       );
       try {
         if (reason === 'migration_pending') {
-          for (let index = 0; index < 3; index += 1) {
-            const runId = randomUUID();
-            const lease = await acquireLease(pool, value.target, {
-              scope: `project:${value.shared.name}`, resource: `pending-history-${index}`,
-              runId, requestId: randomUUID(), ttlSeconds: 900,
-            });
-            expect(lease.acquired).toBe(true);
-            if (!lease.acquired) throw new Error('pending history fixture did not acquire');
-            await releaseLease(pool, value.target, { leaseId: lease.leaseId, runId, requestId: randomUUID() });
-          }
-          // Establish a real open run with durable scope cleanup and lifecycle
-          // work still pending, then simulate the upgrade reopening privacy.
-          const first = await offboardPrincipal(pool, value.operator, value.target.id, {
-            confirmationScopeId: value.owned.id, batchSize: 2,
-          });
-          expect(first.complete).toBe(false);
-          expect((await pool.query(
-            'SELECT scope_cleanup_complete FROM principal_offboarding_runs WHERE principal_id=$1', [value.target.id],
-          )).rows[0].scope_cleanup_complete).toBe(true);
-          const residual = (await pool.query(
-            `SELECT EXISTS(SELECT 1 FROM coordination_operation_receipts WHERE principal_id=$1::uuid AND scope_id=$2::uuid)
-                OR EXISTS(SELECT 1 FROM coordination_leases WHERE principal_id=$1::uuid AND scope_id=$2::uuid) AS remains,
-               NOT principal_complete AS incomplete FROM continuum_coordination_privacy_state($1::uuid,$3::uuid)`,
-            [value.target.id, value.shared.id, value.owned.id],
-          )).rows[0];
-          expect(residual).toEqual({ remains: true, incomplete: true });
+          // Pending initial privacy cannot establish durable scope cleanup.
+          // Access revocation commits, but lifecycle erasure must stay gated.
           await pool.query("UPDATE coordination_contract_backfill_state SET phase='usage' WHERE singleton");
         } else {
           await pool.query('SELECT continuum_operator_set_coordination_principal_quota($1,$2,1,1)',
@@ -259,14 +235,28 @@ describe('coordination final review remediation', () => {
           'offboard-principal', value.target.id, '--confirm-scope', value.owned.id, '--batch-size', '2',
         ], 60_000);
         expect(blocked).toMatchObject({ exitCode: 3, payload: { complete: false, reason } });
-        expect(Number(blocked.payload.attempts)).toBeGreaterThan(1);
+        if (reason === 'detached_quota') expect(Number(blocked.payload.attempts)).toBeGreaterThan(1);
+        else {
+          expect(Number(blocked.payload.attempts)).toBeGreaterThanOrEqual(1);
+          expect(Number(blocked.payload.attempts)).toBeLessThanOrEqual(2);
+          expect((await pool.query(
+            `SELECT memories_processed::int, audit_rows_processed::int, scope_cleanup_complete,
+               completed_at IS NOT NULL AS complete FROM principal_offboarding_runs WHERE principal_id=$1`,
+            [value.target.id],
+          )).rows[0]).toEqual({ memories_processed: 0, audit_rows_processed: 0,
+            scope_cleanup_complete: false, complete: false });
+          expect((await pool.query(
+            'SELECT disabled_at IS NOT NULL AS disabled, offboarded_at IS NOT NULL AS offboarded FROM principals WHERE id=$1',
+            [value.target.id],
+          )).rows[0]).toEqual({ disabled: true, offboarded: false });
+        }
         expect((await pool.query(
           "SELECT count(*)::int AS count FROM memories WHERE scope_id=$1 AND body<>'[erased]'", [value.owned.id],
-        )).rows[0].count).toBe(0);
+        )).rows[0].count).toBe(reason === 'detached_quota' ? 0 : 7);
         expect((await pool.query(
           'SELECT count(*)::int AS count FROM audit_log WHERE query IS NOT NULL AND (principal_id=$1 OR scope_id=$2)',
           [value.target.id, value.owned.id],
-        )).rows[0].count).toBe(0);
+        )).rows[0].count).toBe(reason === 'detached_quota' ? 0 : 7);
       } finally {
         await pool.query("UPDATE coordination_contract_backfill_state SET phase='complete' WHERE singleton");
       }
