@@ -230,7 +230,10 @@ reconciliation cohort, and excludes it from shutdown release. Reconciliation
 never invokes the consumer again.
 Leases for ambiguous deliveries are not released or renewed after stop returns. A
 process-wide in-flight fence excludes them from claims by replacement workers
-in the same process until the original callback settles. Admission is isolated
+in the same process until the callback and any retained paid outcome are
+reconciled, or the process exits. Once stop returns, periodic renewal and cohort
+retries halt; do not treat callback settlement alone as freeing a pending-write
+slot. Late fenced results may still clear a retained outcome. Admission is isolated
 per webhook ID: a webhook can retain at most the configured claim-batch count,
 and saturated webhook IDs are omitted from new claims while other IDs continue
 to drain. A hard process-wide ceiling of 100 callbacks remains as a backstop
@@ -241,7 +244,7 @@ earlier. A rejection after the worker's actual shutdown abort is abandoned
 without charging the callback as a genuine failure. An abort caused by lease
 ownership loss is instead persisted as a failed attempt when the ownership
 fence still matches; if another owner has already reclaimed it, the fenced
-write is a no-op and the durable lease state wins. Settled callbacks
+write is a no-op and the durable lease state wins. Callbacks whose retained paid outcomes have also settled
 are removed from both the in-flight and retained sets. After a crash, expiry
 provides at-least-once recovery, and
 claims that end in repeated crashes are dead-lettered at the configured attempt
