@@ -62,7 +62,6 @@ describe('issue 7 second independent review remediation', () => {
     expect(migrator).toMatch(/0073_coordination_bounded_discovery_and_locking\.sql['"],\s*\n\s*['"][0-9a-f]{64}/);
     expect(service).toMatch(/SET LOCAL continuum\.client_coordination_privacy_version/i);
     expect(service).toMatch(/pg_try_advisory_xact_lock/i);
-    expect(service).toMatch(/FOR UPDATE NOWAIT/i);
     expect(service).toMatch(/55P03[\s\S]*lock_busy|lock_busy[\s\S]*55P03/i);
   });
 

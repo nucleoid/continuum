@@ -328,7 +328,7 @@ describe('coordination storage and service', () => {
     }
   });
 
-  it('maps database constraint violations to stable INVALID_INPUT', async () => {
+  it('sanitizes unknown database constraint violations as INTERNAL', async () => {
     await pool.query(`
       CREATE OR REPLACE FUNCTION coordination_test_reject_resource()
       RETURNS trigger LANGUAGE plpgsql AS $$
@@ -344,7 +344,11 @@ describe('coordination storage and service', () => {
     `);
     try {
       await expect(acquire(pool, 'database-rejected'))
-        .rejects.toEqual(expectCode('INVALID_INPUT'));
+        .rejects.toMatchObject({ code: 'INTERNAL', message: 'An internal error occurred' });
+      expect((await pool.query(
+        `SELECT count(*)::int AS count FROM coordination_resources
+          WHERE scope_id = $1 AND resource = 'database-rejected'`, [scope.id],
+      )).rows).toEqual([{ count: 0 }]);
     } finally {
       await pool.query(
         'DROP TRIGGER IF EXISTS coordination_test_reject_resource ON coordination_resources',
@@ -681,6 +685,8 @@ describe('coordination storage and service', () => {
       `INSERT INTO coordination_resources (scope_id, resource, fencing_token)
        VALUES ($1, 'plan-history', 100000)`, [scope.id],
     );
+    // 100k terminal generations share one resource and remain within the scope
+    // resource cap; allow a bounded fixture budget for trigger-maintained history.
     const planNoisePrincipal = randomUUID();
     await pool.query(
       `INSERT INTO principals (id, external_id, kind, display_name)
@@ -785,7 +791,7 @@ describe('coordination storage and service', () => {
     } finally {
       plans.release();
     }
-  });
+  }, 120_000);
 
   it('enforces nondecreasing fencing tokens in the database', async () => {
     const acquired = await acquire(pool, 'monotonic-db-guard');

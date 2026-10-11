@@ -406,45 +406,73 @@ describe('coordination exact-head review regressions', () => {
       ...(pool as unknown as { options: PoolConfig }).options,
       max: 1, options: `-c search_path=${schema},public -c role=${applicationRole}`,
     });
+    const operator = await createOperator(value.operator.id, 1);
+    await pool.query(
+      'INSERT INTO coordination_principal_usage(principal_id) VALUES ($1)',
+      [value.target.id],
+    );
     const blocker = await pool.connect();
     try {
       const applicationPid = Number((await application.query(
         'SELECT pg_backend_pid() AS pid',
       )).rows[0].pid);
+      const operatorPid = Number((await operator.query(
+        'SELECT pg_backend_pid() AS pid',
+      )).rows[0].pid);
+      const blockerPid = Number((await blocker.query(
+        'SELECT pg_backend_pid() AS pid',
+      )).rows[0].pid);
       await blocker.query('BEGIN');
       await blocker.query(
-        'SELECT pg_advisory_xact_lock(hashtextextended($1::text, 604692072))',
-        [value.owned.id],
+        'SELECT 1 FROM coordination_principal_usage WHERE principal_id = $1 FOR UPDATE',
+        [value.target.id],
       );
       const acquireRunId = randomUUID();
       const acquire = acquireLease(application, value.target, {
         scope: `user:${value.owned.name}`, resource: 'acquire-first',
         runId: acquireRunId, requestId: randomUUID(), ttlSeconds: 300,
-      });
+      }).then(
+        (result) => ({ ok: true as const, result }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
       let acquireWaiting = false;
       for (let attempt = 0; attempt < 100 && !acquireWaiting; attempt += 1) {
         acquireWaiting = Boolean((await pool.query(
-          `SELECT wait_event_type = 'Lock' AS waiting
-             FROM pg_stat_activity WHERE pid = $1`, [applicationPid],
+          `SELECT $2::int = ANY(pg_blocking_pids(pid))
+                    AND query LIKE '%continuum_coordination_lock_principal_usage%' AS waiting
+             FROM pg_stat_activity WHERE pid = $1`, [applicationPid, blockerPid],
         )).rows[0]?.waiting);
         if (!acquireWaiting) await new Promise((resolve) => setTimeout(resolve, 10));
       }
       expect(acquireWaiting).toBe(true);
-      let offboardingSettled = false;
-      const offboarding = offboardPrincipal(pool, value.operator, value.target.id, {
+      // The usage barrier is after authorization and before resource locks. An
+      // offboarding writer must wait on that acquiring session's principal lock.
+      const offboarding = offboardPrincipal(operator, value.operator, value.target.id, {
         confirmationScopeId: value.owned.id, batchSize: 100,
-      }).finally(() => { offboardingSettled = true; });
-      for (let attempt = 0; attempt < 100 && !offboardingSettled; attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 10));
+      }).then(
+        (result) => ({ ok: true as const, result }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      let offboardingWaiting = false;
+      for (let attempt = 0; attempt < 50 && !offboardingWaiting; attempt += 1) {
+        offboardingWaiting = Boolean((await pool.query(
+          `SELECT $2::int = ANY(pg_blocking_pids(pid))
+                    AND query LIKE '%FOR UPDATE%' AS waiting
+             FROM pg_stat_activity WHERE pid = $1`, [operatorPid, applicationPid],
+        )).rows[0]?.waiting);
+        if (!offboardingWaiting) await new Promise((resolve) => setTimeout(resolve, 10));
       }
-      expect(offboardingSettled).toBe(true);
       await blocker.query('COMMIT');
-      const acquired = await acquire;
-      expect(acquired).toMatchObject({ acquired: true });
-      await expect(offboarding).resolves.toMatchObject({
-        complete: false, progressed: false, reason: 'lock_busy',
+      expect(offboardingWaiting).toBe(true);
+      const acquireOutcome = await acquire;
+      expect(acquireOutcome).toMatchObject({ ok: true, result: { acquired: true } });
+      if (!acquireOutcome.ok || !acquireOutcome.result.acquired) {
+        throw new Error('expected acquire-first lease');
+      }
+      const acquired = acquireOutcome.result;
+      expect(await offboarding).toMatchObject({
+        ok: true, result: { complete: false, reason: 'live_lease' },
       });
-      if (!acquired.acquired) throw new Error('expected acquire-first lease');
       await releaseLease(application, value.target, {
         leaseId: acquired.leaseId, runId: acquireRunId, requestId: randomUUID(),
       });
@@ -466,6 +494,7 @@ describe('coordination exact-head review regressions', () => {
       await blocker.query('ROLLBACK').catch(() => undefined);
       blocker.release();
       await application.end();
+      await operator.end();
     }
   }, 30_000);
 });
