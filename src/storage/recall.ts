@@ -1,4 +1,4 @@
-import type pg from 'pg';
+import pg from 'pg';
 import type { MemoryType, RecallResult } from '../types.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import { vectorSearchMemoryIds } from './embeddings.js';
@@ -69,8 +69,13 @@ class VectorSearchTimeoutError extends Error {
 }
 
 function connectable(pool: Queryable): pool is Queryable & Pick<pg.Pool, 'connect'> {
-  return typeof (pool as Partial<pg.Pool>).connect === 'function';
+  // PoolClient inherits Client.connect, which must not be called a second time.
+  return !(pool instanceof pg.Client)
+    && typeof (pool as Partial<pg.PoolClient>).release !== 'function'
+    && typeof (pool as Partial<pg.Pool>).connect === 'function';
 }
+
+let vectorSavepointSequence = 0;
 
 async function connectBeforeDeadline(
   pool: Queryable & Pick<pg.Pool, 'connect'>,
@@ -135,39 +140,105 @@ async function boundedVectorSearch(
   types: MemoryType[] | undefined,
   signal: AbortSignal,
 ): Promise<Array<{ id: string; distance: number }>> {
-  let remainingMs = deadlineAt - Date.now();
-  if (remainingMs < 1 || signal.aborted) {
-    throw new VectorSearchTimeoutError('Vector search deadline exceeded');
-  }
-  if (!connectable(pool)) {
-    return vectorSearchMemoryIds(pool, queryVec, scopeIds, provider, limit, types);
-  }
-  const client = await connectBeforeDeadline(pool, deadlineAt, signal);
-  let transactionStarted = false;
-  let discard = false;
-  try {
-    remainingMs = deadlineAt - Date.now();
-    if (remainingMs < 1 || signal.aborted) {
+  const remaining = () => {
+    const ms = deadlineAt - Date.now();
+    if (ms < 1 || signal.aborted) {
       throw new VectorSearchTimeoutError('Vector search deadline exceeded');
     }
-    await client.query('BEGIN');
-    transactionStarted = true;
-    await client.query(`SET LOCAL statement_timeout = '${remainingMs}ms'`);
+    return ms;
+  };
+  remaining();
+  const owned = connectable(pool);
+  const client = owned ? await connectBeforeDeadline(pool, deadlineAt, signal) : pool;
+  const physicalClient = owned || client instanceof pg.Client
+    || typeof (client as Partial<pg.PoolClient>).release === 'function';
+  let transactionStarted = false;
+  let savepoint: string | undefined;
+  let previousTimeout: string | undefined;
+  let previousTimeoutMs = 0;
+  let discard = false;
+  try {
+    remaining();
+    if (owned) {
+      await client.query('BEGIN');
+      transactionStarted = true;
+    } else if (physicalClient) {
+      const name = `continuum_vector_${++vectorSavepointSequence}`;
+      try {
+        await client.query(`SAVEPOINT ${name}`);
+        savepoint = name;
+      } catch (error) {
+        // Outside a caller transaction SAVEPOINT changes no session state.
+        if ((error as { code?: unknown })?.code !== '25P01') throw error;
+      }
+    }
+    if (physicalClient) {
+      remaining();
+      const settings = await client.query(
+        `SELECT pg_catalog.current_setting('statement_timeout') AS timeout,
+                setting::bigint AS timeout_ms
+           FROM pg_catalog.pg_settings WHERE name='statement_timeout'`,
+      );
+      previousTimeout = String(settings.rows[0].timeout);
+      previousTimeoutMs = Number(settings.rows[0].timeout_ms);
+    }
+    const bounded: Queryable = { query: (async (sql: string, values?: unknown[]) => {
+      let budget = remaining();
+      if (physicalClient) {
+        if (previousTimeoutMs > 0) budget = Math.min(budget, previousTimeoutMs);
+        await client.query(
+          "SELECT pg_catalog.set_config('statement_timeout',$1::text,$2::boolean)",
+          [`${budget}ms`, transactionStarted || savepoint !== undefined],
+        );
+      }
+      // The settings round trip also consumes the shared wall-clock budget.
+      remaining();
+      return client.query(sql, values);
+    }) as Queryable['query'] };
     const hits = await vectorSearchMemoryIds(
-      client, queryVec, scopeIds, provider, limit, types,
+      bounded, queryVec, scopeIds, provider, limit, types,
     );
-    await client.query('COMMIT');
+    if (transactionStarted) {
+      await client.query('COMMIT');
+      transactionStarted = false;
+    } else if (savepoint !== undefined) {
+      await client.query(
+        "SELECT pg_catalog.set_config('statement_timeout',$1::text,true)", [previousTimeout],
+      );
+      previousTimeout = undefined;
+      await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+      savepoint = undefined;
+    }
     return hits;
   } catch (error) {
     if (transactionStarted) {
       try { await client.query('ROLLBACK'); } catch { discard = true; }
+    } else if (savepoint !== undefined) {
+      try {
+        await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+        await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+        previousTimeout = undefined;
+      } catch { discard = true; }
     }
     if ((error as { code?: unknown })?.code === '57014') {
       throw new VectorSearchTimeoutError('Vector search deadline exceeded');
     }
     throw error;
   } finally {
-    client.release(discard);
+    if (!owned && !discard && previousTimeout !== undefined) {
+      try {
+        await client.query(
+          "SELECT pg_catalog.set_config('statement_timeout',$1::text,false)", [previousTimeout],
+        );
+      } catch { discard = true; }
+    }
+    if (owned || discard) {
+      if (typeof (client as Partial<pg.PoolClient>).release === 'function') {
+        (client as pg.PoolClient).release(discard);
+      } else if (client instanceof pg.Client && discard) {
+        await client.end();
+      }
+    }
   }
 }
 
