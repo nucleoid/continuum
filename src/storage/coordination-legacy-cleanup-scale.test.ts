@@ -50,12 +50,13 @@ describe('production legacy cleanup at current-lease scale', () => {
            FROM generate_series(1, $3::integer) n`, [scope.id, nonce, count],
       );
       await client.query(
-        `INSERT INTO coordination_leases(lease_id, scope_id, resource, principal_id, run_id,
+        `WITH snapshot AS MATERIALIZED (SELECT clock_timestamp() AS at)
+         INSERT INTO coordination_leases(lease_id, scope_id, resource, principal_id, run_id,
                                         fencing_token, acquired_at, expires_at, cleanup_eligible_at)
          SELECT md5($3 || ':lease:' || n)::uuid, $1, 'legacy-current-' || n, $2,
                 md5($3 || ':run:' || n)::uuid, 1,
-                clock_timestamp() - interval '2 days', clock_timestamp() + interval '1 day', NULL
-           FROM generate_series(1, $4::integer) n`, [scope.id, principal.id, nonce, count],
+                snapshot.at, snapshot.at + interval '15 minutes', NULL
+           FROM generate_series(1, $4::integer) n CROSS JOIN snapshot`, [scope.id, principal.id, nonce, count],
       );
       await client.query(
         `INSERT INTO coordination_scope_usage(scope_id, resource_count) VALUES($1, $2)
