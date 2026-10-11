@@ -6,8 +6,8 @@ import { dirname, resolve } from 'node:path';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const timeoutMs = 10_000;
 
-function spawnEntrypoint(relativePath, env) {
-  return spawn(process.execPath, [resolve(root, relativePath)], {
+function spawnEntrypoint(relativePath, env, args = []) {
+  return spawn(process.execPath, [resolve(root, relativePath), ...args], {
     cwd: root,
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -95,8 +95,8 @@ async function smokeMcpValidation() {
   process.stdout.write('MCP compiled entrypoint reached principal validation\n');
 }
 
-async function runToExit(relativePath, env) {
-  const child = spawnEntrypoint(relativePath, env);
+async function runToExit(relativePath, env, args = []) {
+  const child = spawnEntrypoint(relativePath, env, args);
   const output = captureOutput(child);
   let timeout;
   try {
@@ -142,7 +142,20 @@ async function smokeWindowsAuditExportRejection() {
   process.stdout.write('Audit retention rejected unsupported Windows export before database access\n');
 }
 
+async function smokeTagCliValidation() {
+  const env = { ...process.env };
+  delete env.CONTINUUM_BEARER;
+  const result = await runToExit('dist/cli/tag-vocabularies.js', env, ['list', 'project']);
+  if (result.code === 0 || !result.stderr.includes('CONTINUUM_BEARER is required')) {
+    throw new Error(
+      `Tag CLI did not execute credential validation: ${JSON.stringify(result)}`,
+    );
+  }
+  process.stdout.write('Tag CLI compiled entrypoint reached credential validation\n');
+}
+
 await smokeApi();
 await smokeMcpValidation();
 await smokeDisabledAuditRetention();
 await smokeWindowsAuditExportRejection();
+await smokeTagCliValidation();

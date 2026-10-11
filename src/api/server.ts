@@ -39,6 +39,8 @@ import { supersedeRouter } from './routes/supersede.js';
 import { offboardingRouter } from './routes/offboarding.js';
 import { locksRouter } from './routes/locks.js';
 import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoordinationContractReady } from '../storage/provider-lifecycle.js';
+import { tagVocabulariesRouter } from './routes/tag-vocabularies.js';
+import type { CaptureRegistry } from '../capture/plugin.js';
 
 export { createReadinessState } from './readiness.js';
 
@@ -77,6 +79,7 @@ export interface AppOptions {
   relationThreshold?: number;
   ingestConfig?: IngestConfig;
   authenticator?: Authenticator;
+  captureRegistry?: CaptureRegistry;
 }
 
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
@@ -95,6 +98,7 @@ const KNOWN_LOG_PATHS = new Set([
   '/api/v0/admin/principals/:principalId/offboard',
   '/api/v0/locks', '/api/v0/locks/acquire', '/api/v0/locks/renew',
   '/api/v0/locks/release',
+  '/api/v0/tag-vocabularies',
 ]);
 
 const defaultLogger: OperationalLogger = {
@@ -300,7 +304,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   });
 
   const v0 = express.Router();
-  v0.use(ingestRouter(pool, provider, ingestConfig, undefined, relationThreshold, authenticator));
+  v0.use(ingestRouter(pool, provider, ingestConfig, opts.captureRegistry, relationThreshold, authenticator));
   v0.use(bearerAuth(pool, authenticator));
   v0.use(captureRouter(pool, provider, relationThreshold));
   v0.use(recallRouter(pool, provider));
@@ -313,6 +317,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   v0.use(supersedeRouter(pool, provider));
   v0.use(offboardingRouter(pool));
   v0.use(locksRouter(pool));
+  v0.use(tagVocabulariesRouter(pool));
   app.use('/api/v0', v0);
 
   app.use('/api', (_req, res) => {

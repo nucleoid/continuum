@@ -29,6 +29,7 @@ export * from './services/agents-md.js';
 export * from './services/api-keys.js';
 export * from './services/membership-sync.js';
 export * from './identity/graph-membership.js';
+export * from './services/tag-vocabularies.js';
 export * from './lifecycle/sweep.js';
 export { promoteMemory, verifyMemory, PromoteError } from './storage/promote.js';
 export * from './capture/index.js';
