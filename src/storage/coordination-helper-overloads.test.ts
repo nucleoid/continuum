@@ -60,8 +60,14 @@ it.each([false,true])('uses tenant UUID coordination helpers with a later hostil
     } finally { await creator.query('RESET ROLE'); creator.release(); }
     application = new pg.Pool({ ...(owner as unknown as { options: pg.PoolConfig }).options,
       max:1,options:`-c search_path=public,${schema} -c role=${app}` });
-    await reconcilePgvectorProviderGrants(application,{expectedSchema:'public'});
-    await requireCoordinationContractReady(application,{expectedSchema:'public'});
+    await expect(reconcilePgvectorProviderGrants(application,{expectedSchema:'public'}))
+      .rejects.toThrow(/runtime application schema.*trust/i);
+    await expect(requireCoordinationContractReady(application,{expectedSchema:'public'}))
+      .rejects.toThrow(/runtime application schema.*trust/i);
+    // Direct library callers retain their caller-trusted path compatibility.
+    // Keep the independent typed UUID SQL proof under those real app privileges.
+    await reconcilePgvectorProviderGrants(application);
+    await requireCoordinationContractReady(application);
     expect((await application.query('SELECT continuum_coordination_scope_fencing_floor($1::uuid)::text AS floor',[scope.id])).rows)
       .toEqual([{floor:reclaimed?'900':'0'}]);
     expect((await application.query('SELECT continuum_coordination_scope_fencing_floor($1)::text AS floor',[scope.id])).rows)
