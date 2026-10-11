@@ -117,7 +117,8 @@ BEGIN
         'run_id',privacy_run.run_id,'approval_id',privacy_run.approval_id::text,
         'acknowledged_evidence_hash',privacy_run.approval_evidence_hash,'rows_processed',names_processed+deliveries_processed));
   END IF;
-  RETURN jsonb_build_object('complete',clean,'processed',names_processed+deliveries_processed);
+  RETURN jsonb_build_object('complete',clean,'processed',names_processed+deliveries_processed,
+    'batch_full',names_processed=batch_limit OR deliveries_processed=batch_limit);
 END;
 $$;
 REVOKE ALL ON FUNCTION continuum_operator_scrub_promotion_scope(UUID,UUID,UUID,INTEGER) FROM PUBLIC;

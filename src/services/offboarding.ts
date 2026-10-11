@@ -760,7 +760,7 @@ export async function mapOwnedUserScope(
 }
 
 async function scrubPromotionScope(client: pg.PoolClient, actorId: string, principalId: string,
-  scopeId: string, batchSize: number): Promise<{ complete: boolean; processed: number }> {
+  scopeId: string, batchSize: number): Promise<{ complete: boolean; processed: number; batch_full?: boolean }> {
   const available = await client.query<{ installed: boolean; available: boolean }>(
     `SELECT pg_catalog.to_regclass('promotion_events') IS NOT NULL AS installed,
       pg_catalog.to_regprocedure('continuum_operator_scrub_promotion_scope(uuid,uuid,uuid,integer)') IS NOT NULL AS available`,
@@ -768,7 +768,7 @@ async function scrubPromotionScope(client: pg.PoolClient, actorId: string, princ
   // Older schemas have no outbox. Once present, its erasure capability is mandatory.
   if (!available.rows[0]?.installed) return { complete: true, processed: 0 };
   if (!available.rows[0].available) throw new ServiceError('DEPENDENCY_UNAVAILABLE', 'Promotion privacy migration is required');
-  const result = await client.query<{ privacy: { complete: boolean; processed: number } }>(
+  const result = await client.query<{ privacy: { complete: boolean; processed: number; batch_full?: boolean } }>(
     `SELECT continuum_operator_scrub_promotion_scope($1::uuid,$2::uuid,$3::uuid,$4::integer) AS privacy`,
     [actorId, principalId, scopeId, Math.min(batchSize, 1_000)],
   );
@@ -1412,7 +1412,9 @@ async function offboardPrincipalCore(
       coordinationPrivacyComplete = coordinationPrivacyComplete && outboxPrivacy.complete;
       coordinationPrivacyProgressed = coordinationPrivacyProgressed || outboxPrivacy.processed > 0;
       coordinationPrivacyMutated = coordinationPrivacyMutated || outboxPrivacy.processed > 0;
-      if (!outboxPrivacy.complete && coordinationPrivacyReason === null) coordinationPrivacyReason = 'lock_busy';
+      if (!outboxPrivacy.complete && !outboxPrivacy.batch_full && coordinationPrivacyReason === null) {
+        coordinationPrivacyReason = 'lock_busy';
+      }
     }
     let actualStateErased = false;
     // A bounded scrub must commit independently of the full-history predicate.
@@ -1573,7 +1575,9 @@ async function offboardPrincipalCore(
         const outboxPrivacy = await scrubPromotionScope(client, actor.id, principalId, scopeId, batchSize);
         coordinationPrivacyComplete = coordinationPrivacyComplete && outboxPrivacy.complete;
         coordinationPrivacyProgressed = coordinationPrivacyProgressed || outboxPrivacy.processed > 0;
-        if (!outboxPrivacy.complete && coordinationPrivacyReason === null) coordinationPrivacyReason = 'lock_busy';
+        if (!outboxPrivacy.complete && !outboxPrivacy.batch_full && coordinationPrivacyReason === null) {
+          coordinationPrivacyReason = 'lock_busy';
+        }
         if (ownedCoordinationComplete && coordinationPrivacyComplete) {
           await writeOffboardingRun(client, principalId, actor.id, 'scope_complete');
         }
