@@ -50,7 +50,7 @@ describe('coordination contract scale and recovery', () => {
     } finally { await client.query('RESET plan_cache_mode'); client.release(); }
   }, 120_000);
 
-  it('seeks deep receipt and repair-page cursors without rereading the processed prefix', async () => {
+  it('seeks a deep receipt cursor without rereading the processed prefix', async () => {
     await seedPrincipals();
     const scope = await createScope(pool, { kind: 'project', name: 'scale-receipts' });
     await pool.query("INSERT INTO coordination_resources(scope_id,resource) VALUES($1,'scale')", [scope.id]);
@@ -63,9 +63,6 @@ describe('coordination contract scale and recovery', () => {
     await pool.query(`INSERT INTO coordination_principal_privacy_progress(principal_id,detached_principal_id,privacy_version)
       SELECT id,'00000000-0000-4000-8000-000000000012'::uuid,2 FROM principals WHERE external_id LIKE 'scale-%';
       ANALYZE coordination_operation_receipts; ANALYZE coordination_principal_privacy_progress`);
-    const operator = await createPrincipal(pool, { externalId: 'scale-operator', kind: 'user', displayName: 'Operator' });
-    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
-    await addMembership(pool, operator.id, org.id, 'admin');
     const client = await pool.connect();
     try {
       await client.query(`UPDATE coordination_contract_backfill_state SET phase='receipts',
@@ -74,16 +71,27 @@ describe('coordination contract scale and recovery', () => {
       expect((await client.query('SELECT receipt_principal_cursor FROM coordination_contract_backfill_state')).rows[0].receipt_principal_cursor)
         .toBe(uuid(49_001));
       expect(receiptBuffers).toBeLessThan(400);
-      const pageBuffers = await plan(client,
+    } finally { await client.query('RESET plan_cache_mode'); client.release(); }
+  }, 120_000);
+
+  it('seeks a deep repair-page cursor independently of receipt repair', async () => {
+    await seedPrincipals();
+    await pool.query(`INSERT INTO coordination_principal_privacy_progress(principal_id,detached_principal_id,privacy_version)
+      SELECT id,'00000000-0000-4000-8000-000000000012'::uuid,2 FROM principals WHERE external_id LIKE 'scale-%';
+      ANALYZE coordination_principal_privacy_progress`);
+    const operator = await createPrincipal(pool, { externalId: 'scale-operator', kind: 'user', displayName: 'Operator' });
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await addMembership(pool, operator.id, org.id, 'admin');
+    const client = await pool.connect();
+    try {
+      const buffers = await plan(client,
         'SELECT * FROM continuum_operator_list_coordination_privacy_repair_page($1,$2,$3)',
         [operator.id, uuid(49_000), 2]);
-      const page = (await client.query(
-        'SELECT * FROM continuum_operator_list_coordination_privacy_repair_page($1,$2,$3)',
-        [operator.id, uuid(49_000), 2],
-      )).rows[0];
+      const page = (await client.query('SELECT * FROM continuum_operator_list_coordination_privacy_repair_page($1,$2,$3)',
+        [operator.id,uuid(49_000),2])).rows[0];
       expect(page.scanned_count).toBe(2);
       expect(page.next_cursor).toBe(uuid(49_002));
-      expect(pageBuffers).toBeLessThan(400);
+      expect(buffers).toBeLessThan(400);
     } finally { await client.query('RESET plan_cache_mode'); client.release(); }
   }, 120_000);
 

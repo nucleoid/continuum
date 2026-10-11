@@ -27,6 +27,32 @@ async function fixture(run: (pool: pg.Pool, admin: pg.Pool, schema: string, shad
 }
 
 describe('qualified provider startup gate', () => {
+  it('verifies startup under a direct quoted LOGIN role without parsing its name as regrole', async () => {
+    await fixture(async (_pool, admin, schema, shadow) => {
+      const role = `startup-role-${randomUUID().slice(0, 8)}`;
+      const password = randomUUID();
+      let runtime: pg.Pool | undefined;
+      try {
+        await admin.query(`CREATE ROLE "${role}" LOGIN PASSWORD '${password}';
+          GRANT USAGE ON SCHEMA "${schema}" TO "${role}";
+          GRANT SELECT ON "${schema}".memories TO "${role}";
+          CREATE FUNCTION "${schema}".continuum_assert_current_pgvector_profile() RETURNS void
+          LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,"${schema}",pg_temp
+          AS $$ BEGIN RETURN; END $$;
+          REVOKE ALL ON FUNCTION "${schema}".continuum_assert_current_pgvector_profile() FROM PUBLIC;
+          GRANT EXECUTE ON FUNCTION "${schema}".continuum_assert_current_pgvector_profile() TO "${role}";`);
+        const url = new URL(databaseUrl); url.username = role; url.password = password;
+        runtime = new pg.Pool({ connectionString: url.toString(), max: 1,
+          options: `-c search_path=${shadow},${schema}` });
+        expect((await runtime.query('SELECT current_user AS role')).rows).toEqual([{ role }]);
+        await expect(reconcilePgvectorProviderGrants(runtime)).resolves.toBeUndefined();
+      } finally {
+        await runtime?.end();
+        await admin.query(`DROP OWNED BY "${role}"; DROP ROLE IF EXISTS "${role}"`);
+      }
+    });
+  });
+
   it('runs the verifier in the actual memories namespace despite an earlier no-op', async () => {
     await fixture(async (pool, admin, schema, shadow) => {
       await admin.query(`INSERT INTO "${schema}"._continuum_migrations VALUES('0080_pgvector_provider_grants.sql');

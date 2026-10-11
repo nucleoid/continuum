@@ -9,7 +9,7 @@ import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { acquireLease } from './coordination.js';
 import {
-  listCoordinationPrivacyRepairs, mapOwnedUserScope, offboardPrincipal,
+  listCoordinationPrivacyRepairs, mapOwnedUserScope, offboardPrincipal, repairCoordinationPrivacy,
 } from './offboarding.js';
 
 const execFileAsync = promisify(execFile);
@@ -135,7 +135,7 @@ describe('coordination final review remediation', () => {
       scope: `user:${value.owned.name}`, resource: 'owned-held', runId: randomUUID(),
       requestId: randomUUID(), ttlSeconds: 300,
     });
-    expect(held.outcome).toBe('acquired');
+    expect(held.acquired).toBe(true);
     let result = await offboardPrincipal(pool, value.operator, value.target.id, {
       confirmationScopeId: value.owned.id,
     });
@@ -154,6 +154,37 @@ describe('coordination final review remediation', () => {
       });
     }
     expect(result.complete).toBe(true);
+  });
+
+  it('contract offboarding review: disabled-only repair resumes an existing authorized owned-scope phase', async () => {
+    const value = await fixture('disabled-existing-scope-repair');
+    await pool.query(
+      `INSERT INTO coordination_resources(scope_id, resource)
+       SELECT $1, 'legacy-disabled-resource-' || n FROM generate_series(1, 2501) n`, [value.owned.id],
+    );
+    await pool.query('SELECT continuum_disable_principal($1, $2)', [value.operator.id, value.target.id]);
+    await pool.query('SELECT continuum_operator_pseudonymize_scope_v2($1, $2, $3)', [
+      value.operator.id, value.owned.id, 'erased-authorized-existing-scope',
+    ]);
+    expect((await pool.query(
+      'SELECT completed_at FROM coordination_scope_privacy_progress WHERE scope_id = $1', [value.owned.id],
+    )).rows[0].completed_at).toBeNull();
+    let result = await repairCoordinationPrivacy(pool, value.operator, value.target.id, {
+      confirmationScopeId: value.owned.id,
+    });
+    const remaining = (await pool.query(
+      'SELECT count(*)::int AS count FROM coordination_resources WHERE scope_id = $1', [value.owned.id],
+    )).rows[0].count;
+    expect(result.complete && remaining > 0).toBe(false);
+    for (let attempt = 0; attempt < 12 && !result.complete; attempt += 1) {
+      result = await repairCoordinationPrivacy(pool, value.operator, value.target.id, {
+        confirmationScopeId: value.owned.id,
+      });
+    }
+    expect(result.complete).toBe(true);
+    expect((await pool.query(
+      'SELECT count(*)::int AS count FROM coordination_resources WHERE scope_id = $1', [value.owned.id],
+    )).rows[0].count).toBe(0);
   });
 
   it('contract offboarding review: resumes an owned scope reopened by the contract backfill before claiming completion', async () => {

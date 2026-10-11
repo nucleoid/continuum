@@ -141,7 +141,7 @@ export interface CoordinationPrivacyRepairPage {
 
 export type CoordinationPrivacyBlockReason =
   'live_lease' | 'owned_live_lease' | 'migration_pending'
-  | 'detached_quota' | 'lock_busy' | 'no_progress' | null;
+  | 'detached_quota' | 'lock_busy' | 'no_progress' | 'offboarding_required' | null;
 
 function isCoordinationContractPending(error: unknown): boolean {
   const failure = error as { code?: string; constraint?: string; message?: string };
@@ -390,6 +390,19 @@ export async function repairCoordinationPrivacy(
     }
     const state: CoordinationPrivacyRepairCandidate['state'] =
       target.rows[0].offboarded_at === null ? 'disabled_only' : 'offboarded';
+    if (state === 'offboarded') {
+      // Principal privacy alone is not proof of full lifecycle erasure.
+      // The confirmed offboarding path owns that bounded verification.
+      await record(client, {
+        principalId: actor.id, action: 'read',
+        metadata: { operation: 'coordination_privacy_repair', outcome: 'offboarding_required' },
+      });
+      await client.query('COMMIT');
+      return {
+        principalId, scopeId, state, complete: false,
+        progressed: false, blockedUntil: null, reason: 'offboarding_required',
+      };
+    }
     const candidate = await client.query(
       `SELECT repair_state
          FROM continuum_operator_list_coordination_privacy_repairs($1, $2, 1)`,
@@ -1235,6 +1248,11 @@ async function offboardPrincipalCore(
     );
     let coordinationPrivacyComplete = Number(privacyState.rows[0]?.privacy_version) >= 3
       && privacyState.rows[0]?.principal_complete === true;
+    const initialOwnedPrivacy = !dryRun && target.rows[0].disabled_at !== null
+      ? await ownedScopePrivacyState(client, actor.id, scopeId) : null;
+    if (initialOwnedPrivacy) {
+      coordinationPrivacyComplete = coordinationPrivacyComplete && ownedScopeIsClean(initialOwnedPrivacy);
+    }
     let coordinationPrivacyMutated = false;
     let coordinationPrivacyProgressed = false;
     let coordinationPrivacyBlockedUntil: Date | null = null;
@@ -1257,25 +1275,45 @@ async function offboardPrincipalCore(
     }
     // An open scope-cleanup phase performs its one privacy batch below. A
     // resumed run whose scope cleanup is already durable still needs this
-    // pre-scrub if a later upgrade reopened only principal privacy progress.
+    // bounded repair if an upgrade reopened principal or owned-scope privacy.
     const scrubBeforeVerification = runCompleted
       || (resumedRun && Boolean(run.rows[0].scope_cleanup_complete));
     if (!dryRun && scrubBeforeVerification && wasOffboarded && !coordinationPrivacyComplete) {
-      const privacyRepair = await client.query<{ privacy: {
-        complete?: boolean; progressed?: boolean; blocked_until?: string | null;
-        reason?: CoordinationPrivacyBlockReason;
-      } }>(
-        `SELECT continuum_operator_scrub_coordination_principal(
-           $1, $2, $3, $4
-         ) AS privacy`,
-        [actor.id, principalId, scopeId, Math.min(batchSize, 1_000)],
-      );
-      coordinationPrivacyMutated = true;
-      coordinationPrivacyComplete = privacyRepair.rows[0]?.privacy?.complete === true;
-      coordinationPrivacyProgressed = privacyRepair.rows[0]?.privacy?.progressed === true;
-      coordinationPrivacyBlockedUntil = privacyRepair.rows[0]?.privacy?.blocked_until
-        ? new Date(privacyRepair.rows[0].privacy.blocked_until!) : null;
-      coordinationPrivacyReason = privacyRepair.rows[0]?.privacy?.reason ?? null;
+      await client.query('SAVEPOINT offboarding_preverification_privacy');
+      try {
+        const ownedBefore = initialOwnedPrivacy ?? await ownedScopePrivacyState(client, actor.id, scopeId);
+        if (!ownedScopeIsClean(ownedBefore)) {
+          await client.query('SELECT continuum_operator_pseudonymize_scope_v2($1, $2, $3)', [
+            actor.id, scopeId, ownedBefore.pseudonym ?? scopePseudonym,
+          ]);
+        }
+        const privacyRepair = await client.query<{ privacy: {
+          complete?: boolean; progressed?: boolean; blocked_until?: string | null;
+          reason?: CoordinationPrivacyBlockReason;
+        } }>(
+          `SELECT continuum_operator_scrub_coordination_principal(
+             $1, $2, $3, $4
+           ) AS privacy`,
+          [actor.id, principalId, scopeId, Math.min(batchSize, 1_000)],
+        );
+        const ownedAfter = await ownedScopePrivacyState(client, actor.id, scopeId);
+        coordinationPrivacyMutated = true;
+        coordinationPrivacyComplete = privacyRepair.rows[0]?.privacy?.complete === true
+          && ownedScopeIsClean(ownedAfter);
+        coordinationPrivacyProgressed = privacyRepair.rows[0]?.privacy?.progressed === true
+          || ownedScopeProgressed(ownedBefore, ownedAfter);
+        coordinationPrivacyBlockedUntil = privacyRepair.rows[0]?.privacy?.blocked_until
+          ? new Date(privacyRepair.rows[0].privacy.blocked_until!) : null;
+        coordinationPrivacyReason = privacyRepair.rows[0]?.privacy?.reason ?? null;
+        await client.query('RELEASE SAVEPOINT offboarding_preverification_privacy');
+      } catch (error) {
+        if (!isCoordinationContractPending(error)) throw error;
+        await client.query('ROLLBACK TO SAVEPOINT offboarding_preverification_privacy');
+        await client.query('RELEASE SAVEPOINT offboarding_preverification_privacy');
+        coordinationPrivacyComplete = false;
+        coordinationPrivacyMutated = true;
+        coordinationPrivacyReason = 'migration_pending';
+      }
     }
     let actualStateErased = false;
     // A bounded scrub must commit independently of the full-history predicate.

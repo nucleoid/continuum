@@ -6,7 +6,7 @@ import { runAuditRetention } from '../maintenance/audit-retention.js';
 import {
   provisionEntraGroupBinding, revokeEntraGroupBinding,
 } from './membership-sync.js';
-import { listCoordinationPrivacyRepairPage, mapOwnedUserScope, offboardPrincipal } from './offboarding.js';
+import { listCoordinationPrivacyRepairPage, mapOwnedUserScope, offboardPrincipal, repairCoordinationPrivacy } from './offboarding.js';
 import { disablePrincipal, reactivatePrincipal } from './principal-admin.js';
 import { ServiceError } from './errors.js';
 
@@ -170,6 +170,31 @@ const paths: Array<{
 ];
 
 describe('operator boundary database errors', () => {
+  it('does not claim full lifecycle completion for an offboarded privacy-repair caller', async () => {
+    const client = {
+      release: vi.fn(),
+      query: vi.fn(async (sql: string) => {
+        let rows: Record<string, unknown>[] = [];
+        if (sql.includes('to_regprocedure')) rows = [{ ready: true }];
+        else if (sql.includes('pg_try_advisory_xact_lock')) rows = [{ locked: true }];
+        else if (/FROM scopes WHERE kind = \$1 AND name = \$2/.test(sql)) {
+          rows = [{ id: SCOPE_ID, kind: 'org', name: '', created_at: new Date() }];
+        } else if (/FROM scope_memberships m JOIN principals p/.test(sql)) {
+          rows = [{ principal_id: ACTOR_ID, scope_id: SCOPE_ID, role: 'admin',
+            source_kind: 'manual', source_id: 'manual', active: true, added_at: new Date() }];
+        } else if (sql.includes('SELECT principal.id, principal.disabled_at')) {
+          rows = [{ id: TARGET_ID, scope_id: SCOPE_ID, disabled_at: new Date(), offboarded_at: new Date() }];
+        } else if (sql.includes('FROM continuum_coordination_privacy_state')) {
+          rows = [{ privacy_version: 3, principal_complete: true }];
+        }
+        return { rowCount: rows.length, rows };
+      }),
+    };
+    const pool = { connect: vi.fn().mockResolvedValue(client) } as unknown as pg.Pool;
+    await expect(repairCoordinationPrivacy(pool, actor, TARGET_ID, {
+      confirmationScopeId: SCOPE_ID,
+    })).resolves.toMatchObject({ complete: false, reason: 'offboarding_required' });
+  });
   it('preserves the original lock failure when the offboarding preview also fails', async () => {
     const original = databaseFailure('could not obtain lock', '55P03');
     const previewFailure = databaseFailure('preview connection lost', '08006');
