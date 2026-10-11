@@ -2385,6 +2385,53 @@ describe('runMigrations', () => {
     }
   }, 60_000);
 
+  it('bounds a parked 0053 upgrade lock wait and records the operative 0054 timeout recipe', async () => {
+    const schema = `early_lock_${randomUUID().replaceAll('-', '').slice(0,16)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL }); pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const blocker = schemaPool(schema);
+    const prefix = await mkdtemp(join(tmpdir(),'continuum-early-prefix-')); directories.push(prefix);
+    const forward = await mkdtemp(join(tmpdir(),'continuum-early-forward-')); directories.push(forward);
+    const source = join(process.cwd(),'migrations');
+    const name = '0054_coordination_leases.sql';
+    const canonical = (await readFile(join(source,name),'utf8')).replaceAll('\r\n','\n');
+    const lock = await blocker.connect();
+    try {
+      const files = (await readdir(source)).filter(file=>file.endsWith('.sql') && file<'0054').sort();
+      await Promise.all(files.map(file=>copyFile(join(source,file),join(prefix,file))));
+      await runMigrations(pool,prefix);
+      await copyFile(join(source,name),join(forward,name));
+      await pool.query("SET statement_timeout='1600ms'");
+      await lock.query('BEGIN');
+      await lock.query('LOCK TABLE scopes IN ACCESS EXCLUSIVE MODE');
+      // Without a transactional lock bound, the held FK target causes 57014
+      // from the independent watchdog instead of the required 55P03 refusal.
+      await expect(runMigrations(pool,forward)).rejects.toMatchObject({ cause: { code:'55P03' } });
+      expect((await pool.query('SELECT name FROM _continuum_migrations WHERE name=$1',[name])).rows).toEqual([]);
+      expect((await pool.query("SELECT to_regclass('coordination_resources') AS relation")).rows)
+        .toEqual([{ relation:null }]);
+      await lock.query('ROLLBACK');
+      await pool.query('RESET statement_timeout');
+      await runMigrations(pool,forward);
+      const effective = "SET LOCAL lock_timeout = '1s';\n"+canonical;
+      const hash = createHash('sha256');
+      for (const value of [effective,'[]']) {
+        const bytes = Buffer.from(value,'utf8'); const length = Buffer.alloc(4); length.writeUInt32BE(bytes.length);
+        hash.update(length).update(bytes);
+      }
+      expect((await pool.query(`SELECT variant,source_sha256,effective_sql_sha256,executed_sql_sha256,
+        statement_count,state FROM _continuum_migration_execution WHERE migration_name=$1 AND phase='file'`,[name])).rows)
+        .toEqual([{ variant:'canonical-lf-lock1s-v1',source_sha256:createHash('sha256').update(canonical).digest('hex'),
+          effective_sql_sha256:createHash('sha256').update(effective).digest('hex'),executed_sql_sha256:hash.digest('hex'),
+          statement_count:1,state:'completed' }]);
+    } finally {
+      await lock.query('ROLLBACK').catch(()=>undefined); lock.release();
+      await pool.query('RESET statement_timeout');
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  },120_000);
+
   it('runs marked concurrent-index migrations outside a transaction', async () => {
     const queries: string[] = [];
     const client = {
@@ -2432,9 +2479,11 @@ describe('runMigrations', () => {
   it('halves the 0062 cleanup directive batch after lock refusal and resets both timeouts', async () => {
     const queries: string[] = [];
     const sizes: unknown[] = [];
+    const recipes: unknown[] = [];
     const client = {
       query: vi.fn(async (query: string, values?: unknown[]) => {
         queries.push(query.trim());
+        if (query.includes('INSERT INTO _continuum_migration_execution') && query.includes("'started'")) recipes.push(values?.[3]);
         if (query.includes('pg_try_advisory_lock')) return { rowCount: 1, rows: [{ locked: true }] };
         if (query.includes('pg_advisory_unlock')) return { rowCount: 1, rows: [{ unlocked: true }] };
         if (query.includes('SELECT 1 FROM _continuum_migrations')
@@ -2457,6 +2506,7 @@ describe('runMigrations', () => {
       await expect(runMigrations({ connect: vi.fn(async () => client) } as unknown as pg.Pool, directory))
         .resolves.toHaveLength(1);
       expect(sizes).toEqual([1000, 500, 500]);
+      expect(recipes).toEqual(['online-cleanup-adaptive-max1000-lock1s-statement5s-v2']);
       expect(queries).toContain("SET lock_timeout = '1s'");
       expect(queries).toContain("SET statement_timeout = '5s'");
       expect(queries).toContain('RESET lock_timeout');
