@@ -1053,13 +1053,19 @@ export async function runMigrations(
       // Published-byte verification remains separate and rejects every change
       // other than Git's CRLF materialization.
       const canonicalSql = verifiedSources.get(file)!;
-      const sql = file === '0073_coordination_bounded_discovery_and_locking.sql'
+      const transformedSql = file === '0073_coordination_bounded_discovery_and_locking.sql'
         ? deferLegacy0073Backfill(canonicalSql)
         : file === '0074_coordination_compatibility_and_upgrade_repair.sql'
           ? repair0074PartialUpgradeDiscovery(canonicalSql)
           : file === '0076_coordination_review_2_remediation.sql'
             ? repair0076CrLfNormalization(canonicalSql)
           : canonicalSql;
+      // Bound DDL waits when upgrading a parked early coordination schema,
+      // without changing the published migration files. This exact prefix is
+      // part of the effective SQL and the atomically recorded execution digest.
+      const earlyTransactional = /^005[4-9]_/.test(file);
+      const sql = earlyTransactional
+        ? "SET LOCAL lock_timeout = '1s';\n" + transformedSql : transformedSql;
       const online = sql.trimStart().startsWith(NO_TRANSACTION_MARKER);
       const deferCleanup = file === '0060_coordination_online_finish.sql'
         && files.includes('0061_coordination_forward_security_repair.sql');
@@ -1073,7 +1079,7 @@ export async function runMigrations(
             ? '0076-crlf-pairs-only-v1'
             : online ? (deferCleanup ? 'online-directives-deferred-cleanup-v1'
               : adaptiveCleanup ? 'online-cleanup-adaptive-max1000-lock1s-statement5s-v2' : 'online-directives-v1')
-              : 'canonical-lf-v1';
+              : earlyTransactional ? 'canonical-lf-lock1s-v1' : 'canonical-lf-v1';
       const execution = new MigrationExecution(file, online ? 'file-online' : 'file',
         variant, sqlHash(canonicalSql), sqlHash(sql));
       let transactionOpen = false;
