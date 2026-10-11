@@ -883,8 +883,17 @@ CREATE TRIGGER guard_offboarding_access_audit BEFORE INSERT OR UPDATE OR DELETE 
 FOR EACH ROW EXECUTE FUNCTION continuum_guard_offboarding_access_audit();
 
 -- The detached history identity is a storage sink, never an interactive actor.
-UPDATE principals SET disabled_at=clock_timestamp()
-WHERE id='00000000-0000-4000-8000-000000000012' AND disabled_at IS NULL;
+DO $detached_preflight$
+BEGIN
+  IF EXISTS(SELECT 1 FROM principals WHERE id='00000000-0000-4000-8000-000000000012'
+      AND (disabled_at IS NULL OR kind<>'service'))
+    OR EXISTS(SELECT 1 FROM scope_memberships WHERE principal_id='00000000-0000-4000-8000-000000000012')
+    OR EXISTS(SELECT 1 FROM service_api_keys WHERE principal_id='00000000-0000-4000-8000-000000000012')
+    OR EXISTS(SELECT 1 FROM continuum_trusted_database_identities WHERE principal_id='00000000-0000-4000-8000-000000000012') THEN
+    RAISE EXCEPTION 'reserved detached coordination identity has authority drift; the migration owner must review and remove its memberships, keys and trusted bindings and restore its disabled service state before retrying';
+  END IF;
+END;
+$detached_preflight$;
 ALTER TABLE principals ADD CONSTRAINT principals_detached_coordination_identity_check
 CHECK(id<>'00000000-0000-4000-8000-000000000012' OR (kind='service' AND disabled_at IS NOT NULL));
 

@@ -596,9 +596,11 @@ independently randomized in bounded batches. The detached identity is disabled.
 It is reserved for storage: 0081 prevents enabling it or changing its kind from
 service, and refuses memberships, API keys and trusted database identity
 bindings. Ordinary disabled service principals retain their normal approved
-reactivation and key workflows. Existing sink credentials or authority metadata
-must be reviewed and removed by the owner; disabling the sink closes its
-authentication path without deleting anonymous lease or receipt history.
+reactivation and key workflows. Migration refuses pre-existing sink authority
+drift: the owner must review and remove any memberships, key material or trusted
+bindings and restore its disabled service state before retrying. This repair
+does not delete anonymous lease or receipt history, rotate global roles or
+change provider ACLs automatically.
 Detachment uses the same combined receipt budget across acquire, contention,
 renew, and release. It freezes a bounded candidate page, then rechecks available
 space under the detached usage lock. A full budget leaves the repair incomplete
