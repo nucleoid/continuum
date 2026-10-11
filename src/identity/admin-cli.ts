@@ -114,8 +114,10 @@ async function main(): Promise<void> {
       let attempts = 1;
       let incompleteReason: 'blocked' | 'single_batch' | 'no_progress'
         | 'attempt_limit' | null = null;
-      while (!dryRun && !once && !result.complete && !result.blockedUntil
-        && result.reason === null && attempts < 100) {
+      while (!dryRun && !once && !result.complete && attempts < 100
+        && ((!result.blockedUntil && result.reason === null)
+          || (result.reason === 'live_lease' && result.progressed
+            && (result.progress.memoriesRemaining > 0 || result.progress.auditRowsRemaining > 0)))) {
         if (!result.progressed) { incompleteReason = 'no_progress'; break; }
         await new Promise((resolve) => setTimeout(resolve, Math.min(attempts * 25, 250)));
         result = await offboardPrincipal(pool, actor, positional[0], {
