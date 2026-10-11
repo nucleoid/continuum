@@ -81,6 +81,11 @@ it.each(['open','completed'] as const)(
       expect((await pool.query(`SELECT metadata ? 'fencing_token' AS token,metadata ? 'resource_bytes' AS bytes,
         metadata=continuum_offboarding_expected_audit_metadata(metadata) AS canonical FROM audit_log WHERE id=$1::bigint`,[lockAuditId!])).rows)
         .toEqual([{token:false,bytes:false,canonical:true}]);
+      expect((await pool.query(`SELECT phase,audit_cursor,
+        audit_high_water_id >= $1::bigint AS fenced,
+        audit_rows_scanned > 0 AS scanned,audit_rows_rewritten::int AS rewritten
+        FROM coordination_contract_backfill_state WHERE singleton`,[lockAuditId!])).rows)
+        .toEqual([{phase:'complete',audit_cursor:null,fenced:true,scanned:true,rewritten:1}]);
       let current=await offboardPrincipal(pool,actor,subject.id,{confirmationScopeId:owned.id,batchSize:100});
       for(let batch=0;batch<30&&!current.complete;batch++) current=await offboardPrincipal(pool,actor,subject.id,{confirmationScopeId:owned.id,batchSize:100});
       expect(current.complete).toBe(true);

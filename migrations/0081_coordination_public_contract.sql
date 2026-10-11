@@ -7,8 +7,12 @@ LOCK TABLE coordination_operation_receipts IN SHARE ROW EXCLUSIVE MODE;
 
 CREATE TABLE coordination_contract_backfill_state (
   singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
-  phase TEXT NOT NULL DEFAULT 'usage' CHECK (phase IN ('usage','floors','scopes','receipts','complete')),
+  phase TEXT NOT NULL DEFAULT 'usage' CHECK (phase IN ('usage','fenced_audits','floors','scopes','receipts','complete')),
   principal_cursor UUID,
+  audit_cursor BIGINT,
+  audit_high_water_id BIGINT NOT NULL DEFAULT 0 CHECK(audit_high_water_id>=0),
+  audit_rows_scanned BIGINT NOT NULL DEFAULT 0 CHECK(audit_rows_scanned>=0),
+  audit_rows_rewritten BIGINT NOT NULL DEFAULT 0 CHECK(audit_rows_rewritten>=0),
   resource_scope_cursor UUID,
   resource_key_cursor TEXT,
   resource_rows_processed BIGINT NOT NULL DEFAULT 0 CHECK(resource_rows_processed >= 0),
@@ -241,7 +245,38 @@ BEGIN
     $usage$ INTO selected_count,next_id USING progress.principal_cursor,batch_limit;
     UPDATE coordination_contract_backfill_state SET principal_cursor = CASE WHEN selected_count<batch_limit THEN NULL
       ELSE COALESCE(next_id,principal_cursor) END,
-      phase = CASE WHEN selected_count < batch_limit THEN 'floors' ELSE phase END WHERE singleton;
+      audit_cursor=CASE WHEN selected_count<batch_limit THEN NULL ELSE audit_cursor END,
+      audit_high_water_id=CASE WHEN selected_count<batch_limit
+        THEN (SELECT COALESCE(max(id),0) FROM audit_log) ELSE audit_high_water_id END,
+      phase = CASE WHEN selected_count < batch_limit THEN 'fenced_audits' ELSE phase END WHERE singleton;
+  ELSIF progress.phase='fenced_audits' THEN
+    -- A previous run's audit cursors may already have passed another holder's
+    -- lock row in its owned scope. Repair only approved fenced history, using
+    -- raw audit-ID windows so this phase does not depend on the later v7 index.
+    EXECUTE $audits$ WITH candidates AS MATERIALIZED (
+      SELECT id FROM audit_log WHERE id>COALESCE($1,0) AND id<=$2
+      ORDER BY id LIMIT $3 FOR UPDATE
+    ), rewritten AS (
+      UPDATE audit_log audit SET metadata=continuum_offboarding_expected_audit_metadata(audit.metadata)
+      FROM candidates WHERE audit.id=candidates.id
+        AND audit.metadata->>'operation' IN ('lock_acquire','lock_renew','lock_release','lock_inspect')
+        AND audit.metadata ?| ARRAY['fencing_token','resource_bytes']
+        AND (EXISTS(SELECT 1 FROM principal_offboarding_runs run
+          WHERE run.principal_id=audit.principal_id AND audit.id<=run.audit_fence_id)
+          OR EXISTS(SELECT 1 FROM principal_user_scopes mapping
+            JOIN principal_offboarding_runs run ON run.principal_id=mapping.principal_id
+            WHERE mapping.scope_id=audit.scope_id AND run.scope_id=mapping.scope_id
+              AND audit.id<=run.audit_fence_id))
+      RETURNING 1
+    ) SELECT count(*)::int AS selected_count,max(id) AS next_id,
+      (SELECT count(*)::int FROM rewritten) AS rewritten_count FROM candidates
+    $audits$ INTO item USING progress.audit_cursor,progress.audit_high_water_id,batch_limit;
+    selected_count:=item.selected_count;
+    UPDATE coordination_contract_backfill_state SET
+      audit_cursor=CASE WHEN selected_count<batch_limit THEN NULL ELSE item.next_id END,
+      audit_rows_scanned=audit_rows_scanned+selected_count,
+      audit_rows_rewritten=audit_rows_rewritten+item.rewritten_count,
+      phase=CASE WHEN selected_count<batch_limit THEN 'floors' ELSE phase END WHERE singleton;
   ELSIF progress.phase = 'floors' THEN
     -- Surviving 0055-era renamed keys may have no privacy progress or floor.
     -- Read each physical key once; do not put a scoped aggregate on acquisition.
