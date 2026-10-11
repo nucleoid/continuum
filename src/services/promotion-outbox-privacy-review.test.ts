@@ -183,9 +183,30 @@ describe('promotion outbox privacy review', () => {
         [promoted.promotionEvent.eventId])).rows[0].destination_scope_name).toBe(personal.name);
       expect((await pool.query('SELECT state FROM promotion_event_deliveries WHERE event_id=$1::uuid',
         [promoted.promotionEvent.eventId])).rows).toEqual([{ state: 'privacy_cancelled' }]);
-      const second = await offboardPrincipal(pool, admin, target.id, { confirmationScopeId: personal.id, batchSize: 2 });
-      expect(second).toMatchObject({ complete: false, progressed: false, reason: 'lock_busy' });
-      expect(second.progress.batch).toBe(first.progress.batch);
+      const cursorState = async () => (await pool.query(`SELECT memory_cursor,memory_complete,scope_cleanup_complete,
+        audit_fence_id,audit_principal_cursor,audit_scope_cursor,audit_scope_ids_cursor,
+        audit_memory_key_cursor,audit_memory_item_cursor,audit_memory_complete,
+        audit_linked_request_cursor,audit_linked_request_item_cursor,audit_linked_request_exhausted,audit_linked_complete
+        FROM principal_offboarding_runs WHERE principal_id=$1::uuid`, [target.id])).rows[0];
+      let prior = first;
+      let stableBlocked = false;
+      // A small first batch can leave honest audit keyset/phase advancement.
+      // Prove cursor stability before asserting no-op accounting.
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        const before = await cursorState();
+        const current = await offboardPrincipal(pool, admin, target.id, { confirmationScopeId: personal.id, batchSize: 2 });
+        const after = await cursorState();
+        expect(current).toMatchObject({ complete: false, reason: 'lock_busy' });
+        if (JSON.stringify(after) === JSON.stringify(before)) {
+          expect(current.progressed).toBe(false);
+          expect(current.progress.batch).toBe(prior.progress.batch);
+          stableBlocked = true;
+          break;
+        }
+        expect(current.progressed).toBe(true);
+        prior = current;
+      }
+      expect(stableBlocked).toBe(true);
       await holder.query('ROLLBACK');
       let resumed = await offboardPrincipal(pool, admin, target.id, { confirmationScopeId: personal.id, batchSize: 2 });
       for (let attempt = 0; !resumed.complete && attempt < 5; attempt += 1) {
