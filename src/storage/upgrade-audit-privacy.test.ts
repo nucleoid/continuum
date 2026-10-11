@@ -67,6 +67,10 @@ it('reopens genuine completed80 privacy cursors including inspection-only princi
     const auditIds=(await pool.query(`SELECT id FROM audit_log WHERE principal_id=ANY($1::uuid[])
       AND metadata->>'operation' IN ('lock_acquire','lock_inspect')`,[[holder.id,inspector.id]])).rows.map((row)=>row.id);
     expect(auditIds).toHaveLength(4);
+    // Inspection itself creates no usage row. The published80 scrub creates
+    // one while serializing its capacity work, even for an inspection-only user.
+    expect((await pool.query('SELECT count(*)::int AS count FROM coordination_principal_usage WHERE principal_id=$1::uuid',[inspector.id])).rows)
+      .toEqual([{count:0}]);
     for (const subject of subjects) {
       await pool.query('UPDATE principals SET disabled_at=clock_timestamp() WHERE id=$1::uuid',[subject.principal.id]);
       let complete=false;
@@ -86,7 +90,7 @@ it('reopens genuine completed80 privacy cursors including inspection-only princi
         .toEqual([{privacy_version:3,complete:true,cursor_past:true}]);
     }
     expect((await pool.query('SELECT count(*)::int AS count FROM coordination_principal_usage WHERE principal_id=$1::uuid',[inspector.id])).rows)
-      .toEqual([{count:0}]);
+      .toEqual([{count:1}]);
     expect((await pool.query(`SELECT bool_and(metadata ? 'resource_bytes') AS bytes FROM audit_log WHERE id=ANY($1::bigint[])`,[auditIds])).rows)
       .toEqual([{bytes:true}]);
     await runMigrations(pool);
