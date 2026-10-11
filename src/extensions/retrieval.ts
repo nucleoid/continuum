@@ -28,7 +28,7 @@ export interface EnrichmentLogger {
   warn(event: {
     event: 'retrieval_enricher_failed';
     enricherId: string;
-    reason: 'error' | 'timeout' | 'aborted' | 'invalid_output';
+    reason: 'error' | 'timeout' | 'aborted' | 'invalid_output' | 'saturated' | 'oversized_input';
   }): void;
 }
 
@@ -59,6 +59,42 @@ export function enrichmentConfigFromEnv(
     );
   }
   return { timeoutMs, maxBytes: DEFAULT_ENRICHMENT_MAX_BYTES };
+}
+
+const MAX_ENRICHER_CALLS = 16;
+const MAX_ENRICHER_INPUT_BYTES = 1024 * 1024;
+const MAX_RETAINED_INPUT_BYTES = 8 * 1024 * 1024;
+const inFlightEnrichers = new Map<string, number>();
+let activeEnricherCalls = 0;
+let retainedInputBytes = 0;
+
+// Conservative UTF-16/key/object estimate, without serializing or cloning large
+// input. Metadata depth/node fences also bound the traversal's own work.
+function optionalInputBytes(value: unknown): number | null {
+  let bytes = 0;
+  let nodes = 0;
+  const path = new Set<object>();
+  const visit = (candidate: unknown, depth: number): boolean => {
+    if (++nodes > 10_000 || depth > 32) return false;
+    if (typeof candidate === 'string') bytes += 32 + candidate.length * 2;
+    else if (candidate === null || candidate === undefined || typeof candidate === 'boolean' || typeof candidate === 'number') bytes += 16;
+    else if (candidate instanceof Date) bytes += 128;
+    else if (typeof candidate === 'object') {
+      if (path.has(candidate)) return false;
+      const prototype = Object.getPrototypeOf(candidate);
+      if (!Array.isArray(candidate) && prototype !== Object.prototype && prototype !== null) return false;
+      path.add(candidate); bytes += 64;
+      for (const key in candidate) {
+        if (!Object.prototype.hasOwnProperty.call(candidate, key)) continue;
+        bytes += 32 + key.length * 2;
+        const descriptor = Object.getOwnPropertyDescriptor(candidate, key);
+        if (!descriptor || !('value' in descriptor) || bytes > MAX_ENRICHER_INPUT_BYTES || !visit(descriptor.value, depth + 1)) return false;
+      }
+      path.delete(candidate);
+    } else return false;
+    return bytes <= MAX_ENRICHER_INPUT_BYTES;
+  };
+  try { return visit(value, 0) ? bytes : null; } catch { return null; }
 }
 
 function cloneAndFreeze<T>(value: T): T {
@@ -149,21 +185,55 @@ export async function applyRetrievalEnrichers(
       // Operational logging must never turn optional enrichment into a request failure.
     }
   };
-  const input = cloneAndFreeze(results) as readonly Readonly<RecallResult>[];
+  if (options.signal?.aborted) {
+    for (const enricher of enrichers) warn({ event: 'retrieval_enricher_failed', enricherId: enricher.id, reason: 'aborted' });
+    return results;
+  }
+  const bytes = optionalInputBytes(results);
+  if (bytes === null) {
+    for (const enricher of enrichers) warn({ event: 'retrieval_enricher_failed', enricherId: enricher.id, reason: 'oversized_input' });
+    return results;
+  }
+  const admitted: RetrievalEnricher[] = [];
+  const reported = new Set<string>();
+  for (const enricher of enrichers) {
+    if ((inFlightEnrichers.get(enricher.id) ?? 0) > 0
+        || activeEnricherCalls + admitted.length >= MAX_ENRICHER_CALLS
+        || retainedInputBytes + bytes > MAX_RETAINED_INPUT_BYTES) {
+      warn({ event: 'retrieval_enricher_failed', enricherId: enricher.id, reason: 'saturated' });
+      reported.add(enricher.id);
+    } else admitted.push(enricher);
+  }
+  if (admitted.length === 0) return results;
+  retainedInputBytes += bytes;
+  activeEnricherCalls += admitted.length;
+  for (const enricher of admitted) inFlightEnrichers.set(enricher.id, 1);
+  let unsettled = admitted.length;
+  const release = (enricher: RetrievalEnricher) => {
+    inFlightEnrichers.delete(enricher.id); activeEnricherCalls -= 1;
+    if (--unsettled === 0) retainedInputBytes -= bytes;
+  };
+  let input: readonly Readonly<RecallResult>[];
+  try { input = cloneAndFreeze(results); }
+  catch {
+    for (const enricher of admitted) { release(enricher); warn({ event: 'retrieval_enricher_failed', enricherId: enricher.id, reason: 'error' }); }
+    return results;
+  }
+  const resultCount = results.length;
   const controller = new AbortController();
   const abortForShutdown = () => controller.abort();
   options.signal?.addEventListener('abort', abortForShutdown, { once: true });
   if (options.signal?.aborted) controller.abort();
   const completed = new Map<string, EnrichmentOutput>();
-  const reported = new Set<string>();
-  const tasks = enrichers.map(async (enricher) => {
+  const tasks = admitted.map(async (enricher) => {
     try {
+      if (controller.signal.aborted) return;
       const raw = await enricher.enrich(input, {
         principalId,
         signal: controller.signal,
       });
       if (controller.signal.aborted) return;
-      const output = validateAndCloneOutput(raw, results.length, options.maxBytes);
+      const output = validateAndCloneOutput(raw, resultCount, options.maxBytes);
       if (!output) {
         warn({
           event: 'retrieval_enricher_failed',
@@ -183,6 +253,9 @@ export async function applyRetrievalEnrichers(
         });
         reported.add(enricher.id);
       }
+    } finally {
+      // A response deadline is not settlement of an abort-ignoring invocation.
+      release(enricher);
     }
   });
 

@@ -19,7 +19,7 @@ describe('enrichment admission review', () => {
     const input = [result()];
     const output = await applyRetrievalEnrichers(input, input[0].memory.authorId, registry,
       { timeoutMs: 5, maxBytes: 1024, signal: controller.signal, logger: { warn: vi.fn() } });
-    expect(output).toBe(input);
+    expect(output === input).toBe(true);
     expect(enrich).not.toHaveBeenCalled();
   });
 
@@ -83,7 +83,7 @@ describe('enrichment admission review', () => {
     try {
       const output = await applyRetrievalEnrichers(input, input[0].memory.authorId, registry,
         { timeoutMs: 5, maxBytes: 1024, logger: { warn } });
-      expect(output).toBe(input);
+      expect(output === input).toBe(true);
       expect(enrich).not.toHaveBeenCalled();
       expect(cloning.mock.calls.some((args) => args[0] === input)).toBe(false);
       expect(warn).toHaveBeenCalledWith({ event: 'retrieval_enricher_failed', enricherId: 'oversized-input', reason: 'oversized_input' });
