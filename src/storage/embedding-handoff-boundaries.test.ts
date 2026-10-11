@@ -64,6 +64,85 @@ describe('embedding handoff storage boundaries', () => {
     ]);
   });
 
+  async function boundedWorker() {
+    const worker = await pool.connect();
+    const before = (await worker.query(`SELECT pg_catalog.current_setting('statement_timeout') AS statement,
+      pg_catalog.current_setting('lock_timeout') AS lock`)).rows[0];
+    await worker.query("SET statement_timeout='5s'; SET lock_timeout='1s'");
+    const pid = (await worker.query('SELECT pg_catalog.pg_backend_pid() AS pid')).rows[0].pid as number;
+    return { worker, pid, release: async () => {
+      let discard = false;
+      try {
+        await worker.query("SELECT pg_catalog.set_config('statement_timeout',$1::text,FALSE),pg_catalog.set_config('lock_timeout',$2::text,FALSE)",
+          [before.statement, before.lock]);
+      } catch (error) { discard = true; throw error; }
+      finally { worker.release(discard); }
+    } };
+  }
+
+  async function waitForBlocked(pids: number[]) {
+    const deadline = Date.now() + 750;
+    while (Date.now() < deadline) {
+      const result = await client.query(`SELECT count(*)::int AS blocked FROM pg_catalog.unnest($1::integer[]) pid
+        WHERE pg_catalog.cardinality(pg_catalog.pg_blocking_pids(pid))>0`, [pids]);
+      if (result.rows[0].blocked === pids.length) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error('Embedding writers did not reach the held-row barrier within 750ms');
+  }
+
+  it('persists simultaneous providers after a shared held-row barrier without a lock upgrade deadlock', async () => {
+    const value = await memory();
+    const first = await boundedWorker();
+    const second = await boundedWorker();
+    let writes: Promise<unknown>[] = [];
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT id FROM memories WHERE id=$1::uuid FOR UPDATE', [value.id]);
+      writes = [storeMemoryEmbeddingVector(first.worker, value.id, firstVector, { id: 'test:provider-a', dim: 768 }),
+        storeMemoryEmbeddingVector(second.worker, value.id, secondVector, { id: 'test:provider-b', dim: 768 })];
+      const outcomes = Promise.allSettled(writes);
+      await waitForBlocked([first.pid, second.pid]);
+      await client.query('COMMIT');
+      expect(await Promise.all(writes)).toEqual([true, true]);
+      await outcomes;
+      expect((await client.query('SELECT provider FROM memory_embeddings WHERE memory_id=$1::uuid ORDER BY provider', [value.id])).rows)
+        .toEqual([{ provider: 'test:provider-a' }, { provider: 'test:provider-b' }]);
+    } finally {
+      await client.query('ROLLBACK');
+      await Promise.allSettled(writes);
+      await first.release(); await second.release();
+    }
+  });
+
+  for (const change of ['expiry', 'archive'] as const) {
+    it(`does not reinsert a vector when ${change} wins the held-row persistence race`, async () => {
+      const value = await memory();
+      const writer = await boundedWorker();
+      let write: Promise<boolean> | undefined;
+      try {
+        await client.query('BEGIN');
+        await client.query('SELECT id FROM memories WHERE id=$1::uuid FOR UPDATE', [value.id]);
+        write = storeMemoryEmbeddingVector(writer.worker, value.id, firstVector, { id: 'test:late-provider', dim: 768 });
+        void write.catch(() => undefined);
+        await waitForBlocked([writer.pid]);
+        if (change === 'expiry') {
+          await client.query("UPDATE memories SET expires_at=pg_catalog.clock_timestamp()-INTERVAL '1 second' WHERE id=$1::uuid", [value.id]);
+        } else {
+          await client.query("UPDATE memories SET state='archived' WHERE id=$1::uuid", [value.id]);
+        }
+        await client.query('COMMIT');
+        expect(await write).toBe(false);
+        expect((await client.query('SELECT count(*)::int AS count FROM memory_embeddings WHERE memory_id=$1::uuid', [value.id])).rows)
+          .toEqual([{ count: 0 }]);
+      } finally {
+        await client.query('ROLLBACK');
+        await write?.catch(() => undefined);
+        await writer.release();
+      }
+    });
+  }
+
   it('does not persist a vector for an expired live memory', async () => {
     const value = await memory();
     await client.query('UPDATE memories SET expires_at=pg_catalog.clock_timestamp()-INTERVAL \'1 second\' WHERE id=$1::uuid', [value.id]);
