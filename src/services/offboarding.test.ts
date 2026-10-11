@@ -1376,11 +1376,11 @@ describe('offboarding and erasure', () => {
     expect(first).toMatchObject({ complete: false, progress: { memoriesProcessed: 10 } });
     expect(first.progress.auditRowsProcessed).toBeGreaterThan(0);
     expect(first.progress.auditRowsProcessed).toBeLessThanOrEqual(10);
-    expect((await pool.query(
+    expect((await bounded.query(
       `SELECT disabled_at IS NOT NULL AS disabled, offboarded_at IS NOT NULL AS fenced
          FROM principals WHERE id = $1`, [value.target.id],
     )).rows[0]).toEqual({ disabled: true, fenced: true });
-    expect((await pool.query(
+    expect((await bounded.query(
       `SELECT count(*)::int AS count FROM memories
         WHERE scope_id = $1 AND title = '[erased]'`, [value.personal.id],
     )).rows[0].count).toBe(10);
@@ -1718,11 +1718,11 @@ describe('offboarding and erasure', () => {
       if (result.complete) break;
     }
     expect(result?.complete).toBe(true);
-    expect((await pool.query(
+    expect((await bounded.query(
       `SELECT EXISTS (SELECT 1 FROM memories WHERE scope_id = $1 AND title <> '[erased]') AS dirty`,
       [value.personal.id],
     )).rows[0].dirty).toBe(false);
-    expect((await pool.query(
+    expect((await bounded.query(
       `SELECT EXISTS (SELECT 1 FROM audit_log WHERE scope_id = $1 AND query IS NOT NULL) AS dirty`,
       [value.personal.id],
     )).rows[0].dirty).toBe(false);
