@@ -268,7 +268,8 @@ describe('PromotionEventWorker', () => {
       claimResult.resolve([claimedDelivery]);
       await expect(draining).rejects.toThrow('promotion database operation timed out');
       expect(callback).not.toHaveBeenCalled();
-      expect(store.abandon).not.toHaveBeenCalled();
+      expect(store.abandon).toHaveBeenCalledOnce();
+      expect(store.abandon).toHaveBeenCalledWith(pool, 'worker-test', [claimedDelivery]);
       expect(store.release).toHaveBeenCalledOnce();
     } finally {
       vi.useRealTimers();
