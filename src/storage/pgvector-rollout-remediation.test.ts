@@ -1479,6 +1479,67 @@ describe('pgvector rollout remediation', () => {
     });
   }, 240_000);
 
+  it('refuses a second tenant binding to a self-bootstrapped provider after its tenant owner loses superuser', async () => {
+    const firstRole=identifier('bootstrap_tenant_owner');
+    const secondRole=identifier('bootstrap_second_owner'); roles.push(firstRole,secondRole);
+    await withFreshDatabase(async(root,target,url,database)=>{
+      const firstSchema=identifier('bootstrap_first'); const secondSchema=identifier('bootstrap_second');
+      await root.query(`CREATE ROLE ${quoteIdentifier(firstRole)} NOLOGIN SUPERUSER;
+        CREATE ROLE ${quoteIdentifier(secondRole)} NOLOGIN`);
+      await target.query(`CREATE SCHEMA ${quoteIdentifier(firstSchema)} AUTHORIZATION ${quoteIdentifier(firstRole)};
+        CREATE SCHEMA ${quoteIdentifier(secondSchema)} AUTHORIZATION ${quoteIdentifier(secondRole)};
+        GRANT CONNECT ON DATABASE ${quoteIdentifier(database)} TO ${quoteIdentifier(firstRole)},${quoteIdentifier(secondRole)}`);
+      const first=migrationPool(url,firstSchema,firstRole);
+      const second=migrationPool(url,secondSchema,secondRole);
+      const directory=await migrationDirectoryThrough('0001_init.sql');
+      await runMigrations(first,directory);
+      expect((await target.query(`SELECT extension.extowner=role.oid AS extension_owned,
+        namespace.nspowner=role.oid AS schema_owned FROM pg_extension extension
+        JOIN pg_namespace namespace ON namespace.oid=extension.extnamespace
+        JOIN pg_roles role ON role.rolname=$1 WHERE extension.extname='vector'`,[firstRole])).rows)
+        .toEqual([{extension_owned:true,schema_owned:true}]);
+      await root.query(`ALTER ROLE ${quoteIdentifier(firstRole)} NOSUPERUSER`);
+      await target.query(`GRANT USAGE ON SCHEMA continuum_extensions TO ${quoteIdentifier(secondRole)}`);
+      expect((await target.query('SELECT rolsuper FROM pg_roles WHERE rolname=$1',[firstRole])).rows)
+        .toEqual([{rolsuper:false}]);
+      await expect(runMigrations(second,directory)).rejects.toThrow(/provider.*owner.*another Continuum|another Continuum.*provider.*owner/i);
+      expect((await target.query("SELECT to_regclass(format('%I._continuum_migrations',$1::text)) AS ledger",[secondSchema])).rows)
+        .toEqual([{ledger:null}]);
+      const previous=process.env.CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA;
+      process.env.CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA='1';
+      try { await expect(runMigrations(second,directory)).resolves.toHaveLength(1); }
+      finally {
+        if(previous===undefined) delete process.env.CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA;
+        else process.env.CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA=previous;
+      }
+    });
+  },60_000);
+
+  it('rejects non-owner CREATE drift on an existing ledger before provenance or migration DDL', async () => {
+    const writer=identifier('schema_create_drift'); roles.push(writer);
+    await withFreshDatabase(async(root,target,url)=>{
+      const schema=identifier('existing_create_drift');
+      await root.query(`CREATE ROLE ${quoteIdentifier(writer)} NOLOGIN`);
+      await target.query(`CREATE SCHEMA ${quoteIdentifier(schema)}`);
+      const owner=migrationPool(url,schema);
+      const directory=await migrationDirectoryThrough('0001_init.sql');
+      await runMigrations(owner,directory);
+      await target.query(`GRANT CREATE ON SCHEMA ${quoteIdentifier(schema)} TO ${quoteIdentifier(writer)}`);
+      const submitted:string[]=[]; const connect=owner.connect.bind(owner);
+      const wrapped={connect:async()=>{
+        const client=await connect(); const query=client.query.bind(client);
+        return {query:async(sql:string,values?:unknown[])=>{submitted.push(sql); return query(sql,values);},
+          release:(discard?:boolean)=>client.release(discard)};
+      }} as unknown as pg.Pool;
+      await expect(runMigrations(wrapped,directory)).rejects.toThrow(/revoke.*CREATE.*owner.*retry/i);
+      expect(submitted.some(sql=>/CREATE TABLE|ALTER TABLE|CREATE FUNCTION|DO \$trust\$/i.test(sql))).toBe(false);
+      expect((await target.query(`SELECT privilege_type FROM pg_namespace namespace
+        CROSS JOIN LATERAL aclexplode(namespace.nspacl) privilege
+        WHERE namespace.nspname=$1 AND privilege.grantee=(SELECT oid FROM pg_roles WHERE rolname=$2)
+          AND privilege.privilege_type='CREATE'`,[schema,writer])).rows).toHaveLength(1);
+    });
+  },60_000);
+
   it('keeps a second tenant live while separate owners and apps cross 0080', async () => {
     const firstOwnerRole = identifier('continuum_owner_a');
     const secondOwnerRole = identifier('continuum_owner_b');
