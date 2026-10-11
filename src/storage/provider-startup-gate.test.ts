@@ -30,8 +30,8 @@ describe('qualified provider startup gate', () => {
   it('uses an explicit schema anchor and validates PostgreSQL identifier byte limits', () => {
     expect(applicationSchemaFromEnv({})).toBe('public');
     expect(applicationSchemaFromEnv({ CONTINUUM_APPLICATION_SCHEMA: 'Tenant-Schema' })).toBe('Tenant-Schema');
-    expect(applicationSchemaFromEnv({ CONTINUUM_APPLICATION_SCHEMA: 'é'.repeat(31) })).toBe('é'.repeat(31));
-    for (const schema of ['', 'nul\0schema', 'a'.repeat(64), 'é'.repeat(32)]) {
+    expect(applicationSchemaFromEnv({ CONTINUUM_APPLICATION_SCHEMA: '\u00e9'.repeat(31) })).toBe('\u00e9'.repeat(31));
+    for (const schema of ['', 'nul\0schema', 'a'.repeat(64), '\u00e9'.repeat(32)]) {
       expect(() => applicationSchemaFromEnv({ CONTINUUM_APPLICATION_SCHEMA: schema }))
         .toThrow('CONTINUUM_APPLICATION_SCHEMA must be a valid PostgreSQL schema name');
     }
@@ -161,10 +161,12 @@ describe('qualified provider startup gate', () => {
         const url = new URL(databaseUrl); url.username = role; url.password = password;
         runtime = new pg.Pool({ connectionString: url.toString(), max: 1,
           options: `-c search_path=${schema}` });
+        // Characterize the unsafe PostgreSQL name-to-regrole coercion: it picks
+        // the lowercase collision. Startup must use exact catalog lookup instead.
         expect((await runtime.query(`SELECT pg_typeof(current_user)::text AS input_type,
           current_user::regrole::oid=(SELECT oid FROM pg_roles WHERE rolname=current_user) AS exact,
           current_user::regrole::oid<>(SELECT oid FROM pg_roles WHERE rolname=$1) AS distinct_collision`,
-        [collision])).rows).toEqual([{ input_type: 'name', exact: true, distinct_collision: true }]);
+        [collision])).rows).toEqual([{ input_type: 'name', exact: false, distinct_collision: false }]);
         await admin.query(`ALTER TABLE "${schema}".memories OWNER TO "${collision}"`);
         await expect(reconcilePgvectorProviderGrants(runtime, { expectedSchema: schema }))
           .rejects.toThrow('Pgvector startup verifier is missing');
