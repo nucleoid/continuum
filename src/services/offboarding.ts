@@ -246,15 +246,15 @@ async function requireCurrentCoordinationPrivacySchema(
   client: pg.PoolClient,
 ): Promise<void> {
   const contract = await client.query<{ ready: boolean; owned_scope_ready: boolean }>(
-    `SELECT to_regprocedure(format(
+    `SELECT pg_catalog.to_regprocedure(pg_catalog.format(
        '%I.continuum_coordination_privacy_schema_ready()', namespace.nspname
      )) IS NOT NULL AS ready,
-       to_regprocedure(format(
+       pg_catalog.to_regprocedure(pg_catalog.format(
          '%I.continuum_operator_coordination_scope_privacy_state(uuid,uuid)', namespace.nspname
        )) IS NOT NULL AS owned_scope_ready
        FROM pg_class relation
        JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
-      WHERE relation.oid = to_regclass('principals')`,
+      WHERE relation.oid = pg_catalog.to_regclass('principals')`,
   );
   if (contract.rows[0]?.ready !== true) {
     throw new ServiceError(
@@ -408,7 +408,7 @@ export async function repairCoordinationPrivacy(
     await requireOrgAdmin(client, actor.id);
     await tryAdvisoryXactLock(
       client,
-      'SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 762)) AS locked',
+      'SELECT pg_catalog.pg_try_advisory_xact_lock(pg_catalog.hashtextextended($1::text, 762)) AS locked',
       [principalId],
     );
     const target = await client.query(
@@ -714,7 +714,7 @@ export async function mapOwnedUserScope(
       await client.query(
         `UPDATE principal_user_scopes
             SET acknowledged_principal_ids = $2::uuid[], acknowledged_evidence_hash = $3,
-                mapped_by = $4, mapped_at = now()
+                mapped_by = $4, mapped_at = pg_catalog.now()
           WHERE principal_id = $1`,
         [principalId, acknowledgedPrincipalIds, acknowledgedEvidenceHash, actor.id],
       );
@@ -1098,11 +1098,11 @@ async function offboardPrincipalCore(
     if (!dryRun) {
       await requireOrgAdmin(client, actor.id);
       await tryAdvisoryXactLock(
-        client, 'SELECT pg_try_advisory_xact_lock($1::bigint) AS locked', [SYNC_LOCK_ID],
+        client, 'SELECT pg_catalog.pg_try_advisory_xact_lock($1::bigint) AS locked', [SYNC_LOCK_ID],
       );
       await tryAdvisoryXactLock(
         client,
-        'SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 762)) AS locked',
+        'SELECT pg_catalog.pg_try_advisory_xact_lock(pg_catalog.hashtextextended($1::text, 762)) AS locked',
         [principalId],
       );
     }
@@ -1398,7 +1398,7 @@ async function offboardPrincipalCore(
     if (!dryRun && runCompleted && wasOffboarded && coordinationPrivacyComplete
         && !coordinationPrivacyMutated) {
       await client.query(
-        `SELECT set_config('statement_timeout', $1, TRUE)`,
+        `SELECT pg_catalog.set_config('statement_timeout', $1, TRUE)`,
         [`${verificationTimeoutMs}ms`],
       );
       actualStateErased = (await client.query<{ erased: boolean }>(
@@ -1452,7 +1452,7 @@ async function offboardPrincipalCore(
 
     if (runCompleted) {
       await client.query(
-        `SELECT set_config('statement_timeout', $1, TRUE)`,
+        `SELECT pg_catalog.set_config('statement_timeout', $1, TRUE)`,
         [`${verificationTimeoutMs}ms`],
       );
       run = await client.query(
@@ -1597,7 +1597,7 @@ async function offboardPrincipalCore(
     }
     await client.query(
       `UPDATE principals SET display_name = $2,
-              offboarded_at = COALESCE(offboarded_at, now()), reactivated_at = NULL
+              offboarded_at = COALESCE(offboarded_at, pg_catalog.now()), reactivated_at = NULL
         WHERE id = $1`, [principalId, pseudonym],
     );
     if (run.rows[0].audit_fence_id === null) {
@@ -1647,7 +1647,7 @@ async function offboardPrincipalCore(
               metadata = '{}'::jsonb, tags = '{}'::text[], source = 'erased',
               source_ref = NULL, state = 'archived', supersedes_id = NULL,
               promoted_to_id = NULL, expires_at = NULL, last_verified = NULL,
-              updated_at = now()
+              updated_at = pg_catalog.now()
          FROM offboarding_memory_targets t WHERE t.id = m.id`,
     );
     await client.query(
@@ -1756,7 +1756,7 @@ async function offboardPrincipalCore(
       );
       const repair = startedEvidence.rows[0]?.repair === 'true';
       await client.query(
-        `SELECT set_config('statement_timeout', $1, TRUE)`,
+        `SELECT pg_catalog.set_config('statement_timeout', $1, TRUE)`,
         [`${verificationTimeoutMs}ms`],
       );
       await finalizeOffboardingRun(client, progressRow, actor.id, {
