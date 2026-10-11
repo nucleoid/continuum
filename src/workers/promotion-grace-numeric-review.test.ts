@@ -95,9 +95,9 @@ describe('promotion grace and numeric recovery review', () => {
       await worker.drainOnce();
       expect(callback).toHaveBeenCalledOnce();
       expect(store.abandon).not.toHaveBeenCalled();
-      // No pending-ACK fence remains in the process-wide occupied slot signal.
-      expect(logger.info.mock.calls.some(([event]) => event.event === 'promotion_worker_capacity'
-        && event.processInFlight === 0 && event.retainedFences === 0)).toBe(true);
+      // The next public claim sees no old in-process exclusion. Paid ACKs are
+      // not non-ACK retained fences and need no clearing capacity log.
+      expect(vi.mocked(store.claim).mock.calls.at(-1)?.[1].excluded).toEqual([]);
     } finally {
       recovered = true; const stopping = worker.stop('test-finished');
       await vi.advanceTimersByTimeAsync(20); await stopping;
