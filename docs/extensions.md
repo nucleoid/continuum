@@ -224,6 +224,10 @@ promise of uninterrupted work until timeout. An abort-honoring consumer that has
 actually started and then rejects is charged a failure; only shutdown-abandoned
 invocations receive the documented refund. A late failure never shortens a retry
 availability already committed by a timeout whose response was lost.
+If the failure write itself is unavailable, the worker retains that exact paid
+fence and its chosen retry delay, retries persistence through the same bounded
+reconciliation cohort, and excludes it from shutdown release. Reconciliation
+never invokes the consumer again.
 Leases for ambiguous deliveries are not released or renewed after stop returns. A
 process-wide in-flight fence excludes them from claims by replacement workers
 in the same process until the original callback settles. Admission is isolated
