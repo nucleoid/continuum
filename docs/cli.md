@@ -2,8 +2,24 @@
 
 Org-admin identity, group-binding, and offboarding commands are exposed through
 `npm run admin`; see [authentication.md](./authentication.md) and
-[offboarding.md](./offboarding.md). Offboarding supports a non-mutating
-`--dry-run` count and bounded UUID evidence before execution. Execution requires
+[offboarding.md](./offboarding.md). These admin commands connect directly to
+PostgreSQL, separately from the HTTP `continuum` client. Before using the admin examples:
+
+```sh
+export CONTINUUM_DATABASE_URL="$CONTINUUM_OPERATOR_DATABASE_URL"
+export CONTINUUM_ADMIN_ACTOR='<bound-org-admin-external-id>'
+```
+
+`CONTINUUM_OPERATOR_DATABASE_URL` is a private convenience variable for the
+dedicated DB-bound operator connection; the program reads only
+`CONTINUUM_DATABASE_URL`. `CONTINUUM_ADMIN_ACTOR` is the approved administrator's
+principal `external_id`, not an access token, API key, or the internal principal
+UUID supplied as a command argument. The database operator binding and active
+manual org-admin authority must agree. Do not use the shared application
+connection for irreversible administration.
+
+Offboarding supports a non-mutating `--dry-run` count and bounded UUID evidence
+before execution. Execution requires
 `--confirm-scope <user-scope-id>` matching the locked mapping and accepts
 `--batch-size <1-5000>` for the resumable fenced procedure. The exact final
 database proof defaults to 30 seconds; use
@@ -19,6 +35,8 @@ remain status 1. Automation must inspect both the status and the structured
 `incompleteReason`, `reason`, `blockedUntil`, `resumeRecommended`, and
 `resumeAfter` fields. `no_progress` is a resumable status 2 stop.
 `detached_quota`, `lock_busy`, and `live_lease` are typed status 3 blocks.
+That blocking status takes precedence over `--once`: an unblocked incomplete
+single batch exits 2, while a typed block exits 3 even with `--once`.
 A server verification deadline returns `COORDINATION_TIMEOUT` and exits 2 with
 a sanitized error on stderr. Previously committed batches remain durable;
 resume using a verification budget chosen from measured database behavior.
@@ -113,18 +131,33 @@ Diagnostics go to stderr.
 ## Installed-package migrations
 
 The npm package includes every SQL migration and exposes an installed migration
-entrypoint. Set `CONTINUUM_DATABASE_URL` for the target PostgreSQL database,
-then run:
+entrypoint. Run it with the migration/schema owner's connection, not the
+dedicated operator or shared application connection:
 
-```text
-continuum-migrate
+```sh
+CONTINUUM_DATABASE_URL="$CONTINUUM_MIGRATION_OWNER_URL" continuum-migrate
 ```
 
 The migrator takes a PostgreSQL advisory lock, applies pending packaged
-migrations in filename order, and exits nonzero on failure. Run it as a trusted
-operator before starting a newly installed application version.
+migrations in filename order, and exits nonzero on failure.
+`CONTINUUM_MIGRATION_OWNER_URL` is a private convenience variable; the executable
+reads `CONTINUUM_DATABASE_URL`. For a non-public tenant, that connection must
+select the reviewed owner-controlled application schema first in its
+`search_path`. See [offboarding rollout](./offboarding.md) for exact role and
+provider prerequisites.
+
+Apply every packaged migration, including the current 0080 provider and 0081
+contract repairs; complete the owner-only backfill before regranting profiles,
+verifying identities, and starting current binaries. Rerunning the same command
+resumes pending 0081 work even when its SQL filename is ledgered. A migration
+ledger entry alone does not prove backfill completion. Runtime and dedicated
+operator roles cannot substitute for the owner-only repair or provenance
+inspection. Keep admin commands on their operator connection after this step.
 
 ## Exit codes
+
+These codes belong to the regular HTTP `continuum` client. The separate
+`npm run admin` execution/progress statuses are documented above.
 
 | Code | Meaning |
 | --- | --- |

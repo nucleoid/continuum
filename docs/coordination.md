@@ -13,7 +13,7 @@ production agent harness.
 
 ## Authorization
 
-Every operation requires a currently active, explicit `writer` or `admin`
+Every operation requires an enabled principal and a currently active, explicit `writer` or `admin`
 membership on the exact scope. These do not grant coordination access:
 
 - implicit readability of the organization scope;
@@ -30,7 +30,10 @@ generations are all reported as `LEASE_LOST` for renew and release.
 
 Revoking a credential prevents new authenticated calls but does not silently
 delete an already issued lease. Revoking membership prevents later lease
-operations. The lease remains until release or TTL expiry.
+operations. Disablement also prevents renewal and release without forcibly
+changing the lease. Quiesce and release while the holder is still enabled and
+authorized, before revoking credentials/membership or disabling it. After that
+point, cleanup waits for TTL expiry; there is no administrative forced release.
 
 ## Exact resource identity
 
@@ -280,10 +283,12 @@ cause false completion.
 
 Operator maintenance is exposed only through the approval-bound database role:
 `continuum_operator_reclaim_coordination_resource` removes at most 1,000
-expired receipts and terminal lease generations, refuses a live lease or any
+expired receipts plus at most 1,000 lease generations, refuses a live lease or any
 retained receipt, preserves the scope fencing floor, and frees one key slot.
 `continuum_operator_sweep_coordination_state` performs indexed cleanup in
-batches of at most 1,000 for inactive principals. Quota changes, reclaim, and sweeps write operator audit events. Operators must
+up to 1,000 expired receipts plus up to 1,000 eligible terminal lease histories
+per call. It includes active principals; disablement is not a sweep predicate.
+Quota changes, reclaim, and sweeps write operator audit events. Operators must
 set transaction-level `lock_timeout` and `statement_timeout` before invoking
 maintenance; PostgreSQL function `SET` clauses do not bound the already-running
 calling statement, so Continuum does not claim a function-local deadline.
@@ -348,8 +353,38 @@ Matching those functions does not certify every historical function or prove
 against database-owner changes. Only a trusted migration owner may inspect this
 bookkeeping; runtime, operator and sync roles gain no new capability.
 
-Apply all migrations in order through the forward public-contract repair 0081
-(0064 and 0070 remain concurrent-index steps), then **re-run
+Published migration history through 0079 is preserved. The current unreleased
+forward repairs are 0080 for provider profiles and 0081 for the public contract.
+Apply every packaged migration in order through 0081 using the migration/schema
+owner's connection, finish its backfill, then converge exact grants and verify
+before starting current binaries. For the installed command:
+
+```sh
+CONTINUUM_DATABASE_URL="$CONTINUUM_MIGRATION_OWNER_URL" continuum-migrate
+```
+
+The executable reads only `CONTINUUM_DATABASE_URL`; the private owner-URL variable
+is a convenience, not a separate program setting. Runtime and dedicated operator
+connections cannot perform this owner-only work. Select the reviewed application
+schema first in the owner connection's `search_path`.
+
+For owner inspection, replace `public` with the quoted application schema:
+
+```sql
+SELECT phase, principal_cursor, scope_cursor
+FROM public.coordination_contract_backfill_state WHERE singleton;
+SELECT phase, variant, state, source_sha256, effective_sql_sha256,
+       executed_sql_sha256, statement_count
+FROM public._continuum_migration_execution
+WHERE migration_name = '0081_coordination_public_contract.sql'
+ORDER BY started_at DESC LIMIT 20;
+```
+
+Resume pending repair by rerunning the same packaged owner migration command.
+Do not delete evidence, reset cursors, or mark completion by hand.
+
+After the complete chain and owner repair finish (0064 and 0070 remain
+concurrent-index steps), **re-run
 `scripts/grant-application-role.sql`** for every application and dedicated
 operator role. Re-run `scripts/grant-operator-role.sql` immediately afterward
 for dedicated operators. The exact role verifier deliberately rejects both
@@ -363,11 +398,11 @@ including after the migration file has been ledgered. Finish repair before
 enabling current mutation or offboarding traffic. Only the actual schema owner
 may execute the repair capability; a client-supplied repair flag grants no access.
 
-Do not run the current offboarding binary against a database below 0063: it
-requires the versioned coordination privacy state introduced there. During a
-rolling application upgrade, finish database migration and exact grant-profile
-convergence before enabling Entra-sourced coordination or offboarding traffic
-on any current node.
+The current offboarding binary needs the complete packaged chain, including
+the 0079 readiness capability and completed 0081 contract repair. A historical
+0063 privacy-state function alone is insufficient. Finish migration, repair and
+exact application/operator/sync grant convergence before enabling coordination
+mutations or offboarding on any current node.
 
 The forward repair enforces a minimum 24-hour receipt horizon even for older
 writers. Historical short-lived or evicted receipts cannot be reconstructed;
@@ -383,17 +418,18 @@ node runs the current binary and migrations and exact grants have converged.
 
 A binary rollback leaves coordination tables, receipts, quota counters, and
 fencing floors in place. Do not drop or truncate them. Migration 0061 gates the
-old unversioned pseudonymization entry point: binaries older than the 0061-aware
-release fail closed during offboarding instead of treating one bounded batch as
-complete. Every node must run a binary that calls
-`continuum_operator_pseudonymize_scope_v2` before applying 0061. Before
-re-enable, apply all forward migrations, re-run the grant scripts and identity
-verifier, and resume with the retained counters.
+old unversioned pseudonymization entry point. This is a historical compatibility
+boundary, not approval for a 0061-aware rollback of the current 0081 package.
+Only a replacement verified against every applied migration and current privacy,
+quota and role contract is compatible. Keep offboarding disabled during any
+rollback until the current capabilities and exact profiles are restored.
 
-Migrations 0068 through 0073 are forward-only. Before applying them, drain offboarding traffic
-from binaries older than the 0067-aware service. After it is applied, an older
-binary may read and write ordinary coordination state, but it must not be used
-as an offboarding worker: the database refuses its completed-run restart when
+The following migration notes describe historical compatibility boundaries,
+not supported stopping points for the current package. Migrations 0068 through
+0073 are forward-only and require an offboarding drain for older workers.
+Those versions allowed older ordinary coordination writers, but current
+rollout requires every node to use matching schema and grant capabilities.
+An old offboarding worker cannot be retained: the database refuses its completed-run restart when
 coordination privacy is the only dirty state. This refusal preserves immutable
 lifecycle completion; it is not a signal to retry the old command. Route the
 principal to a current node and use `repair-coordination-privacy`. A binary
@@ -458,7 +494,9 @@ completed scrub work when only detached cleanup is busy.
 0078 builds the legacy-incomplete discovery index concurrently and is safe to
 retry. 0079 installs range-bounded NULL-cursor, shallow-cursor, and targeted
 discovery plus contention-safe dirty-marker and detached-receipt handling. Apply
-0078 and 0079 before the current binary; rollback remains forward-only.
+0078 and 0079 as prerequisites within the full packaged chain through 0081;
+those steps alone are insufficient for the current binary. Rollback remains
+forward-only.
 The packaged migrator applies lock and statement timeouts to the restartable
 backfill, reduces a contended batch adaptively, and accepts
 `CONTINUUM_COORDINATION_V4_BACKFILL_BATCH_SIZE` from 1 through 5,000. Re-run
@@ -496,7 +534,9 @@ Offboarding first deactivates every owned-scope membership and disables the
 principal in the same transaction. The owned user scope is then erased in
 bounded receipt, lease, and resource phases. Each call processes at most 1,000
 rows across all phases and records durable progress; the maximum fencing token is
-preserved in the owner-only scope floor before resource deletion. All non-owned
+derived from the resource rows actually deleted by `DELETE ... RETURNING` and
+raised in the owner-only scope floor atomically with that deletion. Locked rows
+keep the phase incomplete until a remaining-row check proves exhaustion. All non-owned
 scopes, including team, project, organization, role, and another user's scope,
 remain shared state, but retained leases and receipts are moved to an
 installation-wide detached principal and their run IDs and payload hashes are

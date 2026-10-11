@@ -8,12 +8,27 @@ Offboarding is an explicit org-administrator operation. It is not inferred from
 principal names, scope names, or memory authorship. Before offboarding, map the
 immutable principal UUID to exactly one existing `user` scope UUID:
 
-```text
-npm run admin -- map-user-scope <principal-id> <user-scope-id>
-npm run admin -- offboard-principal <principal-id> --dry-run
-npm run admin -- offboard-principal <principal-id> --confirm-scope <user-scope-id> --batch-size 1000
+```sh
+export CONTINUUM_DATABASE_URL="$CONTINUUM_OPERATOR_DATABASE_URL"
+export CONTINUUM_ADMIN_ACTOR='<bound-org-admin-external-id>'
+subject_principal_id='<principal-uuid>'
+owned_user_scope_id='<user-scope-uuid>'
+npm run admin -- map-user-scope "$subject_principal_id" "$owned_user_scope_id"
+npm run admin -- offboard-principal "$subject_principal_id" --dry-run
+npm run admin -- offboard-principal "$subject_principal_id" --confirm-scope "$owned_user_scope_id" --batch-size 1000
 npm run admin -- list-incomplete-offboarding
+npm run admin -- list-coordination-privacy-repairs --limit 100
+npm run admin -- repair-coordination-privacy "$subject_principal_id" --confirm-scope "$owned_user_scope_id" --once
 ```
+
+The private `CONTINUUM_OPERATOR_DATABASE_URL` convenience variable must contain
+the dedicated DB-bound operator connection. The program reads only
+`CONTINUUM_DATABASE_URL` and looks up `CONTINUUM_ADMIN_ACTOR` by principal
+`external_id`. That actor must match the operator's approved binding and current
+manual org-admin authority. It is distinct from the internal principal/scope
+UUIDs in arguments, and is not an Entra token or service API key. The ordinary
+HTTP CLI's host/token configuration does not configure this database command.
+Replace the example actor and UUID values before running these commands.
 
 The REST equivalents are `PUT
 /api/v0/admin/principals/:principalId/owned-user-scope` with `{ "scopeId":
@@ -122,10 +137,15 @@ of returning results with an unsanitized late audit row.
 Coordination privacy work is bounded and resumable. After owned-scope
 memberships are deactivated and the principal is disabled, each invocation
 deletes at most 1,000 retained receipts, leases, and resources from the owned
-user scope. The maximum token is copied to the owner-only scope fencing floor
-before each resource batch is deleted. Durable scope progress prevents a retry
-from rescanning completed phases. A live lease stops the operation; expiry or
-explicit release is required before resource deletion.
+user scope. Resource deletion returns the fencing tokens of the locked rows
+actually deleted; their maximum raises the owner-only scope floor in the same
+transaction. Durable scope progress and an actual remaining-row check prevent a
+short `SKIP LOCKED` page from claiming completion. A live owned-scope lease
+stops erasure. Quiesce and release it while the holder is still enabled,
+authenticated, and authorized. After disablement or revocation the holder
+cannot release or renew; cleanup must wait for TTL expiry. There is no forced
+admin release. Owned-scope failure does not promise the shared-scope
+`blockedUntil` response.
 
 During rollout, complete every forward migration and exact application/operator
 grant-profile convergence before enabling Entra-sourced coordination or
@@ -187,7 +207,8 @@ until it returns `complete: true`. A live shared lease returns its
 `blockedUntil` time and stops the CLI run with exit status 3. Detached quota or
 concurrent privacy-lock contention is also a typed status-3 block. The CLI caps
 one invocation at 100 progressing batches with bounded backoff. `--once`
-returns status 2 whenever its committed batch remains incomplete. That command only drives bounded
+returns status 2 for an unblocked incomplete batch; typed blocks remain status 3
+even with `--once`. That command only drives bounded
 coordination metadata scrubbing and never sets `offboarded_at`, pseudonymizes
 the user or scope, erases memories, or deactivates scope access.
 Migrations 0066 and 0067 reopen completed version-2 rows and reset only their
@@ -425,7 +446,9 @@ operation: raw operator `UPDATE` on `entra_groups` is revoked, and revocation,
 quarantine, and deactivation triggers accept only transaction-local guarded
 mutation markers.
 
-Apply all 53 migrations through `0053_offboarding_restore_contract.sql`.
+The following paragraphs describe the historical 0049-0053 identity foundation.
+They are not the current migration stopping point. Apply the complete packaged
+chain, including 0080 and 0081, under the current rollout procedure below.
 Migration `0049_offboarding_review_remediation.sql` makes principal disablement
 create bounded transaction-local guards for its existing membership cascade,
 binds owned-scope access cleanup to a started incomplete run and its mapped
@@ -458,7 +481,7 @@ triggers, normalizes all three transient capability-table shapes, and checks col
 ACLs as well as table ACLs. Sync startup rejects owner and superuser sessions
 and rechecks operator and sync membership edges at each privileged call. The
 application grant script revokes all three marker tables and validates its exact
-direct allow-list—including schema and ambient `PUBLIC` privileges—before
+direct allow-list, including schema and ambient `PUBLIC` privileges, before
 returning success. The application role has no scope
 row update authority; the operator-only pseudonymization function owns the one
 supported user-scope name mutation, while `id`, `kind`, and the canonical
@@ -512,13 +535,29 @@ Production must use separate migration-owner, shared application, dedicated
 operator, and dedicated sync login roles. The operator and sync roles must not
 be granted to the shared application role. Rollout is an explicit maintenance
 window: **stop** every API, MCP, admin, retention, and membership-sync process;
-take and verify a **backup**; **migrate** through
-`0053_offboarding_restore_contract.sql` as the owner; **regrant** the shared app,
-operator, and sync profiles; **verify** the identities; then **start** only the
-`0053`-aware binaries. Mixed pre-`0053`/`0053` binaries or grants are
-unsupported. Do not run migration
-and old binaries concurrently, because old sync code writes freshness directly
-and old application code expects shared-role offboarding authority.
+take and verify a **backup**; **migrate** every packaged file, including 0080 and
+0081, as the migration/schema owner; finish the owner-only 0081 backfill;
+**regrant** every shared app, dedicated operator, and sync profile; **verify**
+the exact identities and provider profiles; then **start** only matching current
+binaries. Published history through 0079 stays unchanged; 0080 and 0081 are the
+current unreleased forward repair files. Keep offboarding and coordination
+mutation traffic drained until the complete schema, repair and grants converge.
+Do not run old binaries or schedulers through this maintenance window.
+
+For the owner procedures and `psql "$CONTINUUM_DATABASE_URL"` examples below,
+switch to the owner connection explicitly:
+
+```sh
+export CONTINUUM_DATABASE_URL="$CONTINUUM_MIGRATION_OWNER_URL"
+continuum-migrate
+```
+
+The installed command reads `CONTINUUM_DATABASE_URL`; from a reviewed checkout
+use `npm run migrate` with that same owner connection. For a non-public tenant,
+configure the owner URL's first effective `search_path` schema as described
+below. The dedicated operator role cannot run the repair or inspect its
+provenance. After owner maintenance, restore the operator setup at the start of
+this guide before running admin commands.
 The supported and CI-tested database major is PostgreSQL 16 with pgvector.
 Qualify another major independently before migration; successful SQL parsing
 alone is not a supported rollout.
@@ -532,7 +571,8 @@ pgvector there. It never chooses a tenant application schema. Dropping one
 application schema therefore does not own or cascade through the provider into
 another installation. Treat `continuum_extensions` as database provider
 infrastructure: its owner controls extension upgrades and it must be dropped
-only after every dependent Continuum schema has been retired.
+only after every dependent tenant and non-Continuum consumer has been retired
+and the provider owner has reviewed decommissioning.
 
 For a fresh application schema, Continuum refuses an existing provider schema
 that contains another Continuum ledger or application tables. Relocate that
@@ -552,7 +592,7 @@ neither `PUBLIC` nor any non-owner. Each tenant migration owner needs only
 `USAGE`; it does not need ownership or grant option when provider access has
 already been granted directly to every profiled runtime role. The provider
 owner controls extension install, update, and final removal. Remove it only
-after every dependent tenant has been retired.
+after every dependent tenant and other provider consumer has been retired.
 
 The migration connection's first effective `search_path` schema is the
 application schema. It must be owner-controlled by the migration role (including
@@ -601,20 +641,24 @@ Migration `0080` recognizes exact application, operator, and registered sync
 profiles plus explicitly registered reporting profiles; `SELECT` on
 `memories` alone is not a provider profile. It records profile OIDs, grants
 provider `USAGE` and extension-function `EXECUTE` when they are not already
-effective, forbids provider `CREATE`, and removes stale direct provider grants
-only from roles registered to this tenant. Inherited function execution is an
+effective, and rejects forbidden provider `CREATE`. A target-scoped regrant
+repairs the selected role without pruning another role waiting for its own
+regrant. Pending or mismatched registrations remain visible and startup fails
+closed until the applicable exact profiles converge. Inherited function execution is an
 effective grant and is accepted consistently by reconciliation and assertion.
 Unregistered DBA/reporting grants are left untouched and do not affect another
 application role's assertion. When pgvector is application-local, schema
 `USAGE` belongs to the application ACL and is never revoked as provider drift.
 
-The dedicated `continuum_extensions` provider closes `PUBLIC` schema and
-function access only when the tenant owner owns the schema and every extension
-function, is the grantor of the `PUBLIC` privileges, and no relation in another
-schema depends on the provider vector type. A shared, DBA-owned, or
-provider-owned installation keeps its existing `PUBLIC` policy and unrelated
-direct grants intact. This prevents one tenant from changing another tenant's
-live provider contract.
+The 0080 provider migration and current regrant procedures never automatically revoke
+database-wide `PUBLIC` access or provider ACLs. Provider access is shared database
+infrastructure; a tenant-local registry is not proof of exclusive use. Even a
+schema owned by this tenant can serve other tenants or non-Continuum users.
+Existing effective `PUBLIC` access is reflected honestly in profile checks.
+Removing provider access or decommissioning the extension requires an explicit
+reviewed provider-owner action covering all consumers. Forbidden schema `CREATE`
+drift must be repaired by that owner before rollout; startup and regrant report
+it rather than silently revoke it.
 
 Register or retire a read-only reporting role only through the tenant migration
 owner, after granting or before revoking its reviewed application-schema
@@ -625,13 +669,14 @@ SELECT continuum_register_pgvector_reporting_profile('continuum_reporter', TRUE)
 SELECT continuum_register_pgvector_reporting_profile('continuum_reporter', FALSE);
 ```
 
-The owner-only function reconciles provider grants immediately. Existing DBA
-grants can remain in place while 0080 is applied, then the owner can register
-the reviewed reporting role without a migration deadlock. Disabling the
-profile revokes tenant-managed provider grants while preserving legitimate
-application-schema access. A provider-owned schema must either delegate the
-narrow grant options to the tenant owner or apply any reported direct
-pregrants/revocations itself.
+Enabling the owner-only registration repairs only that reporting role's missing
+provider grants. Existing DBA grants can remain while 0080 is applied. Disabling
+the registration removes only its local profile and tenant verifier execution;
+it does not revoke shared provider privileges or application-data access.
+Revoke reviewed application `SELECT`, login/membership authority, or provider
+ACLs separately when retiring the role. A failed local runtime gate is not proof
+that direct SQL access was removed. The provider owner must supply missing
+direct pregrants or narrow delegation and review any requested decommission.
 
 Provider verification runs during API, MCP, and membership-sync startup.
 The verifier is resolved and invoked in the namespace of the actual `memories`
@@ -658,6 +703,9 @@ Before applying 0080 and again before starting upgraded runtime processes, run
 `scripts/preflight-pgvector-role-profiles.sql` as the tenant migration owner.
 It lists reader roles that do not match an exact application/operator profile.
 Classify these roles; a reporting reader must not receive application authority.
+This reader inventory does not prove provider exclusivity or repair schema
+`CREATE` drift. Review provider ACLs separately with the provider owner; current
+migration and regrant checks refuse forbidden `CREATE` instead of removing it.
 After the complete migration chain, reapply `grant-application-role.sql` for
 every application and operator runtime role, then `grant-operator-role.sql` for
 the dedicated operator and `grant-sync-role.sql` for the bound sync service.
@@ -666,29 +714,24 @@ This convergence is mandatory before restarting runtime processes. Migration
 sync rotation merely to retain startup verification access.
 
 Re-run the applicable role grant script after role rotation, revocation, or a
-pgvector extension update. Explicit owner grant/reconciliation commands remove
-stale direct provider grants; startup only detects drift. Final assertions
-report missing or extra privilege. Sync registration remains durable across
+pgvector extension update. Explicit owner regrant repairs only approved target
+access and leaves other registrations and shared provider ACLs intact; startup
+only detects drift. Final assertions check exact application/operator profiles,
+required effective provider access, and forbidden provider `CREATE`; they do
+not infer exclusive provider use. Sync registration remains durable across
 owner reconciliation, and `grant-operator-role.sql` changes an application profile to
 the explicit operator kind.
 
 Rolling back to a binary from before provider-schema support is unsafe while
 the extension schema is absent from that binary's runtime `search_path`,
 because older embedding SQL used unqualified vector casts and operators.
-Restore the prior path contract before such a rollback, or keep the current
-binary until a forward repair is available. For a fresh dedicated-provider
-install, the bounded compatibility procedure is:
-
-```sql
-ALTER ROLE continuum_app IN DATABASE continuum
-  SET search_path = continuum_app_schema, continuum_extensions;
-```
-
-Quote the actual role, database, and schema identifiers in operator tooling.
-Apply the same setting to every old application/operator login before starting
-an old replica, verify an unqualified vector query, and remove the role setting
-again before returning to the current binary. Do not overlap old and new
-binaries while changing this contract.
+Keep the current binary until a forward repair is available. An older binary
+also lacks the current 0081 contract/privacy capabilities and cannot be treated
+as compatible merely by changing its vector path. Current exact identity profiles
+reject role-level `search_path` settings and other ambient parameter drift;
+`ALTER ROLE ... SET search_path` is not a supported rollback shortcut. Any
+independently qualified historical restore needs its matching schema, binaries
+and profiles in isolation, not overlapping old and current live processes.
 
 Run exactly one migrator during a rolling deployment. New migrators use
 nonblocking advisory-lock polling so concurrent indexes can finish; older
@@ -909,11 +952,15 @@ retryable.
 
 Rollback is forward-only and requires the verified pre-migration backup for any
 data that bounded legacy cleanup has removed. Application rollback is supported
-only to a 0053-aware binary and its matching grant profile. Stop all processes
-and confirm there are zero incomplete runs with `list-incomplete-offboarding`;
-then deploy a binary aware of every applied schema migration, reapply all three grant profiles,
-run identity verification, and restart. Pre-`0053` binaries are incompatible with the new
-approval and sync boundary and are not a supported application-first rollback.
+only to a binary independently verified against every applied migration and
+current capability/profile contract, including completed 0081 repair. A
+0053-aware or 0063-aware binary alone is insufficient. Stop all processes;
+inventory incomplete lifecycle runs and paged coordination privacy repairs;
+then use a compatible binary, reapply all three grant profiles, verify identities
+and provider profiles, and restart. Keep offboarding disabled if the replacement
+cannot drive the current privacy/version guards. An empty
+`list-incomplete-offboarding` result alone does not prove historical privacy
+repair is finished.
 Database rollback requires a separate forward migration; do not drop guards or
 regrant the shared role ad hoc. Completed offboarding erasure is irreversible
 and is never undone by binary or schema rollback.
