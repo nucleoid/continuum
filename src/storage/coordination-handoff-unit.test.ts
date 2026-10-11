@@ -46,4 +46,17 @@ describe('coordination handoff unit regressions', () => {
       .rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE', message: expect.not.stringContaining('private') });
   });
 
+  it('reports incomplete migration repair as a sanitized dependency failure', async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('FROM scopes')) throw Object.assign(new Error('private pending state'), { code: '55000' });
+      return { rows: [], rowCount: 0 };
+    });
+    const { pool } = transactionClient(query);
+    await expect(acquireLease(pool, {
+      id: randomUUID(), externalId: 'test', kind: 'service', displayName: 'Test', createdAt: new Date(),
+    }, { scope: 'project:test', resource: 'r', runId: randomUUID(), requestId: randomUUID() }))
+      .rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE',
+        message: 'Coordination contract repair is incomplete; finish migrations before starting runtimes' });
+  });
+
 });
