@@ -559,4 +559,26 @@ describe('promotion outbox', () => {
     const { rows } = await pool.query('SELECT state, attempt_count FROM promotion_event_deliveries');
     expect(rows).toEqual([{ state: 'pending', attempt_count: 0 }]);
   });
+  it('preserves committed timeout availability when its lost response is followed by a charged failure', async () => {
+    const { principal, source } = await seed();
+    const promoted = await promoteWithConfiguredWebhooksForTest(pool, principal.id, source.id,
+      { kind: 'project', name: 'destination' }, {}, ['timeout-backoff']);
+    const [delivery] = await claimPromotionDeliveries(pool, { owner: 'timeout-response-owner',
+      webhookIds: ['timeout-backoff'], limit: 1, leaseMs: 60_000 });
+    expect(delivery.event.eventId).toBe(promoted.promotionEvent.eventId);
+    // A lost JS response does not undo this committed exact-fenced timeout.
+    expect(await timeoutPromotionDelivery(pool, delivery.event.eventId, delivery.webhookId, 'timeout-response-owner',
+      { maxAttempts: 3, retryDelayMs: 1000, attemptCount: delivery.attemptCount,
+        leaseGeneration: delivery.leaseGeneration })).toBe('pending');
+    const before = (await pool.query('SELECT available_at FROM promotion_event_deliveries WHERE event_id=$1::uuid',
+      [delivery.event.eventId])).rows[0].available_at as Date;
+    expect(await failPromotionDelivery(pool, delivery.event.eventId, delivery.webhookId, 'timeout-response-owner',
+      { maxAttempts: 3, retryDelayMs: 5, error: new Error('actual late callback failure'),
+        attemptCount: delivery.attemptCount, leaseGeneration: delivery.leaseGeneration })).toBe('pending');
+    const after = (await pool.query('SELECT available_at,attempt_count,lease_owner,last_error FROM promotion_event_deliveries WHERE event_id=$1::uuid',
+      [delivery.event.eventId])).rows[0];
+    expect((after.available_at as Date).getTime()).toBeGreaterThanOrEqual(before.getTime());
+    expect(after).toMatchObject({ attempt_count: 1, lease_owner: null, last_error: 'callback failed' });
+  });
+
 });
