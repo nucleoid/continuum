@@ -16,6 +16,7 @@ const PRESERVED_OFFBOARDING_OPERATIONS = [
   'principal_user_scope_mapped', 'principal_user_scope_acknowledgement_replaced',
   'principal_memory_erased', 'principal_offboarded', 'principal_offboarding_repaired',
   'principal_offboarding_access_revoked',
+  'principal_promotion_privacy_repaired',
 ] as const;
 const PRESERVED_AUDIT_SOURCE = 'audit-retention';
 

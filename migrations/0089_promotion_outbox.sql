@@ -72,7 +72,7 @@ CREATE INDEX promotion_events_scope_privacy_idx ON promotion_events(destination_
 CREATE FUNCTION continuum_operator_scrub_promotion_scope(
   authorization_principal_id UUID,target_principal_id UUID,target_scope_id UUID,batch_limit INTEGER
 ) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
-DECLARE scope_name TEXT; names_processed INTEGER; deliveries_processed INTEGER; clean BOOLEAN;
+DECLARE scope_name TEXT; names_processed INTEGER; deliveries_processed INTEGER; clean BOOLEAN; privacy_run principal_offboarding_runs%ROWTYPE;
 BEGIN
   IF batch_limit IS NULL OR batch_limit NOT BETWEEN 1 AND 1000 THEN RAISE check_violation USING MESSAGE='promotion privacy batch is outside the supported range'; END IF;
   -- This accessor checks the bound approve caller, current manual org admin,
@@ -81,7 +81,7 @@ BEGIN
   IF NOT EXISTS(SELECT 1 FROM principal_user_scopes WHERE principal_id=target_principal_id AND scope_id=target_scope_id) THEN
     RAISE insufficient_privilege USING MESSAGE='promotion privacy requires the approved target mapping';
   END IF;
-  PERFORM 1 FROM continuum_operator_get_offboarding_run(target_principal_id,authorization_principal_id) WHERE scope_id=target_scope_id;
+  SELECT * INTO privacy_run FROM continuum_operator_get_offboarding_run(target_principal_id,authorization_principal_id) WHERE scope_id=target_scope_id;
   IF NOT FOUND THEN RAISE insufficient_privilege USING MESSAGE='promotion privacy requires an authorized offboarding run'; END IF;
   SELECT name INTO scope_name FROM scopes WHERE id=target_scope_id;
   WITH batch AS (
@@ -104,7 +104,9 @@ BEGIN
       WHERE event.destination_scope_id=target_scope_id AND (delivery.state<>'privacy_cancelled' OR delivery.last_error IS NOT NULL OR delivery.lease_owner IS NOT NULL));
   IF names_processed+deliveries_processed>0 THEN
     INSERT INTO audit_log(principal_id,action,scope_id,metadata) VALUES(authorization_principal_id,'archive',target_scope_id,
-      continuum_offboarding_expected_audit_metadata('{}'::jsonb));
+      jsonb_build_object('operation','principal_promotion_privacy_repaired','principal_id',target_principal_id,
+        'run_id',privacy_run.run_id,'approval_id',privacy_run.approval_id::text,
+        'acknowledged_evidence_hash',privacy_run.approval_evidence_hash,'rows_processed',names_processed+deliveries_processed));
   END IF;
   RETURN jsonb_build_object('complete',clean,'processed',names_processed+deliveries_processed);
 END;
@@ -201,3 +203,69 @@ BEGIN
   END LOOP;
 END;
 $privacy_roles$;
+
+-- Canonical receipts need authority before the older definer audit guard.
+CREATE FUNCTION continuum_guard_promotion_privacy_audit() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER AS $$
+BEGIN
+  IF TG_OP<>'INSERT' THEN
+    IF OLD.metadata->>'operation'='principal_promotion_privacy_repaired'
+      OR (TG_OP='UPDATE' AND NEW.metadata->>'operation'='principal_promotion_privacy_repaired') THEN
+      RAISE check_violation USING MESSAGE='promotion privacy evidence is immutable';
+    END IF;
+    IF TG_OP='DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF;
+  END IF;
+  IF NEW.metadata->>'operation'<>'principal_promotion_privacy_repaired' OR NEW.metadata->>'operation' IS NULL THEN RETURN NEW; END IF;
+  IF NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class relation JOIN pg_catalog.pg_roles role ON role.rolname=current_user
+    WHERE relation.oid=TG_RELID AND relation.relowner=role.oid) THEN
+    RAISE insufficient_privilege USING MESSAGE='promotion privacy audit requires the trusted erasure capability';
+  END IF;
+  PERFORM * FROM continuum_operator_coordination_scope_privacy_state(NEW.principal_id,NEW.scope_id);
+  IF NEW.action<>'archive' OR NEW.query IS NOT NULL OR NEW.memory_id IS NOT NULL
+    OR NEW.metadata IS DISTINCT FROM continuum_offboarding_expected_audit_metadata(NEW.metadata)
+    OR jsonb_typeof(NEW.metadata->'rows_processed')<>'number'
+    OR COALESCE(NEW.metadata->>'rows_processed','')!~'^[0-9]+$'
+    OR (NEW.metadata->>'rows_processed')::numeric NOT BETWEEN 1 AND 2000
+    OR NOT EXISTS(SELECT 1 FROM principal_offboarding_runs run
+      WHERE run.run_id::text=NEW.metadata->>'run_id' AND run.scope_id=NEW.scope_id
+        AND run.principal_id::text=NEW.metadata->>'principal_id'
+        AND run.approval_id::text=NEW.metadata->>'approval_id'
+        AND run.approval_evidence_hash=NEW.metadata->>'acknowledged_evidence_hash') THEN
+    RAISE check_violation USING MESSAGE='promotion privacy audit requires canonical approved run evidence';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+REVOKE ALL ON FUNCTION continuum_guard_promotion_privacy_audit() FROM PUBLIC;
+CREATE TRIGGER promotion_privacy_audit_capability BEFORE INSERT OR UPDATE OR DELETE ON audit_log
+FOR EACH ROW EXECUTE FUNCTION continuum_guard_promotion_privacy_audit();
+DO $privacy_audit$
+DECLARE definition TEXT; revised TEXT; signature TEXT; begin_at INTEGER; schema_name TEXT:=current_schema();
+BEGIN
+  definition:=pg_catalog.pg_get_functiondef('continuum_offboarding_expected_audit_metadata(jsonb)'::regprocedure);
+  revised:=replace(definition,'  SELECT CASE',$branch$  SELECT CASE
+    WHEN audit_metadata->>'operation'='principal_promotion_privacy_repaired' THEN
+      (SELECT COALESCE(jsonb_object_agg(entry.key,entry.value),'{}'::jsonb) FROM jsonb_each(audit_metadata) entry
+        WHERE entry.key=ANY(ARRAY['operation','principal_id','run_id','approval_id','acknowledged_evidence_hash','rows_processed']::text[]))$branch$);
+  IF revised=definition THEN RAISE EXCEPTION 'unable to extend promotion privacy audit classifier'; END IF;
+  EXECUTE revised;
+  definition:=pg_catalog.pg_get_functiondef('continuum_reject_offboarded_principal_audit()'::regprocedure);
+  begin_at:=position(E'BEGIN\n' IN definition);
+  IF begin_at=0 THEN RAISE EXCEPTION 'unable to extend promotion privacy audit admission'; END IF;
+  revised:=substr(definition,1,begin_at+length(E'BEGIN\n')-1)
+    || E'  IF NEW.metadata->>''operation''=''principal_promotion_privacy_repaired'' THEN RETURN NEW; END IF;\n'
+    || substr(definition,begin_at+length(E'BEGIN\n'));
+  EXECUTE revised;
+  FOREACH signature IN ARRAY ARRAY[
+    'continuum_redact_offboarding_audit(uuid,uuid,bigint[])',
+    'continuum_protect_offboarded_audit_tombstone()',
+    'continuum_apply_audit_retention_internal_v44(uuid,timestamp with time zone,integer,uuid,integer,jsonb,text,text)'
+  ] LOOP
+    definition:=pg_catalog.pg_get_functiondef(signature::regprocedure);
+    revised:=replace(definition,'''principal_offboarding_access_revoked''',
+      '''principal_offboarding_access_revoked'', ''principal_promotion_privacy_repaired''');
+    IF revised=definition THEN RAISE EXCEPTION 'unable to protect promotion privacy audit evidence in %',signature; END IF;
+    EXECUTE revised;
+  END LOOP;
+  EXECUTE format('ALTER FUNCTION %I.continuum_guard_promotion_privacy_audit() SET search_path=pg_catalog,%I,pg_temp',schema_name,schema_name);
+END;
+$privacy_audit$;

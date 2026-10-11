@@ -82,7 +82,7 @@ describe('promotion outbox privacy review', () => {
       title: 'Audit rollback', body: 'Normal promoted memory.', authorId: target.id, source: 'manual' });
     const promoted = await promoteMemoryWithAudit(pool, target.id, source.id, { kind: 'user', name: personal.name }, {}, ['privacy-audit']);
     await pool.query(`CREATE FUNCTION reject_promotion_privacy_audit() RETURNS trigger LANGUAGE plpgsql AS $$
-      BEGIN IF NEW.action='archive' AND NEW.metadata=continuum_offboarding_expected_audit_metadata('{}'::jsonb) THEN
+      BEGIN IF NEW.action='archive' AND NEW.metadata->>'operation'='principal_promotion_privacy_repaired' THEN
         RAISE EXCEPTION 'expected mandatory promotion privacy audit failure'; END IF; RETURN NEW; END; $$;
       CREATE TRIGGER reject_promotion_privacy_audit BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION reject_promotion_privacy_audit()`);
     try {
