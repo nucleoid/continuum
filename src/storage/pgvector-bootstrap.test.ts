@@ -6,7 +6,6 @@ import { join } from 'node:path';
 import pg from 'pg';
 import { describe, expect, it } from 'vitest';
 import {
-  storeMemoryEmbeddingVector,
   vectorSearchMemoryIds,
   vectorSearchRelatedMemories,
 } from './embeddings.js';
@@ -218,7 +217,7 @@ describe('pgvector schema contract', () => {
     }
   });
 
-  it('stores and searches embeddings with a public-less runtime search path', async () => {
+  it('stores legacy bootstrap embeddings and searches with a public-less runtime search path', async () => {
     await withFreshDatabase(async (_root, target, url, _database, directory) => {
       const applicationSchema = identifier('continuum_app');
       await target.query(`CREATE SCHEMA "${applicationSchema}"`);
@@ -246,8 +245,15 @@ describe('pgvector schema contract', () => {
         );
         const provider = { id: 'test:public-less', dim: 768 };
         const vector = [1, ...Array(767).fill(0)] as number[];
-        await expect(storeMemoryEmbeddingVector(runtime, memoryId, vector, provider))
-          .resolves.toBeUndefined();
+        // This intentionally bootstrap-only database retains the original key.
+        // Seed through compatible SQL, then exercise the current qualified
+        // search APIs without adding public to the runtime search path.
+        // Current composite-key persistence is covered after the real 0088
+        // upgrade in the role and provider-rollout suites.
+        expect((await runtime.query(`INSERT INTO memory_embeddings(memory_id,provider,dim,embedding)
+          VALUES($1::uuid,$2::text,$3::integer,$4::public.vector) RETURNING memory_id`,
+        [memoryId, provider.id, provider.dim, `[${vector.join(',')}]`])).rows)
+          .toEqual([{ memory_id: memoryId }]);
         await expect(vectorSearchMemoryIds(runtime, vector, [scopeId], provider, 5))
           .resolves.toEqual([{ id: memoryId, distance: 0 }]);
         await expect(vectorSearchRelatedMemories(
