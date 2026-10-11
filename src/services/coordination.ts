@@ -374,6 +374,7 @@ export async function renewLease(
       await lockReceiptRequest(client, principal.id, 'renew', requestId);
       const prior = await getReceipt(client, principal.id, 'renew', requestId);
       if (prior) {
+        if (prior.scopeId !== target.scopeId) throw leaseLost();
         assertMatchingReceipt(prior, payloadHash);
         if (!await lockExistingResource(client, target.scopeId, target.resource)) {
           throw leaseLost();
@@ -480,6 +481,7 @@ export async function releaseLease(
       await lockReceiptRequest(client, principal.id, 'release', requestId);
       const prior = await getReceipt(client, principal.id, 'release', requestId);
       if (prior) {
+        if (prior.scopeId !== target.scopeId) throw leaseLost();
         assertMatchingReceipt(prior, payloadHash);
         await requireFinalAuthorization(
           client, principal.id, target.scopeId, 'lease', options.signal,
