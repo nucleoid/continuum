@@ -86,10 +86,15 @@ export async function resetData(pool: pg.Pool): Promise<void> {
              NULL, 'service', 'system:lifecycle')`,
   );
   await pool.query(
-    `INSERT INTO principals (id, external_id, kind, display_name)
+    `INSERT INTO principals (id, external_id, kind, display_name, disabled_at)
      VALUES ('00000000-0000-4000-8000-000000000012',
              gen_random_uuid()::text, 'service',
-             'system:detached-coordination-history')`,
+             'system:detached-coordination-history', clock_timestamp())`,
+  );
+  await pool.query(
+    `INSERT INTO coordination_principal_usage
+       (principal_id, acquire_receipt_limit, contended_receipt_limit)
+     VALUES ('00000000-0000-4000-8000-000000000012', 10000, 10000)`,
   );
   await pool.query('INSERT INTO entra_sync_state (singleton) VALUES (TRUE)');
 }

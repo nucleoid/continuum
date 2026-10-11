@@ -64,7 +64,7 @@ async function fixture(run: (owner: pg.Pool, url: string, principal: string) => 
       .replaceAll(':"continuum_app_role"', q(role)).replaceAll(":'continuum_app_role'", "'" + role + "'");
     await owner.query(script);
     const principal = 'startup:' + randomUUID();
-    await owner.query(`INSERT INTO principals(external_id,kind,display_name) VALUES($1,'service','Startup')`, [principal]);
+    await owner.query(`INSERT INTO principals(id,external_id,kind,display_name) VALUES(gen_random_uuid(),$1,'service','Startup')`, [principal]);
     url.username = role; url.password = password;
     await run(owner, url.toString(), principal);
   } finally {
