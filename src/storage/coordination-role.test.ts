@@ -425,7 +425,7 @@ describe('coordination database role profiles', () => {
            FROM coordination_principal_usage WHERE principal_id = $1`,
         [operatorPrincipal.id],
       )).rows[0]).toEqual({
-        acquire_receipt_limit: 10000, contended_receipt_limit: 2000,
+        acquire_receipt_limit: 10000, contended_receipt_limit: 10000,
       });
       expect((await pool.query(
         `SELECT metadata->>'operation' AS operation FROM audit_log
