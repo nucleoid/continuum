@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { makeTestPool, resetData } from './test-helpers.js';
+import { dropIsolatedTestDatabase, makeTestPool, resetData } from './test-helpers.js';
 import { runMigrations } from './migrator.js';
 import { createPrincipal } from './principals.js';
 import { createScope, getScopeByRef } from './scopes.js';
@@ -318,7 +318,7 @@ describe('coordination contract scale and recovery', () => {
         .resolves.toMatchObject({ rows: [{ completed: true }] });
     } finally {
       await ownerPool?.end(); await target?.end();
-      await root.query(`DROP DATABASE IF EXISTS ${quoted(database)} WITH (FORCE)`);
+      await dropIsolatedTestDatabase(root, database);
       await root.query(`DROP ROLE IF EXISTS ${quoted(owner)}`);
       await root.end();
     }

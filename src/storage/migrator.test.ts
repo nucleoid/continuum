@@ -1,3 +1,4 @@
+import { dropIsolatedTestDatabase } from './test-helpers.js';
 import { copyFile, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -160,7 +161,7 @@ describe('runMigrations', () => {
         endings,
         new Promise((resolve) => setTimeout(resolve, 5_000)),
       ]);
-      await admin.query(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`);
+      await dropIsolatedTestDatabase(admin, database);
       await endings;
       await admin.end();
     }

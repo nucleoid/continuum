@@ -1,3 +1,4 @@
+import { dropIsolatedTestDatabase } from './test-helpers.js';
 import { randomUUID } from 'node:crypto';
 import { copyFile, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -94,7 +95,7 @@ it.each(['open','completed'] as const)(
       expect((await pool.query(`SELECT continuum_offboarding_lifecycle_state_is_erased($1::uuid) AS erased`,[before.run_id])).rows)
         .toEqual([{erased:true}]);
     } finally {
-      await pool?.end();await admin.query(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`);await admin.end();
+      await pool?.end();await dropIsolatedTestDatabase(admin, database);await admin.end();
       await rm(directory,{recursive:true,force:true});
     }
   },180_000,

@@ -1,3 +1,4 @@
+import { dropIsolatedTestDatabase } from './test-helpers.js';
 import { randomUUID } from 'node:crypto';
 import { copyFile, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -55,7 +56,7 @@ it('refuses pre81 detached credential drift and retries after owner repair witho
       .toEqual([{ disabled: true }]);
   } finally {
     await pool?.end();
-    await admin.query(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`); await admin.end();
+    await dropIsolatedTestDatabase(admin, database); await admin.end();
     await rm(directory, { recursive: true, force: true });
   }
 }, 120_000);

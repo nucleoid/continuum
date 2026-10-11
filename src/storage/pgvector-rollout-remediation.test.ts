@@ -1,3 +1,4 @@
+import { dropIsolatedTestDatabase } from './test-helpers.js';
 import {
   copyFile,
   mkdtemp,
@@ -142,16 +143,16 @@ async function withFreshDatabase(
     await run(root, target, url, database);
   } finally {
     const databasePools = pools.filter((pool) => pool !== root && pool !== target);
-    await Promise.all(databasePools.map((pool) => pool.end().catch(() => undefined)));
+    await Promise.all(databasePools.map((pool) => pool.end()));
     for (const pool of databasePools) pools.splice(pools.indexOf(pool), 1);
-    await target.end().catch(() => undefined);
+    await target.end();
     pools.splice(pools.indexOf(target), 1);
-    await root.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(database)} WITH (FORCE)`);
+    await dropIsolatedTestDatabase(root, database);
   }
 }
 
 afterEach(async () => {
-  await Promise.all(pools.splice(0).map((pool) => pool.end().catch(() => undefined)));
+  await Promise.all(pools.splice(0).map((pool) => pool.end()));
   await Promise.all(directories.splice(0).map((directory) =>
     rm(directory, { recursive: true, force: true })));
   if (roles.length > 0) {

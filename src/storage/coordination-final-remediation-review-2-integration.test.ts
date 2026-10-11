@@ -8,7 +8,7 @@ import { addMembership } from './memberships.js';
 import { runMigrations } from './migrator.js';
 import { createPrincipal } from './principals.js';
 import { createScope, getScopeByRef } from './scopes.js';
-import { makeTestPool, resetData } from './test-helpers.js';
+import { dropIsolatedTestDatabase, makeTestPool, resetData } from './test-helpers.js';
 import {
   mapOwnedUserScope, offboardPrincipal, repairCoordinationPrivacy,
 } from '../services/offboarding.js';
@@ -778,9 +778,7 @@ describe('issue 7 final remediation review 2 PostgreSQL proofs', () => {
       )).rows).toEqual([{ live_history: false, recovery_kind: 'superseded' }]);
     } finally {
       await fresh?.end();
-      await maintenance.query(
-        `DROP DATABASE IF EXISTS ${quoteRole(databaseName)} WITH (FORCE)`,
-      ).catch(() => undefined);
+      await dropIsolatedTestDatabase(maintenance, databaseName);
       for (const role of Object.values(roles)) {
         await maintenance.query(`REVOKE ${quoteRole(role)} FROM CURRENT_USER`)
           .catch(() => undefined);
