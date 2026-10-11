@@ -8,6 +8,9 @@ import { createMemory } from '../storage/memories.js';
 import { promoteMemoryWithAudit } from '../storage/promote.js';
 import { claimPromotionDeliveries, releasePromotionDeliveries, completePromotionDelivery, manualRetryPromotionDelivery } from '../storage/promotion-events.js';
 import { mapOwnedUserScope, offboardPrincipal } from './offboarding.js';
+import { PromotionEventWorker } from '../workers/promotion-events.js';
+import { PromotionWebhookRegistry } from '../extensions/promotion.js';
+import type { PromotionEvent } from '../extensions/promotion.js';
 
 describe('promotion outbox privacy review', () => {
   let pool: pg.Pool;
@@ -98,6 +101,59 @@ describe('promotion outbox privacy review', () => {
       .toEqual([{ state: 'pending', attempt_count: 0 }]);
     const result = await offboardPrincipal(pool, admin, target.id, { confirmationScopeId: personal.id });
     expect(result.complete).toBe(true);
+  });
+
+  it('fences a running abort-ignoring consumer and its late ACK without claiming to retract its received snapshot', async () => {
+    const admin = await createPrincipal(pool, { externalId: 'privacy-callback-admin', kind: 'user', displayName: 'Admin' });
+    const target = await createPrincipal(pool, { externalId: 'privacy-callback-target', kind: 'user', displayName: 'Private Person' });
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    const shared = await createScope(pool, { kind: 'team', name: 'callback-shared-source' });
+    const personal = await createScope(pool, { kind: 'user', name: 'callback-private-owner' });
+    await addMembership(pool, admin.id, org.id, 'admin');
+    await addMembership(pool, target.id, shared.id, 'writer');
+    await addMembership(pool, target.id, personal.id, 'writer');
+    await mapOwnedUserScope(pool, admin, target.id, personal.id);
+    const source = await createMemory(pool, { scopeId: shared.id, scopeKind: 'team', type: 'fact',
+      title: 'Running consumer', body: 'Normal promotion.', authorId: target.id, source: 'manual' });
+    const promoted = await promoteMemoryWithAudit(pool, target.id, source.id, { kind: 'user', name: personal.name }, {}, ['running-hook']);
+    const entered = Promise.withResolvers<PromotionEvent>();
+    const aborted = Promise.withResolvers<void>();
+    const callbackDone = Promise.withResolvers<void>();
+    let calls = 0;
+    const registry = new PromotionWebhookRegistry();
+    registry.register({ id: 'running-hook', onPromoted: async (event, context) => {
+      calls += 1; entered.resolve(event);
+      context.signal.addEventListener('abort', () => aborted.resolve(), { once: true });
+      await callbackDone.promise; // Deliberately ignore abort, as an external consumer can.
+    } });
+    const worker = new PromotionEventWorker(pool, registry, { owner: 'privacy-running', pollMs: 100,
+      claimBatch: 1, leaseMs: 1_000, callbackTimeoutMs: 800, databaseTimeoutMs: 200,
+      shutdownWaitMs: 100, maxAttempts: 3, baseBackoffMs: 10, maxBackoffMs: 100,
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined } });
+    const draining = worker.drainOnce().then(() => undefined, (error: unknown) => error);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const snapshot = await entered.promise;
+      expect(snapshot.destinationScope.name).toBe(personal.name);
+      const result = await offboardPrincipal(pool, admin, target.id, { confirmationScopeId: personal.id });
+      expect(result.complete).toBe(true);
+      const observedAbort = await Promise.race([aborted.promise.then(() => true), new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), 2_000);
+      })]);
+      expect(observedAbort).toBe(true);
+      // This is honest stored-state erasure, not JavaScript-memory retraction.
+      expect(snapshot.destinationScope.name).toBe(personal.name);
+      callbackDone.resolve();
+      expect(await draining).toBeUndefined();
+      await worker.stop('test-finished');
+      expect((await pool.query('SELECT state,lease_owner,last_error FROM promotion_event_deliveries WHERE event_id=$1::uuid',
+        [promoted.promotionEvent.eventId])).rows).toEqual([{ state: 'privacy_cancelled', lease_owner: null, last_error: null }]);
+      expect(await claimPromotionDeliveries(pool, { owner: 'replacement', webhookIds: ['running-hook'], limit: 1, leaseMs: 1_000 })).toEqual([]);
+      expect(calls).toBe(1);
+    } finally {
+      if (timer) clearTimeout(timer);
+      callbackDone.resolve(); await draining; await worker.stop('test-finished');
+    }
   });
 
 });
