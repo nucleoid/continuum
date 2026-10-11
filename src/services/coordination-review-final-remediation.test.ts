@@ -216,7 +216,7 @@ describe('coordination final review remediation', () => {
           for (let index = 0; index < 3; index += 1) {
             const runId = randomUUID();
             const lease = await acquireLease(pool, value.target, {
-              scope: { kind: 'project', name: value.shared.name }, resource: `pending-history-${index}`,
+              scope: `project:${value.shared.name}`, resource: `pending-history-${index}`,
               runId, requestId: randomUUID(), ttlSeconds: 900,
             });
             expect(lease.acquired).toBe(true);
