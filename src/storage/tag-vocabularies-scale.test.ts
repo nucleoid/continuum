@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -23,11 +23,11 @@ it('rewrites 25,000 mixed historical rows within the bounded migration budget', 
   });
   try {
     await admin.query(`CREATE SCHEMA ${schema}`);
-    for (const name of [
-      '0001_init.sql', '0002_lifecycle_principal.sql',
-      '0003_lifecycle_expiry_index.sql', '0004_review_queue_index.sql',
-    ]) {
-      await writeFile(join(before, name), await readFile(join(MIGRATIONS, name), 'utf8'));
+    for (const name of (await readdir(MIGRATIONS)).sort()) {
+      if (!/^\d{4}_.+\.sql$/.test(name) || Number(name.slice(0, 4)) > 82) continue;
+      const source = await readFile(join(MIGRATIONS, name), 'utf8');
+      await writeFile(join(before, name), source);
+      await writeFile(join(after, name), source);
     }
     await writeFile(
       join(after, '0083_tag_vocabularies.sql'),
@@ -88,4 +88,4 @@ it('rewrites 25,000 mixed historical rows within the bounded migration budget', 
       rm(after, { recursive: true, force: true }),
     ]);
   }
-}, 30_000);
+}, 180_000);

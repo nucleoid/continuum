@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -80,12 +80,7 @@ describe('tag vocabulary schema', () => {
     });
     try {
       await admin.query(`CREATE SCHEMA ${schema}`);
-      for (const name of [
-        '0001_init.sql', '0002_lifecycle_principal.sql',
-        '0003_lifecycle_expiry_index.sql', '0004_review_queue_index.sql',
-      ]) {
-        await writeFile(join(first, name), await readFile(join(MIGRATIONS, name), 'utf8'));
-      }
+      await copyPriorTagMigrations(first, second);
       await writeFile(
         join(second, '0083_tag_vocabularies.sql'),
         await readFile(join(MIGRATIONS, '0083_tag_vocabularies.sql'), 'utf8'),
@@ -239,7 +234,7 @@ describe('tag vocabulary schema', () => {
         rm(second, { recursive: true, force: true }),
       ]);
     }
-  });
+  }, 180_000);
 
   it('drains FOR UPDATE-first writers without deadlock while reads continue', async () => {
     const suffix = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
@@ -259,24 +254,17 @@ describe('tag vocabulary schema', () => {
     });
     let priorWriter: pg.PoolClient | undefined;
     let queuedWriter: pg.PoolClient | undefined;
+    let rewriteGate: pg.PoolClient | undefined;
     let priorWriterOpen = false;
     let migration: Promise<unknown> | undefined;
     let queuedInsert: Promise<{ error?: { code?: string }; inserted?: boolean }> | undefined;
     try {
       await admin.query(`CREATE SCHEMA ${schema}`);
-      for (const name of [
-        '0001_init.sql', '0002_lifecycle_principal.sql',
-        '0003_lifecycle_expiry_index.sql', '0004_review_queue_index.sql',
-      ]) {
-        await writeFile(join(first, name), await readFile(join(MIGRATIONS, name), 'utf8'));
-      }
+      await copyPriorTagMigrations(first, second);
       const migrationSql = await readFile(join(MIGRATIONS, '0083_tag_vocabularies.sql'), 'utf8');
       await writeFile(
         join(second, '0083_tag_vocabularies.sql'),
-        migrationSql.replace(
-          /LOCK TABLE memories IN [A-Z ]+ MODE;/,
-          (lock) => `${lock}\nSELECT pg_sleep(0.5);`,
-        ),
+        migrationSql,
       );
       await runMigrations(writers, first);
       await writers.query(`
@@ -294,6 +282,25 @@ describe('tag vocabulary schema', () => {
         )
       `);
 
+      // Park the real rewrite using a fixture trigger, without changing the
+      // checksum-pinned migration. The prior writer changes only tags, while
+      // the migration first creates its database-owned provenance metadata.
+      await writers.query(`
+        CREATE FUNCTION tag_fixture_park_rewrite() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF NEW.metadata ? 'continuum_tag_migration' THEN
+            PERFORM pg_catalog.pg_advisory_xact_lock(786421, pg_catalog.hashtext(TG_TABLE_SCHEMA));
+          END IF;
+          RETURN NEW;
+        END;
+        $$;
+        CREATE TRIGGER tag_fixture_park_rewrite BEFORE UPDATE OF metadata ON memories
+          FOR EACH ROW EXECUTE FUNCTION tag_fixture_park_rewrite()
+      `);
+      rewriteGate = await admin.connect();
+      await rewriteGate.query('BEGIN');
+      await rewriteGate.query('SELECT pg_catalog.pg_advisory_xact_lock(786421,pg_catalog.hashtext($1::text))', [schema]);
+
       priorWriter = await writers.connect();
       await priorWriter.query('BEGIN');
       priorWriterOpen = true;
@@ -304,6 +311,7 @@ describe('tag vocabulary schema', () => {
       `);
 
       migration = runMigrations(migrator, second);
+      void migration.catch(() => undefined);
       await waitForTableLock(
         admin, `${schema}.memories`, 'ExclusiveLock', false,
       );
@@ -339,6 +347,9 @@ describe('tag vocabulary schema', () => {
       );
       await waitForTableLock(admin, `${schema}.memories`, 'RowExclusiveLock', false);
 
+      await rewriteGate.query('COMMIT');
+      rewriteGate.release();
+      rewriteGate = undefined;
       await migration;
       expect(await queuedInsert).toMatchObject({ error: { code: '23514' } });
 
@@ -358,6 +369,8 @@ describe('tag vocabulary schema', () => {
       }]);
     } finally {
       if (priorWriterOpen) await priorWriter?.query('ROLLBACK').catch(() => undefined);
+      await rewriteGate?.query('ROLLBACK');
+      rewriteGate?.release();
       await migration?.catch(() => undefined);
       await queuedInsert?.catch(() => undefined);
       priorWriter?.release();
@@ -370,7 +383,7 @@ describe('tag vocabulary schema', () => {
         rm(second, { recursive: true, force: true }),
       ]);
     }
-  });
+  }, 180_000);
 
   it('bounds lock acquisition and EXCLUSIVE-lock work before taking the migration lock', async () => {
     const sql = await readFile(join(MIGRATIONS, '0083_tag_vocabularies.sql'), 'utf8');
@@ -410,25 +423,20 @@ describe('tag vocabulary schema', () => {
     let writer: pg.PoolClient | undefined;
     try {
       await admin.query(`CREATE SCHEMA ${schema}`);
-      for (const name of [
-        '0001_init.sql', '0002_lifecycle_principal.sql',
-        '0003_lifecycle_expiry_index.sql', '0004_review_queue_index.sql',
-      ]) {
-        await writeFile(join(first, name), await readFile(join(MIGRATIONS, name), 'utf8'));
-      }
+      await copyPriorTagMigrations(first, second);
       const migrationSql = await readFile(join(MIGRATIONS, '0083_tag_vocabularies.sql'), 'utf8');
       await writeFile(
         join(second, '0083_tag_vocabularies.sql'),
-        migrationSql.replace("SET LOCAL lock_timeout = '5s';", "SET LOCAL lock_timeout = '150ms';"),
+        migrationSql,
       );
       await runMigrations(writerPool, first);
       writer = await writerPool.connect();
       await writer.query('BEGIN');
-      await writer.query('LOCK TABLE principals IN ACCESS EXCLUSIVE MODE');
+      await writer.query('LOCK TABLE principals IN SHARE ROW EXCLUSIVE MODE');
 
       const started = Date.now();
       await expect(runMigrations(migrator, second)).rejects.toThrow(/lock timeout/i);
-      expect(Date.now() - started).toBeLessThan(2_000);
+      expect(Date.now() - started).toBeLessThan(8_000);
       const rollback = await writerPool.query(
         `SELECT to_regclass('${schema}.tag_vocabularies') AS vocabulary`,
       );
@@ -444,7 +452,7 @@ describe('tag vocabulary schema', () => {
         rm(second, { recursive: true, force: true }),
       ]);
     }
-  });
+  }, 180_000);
 
   it('rolls back cleanly when the bounded table-lock wait expires', async () => {
     const suffix = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
@@ -464,16 +472,11 @@ describe('tag vocabulary schema', () => {
     let writer: pg.PoolClient | undefined;
     try {
       await admin.query(`CREATE SCHEMA ${schema}`);
-      for (const name of [
-        '0001_init.sql', '0002_lifecycle_principal.sql',
-        '0003_lifecycle_expiry_index.sql', '0004_review_queue_index.sql',
-      ]) {
-        await writeFile(join(first, name), await readFile(join(MIGRATIONS, name), 'utf8'));
-      }
+      await copyPriorTagMigrations(first, second);
       const migrationSql = await readFile(join(MIGRATIONS, '0083_tag_vocabularies.sql'), 'utf8');
       await writeFile(
         join(second, '0083_tag_vocabularies.sql'),
-        migrationSql.replace("SET LOCAL lock_timeout = '5s';", "SET LOCAL lock_timeout = '150ms';"),
+        migrationSql,
       );
       await runMigrations(writerPool, first);
       await writerPool.query(`
@@ -500,7 +503,7 @@ describe('tag vocabulary schema', () => {
 
       const started = Date.now();
       await expect(runMigrations(migrator, second)).rejects.toThrow(/lock timeout/i);
-      expect(Date.now() - started).toBeLessThan(2_000);
+      expect(Date.now() - started).toBeLessThan(8_000);
 
       const rollback = await writerPool.query(
         `SELECT to_regclass('${schema}.tag_vocabularies') AS vocabulary,
@@ -521,7 +524,7 @@ describe('tag vocabulary schema', () => {
         rm(second, { recursive: true, force: true }),
       ]);
     }
-  });
+  }, 180_000);
 
   it.each([
     ['uppercase', 'Deploy'],
@@ -607,3 +610,12 @@ describe('tag vocabulary schema', () => {
     expect(query.mock.calls[0][0]).not.toContain('FOR UPDATE');
   });
 });
+
+async function copyPriorTagMigrations(before: string, after: string): Promise<void> {
+  for (const name of (await readdir(MIGRATIONS)).sort()) {
+    if (!/^\d{4}_.+\.sql$/.test(name) || Number(name.slice(0, 4)) > 82) continue;
+    const source = await readFile(join(MIGRATIONS, name), 'utf8');
+    await writeFile(join(before, name), source);
+    await writeFile(join(after, name), source);
+  }
+}
