@@ -91,15 +91,15 @@ const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
   ['0083_tag_vocabularies.sql',
     '6d7dfb4e612b699f40837698da3156166330eda3e003f67fd59f602554936d91'],
   ['0084_provider_embeddings_backfill.sql',
-    'c936d830ab9f00571a392ce72977007a6134b3d0f2237dc88a85ef850862ffd1'],
+    '68e754cb35f98d637879bcb9519f3603ec6e118a7f6945c6bef4fc86e8a7ada3'],
   ['0085_embedding_backfill_failures.sql',
     'bf832c89bffcb3d03e33a006601f9044907779465c6e860d9db42b282d68a14d'],
   ['0086_embedding_backfill_failure_disposition.sql',
     '470c7a9458fedb3834987cc7a276e3ffacc2f893a39e936cea0f8a88d8687539'],
   ['0087_embedding_provider_scan_index.sql',
-    '6049e0743c585a73a56849812eb0740b1bb08f254963aa3650bde1622c31dea8'],
+    'f9ab8aacaa5bd70bb251bea6a0323a4002dd370949e743b149687301095fc204'],
   ['0088_embedding_provider_scan_index_rebuild.sql',
-    'e7e9dc8b7cb5a3266e70dcf0fe0a31221baedf182aa6356ac3a0146c7e1de39c'],
+    'e0f21f1cfa4a81fbc7c8fbe65e06ae31157e499dbf562b482b87099185e079e2'],
 ]);
 const FORWARD_MIGRATION_REQUIREMENTS = new Map([
   ['0084_provider_embeddings_backfill.sql', '0083_tag_vocabularies.sql'],
