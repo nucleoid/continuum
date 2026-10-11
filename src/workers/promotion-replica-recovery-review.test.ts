@@ -134,4 +134,41 @@ describe('promotion replica recovery review', () => {
       await draining; await worker.stop('test-finished'); await Promise.allSettled([...pendingWrites]);
     }
   });
+  it('charges a started consumer rejection after renewal uncertainty and preserves its backoff', async () => {
+    const events = await seed(['started-failure']);
+    const entered = Promise.withResolvers<void>();
+    const aborted = Promise.withResolvers<void>();
+    const persisted = Promise.withResolvers<void>();
+    let calls = 0;
+    let renewals = 0;
+    const registry = new PromotionWebhookRegistry();
+    registry.register({ id: 'started-failure', onPromoted: async (_event, context) => {
+      calls += 1; entered.resolve();
+      context.signal.addEventListener('abort', () => aborted.resolve(), { once: true });
+      await aborted.promise;
+      throw new Error('started consumer rejected after ownership uncertainty');
+    } });
+    const store: PromotionWorkerStore = { ...actualStore,
+      renew: async (...args) => {
+        if (++renewals === 1) throw new Error('injected recoverable ownership uncertainty');
+        return renewPromotionDeliveries(...args);
+      },
+      abandon: async (...args) => { const result = await abandonPromotionDeliveries(...args); persisted.resolve(); return result; },
+      fail: async (...args) => { const result = await failPromotionDelivery(...args); persisted.resolve(); return result; },
+    };
+    const worker = new PromotionEventWorker(pool, registry, { ...options('started-primary'),
+      callbackTimeoutMs: 450, baseBackoffMs: 200, maxBackoffMs: 400 }, store);
+    const draining = worker.drainOnce().then(() => undefined, (error: unknown) => error);
+    try {
+      await beforeWatch(entered.promise);
+      await beforeWatch(persisted.promise);
+      expect(calls).toBe(1);
+      const state = (await pool.query(`SELECT attempt_count,state,last_error,lease_owner,
+        available_at>pg_catalog.clock_timestamp() AS backoff_remains FROM promotion_event_deliveries WHERE event_id=$1::uuid`,
+        [events.get('started-failure')])).rows[0];
+      expect(state).toMatchObject({ attempt_count: 1, state: 'pending', last_error: 'callback failed',
+        lease_owner: null, backoff_remains: true });
+    } finally { aborted.resolve(); await draining; await worker.stop('test-finished'); }
+  });
+
 });
