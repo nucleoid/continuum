@@ -406,9 +406,16 @@ Matching those functions does not certify every historical function or prove
 against database-owner changes. Only a trusted migration owner may inspect this
 bookkeeping; runtime, operator and sync roles gain no new capability.
 
+The 0082 index is built concurrently after the 0081 contract backfill. It matches
+the current private-field predicate, including fencing tokens and resource byte
+lengths; the published 0070 five-field index remains unchanged. Invalid-index
+repair and valid-index verification make interrupted online builds retryable.
+This index is not a prerequisite for the earlier bounded 0081 repair phases.
+
 Published migration history through 0079 is preserved. The current unreleased
-forward repairs are 0080 for provider profiles and 0081 for the public contract.
-Apply every packaged migration in order through 0081 using the migration/schema
+forward repairs are 0080 for provider profiles, 0081 for the public contract,
+and 0082 for the matching seven-field privacy audit index.
+Apply every packaged migration in order through 0082 using the migration/schema
 owner's connection, finish its backfill, then converge exact grants and verify
 before starting current binaries. For the installed command:
 

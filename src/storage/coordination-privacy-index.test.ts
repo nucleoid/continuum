@@ -27,6 +27,9 @@ it('plans the installed seven-key privacy audit probe with its matching partial 
     for(const [principal,expected]of[[clean,false],[dirty,true]]as const){
       const result=await client.query(`EXECUTE coordination_installed_privacy_probe('${principal.id}'::uuid)`);
       expect(result.rows).toEqual([{dirty:expected}]);
+    }
+    const observations:{indexes:unknown[]}[]=[];
+    for(const [principal,expected]of[[clean,false],[dirty,true]]as const){
       const plan=await client.query(`EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON)
         EXECUTE coordination_installed_privacy_probe('${principal.id}'::uuid)`);
       const nodes:Record<string,unknown>[]=[];
@@ -36,9 +39,19 @@ it('plans the installed seven-key privacy audit probe with its matching partial 
         const node=value as Record<string,unknown>;nodes.push(node);Object.values(node).forEach(walk);
       };
       walk(plan.rows[0]['QUERY PLAN']);
-      expect(nodes.map((node)=>node['Index Name']).filter(Boolean))
-        .toContain('audit_log_coordination_privacy_linkable_v7_idx');
+      const indexes=nodes.map((node)=>node['Index Name']).filter(Boolean);
+      console.info('coordination-privacy-probe-plan',JSON.stringify({
+        dirty:expected,indexes,executionMs:plan.rows[0]['QUERY PLAN'][0]['Execution Time'],
+        scans:nodes.filter((node)=>String(node['Node Type']).includes('Scan')).map((node)=>({
+          type:node['Node Type'],relation:node['Relation Name'],index:node['Index Name'],
+          actualRows:node['Actual Rows'],loops:node['Actual Loops'],filteredRows:node['Rows Removed by Filter'],
+          heapFetches:node['Heap Fetches'],sharedHits:node['Shared Hit Blocks'],sharedReads:node['Shared Read Blocks'],
+        })),
+      }));
+      observations.push({indexes});
     }
+    for(const observation of observations)expect(observation.indexes)
+      .toContain('audit_log_coordination_privacy_linkable_v7_idx');
     await client.query('DEALLOCATE coordination_installed_privacy_probe');await client.query('COMMIT');
   }finally{
     if(client){await client.query('ROLLBACK').catch(()=>undefined);client.release();}
