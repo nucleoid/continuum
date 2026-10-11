@@ -1766,6 +1766,22 @@ async function offboardPrincipalCore(
     const durableProgress = durableOffboardingProgressed(
       durableProgressBefore, currentRun.rows[0] as Record<string, unknown>,
     );
+    if (!completionReady && coordinationPrivacyReason === 'lock_busy'
+        && !durableProgress && !coordinationPrivacyProgressed
+        && memoryCandidates === 0 && auditedRows === 0 && auditedQueries === 0
+        && (targetEmbeddingDelete.rowCount ?? 0) === 0
+        && membershipCount === 0 && aliasCount === 0 && entraCount === 0) {
+      // A skipped locked outbox row is an incomplete proof, not a new erasure
+      // batch. Preserve the last durable counters after all access/approval
+      // checks and cursor phases have run without changing their state.
+      await client.query('COMMIT');
+      return { ...baseResult, dryRun: false, alreadyOffboarded: false, complete: false, progressed: false,
+        blockedUntil: coordinationPrivacyBlockedUntil, reason: coordinationPrivacyReason,
+        progress: { batch: Number(run.rows[0].batches), batchSize,
+          memoriesProcessed: Number(run.rows[0].memories_processed),
+          auditRowsProcessed: Number(run.rows[0].audit_rows_processed),
+          memoriesRemaining: memoryComplete ? 0 : 1, auditRowsRemaining: remainingAudit ? 1 : 0 } };
+    }
     const progressUpdate = await writeOffboardingRun(
       client, principalId, actor.id, 'add_progress', {
         memories: memoryBatch, audit_rows: auditedRows,
