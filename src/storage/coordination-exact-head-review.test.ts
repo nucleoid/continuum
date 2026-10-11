@@ -34,6 +34,11 @@ describe('coordination exact-head review regressions', () => {
   beforeEach(async () => { pool ??= await makeTestPool(); await resetData(pool); }, 30_000);
   afterAll(async () => {
     for (const role of roles.reverse()) {
+      await pool.query(
+        `DELETE FROM continuum_pgvector_role_profiles
+          WHERE database_role_oid = (SELECT oid FROM pg_roles WHERE rolname = $1)`,
+        [role],
+      );
       await pool.query('DROP OWNED BY ' + quoteRole(role));
       await pool.query('REVOKE ' + quoteRole(role) + ' FROM CURRENT_USER CASCADE');
       await pool.query('DROP ROLE ' + quoteRole(role));
@@ -470,8 +475,10 @@ describe('coordination exact-head review regressions', () => {
         throw new Error('expected acquire-first lease');
       }
       const acquired = acquireOutcome.result;
-      expect(await offboarding).toMatchObject({
-        ok: true, result: { complete: false, reason: 'live_lease' },
+      const offboardingOutcome = await offboarding;
+      if (!offboardingOutcome.ok) throw offboardingOutcome.error;
+      expect(offboardingOutcome.result).toMatchObject({
+        complete: false, reason: 'live_lease',
       });
       await releaseLease(application, value.target, {
         leaseId: acquired.leaseId, runId: acquireRunId, requestId: randomUUID(),
