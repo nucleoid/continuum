@@ -91,7 +91,7 @@ describe('embedding resource review', () => {
     const blockedProvider: EmbeddingProvider = { id: 'test:blocked-provider', dim: 768, local: true,
       embed: async (texts) => texts.map(() => vector) };
     const healthyEmbed = vi.fn(async (texts: string[]) => texts.map(() => vector));
-    const healthyProvider: EmbeddingProvider = { id: 'test:healthy-provider', dim: 768, local: true, embed: healthyEmbed };
+    const healthyProvider: EmbeddingProvider = { id: 'test:healthy-provider', dim: 768, local: false, embed: healthyEmbed };
     const routing = new ScopeEmbeddingRouter(new EmbeddingRegistry([['blocked', blockedProvider], ['healthy', healthyProvider]]),
       { default: 'blocked', rules: [{ match: { kind: 'project', name: 'healthy-provider' }, provider: 'healthy' }] });
     const blocker = await pool.connect();
