@@ -62,9 +62,11 @@ export function enrichmentConfigFromEnv(
 }
 
 const MAX_ENRICHER_CALLS = 16;
+const MAX_HEALTHY_CALLS_PER_ID = 4;
 const MAX_ENRICHER_INPUT_BYTES = 1024 * 1024;
 const MAX_RETAINED_INPUT_BYTES = 8 * 1024 * 1024;
 const inFlightEnrichers = new Map<string, number>();
+const detachedEnrichers = new Map<string, number>();
 let activeEnricherCalls = 0;
 let retainedInputBytes = 0;
 
@@ -197,7 +199,8 @@ export async function applyRetrievalEnrichers(
   const admitted: RetrievalEnricher[] = [];
   const reported = new Set<string>();
   for (const enricher of enrichers) {
-    if ((inFlightEnrichers.get(enricher.id) ?? 0) > 0
+    if ((detachedEnrichers.get(enricher.id) ?? 0) > 0
+        || (inFlightEnrichers.get(enricher.id) ?? 0) >= MAX_HEALTHY_CALLS_PER_ID
         || activeEnricherCalls + admitted.length >= MAX_ENRICHER_CALLS
         || retainedInputBytes + bytes > MAX_RETAINED_INPUT_BYTES) {
       warn({ event: 'retrieval_enricher_failed', enricherId: enricher.id, reason: 'saturated' });
@@ -207,10 +210,19 @@ export async function applyRetrievalEnrichers(
   if (admitted.length === 0) return results;
   retainedInputBytes += bytes;
   activeEnricherCalls += admitted.length;
-  for (const enricher of admitted) inFlightEnrichers.set(enricher.id, 1);
+  for (const enricher of admitted) inFlightEnrichers.set(enricher.id, (inFlightEnrichers.get(enricher.id) ?? 0) + 1);
+  const unsettledIds = new Set(admitted.map((enricher) => enricher.id));
+  const detachedIds = new Set<string>();
   let unsettled = admitted.length;
   const release = (enricher: RetrievalEnricher) => {
-    inFlightEnrichers.delete(enricher.id); activeEnricherCalls -= 1;
+    const active = (inFlightEnrichers.get(enricher.id) ?? 1) - 1;
+    if (active === 0) inFlightEnrichers.delete(enricher.id); else inFlightEnrichers.set(enricher.id, active);
+    unsettledIds.delete(enricher.id);
+    if (detachedIds.delete(enricher.id)) {
+      const detached = (detachedEnrichers.get(enricher.id) ?? 1) - 1;
+      if (detached === 0) detachedEnrichers.delete(enricher.id); else detachedEnrichers.set(enricher.id, detached);
+    }
+    activeEnricherCalls -= 1;
     if (--unsettled === 0) retainedInputBytes -= bytes;
   };
   let input: readonly Readonly<RecallResult>[];
@@ -221,6 +233,13 @@ export async function applyRetrievalEnrichers(
   }
   const resultCount = results.length;
   const controller = new AbortController();
+  controller.signal.addEventListener('abort', () => {
+    // Healthy overlap is bounded but allowed. Only unsettled detached calls
+    // close admission for an ID until the actual provider promise settles.
+    for (const id of unsettledIds) {
+      detachedIds.add(id); detachedEnrichers.set(id, (detachedEnrichers.get(id) ?? 0) + 1);
+    }
+  }, { once: true });
   const abortForShutdown = () => controller.abort();
   options.signal?.addEventListener('abort', abortForShutdown, { once: true });
   if (options.signal?.aborted) controller.abort();
