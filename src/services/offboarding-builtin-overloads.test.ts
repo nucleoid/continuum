@@ -33,17 +33,17 @@ describe('offboarding builtin resolution review', () => {
     try {
       await owner.query(`CREATE ROLE ${quote(role)} LOGIN PASSWORD '${password}'`);
       for (const script of ['grant-application-role.sql', 'grant-operator-role.sql']) {
-      const grantSource = await readFile(path.join(process.cwd(), 'scripts', script), 'utf8');
-      const grantSql = grantSource.split(/\r?\n/).filter((line) => !line.trimStart().startsWith('\\')).join('\n')
-        .replaceAll(':"continuum_schema"', '"public"').replaceAll(":'continuum_schema'", "'public'")
-        .replaceAll(':"continuum_app_role"', quote(role)).replaceAll(":'continuum_app_role'", `'${role}'`)
-        .replaceAll(':"continuum_operator_role"', quote(role)).replaceAll(":'continuum_operator_role'", `'${role}'`)
-        .replaceAll(":'continuum_principal_id'", `'${admin.id}'`);
-      const grant = await owner.connect();
-      let discardGrant = false;
-      try { await grant.query(grantSql); }
-      catch (error) { try { await grant.query('ROLLBACK'); } catch { discardGrant = true; } throw error; }
-      finally { grant.release(discardGrant); }
+        const grantSource = await readFile(path.join(process.cwd(), 'scripts', script), 'utf8');
+        const grantSql = grantSource.split(/\r?\n/).filter((line) => !line.trimStart().startsWith('\\')).join('\n')
+          .replaceAll(':"continuum_schema"', '"public"').replaceAll(":'continuum_schema'", "'public'")
+          .replaceAll(':"continuum_app_role"', quote(role)).replaceAll(":'continuum_app_role'", `'${role}'`)
+          .replaceAll(':"continuum_operator_role"', quote(role)).replaceAll(":'continuum_operator_role'", `'${role}'`)
+          .replaceAll(":'continuum_principal_id'", `'${admin.id}'`);
+        const grant = await owner.connect();
+        let discardGrant = false;
+        try { await grant.query(grantSql); }
+        catch (error) { try { await grant.query('ROLLBACK'); } catch { discardGrant = true; } throw error; }
+        finally { grant.release(discardGrant); }
       }
       await owner.query(`CREATE SCHEMA ${quote(hostile)};
         CREATE SEQUENCE ${quote(hostile)}.called;
