@@ -395,6 +395,11 @@ export async function repairCoordinationPrivacy(
     }
     const state: CoordinationPrivacyRepairCandidate['state'] =
       target.rows[0].offboarded_at === null ? 'disabled_only' : 'offboarded';
+    const candidate = await client.query(
+      `SELECT repair_state
+         FROM continuum_operator_list_coordination_privacy_repairs($1, $2, 1)`,
+      [actor.id, principalId],
+    );
     if (state === 'offboarded') {
       // Principal privacy alone is not proof of full lifecycle erasure.
       // The confirmed offboarding path owns that bounded verification.
@@ -408,11 +413,6 @@ export async function repairCoordinationPrivacy(
         progressed: false, blockedUntil: null, reason: 'offboarding_required',
       };
     }
-    const candidate = await client.query(
-      `SELECT repair_state
-         FROM continuum_operator_list_coordination_privacy_repairs($1, $2, 1)`,
-      [actor.id, principalId],
-    );
     const privacy = await client.query(
       `SELECT privacy_version, principal_complete
          FROM continuum_coordination_privacy_state($1, $2)`,
