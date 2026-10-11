@@ -177,6 +177,7 @@ describe('coordination final review remediation', () => {
         "INSERT INTO coordination_resources(scope_id, resource) VALUES($1, 'legacy-personal-resource')",
         [value.owned.id],
       );
+      await setup.query('SET CONSTRAINTS ALL IMMEDIATE');
       await setup.query('ALTER TABLE coordination_resources ENABLE TRIGGER USER');
       await setup.query(
         `INSERT INTO coordination_scope_usage(scope_id, resource_count) VALUES($1, 1)
