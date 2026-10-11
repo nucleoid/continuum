@@ -15,8 +15,9 @@ each result. Continuum places each object under
 scores, excerpts, ordering, or another extension's namespace.
 
 Admitted enrichers run concurrently under one request deadline. A pre-aborted
-request invokes none. Per process, at most one unsettled call per enricher ID
-and 16 unsettled calls overall are admitted. Admission checks a conservative
+request invokes none. Per process, up to four healthy unsettled calls per enricher ID
+and 16 unsettled calls overall are admitted. Once a call times out or is aborted
+but remains unsettled, that ID admits no new calls until its detached calls settle. Admission checks a conservative
 input-size estimate before cloning: 1 MiB per snapshot and 8 MiB retained across
 snapshots, with finite depth and node limits. These are input accounting limits,
 not measured process memory. An oversized or saturated input fails open to core
@@ -95,8 +96,10 @@ consumers. Coordinate ID changes and consumer deployment; removing an ID does
 not delete prior pending deliveries, and consumers deduplicate by event ID.
 
 Do not mix old producers or old offboarding runtimes with this release. Older
-binaries can omit delivery rows or complete offboarding without outbox erasure,
-and new workers cannot reconstruct omitted events. Quiesce all producers and
+producers can omit delivery rows, and new workers cannot reconstruct omitted
+events. Older offboarding code does not scrub the outbox; the installed 0089
+physical predicate prevents false completion, so old code can remain incomplete
+instead of repairing those rows. Quiesce all producers and
 worker replicas, complete migration 0089, explicitly regrant every APP and OP
 role, configure IDs, then enable the new binaries. Current REST and MCP startup
 checks outbox readiness without repairing or granting it. Rolling back binaries
@@ -210,6 +213,107 @@ the worker's own shutdown abort are abandoned without consuming an attempt.
 The default registries are empty. Deployments register consumers at their
 composition boundary. Core does not import or know about downstream products.
 
+## Supported composition entrypoints
+
+The package ships its `dist/api`, `dist/storage` and `dist/workers` modules and
+has no `exports` restriction. These deep imports are the supported composition
+boundary for this release; pin the package version when maintaining a custom
+launcher. `createApp` and `buildMcpServer` are transport builders, not complete
+startup or shutdown lifecycles. Register extensions before constructing them.
+
+The following `continuum-rest.mjs` is a runnable REST composition after normal
+APP-role database, authentication and embedding environment configuration.
+Configure the operator registry to `['promotion-log']` before launching it.
+Its sample consumer only logs the stable event ID; a real consumer must implement
+idempotency and abort handling for its own side effects.
+
+```js
+import { randomUUID } from 'node:crypto';
+import { defaultExtensionRegistries, enrichmentConfigFromEnv } from '@continuum/core';
+import { createApp, formatOperationalError } from '@continuum/core/dist/api/server.js';
+import { startRuntime } from '@continuum/core/dist/api/runtime.js';
+import { createReadinessState } from '@continuum/core/dist/api/readiness.js';
+import { authModeFromEnv, createAuthenticator, entraConfigFromEnv, warnOnDevAuthMode } from '@continuum/core/dist/api/auth.js';
+import { getPool, closePool } from '@continuum/core/dist/storage/pool.js';
+import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoordinationContractReady, requirePromotionOutboxReady } from '@continuum/core/dist/storage/provider-lifecycle.js';
+import { makeEmbeddingRouterFromEnv } from '@continuum/core/dist/embeddings/factory.js';
+import { warnOnMissingEmbeddingRoutingScopes } from '@continuum/core/dist/embeddings/router.js';
+import { configuredReviewHorizonDays } from '@continuum/core/dist/services/review-queue.js';
+import { relationThresholdFromEnv } from '@continuum/core/dist/services/relations.js';
+import { PromotionEventWorker, promotionWorkerOptionsFromEnv } from '@continuum/core/dist/workers/promotion-events.js';
+
+async function main() {
+  const pool = getPool();
+  const schemaOptions = { expectedSchema: applicationSchemaFromEnv() };
+  await reconcilePgvectorProviderGrants(pool, schemaOptions);
+  await requireCoordinationContractReady(pool, schemaOptions);
+  await requirePromotionOutboxReady(pool, schemaOptions);
+  const mode = authModeFromEnv();
+  warnOnDevAuthMode(mode);
+  const authenticator = createAuthenticator(pool, mode, mode === 'entra' ? entraConfigFromEnv() : undefined);
+  const embeddingProvider = makeEmbeddingRouterFromEnv();
+  await warnOnMissingEmbeddingRoutingScopes(pool, embeddingProvider);
+  const extensions = defaultExtensionRegistries();
+  extensions.retrievalEnrichers.register({ id: 'memory-kind', async enrich(results) {
+    return results.map(({ memory }) => ({ kind: memory.type }));
+  } });
+  extensions.promotionWebhooks.register({ id: 'promotion-log', async onPromoted(event) {
+    console.info(JSON.stringify({ event: 'custom_promotion', eventId: event.eventId }));
+  } });
+  const expected = (await pool.query('SELECT continuum_promotion_webhook_ids() AS ids')).rows[0].ids;
+  if (JSON.stringify(expected) !== JSON.stringify(extensions.promotionWebhooks.ids())) {
+    throw new Error('Custom producer IDs do not match the operator registry');
+  }
+  const readiness = createReadinessState();
+  const enrichmentShutdown = new AbortController();
+  const app = createApp(pool, { embeddingProvider, authenticator, readiness,
+    readinessTimeoutMs: Number(process.env.CONTINUUM_READINESS_TIMEOUT_MS ?? 1000),
+    reviewHorizonDays: configuredReviewHorizonDays(), relationThreshold: relationThresholdFromEnv(),
+    retrievalEnrichers: extensions.retrievalEnrichers, promotionWebhooks: extensions.promotionWebhooks,
+    enrichment: { ...enrichmentConfigFromEnv(), signal: enrichmentShutdown.signal } });
+  const worker = new PromotionEventWorker(pool, extensions.promotionWebhooks,
+    promotionWorkerOptionsFromEnv(`custom-api:${process.pid}:${randomUUID()}`));
+  await startRuntime(app, { port: Number(process.env.CONTINUUM_API_PORT ?? 4000), readiness,
+    workers: [{ stop() { enrichmentShutdown.abort(); } }, worker], closePool,
+    shutdownTimeoutMs: Number(process.env.CONTINUUM_SHUTDOWN_TIMEOUT_MS ?? 10000) });
+}
+main().catch(async (error) => {
+  console.error(JSON.stringify({ event: 'startup_failed', error: formatOperationalError(error) }));
+  process.exitCode = 1;
+  try { await closePool(); } catch { console.error('Custom startup pool cleanup failed'); }
+});
+```
+
+For a custom MCP launcher, use the same pool, schema gates, canonical-ID check,
+configured embedding router and authenticator before building the transport.
+Deep-import `buildMcpServer` from `@continuum/core/dist/api/mcp.js`; pass the
+registered enrichers and webhooks in its dependencies. Authenticate the bearer
+with `authenticator.authenticate('Bearer', token)` and reject absent or lifecycle
+principals, then pass `authenticated.principal` and `authenticated.allowedSource`.
+Connect it to `StdioServerTransport` from `@modelcontextprotocol/sdk` (declare that
+SDK dependency in the launcher package). Retain the stock MCP launcher's 30-second
+credential revalidation, token-expiry timer, and fatal startup/credential handling;
+passing a principal once does not provide ongoing credential validation. On
+shutdown, abort enrichment, close the MCP server and pool, and apply a finite
+process deadline. Keep protocol stdout exclusively for MCP messages. Run webhook
+consumers in the REST composition or a dedicated worker with the same ID set,
+not an unbounded background task in a stdio session.
+
+Promotion into a scope mapped to a disabled user is masked as `403 FORBIDDEN`
+with `Target scope is unavailable for promotion`, after normal destination ACL
+checks. An explicitly acknowledged shared-scope capture override can still permit
+capture into that scope. It does not authorize promotion or bypass outbox privacy.
+
+While retained non-ACK fences exist, each drain logs `promotion_worker_capacity`
+with `retainedFences`, `processInFlight` and `processCapacity` (100), then logs a
+clearing count after settlement. These are retained-fence counts, not a promise
+that every retained consumer is still executing user code. At least 100 distinct
+hung IDs can occupy all process slots and stop healthy work; below that limit a
+healthy ID may receive only one slot per poll. Restart all affected worker
+processes through bounded shutdown to clear abort-ignoring consumers. Different
+in-process worker registries are unsupported. Serial claims can still consume
+bounded database time before later IDs are admitted.
+
 ## Owned-scope privacy
 
 Approved offboarding includes the promotion outbox in its physical completion
@@ -242,7 +346,11 @@ its copy.
 Apply `0089_promotion_outbox.sql` as the application-schema migration owner
 with database `TEMPORARY` privilege. Quiesce old producers and worker replicas
 for cutover, use a finite external migration-process deadline, and complete
-migrations before enabling the new binaries. Its 5-second lock and 60-second
+migrations before enabling the new binaries. A skipped-role NOTICE is visible
+when the SQL is run through psql; the TypeScript migrator does not forward that
+NOTICE. Always run the explicit grant scripts and require the exact-profile and
+readiness startup checks rather than inferring role readiness from migration
+success. Its 5-second lock and 60-second
 statement limits apply per statement, not to the whole migration transaction.
 
 The outbox schema ships as `0089_promotion_outbox.sql`. Earlier unmerged branch
