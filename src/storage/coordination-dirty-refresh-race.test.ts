@@ -11,16 +11,15 @@ describe('coordination dirty refresh deletion contention', () => {
   beforeEach(async () => { pool ??= await makeTestPool(); await resetData(pool); }, 30_000);
   afterAll(async () => pool?.end());
 
-  it('retains discovery evidence when an allowed mapping writer races a refresh deleting the old marker', async () => {
+  it('retains discovery evidence when first mapping insertion races a refresh deleting the old marker', async () => {
     const principal = await createPrincipal(pool, { externalId: 'dirty-race:' + randomUUID(), kind: 'user', displayName: 'Target' });
     const operator = await createPrincipal(pool, { externalId: 'dirty-operator:' + randomUUID(), kind: 'user', displayName: 'Operator' });
     const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
     await addMembership(pool, operator.id, org.id, 'admin');
+    // Owner repair may attach the first mapping to legacy completed progress.
+    // Mapping identity updates are immutable; this test uses only INSERT.
     const oldScope = await createScope(pool, { kind: 'user', name: 'old-' + randomUUID() });
     const newScope = await createScope(pool, { kind: 'user', name: 'new-' + randomUUID() });
-    await pool.query(`INSERT INTO principal_user_scopes(principal_id,scope_id,mapped_by,
-      acknowledged_principal_ids,acknowledged_evidence_hash) VALUES($1,$2,$1,ARRAY[$1::uuid],repeat('a',64))`,
-    [principal.id, oldScope.id]);
     await pool.query(`INSERT INTO coordination_resources(scope_id,resource) VALUES($1,'history')`, [oldScope.id]);
     await pool.query(`INSERT INTO coordination_leases(lease_id,scope_id,resource,principal_id,run_id,
       fencing_token,acquired_at,expires_at,released_at,cleanup_eligible_at)
@@ -32,7 +31,7 @@ describe('coordination dirty refresh deletion contention', () => {
       (principal_id,detached_principal_id,privacy_version,completed_at)
       VALUES($1,'00000000-0000-4000-8000-000000000012',3,clock_timestamp())`, [principal.id]);
     expect((await pool.query('SELECT continuum_coordination_privacy_actual_state_is_erased($1,$2) AS erased',
-      [principal.id, oldScope.id])).rows).toEqual([{ erased: true }]);
+      [principal.id, oldScope.id])).rows).toEqual([{ erased: false }]);
     await pool.query(`INSERT INTO coordination_privacy_dirty_principals(principal_id)
       VALUES($1) ON CONFLICT(principal_id) DO NOTHING`, [principal.id]);
     const refresher = await pool.connect(); const writer = await pool.connect();
@@ -44,8 +43,10 @@ describe('coordination dirty refresh deletion contention', () => {
       await writer.query('BEGIN'); await writer.query("SET LOCAL statement_timeout='3s'");
       const writerPid = (await writer.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
       let settled = false;
-      const update = writer.query('UPDATE principal_user_scopes SET scope_id=$2 WHERE principal_id=$1',
-        [principal.id, newScope.id]).then(
+      const update = writer.query(`INSERT INTO principal_user_scopes
+        (principal_id,scope_id,mapped_by,acknowledged_principal_ids,acknowledged_evidence_hash)
+        VALUES($1,$2,$3,ARRAY[$1::uuid],repeat('a',64))`,
+        [principal.id, newScope.id, operator.id]).then(
         () => ({ ok: true as const }), (error: unknown) => ({ ok: false as const, error }),
       ).finally(() => { settled = true; });
       // Old code returns early on NOWAIT; a conservative retry can wait for the
