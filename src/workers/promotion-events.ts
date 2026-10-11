@@ -173,6 +173,7 @@ export class PromotionEventWorker implements RuntimeWorker {
   private stopped = false;
   private started = false;
   private stopPromise?: Promise<void>;
+  private shutdownDeadline?: number;
   private timer?: NodeJS.Timeout;
   private leaseTimer?: NodeJS.Timeout;
   private leaseRenewal?: Promise<void>;
@@ -245,6 +246,7 @@ export class PromotionEventWorker implements RuntimeWorker {
   stop(reason: string): Promise<void> {
     if (this.stopPromise) return this.stopPromise;
     this.stopped = true;
+    this.shutdownDeadline = Date.now() + this.options.shutdownWaitMs;
     this.stopPromise = this.stopWorker(reason);
     return this.stopPromise;
   }
@@ -366,7 +368,7 @@ export class PromotionEventWorker implements RuntimeWorker {
 
   private async stopWorker(reason: string): Promise<void> {
     if (this.timer) clearTimeout(this.timer);
-    const deadline = Date.now() + this.options.shutdownWaitMs;
+    const deadline = this.shutdownDeadline!;
     let timeout: NodeJS.Timeout | undefined;
     const outcome = await Promise.race([
       Promise.allSettled([...this.active]).then(() => 'drained' as const),
@@ -389,6 +391,7 @@ export class PromotionEventWorker implements RuntimeWorker {
         active: this.controllers.size,
       });
     }
+    this.shutdownDeadline = undefined;
     if (this.leaseTimer) clearTimeout(this.leaseTimer);
     this.leaseTimer = undefined;
     if (this.leaseRenewal) {
@@ -596,18 +599,21 @@ export class PromotionEventWorker implements RuntimeWorker {
   }
 
   private ensureLeaseRenewal(): void {
-    if (this.stopped || this.controllers.size === 0 || this.leaseTimer || this.leaseRenewal) return;
+    if ((this.stopped && (this.shutdownDeadline === undefined || Date.now() >= this.shutdownDeadline))
+      || this.controllers.size === 0 || this.leaseTimer || this.leaseRenewal) return;
     const interval = Math.max(1, Math.floor(this.options.leaseMs / 3));
     const now = Date.now();
     const due = Math.min(...[...this.controllers.values()].map((delivery) =>
       (this.renewedAt.get(delivery) ?? now) + interval));
     const delay = Math.max(1, (this.renewalRetryAt ?? due) - now);
+    if (this.stopped && now + delay >= this.shutdownDeadline!) return;
     this.leaseTimer = setTimeout(() => {
       this.leaseTimer = undefined;
+      if (this.stopped && (this.shutdownDeadline === undefined || Date.now() >= this.shutdownDeadline)) return;
       const deliveries = [...this.controllers.values()];
       this.leaseRenewal = this.renewLeases(deliveries, Math.min(this.options.databaseTimeoutMs, interval)).finally(() => {
         this.leaseRenewal = undefined;
-        if (!this.stopped && this.controllers.size > 0) this.ensureLeaseRenewal();
+        if (this.controllers.size > 0) this.ensureLeaseRenewal();
       });
     }, delay);
   }
@@ -660,7 +666,15 @@ export class PromotionEventWorker implements RuntimeWorker {
         this.scheduleAcknowledgements(deliveries);
         return;
       }
-      for (const [controller] of current) this.abortForOwnershipLoss(controller);
+      // A short aggregate count cannot identify which exact delivery was lost.
+      // Keep paid ACKs reconcilable and signal uncertainty to live callbacks.
+      for (const [controller, delivery] of current) {
+        this.retainLease(delivery);
+        if (this.pendingAcknowledgements.get(deliveryKey(delivery)) !== controller) this.abortForOwnershipUncertainty(controller);
+      }
+      this.renewalRetryAt = current.length > 0 ? Date.now()
+        + Math.max(1, Math.min(this.options.databaseTimeoutMs, Math.floor(this.options.leaseMs / 12))) : undefined;
+      this.scheduleAcknowledgements(current.map(([, delivery]) => delivery));
     } else {
       void operation.catch(() => undefined);
       for (const [controller, delivery] of current) {

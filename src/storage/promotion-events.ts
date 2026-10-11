@@ -328,7 +328,7 @@ export async function failPromotionDelivery(
     `UPDATE promotion_event_deliveries
         SET state = CASE WHEN attempt_count >= $4 THEN 'dead_letter' ELSE 'pending' END,
             available_at = CASE WHEN attempt_count >= $4 THEN available_at
-                                ELSE now() + ($5 * interval '1 millisecond') END,
+                                ELSE GREATEST(available_at, now() + ($5 * interval '1 millisecond')) END,
             dead_lettered_at = CASE WHEN attempt_count >= $4 THEN now() ELSE NULL END,
             last_error = 'callback failed',
             lease_owner = NULL,
