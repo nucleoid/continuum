@@ -912,6 +912,74 @@ describe('pgvector rollout remediation', () => {
     });
   }, 240_000);
 
+  it.each(['application','reporting'] as const)(
+    'requires actionable provider delegation for %s when plain owner USAGE cannot grant target USAGE', async(kind)=>{
+      const ownerRole=identifier('plain_usage_owner');
+      const appRole=identifier('plain_usage_app');
+      const reportingRole=identifier('plain_usage_reporter');
+      roles.push(ownerRole,appRole,reportingRole);
+      await withFreshDatabase(async(root,target,url,database)=>{
+        const applicationSchema=identifier('plain_usage_app_schema');
+        const providerSchema=identifier('plain_usage_provider');
+        await root.query(`CREATE ROLE ${quoteIdentifier(ownerRole)} NOLOGIN;
+          CREATE ROLE ${quoteIdentifier(appRole)} NOLOGIN;
+          CREATE ROLE ${quoteIdentifier(reportingRole)} NOLOGIN`);
+        await target.query(`GRANT CONNECT ON DATABASE ${quoteIdentifier(database)} TO ${quoteIdentifier(ownerRole)};
+          CREATE SCHEMA ${quoteIdentifier(applicationSchema)} AUTHORIZATION ${quoteIdentifier(ownerRole)};
+          CREATE SCHEMA ${quoteIdentifier(providerSchema)};
+          CREATE EXTENSION vector WITH SCHEMA ${quoteIdentifier(providerSchema)};
+          REVOKE USAGE ON SCHEMA ${quoteIdentifier(providerSchema)} FROM PUBLIC;
+          GRANT USAGE ON SCHEMA ${quoteIdentifier(providerSchema)} TO ${quoteIdentifier(ownerRole)},${quoteIdentifier(appRole)}`);
+        const owner=migrationPool(url,applicationSchema,ownerRole);
+        await runMigrations(owner,await migrationDirectoryThrough('0079_coordination_upgrade_scale_remediation.sql'));
+        await grantApplicationRole(owner,applicationSchema,appRole);
+        await runMigrations(owner,await fullMigrationDirectory());
+        await grantApplicationRole(owner,applicationSchema,appRole);
+        await owner.query(`GRANT USAGE ON SCHEMA ${quoteIdentifier(applicationSchema)} TO ${quoteIdentifier(reportingRole)};
+          GRANT SELECT ON memories TO ${quoteIdentifier(reportingRole)}`);
+        const targetRole=kind==='application'?appRole:reportingRole;
+        await target.query(`REVOKE USAGE ON SCHEMA ${quoteIdentifier(providerSchema)} FROM ${quoteIdentifier(targetRole)}`);
+        expect((await target.query(`SELECT
+          has_schema_privilege($1,$2,'USAGE') AS owner_usage,
+          has_schema_privilege($1,$2,'USAGE WITH GRANT OPTION') AS owner_delegation,
+          has_schema_privilege($3,$2,'USAGE') AS target_usage`,
+          [ownerRole,providerSchema,targetRole])).rows)
+          .toEqual([{owner_usage:true,owner_delegation:false,target_usage:false}]);
+        const refresh=()=>owner.query(kind==='reporting'
+          ? 'SELECT continuum_register_pgvector_reporting_profile($1::name,TRUE)'
+          : 'SELECT continuum_grant_application_vector_functions($1::name)',[targetRole]);
+        await expect(refresh()).rejects.toThrow(/provider owner must GRANT USAGE.*WITH GRANT OPTION/i);
+        expect((await target.query(`SELECT has_schema_privilege($1,$2,'USAGE') AS usage`,
+          [targetRole,providerSchema])).rows).toEqual([{usage:false}]);
+        if(kind==='reporting') {
+          expect((await owner.query(`SELECT profile_kind FROM continuum_pgvector_role_profiles
+            WHERE database_role_oid=(SELECT oid FROM pg_roles WHERE rolname=$1)`,[targetRole])).rows)
+            .toEqual([]);
+        }
+        // A DBA/provider-owner direct grant is sufficient; the tenant owner
+        // still has no grant option and no ownership transfer is required.
+        await target.query(`GRANT USAGE ON SCHEMA ${quoteIdentifier(providerSchema)} TO ${quoteIdentifier(targetRole)}`);
+        await expect(refresh()).resolves.toBeDefined();
+        expect((await owner.query(`SELECT profile_kind FROM continuum_pgvector_role_profiles
+          WHERE database_role_oid=(SELECT oid FROM pg_roles WHERE rolname=$1)`,[targetRole])).rows)
+          .toEqual([{profile_kind:kind}]);
+        expect((await target.query(`SELECT
+          has_schema_privilege($1,$2,'USAGE WITH GRANT OPTION') AS owner_delegation,
+          has_schema_privilege($3,$2,'USAGE') AS target_usage`,
+          [ownerRole,providerSchema,targetRole])).rows)
+          .toEqual([{owner_delegation:false,target_usage:true}]);
+        if(kind==='application') {
+          await expect(owner.query('SELECT continuum_assert_application_vector_profile($1::name)',[targetRole]))
+            .resolves.toBeDefined();
+        } else {
+          const reporter=migrationPool(url,applicationSchema,targetRole);
+          await expect(reconcilePgvectorProviderGrants(reporter,{expectedSchema:applicationSchema}))
+            .resolves.toBeUndefined();
+        }
+      });
+    },180_000,
+  );
+
   it('refuses an unreviewed public provider before creating the tenant ledger', async () => {
     const previous = process.env.CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA;
     delete process.env.CONTINUUM_ALLOW_LEGACY_SHARED_VECTOR_SCHEMA;
