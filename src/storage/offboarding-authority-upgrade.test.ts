@@ -100,10 +100,16 @@ describe('0048 trusted database identity upgrade', () => {
       + ' TO ' + quoteIdentifier(syncRole));
 
     await addMigration(state.directory, '0048_offboarding_independent_review.sql');
-    // Current provenance admission rejects unsafe legacy grants before the
-    // historical migration can inspect operator registration.
+    // Current application-schema admission rejects CREATE drift before any
+    // provenance or historical registration repair can change the schema.
     await expect(runMigrations(state.pool, state.directory))
-      .rejects.toThrow(/migration provenance application schema has untrusted CREATE grants/i);
+      .rejects.toThrow('The application schema ' + quoteIdentifier(state.schema)
+        + ' selected by search_path must not grant CREATE to PUBLIC or a non-owner. '
+        + 'Revoke CREATE as the application schema owner before retrying');
+    expect((await state.pool.query('SELECT has_schema_privilege($1,$2,\'CREATE\') AS allowed',
+      [syncRole,state.schema])).rows).toEqual([{allowed:true}]);
+    expect((await state.pool.query("SELECT name FROM _continuum_migrations WHERE name='0048_offboarding_independent_review.sql'")).rows)
+      .toEqual([]);
     await state.pool.query('REVOKE CREATE ON SCHEMA ' + quoteIdentifier(state.schema)
       + ' FROM ' + quoteIdentifier(syncRole));
     await expect(runMigrations(state.pool, state.directory))
