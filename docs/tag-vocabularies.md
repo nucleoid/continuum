@@ -18,7 +18,9 @@ remain available in capture metadata but are not taxonomy tags.
 ## Upgrade behavior
 
 Migration `0083_tag_vocabularies.sql` is a one-way rewrite of historical
-memory tags. Only the ten built-in tags listed above remain active. Every other
+memory tags. Its migration owner must own the application schema and have
+`TEMPORARY` on the database for transaction-local role planning; runtime roles
+do not need that grant. Only the ten built-in tags listed above remain active. Every other
 original unknown value is removed from `tags` and retained, unchanged and in
 order, in `metadata.continuum_legacy_tags`; this includes well-formed private
 tags, plugin dimensions, malformed values, and null array elements. Built-in
