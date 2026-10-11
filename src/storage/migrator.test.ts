@@ -2409,7 +2409,7 @@ describe('runMigrations', () => {
       // from the independent watchdog instead of the required 55P03 refusal.
       await expect(runMigrations(pool,forward)).rejects.toMatchObject({ cause: { code:'55P03' } });
       expect((await pool.query('SELECT name FROM _continuum_migrations WHERE name=$1',[name])).rows).toEqual([]);
-      expect((await pool.query("SELECT to_regclass('coordination_resources') AS relation")).rows)
+      expect((await pool.query("SELECT to_regclass(format('%I.coordination_resources',$1::text)) AS relation",[schema])).rows)
         .toEqual([{ relation:null }]);
       await lock.query('ROLLBACK');
       await pool.query('RESET statement_timeout');
