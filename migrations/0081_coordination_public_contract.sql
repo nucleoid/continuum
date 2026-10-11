@@ -189,6 +189,12 @@ BEGIN
       '''request_id'',''run_id'',''lease_id'',''resource'',''resource_sha256''',
       '''request_id'',''run_id'',''lease_id'',''resource'',''resource_sha256'',''fencing_token'',''resource_bytes''');
     IF revised=definition THEN RAISE EXCEPTION 'unable to detect legacy audit join fields in %',signature; END IF;
+    IF signature='continuum_coordination_privacy_actual_state_is_erased(uuid,uuid)' THEN
+      definition:=revised;
+      revised:=replace(definition,'AND progress.completed_at IS NOT NULL',
+        'AND progress.completed_at IS NOT NULL AND progress.last_lease_id IS NULL AND progress.last_request_id IS NULL');
+      IF revised=definition THEN RAISE EXCEPTION 'unable to guard legacy coordination privacy UUID cursors'; END IF;
+    END IF;
     EXECUTE revised;
   END LOOP;
 END;
@@ -216,11 +222,16 @@ BEGIN
       SELECT principal_id FROM usage_ids UNION SELECT principal_id FROM privacy_ids
       ORDER BY principal_id LIMIT $2
     ), reopened AS (
-      UPDATE coordination_principal_privacy_progress privacy SET audit_cursor_id=0,
-        completed_at=NULL,updated_at=clock_timestamp()
+      UPDATE coordination_principal_privacy_progress privacy SET
+        last_lease_id=NULL,last_request_id=NULL,
+        audit_cursor_id=CASE WHEN principal.disabled_at IS NOT NULL OR principal.offboarded_at IS NOT NULL
+          THEN 0 ELSE privacy.audit_cursor_id END,
+        completed_at=CASE WHEN principal.disabled_at IS NOT NULL OR principal.offboarded_at IS NOT NULL
+          THEN NULL ELSE privacy.completed_at END,updated_at=clock_timestamp()
       FROM candidates JOIN principals principal ON principal.id=candidates.principal_id
       WHERE privacy.principal_id=candidates.principal_id
-        AND (principal.disabled_at IS NOT NULL OR principal.offboarded_at IS NOT NULL)
+        AND (principal.disabled_at IS NOT NULL OR principal.offboarded_at IS NOT NULL
+          OR privacy.last_lease_id IS NOT NULL OR privacy.last_request_id IS NOT NULL)
     ), updated AS (
       UPDATE coordination_principal_usage usage SET acquire_receipt_count = 0, contended_receipt_count = 0,
         mutation_receipt_count = 0, acquire_receipt_limit = LEAST(acquire_receipt_limit,10000),
