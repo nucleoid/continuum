@@ -90,6 +90,9 @@ BEGIN
   IF to_regprocedure(format('%I.continuum_operator_list_coordination_privacy_repair_page(uuid,uuid,integer)', schema_name)) IS NOT NULL THEN
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_operator_list_coordination_privacy_repair_page(UUID,UUID,INTEGER) TO %I',schema_name,target_role);
   END IF;
+  IF to_regprocedure(format('%I.continuum_operator_coordination_scope_privacy_state(uuid,uuid)', schema_name)) IS NOT NULL THEN
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_operator_coordination_scope_privacy_state(UUID,UUID) TO %I',schema_name,target_role);
+  END IF;
   IF to_regclass(format('%I.continuum_pgvector_role_profiles', schema_name)) IS NOT NULL THEN
     EXECUTE format(
       'SELECT %I.continuum_grant_application_vector_functions($1::name)', schema_name

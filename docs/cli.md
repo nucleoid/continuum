@@ -30,11 +30,12 @@ durable unfinished runs before or after maintenance. Every non-dry-run
 `offboard-principal` or `repair-coordination-privacy` response with
 `complete: false` exits nonzero: status 2 means a resumable single batch,
 no-progress stop, or attempt cap; status 3 means a typed blocking condition
-such as `live_lease`, `detached_quota`, or `lock_busy`. Fatal command failures
+such as `live_lease`, `owned_live_lease`, `migration_pending`,
+`offboarding_required`, `detached_quota`, or `lock_busy`. Fatal command failures
 remain status 1. Automation must inspect both the status and the structured
 `incompleteReason`, `reason`, `blockedUntil`, `resumeRecommended`, and
 `resumeAfter` fields. `no_progress` is a resumable status 2 stop.
-`detached_quota`, `lock_busy`, and `live_lease` are typed status 3 blocks.
+These non-null blocking reasons produce status 3; `no_progress` produces status 2.
 That blocking status takes precedence over `--once`: an unblocked incomplete
 single batch exits 2, while a typed block exits 3 even with `--once`.
 A server verification deadline returns `COORDINATION_TIMEOUT` and exits 2 with
@@ -44,13 +45,21 @@ Completed-run privacy re-scrubs commit before the subsequent exact proof.
 A dry-run preview never claims exact completion from bounded counts and does
 not require execution of operator-only verification routines.
 `resumeAfter` is populated only when the database supplied a `blockedUntil`
-timestamp. A false `resumeRecommended` means the command is complete.
+timestamp. Check `complete` and the reason fields directly; a false
+`resumeRecommended` alone does not prove completion. A dry-run uses false
+without performing completion.
+`migration_pending` requires owner migration/backfill completion before retry.
+`owned_live_lease` means existing owned-scope privacy work must wait for expiry;
+`blockedUntil` may contain one observed live-lease expiry, or may be null. Recheck
+the full scope after that time. For `offboarding_required`, use the ordinary
+confirmed `offboard-principal` command; coordination-only repair does not prove
+the offboarded target's full lifecycle state is erased.
 Mapping a legitimately shared personal scope requires the explicit
 `map-user-scope ... --allow-other-active-members` acknowledgement.
 
-`list-coordination-privacy-repairs --limit <1-1000> [--after <principal-id>]`
+`list-coordination-privacy-repairs [--limit <1-1000>] [--after <principal-id>]`
 returns one bounded discovery window with `repairs`, `nextCursor`, `hasMore`,
-and `scannedCount`. Follow a non-null `nextCursor` even when `repairs` is empty
+and `scannedCount`. The default limit is 100. Follow a non-null `nextCursor` even when `repairs` is empty
 or short. Filtered candidates consume scan slots; the command never fills a
 page by scanning indefinitely. Migration 0081 and the current operator profile
 are required. Missing paging support returns `DEPENDENCY_UNAVAILABLE` instead
@@ -153,6 +162,12 @@ resumes pending 0081 work even when its SQL filename is ledgered. A migration
 ledger entry alone does not prove backfill completion. Runtime and dedicated
 operator roles cannot substitute for the owner-only repair or provenance
 inspection. Keep admin commands on their operator connection after this step.
+REST and MCP startup verify the trusted 0081 readiness capability after the
+provider profile check and refuse startup if it is absent or repair is pending.
+The standalone provider verifier and identity sync retain their separate
+provider checks. `/health/ready` checks database connectivity and runtime
+shutdown state. It does not rerun contract verification or replace owner
+migration and backfill verification.
 
 ## Exit codes
 

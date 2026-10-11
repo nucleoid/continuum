@@ -121,8 +121,8 @@ export async function ensureExecutionLedger(client: pg.PoolClient): Promise<bool
       BEGIN
         SELECT nspowner INTO schema_owner FROM pg_namespace WHERE nspname=current_schema();
         IF schema_owner IS NULL OR NOT (
-          schema_owner=current_user::regrole OR pg_has_role(current_user,schema_owner,'USAGE')
-          OR (schema_owner='pg_database_owner'::regrole AND current_user::regrole=
+          schema_owner=(SELECT oid FROM pg_catalog.pg_roles WHERE rolname=current_user) OR pg_has_role(current_user,schema_owner,'USAGE')
+          OR (schema_owner='pg_database_owner'::regrole AND (SELECT oid FROM pg_catalog.pg_roles WHERE rolname=current_user)=
             (SELECT datdba FROM pg_database WHERE datname=current_database()))) THEN
           RAISE EXCEPTION 'migration provenance requires the owner-controlled application schema';
         END IF;
@@ -133,7 +133,7 @@ export async function ensureExecutionLedger(client: pg.PoolClient): Promise<bool
           RAISE EXCEPTION 'migration provenance application schema has untrusted CREATE grants';
         END IF;
         IF EXISTS(SELECT 1 FROM pg_class WHERE oid=to_regclass(format('%I._continuum_migration_execution',current_schema()))
-          AND (relkind<>'r' OR relowner<>current_user::regrole)) THEN
+          AND (relkind<>'r' OR relowner<>(SELECT oid FROM pg_catalog.pg_roles WHERE rolname=current_user))) THEN
           RAISE EXCEPTION 'migration provenance relation ownership or kind drift';
         END IF;
       END $trust$;
@@ -228,7 +228,7 @@ export async function verifyContractFunctionBodies(client: pg.PoolClient, source
     const result = await client.query<{
       prosrc: string; owner: boolean; language: string; prosecdef: boolean;
       hardened: boolean; publicExecute: boolean;
-    }>(`SELECT function.prosrc,function.proowner=current_user::regrole AS owner,
+    }>(`SELECT function.prosrc,function.proowner=(SELECT oid FROM pg_catalog.pg_roles WHERE rolname=current_user) AS owner,
         language.lanname AS language,function.prosecdef,
         function.proconfig @> ARRAY[format('search_path=pg_catalog, %I, pg_temp',current_schema())] AS hardened,
         EXISTS(SELECT 1 FROM aclexplode(COALESCE(function.proacl,acldefault('f',function.proowner))) privilege

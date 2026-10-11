@@ -213,13 +213,15 @@ Acquire, contention, renew, and release receipts are retained for at least
 24 hours from the operation's database server time:
 
 - acquire success replays its original response only while that generation is
-  still current and unexpired;
+  still current and unexpired. An expired, released or displaced acquire
+  generation returns `LEASE_LOST`; inspect it and use a new request UUID;
 - acquire contention replays the original contention, even if the holder has
   since changed;
 - renew success replays its original conservative timestamps without extending
   again, and only while the generation remains current and unexpired;
 - release success replays with `alreadyReleased` or `already_released`, even
-  if a successor now exists.
+  if a successor now exists, while the caller remains authorized and privacy
+  erasure has not removed that receipt.
 
 Authorization is revalidated before any receipt result or conflict is exposed.
 Replay adds no duplicate audit row.
@@ -391,12 +393,30 @@ for dedicated operators. The exact role verifier deliberately rejects both
 missing coordination grants and broader manual grants.
 
 The 0081 repair rebuilds all receipt counters and extends remaining historical
-short receipts in durable, bounded keyset batches. Fresh coordination mutations
+receipt retention. It also advances a bounded `(scope_id,resource)` cursor to
+preserve each scope's maximum surviving resource generation, including renamed
+0055-era keys with no privacy progress. Each call processes at most 1,000 rows;
+floor writes, processed counts and the cursor commit together. Completion is
+gated on this phase as well as the usage, scope and receipt phases. No surviving
+resource scan is added to ordinary acquisition. On floor-phase completion,
+both resource cursor fields are cleared in that same transaction; the processed
+count and persistent fencing floors remain.
+Short receipts are extended in durable, bounded keyset batches. Fresh coordination mutations
 return `DEPENDENCY_UNAVAILABLE` while the repair is pending; retained authorized
 replays remain available. An interrupted repair resumes from its saved cursors,
 including after the migration file has been ledgered. Finish repair before
 enabling current mutation or offboarding traffic. Only the actual schema owner
 may execute the repair capability; a client-supplied repair flag grants no access.
+Upgrades parked before 0060 also apply a transaction-local one-second lock wait
+bound to transactional published files 0054 through 0059, recorded as the
+`canonical-lf-lock1s-v1` execution variant. Their canonical source bytes remain
+unchanged. The no-transaction 0058 online indexes retain their original execution
+mode and receive no transactional prefix. Schedule owner maintenance, drain long transactions and retry after
+lock refusal; the lock bound does not limit the duration of unlocked data work.
+The 0062 cleanup directive uses adaptive batches of at most 1,000 with one-second
+lock and five-second statement bounds. Its historical final exhaustion query
+still examines pending current leases; a slow installation may fail again at
+batch size one and needs measured operator investigation before retrying.
 
 The current offboarding binary needs the complete packaged chain, including
 the 0079 readiness capability and completed 0081 contract repair. A historical
@@ -432,7 +452,10 @@ rollout requires every node to use matching schema and grant capabilities.
 An old offboarding worker cannot be retained: the database refuses its completed-run restart when
 coordination privacy is the only dirty state. This refusal preserves immutable
 lifecycle completion; it is not a signal to retry the old command. Route the
-principal to a current node and use `repair-coordination-privacy`. A binary
+principal to a current node and resume the ordinary confirmed offboarding
+command. `repair-coordination-privacy` returns `offboarding_required` for an
+offboarded target so coordination-only completion cannot stand in for full
+lifecycle verification. A binary
 rollback therefore leaves offboarding traffic disabled until a current binary
 and the exact application/operator grant profiles are restored.
 
@@ -531,7 +554,11 @@ Migrations 0063 and 0064 perform no installation-wide recount. Their privacy
 work is restartable, keyset-bounded, and backed by concurrently built indexes.
 
 Offboarding first deactivates every owned-scope membership and disables the
-principal in the same transaction. The owned user scope is then erased in
+principal in the same transaction. If contract repair or a live owned lease
+blocks privacy, this access revocation and its audit commit durably while the
+privacy savepoint rolls back. The result remains incomplete with
+`migration_pending` or `owned_live_lease`; a live-lease expiry witness is optional
+and must be followed by a scope recheck. The owned user scope is then erased in
 bounded receipt, lease, and resource phases. Each call processes at most 1,000
 rows across all phases and records durable progress; the maximum fencing token is
 derived from the resource rows actually deleted by `DELETE ... RETURNING` and
@@ -576,9 +603,55 @@ resume without rescanning completed pages.
 `list-coordination-privacy-repairs` operator command instead. It distinguishes
 completed offboarding from disabled-only direct scrub state. Resume an
 offboarded row with the ordinary confirmed offboarding command; resume a
-disabled-only row only with `repair-coordination-privacy`. Runtime roles receive
+disabled-only row only with `repair-coordination-privacy`. An offboarded target
+passed to that repair command receives the audited `offboarding_required`
+pointer to the full confirmed command. Runtime roles receive
 only least-privilege discovery and repair functions and no direct
 progress-table privileges.
+The 0081 scope backfill also reopens mapped principal repair markers when a
+previously completed owned scope still has resource rows. Those markers remain
+discoverable until owned-scope erasure completes. Disabled-only repair resumes
+the existing scope progress with its recorded pseudonym; it does not invent
+ownership or create a fresh scope erasure request.
+Owned progress is measured by phase changes, processed-row counts and physical
+exhaustion. A final empty page can therefore count as progress. Disabled-only
+repair completion requires shared principal privacy plus physical exhaustion of
+any existing owned phase; it does not claim full lifecycle offboarding.
+
+Historical incomplete user-scope progress can also lack an approved principal
+mapping. It is deliberately absent from principal-based discovery. The migration
+owner must review those scopes separately, with a bounded cursor query against
+the actual application schema, for example:
+
+```sql
+SELECT progress.scope_id, progress.pseudonym, progress.phase
+FROM application_data.coordination_scope_privacy_progress AS progress
+JOIN application_data.scopes AS scope ON scope.id = progress.scope_id
+WHERE progress.scope_id > '00000000-0000-0000-0000-000000000000'::uuid
+  AND progress.phase <> 'complete' AND scope.kind = 'user'
+  AND NOT EXISTS (
+    SELECT 1 FROM application_data.principal_user_scopes AS mapping
+    WHERE mapping.scope_id = progress.scope_id
+  )
+ORDER BY progress.scope_id LIMIT 100;
+```
+
+Use the last returned scope UUID as the next lower bound. Do not grant progress
+table reads to runtime roles or infer an owner from the scope name. After
+reviewing the existing erasure authorization, inactive memberships and live
+lease expiry, the owner can resume the existing request using a current manual
+org-admin actor and the exact recorded pseudonym:
+
+```sql
+SELECT application_data.continuum_operator_pseudonymize_scope_v2_legacy(
+  'approved-admin-uuid'::uuid, 'reviewed-scope-uuid'::uuid, 'recorded-pseudonym'
+);
+```
+
+Each call processes at most 1,000 rows. Commit each call and recheck that scope's
+progress until its phase is `complete` and no resource, lease or receipt rows
+remain. Stop on authorization or live-lease refusal; do not disable the guards
+or manufacture a principal mapping to make the scope discoverable.
 Version 3 canonicalizes lock metadata in owned and shared scopes. Completion
 uses one shared lifecycle predicate plus a full coordination-state predicate;
 the non-coordination repair check and full offboarding check cannot drift.
@@ -604,7 +677,8 @@ mapped owned user scope; it does not restore detached historical identities.
 
 Release requires an unexpired current generation, current authorization, and
 space for its receipt. Exact replay remains
-available for every release receipt throughout its documented 24-hour horizon.
+available during its documented 24-hour horizon while current authorization
+holds and authorized privacy erasure has not removed the receipt.
 
 ## Harness guidance
 

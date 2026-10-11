@@ -171,7 +171,7 @@ describe('runMigrations', () => {
     ['single-batch', 1, 10],
     ['multi-batch', 3, 1],
   ] as const)(
-    'refuses current-binary 0064 offboarding before upgrade for %s privacy work',
+    'refuses 0064 offboarding then completes after upgrade for %s privacy work',
     async (label, leaseCount, repairBatchSize) => {
       // Keep the schema below PostgreSQL's 63-byte identifier limit. A silently
       // truncated CREATE SCHEMA name must not masquerade as a valid search_path.
@@ -208,32 +208,6 @@ describe('runMigrations', () => {
         })).rejects.toMatchObject({
           code: 'CONFLICT', message: expect.stringMatching(/finish migrations/i),
         });
-        return;
-        let completed: Awaited<ReturnType<typeof offboardPrincipal>>;
-        const finishHistoricalScopePhase = async () => {
-          const privacyReady = (await pool.query(
-            `SELECT principal.completed_at IS NOT NULL
-                    AND scope.completed_at IS NOT NULL AS ready
-               FROM coordination_principal_privacy_progress principal
-               JOIN coordination_scope_privacy_progress scope ON scope.scope_id = $2
-              WHERE principal.principal_id = $1`,
-            [target.id, owned.id],
-          )).rows[0]?.ready === true;
-          if (privacyReady) {
-            await pool.query(
-              `SELECT continuum_operator_write_offboarding_run($1, $2, 'scope_complete', '{}'::jsonb)`,
-              [target.id, operator.id],
-            );
-          }
-        };
-        if (!completed.complete) await finishHistoricalScopePhase();
-        for (let attempt = 0; !completed.complete && attempt < 100; attempt += 1) {
-          completed = await offboardPrincipal(pool, operator, target.id, {
-            confirmationScopeId: owned.id, batchSize: 100,
-          });
-          if (!completed.complete) await finishHistoricalScopePhase();
-        }
-        expect(completed.complete, JSON.stringify(completed)).toBe(true);
         if (leaseCount > 0) {
           await pool.query('ALTER TABLE audit_log DISABLE TRIGGER reject_offboarded_principal_audit');
           try {
@@ -252,10 +226,10 @@ describe('runMigrations', () => {
             await pool.query('ALTER TABLE audit_log ENABLE TRIGGER reject_offboarded_principal_audit');
           }
         }
-        const immutableBefore = (await pool.query(
+        expect((await pool.query(
           `SELECT phase, evidence FROM principal_offboarding_run_events
             WHERE principal_id = $1 ORDER BY id`, [target.id],
-        )).rows;
+        )).rows).toEqual([]);
 
         const disabledOnly = await createPrincipal(pool, {
           externalId: `disabled:${suffix}`, kind: 'user', displayName: 'Disabled direct scrub',
@@ -264,13 +238,7 @@ describe('runMigrations', () => {
           kind: 'user', name: `disabled-owned-${suffix}`,
         });
         await addMembership(pool, disabledOnly.id, disabledOwned.id, 'writer');
-        await pool.query(
-          `INSERT INTO principal_user_scopes
-             (principal_id, scope_id, mapped_by, acknowledged_principal_ids,
-              acknowledged_evidence_hash)
-           VALUES ($1, $2, $3, '{}'::uuid[], repeat('d', 64))`,
-          [disabledOnly.id, disabledOwned.id, operator.id],
-        );
+        await mapOwnedUserScope(pool, operator, disabledOnly.id, disabledOwned.id);
         await pool.query(
           'UPDATE principals SET disabled_at = clock_timestamp() WHERE id = $1',
           [disabledOnly.id],
@@ -306,15 +274,10 @@ describe('runMigrations', () => {
           [target.id],
         )).rows).toEqual([{ persisted: true, privacy_version: 3 }]);
         expect((await pool.query(
-          `SELECT phase, evidence FROM principal_offboarding_run_events
-            WHERE principal_id = $1 AND phase <> 'started' AND phase <> 'completed'
-            ORDER BY id`, [target.id],
-        )).rows).toEqual([]);
-        expect((await pool.query(
-          `SELECT phase, evidence FROM principal_offboarding_run_events
+          `SELECT phase FROM principal_offboarding_run_events
             WHERE principal_id = $1 AND phase IN ('started', 'completed') ORDER BY id`,
           [target.id],
-        )).rows).toEqual(immutableBefore);
+        )).rows).toEqual([{ phase: 'started' }, { phase: 'completed' }]);
         expect((await pool.query(
           `SELECT completed_at IS NULL AS reopened
              FROM coordination_principal_privacy_progress WHERE principal_id = $1`,
@@ -2422,6 +2385,86 @@ describe('runMigrations', () => {
     }
   }, 60_000);
 
+  it('bounds a parked 0053 upgrade lock wait and records the operative 0054 timeout recipe', async () => {
+    const schema = `early_lock_${randomUUID().replaceAll('-', '').slice(0,16)}`;
+    const admin = new pg.Pool({ connectionString: DATABASE_URL }); pools.push(admin);
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = schemaPool(schema);
+    const blocker = schemaPool(schema);
+    const prefix = await mkdtemp(join(tmpdir(),'continuum-early-prefix-')); directories.push(prefix);
+    const forward = await mkdtemp(join(tmpdir(),'continuum-early-forward-')); directories.push(forward);
+    const source = join(process.cwd(),'migrations');
+    const name = '0054_coordination_leases.sql';
+    const canonical = (await readFile(join(source,name),'utf8')).replaceAll('\r\n','\n');
+    const lock = await blocker.connect();
+    try {
+      const files = (await readdir(source)).filter(file=>file.endsWith('.sql') && file<'0054').sort();
+      await Promise.all(files.map(file=>copyFile(join(source,file),join(prefix,file))));
+      await runMigrations(pool,prefix);
+      await copyFile(join(source,name),join(forward,name));
+      await pool.query("SET statement_timeout='1600ms'");
+      await lock.query('BEGIN');
+      await lock.query('LOCK TABLE scopes IN ACCESS EXCLUSIVE MODE');
+      // Without a transactional lock bound, the held FK target causes 57014
+      // from the independent watchdog instead of the required 55P03 refusal.
+      await expect(runMigrations(pool,forward)).rejects.toMatchObject({ cause: { code:'55P03' } });
+      expect((await pool.query('SELECT name FROM _continuum_migrations WHERE name=$1',[name])).rows).toEqual([]);
+      expect((await pool.query("SELECT to_regclass(format('%I.coordination_resources',$1::text)) AS relation",[schema])).rows)
+        .toEqual([{ relation:null }]);
+      await lock.query('ROLLBACK');
+      await pool.query('RESET statement_timeout');
+      await runMigrations(pool,forward);
+      const effective = "SET LOCAL lock_timeout = '1s';\n"+canonical;
+      const hash = createHash('sha256');
+      for (const value of [effective,'[]']) {
+        const bytes = Buffer.from(value,'utf8'); const length = Buffer.alloc(4); length.writeUInt32BE(bytes.length);
+        hash.update(length).update(bytes);
+      }
+      expect((await pool.query(`SELECT variant,source_sha256,effective_sql_sha256,executed_sql_sha256,
+        statement_count,state FROM _continuum_migration_execution WHERE migration_name=$1 AND phase='file'`,[name])).rows)
+        .toEqual([{ variant:'canonical-lf-lock1s-v1',source_sha256:createHash('sha256').update(canonical).digest('hex'),
+          effective_sql_sha256:createHash('sha256').update(effective).digest('hex'),executed_sql_sha256:hash.digest('hex'),
+          statement_count:1,state:'completed' }]);
+    } finally {
+      await lock.query('ROLLBACK').catch(()=>undefined); lock.release();
+      await pool.query('RESET statement_timeout');
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    }
+  },120_000);
+
+  it('keeps published 0058 concurrent indexes outside transactions without an early timeout prefix', async () => {
+    const name='0058_coordination_online_prep.sql';
+    const directory=await mkdtemp(join(tmpdir(),'continuum-0058-online-')); directories.push(directory);
+    await copyFile(join(process.cwd(),'migrations',name),join(directory,name));
+    const canonical=(await readFile(join(directory,name),'utf8')).replaceAll('\r\n','\n');
+    const digest=createHash('sha256').update(canonical).digest('hex');
+    const queries:string[]=[]; const started:unknown[][]=[]; let inTransaction=false;
+    const client={ query:vi.fn(async(query:string,values?:unknown[])=>{
+      queries.push(query.trim());
+      if(query==='BEGIN') inTransaction=true;
+      if(query==='COMMIT'||query==='ROLLBACK') inTransaction=false;
+      if(query.includes('CREATE INDEX CONCURRENTLY')&&inTransaction) {
+        throw Object.assign(new Error('concurrent index inside transaction'),{code:'25001'});
+      }
+      if(query.includes('pg_try_advisory_lock')) return {rows:[{locked:true}],rowCount:1};
+      if(query.includes('pg_advisory_unlock')) return {rows:[{unlocked:true}],rowCount:1};
+      if(query.includes('SELECT 1 FROM _continuum_migrations')) {
+        return {rows:[],rowCount:values?.[0]===name?0:1};
+      }
+      if(query.includes('SELECT 1 FROM _continuum_migration_execution')&&query.includes("state='started'")) {
+        return {rows:[],rowCount:0};
+      }
+      if(query.includes('FROM pg_class c')&&query.includes('pg_index')) return {rows:[{schema:'public',valid:true}],rowCount:1};
+      if(query.includes('INSERT INTO _continuum_migration_execution')&&query.includes("'started'")) started.push(values??[]);
+      return {rows:[],rowCount:1};
+    }),release:vi.fn() };
+    await expect(runMigrations({connect:vi.fn(async()=>client)} as unknown as pg.Pool,directory)).resolves.toHaveLength(1);
+    expect(queries.filter(query=>query.includes('CREATE INDEX CONCURRENTLY'))).toHaveLength(2);
+    expect(queries.some(query=>query.startsWith("SET LOCAL lock_timeout = '1s';"))).toBe(false);
+    expect(started).toHaveLength(1);
+    expect(started[0].slice(1,6)).toEqual([name,'file-online','online-directives-v1',digest,digest]);
+  });
+
   it('runs marked concurrent-index migrations outside a transaction', async () => {
     const queries: string[] = [];
     const client = {
@@ -2464,6 +2507,47 @@ describe('runMigrations', () => {
     expect(ledger).toBeGreaterThan(index);
     expect(queries.slice(index + 1, ledger)).toContain('BEGIN');
     expect(queries.slice(ledger + 1)).toContain('COMMIT');
+  });
+
+  it('halves the 0062 cleanup directive batch after lock refusal and resets both timeouts', async () => {
+    const queries: string[] = [];
+    const sizes: unknown[] = [];
+    const recipes: unknown[] = [];
+    const client = {
+      query: vi.fn(async (query: string, values?: unknown[]) => {
+        queries.push(query.trim());
+        if (query.includes('INSERT INTO _continuum_migration_execution') && query.includes("'started'")) recipes.push(values?.[3]);
+        if (query.includes('pg_try_advisory_lock')) return { rowCount: 1, rows: [{ locked: true }] };
+        if (query.includes('pg_advisory_unlock')) return { rowCount: 1, rows: [{ unlocked: true }] };
+        if (query.includes('SELECT 1 FROM _continuum_migrations')
+          || (query.includes('SELECT 1 FROM _continuum_migration_execution') && query.includes("state='started'"))) {
+          return { rowCount: 0, rows: [] };
+        }
+        if (query.includes('SELECT continuum_backfill_coordination_cleanup(')) {
+          sizes.push(values?.[0]);
+          if (sizes.length === 1) throw Object.assign(new Error('controlled row lock refusal'), { code: '55P03' });
+          return { rowCount: 1, rows: [{ completed: sizes.length === 3 }] };
+        }
+        return { rowCount: 1, rows: [] };
+      }),
+      release: vi.fn(),
+    };
+    const directory = await migrationDirectory('-- continuum:no-transaction\n-- continuum:backfill-coordination-repair;');
+    const previous = process.env.CONTINUUM_COORDINATION_V4_BACKFILL_BATCH_SIZE;
+    process.env.CONTINUUM_COORDINATION_V4_BACKFILL_BATCH_SIZE = '1000';
+    try {
+      await expect(runMigrations({ connect: vi.fn(async () => client) } as unknown as pg.Pool, directory))
+        .resolves.toHaveLength(1);
+      expect(sizes).toEqual([1000, 500, 500]);
+      expect(recipes).toEqual(['online-cleanup-adaptive-max1000-lock1s-statement5s-v2']);
+      expect(queries).toContain("SET lock_timeout = '1s'");
+      expect(queries).toContain("SET statement_timeout = '5s'");
+      expect(queries).toContain('RESET lock_timeout');
+      expect(queries).toContain('RESET statement_timeout');
+    } finally {
+      if (previous === undefined) delete process.env.CONTINUUM_COORDINATION_V4_BACKFILL_BATCH_SIZE;
+      else process.env.CONTINUUM_COORDINATION_V4_BACKFILL_BATCH_SIZE = previous;
+    }
   });
 
   it('runs a commented selector-backfill directive until its watermark completes', async () => {

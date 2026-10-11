@@ -87,7 +87,7 @@ const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
   ['0080_pgvector_provider_grants.sql',
     '25da04f42f964eed08764a472dbc931647b2f1d35597eaa09ede840b2e798600'],
   ['0081_coordination_public_contract.sql',
-    '0e3fc156bbc1441fb063a7737e7696c0a811205e90199c863465f11d72d62a69'],
+    '81af8463b45c63b88f16ae19219ddacf1b7fa3db67dea7ef4c85c191be1e1dad'],
 ]);
 const FORWARD_MIGRATION_REQUIREMENTS = new Map([
   ['0053_offboarding_restore_contract.sql', '0052_offboarding_review_repair.sql'],
@@ -258,7 +258,7 @@ function repair0074PartialUpgradeDiscovery(sql: string): string {
        AND position(chr(13) IN function.prosrc) > 0`,
       `WHERE function.pronamespace = quote_ident(current_schema())::regnamespace
        AND function.proname LIKE 'continuum\\_%' ESCAPE '\\'
-       AND function.proowner = current_user::regrole
+       AND function.proowner = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname=current_user)
        AND position(chr(13) || chr(10) IN function.prosrc) > 0
        AND NOT EXISTS (
          SELECT 1 FROM pg_depend dependency
@@ -326,7 +326,7 @@ async function repairStoredCrLfFunctions(
        FROM pg_proc function
       WHERE function.pronamespace = quote_ident(current_schema())::regnamespace
         AND function.proname LIKE 'continuum\_%' ESCAPE '\'
-        AND function.proowner = current_user::regrole
+        AND function.proowner = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname=current_user)
         AND position(chr(13) || chr(10) IN function.prosrc) > 0
         AND NOT EXISTS (
           SELECT 1 FROM pg_depend dependency
@@ -345,7 +345,7 @@ async function repairStoredCrLfFunctions(
        FROM pg_proc function
       WHERE function.pronamespace = quote_ident(current_schema())::regnamespace
         AND function.proname LIKE 'continuum\_%' ESCAPE '\'
-        AND function.proowner = current_user::regrole
+        AND function.proowner = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname=current_user)
         AND position(chr(13) || chr(10) IN function.prosrc) > 0
         AND NOT EXISTS (
           SELECT 1 FROM pg_depend dependency
@@ -456,17 +456,8 @@ async function runNonTransactionalStatement(
     (line) => line.trim() === BACKFILL_COORDINATION_REPAIR,
   )) {
     if (deferCoordinationBackfill) return;
-    await client.query("SET statement_timeout = '5s'");
-    try {
-      for (;;) {
-        const result = await execution.query<{ completed: boolean }>(client,
-          `SELECT continuum_backfill_coordination_cleanup(1000) AS completed`,
-        );
-        if (result.rows[0]?.completed === true) return;
-      }
-    } finally {
-      await client.query('RESET statement_timeout');
-    }
+    await runAdaptiveCoordinationBackfill(client, 'continuum_backfill_coordination_cleanup', execution, 1000);
+    return;
   }
   if (statement.split(/\r?\n/).some(
     (line) => line.trim() === BACKFILL_OFFBOARDING_SELECTORS,
@@ -527,7 +518,7 @@ async function finishContractBackfill(
     DECLARE target OID;
     BEGIN
       target := to_regprocedure(format('%I.continuum_backfill_coordination_contract(integer)',current_schema()));
-      IF target IS NULL OR NOT EXISTS(SELECT 1 FROM pg_proc WHERE oid=target AND proowner=current_user::regrole) THEN
+      IF target IS NULL OR NOT EXISTS(SELECT 1 FROM pg_proc WHERE oid=target AND proowner=(SELECT oid FROM pg_catalog.pg_roles WHERE rolname=current_user)) THEN
         RAISE EXCEPTION 'coordination contract backfill requires its function owner';
       END IF;
     END $contract_owner$;`);
@@ -1062,24 +1053,33 @@ export async function runMigrations(
       // Published-byte verification remains separate and rejects every change
       // other than Git's CRLF materialization.
       const canonicalSql = verifiedSources.get(file)!;
-      const sql = file === '0073_coordination_bounded_discovery_and_locking.sql'
+      const transformedSql = file === '0073_coordination_bounded_discovery_and_locking.sql'
         ? deferLegacy0073Backfill(canonicalSql)
         : file === '0074_coordination_compatibility_and_upgrade_repair.sql'
           ? repair0074PartialUpgradeDiscovery(canonicalSql)
           : file === '0076_coordination_review_2_remediation.sql'
             ? repair0076CrLfNormalization(canonicalSql)
           : canonicalSql;
-      const online = sql.trimStart().startsWith(NO_TRANSACTION_MARKER);
+      // Bound DDL waits when upgrading a parked early coordination schema,
+      // without changing the published migration files. This exact prefix is
+      // part of the effective SQL and the atomically recorded execution digest.
+      const online = canonicalSql.trimStart().startsWith(NO_TRANSACTION_MARKER);
+      const earlyTransactional = /^005[4-9]_/.test(file) && !online;
+      const sql = earlyTransactional
+        ? "SET LOCAL lock_timeout = '1s';\n" + transformedSql : transformedSql;
       const deferCleanup = file === '0060_coordination_online_finish.sql'
         && files.includes('0061_coordination_forward_security_repair.sql');
+      const adaptiveCleanup = online && !deferCleanup
+        && canonicalSql.split('\n').some((line) => line.trim() === BACKFILL_COORDINATION_REPAIR + ';');
       const variant = file === '0073_coordination_bounded_discovery_and_locking.sql'
         ? '0073-online-backfill-deferred-v1'
         : file === '0074_coordination_compatibility_and_upgrade_repair.sql'
           ? '0074-partial-upgrade-discovery-crlf-v1'
           : file === '0076_coordination_review_2_remediation.sql'
             ? '0076-crlf-pairs-only-v1'
-            : online ? (deferCleanup ? 'online-directives-deferred-cleanup-v1' : 'online-directives-v1')
-              : 'canonical-lf-v1';
+            : online ? (deferCleanup ? 'online-directives-deferred-cleanup-v1'
+              : adaptiveCleanup ? 'online-cleanup-adaptive-max1000-lock1s-statement5s-v2' : 'online-directives-v1')
+              : earlyTransactional ? 'canonical-lf-lock1s-v1' : 'canonical-lf-v1';
       const execution = new MigrationExecution(file, online ? 'file-online' : 'file',
         variant, sqlHash(canonicalSql), sqlHash(sql));
       let transactionOpen = false;

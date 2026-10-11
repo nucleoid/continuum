@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import { ServiceError } from '../services/errors.js';
 
 function quoteIdentifier(value: string): string {
   return `"${value.replaceAll('"', '""')}"`;
@@ -75,4 +76,49 @@ export async function reconcilePgvectorProviderGrants(pool: pg.Pool): Promise<vo
   } finally {
     client.release(destroyClient);
   }
+}
+
+
+/** REST/MCP startup requires the current contract without repairing it. */
+export async function requireCoordinationContractReady(pool: pg.Pool): Promise<void> {
+  const unavailable = () => new ServiceError('DEPENDENCY_UNAVAILABLE',
+    'Coordination contract readiness is unavailable; finish migrations before starting runtimes');
+  const incomplete = () => new ServiceError('DEPENDENCY_UNAVAILABLE',
+    'Coordination contract repair is incomplete; finish migrations before starting runtimes');
+  const client = await pool.connect().catch(() => { throw unavailable(); });
+  let destroyClient = false;
+  try {
+    await client.query('BEGIN');
+    await client.query(`SELECT set_config('statement_timeout', CASE
+      WHEN setting::bigint BETWEEN 1 AND 5000 THEN setting || 'ms'
+      ELSE '5000ms' END, TRUE) FROM pg_settings WHERE name='statement_timeout'`);
+    await client.query("SET LOCAL lock_timeout = '1s'");
+    const metadata = await client.query<{ schema: string; trusted: boolean }>(`
+      SELECT namespace.nspname AS schema,
+        COALESCE(helper.proowner=relation.relowner AND helper.prosecdef AND helper.provolatile='s'
+          AND helper.prorettype='pg_catalog.bool'::regtype AND helper.pronargs=0
+          AND helper.proconfig @> ARRAY[pg_catalog.format(
+            'search_path=pg_catalog, %I, pg_temp', namespace.nspname)]
+          AND NOT EXISTS (SELECT 1 FROM pg_catalog.aclexplode(COALESCE(
+            helper.proacl,pg_catalog.acldefault('f',helper.proowner))) privilege
+            WHERE privilege.grantee=0 AND privilege.privilege_type='EXECUTE'),FALSE) AS trusted
+        FROM pg_catalog.pg_class relation
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace
+        LEFT JOIN pg_catalog.pg_proc helper ON helper.oid=pg_catalog.to_regprocedure(
+          pg_catalog.format('%I.continuum_coordination_contract_is_ready()',namespace.nspname))
+        WHERE relation.oid=pg_catalog.to_regclass('memories')
+    `);
+    const state = metadata.rows[0];
+    if (!state?.trusted) throw unavailable();
+    const result = await client.query<{ ready: boolean }>(
+      `SELECT ${quoteIdentifier(state.schema)}.continuum_coordination_contract_is_ready() AS ready`,
+    );
+    if (result.rows[0]?.ready !== true) throw incomplete();
+    await client.query('COMMIT');
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch { destroyClient = true; }
+    if (error instanceof ServiceError) throw error;
+    if ((error as { code?: unknown })?.code === '55000') throw incomplete();
+    throw unavailable();
+  } finally { client.release(destroyClient); }
 }
