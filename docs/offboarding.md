@@ -74,10 +74,12 @@ rows examined before redaction-policy filtering. If a branch reaches that
 limit, `auditRows` and `auditQueries` are explicitly truncated/unknown even
 when the returned dirty-row count is zero.
 
-Execution immediately disables and pseudonymizes the principal and scope,
-deactivates owned-scope access, quarantines its Entra bindings, and deletes
-aliases in the first transaction. Those database fences remain closed while
-memories and audit rows are processed in retry-safe batches. `batchSize`
+The first authorized execution disables the principal, deactivates owned-scope
+access, quarantines its Entra bindings and deletes aliases. If coordination
+privacy is blocked, those audited access changes commit while the principal and
+scope names and `offboarded_at` remain unchanged. Pseudonymization and erasure
+advance only when their privacy work can proceed. The access fences remain
+closed while memories and audit rows are processed in retry-safe batches. `batchSize`
 defaults to 1,000 and accepts 1 through 5,000 through REST or CLI
 `--batch-size`; each response reports cumulative processed counts, bounded
 remaining-work indicators, batch number, and `complete`. Durable UUID and audit
@@ -98,10 +100,12 @@ is deactivated, including delegate and ingest identities. Database triggers
 reject later active memberships or bindings while its owner remains offboarded.
 Safe retries return `alreadyOffboarded: true` only when an immutable `completed`
 run event exists for the current run UUID, the principal and scope pseudonyms
-remain in place, and the database write fences remain closed. Memory, embedding,
-access, alias, binding, and historical audit cleanliness are trusted from the
-guarded immutable completion receipt and durable phase cursors; completed
-retries do not rescan clean pre-fence history. A legacy state without a run
+remain in place, and the database write fences remain closed. The completion
+receipt and durable phase cursors are necessary evidence, but a completed clean
+retry also runs the actual full-state verification before claiming success.
+This can inspect historical state again under the configured verification
+budget, defaulting to 30 seconds. A deadline returns `COORDINATION_TIMEOUT`
+instead of `alreadyOffboarded: true`. A legacy state without a run
 receipt is never accepted from a truncated preview. Rows above the fence are rejected
 at the principal/owned-scope audit boundary. Dry-run and retry output includes
 dirty-memory and dirty-audit indicators. Retry output also includes the first durable
