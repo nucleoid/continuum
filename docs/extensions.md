@@ -215,6 +215,12 @@ its copy.
 
 ## Migration history and branch builds
 
+Apply `0089_promotion_outbox.sql` as the application-schema migration owner
+with database `TEMPORARY` privilege. Quiesce old producers and worker replicas
+for cutover, use a finite external migration-process deadline, and complete
+migrations before enabling the new binaries. Its 5-second lock and 60-second
+statement limits apply per statement, not to the whole migration transaction.
+
 The outbox schema ships as `0089_promotion_outbox.sql`. Earlier unmerged branch
 builds used names such as `0007_promotion_outbox.sql` while other branches also
 owned the `0007` prefix. Those names were never a supported shared migration
