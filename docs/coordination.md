@@ -487,9 +487,11 @@ and the exact application/operator grant profiles are restored.
 Migration 0069 makes completion depend on current database state as well as
 durable progress. It replays the privacy audit cursor as version 3, including
 owned-scope lock rows left by pre-0065 installations. Discovery is bounded by
-a principal UUID cursor and a partial incomplete/version index. A live shared
-lease returns `blockedUntil` and `progressed: false`; the CLI stops that run
-instead of polling, and never writes a batch event for a no-progress attempt.
+a principal UUID cursor and a partial incomplete/version index. Shared privacy
+scrubbing can return a live-lease `blockedUntil` without privacy progress.
+The ordinary offboarding CLI still continues progressing memory and audit work
+before stopping on the remaining privacy block. Coordination-only repair stops
+on that block instead of polling; no-progress attempts add no batch event.
 The database rejects offboarding run creation or start while a disabled-only
 privacy repair is pending.
 

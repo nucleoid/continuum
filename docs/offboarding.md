@@ -75,8 +75,8 @@ limit, `auditRows` and `auditQueries` are explicitly truncated/unknown even
 when the returned dirty-row count is zero.
 
 The first authorized execution disables the principal, deactivates owned-scope
-access, quarantines its Entra bindings and deletes aliases. If coordination
-privacy is blocked, those audited access changes commit while the principal and
+access, quarantines its Entra bindings and deletes aliases. If migration
+readiness or an owned live lease blocks scope privacy, those audited access changes commit while the principal and
 scope names and `offboarded_at` remain unchanged. Pseudonymization and erasure
 advance only when their privacy work can proceed. The access fences remain
 closed while memories and audit rows are processed in retry-safe batches. `batchSize`
@@ -227,8 +227,8 @@ command. For `disabled_only` rows, run the non-lifecycle
 until it returns `complete: true`. It may also resume an existing incomplete,
 explicitly approved owned-scope phase using its recorded pseudonym. It cannot
 infer ownership or start a fresh scope erasure merely because the principal is
-disabled. A live shared lease returns its
-`blockedUntil` time and stops the CLI run with exit status 3. Detached quota or
+disabled. In this coordination-only repair command, a live shared lease returns
+its `blockedUntil` time and stops the CLI run with exit status 3. Detached quota or
 concurrent privacy-lock contention is also a typed status-3 block. The CLI caps
 one invocation at 100 progressing batches with bounded backoff. `--once`
 returns status 2 for an unblocked incomplete batch; typed blocks remain status 3
@@ -257,10 +257,18 @@ final page deletes no rows.
 
 The ordinary `offboard-principal` loop treats durable cursor movement and phase
 completion as progress even when a page contains only already-canonical or
-preserved rows. It exits 0 only for truthful completion (or a requested dry
+preserved rows. Without `--once`, a shared `live_lease` result does not stop
+progressing memory and audit erasure: the loop continues while that batch made
+progress and either cursor still has work. It stops with status 3 once only
+blocked privacy work remains or progress stops, without polling the lease for
+expiry. The 100-attempt cap and bounded backoff still apply. It exits 0 only for truthful completion (or a requested dry
 run), exits 3 for a typed blocking state, and exits 2 for an incomplete
 single-batch run, bounded attempt cap, or untyped no-progress state. The
 `repair-coordination-privacy` command uses the same status contract.
+Both commands count a committed positive expired-detached-receipt purge as
+progress. The service clears a stale `detached_quota` only if that purge freed
+space and no `blockedUntil` was returned; genuinely saturated capacity and live
+leases remain typed blocks.
 Migrations 0074 through 0077 require a maintenance drain of pre-0074
 offboarding workers and finish lifecycle eligibility repair online in
 restartable, timeout-bounded batches. Migration 0076 enforces explicit

@@ -36,6 +36,12 @@ remain status 1. Automation must inspect both the status and the structured
 `incompleteReason`, `reason`, `blockedUntil`, `resumeRecommended`, and
 `resumeAfter` fields. `no_progress` is a resumable status 2 stop.
 These non-null blocking reasons produce status 3; `no_progress` produces status 2.
+Without `--once`, `offboard-principal` continues through a shared `live_lease`
+result while that batch made progress and memory or audit work remains. It
+stops with status 3 when only the blocked privacy work remains, or progress
+stops; it does not poll the live lease for expiry. Each invocation still caps
+at 100 attempts with bounded backoff. `repair-coordination-privacy` has no
+memory or lifecycle audit phase to continue through a live-lease block.
 That blocking status takes precedence over `--once`: an unblocked incomplete
 single batch exits 2, while a typed block exits 3 even with `--once`.
 A server verification deadline returns `COORDINATION_TIMEOUT` and exits 2 with
@@ -54,6 +60,10 @@ without performing completion.
 the full scope after that time. For `offboarding_required`, use the ordinary
 confirmed `offboard-principal` command; coordination-only repair does not prove
 the offboarded target's full lifecycle state is erased.
+Expired detached-receipt cleanup that commits a positive purge count is progress.
+Only a `detached_quota` result with freed capacity and no `blockedUntil` is
+treated as a stale quota block and cleared for another bounded attempt. A live
+lease or quota result that freed no space remains a typed block.
 Mapping a legitimately shared personal scope requires the explicit
 `map-user-scope ... --allow-other-active-members` acknowledgement.
 
