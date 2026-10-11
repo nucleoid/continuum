@@ -1084,7 +1084,7 @@ export async function runMigrations(
       const online = canonicalSql.trimStart().startsWith(NO_TRANSACTION_MARKER);
       const earlyTransactional = /^005[4-9]_/.test(file) && !online;
       const sql = earlyTransactional
-        ? "SET LOCAL lock_timeout = '1s';\n" + transformedSql : transformedSql;
+        ? "SET LOCAL lock_timeout = '1s';\nSET LOCAL statement_timeout = '30s';\n" + transformedSql : transformedSql;
       const deferCleanup = file === '0060_coordination_online_finish.sql'
         && files.includes('0061_coordination_forward_security_repair.sql');
       const adaptiveCleanup = online && !deferCleanup
@@ -1097,7 +1097,7 @@ export async function runMigrations(
             ? '0076-crlf-pairs-only-v1'
             : online ? (deferCleanup ? 'online-directives-deferred-cleanup-v1'
               : adaptiveCleanup ? 'online-cleanup-adaptive-max1000-lock1s-statement5s-v2' : 'online-directives-v1')
-              : earlyTransactional ? 'canonical-lf-lock1s-v1' : 'canonical-lf-v1';
+              : earlyTransactional ? 'canonical-lf-lock1s-statement30s-v2' : 'canonical-lf-v1';
       const execution = new MigrationExecution(file, online ? 'file-online' : 'file',
         variant, sqlHash(canonicalSql), sqlHash(sql));
       let transactionOpen = false;
@@ -1144,6 +1144,10 @@ export async function runMigrations(
           await finishContractBackfill(client, file, canonicalSql);
         }
       } catch (error) {
+        // Online files can install session settings before later DDL fails.
+        // Preserve the original failure and unlock normally, but never return
+        // that possibly contaminated session to the caller's pool.
+        if (online) discardClient = true;
         const migrationError = new Error(
           `Migration ${file} failed: ${(error as Error).message}`,
           { cause: error },
