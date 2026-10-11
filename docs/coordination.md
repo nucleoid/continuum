@@ -312,8 +312,10 @@ calling statement, so Continuum does not claim a function-local deadline.
 `continuum_operator_set_coordination_scope_quota` adjusts a reviewed scope
 limit within the hard ceiling. The principal quota setter's `acquire_limit`
 parameter now sets the combined receipt budget, capped at 10,000. Its legacy
-`contended_limit` remains a bounded compatibility field and is ignored by quota
-enforcement. Lowering a budget preserves existing receipts and authorized
+`contended_limit` is a compatibility alias: new setter calls must pass the same
+value as `acquire_limit`, or fail with SQLSTATE `22023` before changing quotas.
+Previously stored contended limits are ignored by quota enforcement. Lowering a
+budget preserves existing receipts and authorized
 replays and refuses fresh growth until cleanup frees space.
 Before applying 0081 to an existing lease installation, run the owner-only
 read-only quota baseline with writers paused:

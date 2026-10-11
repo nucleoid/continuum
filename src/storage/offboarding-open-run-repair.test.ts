@@ -8,6 +8,7 @@ import { listCoordinationPrivacyRepairPage, mapOwnedUserScope, offboardPrincipal
 import { createPrincipal } from './principals.js';
 import { createScope, getScopeByRef } from './scopes.js';
 import { addMembership } from './memberships.js';
+import { canMutateScope } from '../scopes/access.js';
 import { makeTestPool, resetData } from './test-helpers.js';
 
 describe('coordination-only repair beside an open lifecycle run', () => {
@@ -48,6 +49,10 @@ describe('coordination-only repair beside an open lifecycle run', () => {
     // This is the allowed ordinary reactivation path before any lifecycle run.
     // If it is refused, the observational setup fails; do not bypass its guard.
     await reactivatePrincipal(pool,actor,target.id);
+    // Reactivation does not restore revoked memberships. Grant ordinary
+    // writer access while no lifecycle run exists, without bypassing privacy.
+    await addMembership(pool,target.id,owned.id,'writer');
+    expect(await canMutateScope(pool,target.id,owned.id)).toBe(true);
     const ownedLease=await acquireLease(pool,target,{scope:`user:${owned.name}`,resource:'still-owned',
       runId:randomUUID(),requestId:randomUUID(),ttlSeconds:900});
     expect(ownedLease.acquired).toBe(true);
