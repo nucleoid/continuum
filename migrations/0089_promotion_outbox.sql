@@ -74,7 +74,7 @@ CREATE FUNCTION continuum_operator_scrub_promotion_scope(
 ) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
 DECLARE scope_name TEXT; names_processed INTEGER; deliveries_processed INTEGER; clean BOOLEAN;
 BEGIN
-  IF batch_limit NOT BETWEEN 1 AND 1000 THEN RAISE check_violation USING MESSAGE='promotion privacy batch is outside the supported range'; END IF;
+  IF batch_limit IS NULL OR batch_limit NOT BETWEEN 1 AND 1000 THEN RAISE check_violation USING MESSAGE='promotion privacy batch is outside the supported range'; END IF;
   -- This accessor checks the bound approve caller, current manual org admin,
   -- disabled user mapping and matching immutable approval evidence.
   PERFORM * FROM continuum_operator_coordination_scope_privacy_state(authorization_principal_id,target_scope_id);
@@ -142,8 +142,7 @@ BEGIN
   ELSIF TG_OP='INSERT' AND EXISTS(SELECT 1 FROM promotion_events event JOIN principal_user_scopes mapping ON mapping.scope_id=event.destination_scope_id
     JOIN principals principal ON principal.id=mapping.principal_id AND principal.disabled_at IS NOT NULL WHERE event.id=NEW.event_id) THEN
     RAISE check_violation USING MESSAGE='promotion delivery destination is disabled';
-  ELSIF TG_OP='UPDATE' AND OLD.state='privacy_cancelled' AND NEW IS DISTINCT FROM OLD THEN
-    RAISE check_violation USING MESSAGE='erased promotion delivery is immutable';
+
   END IF;
   RETURN NEW;
 END;
@@ -153,13 +152,41 @@ CREATE TRIGGER guard_promotion_event_privacy BEFORE INSERT ON promotion_events
 FOR EACH ROW EXECUTE FUNCTION continuum_guard_promotion_privacy();
 CREATE TRIGGER guard_promotion_delivery_privacy BEFORE INSERT OR UPDATE ON promotion_event_deliveries
 FOR EACH ROW EXECUTE FUNCTION continuum_guard_promotion_privacy();
+-- Invoker identity is essential here: the validated owner-definer scrub reaches
+-- this trigger as owner, while a direct APP or OP table write does not.
+CREATE FUNCTION continuum_guard_promotion_cancellation() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER AS $$
+DECLARE trusted_owner BOOLEAN;
+BEGIN
+  IF TG_OP='UPDATE' AND NEW IS NOT DISTINCT FROM OLD THEN RETURN NEW; END IF;
+  IF NEW.state='privacy_cancelled' OR (TG_OP='UPDATE' AND OLD.state='privacy_cancelled') THEN
+    SELECT relation.relowner=role.oid INTO trusted_owner FROM pg_catalog.pg_class relation
+      JOIN pg_catalog.pg_roles role ON role.rolname=current_user WHERE relation.oid=TG_RELID;
+    IF trusted_owner IS DISTINCT FROM TRUE THEN
+      RAISE check_violation USING MESSAGE='promotion cancellation requires the trusted erasure capability';
+    END IF;
+    -- The schema owner can import a historical terminal row. An authorized
+    -- scrub may repair its dirty shape; runtime writers cannot manufacture it.
+    IF TG_OP='INSERT' THEN RETURN NEW; END IF;
+    IF NEW.state<>'privacy_cancelled' OR NEW.last_error IS NOT NULL OR NEW.lease_owner IS NOT NULL OR NEW.lease_expires_at IS NOT NULL
+      OR NEW.lease_generation<>OLD.lease_generation+1
+      OR (to_jsonb(NEW)-ARRAY['state','last_error','lease_owner','lease_expires_at','lease_generation'])
+        IS DISTINCT FROM (to_jsonb(OLD)-ARRAY['state','last_error','lease_owner','lease_expires_at','lease_generation']) THEN
+      RAISE check_violation USING MESSAGE='erased promotion delivery only permits canonical trusted cleanup';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+REVOKE ALL ON FUNCTION continuum_guard_promotion_cancellation() FROM PUBLIC;
+CREATE TRIGGER guard_promotion_delivery_cancellation BEFORE INSERT OR UPDATE ON promotion_event_deliveries
+FOR EACH ROW EXECUTE FUNCTION continuum_guard_promotion_cancellation();
 DO $privacy_roles$
 DECLARE definition TEXT; revised TEXT; candidate RECORD; schema_name TEXT:=current_schema(); function_record RECORD;
 BEGIN
   FOR function_record IN SELECT proname,pg_catalog.pg_get_function_identity_arguments(oid) arguments FROM pg_catalog.pg_proc
     WHERE pronamespace=pg_catalog.to_regnamespace(schema_name) AND proname=ANY(ARRAY[
       'continuum_operator_scrub_promotion_scope','continuum_offboarding_lifecycle_state_is_erased',
-      'continuum_offboarding_lifecycle_state_is_erased_pre_extensions','continuum_guard_promotion_privacy']) LOOP
+      'continuum_offboarding_lifecycle_state_is_erased_pre_extensions','continuum_guard_promotion_privacy','continuum_guard_promotion_cancellation']) LOOP
     EXECUTE format('ALTER FUNCTION %I.%I(%s) SET search_path=pg_catalog,%I,pg_temp',schema_name,function_record.proname,function_record.arguments,schema_name);
   END LOOP;
   SELECT pg_catalog.pg_get_functiondef('continuum_assert_application_role_allowlist(name,boolean)'::regprocedure) INTO definition;
