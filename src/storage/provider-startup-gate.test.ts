@@ -46,12 +46,23 @@ describe('qualified provider startup gate', () => {
           CREATE FUNCTION "${shadow}".continuum_coordination_contract_is_ready() RETURNS BOOLEAN
           LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,"${shadow}",pg_temp AS 'SELECT TRUE';
           REVOKE ALL ON FUNCTION "${shadow}".continuum_coordination_contract_is_ready() FROM PUBLIC;`);
-        await expect(reconcilePgvectorProviderGrants(pool)).rejects.toThrow(/runtime application schema.*trust/i);
-        await expect(requireCoordinationContractReady(pool)).rejects.toThrow(/runtime application schema.*trust/i);
+        await expect(reconcilePgvectorProviderGrants(pool, { expectedSchema: schema })).rejects.toThrow(/runtime application schema.*trust/i);
+        await expect(requireCoordinationContractReady(pool, { expectedSchema: schema })).rejects.toThrow(/runtime application schema.*trust/i);
       } finally {
         await pool.query('RESET ROLE');
         await admin.query(`DROP OWNED BY "${role}"; DROP ROLE IF EXISTS "${role}"`);
       }
+    });
+  });
+
+  it('refuses an empty leading schema before the configured tenant', async () => {
+    await fixture(async (pool, _admin, schema) => {
+      await expect(reconcilePgvectorProviderGrants(pool, { expectedSchema: schema }))
+        .rejects.toThrow(/runtime application schema.*trust/i);
+      await expect(requireCoordinationContractReady(pool, { expectedSchema: schema }))
+        .rejects.toThrow(/runtime application schema.*trust/i);
+      await pool.query(`SET search_path="${schema}"`);
+      await expect(reconcilePgvectorProviderGrants(pool, { expectedSchema: schema })).resolves.toBeUndefined();
     });
   });
 

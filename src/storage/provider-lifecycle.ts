@@ -5,8 +5,37 @@ function quoteIdentifier(value: string): string {
   return `"${value.replaceAll('"', '""')}"`;
 }
 
-/** Verify startup profiles without changing live provider privileges. */
-export async function reconcilePgvectorProviderGrants(pool: pg.Pool): Promise<void> {
+export interface StartupSchemaOptions { expectedSchema?: string }
+
+/** Runtime entrypoints take their schema anchor from explicit configuration. */
+export function applicationSchemaFromEnv(env: NodeJS.ProcessEnv = process.env): string {
+  const schema = env.CONTINUUM_APPLICATION_SCHEMA ?? 'public';
+  if (!schema || schema.includes('\0') || Buffer.byteLength(schema, 'utf8') > 63) {
+    throw new Error('CONTINUUM_APPLICATION_SCHEMA must be a valid PostgreSQL schema name');
+  }
+  return schema;
+}
+
+async function requireSchemaAnchor(client: pg.PoolClient, expectedSchema?: string): Promise<void> {
+  if (expectedSchema === undefined) return;
+  const result = await client.query<{ anchored: boolean }>(`
+    SELECT COALESCE((pg_catalog.current_schemas(FALSE))[1]=$1
+      AND namespace.nspname=$1,FALSE) AS anchored
+    FROM pg_catalog.pg_class relation
+    JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace
+    WHERE relation.oid=pg_catalog.to_regclass('memories')
+  `, [expectedSchema]);
+  if (result.rows[0]?.anchored !== true) {
+    throw new ServiceError('DEPENDENCY_UNAVAILABLE',
+      'Runtime application schema is not trusted; configure CONTINUUM_APPLICATION_SCHEMA and search_path');
+  }
+}
+
+/** Verify profiles without changing grants. Without expectedSchema, trust is
+ * limited to ownership of the relation and helper selected by search_path. */
+export async function reconcilePgvectorProviderGrants(
+  pool: pg.Pool, options: StartupSchemaOptions = {},
+): Promise<void> {
   const client = await pool.connect();
   let destroyClient = false;
   try {
@@ -20,6 +49,7 @@ export async function reconcilePgvectorProviderGrants(pool: pg.Pool): Promise<vo
         FROM pg_settings WHERE name = 'statement_timeout'
     `);
     await client.query("SET LOCAL lock_timeout = '1s'");
+    await requireSchemaAnchor(client, options.expectedSchema);
     const readiness = await client.query<{
       owner: boolean; helper: boolean; trusted: boolean; schema: string;
     }>(`
@@ -80,7 +110,9 @@ export async function reconcilePgvectorProviderGrants(pool: pg.Pool): Promise<vo
 
 
 /** REST/MCP startup requires the current contract without repairing it. */
-export async function requireCoordinationContractReady(pool: pg.Pool): Promise<void> {
+export async function requireCoordinationContractReady(
+  pool: pg.Pool, options: StartupSchemaOptions = {},
+): Promise<void> {
   const unavailable = () => new ServiceError('DEPENDENCY_UNAVAILABLE',
     'Coordination contract readiness is unavailable; finish migrations before starting runtimes');
   const incomplete = () => new ServiceError('DEPENDENCY_UNAVAILABLE',
@@ -93,6 +125,7 @@ export async function requireCoordinationContractReady(pool: pg.Pool): Promise<v
       WHEN setting::bigint BETWEEN 1 AND 5000 THEN setting || 'ms'
       ELSE '5000ms' END, TRUE) FROM pg_settings WHERE name='statement_timeout'`);
     await client.query("SET LOCAL lock_timeout = '1s'");
+    await requireSchemaAnchor(client, options.expectedSchema);
     const metadata = await client.query<{ schema: string; trusted: boolean }>(`
       SELECT namespace.nspname AS schema,
         COALESCE(helper.proowner=relation.relowner AND helper.prosecdef AND helper.provolatile='s'
