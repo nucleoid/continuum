@@ -90,7 +90,10 @@ describe('coordination runtime startup contract', () => {
       await owner.query('DROP FUNCTION IF EXISTS continuum_coordination_contract_is_ready()');
       const result = await startup(transport, url, principal);
       expect(result.output).not.toMatch(/Continuum API listening|"protocolVersion"/);
-      expect(result.errorOutput).toMatch(/Coordination contract readiness is unavailable; finish migrations/);
+      // The exact application profile includes the readiness helper, so the
+      // provider-first profile gate rejects this missing capability before it
+      // can reach the separate readiness check.
+      expect(result.errorOutput).toMatch(/does not hold an exact Continuum application or operator profile/);
     });
   }, 60_000);
 
