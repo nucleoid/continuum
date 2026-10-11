@@ -882,6 +882,38 @@ REVOKE ALL ON FUNCTION continuum_guard_offboarding_access_audit() FROM PUBLIC;
 CREATE TRIGGER guard_offboarding_access_audit BEFORE INSERT OR UPDATE OR DELETE ON audit_log
 FOR EACH ROW EXECUTE FUNCTION continuum_guard_offboarding_access_audit();
 
+-- The detached history identity is a storage sink, never an interactive actor.
+DO $detached_preflight$
+BEGIN
+  IF EXISTS(SELECT 1 FROM principals WHERE id='00000000-0000-4000-8000-000000000012'
+      AND (disabled_at IS NULL OR kind<>'service'))
+    OR EXISTS(SELECT 1 FROM scope_memberships WHERE principal_id='00000000-0000-4000-8000-000000000012')
+    OR EXISTS(SELECT 1 FROM service_api_keys WHERE principal_id='00000000-0000-4000-8000-000000000012')
+    OR EXISTS(SELECT 1 FROM continuum_trusted_database_identities WHERE principal_id='00000000-0000-4000-8000-000000000012') THEN
+    RAISE EXCEPTION 'reserved detached coordination identity has authority drift; the migration owner must review and remove its memberships, keys and trusted bindings and restore its disabled service state before retrying';
+  END IF;
+END;
+$detached_preflight$;
+ALTER TABLE principals ADD CONSTRAINT principals_detached_coordination_identity_check
+CHECK(id<>'00000000-0000-4000-8000-000000000012' OR (kind='service' AND disabled_at IS NOT NULL));
+
+CREATE FUNCTION continuum_guard_detached_coordination_authority()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN
+  IF NEW.principal_id='00000000-0000-4000-8000-000000000012' THEN
+    RAISE insufficient_privilege USING MESSAGE='reserved detached coordination principal cannot have memberships, keys or trusted identities';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+REVOKE ALL ON FUNCTION continuum_guard_detached_coordination_authority() FROM PUBLIC;
+CREATE TRIGGER guard_detached_coordination_membership BEFORE INSERT OR UPDATE ON scope_memberships
+FOR EACH ROW EXECUTE FUNCTION continuum_guard_detached_coordination_authority();
+CREATE TRIGGER guard_detached_coordination_key BEFORE INSERT OR UPDATE ON service_api_keys
+FOR EACH ROW EXECUTE FUNCTION continuum_guard_detached_coordination_authority();
+CREATE TRIGGER guard_detached_coordination_identity BEFORE INSERT OR UPDATE ON continuum_trusted_database_identities
+FOR EACH ROW EXECUTE FUNCTION continuum_guard_detached_coordination_authority();
+
 DO $harden$
 DECLARE schema_name TEXT := current_schema(); function_record RECORD;
 BEGIN
@@ -894,7 +926,8 @@ BEGIN
         'continuum_coordination_resource_counter','continuum_operator_set_coordination_scope_quota',
         'continuum_operator_set_coordination_principal_quota','continuum_operator_reclaim_coordination_resource',
         'continuum_operator_list_coordination_privacy_repair_page','continuum_operator_coordination_scope_privacy_state','continuum_operator_pseudonymize_scope_v2_legacy',
-        'continuum_operator_scrub_coordination_principal_v3','continuum_guard_offboarding_access_audit'
+        'continuum_operator_scrub_coordination_principal_v3','continuum_guard_offboarding_access_audit',
+        'continuum_guard_detached_coordination_authority'
       ]) LOOP
     EXECUTE format('ALTER FUNCTION %I.%I(%s) SET search_path=pg_catalog,%I,pg_temp',schema_name,function_record.proname,function_record.arguments,schema_name);
     EXECUTE format('REVOKE ALL ON FUNCTION %I.%I(%s) FROM PUBLIC',schema_name,function_record.proname,function_record.arguments);
