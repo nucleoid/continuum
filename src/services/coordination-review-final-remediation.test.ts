@@ -198,6 +198,38 @@ describe('coordination final review remediation', () => {
     )).rows[0].count).toBe(0);
   }, 60_000);
 
+  it('blocked privacy CLI review: continues when an expired detached receipt purge frees the blocked quota', async () => {
+    const value = await fixture('detached-quota-purge');
+    await pool.query('SELECT continuum_disable_principal($1, $2)', [value.operator.id, value.target.id]);
+    await pool.query(
+      `INSERT INTO coordination_principal_privacy_progress(principal_id, detached_principal_id, privacy_version, completed_at)
+       VALUES($1, $2, 3, NULL)`, [value.target.id, detachedPrincipalId],
+    );
+    await pool.query(
+      'SELECT continuum_operator_set_coordination_principal_quota($1, $2, 1, 1)',
+      [value.operator.id, detachedPrincipalId],
+    );
+    await pool.query("INSERT INTO coordination_resources(scope_id, resource) VALUES($1, 'quota-shared')", [value.shared.id]);
+    for (const principalId of [detachedPrincipalId, value.target.id]) {
+      await pool.query(
+        `INSERT INTO coordination_operation_receipts(principal_id, operation, request_id, payload_hash,
+           outcome, scope_id, resource, expires_at, server_time, retry_after_seconds, retain_until, created_at)
+         VALUES($1, 'acquire', gen_random_uuid(), sha256(convert_to($1::text, 'UTF8')),
+           'contended', $2, 'quota-shared', clock_timestamp() - interval '2 days',
+           clock_timestamp() - interval '2 days', 0, clock_timestamp() - interval '1 day',
+           clock_timestamp() - interval '2 days')`, [principalId, value.shared.id],
+      );
+    }
+    const result = await adminCli(value.operator, [
+      'repair-coordination-privacy', value.target.id, '--confirm-scope', value.owned.id, '--batch-size', '1',
+    ], 60_000);
+    expect(result).toMatchObject({ exitCode: 0, payload: { complete: true } });
+    expect(Number(result.payload.attempts)).toBeGreaterThan(1);
+    expect((await pool.query(
+      'SELECT count(*)::int AS count FROM coordination_operation_receipts WHERE principal_id = $1', [value.target.id],
+    )).rows[0].count).toBe(0);
+  }, 60_000);
+
   it('contract offboarding review: durably revokes access while backfill is pending and resumes after readiness', async () => {
     const value = await fixture('pending-contract-access');
     try {
