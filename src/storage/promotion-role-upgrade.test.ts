@@ -195,6 +195,30 @@ async function roleUpgradeAcceptance(review?: 'poison' | 'null' | 'regrant') {
         await owner.query('DROP TRIGGER reject_registry_configuration_audit ON audit_log; DROP FUNCTION reject_registry_configuration_audit()');
       }
       expect((await owner.query('SELECT webhook_ids FROM promotion_webhook_registry WHERE singleton')).rows).toEqual(before);
+      const reader = await owner.connect();
+      let configure: Promise<pg.QueryResult> | undefined;
+      try {
+        await reader.query('BEGIN');
+        const readerPid = (await reader.query('SELECT pg_catalog.pg_backend_pid() AS pid')).rows[0].pid;
+        const operatorPid = (await operator.query('SELECT pg_catalog.pg_backend_pid() AS pid')).rows[0].pid;
+        expect((await reader.query('SELECT continuum_promotion_webhook_ids() AS ids')).rows[0].ids).toEqual(['upgrade-hook']);
+        configure = operator.query('SELECT continuum_operator_set_promotion_webhook_ids($1::uuid,$2::text[])',
+          [administrator, ['upgrade-hook', 'upgrade-hook']]);
+        void configure.catch(() => undefined);
+        const deadline = Date.now() + 1_000;
+        let blocked = false;
+        while (!blocked && Date.now() < deadline) {
+          blocked = (await owner.query('SELECT $1::integer=ANY(pg_catalog.pg_blocking_pids($2::integer)) AS blocked',
+            [readerPid, operatorPid])).rows[0].blocked;
+          if (!blocked) await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        expect(blocked).toBe(true);
+      } finally {
+        try { await reader.query('ROLLBACK'); } finally { reader.release(); }
+        if (configure) await configure;
+      }
+      expect((await owner.query('SELECT webhook_ids FROM promotion_webhook_registry WHERE singleton')).rows).toEqual(before);
+
     }
 
     const admin = (await getPrincipal(owner, administrator))!;
