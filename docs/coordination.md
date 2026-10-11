@@ -421,6 +421,31 @@ is a convenience, not a separate program setting. Runtime and dedicated operator
 connections cannot perform this owner-only work. Select the reviewed application
 schema first in the owner connection's `search_path`.
 
+Current REST/MCP and membership-sync processes anchor the application namespace
+with `CONTINUUM_APPLICATION_SCHEMA`, which defaults to `public`. Their resolved
+explicit `search_path` must contain exactly that schema, with `pg_catalog`
+remaining implicit. Putting the application schema first while retaining later
+schemas is insufficient. An explicitly listed `pg_catalog`, a caller-owned
+`$user` schema, or any later resolved schema makes configured startup fail closed.
+Nonexistent `$user` entries do not appear in the resolved path.
+
+For a custom tenant, set `CONTINUUM_APPLICATION_SCHEMA=tenant_app` and configure
+the connection's `search_path` as `tenant_app` only. A separate DBA-owned
+pgvector provider remains supported: current runtime queries resolve its types
+and operators without adding that provider schema to the runtime path. The
+historical 0001 bootstrap can temporarily use an application/provider path for
+its unqualified extension DDL; that migration-only exception does not permit
+such a path in current runtime startup. Application-local pgvector also remains
+supported with the same single application namespace.
+
+Standalone library calls may omit the optional `expectedSchema` gate argument
+for compatibility. In that mode the caller must supply a trusted connection
+path; relation/helper ownership checks do not establish an independent schema
+anchor. REST/MCP and membership-sync entrypoints always pass the configured
+anchor. Coordination
+SQL additionally selects catalog primitives explicitly and types UUID helper
+arguments to prevent differently typed overloads from redirecting those calls.
+
 For owner inspection, replace `public` with the quoted application schema:
 
 ```sql
@@ -704,8 +729,12 @@ Use `list-coordination-privacy-repairs` or `listCoordinationPrivacyRepairPage`
 and follow `nextCursor` until it is null, including after empty result pages.
 If dirty-marker refresh encounters a concurrent refresh, 0081 conservatively
 upserts the marker instead of silently dropping evidence. The fallback has a
-one-second lock wait bound. If contention or cancellation prevents it, the
-caller transaction fails and its mutation must roll back; retry that operation.
+one-second lock wait bound. If contention prevents it, direct principal or
+mapping writes raise PostgreSQL `55P03` and their transaction must roll back.
+The guarded operator scrub rolls back its attempted work and returns
+`lock_busy`; previously committed v3 progress and dirty evidence remain intact.
+Retry the whole operation after the competing transaction settles. Cancellation
+also leaves the attempted mutation uncommitted.
 A conservative marker can be a false positive, so repair still verifies the
 actual privacy state before claiming completion.
 The 0081 scope backfill also reopens mapped principal repair markers when a
