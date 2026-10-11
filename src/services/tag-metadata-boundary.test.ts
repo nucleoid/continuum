@@ -110,4 +110,49 @@ describe('controlled tag provenance boundary', () => {
       type: 'fact', title: 'Related attempt', body: 'Valid body', source: 'manual', metadata: { related: [] } }))
       .rejects.toMatchObject({ code: 'INVALID_INPUT' });
   });
+
+  it('compatibility quarantines real application legacy writes without accepting caller provenance', async () => {
+    const { principal, scope } = await fixture();
+    const enable = await readFile(path.join(process.cwd(), 'scripts/enable-tag-legacy-writer-compat.sql'), 'utf8');
+    const restore = await readFile(path.join(process.cwd(), 'scripts/restore-tag-strict-enforcement.sql'), 'utf8');
+    await owner.query(enable);
+    try {
+      const inserted = await application.query(
+        `INSERT INTO memories(scope_id,type,title,body,author_id,source,tags,metadata)
+         VALUES($1::uuid,'fact','Legacy writer','Ordinary body',$2::uuid,'manual',
+           ARRAY['Branch','private-state'], '{"ordinary":true}'::jsonb)
+         RETURNING tags,metadata`, [scope.id, principal.id],
+      );
+      expect(inserted.rows[0]).toMatchObject({ tags: ['branch'], metadata: {
+        ordinary: true, continuum_legacy_tags: ['private-state'],
+        continuum_tag_rollback_compat: { version: 1, original_tags: ['Branch', 'private-state'] },
+      } });
+      for (const key of protectedKeys) {
+        await expect(application.query(
+          `INSERT INTO memories(scope_id,type,title,body,author_id,source,tags,metadata)
+           VALUES($1::uuid,'fact','Forged','Ordinary body',$2::uuid,'manual','{}'::text[],$3::jsonb)`,
+          [scope.id, principal.id, JSON.stringify({ [key]: { forged: true } })],
+        )).rejects.toMatchObject({ code: '23514', constraint: 'memories_tag_provenance' });
+      }
+      await expect(application.query('UPDATE continuum_tag_write_policy SET legacy_compat=FALSE'))
+        .rejects.toMatchObject({ code: '42501' });
+    } finally {
+      await owner.query(restore);
+    }
+  });
+
+  it('strict restoration retains the actual application 32-tag bound', async () => {
+    const { principal, scope } = await fixture();
+    await owner.query(await readFile(path.join(process.cwd(), 'scripts/restore-tag-strict-enforcement.sql'), 'utf8'));
+    const tags = Array.from({ length: 33 }, (_, index) => `limit-${index}`);
+    await owner.query(
+      `INSERT INTO tag_vocabularies(scope_kind,tag,created_by)
+       SELECT 'project',tag,$1::uuid FROM unnest($2::text[]) requested(tag)`, [principal.id, tags],
+    );
+    await expect(application.query(
+      `INSERT INTO memories(scope_id,type,title,body,author_id,source,tags)
+       VALUES($1::uuid,'fact','Too many','Ordinary body',$2::uuid,'manual',$3::text[])`,
+      [scope.id, principal.id, tags],
+    )).rejects.toMatchObject({ code: '23514', constraint: 'memories_tags_controlled_vocabulary' });
+  });
 });
