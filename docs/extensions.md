@@ -24,8 +24,8 @@ not measured process memory. An oversized or saturated input fails open to core
 results. Timeout does not free an unsettled extension's slot or retained input;
 actual settlement does. Before the first deadline, up to four overlapping calls
 for one ID can hang and retain snapshots; the limits prevent unbounded accumulation.
-Four IDs with four detached calls each can fill all16 process slots, and retained
-near1MiB snapshots can exhaust the8MiB input budget. Later requests then fail open
+Four IDs with four detached calls each can fill all 16 process slots, and retained
+near 1 MiB snapshots can exhaust the 8 MiB input budget. Later requests then fail open
 with `saturated` warnings, possibly omitting all enrichment across principals.
 If those promises never settle, fix or disable the extension and restart every
 affected REST/MCP process to clear the process-local fences and snapshots.
