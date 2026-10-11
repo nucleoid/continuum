@@ -65,7 +65,7 @@ describe('qualified provider startup gate', () => {
     });
   });
 
-  it('verifies startup under a direct quoted LOGIN role without parsing its name as regrole', async () => {
+  it.each([true, false])('verifies direct quoted LOGIN startup with helper present=%s', async (helperPresent) => {
     await fixture(async (_pool, admin, schema, shadow) => {
       const role = `startup-role-${randomUUID().slice(0, 8)}`;
       const password = randomUUID();
@@ -83,7 +83,14 @@ describe('qualified provider startup gate', () => {
         runtime = new pg.Pool({ connectionString: url.toString(), max: 1,
           options: `-c search_path=${shadow},${schema}` });
         expect((await runtime.query('SELECT current_user AS role')).rows).toEqual([{ role }]);
-        await expect(reconcilePgvectorProviderGrants(runtime)).resolves.toBeUndefined();
+        if (helperPresent) {
+          await expect(reconcilePgvectorProviderGrants(runtime)).resolves.toBeUndefined();
+        } else {
+          await admin.query(`DROP FUNCTION "${schema}".continuum_assert_current_pgvector_profile()`);
+          await expect(reconcilePgvectorProviderGrants(runtime)).rejects.toThrow(
+            'Pgvector startup verifier is missing',
+          );
+        }
       } finally {
         await runtime?.end();
         await admin.query(`DROP OWNED BY "${role}"; DROP ROLE IF EXISTS "${role}"`);
