@@ -185,6 +185,7 @@ export class PromotionEventWorker implements RuntimeWorker {
   private readonly ownershipLost = new Set<AbortController>();
   private readonly ownershipUncertain = new Set<AbortController>();
   private readonly pendingAcknowledgements = new Map<string, AbortController>();
+  private readonly pendingFailures = new Map<string, { controller: AbortController; retryDelayMs: number }>();
   private readonly logger: PromotionWorkerLogger;
   private readonly random: () => number;
 
@@ -580,7 +581,7 @@ export class PromotionEventWorker implements RuntimeWorker {
       if (timer) clearTimeout(timer);
       // A retained lease is only useful while an actual callback follower owns its cleanup.
       // Persistence errors before follower installation must never strand fences or renewals.
-      if (!lateFollower) this.finishCallback(delivery, controller);
+      if (!lateFollower && this.pendingFailures.get(key)?.controller !== controller) this.finishCallback(delivery, controller);
     }
   }
 
@@ -644,9 +645,9 @@ export class PromotionEventWorker implements RuntimeWorker {
       for (const [controller, delivery] of current) {
         const key = exactDeliveryKey(delivery);
         if (lost.has(key)) {
-          if (this.pendingAcknowledgements.get(deliveryKey(delivery)) === controller) this.finishCallback(delivery, controller);
+          if (this.hasPendingWrite(delivery, controller)) this.finishCallback(delivery, controller);
           else this.abortForOwnershipLoss(controller);
-        } else if (terminal.has(key) && this.pendingAcknowledgements.get(deliveryKey(delivery)) !== controller) {
+        } else if (terminal.has(key) && !this.hasPendingWrite(delivery, controller)) {
           this.stopLeaseRenewal(controller);
         } else if (renewed.has(key) || terminal.has(key)) {
           // Issuance is a conservative lower bound on the committed SQL clock.
@@ -670,7 +671,7 @@ export class PromotionEventWorker implements RuntimeWorker {
       // Keep paid ACKs reconcilable and signal uncertainty to live callbacks.
       for (const [controller, delivery] of current) {
         this.retainLease(delivery);
-        if (this.pendingAcknowledgements.get(deliveryKey(delivery)) !== controller) this.abortForOwnershipUncertainty(controller);
+        if (!this.hasPendingWrite(delivery, controller)) this.abortForOwnershipUncertainty(controller);
       }
       this.renewalRetryAt = current.length > 0 ? Date.now()
         + Math.max(1, Math.min(this.options.databaseTimeoutMs, Math.floor(this.options.leaseMs / 12))) : undefined;
@@ -679,7 +680,7 @@ export class PromotionEventWorker implements RuntimeWorker {
       void operation.catch(() => undefined);
       for (const [controller, delivery] of current) {
         this.retainLease(delivery);
-        if (this.pendingAcknowledgements.get(deliveryKey(delivery)) !== controller) this.abortForOwnershipUncertainty(controller);
+        if (!this.hasPendingWrite(delivery, controller)) this.abortForOwnershipUncertainty(controller);
       }
       // A finite prompt retry retains a positive margin after one slow attempt.
       this.renewalRetryAt = current.length > 0 ? Date.now()
@@ -737,7 +738,7 @@ export class PromotionEventWorker implements RuntimeWorker {
       return false;
     }).catch(() => {
       this.logger.error({ event: 'promotion_delivery_late_settlement_failed' });
-      return false;
+      return this.pendingFailures.get(deliveryKey(delivery))?.controller === controller;
     }).then((keepFence) => {
       if (!keepFence) this.finishCallback(delivery, controller);
     });
@@ -785,20 +786,27 @@ export class PromotionEventWorker implements RuntimeWorker {
       });
       return true;
     }
-    const retryDelayMs = this.retryDelay(delivery.attemptCount);
-    const state = await this.databaseOperation(this.store.fail(
-      this.pool,
-      eventId,
-      webhookId,
-      this.options.owner,
-      {
-        maxAttempts: this.options.maxAttempts,
-        retryDelayMs,
-        error: new Error('callback failed'),
-        attemptCount: delivery.attemptCount,
-        leaseGeneration: delivery.leaseGeneration,
-      },
+    const pending = this.pendingFailures.get(deliveryKey(delivery));
+    const retryDelayMs = pending?.controller === controller ? pending.retryDelayMs : this.retryDelay(delivery.attemptCount);
+    const failing = Promise.resolve().then(() => this.store.fail(
+      this.pool, eventId, webhookId, this.options.owner,
+      { maxAttempts: this.options.maxAttempts, retryDelayMs, error: new Error('callback failed'),
+        attemptCount: delivery.attemptCount, leaseGeneration: delivery.leaseGeneration },
     ));
+    let state: 'pending' | 'dead_letter' | 'lost_lease';
+    try {
+      state = await this.databaseOperation(failing);
+    } catch (error) {
+      this.retainLease(delivery);
+      this.pendingFailures.set(deliveryKey(delivery), { controller, retryDelayMs });
+      this.controllers.set(controller, delivery);
+      // An observed late write proves this exact paid settlement completed.
+      void failing.then(() => {
+        if (this.pendingFailures.get(deliveryKey(delivery))?.controller === controller) this.finishCallback(delivery, controller);
+      }, () => undefined);
+      this.ensureLeaseRenewal();
+      throw error;
+    }
     this.logger.warn({
       event: 'promotion_delivery_failed', eventId, webhookId,
       attempt: delivery.attemptCount, reason: 'error', state,
@@ -807,17 +815,23 @@ export class PromotionEventWorker implements RuntimeWorker {
     return true;
   }
 
+  private hasPendingWrite(delivery: ClaimedPromotionDelivery, controller: AbortController): boolean {
+    const key = deliveryKey(delivery);
+    return this.pendingAcknowledgements.get(key) === controller || this.pendingFailures.get(key)?.controller === controller;
+  }
+
   private scheduleAcknowledgements(deliveries: readonly ClaimedPromotionDelivery[]): void {
     if (this.acknowledgementRetry) return;
     const pending = deliveries.filter((delivery) => {
-      const controller = this.pendingAcknowledgements.get(deliveryKey(delivery));
+      const controller = this.pendingAcknowledgements.get(deliveryKey(delivery))
+        ?? this.pendingFailures.get(deliveryKey(delivery))?.controller;
       const current = controller && this.controllers.get(controller);
       return current && exactDeliveryKey(current) === exactDeliveryKey(delivery);
     });
     if (pending.length === 0) return;
     const start = this.acknowledgementCursor % pending.length;
     // A bounded rotating cohort cannot monopolize renewal or starve later paid
-    // callbacks. Database deadlines apply concurrently, never serially per ACK.
+    // outcomes. Database deadlines apply concurrently, never serially per write.
     const cohort = [...pending.slice(start), ...pending.slice(0, start)].slice(0, 10);
     this.acknowledgementCursor = (start + cohort.length) % pending.length;
     this.acknowledgementRetry = this.retryAcknowledgements(cohort).catch(() => {
@@ -830,10 +844,15 @@ export class PromotionEventWorker implements RuntimeWorker {
   ): Promise<void> {
     await Promise.all(deliveries.map(async (delivery) => {
       const key = deliveryKey(delivery);
-      const controller = this.pendingAcknowledgements.get(key);
+      const controller = this.pendingAcknowledgements.get(key) ?? this.pendingFailures.get(key)?.controller;
       if (!controller || !this.controllers.get(controller)
         || exactDeliveryKey(this.controllers.get(controller)!) !== exactDeliveryKey(delivery)) return;
       try {
+        if (this.pendingFailures.get(key)?.controller === controller) {
+          await this.persistCallbackOutcome(delivery, controller, 'failure');
+          this.finishCallback(delivery, controller);
+          return;
+        }
         const acknowledged = await this.databaseOperation(this.store.complete(
           this.pool,
           delivery.event.eventId,
@@ -853,7 +872,8 @@ export class PromotionEventWorker implements RuntimeWorker {
         this.finishCallback(delivery, controller);
       } catch {
         this.logger.error({
-          event: 'promotion_delivery_acknowledgement_failed',
+          event: this.pendingFailures.get(key)?.controller === controller
+            ? 'promotion_delivery_failure_persistence_failed' : 'promotion_delivery_acknowledgement_failed',
           eventId: delivery.event.eventId,
           webhookId: delivery.webhookId,
           attempt: delivery.attemptCount,
@@ -872,6 +892,7 @@ export class PromotionEventWorker implements RuntimeWorker {
     const key = deliveryKey(delivery);
     this.stopRenewingCallback(controller);
     if (this.pendingAcknowledgements.get(key) === controller) this.pendingAcknowledgements.delete(key);
+    if (this.pendingFailures.get(key)?.controller === controller) this.pendingFailures.delete(key);
     const retained = this.retainedLeases.get(key);
     if (retained && exactDeliveryKey(retained) === exactDeliveryKey(delivery)) this.retainedLeases.delete(key);
     const held = inFlightCallbacks.get(key);
