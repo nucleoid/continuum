@@ -7,7 +7,7 @@ import { createPrincipal } from './principals.js';
 import { createScope, getScopeByRef } from './scopes.js';
 import { addMembership } from './memberships.js';
 import { mapOwnedUserScope } from '../services/offboarding.js';
-import { acquireLease } from '../services/coordination.js';
+import { acquireLease, renewLease } from '../services/coordination.js';
 
 const databaseUrl = process.env.CONTINUUM_TEST_DATABASE_URL
   ?? 'postgres://continuum:continuum@localhost:5433/continuum';
@@ -192,6 +192,40 @@ describe('coordination contract scale and recovery', () => {
     expect((await pool.query('SELECT continuum_coordination_contract_is_ready() AS ready')).rows)
       .toEqual([{ ready: false }]);
   });
+
+  it('recounts real API receipts exactly when a completed ledgered backfill is reopened', async () => {
+    const writer=await createPrincipal(pool,{externalId:randomUUID(),kind:'user',displayName:'Reopened writer'});
+    const scope=await createScope(pool,{kind:'project',name:'reopened-counter'});
+    await addMembership(pool,writer.id,scope.id,'writer');
+    const runId=randomUUID();
+    const acquired=await acquireLease(pool,writer,{scope:'project:reopened-counter',resource:'key',runId,
+      requestId:'10000000-0000-4000-8000-000000000001',ttlSeconds:900});
+    if(!acquired.acquired) throw new Error('fresh counter fixture acquisition contended');
+    // Reset only the prior test fixture's owner state to a fresh81 starting
+    // position. Counter values are produced exclusively by real API mutations.
+    await pool.query(`UPDATE coordination_contract_backfill_state SET phase='usage',
+      principal_cursor=NULL,scope_cursor=NULL,resource_scope_cursor=NULL,resource_key_cursor=NULL,
+      receipt_principal_cursor=NULL,receipt_operation_cursor=NULL,receipt_request_cursor=NULL,
+      resource_rows_processed=0`);
+    await runMigrations(pool);
+    expect((await pool.query('SELECT phase FROM coordination_contract_backfill_state')).rows)
+      .toEqual([{phase:'complete'}]);
+    await renewLease(pool,writer,{leaseId:acquired.leaseId,runId,
+      requestId:'10000000-0000-4000-8000-000000000002',ttlSeconds:900});
+    // Advertised ledgered repair resume: reopen its phase, retaining the
+    // completed state as stored. Do not manufacture or zero any usage counter.
+    await pool.query("UPDATE coordination_contract_backfill_state SET phase='usage'");
+    await runMigrations(pool);
+    expect((await pool.query('SELECT count(*)::int AS count FROM coordination_operation_receipts WHERE principal_id=$1',[writer.id])).rows)
+      .toEqual([{count:2}]);
+    expect((await pool.query(`SELECT acquire_receipt_count,contended_receipt_count,mutation_receipt_count
+      FROM coordination_principal_usage WHERE principal_id=$1`,[writer.id])).rows)
+      .toEqual([{acquire_receipt_count:1,contended_receipt_count:0,mutation_receipt_count:1}]);
+    expect((await pool.query(`SELECT phase,principal_cursor,scope_cursor,resource_scope_cursor,resource_key_cursor,
+      receipt_principal_cursor,receipt_operation_cursor,receipt_request_cursor FROM coordination_contract_backfill_state`)).rows)
+      .toEqual([{phase:'complete',principal_cursor:null,scope_cursor:null,resource_scope_cursor:null,
+        resource_key_cursor:null,receipt_principal_cursor:null,receipt_operation_cursor:null,receipt_request_cursor:null}]);
+  },60_000);
 
   it('backfills receipts as the non-superuser function owner with database TEMP revoked', async () => {
     const database = `contract_temp_${randomUUID().replaceAll('-', '')}`;
