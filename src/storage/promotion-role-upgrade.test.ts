@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import pg from 'pg';
 import { expect, it } from 'vitest';
 import { runMigrations } from './migrator.js';
-import { reconcilePgvectorProviderGrants, requireCoordinationContractReady } from './provider-lifecycle.js';
+import { reconcilePgvectorProviderGrants, requireCoordinationContractReady, requirePromotionOutboxReady } from './provider-lifecycle.js';
 import { createScope } from './scopes.js';
 import { createPrincipal, getPrincipal } from './principals.js';
 import { mapOwnedUserScope, offboardPrincipal } from '../services/offboarding.js';
@@ -102,7 +102,7 @@ async function roleUpgradeAcceptance(review?: 'poison' | 'null' | 'regrant') {
       FROM pg_catalog.pg_class relation JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace
       CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(relation.relacl,pg_catalog.acldefault('r',relation.relowner))) acl
       WHERE namespace.nspname=$1::text AND relation.relname=ANY($2::text[]) AND acl.grantee=0`,
-    [schema, ['promotion_events', 'promotion_event_deliveries']])).rows).toEqual([]);
+    [schema, ['promotion_events', 'promotion_event_deliveries', 'promotion_webhook_registry']])).rows).toEqual([]);
 
     for (const role of roles) {
       const url = new URL(databaseUrl);
@@ -119,8 +119,8 @@ async function roleUpgradeAcceptance(review?: 'poison' | 'null' | 'regrant') {
       if (role !== operatorRole) await expect(connection.query(
         'SELECT continuum_operator_scrub_promotion_scope($1::uuid,$2::uuid,$3::uuid,1::integer)',
         [administrator, administrator, randomUUID()])).rejects.toMatchObject({ code: '42501' });
-      for (const table of ['promotion_events', 'promotion_event_deliveries']) {
-        const expected = role === appRole || role === operatorRole
+      for (const table of ['promotion_events', 'promotion_event_deliveries', 'promotion_webhook_registry']) {
+        const expected = table !== 'promotion_webhook_registry' && (role === appRole || role === operatorRole)
           ? table === 'promotion_events' ? ['SELECT', 'INSERT'] : ['SELECT', 'INSERT', 'UPDATE'] : [];
         // Each actual LOGIN inspects its own effective rights, not the owner
         // claiming that a target role ought to have a privilege.
@@ -134,11 +134,20 @@ async function roleUpgradeAcceptance(review?: 'poison' | 'null' | 'regrant') {
       }
       if (role === appRole || role === operatorRole) {
         await requireCoordinationContractReady(connection, { expectedSchema: schema });
+        await requirePromotionOutboxReady(connection, { expectedSchema: schema });
         await expect(connection.query('UPDATE promotion_events SET occurred_at=occurred_at WHERE FALSE'))
           .rejects.toMatchObject({ code: '42501' });
         await expect(connection.query('DELETE FROM promotion_event_deliveries WHERE FALSE'))
           .rejects.toMatchObject({ code: '42501' });
       }
+    }
+    for (const [role, connection] of logins) {
+      expect((await connection.query(`SELECT pg_catalog.has_function_privilege(
+        'continuum_operator_set_promotion_webhook_ids(uuid,text[])','EXECUTE') AS allowed`)).rows)
+        .toEqual([{ allowed: role === operatorRole }]);
+      expect((await connection.query(`SELECT pg_catalog.has_function_privilege(
+        'continuum_promotion_webhook_ids()','EXECUTE') AS allowed`)).rows)
+        .toEqual([{ allowed: role === appRole || role === operatorRole }]);
     }
     const app = logins.get(appRole)!;
     const sourceScope = await createScope(owner, { kind: 'team', name: 'role-upgrade-source' });
@@ -168,6 +177,26 @@ async function roleUpgradeAcceptance(review?: 'poison' | 'null' | 'regrant') {
       .rejects.toThrow(/Runtime application schema is not trusted/);
 
     const operator = logins.get(operatorRole)!;
+    if (review === 'regrant') {
+      const before = (await owner.query('SELECT webhook_ids FROM promotion_webhook_registry WHERE singleton')).rows;
+      await expect(operator.query('SELECT continuum_operator_set_promotion_webhook_ids($1::uuid,$2::text[])',
+        [administrator, null])).rejects.toMatchObject({ code: '23514' });
+      await expect(operator.query('SELECT continuum_operator_set_promotion_webhook_ids($1::uuid,$2::text[])',
+        [administrator, ['Invalid ID']])).rejects.toMatchObject({ code: '23514' });
+      await owner.query(`CREATE FUNCTION reject_registry_configuration_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW.metadata->>'operation'='promotion_webhook_registry_configured' THEN
+          RAISE EXCEPTION 'expected registry audit failure'; END IF; RETURN NEW; END $$;
+        CREATE TRIGGER reject_registry_configuration_audit BEFORE INSERT ON audit_log
+          FOR EACH ROW EXECUTE FUNCTION reject_registry_configuration_audit()`);
+      try {
+        await expect(operator.query('SELECT continuum_operator_set_promotion_webhook_ids($1::uuid,$2::text[])',
+          [administrator, ['replacement-hook']])).rejects.toThrow('expected registry audit failure');
+      } finally {
+        await owner.query('DROP TRIGGER reject_registry_configuration_audit ON audit_log; DROP FUNCTION reject_registry_configuration_audit()');
+      }
+      expect((await owner.query('SELECT webhook_ids FROM promotion_webhook_registry WHERE singleton')).rows).toEqual(before);
+    }
+
     const admin = (await getPrincipal(owner, administrator))!;
     const target = await createPrincipal(owner, { externalId: `promotion-private-${suffix}`, kind: 'user', displayName: 'Private Person' });
     const personal = await createScope(owner, { kind: 'user', name: `personal-${suffix}` });
