@@ -593,6 +593,12 @@ scopes, including team, project, organization, role, and another user's scope,
 remain shared state, but retained leases and receipts are moved to an
 installation-wide detached principal and their run IDs and payload hashes are
 independently randomized in bounded batches. The detached identity is disabled.
+It is reserved for storage: 0081 prevents enabling it or changing its kind from
+service, and refuses memberships, API keys and trusted database identity
+bindings. Ordinary disabled service principals retain their normal approved
+reactivation and key workflows. Existing sink credentials or authority metadata
+must be reviewed and removed by the owner; disabling the sink closes its
+authentication path without deleting anonymous lease or receipt history.
 Detachment uses the same combined receipt budget across acquire, contention,
 renew, and release. It freezes a bounded candidate page, then rechecks available
 space under the detached usage lock. A full budget leaves the repair incomplete
