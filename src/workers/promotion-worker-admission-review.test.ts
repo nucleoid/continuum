@@ -116,4 +116,47 @@ describe('promotion admission review', () => {
       expect(attempts.get('zeta')).toBe(0);
     } finally { await worker.stop('test-finished'); }
   });
+  it('preserves admission for a known initially empty healthy ID across two same-registry workers and ten hung IDs', async () => {
+    vi.useFakeTimers();
+    const hungDone = Promise.withResolvers<void>();
+    const registry = new PromotionWebhookRegistry();
+    let hungStarted = 0;
+    let healthyBacklog = false;
+    let healthyClaimed = false;
+    let healthyCalls = 0;
+    let sequence = 10;
+    for (let i = 0; i < 10; i += 1) registry.register({ id: `hang${String(i).padStart(2, '0')}`,
+      onPromoted: async () => { hungStarted += 1; await hungDone.promise; } });
+    registry.register({ id: 'healthy', onPromoted: async () => { healthyCalls += 1; } });
+    const persistence = store({ claim: vi.fn(async (_pool, input) => {
+      const hook = input.webhookIds[0];
+      if (hook === 'healthy') {
+        if (!healthyBacklog || healthyClaimed) return [];
+        healthyClaimed = true; return [delivery(hook)];
+      }
+      return Array.from({ length: input.limit }, () => ({ ...delivery(hook),
+        event: { ...delivery(hook).event, eventId: `00000000-0000-4000-8000-${String(++sequence).padStart(12, '0')}` } }));
+    }), renew: vi.fn(async (_pool, _owner, claims) => ({ renewed: claims, terminalOwned: [], lost: [] })) });
+    const workers = ['same-set-one', 'same-set-two'].map((owner) => new Worker(pool, registry,
+      options({ owner, claimBatch: 10, callbackTimeoutMs: 5, maxAttempts: 3 }), persistence));
+    const drain = async (worker: InstanceType<typeof Worker>) => {
+      const running = worker.drainOnce(); await vi.advanceTimersByTimeAsync(5); await running;
+    };
+    try {
+      await drain(workers[0]);
+      for (let attempt = 0; attempt < 3; attempt += 1) await drain(workers[attempt % 2]);
+      expect(hungStarted).toBeGreaterThan(0);
+      expect(hungStarted).toBeLessThan(100);
+      expect(healthyCalls).toBe(0);
+      healthyBacklog = true;
+      await drain(workers[1]);
+      expect(healthyCalls).toBe(1);
+      expect(hungStarted + healthyCalls).toBeLessThanOrEqual(100);
+    } finally {
+      hungDone.resolve(); await vi.advanceTimersByTimeAsync(0);
+      const stopping = Promise.all(workers.map((worker) => worker.stop('test-finished')));
+      await vi.advanceTimersByTimeAsync(50); await stopping;
+    }
+  });
+
 });
