@@ -39,7 +39,7 @@ describe('coordination final review forward repair', () => {
     expect(online).toMatch(/CREATE INDEX CONCURRENTLY/i);
   });
 
-  it('bounds expired acquire deletion in the insert trigger to 100 rows', async () => {
+  it('bounds expired receipt cleanup to 100 while preserving retained receipts', async () => {
     const principal = await createPrincipal(pool, {
       externalId: `service:bounded-trigger:${randomUUID()}`,
       kind: 'service', displayName: 'Bounded trigger',
@@ -55,15 +55,9 @@ describe('coordination final review forward repair', () => {
           resource, expires_at, server_time, retry_after_seconds, retain_until)
        SELECT $1, 'acquire', gen_random_uuid(), sha256(convert_to(g::text, 'UTF8')),
               'contended', $2, 'bounded', clock_timestamp() + interval '1 minute',
-              clock_timestamp(), 1, clock_timestamp() + interval '1 minute'
+              clock_timestamp() - interval '2 days', 1, clock_timestamp() - interval '1 day'
          FROM generate_series(1, 150) g`,
       [principal.id, scope.id],
-    );
-    await pool.query(
-      `UPDATE coordination_operation_receipts
-          SET server_time = clock_timestamp() - interval '2 minutes',
-              retain_until = clock_timestamp() - interval '1 minute'
-        WHERE principal_id = $1`, [principal.id],
     );
     await pool.query(
       `INSERT INTO coordination_operation_receipts
@@ -71,13 +65,22 @@ describe('coordination final review forward repair', () => {
           resource, expires_at, server_time, retry_after_seconds, retain_until)
        VALUES ($1, 'acquire', gen_random_uuid(), sha256(convert_to('new', 'UTF8')),
                'contended', $2, 'bounded', clock_timestamp() + interval '1 minute',
-               clock_timestamp(), 1, clock_timestamp() + interval '1 minute')`,
+               clock_timestamp(), 1, clock_timestamp() + interval '24 hours')`,
       [principal.id, scope.id],
     );
     expect((await pool.query(
       `SELECT count(*)::int AS count FROM coordination_operation_receipts
         WHERE principal_id = $1`, [principal.id],
-    )).rows).toEqual([{ count: 51 }]);
+    )).rows).toEqual([{ count: 151 }]);
+    expect((await pool.query(
+      'SELECT continuum_coordination_cleanup_expired_receipts($1) AS removed',
+      [principal.id],
+    )).rows).toEqual([{ removed: 100 }]);
+    expect((await pool.query(
+      `SELECT count(*)::int AS count,
+              count(*) FILTER (WHERE retain_until > clock_timestamp())::int AS retained
+         FROM coordination_operation_receipts WHERE principal_id = $1`, [principal.id],
+    )).rows).toEqual([{ count: 51, retained: 1 }]);
   });
 
   it('uses indexed bounded production cleanup shapes', async () => {
@@ -99,6 +102,8 @@ describe('coordination final review forward repair', () => {
       kind: 'service', displayName: 'Plan owner',
     });
     const scope = await createScope(pool, { kind: 'project', name: `plan-${randomUUID()}` });
+    // Owner-only historical overage fixture: upgrades preserve existing rows above
+    // today's 10k resource cap; ordinary inserts remain subject to the hard cap.
     await pool.query('ALTER TABLE coordination_resources DISABLE TRIGGER USER');
     await pool.query('ALTER TABLE coordination_operation_receipts DISABLE TRIGGER USER');
     try {
