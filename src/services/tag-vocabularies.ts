@@ -91,11 +91,25 @@ export async function validateTagsForScopeKind(
 }
 
 export async function listTagVocabulary(
-  queryable: Queryable,
+  pool: pg.Pool,
+  principal: Principal,
   scopeKind: ScopeKind,
 ): Promise<TagVocabulary[]> {
-  assertScopeKind(scopeKind);
-  return listTagVocabularyRows(queryable, scopeKind);
+  try {
+    assertScopeKind(scopeKind);
+    return await inMutationTransaction(pool, async (client) => {
+      const actor = await client.query(
+        'SELECT id FROM principals WHERE id=$1::uuid AND disabled_at IS NULL FOR KEY SHARE', [principal.id],
+      );
+      if (actor.rows.length !== 1) throw new ServiceError('FORBIDDEN', 'Principal is not active');
+      const entries = await listTagVocabularyRows(client, scopeKind);
+      await recordAudit(client, { principalId: principal.id, action: 'read',
+        metadata: { operation: 'list_tag_vocabulary', scopeKind, count: entries.length } });
+      return entries;
+    });
+  } catch (error) {
+    throw asServiceError(error);
+  }
 }
 
 async function requireLockedOrgAdmin(queryable: Queryable, principalId: string): Promise<string> {

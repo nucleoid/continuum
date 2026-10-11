@@ -12,6 +12,30 @@ export interface TagVocabularyCliOptions {
 
 const USAGE = 'Usage: continuum-tags <list|add|update|remove> <scope-kind> [tag] [description]';
 const SCOPE_KINDS = new Set(['org', 'team', 'project', 'user', 'role']);
+const RESPONSE_MAX_BYTES = 1_048_576;
+const REQUEST_TIMEOUT_MS = 30_000;
+
+async function boundedResponseText(response: Response): Promise<string> {
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      size += chunk.value.byteLength;
+      if (size > RESPONSE_MAX_BYTES) {
+        await reader.cancel();
+        throw new Error('Continuum API response exceeds 1 MiB');
+      }
+      chunks.push(chunk.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
 
 export async function runTagVocabularyCli(
   args: readonly string[],
@@ -55,15 +79,28 @@ export async function runTagVocabularyCli(
     }
   }
 
-  const response = await (options.fetch ?? fetch)(url, {
-    method,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      ...(body ? { 'Content-Type': 'application/json' } : {}),
-    },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  });
-  const text = await response.text();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let response: Response;
+  let text: string;
+  try {
+    response = await (options.fetch ?? fetch)(url, {
+      method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...(body ? { 'Content-Type': 'application/json' } : {}),
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+      signal: controller.signal,
+    });
+    text = await boundedResponseText(response);
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error('Continuum API request timed out');
+    if (error instanceof Error && error.message === 'Continuum API response exceeds 1 MiB') throw error;
+    throw new Error('Continuum API request failed');
+  } finally {
+    clearTimeout(timer);
+  }
   if (!response.ok) {
     let message = `Continuum API returned HTTP ${response.status}`;
     try {

@@ -33,6 +33,15 @@ describe('/api/v0/tag-vocabularies', () => {
     return { principal, org };
   }
 
+  async function independentOrgAdministrator(label: string) {
+    const principal = await createPrincipal(pool, {
+      externalId: `entra:tags:independent:${label}`, kind: 'user', displayName: 'Vocabulary Administrator',
+    });
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await addMembership(pool, principal.id, org.id, 'admin');
+    return principal;
+  }
+
   it('lets any authenticated principal list deterministic built-in entries', async () => {
     const { principal } = await actor();
     const response = await request(app)
@@ -60,6 +69,7 @@ describe('/api/v0/tag-vocabularies', () => {
   it('requires org admin and audits create, update, and delete atomically', async () => {
     const denied = await actor('admin');
     const team = await createScope(pool, { kind: 'team', name: 'admins-only-here' });
+    await independentOrgAdministrator('last-admin-control');
     await addMembership(pool, denied.principal.id, denied.org.id, 'reader');
     await addMembership(pool, denied.principal.id, team.id, 'admin');
     const forbidden = await request(app)
@@ -165,6 +175,7 @@ describe('/api/v0/tag-vocabularies', () => {
 
   it('cannot delete a tag after a concurrent capture has validated it', async () => {
     const { principal } = await actor('admin');
+    const deletionActor = await independentOrgAdministrator('capture-race');
     const project = await createScope(pool, { kind: 'project', name: 'capture-race' });
     await addMembership(pool, principal.id, project.id, 'writer');
     await pool.query(
@@ -187,7 +198,7 @@ describe('/api/v0/tag-vocabularies', () => {
     const deletePid = deferred<number>();
     const deletion = removeTagVocabulary(
       poolReportingClientPid(pool, deletePid),
-      principal,
+      deletionActor,
       { scopeKind: 'project', tag: 'race-safe' },
     );
     await waitForDatabaseLock(pool, await deletePid.promise);
@@ -206,6 +217,7 @@ describe('/api/v0/tag-vocabularies', () => {
 
   it('does not lock unrelated vocabulary rows while capture is in flight', async () => {
     const { principal } = await actor('admin');
+    const deletionActor = await independentOrgAdministrator('narrow-capture');
     const project = await createScope(pool, { kind: 'project', name: 'narrow-locks' });
     await addMembership(pool, principal.id, project.id, 'writer');
     await pool.query(
@@ -228,7 +240,7 @@ describe('/api/v0/tag-vocabularies', () => {
 
     const deletion = removeTagVocabulary(
       pool,
-      principal,
+      deletionActor,
       { scopeKind: 'project', tag: 'delete-tag' },
     );
     const outcome = await Promise.race([
@@ -244,6 +256,7 @@ describe('/api/v0/tag-vocabularies', () => {
 
   it('does not lock unrelated destination vocabulary rows during promotion', async () => {
     const { principal } = await actor('admin');
+    const deletionActor = await independentOrgAdministrator('narrow-promotion');
     const team = await createScope(pool, { kind: 'team', name: 'promotion-source' });
     const project = await createScope(pool, { kind: 'project', name: 'promotion-target' });
     await addMembership(pool, principal.id, team.id, 'writer');
@@ -275,7 +288,7 @@ describe('/api/v0/tag-vocabularies', () => {
 
     const deletion = removeTagVocabulary(
       pool,
-      principal,
+      deletionActor,
       { scopeKind: 'project', tag: 'delete-tag' },
     );
     const outcome = await Promise.race([

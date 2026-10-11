@@ -39,7 +39,7 @@ export function tagVocabulariesRouter(pool: pg.Pool): Router {
       res.status(400).json({ code: 'INVALID_INPUT', error: 'Invalid request' });
       return;
     }
-    const entries = await listTagVocabulary(pool, parsed.data.scopeKind);
+    const entries = await listTagVocabulary(pool, req.principal!, parsed.data.scopeKind);
     res.json({ scopeKind: parsed.data.scopeKind, entries: entries.map(responseEntry) });
   });
 

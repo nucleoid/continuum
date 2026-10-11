@@ -71,6 +71,7 @@ describe('continuum-tags CLI', () => {
         token: 'private-token',
       });
       const assertion = expect(operation).rejects.toThrow('Continuum API request timed out');
+      void assertion.catch(() => undefined);
       await vi.advanceTimersByTimeAsync(30_000);
       await assertion;
     } finally {
