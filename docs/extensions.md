@@ -166,6 +166,29 @@ the worker's own shutdown abort are abandoned without consuming an attempt.
 The default registries are empty. Deployments register consumers at their
 composition boundary. Core does not import or know about downstream products.
 
+## Owned-scope privacy
+
+Approved offboarding includes the promotion outbox in its physical completion
+proof. A bounded operator-only batch replaces an owned destination's personal
+scope-name snapshot with the canonical erased scope name and clears retained
+callback errors. Stable event, memory, scope and principal UUIDs remain for
+accounting. Related deliveries become `privacy_cancelled`: their lease and
+owner are cleared and their generation advances. They cannot be claimed,
+manually retried or acknowledged by an older delivery generation. Ordinary
+application roles cannot update event snapshots or invoke the erasure helper.
+The helper requires a bound approval identity, current manual organization
+administrator, immutable approved disabled-user mapping and its authorized
+run. Audit failure rolls the transaction back.
+
+Completion waits for actual outbox state, rather than an old erasure receipt.
+Retries commit bounded progress and check the current physical state again.
+A callback that has already received its event may retain that original
+payload or have sent it downstream. Losing its durable ownership fence stops
+future acknowledgement or retry writes; the next ownership check signals
+abort. JavaScript cannot retract a payload or force an abort-ignoring consumer
+to stop. Operators must arrange downstream erasure separately when required.
+Core makes no downstream deletion promise.
+
 ## Migration history and branch builds
 
 The outbox schema ships as `0089_promotion_outbox.sql`. Earlier unmerged branch
