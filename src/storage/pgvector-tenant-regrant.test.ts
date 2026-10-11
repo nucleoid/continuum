@@ -84,6 +84,55 @@ async function providerAccess(pool: pg.Pool, role: string) {
 }
 
 describe('pgvector tenant-scoped explicit regrant', () => {
+  it.each([
+    ['application', true], ['application', false],
+    ['operator', true], ['operator', false], ['sync', true], ['sync', false],
+  ] as const)('preserves %s identity when reporting registration enabled=%s', async (kind, enabled) => {
+    await isolated(async ({ admin, tenant, role }) => {
+      const schema = name('tenant_kind'); const owner = await tenant(schema); await runMigrations(owner);
+      const target = await role();
+      if (kind === 'sync') {
+        await admin.query(`ALTER ROLE ${q(target)} LOGIN`);
+        const actor = await createPrincipal(owner, { externalId: name('sync_kind'), kind: 'service', displayName: 'Sync' });
+        await owner.query('SELECT continuum_register_trusted_database_identity($1::name,$2::uuid,FALSE,TRUE)', [target, actor.id]);
+      } else {
+        await grants(owner, schema, target);
+        if (kind === 'operator') {
+          const actor = await createPrincipal(owner, { externalId: name('operator_kind'), kind: 'user', displayName: 'Operator' });
+          const org = (await getScopeByRef(owner, { kind: 'org', name: '' }))!;
+          await addMembership(owner, actor.id, org.id, 'admin');
+          await grants(owner, schema, target, actor.id);
+        }
+      }
+      const before = (await owner.query(`SELECT profile_kind, provider_schema_oid, refreshed_at
+        FROM continuum_pgvector_role_profiles WHERE database_role_oid=$1::regrole::oid`, [target])).rows;
+      {
+        await expect(owner.query('SELECT continuum_register_pgvector_reporting_profile($1::name,$2)', [target, enabled]))
+          .rejects.toThrow(/role is already registered with a non-reporting profile/i);
+        expect((await owner.query(`SELECT profile_kind,provider_schema_oid,refreshed_at
+          FROM continuum_pgvector_role_profiles WHERE database_role_oid=$1::regrole::oid`, [target])).rows).toEqual(before);
+        expect((await owner.query(`SELECT has_function_privilege($1,
+          'continuum_assert_current_pgvector_profile()','EXECUTE') AS gate`, [target])).rows).toEqual([{ gate: true }]);
+      }
+    });
+  }, 180_000);
+
+  it('disables only reporting metadata idempotently without changing provider ACLs', async () => {
+    await isolated(async ({ admin, tenant, role }) => {
+      const schema = name('tenant_reporting'); const owner = await tenant(schema); await runMigrations(owner);
+      const target = await role();
+      await owner.query(`GRANT USAGE ON SCHEMA ${q(schema)} TO ${q(target)}; GRANT SELECT ON memories TO ${q(target)}`);
+      await owner.query('SELECT continuum_register_pgvector_reporting_profile($1::name,TRUE)', [target]);
+      const before = await providerAccess(admin, target);
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await owner.query('SELECT continuum_register_pgvector_reporting_profile($1::name,FALSE)', [target]);
+        expect(await providerAccess(admin, target)).toEqual(before);
+        expect((await owner.query(`SELECT profile_kind FROM continuum_pgvector_role_profiles
+          WHERE database_role_oid=$1::regrole::oid`, [target])).rows).toEqual([]);
+      }
+    });
+  }, 180_000);
+
   it.each(['dedicated', 'legacy-public'])('accepts sync startup with preserved PUBLIC provider USAGE in %s layout', async (layout) => {
     await isolated(async ({ admin, tenant, role }) => {
       const provider = layout === 'dedicated' ? 'continuum_extensions' : 'public';

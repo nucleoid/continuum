@@ -556,99 +556,161 @@ describe('coordination final review remediation', () => {
 
   it('plans the generic production function with 50000 clean and reactivated rows', async () => {
     const dirty = await fixture('disabled-dirty-candidate');
-    await pool.query(
-      'UPDATE principals SET disabled_at = clock_timestamp() WHERE id = $1',
-      [dirty.target.id],
-    );
-    await pool.query(
-      `INSERT INTO principals
-         (id, external_id, kind, display_name, disabled_at, reactivated_at)
-       SELECT ('30000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid,
-              $1 || ':' || n, 'user', 'Clean or reactivated target',
-              CASE WHEN n <= 25000 THEN clock_timestamp() ELSE NULL END,
-              CASE WHEN n > 25000 THEN clock_timestamp() ELSE NULL END
-         FROM generate_series(1, 50000) n`,
-      [`clean-completed:${randomUUID()}`],
-    );
-    await pool.query(
-      `INSERT INTO scopes (id, kind, name)
-       SELECT ('40000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid,
-              'user', $1 || ':' || n
-         FROM generate_series(1, 50000) n`,
-      [`clean-completed-scope:${randomUUID()}`],
-    );
-    await pool.query(
-      `INSERT INTO principal_user_scopes
-         (principal_id, scope_id, mapped_by, acknowledged_principal_ids,
-          acknowledged_evidence_hash)
-       SELECT ('30000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid,
-              ('40000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid,
-              $1,
-              ARRAY[('30000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid],
-              repeat('c', 64)
-         FROM generate_series(1, 50000) n`,
-      [dirty.operator.id],
-    );
-    await pool.query(
-      `INSERT INTO coordination_principal_privacy_progress
-         (principal_id, detached_principal_id, privacy_version, completed_at)
-       SELECT ('30000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid,
-              $1, 3, clock_timestamp()
-         FROM generate_series(1, 50000) n`,
-      [detachedPrincipalId],
-    );
-    await pool.query(
-      `INSERT INTO coordination_principal_privacy_progress
-         (principal_id, detached_principal_id, privacy_version, completed_at)
-       VALUES ($1, $2, 2, NULL)`,
-      [dirty.target.id, detachedPrincipalId],
-    );
-    await pool.query(
-      `INSERT INTO audit_log (principal_id, action, scope_id, metadata)
-       VALUES ($1, 'write', $2, jsonb_build_object(
-         'operation', 'lock_release', 'request_id', gen_random_uuid(),
-         'run_id', gen_random_uuid(), 'lease_id', gen_random_uuid(),
-         'resource', 'dirty', 'resource_sha256', repeat('b', 64)))`,
-      [dirty.target.id, dirty.shared.id],
-    );
-    await pool.query('ANALYZE principals');
-    await pool.query('ANALYZE principal_user_scopes');
-    await pool.query('ANALYZE audit_log');
-    await pool.query('ANALYZE coordination_principal_privacy_progress');
+    const client = await pool.connect();
+    const original = (await client.query(
+      `SELECT current_setting('statement_timeout') AS timeout,
+              current_setting('plan_cache_mode') AS cache, pg_backend_pid() AS pid`,
+    )).rows[0];
+    const deadline = performance.now() + 75_000;
+    let phase = 0;
+    let discard = false;
+    let prepared = false;
+    let operationFailed = false;
+    const preparedName = `production_privacy_repairs_${randomUUID().replaceAll('-', '')}`;
+    const query = async (sql: string, values: unknown[] = []) => {
+      const remaining = Math.floor(deadline - performance.now());
+      if (remaining < 1) throw new Error('privacy scale diagnostic reached its bounded fixture deadline');
+      await client.query("SELECT set_config('statement_timeout', $1, FALSE)", [`${Math.min(15_000, remaining)}ms`]);
+      const label = sql.trim().split('\n')[0];
+      const started = performance.now();
+      const currentPhase = ++phase;
+      console.info('privacy-scale-phase-start', JSON.stringify({ phase: currentPhase, label, pid: original.pid }));
+      try { return await client.query(sql, values); }
+      finally {
+        console.info('privacy-scale-phase-end', JSON.stringify({ phase: currentPhase, label,
+          elapsedMs: Math.round(performance.now() - started) }));
+      }
+    };
+    try {
+      await query('BEGIN');
+      await query("SET LOCAL lock_timeout = '1s'");
+      await query(
+        'UPDATE principals SET disabled_at = clock_timestamp() WHERE id = $1',
+        [dirty.target.id],
+      );
+      await query(
+        `INSERT INTO principals
+           (id, external_id, kind, display_name, disabled_at, reactivated_at)
+         SELECT ('30000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid,
+                $1 || ':' || n, 'user', 'Clean or reactivated target',
+                CASE WHEN n <= 25000 THEN clock_timestamp() ELSE NULL END,
+                CASE WHEN n > 25000 THEN clock_timestamp() ELSE NULL END
+           FROM generate_series(1, 50000) n`,
+        [`clean-completed:${randomUUID()}`],
+      );
+      await query(
+        `INSERT INTO scopes (id, kind, name)
+         SELECT ('40000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid,
+                'user', $1 || ':' || n
+           FROM generate_series(1, 50000) n`,
+        [`clean-completed-scope:${randomUUID()}`],
+      );
+      await query(
+        `INSERT INTO principal_user_scopes
+           (principal_id, scope_id, mapped_by, acknowledged_principal_ids,
+            acknowledged_evidence_hash)
+         SELECT ('30000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid,
+                ('40000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid,
+                $1,
+                ARRAY[('30000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid],
+                repeat('c', 64)
+           FROM generate_series(1, 50000) n`,
+        [dirty.operator.id],
+      );
+      await query(
+        `INSERT INTO coordination_principal_privacy_progress
+           (principal_id, detached_principal_id, privacy_version, completed_at)
+         SELECT ('30000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid,
+                $1, 3, clock_timestamp()
+           FROM generate_series(1, 50000) n`,
+        [detachedPrincipalId],
+      );
+      await query(
+        `INSERT INTO coordination_principal_privacy_progress
+           (principal_id, detached_principal_id, privacy_version, completed_at)
+         VALUES ($1, $2, 2, NULL)`,
+        [dirty.target.id, detachedPrincipalId],
+      );
+      await query(
+        `INSERT INTO audit_log (principal_id, action, scope_id, metadata)
+         VALUES ($1, 'write', $2, jsonb_build_object(
+           'operation', 'lock_release', 'request_id', gen_random_uuid(),
+           'run_id', gen_random_uuid(), 'lease_id', gen_random_uuid(),
+           'resource', 'dirty', 'resource_sha256', repeat('b', 64)))`,
+        [dirty.target.id, dirty.shared.id],
+      );
+      await query('ANALYZE principals');
+      await query('ANALYZE principal_user_scopes');
+      await query('ANALYZE audit_log');
+      await query('ANALYZE coordination_principal_privacy_progress');
 
-    await pool.query('SELECT pg_stat_force_next_flush()');
-    const scansBefore = BigInt((await pool.query(
-      `SELECT COALESCE(idx_scan, 0)::text AS scans
-         FROM pg_stat_user_indexes
-        WHERE schemaname = current_schema()
-          AND indexrelname = 'coordination_privacy_repair_eligible_idx'`,
-    )).rows[0]?.scans ?? '0');
-    await pool.query('SET plan_cache_mode = force_generic_plan');
-    await pool.query(
-      `PREPARE production_privacy_repairs(uuid, uuid, uuid, integer) AS
-       SELECT * FROM continuum_operator_list_coordination_privacy_repairs($1, $2, $3, $4)`,
-    );
-    const plan = await pool.query(
-      `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
-       EXECUTE production_privacy_repairs(
-         '${dirty.operator.id}'::uuid, NULL::uuid, NULL::uuid, 100)`,
-    );
-    const root = plan.rows[0]['QUERY PLAN'][0].Plan as Record<string, unknown>;
-    const buffers = Number(root['Shared Hit Blocks'] ?? 0)
-      + Number(root['Shared Read Blocks'] ?? 0);
-    expect(root['Actual Rows']).toBe(1);
-    expect(buffers).toBeLessThan(2_000);
-    await pool.query('SELECT pg_stat_force_next_flush()');
-    const scansAfter = BigInt((await pool.query(
-      `SELECT COALESCE(idx_scan, 0)::text AS scans
-         FROM pg_stat_user_indexes
-        WHERE schemaname = current_schema()
-          AND indexrelname = 'coordination_privacy_repair_eligible_idx'`,
-    )).rows[0]?.scans ?? '0');
-    expect(scansAfter).toBeGreaterThan(scansBefore);
-    expect(await listCoordinationPrivacyRepairs(pool, dirty.operator, 100)).toEqual([{
-      principalId: dirty.target.id, scopeId: dirty.owned.id, state: 'disabled_only',
-    }]);
+      await query('COMMIT');
+      await query('SELECT pg_stat_force_next_flush()');
+      const scansBefore = BigInt((await query(
+        `SELECT COALESCE(idx_scan, 0)::text AS scans
+           FROM pg_stat_user_indexes
+          WHERE schemaname = current_schema()
+            AND indexrelname = 'coordination_privacy_repair_eligible_idx'`,
+      )).rows[0]?.scans ?? '0');
+      await query('SET plan_cache_mode = force_generic_plan');
+      await query(
+        `PREPARE ${preparedName}(uuid, uuid, uuid, integer) AS
+         SELECT * FROM continuum_operator_list_coordination_privacy_repairs($1, $2, $3, $4)`,
+      );
+      prepared = true;
+      const plan = await query(
+        `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+         EXECUTE ${preparedName}(
+           '${dirty.operator.id}'::uuid, NULL::uuid, NULL::uuid, 100)`,
+      );
+      const root = plan.rows[0]['QUERY PLAN'][0].Plan as Record<string, unknown>;
+      const buffers = Number(root['Shared Hit Blocks'] ?? 0)
+        + Number(root['Shared Read Blocks'] ?? 0);
+      expect(root['Actual Rows']).toBe(1);
+      expect(buffers).toBeLessThan(2_000);
+      await query('SELECT pg_stat_force_next_flush()');
+      const scansAfter = BigInt((await query(
+        `SELECT COALESCE(idx_scan, 0)::text AS scans
+           FROM pg_stat_user_indexes
+          WHERE schemaname = current_schema()
+            AND indexrelname = 'coordination_privacy_repair_eligible_idx'`,
+      )).rows[0]?.scans ?? '0');
+      expect(scansAfter).toBeGreaterThan(scansBefore);
+      const serviceBudget = Math.min(15_000, Math.floor(deadline - performance.now()));
+      if (serviceBudget < 1) throw new Error('privacy scale service probe reached its bounded deadline');
+      const base = (pool as unknown as { options: PoolConfig }).options;
+      const servicePool = new pg.Pool({ ...base, max: 1,
+        options: `${base.options ?? ''} -c statement_timeout=${serviceBudget} -c lock_timeout=1000`,
+      });
+      try {
+        expect(await listCoordinationPrivacyRepairs(servicePool, dirty.operator, 100)).toEqual([{
+          principalId: dirty.target.id, scopeId: dirty.owned.id, state: 'disabled_only',
+        }]);
+      } finally { await servicePool.end(); }
+    } catch (error) {
+      operationFailed = true;
+      discard = true;
+      throw error;
+    } finally {
+      try {
+        await client.query('ROLLBACK');
+        if (prepared) await client.query(`DEALLOCATE ${preparedName}`);
+        await client.query(`SELECT set_config('statement_timeout', $1, FALSE),
+                                  set_config('plan_cache_mode', $2, FALSE)`, [original.timeout, original.cache]);
+      } catch { discard = true; }
+      client.release(discard);
+      // The SQL deadline ends the query before Vitest's hard wall. Rollback and
+      // clearing imported test data prevent a failed fixture blocking TRUNCATE.
+      const base = (pool as unknown as { options: PoolConfig }).options;
+      const cleanup = new pg.Pool({ ...base, max: 1,
+        options: `${base.options ?? ''} -c statement_timeout=10000 -c lock_timeout=1000`,
+      });
+      try { await resetData(cleanup); }
+      catch (cleanupError) {
+        if (!operationFailed) throw cleanupError;
+        console.error('privacy-scale-cleanup-failed', (cleanupError as { code?: string }).code ?? 'unknown');
+      } finally { await cleanup.end(); }
+    }
   }, 120_000);
 
   it('skips a locked expired detached receipt under a caller-owned timeout', async () => {
