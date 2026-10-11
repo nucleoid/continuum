@@ -345,7 +345,16 @@ BEGIN
     'WHERE owned.scope_id=owned_scope_id AND (owned.phase<>''complete'' OR owned.completed_at IS NULL)) OR EXISTS (' ||
       chr(10) || '      SELECT 1 FROM audit_log audit');
   IF revised=definition THEN RAISE EXCEPTION 'unable to include owned scope privacy in dirty discovery'; END IF;
+  definition:=revised;
+  revised:=replace(definition,
+    '  EXCEPTION WHEN lock_not_available THEN' || chr(10) || '    RETURN;',
+    '  EXCEPTION WHEN lock_not_available THEN' || chr(10) ||
+    '    INSERT INTO coordination_privacy_dirty_principals(principal_id)' || chr(10) ||
+    '    VALUES(target_principal_id) ON CONFLICT(principal_id)' || chr(10) ||
+    '    DO UPDATE SET dirty_at=clock_timestamp();');
+  IF revised=definition THEN RAISE EXCEPTION 'unable to preserve dirty evidence after refresh contention'; END IF;
   EXECUTE revised;
+  EXECUTE format('ALTER FUNCTION %I.continuum_refresh_coordination_privacy_dirty(uuid) SET lock_timeout=''1s''',current_schema());
 END;
 $owned_dirty$;
 

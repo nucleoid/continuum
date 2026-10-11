@@ -640,6 +640,12 @@ after the candidate limit can return an empty array while eligible principals
 remain beyond that window. They are unsuitable for proving bulk exhaustion.
 Use `list-coordination-privacy-repairs` or `listCoordinationPrivacyRepairPage`
 and follow `nextCursor` until it is null, including after empty result pages.
+If dirty-marker refresh encounters a concurrent refresh, 0081 conservatively
+upserts the marker instead of silently dropping evidence. The fallback has a
+one-second lock wait bound. If contention or cancellation prevents it, the
+caller transaction fails and its mutation must roll back; retry that operation.
+A conservative marker can be a false positive, so repair still verifies the
+actual privacy state before claiming completion.
 The 0081 scope backfill also reopens mapped principal repair markers when a
 previously completed owned scope still has resource rows. Those markers remain
 discoverable until owned-scope erasure completes. Disabled-only repair resumes
