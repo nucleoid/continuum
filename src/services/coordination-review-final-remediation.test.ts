@@ -9,7 +9,7 @@ import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { acquireLease } from './coordination.js';
 import {
-  listCoordinationPrivacyRepairs, mapOwnedUserScope,
+  listCoordinationPrivacyRepairs, mapOwnedUserScope, offboardPrincipal,
 } from './offboarding.js';
 
 const execFileAsync = promisify(execFile);
@@ -39,6 +39,95 @@ describe('coordination final review remediation', () => {
     await mapOwnedUserScope(pool, operator, target.id, owned.id);
     return { operator, target, owned, shared };
   }
+
+  it('contract offboarding review: durably revokes access while backfill is pending and resumes after readiness', async () => {
+    const value = await fixture('pending-contract-access');
+    try {
+      await pool.query("UPDATE coordination_contract_backfill_state SET phase = 'principals' WHERE singleton");
+      const pending = await offboardPrincipal(pool, value.operator, value.target.id, {
+        confirmationScopeId: value.owned.id,
+      });
+      expect(pending).toMatchObject({ complete: false, reason: 'migration_pending' });
+      expect((await pool.query(
+        `SELECT disabled_at IS NOT NULL AS disabled, offboarded_at IS NOT NULL AS offboarded
+           FROM principals WHERE id = $1`, [value.target.id],
+      )).rows[0]).toEqual({ disabled: true, offboarded: false });
+      expect((await pool.query(
+        'SELECT active FROM scope_memberships WHERE principal_id = $1 AND scope_id = $2',
+        [value.target.id, value.owned.id],
+      )).rows[0].active).toBe(false);
+      expect((await pool.query(
+        `SELECT completed_at IS NOT NULL AS complete FROM principal_offboarding_runs WHERE principal_id = $1`,
+        [value.target.id],
+      )).rows[0].complete).toBe(false);
+      expect((await pool.query(
+        `SELECT count(*)::int AS count FROM audit_log
+          WHERE metadata->>'operation' = 'principal_offboarding_access_revoked'
+            AND metadata->>'principal_id' = $1`, [value.target.id],
+      )).rows[0].count).toBe(1);
+      await pool.query("UPDATE coordination_contract_backfill_state SET phase = 'complete' WHERE singleton");
+      let result = pending;
+      for (let attempt = 0; attempt < 12 && !result.complete; attempt += 1) {
+        result = await offboardPrincipal(pool, value.operator, value.target.id, {
+          confirmationScopeId: value.owned.id,
+        });
+      }
+      expect(result.complete).toBe(true);
+      expect((await pool.query(
+        'SELECT count(*)::int AS count FROM coordination_resources WHERE scope_id = $1', [value.owned.id],
+      )).rows[0].count).toBe(0);
+    } finally {
+      await pool.query("UPDATE coordination_contract_backfill_state SET phase = 'complete' WHERE singleton");
+    }
+  });
+
+  it('contract offboarding review: rolls back pending-window access revocation when its audit fails', async () => {
+    const value = await fixture('pending-contract-audit');
+    await pool.query(`CREATE FUNCTION fail_contract_access_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.metadata->>'operation' = 'principal_offboarding_access_revoked' THEN
+          RAISE EXCEPTION 'contract access audit unavailable';
+        END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER fail_contract_access_audit BEFORE INSERT ON audit_log
+      FOR EACH ROW EXECUTE FUNCTION fail_contract_access_audit()`);
+    try {
+      await pool.query("UPDATE coordination_contract_backfill_state SET phase = 'principals' WHERE singleton");
+      await expect(offboardPrincipal(pool, value.operator, value.target.id, {
+        confirmationScopeId: value.owned.id,
+      })).rejects.toThrow('contract access audit unavailable');
+      expect((await pool.query(
+        'SELECT disabled_at FROM principals WHERE id = $1', [value.target.id],
+      )).rows[0].disabled_at).toBeNull();
+      expect((await pool.query(
+        'SELECT active FROM scope_memberships WHERE principal_id = $1 AND scope_id = $2',
+        [value.target.id, value.owned.id],
+      )).rows[0].active).toBe(true);
+      expect((await pool.query(
+        'SELECT count(*)::int AS count FROM principal_offboarding_runs WHERE principal_id = $1', [value.target.id],
+      )).rows[0].count).toBe(0);
+    } finally {
+      await pool.query('DROP TRIGGER fail_contract_access_audit ON audit_log; DROP FUNCTION fail_contract_access_audit()');
+      await pool.query("UPDATE coordination_contract_backfill_state SET phase = 'complete' WHERE singleton");
+    }
+  });
+
+  it('contract offboarding review: CLI continues while bounded owned-scope batches delete resources', async () => {
+    const value = await fixture('owned-coordination-progress');
+    await pool.query(
+      `INSERT INTO coordination_resources(scope_id, resource)
+       SELECT $1, 'owned-resource-' || n FROM generate_series(1, 2501) n`, [value.owned.id],
+    );
+    const result = await adminCli(value.operator, [
+      'offboard-principal', value.target.id, '--confirm-scope', value.owned.id,
+    ], 60_000);
+    expect(result).toMatchObject({ exitCode: 0, payload: { complete: true } });
+    expect(Number(result.payload.attempts)).toBeGreaterThan(2);
+    expect((await pool.query(
+      'SELECT count(*)::int AS count FROM coordination_resources WHERE scope_id = $1', [value.owned.id],
+    )).rows[0].count).toBe(0);
+  }, 60_000);
 
   async function adminCli(
     operator: Awaited<ReturnType<typeof fixture>>['operator'], args: string[], timeout = 30_000,
