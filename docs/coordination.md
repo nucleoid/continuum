@@ -315,6 +315,28 @@ parameter now sets the combined receipt budget, capped at 10,000. Its legacy
 `contended_limit` remains a bounded compatibility field and is ignored by quota
 enforcement. Lowering a budget preserves existing receipts and authorized
 replays and refuses fresh growth until cleanup frees space.
+Before applying 0081 to an existing lease installation, run the owner-only
+read-only quota baseline with writers paused:
+
+```sh
+psql "$CONTINUUM_MIGRATION_OWNER_URL" -v continuum_schema=public \
+  -f scripts/preflight-coordination-contract.sql
+```
+
+Replace `public` with the actual tenant schema. The script emits bounded JSON
+notices for configured acquisition/legacy contention limits, proposed combined
+limits, stored operation totals, recently expired rows and scope key limits.
+Limits above 10,000 will be clamped; a lowered acquisition limit will instead
+cap acquisitions, contention, renewals and releases together. The contention
+argument no longer protects a separate budget. Review every configured limit
+against renewal/polling demand, not only whether existing rows fit today.
+Pages default to 100; pass each non-null `principal_page` or `scope_page`
+`next_cursor` back as `continuum_after_principal_id` or
+`continuum_after_scope_id` until both are null. The script changes no values or
+ACLs and has a five-second statement bound. A timeout is not a clean report;
+reduce the page limit or investigate the measured maintenance workload.
+After owner backfill, sweep expired detached history in bounded operator batches
+before privacy repair; do not evict retained ordinary receipts to admit growth.
 The shared application role cannot execute these operator
 functions, directly update usage/counter tables, or update protected lease and
 resource identity columns; owner-owned triggers and narrow `SECURITY DEFINER`
@@ -342,6 +364,13 @@ records. Unknown history or interrupted attempts without matching completed
 evidence cannot use that skip; changed recipes and a reopened pending singleton
 also require operative repair.
 
+The usage phase scans a bounded common UUID window of usage and existing privacy
+progress rows. For disabled or offboarded principals it reopens completed audit
+privacy and resets its audit cursor, including inspection-only principals with
+no usage row. Run the paged privacy-repair discovery after migration and finish
+those repairs to apply the narrower post-erasure audit shape. Ordinary lock
+mutation audits retain their operational fields until privacy erasure.
+
 Adaptive backfill treats PostgreSQL `57014` as a retryable cancellation category.
 That SQLSTATE covers both statement deadlines and an administrator's
 `pg_cancel_backend`; the driver does not provide a portable distinction. Batch
@@ -359,6 +388,11 @@ ledger commit together. Online DDL cannot share that transaction: an interrupted
 attempt remains `started` with unknown partial effects, and retry-safe work reruns
 before completed evidence and the ledger commit together. A changed recipe on an
 unfinished attempt requires operator reconciliation.
+An old `started` attempt may remain after a later successful retry. Matching
+completed evidence and a complete singleton permit the current recipe to skip
+work safely. A future different recipe can still fail closed on that older
+attempt; investigate its recorded source/variant and catalog effects with the
+owner before adopting a new recipe. Do not erase history to make admission pass.
 
 Already-ledgered files without historical execution evidence are recorded as
 `history-unknown`. Current checksums do not retroactively prove which SQL ran.
@@ -432,6 +466,12 @@ lock refusal or statement cancellation. Each cancelled transactional file rolls
 back atomically and requires a later owner retry in the maintenance window.
 Failed online execution clients are discarded after advisory-lock cleanup so
 session settings installed by a partly executed file cannot leak into later work.
+The 0081 schema transaction also validates a principal CHECK and installs
+principal/membership/key/identity/audit triggers. Their table locks can stall
+authentication and ordinary reads for up to the statement budget, not just
+lease mutations. The maintenance drain must include REST/MCP, webhook intake,
+jobs, sync and other serving readers/writers; do not promise uninterrupted
+memory or authentication traffic during this step.
 The 0062 cleanup directive uses adaptive batches of at most 1,000 with one-second
 lock and five-second statement bounds. Its historical final exhaustion query
 still examines pending current leases; a slow installation may fail again at
@@ -621,8 +661,8 @@ and reactivation does not restore the erased request identities.
 Shared-scope handling is independent of scope kind: team, project, role,
 organization, and another user's scope are all retained while the departing
 principal's lease/receipt identity is detached. Lock audit metadata is reduced
-to `operation`, `outcome`, `fencing_token`, `resource_bytes`, `transport`, and
-`own_lease`; request, run, lease, resource, resource digest, and unknown keys
+to `operation`, `outcome`, `transport`, and `own_lease`; fencing tokens, byte
+counts, request, run, lease, resource, resource digest, and unknown keys
 are removed. Unrelated immutable retention/offboarding evidence is untouched.
 Privacy version 2 reopens progress previously completed by 0059 or 0060, and
 migrations 0066 and 0067 reopen completed version-2 rows after the 0065
@@ -706,8 +746,8 @@ the non-coordination repair check and full offboarding check cannot drift.
 Completion is not recorded until owned-scope erasure and shared-scope
 detachment are both complete. Append-only coordination operator events survive
 audit retention and offboarding. Lock audit metadata retains operation evidence
-but removes the resource digest, which could otherwise disclose low-entropy
-resource names by brute force.
+but removes resource digests, fencing tokens and byte counts. The latter two
+fields could otherwise join the erased principal back to a shared plaintext key.
 
 Direct scope pseudonymization requires zero active memberships and zero live
 leases. Direct principal scrubbing additionally requires a disabled or

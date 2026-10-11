@@ -185,8 +185,8 @@ identifiers. Every non-owned scope kind follows this shared-scope detachment
 policy; scope kind does not exempt retained coordination history.
 `scope_cleanup_complete` is written only after both owned-scope erasure and
 shared-scope detachment report durable completion. Preserved `lock_*` audit
-metadata retains only `operation`, `outcome`, `fencing_token`,
-`resource_bytes`, `transport`, and `own_lease`. It removes request, run, lease,
+metadata retains only `operation`, `outcome`, `transport`, and `own_lease`.
+It removes fencing tokens, byte counts, request, run, lease,
 resource, resource-digest, and unknown metadata keys. This canonical shape is
 also the only update accepted by the immutable offboarded-audit tombstone
 guard. Unrelated audit-retention and offboarding evidence keeps its own
@@ -254,6 +254,12 @@ full offboarding; an existing owned phase must be complete and have no remaining
 resource, receipt or lease rows. Progress includes a phase change, an increased
 processed-row count, or transition to a physically clean scope, even if the
 final page deletes no rows.
+An access-only first batch can leave an open lifecycle run while discovery still
+classifies its principal as `disabled_only`. Check `list-incomplete-offboarding`
+and resume that run with the full confirmed `offboard-principal` command. A
+coordination-only `complete: true` can mean shared-principal privacy is clean
+without creating a new owned-scope phase; it does not close the existing run or
+prove owned data erased. Repair must never infer a fresh scope-erasure request.
 
 The ordinary `offboard-principal` loop treats durable cursor movement and phase
 completion as progress even when a page contains only already-canonical or
@@ -782,6 +788,18 @@ the dedicated operator and `grant-sync-role.sql` for the bound sync service.
 This convergence is mandatory before restarting runtime processes. Migration
 0080 itself preserves existing OID-bound sync profiles, so it does not require
 sync rotation merely to retain startup verification access.
+The sync provider-profile gate remains fatal even though Graph reconciliation
+does not execute vector operations. A provider namespace/OID change, forbidden
+direct or inherited provider USAGE for the sync role, or a mismatched
+`CONTINUUM_APPLICATION_SCHEMA` pauses Graph membership reconciliation before
+fetching the snapshot. Group removals then have revocation latency until sync
+recovers. Entra-sourced memberships fail closed after the last successful sync's
+stored staleness bound, defaulting to 48 hours; they may remain effective before
+that deadline. Fix reviewed provider drift, reapply the exact sync grant profile
+and schema setting, then run and verify sync after provider maintenance.
+Manual administration and authorized offboarding remain independent of provider
+execution grants; use them when prompt revocation is required. Do not give sync
+vector privileges or weaken its exact role profile to restore reconciliation.
 
 Re-run the applicable role grant script after role rotation, revocation, or a
 pgvector extension update. Explicit owner regrant repairs only approved target

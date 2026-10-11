@@ -17,6 +17,9 @@ import {
 } from './embeddings.js';
 import { runMigrations } from './migrator.js';
 import { reconcilePgvectorProviderGrants } from './provider-lifecycle.js';
+import { createPrincipal } from './principals.js';
+import { createScope, getScopeByRef } from './scopes.js';
+import { addMembership } from './memberships.js';
 
 const DATABASE_URL =
   process.env.CONTINUUM_TEST_DATABASE_URL ??
@@ -1179,6 +1182,58 @@ describe('pgvector rollout remediation', () => {
       await expect(wrongOwner.query(script)).rejects.toThrow(/requires the tenant migration owner/i);
     });
   },60_000);
+
+  it('reports raised and lowered pre81 quotas and stored legacy totals without changing them', async () => {
+    await withFreshDatabase(async(_root,target,url)=>{
+      const schema=identifier('quota_report'); await target.query(`CREATE SCHEMA ${quoteIdentifier(schema)}`);
+      const owner=migrationPool(url,schema);
+      await runMigrations(owner,await migrationDirectoryThrough('0079_coordination_upgrade_scale_remediation.sql'));
+      const actor=await createPrincipal(owner,{externalId:randomUUID(),kind:'user',displayName:'Quota admin'});
+      const lower=await createPrincipal(owner,{externalId:randomUUID(),kind:'service',displayName:'Lowered quota'});
+      const raised=await createPrincipal(owner,{externalId:randomUUID(),kind:'service',displayName:'Raised quota'});
+      const org=(await getScopeByRef(owner,{kind:'org',name:''}))!;
+      const scope=await createScope(owner,{kind:'project',name:'quota-report'});
+      await addMembership(owner,actor.id,org.id,'admin');
+      await owner.query('SELECT continuum_operator_set_coordination_principal_quota($1,$2,100,2000)',[actor.id,lower.id]);
+      await owner.query('SELECT continuum_operator_set_coordination_principal_quota($1,$2,50000,5000)',[actor.id,raised.id]);
+      await owner.query('SELECT continuum_operator_set_coordination_scope_quota($1,$2,50000)',[actor.id,scope.id]);
+      // Valid pre81 stored rows go through the installed counter/retention
+      // triggers; no counter values, constraints or triggers are manufactured.
+      await owner.query("INSERT INTO coordination_resources(scope_id,resource) VALUES($1,'legacy')",[scope.id]);
+      await owner.query(`WITH moment AS MATERIALIZED(SELECT clock_timestamp() AS at), times AS (
+        SELECT CASE WHEN value=1 THEN moment.at-interval '1 hour' ELSE moment.at END AS at
+        FROM moment CROSS JOIN generate_series(1,2) value)
+        INSERT INTO coordination_operation_receipts(principal_id,operation,request_id,payload_hash,outcome,
+          scope_id,resource,expires_at,retry_after_seconds,server_time,retain_until)
+        SELECT $1,'acquire',gen_random_uuid(),decode(repeat('a',64),'hex'),'contended',$2,'legacy',
+          at+interval '1 hour',1,at,at+interval '90 seconds' FROM times`,[lower.id,scope.id]);
+      const before=(await owner.query('SELECT to_jsonb(usage) AS value FROM coordination_principal_usage usage ORDER BY principal_id')).rows;
+      const source=await readFile(join(process.cwd(),'scripts/preflight-coordination-contract.sql'),'utf8');
+      const sql=source.split(/\r?\n/).filter(line=>!line.trimStart().startsWith('\\')).join('\n')
+        .replaceAll(":'continuum_schema'",quoteLiteral(schema))
+        .replaceAll(":'continuum_preflight_limit'","'100'")
+        .replaceAll(":'continuum_after_principal_id'","''")
+        .replaceAll(":'continuum_after_scope_id'","''");
+      const client=await owner.connect(); const reports:Record<string,unknown>[]=[];
+      const notice=(message:{message?:string})=>{
+        if(message.message?.startsWith('{')) reports.push(JSON.parse(message.message));
+      };
+      client.on('notice',notice);
+      try { await client.query(sql); }
+      finally { client.removeListener('notice',notice); client.release(); }
+      expect(reports.find(row=>row.report==='principal'&&row.principal_id===lower.id)).toMatchObject({
+        configured_acquire_limit:100,legacy_contended_limit:2000,proposed_combined_limit:100,
+        stored_rows:2,contended_rows:2,recent_expired_rows:1});
+      expect(reports.find(row=>row.report==='principal'&&row.principal_id===raised.id)).toMatchObject({
+        configured_acquire_limit:50000,legacy_contended_limit:5000,proposed_combined_limit:10000});
+      expect(reports.find(row=>row.report==='scope'&&row.scope_id===scope.id)).toMatchObject({
+        configured_resource_limit:50000,proposed_resource_limit:10000,stored_keys:1});
+      expect((await owner.query('SELECT to_jsonb(usage) AS value FROM coordination_principal_usage usage ORDER BY principal_id')).rows)
+        .toEqual(before);
+      expect((await owner.query("SELECT name FROM _continuum_migrations WHERE name='0081_coordination_public_contract.sql'")).rows)
+        .toEqual([]);
+    });
+  },120_000);
 
   it('provider review: inventories non-profile readers without granting application authority', async () => {
     const readerRole = identifier('continuum_reader_preflight');

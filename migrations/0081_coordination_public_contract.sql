@@ -168,6 +168,32 @@ BEGIN
 END;
 $$;
 
+-- Post-erasure audit shape must not equijoin the principal back to shared
+-- plaintext keys through a resource generation and its UTF-8 byte count.
+DO $scrub_shape$
+DECLARE definition TEXT; revised TEXT; signature TEXT;
+BEGIN
+  definition:=pg_get_functiondef('continuum_offboarding_expected_audit_metadata(jsonb)'::regprocedure);
+  revised:=replace(definition,
+    '          ''operation'',''outcome'',''fencing_token'',''resource_bytes'',' || chr(10) ||
+    '          ''transport'',''own_lease''',
+    '          ''operation'',''outcome'',''transport'',''own_lease''');
+  IF revised=definition THEN RAISE EXCEPTION 'unable to remove shared resource join fields from scrubbed audit'; END IF;
+  EXECUTE revised;
+  FOREACH signature IN ARRAY ARRAY[
+    'continuum_coordination_privacy_actual_state_is_erased(uuid,uuid)',
+    'continuum_refresh_coordination_privacy_dirty(uuid)'
+  ] LOOP
+    definition:=pg_get_functiondef(signature::regprocedure);
+    revised:=replace(definition,
+      '''request_id'',''run_id'',''lease_id'',''resource'',''resource_sha256''',
+      '''request_id'',''run_id'',''lease_id'',''resource'',''resource_sha256'',''fencing_token'',''resource_bytes''');
+    IF revised=definition THEN RAISE EXCEPTION 'unable to detect legacy audit join fields in %',signature; END IF;
+    EXECUTE revised;
+  END LOOP;
+END;
+$scrub_shape$;
+
 CREATE OR REPLACE FUNCTION continuum_backfill_coordination_contract(batch_limit INTEGER)
 RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER AS $$
 DECLARE progress coordination_contract_backfill_state%ROWTYPE; selected_count INTEGER; next_id UUID; item RECORD;
@@ -178,16 +204,29 @@ BEGIN
   IF progress.phase = 'complete' THEN RETURN TRUE; END IF;
   PERFORM set_config('continuum.coordination_contract_repair', 'on', TRUE);
   IF progress.phase = 'usage' THEN
-    EXECUTE $usage$ WITH candidates AS MATERIALIZED (
+    EXECUTE $usage$ WITH usage_ids AS MATERIALIZED (
       SELECT principal_id FROM coordination_principal_usage
       WHERE principal_id >= COALESCE($1,'00000000-0000-0000-0000-000000000000'::uuid)
         AND ($1 IS NULL OR principal_id>$1) ORDER BY principal_id LIMIT $2
+    ), privacy_ids AS MATERIALIZED (
+      SELECT principal_id FROM coordination_principal_privacy_progress
+      WHERE principal_id >= COALESCE($1,'00000000-0000-0000-0000-000000000000'::uuid)
+        AND ($1 IS NULL OR principal_id>$1) ORDER BY principal_id LIMIT $2
+    ), candidates AS MATERIALIZED (
+      SELECT principal_id FROM usage_ids UNION SELECT principal_id FROM privacy_ids
+      ORDER BY principal_id LIMIT $2
+    ), reopened AS (
+      UPDATE coordination_principal_privacy_progress privacy SET audit_cursor_id=0,
+        completed_at=NULL,updated_at=clock_timestamp()
+      FROM candidates JOIN principals principal ON principal.id=candidates.principal_id
+      WHERE privacy.principal_id=candidates.principal_id
+        AND (principal.disabled_at IS NOT NULL OR principal.offboarded_at IS NOT NULL)
     ), updated AS (
       UPDATE coordination_principal_usage usage SET acquire_receipt_count = 0, contended_receipt_count = 0,
         mutation_receipt_count = 0, acquire_receipt_limit = LEAST(acquire_receipt_limit,10000),
         contended_receipt_limit = LEAST(contended_receipt_limit,10000)
       FROM candidates WHERE usage.principal_id = candidates.principal_id RETURNING usage.principal_id
-    ) SELECT count(*)::int, (array_agg(principal_id ORDER BY principal_id DESC))[1] FROM updated
+    ) SELECT count(*)::int, (array_agg(principal_id ORDER BY principal_id DESC))[1] FROM candidates
     $usage$ INTO selected_count,next_id USING progress.principal_cursor,batch_limit;
     UPDATE coordination_contract_backfill_state SET principal_cursor = CASE WHEN selected_count<batch_limit THEN NULL
       ELSE COALESCE(next_id,principal_cursor) END,
