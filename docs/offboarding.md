@@ -41,10 +41,12 @@ worker recovery and shutdown limits.
 ## Outbox rollout and mixed versions
 
 Before migration 0089, quiesce promotion producers, offboarding processes and
-all consumer replicas. Back up the database and migration ledgers, run the
-complete packaged chain as migration owner with database TEMPORARY privilege,
-and explicitly regrant APP and OP profiles. SYNC and reporting receive no
-outbox privileges. Configure the durable webhook ID set through the audited
+all consumer replicas. Back up the database and migration ledgers. Apply the complete packaged
+chain, including 0080 and 0081, through 0089 as migration owner with database
+TEMPORARY privilege; finish the owner-only 0081 backfill; explicitly regrant
+APP, OP and SYNC profiles; verify exact identities, provider profiles and current
+coordination and outbox readiness before starting matching binaries. SYNC and
+reporting receive no outbox privileges. Configure the durable webhook ID set through the audited
 bound-operator function before enabling consumers. Current REST and MCP verify
 outbox readiness at startup even with empty local registries; neither repairs
 missing schema or grants. Health readiness remains a database-connectivity
