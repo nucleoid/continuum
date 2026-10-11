@@ -201,30 +201,10 @@ export async function preparePrincipalReceipts(
   client: pg.PoolClient,
   principalId: string,
 ): Promise<number> {
-  const deleted = await client.query<{
-    acquire_count: number;
-    mutation_count: number;
-  }>(
-    `WITH doomed AS (
-       SELECT principal_id, operation, request_id
-         FROM coordination_operation_receipts
-        WHERE principal_id = $1 AND retain_until <= clock_timestamp()
-        ORDER BY retain_until, operation, request_id
-        LIMIT $2 FOR UPDATE SKIP LOCKED
-     ), removed AS (
-       DELETE FROM coordination_operation_receipts r
-       USING doomed d
-       WHERE r.principal_id = d.principal_id
-         AND r.operation = d.operation
-         AND r.request_id = d.request_id
-       RETURNING r.operation
-     )
-     SELECT count(*) FILTER (WHERE operation = 'acquire')::int AS acquire_count,
-            count(*) FILTER (WHERE operation = 'release')::int AS mutation_count
-       FROM removed`,
-    [principalId, RECEIPT_CLEANUP_BATCH],
+  await client.query(
+    'SELECT continuum_coordination_cleanup_expired_receipts($1)',
+    [principalId],
   );
-  void deleted;
   await client.query(
     `DELETE FROM coordination_leases l
       WHERE l.lease_id IN (

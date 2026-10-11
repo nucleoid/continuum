@@ -53,7 +53,7 @@ describe('coordination database role profiles', () => {
   async function rolePool(role: string): Promise<pg.Pool> {
     await pool.query(
       'GRANT ' + quoteRole(role)
-      + ' TO CURRENT_USER WITH ADMIN OPTION, SET TRUE, INHERIT FALSE',
+      + ' TO CURRENT_USER WITH ADMIN OPTION, SET FALSE, INHERIT FALSE',
     );
     const schema = String((await pool.query(
       'SELECT current_schema() AS schema',
