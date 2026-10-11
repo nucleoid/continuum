@@ -151,6 +151,11 @@ function isCoordinationContractPending(error: unknown): boolean {
   );
 }
 
+function isOwnedScopeLiveLease(error: unknown): boolean {
+  const failure = error as { code?: string; constraint?: string };
+  return failure.code === '23514' && failure.constraint === 'coordination_scope_live_lease';
+}
+
 interface OwnedScopePrivacyState {
   repair_exists: boolean;
   phase: string | null;
@@ -1307,12 +1312,14 @@ async function offboardPrincipalCore(
         coordinationPrivacyReason = privacyRepair.rows[0]?.privacy?.reason ?? null;
         await client.query('RELEASE SAVEPOINT offboarding_preverification_privacy');
       } catch (error) {
-        if (!isCoordinationContractPending(error)) throw error;
+        if (!isCoordinationContractPending(error) && !isOwnedScopeLiveLease(error)) throw error;
         await client.query('ROLLBACK TO SAVEPOINT offboarding_preverification_privacy');
         await client.query('RELEASE SAVEPOINT offboarding_preverification_privacy');
         coordinationPrivacyComplete = false;
         coordinationPrivacyMutated = true;
-        coordinationPrivacyReason = 'migration_pending';
+        coordinationPrivacyReason = isOwnedScopeLiveLease(error) ? 'owned_live_lease' : 'migration_pending';
+        coordinationPrivacyBlockedUntil = isOwnedScopeLiveLease(error)
+          ? initialOwnedPrivacy?.live_lease_until ?? null : null;
       }
     }
     let actualStateErased = false;
@@ -1441,8 +1448,10 @@ async function offboardPrincipalCore(
       // Access revocation is authorized above and must remain durable even
       // while a migration pauses the independent coordination privacy phase.
       await client.query('SAVEPOINT offboarding_coordination_privacy');
+      let ownedLiveLeaseUntil: Date | null = null;
       try {
         const ownedBefore = await ownedScopePrivacyState(client, actor.id, scopeId);
+        ownedLiveLeaseUntil = ownedBefore.live_lease_until;
         await client.query(
           'SELECT continuum_operator_pseudonymize_scope_v2($1, $2, $3)',
           [actor.id, scopeId, scopePseudonym],
@@ -1481,7 +1490,9 @@ async function offboardPrincipalCore(
         }
         await client.query('RELEASE SAVEPOINT offboarding_coordination_privacy');
       } catch (error) {
-        if (!isCoordinationContractPending(error)) throw error;
+        if (!isCoordinationContractPending(error) && !isOwnedScopeLiveLease(error)) throw error;
+        const reason: CoordinationPrivacyBlockReason = isOwnedScopeLiveLease(error)
+          ? 'owned_live_lease' : 'migration_pending';
         await client.query('ROLLBACK TO SAVEPOINT offboarding_coordination_privacy');
         await client.query('RELEASE SAVEPOINT offboarding_coordination_privacy');
         const progressUpdate = await writeOffboardingRun(
@@ -1498,6 +1509,7 @@ async function offboardPrincipalCore(
             operation: 'principal_offboarding_access_revoked', principal_id: principalId,
             approval_id: approvalId, acknowledged_evidence_hash: acknowledgedEvidenceHash,
             run_id: run.rows[0].run_id, privacy_pending: true,
+            reason,
             memberships: membershipCount, aliases: aliasCount, entra_bindings: entraCount,
           })],
         );
@@ -1506,7 +1518,7 @@ async function offboardPrincipalCore(
           ...baseResult, dryRun: false, alreadyOffboarded: false, complete: false,
           progressed: target.rows[0].disabled_at === null || membershipCount > 0
             || aliasCount > 0 || entraCount > 0,
-          blockedUntil: null, reason: 'migration_pending',
+          blockedUntil: reason === 'owned_live_lease' ? ownedLiveLeaseUntil : null, reason,
           progress: { ...previewProgress, batch: Number(progressUpdate.rows[0].batches) },
         };
       }
