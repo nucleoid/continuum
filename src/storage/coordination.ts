@@ -202,7 +202,7 @@ export async function preparePrincipalReceipts(
   principalId: string,
 ): Promise<number> {
   await client.query(
-    'SELECT continuum_coordination_cleanup_expired_receipts($1)',
+    'SELECT continuum_coordination_cleanup_expired_receipts($1::uuid)',
     [principalId],
   );
   await client.query(
@@ -231,7 +231,7 @@ export async function preparePrincipalReceipts(
 }
 
 export async function lockPrincipalUsage(client: pg.PoolClient, principalId: string): Promise<void> {
-  await client.query('SELECT continuum_coordination_lock_principal_usage($1)', [principalId]);
+  await client.query('SELECT continuum_coordination_lock_principal_usage($1::uuid)', [principalId]);
 }
 
 export async function lockReceiptRequest(
@@ -395,7 +395,7 @@ export async function ensureAndLockResource(
     throw new CoordinationStorageError('RESOURCE_QUOTA');
   }
   const rate = await client.query<{ allowed: boolean }>(
-    `SELECT continuum_coordination_reserve_resource_creation($1) AS allowed`,
+    `SELECT continuum_coordination_reserve_resource_creation($1::uuid) AS allowed`,
     [principalId],
   );
   if (rate.rows[0]?.allowed !== true) {
@@ -403,7 +403,7 @@ export async function ensureAndLockResource(
   }
   await client.query(
     `INSERT INTO coordination_resources (scope_id, resource, fencing_token)
-       SELECT $1, $2, continuum_coordination_scope_fencing_floor($1)`,
+       SELECT $1, $2, continuum_coordination_scope_fencing_floor($1::uuid)`,
     [scopeId, resource],
   );
   await client.query(
