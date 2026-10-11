@@ -183,6 +183,12 @@ Definite ownership loss ends renewal. Successful callbacks with a pending ACK
 use a separate rotating cohort of at most 10 concurrent reconciliation writes;
 those writes do not delay the next lease-renewal cycle. A started callback
 that rejects after ownership uncertainty keeps its attempt and bounded backoff.
+This abort can arrive before the callback deadline while some lease margin remains.
+It is deliberate fail-closed behavior when ownership cannot be confirmed, not a
+promise of uninterrupted work until timeout. An abort-honoring consumer that has
+actually started and then rejects is charged a failure; only shutdown-abandoned
+invocations receive the documented refund. A late failure never shortens a retry
+availability already committed by a timeout whose response was lost.
 Leases for ambiguous deliveries are not released or renewed after stop returns. A
 process-wide in-flight fence excludes them from claims by replacement workers
 in the same process until the original callback settles. Admission is isolated
