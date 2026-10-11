@@ -19,7 +19,7 @@ export function applicationSchemaFromEnv(env: NodeJS.ProcessEnv = process.env): 
 async function requireSchemaAnchor(client: pg.PoolClient, expectedSchema?: string): Promise<void> {
   if (expectedSchema === undefined) return;
   const result = await client.query<{ anchored: boolean }>(`
-    SELECT COALESCE(pg_catalog.current_schemas(FALSE)::text[]=ARRAY[$1::text]
+    SELECT COALESCE(pg_catalog.current_schemas(FALSE)::pg_catalog.text[]=ARRAY[$1::pg_catalog.text]
       AND namespace.nspname=$1,FALSE) AS anchored
     FROM pg_catalog.pg_class relation
     JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace
@@ -44,7 +44,7 @@ export async function reconcilePgvectorProviderGrants(
     // checked-out connection holds them through every verification statement.
     await client.query(`
       SELECT pg_catalog.set_config('statement_timeout', CASE
-               WHEN setting::bigint BETWEEN 1 AND 5000 THEN setting || 'ms'
+               WHEN setting::pg_catalog.int8 BETWEEN 1 AND 5000 THEN setting || 'ms'
                ELSE '5000ms' END, TRUE)
         FROM pg_catalog.pg_settings WHERE name = 'statement_timeout'
     `);
