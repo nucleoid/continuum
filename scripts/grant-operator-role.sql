@@ -96,6 +96,10 @@ BEGIN
   IF to_regprocedure(format('%I.continuum_operator_scrub_promotion_scope(uuid,uuid,uuid,integer)', schema_name)) IS NOT NULL THEN
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_operator_scrub_promotion_scope(UUID,UUID,UUID,INTEGER) TO %I',schema_name,target_role);
   END IF;
+  IF to_regprocedure(format('%I.continuum_operator_bind_standup_producer(uuid,name,uuid,text,text)',schema_name)) IS NOT NULL THEN
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_operator_bind_standup_producer(UUID,NAME,UUID,TEXT,TEXT),%I.continuum_operator_map_standup_actor(UUID,TEXT,TEXT,UUID,TEXT) TO %I',schema_name,schema_name,target_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_operator_scrub_standup_scope(UUID,UUID,UUID,INTEGER) TO %I',schema_name,target_role);
+  END IF;
   IF to_regprocedure(format('%I.continuum_operator_set_promotion_webhook_ids(uuid,text[])',schema_name)) IS NOT NULL THEN
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_operator_set_promotion_webhook_ids(UUID,TEXT[]) TO %I',schema_name,target_role);
   END IF;

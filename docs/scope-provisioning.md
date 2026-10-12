@@ -1,14 +1,17 @@
 # Scope provisioning rollout
 
 `continuum.ensure_scope` requires an explicit `admin` membership on the
-singleton org scope. This is an intentional breaking authorization change for
-callers that previously created scopes without permission.
+singleton org scope. Scope creation uses the same authenticated principal and current membership
+checks as other mutations. An existing scope still requires this authority when
+called through `ensure_scope`.
 
 ## Before rollout
 
 1. Inventory every MCP client, hook, and agent that calls `ensure_scope`.
 2. List current org-admin memberships. The inventory intentionally omits
-   `external_id` because it is the live v0 bearer credential:
+   `external_id`. In explicit development authentication mode that identifier
+   is a bearer credential; in Entra mode it identifies a principal but does not
+   authenticate the caller:
 
    ```sh
    psql "$CONTINUUM_DATABASE_URL" -f scripts/list-org-admins.sql
@@ -37,8 +40,8 @@ callers that previously created scopes without permission.
    the sole requirement; remove the membership only when no explicit org role
    is needed.
    Both scripts key on the non-secret principal UUID printed by the inventory,
-   refuse to change anything other than exactly one current org admin, and
-   refuse to remove or demote the last org admin:
+   refuse to change anything other than exactly one current manual org admin,
+   and require another active manual org admin before removing or demoting it:
 
    ```sh
    psql "$CONTINUUM_DATABASE_URL" \
@@ -60,72 +63,93 @@ callers that previously created scopes without permission.
    ```
 3. Pre-create scopes required by non-admin callers or move provisioning into an
    operator workflow.
-4. Choose a dedicated operator principal with a high-entropy, non-enumerable
-   `external_id`. Do not use a readable name and do not grant org admin to a
-   shared agent or capture service merely to preserve the old behavior. During
-   v0 the REST bearer credential is the literal `external_id`; org admin also
-   permits org writes and full audit-log reads.
-5. Confirm that the REST port is limited to the trusted operator network. If a
-   high-entropy identity and that network restriction are not both in place,
-   postpone this rollout until Entra validation ships in M4.
-6. Create a fresh high-entropy identifier on the private operator terminal with
-   `openssl rand -hex 32`. Paste it only at the prompts below; do not put the
-   identifier in command arguments, shell history, tickets, or logs. Create the
-   dedicated principal, record the principal UUID printed by the create script,
-   then grant org admin:
-
-   ```sh
-   psql "$CONTINUUM_DATABASE_URL" -f scripts/create-scope-operator.sql
-   psql "$CONTINUUM_DATABASE_URL" -f scripts/grant-org-admin.sql
-   ```
-
-   The grant script is idempotent for an existing admin and refuses to replace
-   an existing reader or writer role.
-
-7. Verify the resulting membership and record the operator change through the
-   deployment change-control process without placing the bearer in query text:
-
-   ```sh
-   psql "$CONTINUUM_DATABASE_URL" \
-     -v principal_id='<non-secret UUID printed by the create script>' \
-     -f scripts/verify-scope-operator.sql
-   ```
-
-8. Build the reviewed checkout, then call the MCP tool through the supplied
-   one-shot client from a private terminal. This launches `node dist/api/mcp.js`
-   directly, so npm cannot write banners into the stdio protocol. Never create
-   scopes with direct SQL and never persist this credential in an MCP config:
+4. Use an existing authenticated org administrator for provisioning. Keep
+   routine agents and capture services on their least-privilege memberships.
+   Org admin permits scope creation, org writes, cross-principal audit access,
+   vocabulary administration, and knowledge-gap reports. It does not replace
+   the separate DB-bound operator role for protected administration.
+5. Apply every packaged migration through `0090`, finish the owner-only `0081`
+   contract backfill, and converge the current application/operator/sync grants
+   before starting matching binaries. Follow [offboarding rollout](./offboarding.md)
+   and [tag vocabulary rollout](./tag-vocabularies.md). The migration owner
+   needs database `TEMPORARY` for the role-planning tables in `0083`, `0085`,
+   `0089` and `0090`. Current REST and MCP startup require coordination repair,
+   promotion-outbox readiness and the Standup schema. Quiesce promotion and
+   activity producers, offboarding processes and promotion workers during
+   schema work; explicitly regrant exact APP/OP profiles before restarting.
+   Configure reviewed activity bindings separately as described in
+   [Standup](./standup.md). Runtime connections
+   use the application profile and an explicit search path containing only the
+   configured `CONTINUUM_APPLICATION_SCHEMA`, which defaults to `public`; keep
+   `pg_catalog` implicit.
+6. Select the credential for the explicit authentication mode. In `entra` mode,
+   use a validated Entra access token for an already provisioned principal with
+   effective org-admin membership, or a current service API key for an existing
+   appropriately authorized service principal. Configure the tenant, audience,
+   allowed clients, delegated scope, and application role as described in
+   [authentication.md](./authentication.md). A principal's public `external_id`
+   is not an Entra-mode credential. Never create a readable identifier and
+   treat it as a production bearer token.
+7. Build the checkout, then call the supplied one-shot MCP client from a private
+   terminal. It launches `node dist/api/mcp.js` directly, so npm banners cannot
+   enter the stdio protocol. Its legacy-named credential variable contains the
+   credential accepted by the configured mode, not necessarily an external ID:
 
    ```sh
    npm run build
-   export CONTINUUM_DATABASE_URL
-   read -r -s -p 'Scope operator external_id: ' scope_operator_id
-   CONTINUUM_PRINCIPAL_EXTERNAL_ID="$scope_operator_id" \
+   export CONTINUUM_DATABASE_URL="$CONTINUUM_APPLICATION_DATABASE_URL"
+   export CONTINUUM_AUTH_MODE=entra
+   # Also configure the Entra settings and exact application schema/path above.
+   read -r -s -p 'Scope provisioning bearer: ' scope_provisioning_bearer
+   CONTINUUM_PRINCIPAL_EXTERNAL_ID="$scope_provisioning_bearer" \
      node scripts/ensure-scope.mjs project booking-engine
-   unset scope_operator_id
+   unset scope_provisioning_bearer
    ```
 
-   Repeat the one-shot client for each approved scope, stop after provisioning,
-   remove any temporary shell state, and clear terminal scrollback before
-   screen sharing. The startup error does not echo an unknown credential.
-   Upgrade and restart every ordinary stdio MCP process too; old processes
-   retain the unprotected implementation until they restart.
+   `CONTINUUM_APPLICATION_DATABASE_URL` is a private convenience variable; the
+   program reads `CONTINUUM_DATABASE_URL`. Do not persist credentials in an MCP
+   config or create scopes by bypassing the audited service with direct SQL.
+   Repeat the one-shot client for each approved scope, then remove temporary
+   shell state. Restart old MCP processes during the maintenance window.
 
-The v0 stdio principal and REST bearer identity are self-asserted placeholders.
-Until Entra validation ships in M4, only trusted operators may launch MCP with
-database credentials or use this bootstrap procedure, and REST must remain on a
-trusted network. Remove the temporary org-admin membership after provisioning
-if no ongoing operator workflow needs it. Retire the temporary credential with
-the checked script below; it removes the org membership and rotates
-`external_id` while retaining the principal UUID referenced by audit rows:
+### Development-only identity bootstrap
+
+Explicit `CONTINUUM_AUTH_MODE=dev` accepts an existing principal's `external_id`
+as its bearer. This is a development boundary, even when the identifier is
+random. Do not expose dev mode outside a trusted development machine.
+
+The legacy SQL bootstrap scripts create a service principal named Scope
+Provisioning Operator with a 64-character lowercase hexadecimal identifier.
+They do not issue an Entra token or a hashed service API key. On a private
+development terminal, generate the identifier with `openssl rand -hex 32`, then
+use the prompts rather than placing it in shell arguments:
+
+```sh
+psql "$CONTINUUM_DATABASE_URL" -f scripts/create-scope-operator.sql
+psql "$CONTINUUM_DATABASE_URL" -f scripts/grant-org-admin.sql
+psql "$CONTINUUM_DATABASE_URL" \
+  -v principal_id='<non-secret UUID printed by the create script>' \
+  -f scripts/verify-scope-operator.sql
+```
+
+Run these direct SQL scripts only through an explicitly reviewed database-owner
+maintenance connection. The grant script ensures the matching manual membership
+is active admin, including replacing a lower manual role. Record that authority
+change by principal UUID. Restore the application connection before running the
+one-shot MCP client with `CONTINUUM_AUTH_MODE=dev` and the development external
+ID in `CONTINUUM_PRINCIPAL_EXTERNAL_ID`.
+
+If this temporary development principal is no longer needed, the checked
+retirement script removes its org membership and rotates its external ID while
+retaining the UUID referenced by audit rows:
 
 ```sh
 psql "$CONTINUUM_DATABASE_URL" -f scripts/retire-scope-operator.sql
 ```
 
-The interactive prompts keep the bearer out of command arguments and shell
-history, but the value is visible while typed and may remain in terminal
-scrollback. Use a private operator session and clear it after retirement.
+Use a private terminal, remove temporary shell state, and clear credential-bearing
+scrollback. For production service credentials, use the authenticated and
+audited key issue/rotate/revoke workflow in [authentication.md](./authentication.md).
 
 ## Development prerequisites
 
@@ -135,12 +159,14 @@ the MCP one-shot client tests still run.
 
 ## Rollback
 
-No migration or backfill is involved. Revert the application build and restart
-MCP processes. Existing scopes, memberships, and `create_scope` audit entries
-remain valid. Rolling back restores the insecure scope-creation behavior, so it
-is an emergency measure rather than a steady state.
+Treat the current schema and authority contract as forward-only. Do not roll
+back to binaries that allow unauthenticated or unauthorized scope creation.
+Follow the complete maintenance and tag-compatibility procedures in
+[offboarding.md](./offboarding.md) and [tag-vocabularies.md](./tag-vocabularies.md);
+reverting a build does not undo migrations, repair, or credential changes.
 
-Reverting application code does not undo an admin demotion or removal. Restore
-each recorded principal UUID with `scripts/restore-org-admin.sql`, verify the
-result with `scripts/list-org-admins.sql`, and record the restoration in change
-control.
+A membership change has its own reviewed reversal. Restore each recorded
+principal UUID with `scripts/restore-org-admin.sql`, verify the result with
+`scripts/list-org-admins.sql`, and record the restoration in change control.
+Restoration reactivates the manual admin membership and must be an explicit
+authority decision, not an automatic consequence of a code rollback.

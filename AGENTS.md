@@ -25,6 +25,7 @@ This repository's AGENTS.md is contributor guidance. The generated AGENTS.md bun
 - Preserve provider-qualified embedding keys, configured 768-dimensional compatibility, explicit local-only routing, response validation, recall diagnostics, and bounded backfill hydration/checkpoints. Count and manual failure-mark paths must not load bodies; unresolved suspects must not be skipped by saved cursors. Archive/offboarding must erase every provider vector. Follow [docs/embedding-backfill.md](./docs/embedding-backfill.md).
 - Coordination is a separate non-memory domain. Never capture, embed, recall, promote, or render lease data into generated AGENTS.md. Follow [docs/coordination.md](./docs/coordination.md).
 - Preserve optional enrichment namespaces and admission/output bounds. Enrichers receive already authorized reference data and no credentials; they cannot replace core results. Promotion events, audit and delivery identities commit atomically against the durable operator registry. Preserve lease generations, at-least-once deduplication, cancellation fences, startup gates and outbox erasure. Raw storage retry exports are not authenticated or audited operator APIs. Follow [docs/extensions.md](./docs/extensions.md).
+- Standup attribution requires an actual bound producer LOGIN session, a reviewed external-actor mapping generation, and canonical source proof. Caller metadata, known UUIDs, role switching, and custom GUCs do not establish authority. Preserve source provenance, original expiry ceilings, durable closure ordering, approved ownership, and physical erasure. Personal activity stays outside generated AGENTS.md. Follow [docs/standup.md](./docs/standup.md).
 - Preserve every migration already on public master byte-for-byte, including the original 0052 through 0079 chain and later published files. Use reviewed forward migrations and update the corresponding checksums/prerequisites for new schema work.
 
 ## Current layout
@@ -44,6 +45,7 @@ src/
   lifecycle/      Expiry sweeping and reserved identities
   maintenance/    Audit retention
   insights/       Knowledge-gap analysis
+  standup/        Trusted activity proof and deterministic personal digest rendering
   coordination/   Wire-neutral lease model
   extensions/     Bounded retrieval enrichers and promotion callback registries
   workers/        Leased promotion outbox consumers

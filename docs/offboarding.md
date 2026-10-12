@@ -38,19 +38,26 @@ confirm process exit when callbacks ignore abort. Apply downstream erasure and
 backup policies separately. See [extensions](./extensions.md) for deduplication,
 worker recovery and shutdown limits.
 
-## Outbox rollout and mixed versions
+## Current rollout and mixed versions
 
-Before migration 0089, quiesce promotion producers, offboarding processes and
+Before upgrading through 0090, quiesce promotion and activity producers, offboarding processes and
 all consumer replicas. Back up the database and migration ledgers. Apply the complete packaged
-chain, including 0080 and 0081, through 0089 as migration owner with database
+chain, including 0080 and 0081, through 0090 as migration owner with database
 TEMPORARY privilege; finish the owner-only 0081 backfill; explicitly regrant
 APP, OP and SYNC profiles; verify exact identities, provider profiles and current
-coordination and outbox readiness before starting matching binaries. SYNC and
+coordination, outbox and Standup readiness before starting matching binaries. SYNC and
 reporting receive no outbox privileges. Configure the durable webhook ID set through the audited
 bound-operator function before enabling consumers. Current REST and MCP verify
 outbox readiness at startup even with empty local registries; neither repairs
 missing schema or grants. Health readiness remains a database-connectivity
 check rather than a consumer-delivery health check.
+
+Migration 0090 adds physical Standup actor-label and mapping erasure to completion
+proof. Regrant exact APP/OP profiles and configure reviewed producer bindings
+and actor mappings before enabling trusted activity. Keep serving roles distinct
+from producer roles and restart around binding changes; the serving-pool
+exclusion runs only at startup. See [Standup](./standup.md) for producer failures,
+identity-generation limits and retained accounting evidence.
 
 Do not mix old producers or old offboarding runtimes with the current schema.
 Old producers can omit deliveries, which current workers cannot reconstruct.
@@ -600,7 +607,7 @@ mutation markers.
 
 The following paragraphs describe the historical 0049-0053 identity foundation.
 They are not the current migration stopping point. Apply the complete packaged
-chain through 0089, including completed 0081 repair, under the current rollout procedure below.
+chain through 0090, including completed 0081 repair, under the current rollout procedure below.
 Migration `0049_offboarding_review_remediation.sql` makes principal disablement
 create bounded transaction-local guards for its existing membership cascade,
 binds owned-scope access cleanup to a started incomplete run and its mapped
@@ -686,13 +693,13 @@ transaction.
 Production must use separate migration-owner, shared application, dedicated
 operator, and dedicated sync login roles. The operator and sync roles must not
 be granted to the shared application role. Rollout is an explicit maintenance
-window: **stop** every API, MCP, admin, retention, and membership-sync process;
+window: **stop** every API, MCP, admin, retention, membership-sync, activity producer and promotion worker process;
 take and verify a **backup**; **migrate** every packaged file, including 0080 and
 0081, as the migration/schema owner; finish the owner-only 0081 backfill;
 **regrant** every shared app, dedicated operator, and sync profile; **verify**
 the exact identities and provider profiles; then **start** only matching current
-binaries. Published migrations through 0088, including 0080 and 0081, are
-immutable. Migration 0089 is the current unpublished extension candidate. Keep
+binaries. Published migrations through 0089, including 0080 and 0081, are
+immutable. Migration 0090 is the current unpublished Standup candidate. Keep
 offboarding and coordination
 mutation traffic drained until the complete schema, repair and grants converge.
 Do not run old binaries or schedulers through this maintenance window.
@@ -1193,7 +1200,8 @@ retryable.
 Rollback is forward-only and requires the verified pre-migration backup for any
 data that bounded legacy cleanup has removed. Application rollback is supported
 only to a binary independently verified against every applied migration and
-current capability/profile contract, including completed 0081 repair and the 0089 outbox. A
+current capability/profile contract, including completed 0081 repair, the 0089 outbox
+and 0090 Standup privacy proof. A
 0053-aware or 0063-aware binary alone is insufficient. Stop all processes;
 inventory incomplete lifecycle runs and paged coordination privacy repairs;
 then use a compatible binary, reapply all three grant profiles, verify identities

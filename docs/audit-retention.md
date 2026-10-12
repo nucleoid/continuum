@@ -28,12 +28,15 @@ The following controls bound every invocation:
 - `CONTINUUM_AUDIT_RETENTION_MAX_BATCHES`, default 10, maximum 1,000
 - `CONTINUUM_AUDIT_RETENTION_MAX_ROWS`, default 1,000, maximum 100,000
 
-Set `CONTINUUM_AUDIT_RETENTION_PRINCIPAL_EXTERNAL_ID` to an existing principal
-that currently has `admin` membership on the singleton org scope. The runner
-checks this authority before inspecting audit records and again inside each
-delete transaction. Until the credential redesign in issue #24 lands, this
-configured external ID is permitted only for trusted local or pilot operation.
-It is not a credential and must not be treated as production authentication.
+Set `CONTINUUM_AUDIT_RETENTION_PRINCIPAL_EXTERNAL_ID` to the external ID of
+the existing active manual org administrator approved for the dedicated
+DB-bound operator login. Set `CONTINUUM_DATABASE_URL` to that operator
+connection. The external ID selects the audited actor; it is not an Entra token,
+service API key, or an independent authentication grant. The database verifies
+the operator role-name/OID binding as well as current actor authority before
+inspection and inside each deletion transaction. See
+[offboarding role setup](./offboarding.md) for the current grant and binding
+procedure. Do not use the migration owner or shared application connection.
 
 ## Optional JSONL export
 
@@ -85,8 +88,9 @@ filesystem and PostgreSQL transaction boundary.
 ## Running and scheduling
 
 Build first, then preview the exact fixed-cutoff counts. The JSON result reports
-`eligible` as the total number of rows older than the cutoff and `deletable` as
-the maximum this invocation could delete after applying the batch and row caps:
+`eligible` as the number of older rows remaining after preserved offboarding
+operations and retention summaries are excluded. `deletable` applies the batch
+and row caps to that eligible count:
 
 ```sh
 npm run build
@@ -104,11 +108,12 @@ available for `--batch-size`, `--max-batches`, and `--max-rows`. All output is a
 single structured JSON summary. A disabled or lock-busy invocation exits without
 mutation. Failures exit nonzero and do not log credentials or audit payloads.
 
-Run this command as the documented non-owner Continuum application role after
-applying `scripts/grant-application-role.sql`, never as the migration/function
-owner. The configured principal supplies the audited org-admin identity; the
+Run this command as the dedicated non-owner operator role after the owner
+applies its application profile and `scripts/grant-operator-role.sql`, never
+as the migration/function owner or shared application role. The configured
+principal supplies the audited org-admin identity; the
 database role supplies only the least-privilege execution boundary.
-The application role has no `UPDATE`, `DELETE`, or `TRUNCATE` privilege on
+The operator role has no `UPDATE`, `DELETE`, or `TRUNCATE` privilege on
 `audit_log`. It can execute only the guarded retention function, which rechecks
 the current administrator, strict cutoff, exact exported rows, preserved
 offboarding evidence, and batch bounds before deleting and writing the summary.
@@ -124,7 +129,7 @@ queries, metadata, payloads, credentials, or a host path.
 
 Keep normal autovacuum enabled and monitor dead tuples, table size, command
 duration, and replica lag. Increase limits only from measured evidence. This
-feature does not partition `audit_log` or invent the issue #24 credential model.
+feature does not partition `audit_log`.
 
 Principal offboarding receipts are stored separately in
 `principal_offboarding_events` and are intentionally not selected or deleted by

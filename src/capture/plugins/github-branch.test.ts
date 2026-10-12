@@ -42,6 +42,16 @@ describe('github-branch plugin', () => {
     });
   });
 
+  it('bounds the derived title without cutting a surrogate pair or shortening the source identity', () => {
+    const ref = 'b'.repeat(484) + '😀' + 'tail';
+    const captured = githubBranchPlugin.transform(event({ ref }))[0];
+    expect(captured.title).toBe('Started branch ' + 'b'.repeat(484));
+    expect(captured.title.length).toBeLessThanOrEqual(500);
+    expect(captured.body).toContain(ref);
+    expect(captured.metadata?.ref).toBe(ref);
+    expect(captured.sourceRef).toBe('https://github.com/exampleorg/booking-engine/tree/' + ref);
+  });
+
   it('skips tag creation events', () => {
     const ev = event({ ref: 'v1.0.0', ref_type: 'tag' });
     expect(githubBranchPlugin.transform(ev)).toEqual([]);

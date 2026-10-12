@@ -155,6 +155,17 @@ Human output is deterministic and strips terminal control characters, including
 from rendered `agents-md` content, while preserving its line structure.
 Diagnostics go to stderr.
 
+## Package and repository documentation
+
+The npm package includes its runtime binaries, compiled library, SQL migrations,
+checked provisioning scripts and public operational guides, including webhook
+ingestion. Contributor bootstrap files `AGENTS.md` and `ARCHITECTURE.md`, the
+configuration example `.env.example`, test helpers and tenant-specific modules
+are repository materials, not installed package files. Use the
+[public repository](https://github.com/nucleoid/continuum) for those files and
+export deployment configuration through the environment. No private working
+artifacts belong in the package.
+
 ## Installed-package migrations
 
 The npm package includes every SQL migration and exposes an installed migration
@@ -165,21 +176,29 @@ dedicated operator or shared application connection:
 CONTINUUM_DATABASE_URL="$CONTINUUM_MIGRATION_OWNER_URL" continuum-migrate
 ```
 
-The migrator takes a PostgreSQL advisory lock, applies pending packaged
-migrations in filename order, and exits nonzero on failure.
+The migrator polls for a PostgreSQL advisory lock, applies pending packaged
+migrations in filename order, and exits nonzero on failure. Acquisition has no
+built-in whole deadline. Use a finite external process deadline; expiry or any
+nonzero exit is a deployment failure, not permission to start a new binary
+against a partially upgraded schema.
 `CONTINUUM_MIGRATION_OWNER_URL` is a private convenience variable; the executable
 reads `CONTINUUM_DATABASE_URL`. For a non-public tenant, that connection must
 select the reviewed owner-controlled application schema first in its
 `search_path`. See [offboarding rollout](./offboarding.md) for exact role and
 provider prerequisites.
 
-Apply every packaged migration, including the current 0080 provider and 0081
-contract repairs; complete the owner-only backfill before regranting profiles,
+Apply every packaged migration through 0090, including the 0080 provider, 0081
+contract, 0082 privacy index, 0083 vocabulary, 0084-0088 embedding migrations,
+0089 promotion outbox and 0090 trusted activity; complete the
+owner-only backfill before regranting profiles,
 verifying identities, and starting current binaries. Rerunning the same command
 resumes pending 0081 work even when its SQL filename is ledgered. A migration
 ledger entry alone does not prove backfill completion. Runtime and dedicated
 operator roles cannot substitute for the owner-only repair or provenance
-inspection. Keep admin commands on their operator connection after this step.
+inspection. Migrations 0083, 0085, 0089 and 0090 require the owner to have database `TEMPORARY`
+for their role-planning tables; follow the writer-drain and rollback procedure in
+[tag-vocabularies.md](./tag-vocabularies.md). Keep admin commands on their
+operator connection after this step.
 REST and MCP startup verify the trusted 0081 readiness capability after the
 provider profile check and refuse startup if it is absent or repair is pending.
 The standalone provider verifier and identity sync retain their separate
@@ -188,25 +207,61 @@ shutdown state. It does not rerun contract verification or replace owner
 migration and backfill verification.
 REST, MCP and identity sync use `CONTINUUM_APPLICATION_SCHEMA` as their runtime
 schema anchor, defaulting to `public`. For a custom tenant, set that variable
-explicitly and make the connection's first resolved `search_path` namespace the
-same schema, for example `PGOPTIONS='-c search_path=application_data'` with
-`CONTINUUM_APPLICATION_SCHEMA=application_data`. A planted `memories` relation
-in an earlier namespace cannot replace the configured tenant. Library callers
+explicitly and make the connection's resolved explicit `search_path` contain
+exactly that schema, for example `PGOPTIONS='-c search_path=application_data'` with
+`CONTINUUM_APPLICATION_SCHEMA=application_data`. Keep `pg_catalog` implicit
+and omit provider, `$user` when it resolves, and
+co-tenant schemas. An earlier or later resolved namespace, including explicitly
+listed `pg_catalog`, fails the configured runtime anchor. Library callers
 that omit the optional expected schema retain namespace ownership checks but
 do not receive this configuration anchor.
 
-Run the migrator as a trusted operator before starting a newly installed
-application version. Its deployment-wide advisory lock acquisition polls until
-available and has no built-in whole acquisition deadline. Impose a finite
-external process deadline and treat expiry or any nonzero exit as deployment
-failure. Start the new binary only after all packaged migrations and required
-backfills have completed.
+## Separate embedding maintenance command
 
-`npm run embed-backfill -- --count` scans candidate IDs and metadata without
-loading memory bodies. Write runs checkpoint `(provider, dim, scope_filter,
-cursor, updated_at)` progress and isolate failures in
-`(memory_id, provider, dim, disposition, reason, failed_at)`. See
-`docs/embedding-backfill.md` for retry, cursor, no-wrap, and rollout details.
+`npm run embed-backfill -- --count` counts without loading memory bodies. Preview
+with `--dry-run`, then use a finite outer process deadline for mutation. This
+direct database command uses the application-schema/profile/provider startup
+checks and the configured routing, not the HTTP CLI URL/token profile file.
+
+Defaults are `--batch-size 32` (1..1000), `--max-rows 1000` (1..1000000), and
+`--max-errors 25` (1..10000). The row budget is per provider pass. Hydration is
+capped at 4 MiB per batch, including current sizes after scan. `--scope kind:name`
+and `--provider ID` limit work. Count and dry-run are mutually exclusive.
+
+`--cursor UUID` requires a provider and wraps once unless `--no-wrap` is set.
+`--retry-failures` also requires a provider and cannot run in preview modes.
+`--mark-failed UUID` requires a provider, loads no body, and cannot combine with
+cursor, retry, count, or dry-run. It marks operator disposition without advancing
+the scan and reports incomplete. Do not use it to mask a provider-wide outage.
+
+The JSON report includes provider-local counters, cursor/completion, sanitized
+errors, unresolved counts, and at most 25 sampled unresolved UUIDs per provider.
+A provider error or any incomplete report exits 1, including a successful manual
+mark; this is separate from ordinary continuum and admin exit tables. SQL uses
+five-second statement and one-second lock limits, preserving stricter settings
+and restoring originals before owned-client release. See
+[embedding-backfill.md](./embedding-backfill.md) for failure isolation, safe
+retry, and the backup-only rollback of embedding migrations 0084 through 0088.
+
+## Separate tag vocabulary client
+
+`continuum-tags` manages the shared vocabulary for a scope kind:
+
+```text
+continuum-tags list project
+continuum-tags add project troubleshooting "Troubleshooting guidance"
+continuum-tags update project troubleshooting "Revised description"
+continuum-tags remove project troubleshooting
+```
+
+This executable uses `CONTINUUM_BEARER` and optional `CONTINUUM_API_URL`
+(default `http://localhost:4000`). It does not use the ordinary `continuum`
+profile file or `CONTINUUM_TOKEN`. Its request and response-body deadline is
+30 seconds, responses are limited to 1 MiB, and failures exit 1 with a sanitized
+message. Vocabulary listing requires an active authenticated principal;
+mutations require explicit org admin. The REST management API has no equivalent
+MCP management tools. See [tag-vocabularies.md](./tag-vocabularies.md) for
+normalization, system-tag protection, and in-use deletion rules.
 
 ## Exit codes
 
@@ -226,3 +281,12 @@ grant, revoke, or alter memberships, including org-admin roles and private user
 scopes. Use the checked operator workflow in
 [scope-provisioning.md](./scope-provisioning.md) for controlled membership and
 scope changes.
+
+Current REST and MCP startup also require the installed 0089 promotion outbox. Quiesce old producers, offboarding binaries and consumers during rollout, regrant exact APP/OP profiles and configure producer IDs through the audited operator function. This does not add a generic promotion-consumer CLI or authenticated manual-retry endpoint; see [extensions](./extensions.md).
+
+Current REST and MCP also require the 0090 Standup schema. Quiesce activity
+producers during schema work, configure reviewed producer bindings and actor
+mappings, then restart compatible binaries with distinct serving and producer
+roles. Startup rejects a bound producer on the serving pool but does not monitor
+later binding changes. See [Standup](./standup.md) for attributed ingestion and
+recovery; the HTTP CLI has no separate Standup command.

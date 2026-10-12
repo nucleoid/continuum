@@ -270,7 +270,10 @@ BEGIN
     'continuum_operator_list_coordination_privacy_repair_page(uuid,uuid,integer)',
     'continuum_operator_coordination_scope_privacy_state(uuid,uuid)',
     'continuum_operator_scrub_promotion_scope(uuid,uuid,uuid,integer)',
+    'continuum_operator_scrub_standup_scope(uuid,uuid,uuid,integer)',
     'continuum_operator_set_promotion_webhook_ids(uuid,text[])',
+    'continuum_operator_bind_standup_producer(uuid,name,uuid,text,text)',
+    'continuum_operator_map_standup_actor(uuid,text,text,uuid,text)',
     'continuum_operator_offboarding_actual_state_is_erased(uuid,uuid)'
   ] LOOP
     IF to_regprocedure(format('%I.%s', schema_name, signature)) IS NOT NULL THEN
@@ -326,6 +329,10 @@ DECLARE schema_name TEXT:=current_setting('continuum.application_grant_schema');
 BEGIN
   IF to_regclass(format('%I.tag_vocabularies',schema_name)) IS NOT NULL THEN
     EXECUTE format('GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE %I.tag_vocabularies TO %I',schema_name,target_role);
+  END IF;
+  IF to_regclass(format('%I.memory_activity_attributions',schema_name)) IS NOT NULL THEN
+    EXECUTE format('GRANT SELECT ON %I.actor_principal_mappings,%I.memory_activity_attributions,%I.standup_thread_closures TO %I',schema_name,schema_name,schema_name,target_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_record_standup_activity(UUID,JSONB),%I.continuum_standup_producer_context(),%I.continuum_standup_is_ready() TO %I',schema_name,schema_name,schema_name,target_role);
   END IF;
   IF to_regclass(format('%I.promotion_events',schema_name)) IS NOT NULL
     AND to_regclass(format('%I.promotion_event_deliveries',schema_name)) IS NOT NULL THEN

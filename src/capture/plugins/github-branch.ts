@@ -28,12 +28,15 @@ export const githubBranchPlugin: CapturePlugin<GitHubBranchEvent> = {
       `Base: ${event.master_branch ?? 'unknown'}`,
       `Author: ${actorLogin}`,
     ];
+    const title = `Started branch ${event.ref} (${event.repository.name})`;
+    // Bound derived display text while preserving the complete source identity.
+    const boundedTitle = title.length > 500 ? title.slice(0, 500).replace(/[\uD800-\uDBFF]$/, '') : title;
 
     return [
       {
         scope: { kind: 'user', name: userScopeName },
         type: 'context',
-        title: `Started branch ${event.ref} (${event.repository.name})`,
+        title: boundedTitle,
         body: lines.join('\n'),
         tags: ['branch', 'github'],
         source: 'github-branch',

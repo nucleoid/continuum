@@ -16,6 +16,8 @@ export interface IngestPluginConfig {
   enabled: true;
   principalExternalId: string;
   auth: IngestAuth;
+  producerDatabaseUrl?: string;
+  activityActorExternalId?: string;
 }
 
 export interface IngestConfig {
@@ -68,7 +70,10 @@ export function ingestConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Inges
     } else {
       auth = { kind: 'bearer' };
     }
-    plugins[spec.id] = { enabled: true, principalExternalId, auth };
+    plugins[spec.id] = { enabled: true, principalExternalId, auth,
+      ...(env[`${spec.prefix}_DATABASE_URL`]?.trim() ? { producerDatabaseUrl: env[`${spec.prefix}_DATABASE_URL`]!.trim() } : {}),
+      ...(env[`${spec.prefix}_ACTOR_EXTERNAL_ID`]?.trim() ? { activityActorExternalId: env[`${spec.prefix}_ACTOR_EXTERNAL_ID`]!.trim() } : {}),
+    };
   }
   return { plugins };
 }

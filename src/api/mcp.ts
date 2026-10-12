@@ -11,7 +11,7 @@ import type { Principal, ScopeKind } from '../types.js';
 import { getPool } from '../storage/pool.js';
 import { makeEmbeddingRouterFromEnv } from '../embeddings/factory.js';
 import { isDirectEntrypoint } from './entrypoint.js';
-import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoordinationContractReady, requirePromotionOutboxReady } from '../storage/provider-lifecycle.js';
+import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoordinationContractReady, requirePromotionOutboxReady, requireStandupReady } from '../storage/provider-lifecycle.js';
 import { accessibleScopes } from '../services/access.js';
 import { captureMemory } from '../services/capture.js';
 import { recallForPrincipal } from '../services/recall.js';
@@ -44,6 +44,8 @@ import {
 } from './auth.js';
 import { gapConfigFromEnv, renderGapMarkdown, type GapConfig } from '../insights/gaps.js';
 import { getKnowledgeGaps } from '../services/gaps.js';
+import { standupForPrincipal } from '../services/standup.js';
+import { renderStandupMarkdown } from '../standup/render.js';
 import {
   DEFAULT_RELATION_THRESHOLD,
   relationThresholdFromEnv,
@@ -181,7 +183,12 @@ export function buildMcpServer(deps: McpDeps): McpServer {
   for (const provider of asEmbeddingRouter(embeddingProvider).providers()) {
     assertEmbeddingProviderDimension(provider);
   }
-  const logger = deps.logger ?? console;
+  // Stdio stdout is exclusively MCP protocol, including during fail-open recall.
+  const logger = deps.logger ?? {
+    info: console.error.bind(console),
+    warn: console.warn.bind(console),
+    error: console.error.bind(console),
+  };
   const gapConfig = deps.gapConfig ?? gapConfigFromEnv();
   const now = deps.now ?? (() => new Date());
   const errorResult = (error: unknown) => serviceErrorResult(error, logger);
@@ -733,6 +740,39 @@ export function buildMcpServer(deps: McpDeps): McpServer {
   );
 
   server.registerTool(
+    'continuum.standup',
+    {
+      description:
+        'Render a bounded, source-cited digest of activity explicitly attributed to the caller and open threads in their authorized scopes.',
+      inputSchema: {
+        since: z.string().regex(/^([1-9]\d{0,2})h$/).optional(),
+        date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+        timezone: z.string().max(100).optional(),
+        limit: z.number().int().min(1).max(100).optional(),
+        offset: z.number().int().min(0).max(10_000).optional(),
+        open_thread_days: z.number().int().min(1).max(30).optional(),
+        open_thread_limit: z.number().int().min(1).max(100).optional(),
+      },
+    },
+    async (args) => {
+      try {
+        const result = await standupForPrincipal(pool, principal, {
+          sinceHours: args.since === undefined ? undefined : Number(args.since.slice(0, -1)),
+          date: args.date,
+          timezone: args.timezone,
+          limit: args.limit,
+          offset: args.offset,
+          openThreadDays: args.open_thread_days,
+          openThreadLimit: args.open_thread_limit,
+        }, { now: now(), transport: 'mcp' });
+        return textResult(renderStandupMarkdown(result));
+      } catch (error) {
+        return errorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
     'continuum.gaps',
     {
       description:
@@ -869,6 +909,7 @@ async function main(): Promise<void> {
   await reconcilePgvectorProviderGrants(pool, schemaOptions);
   await requireCoordinationContractReady(pool, schemaOptions);
   await requirePromotionOutboxReady(pool, schemaOptions);
+  await requireStandupReady(pool, { ...schemaOptions, servingPool: true });
   const authMode = authModeFromEnv();
   warnOnDevAuthMode(authMode);
   const authenticator = createAuthenticator(

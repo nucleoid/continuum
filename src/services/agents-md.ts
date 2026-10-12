@@ -27,6 +27,8 @@ export async function prepareAgentsMdForPrincipal(
     // This transport deliberately uses the scoped text renderer, not ranked
     // RecallResult objects. Optional retrieval enrichments never enter generated
     // bytes, selection, the digest, or the required generator read audit.
+    // Personal standup attribution and closure tables are a separate reader;
+    // they do not enter this bundle or expand its scoped selection.
     const { markdown, memories } = await renderAgentsMdResult(pool, {
       principalId: principal.id,
       project: input.project,

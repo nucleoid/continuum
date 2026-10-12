@@ -929,14 +929,17 @@ describe('coordination final review remediation', () => {
         );
         console.info('privacy-scale-mapping-chunk', JSON.stringify({ first, last, seeded: last }));
       }
-      await query(
-        `INSERT INTO coordination_principal_privacy_progress
+      for (let first = 1; first <= 50_000; first += 5_000) {
+        const last = Math.min(first + 4_999, 50_000);
+        await query(
+          `INSERT INTO coordination_principal_privacy_progress
            (principal_id, detached_principal_id, privacy_version, completed_at)
          SELECT ('30000000-0000-4000-8000-' || lpad(to_hex(n), 12, '0'))::uuid,
                 $1, 3, clock_timestamp()
-           FROM generate_series(1, 50000) n`,
-        [detachedPrincipalId],
-      );
+           FROM generate_series($2::integer, $3::integer) n`,
+          [detachedPrincipalId, first, last],
+        );
+      }
       await query(
         `INSERT INTO coordination_principal_privacy_progress
            (principal_id, detached_principal_id, privacy_version, completed_at)

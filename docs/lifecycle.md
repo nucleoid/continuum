@@ -38,13 +38,16 @@ The migration seeds the reserved `system:lifecycle` service principal for audit
 attribution. It has no external login identifier, and a database trigger rejects
 membership grants to its reserved UUID. It therefore remains noninteractive
 across rolling deploys and code rollbacks; REST and MCP also reject its UUID as
-defense in depth. Every state transition, embedding deletion for an archived
+defense in depth. Every state transition, deletion of every provider embedding for an archived
 context, and audit row commits atomically.
 
 Migration `0023_offboarding_erasure.sql` generalizes embedding cleanup: every
 transition to `archived`, including supersession, direct maintenance, and
-offboarding, deletes the derived row. New embedding writes lock and recheck the
-parent and are rejected unless it remains live. Migration
+offboarding, deletes every derived provider vector for that memory. New embedding writes lock and recheck the
+parent and recheck live state and current expiry before persisting. An
+embedding computed before archival or expiry cannot make the memory eligible
+again. Provider-qualified storage and backfill use this same boundary; see
+[embedding-backfill.md](./embedding-backfill.md). Migration
 `0024_offboarding_embedding_cleanup.sql` installs a bounded cleanup function and
 runs one 1,000-row upgrade batch. Operators call the function in committed
 batches until it returns zero; the migration does not claim a complete backfill.

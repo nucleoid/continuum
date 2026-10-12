@@ -772,7 +772,20 @@ async function scrubPromotionScope(client: pg.PoolClient, actorId: string, princ
     `SELECT continuum_operator_scrub_promotion_scope($1::uuid,$2::uuid,$3::uuid,$4::integer) AS privacy`,
     [actorId, principalId, scopeId, Math.min(batchSize, 1_000)],
   );
-  return result.rows[0]?.privacy ?? { complete: false, processed: 0 };
+  const outbox = result.rows[0]?.privacy ?? { complete: false, processed: 0 };
+  const standup = await client.query<{ installed: boolean; available: boolean }>(
+    `SELECT pg_catalog.to_regclass('memory_activity_attributions') IS NOT NULL AS installed,
+      pg_catalog.to_regprocedure('continuum_operator_scrub_standup_scope(uuid,uuid,uuid,integer)') IS NOT NULL AS available`,
+  );
+  if (!standup.rows[0]?.installed) return outbox;
+  if (!standup.rows[0].available) throw new ServiceError('DEPENDENCY_UNAVAILABLE', 'Standup privacy migration is required');
+  const scrub = await client.query<{ privacy: { complete: boolean; processed: number; batch_full?: boolean } }>(
+    'SELECT continuum_operator_scrub_standup_scope($1::uuid,$2::uuid,$3::uuid,$4::integer) AS privacy',
+    [actorId, principalId, scopeId, Math.min(batchSize, 1_000)],
+  );
+  const activity = scrub.rows[0]?.privacy ?? { complete: false, processed: 0 };
+  return { complete: outbox.complete && activity.complete, processed: outbox.processed + activity.processed,
+    batch_full: outbox.batch_full || activity.batch_full };
 }
 
 const PRESERVED_AUDIT_OPERATIONS = [
@@ -783,6 +796,7 @@ const PRESERVED_AUDIT_OPERATIONS = [
   'principal_offboarding_repaired',
   'principal_offboarding_access_revoked',
   'principal_promotion_privacy_repaired',
+  'principal_standup_privacy_repaired',
 ] as const;
 
 const AUDIT_EXPECTED_METADATA =

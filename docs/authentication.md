@@ -1,7 +1,8 @@
 # Authentication and Entra membership sync
 
-Continuum requires an explicit authentication mode at every REST API, MCP, or
-operator process start. There is no production default:
+Continuum requires an explicit authentication mode at REST API and MCP
+process start. Database operator commands use their separately bound database
+identity and configured actor. There is no production authentication default:
 
 - `CONTINUUM_AUTH_MODE=dev` enables the local integration-test identity where a
   bearer value is an existing principal `external_id`. Do not expose this mode
@@ -81,8 +82,13 @@ value containing a service principal's public `external_id` is rejected.
 Source-restricted keys must match the exact ingest plugin ID. GitHub HMAC and
 Azure DevOps Basic webhook verification are unchanged.
 
-Use the checked admin transport with `CONTINUUM_ADMIN_ACTOR` set to an existing
-org administrator:
+Use the checked admin transport with `CONTINUUM_DATABASE_URL` set to the
+dedicated operator connection and `CONTINUUM_ADMIN_ACTOR` set to its approved
+existing manual org administrator's external ID. That actor identifier is not
+an HTTP credential or the internal principal UUID. The migration owner first
+applies the application profile to the dedicated role, then
+`scripts/grant-operator-role.sql` with its approved actor UUID; see
+[offboarding.md](./offboarding.md) for the binding and rollout procedure:
 
 ```text
 npm run admin -- issue-key <service-external-id> [allowed-source]
@@ -108,14 +114,15 @@ npm run admin -- disable-principal <principal-id>
 npm run admin -- reactivate-principal <principal-id>
 ```
 
-The application checks the authenticated operator and records that actor in
-the same transaction as reactivation. The database also records a mandatory
-guard event under `system:lifecycle`. Its
-`authorization_principal_id` is the effective administrator UUID presented to
-the database function, not a database-authenticated caller identity. All
-application connections share one database role, so direct SQL access to that
-role is a trusted administrative capability and must not be interpreted as an
-end-user authentication boundary.
+Reactivation checks the actor's current org-admin authority and calls the
+operator-only database capability in the same transaction as its actor audit.
+The database also records a mandatory guard event under `system:lifecycle`.
+Its `authorization_principal_id` is the administrator UUID supplied to the
+guarded function; that UUID alone is not database authentication. The dedicated
+operator login must have the approved role-name/OID binding to that actor.
+Shared application sessions cannot substitute for this protected capability.
+Treat direct database credentials as a privileged boundary and keep migration
+owners, shared application, dedicated operator, and sync roles separate.
 
 After reactivation, review required access and issue a new service key. A later
 authoritative membership sync can restore eligible Entra-sourced memberships;
@@ -163,7 +170,18 @@ mass-deactivation investigation. It requires:
   sourced org admin
 - `CONTINUUM_ENTRA_MAX_STALENESS_HOURS`, an integer from 1 through 168
   (default 48, allowing one delayed nightly run plus token refresh/recovery)
-- the normal database configuration
+- the dedicated approved sync database connection and current sync grant profile
+- `CONTINUUM_APPLICATION_SCHEMA`, default `public`, with the resolved explicit
+  runtime search path containing exactly that schema and `pg_catalog` implicit
+
+The sync entrypoint verifies its exact provider profile and configured schema
+anchor before fetching Graph data. Provider privilege drift or a custom-schema
+configuration mismatch stops membership reconciliation. Preflight and regrant
+the sync profile after provider migrations, and alert on rejected runs before
+the durable staleness deadline. Existing Entra memberships become ineffective
+after that deadline even if reconciliation stays paused. Manual memberships and
+the independently bound admin/offboarding workflow do not depend on this sync
+startup gate. See [provider rollout](./offboarding.md) for recovery.
 
 Before enabling the scheduler, retain an independently managed, active manual
 org administrator as a break-glass identity and configure that identity as the
@@ -250,10 +268,17 @@ snapshot provisions its immutable user object IDs before activating sourced
 memberships. Sign-in never provisions an unknown user.
 
 This release does not support a mixed-version rolling deployment. Stop every
-API, MCP, admin, and membership-sync process built from the old version, then
-apply all migrations through `0021_principal_deactivation.sql`,
+API, MCP, admin, membership-sync process, activity producer and promotion worker
+built from the old version, then apply every packaged migration through
+`0090_standup_activity.sql`, complete
+the owner-only `0081` contract backfill, converge application/operator/sync grants,
 review the inactive bindings conservatively quarantined by
 `0017_entra_quarantine_state.sql`, then start only the new binaries. The
+0090 role snapshot requires migration-owner database TEMPORARY privilege.
+Explicitly regrant exact APP and OP profiles, configure reviewed activity
+producer bindings and actor mappings, and require all current startup checks
+before serving. Keep serving roles distinct from activity producer roles; see
+[Standup](./standup.md) for binding changes and failed-delivery recovery. The
 migrator recognizes the exact pre-renumber Entra filenames used by review
 builds and records their public sequence aliases under the same advisory lock,
 so it does not replay an already applied identity migration. Unrelated or

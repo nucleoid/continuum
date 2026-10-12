@@ -729,11 +729,11 @@ describe('offboarding and erasure', () => {
     expect(indexes).toContain('audit_log_offboarding_scope_ids_cursor_idx');
     expect(indexes).not.toContain('principal_offboarding_audit_requests_pkey');
     expect(indexes).not.toContain('audit_log_request_cursor_idx');
-    // The additive outbox wrapper calls this unchanged lifecycle predicate.
-    // Inspect both actual installed bodies; a security-definer call is not
-    // inlined by EXPLAIN and must not conceal the original audit index proof.
+    // Keep the pre-90 outbox wrapper and its unchanged pre-extension audit
+    // predicate visible. Definer calls are not inlined by EXPLAIN, so inspect
+    // each installed layer instead of losing the original audit index proof.
     const outboxVerifier = (await pool.query(`SELECT prosrc FROM pg_proc
-      WHERE oid='continuum_offboarding_lifecycle_state_is_erased(uuid)'::regprocedure`)).rows[0].prosrc as string;
+      WHERE oid='continuum_offboarding_lifecycle_state_is_erased_pre_standup(uuid)'::regprocedure`)).rows[0].prosrc as string;
     expect(outboxVerifier).toContain('continuum_offboarding_lifecycle_state_is_erased_pre_extensions(target_run_id)');
     expect(outboxVerifier.match(/target_run_id/g)).toHaveLength(2);
     const outboxPlan = (await pool.query(`EXPLAIN (FORMAT JSON) ${outboxVerifier.replaceAll('target_run_id', '$1::uuid')}`, [runId]))
@@ -746,6 +746,25 @@ describe('offboarding and erasure', () => {
     const privacyIndex = await pool.query(`SELECT indexdef FROM pg_indexes WHERE schemaname=current_schema()
       AND tablename='promotion_events' AND indexname='promotion_events_scope_privacy_idx'`);
     expect(privacyIndex.rows[0].indexdef).toContain('(destination_scope_id, id)');
+
+    const standupVerifier = (await pool.query(`SELECT prosrc FROM pg_proc
+      WHERE oid='continuum_offboarding_lifecycle_state_is_erased(uuid)'::regprocedure`)).rows[0].prosrc as string;
+    expect(standupVerifier).toContain('continuum_offboarding_lifecycle_state_is_erased_pre_standup(target_run_id)');
+    // Current wrapper has one retained predicate call and three independently
+    // fenced actor, owned-scope and mapping probes. Preserve all three bodies.
+    expect(standupVerifier.match(/target_run_id/g)).toHaveLength(4);
+    expect(standupVerifier.match(/run\.run_id=target_run_id/g)).toHaveLength(3);
+    expect(standupVerifier).toContain('attribution.actor_principal_id=run.principal_id');
+    expect(standupVerifier).toContain('memory.scope_id=run.scope_id');
+    expect(standupVerifier).toContain("mapping.external_actor_id IS DISTINCT FROM 'erased:'||mapping.mapping_id::text");
+    const standupPlan = (await pool.query(`EXPLAIN (FORMAT JSON) ${standupVerifier.replaceAll('target_run_id', '$1::uuid')}`, [runId]))
+      .rows[0]['QUERY PLAN'][0].Plan as Record<string, unknown>;
+    const priorNodeCount = nodes.length;
+    visit(standupPlan);
+    const standupRelations = nodes.slice(priorNodeCount).map((node) => node['Relation Name']);
+    expect(standupRelations).toContain('memory_activity_attributions');
+    expect(standupRelations).toContain('actor_principal_mappings');
+
 
     expect(nodes.filter((node) =>
       node['Node Type'] === 'Seq Scan'

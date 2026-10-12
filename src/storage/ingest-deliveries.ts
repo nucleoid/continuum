@@ -40,6 +40,7 @@ export async function processIngestDelivery(
   deliveryId: string,
   payloadSha256: string,
   capture: (client: pg.PoolClient) => Promise<CaptureResult[]>,
+  boundProducer = false,
 ): Promise<DeliveryResult> {
   let client: pg.PoolClient;
   try {
@@ -50,6 +51,12 @@ export async function processIngestDelivery(
   let destroyClient = false;
   try {
     await client.query('BEGIN');
+    if (boundProducer) {
+      await client.query(`SELECT pg_catalog.set_config('statement_timeout', CASE WHEN setting::bigint BETWEEN 1 AND 5000
+        THEN setting||'ms' ELSE '5000ms' END,TRUE) FROM pg_catalog.pg_settings WHERE name='statement_timeout'`);
+      await client.query(`SELECT pg_catalog.set_config('lock_timeout', CASE WHEN setting::bigint BETWEEN 1 AND 1000
+        THEN setting||'ms' ELSE '1000ms' END,TRUE) FROM pg_catalog.pg_settings WHERE name='lock_timeout'`);
+    }
     const inserted = await client.query(
       `INSERT INTO ingest_deliveries (plugin_id, delivery_id, payload_sha256, state)
        VALUES ($1, $2, $3, 'processing')
