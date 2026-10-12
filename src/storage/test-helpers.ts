@@ -10,7 +10,7 @@ export async function dropIsolatedTestDatabase(
   database: string,
   options: { cleanupTimeoutMs?: number } = {},
 ): Promise<void> {
-  const cleanupTimeoutMs = options.cleanupTimeoutMs ?? 60_000;
+  const cleanupTimeoutMs = options.cleanupTimeoutMs ?? 90_000;
   if (!Number.isInteger(cleanupTimeoutMs) || cleanupTimeoutMs < 1 || cleanupTimeoutMs > 90_000) {
     throw new Error('Fixture cleanup timeout must be an integer from 1 to 90000 milliseconds');
   }

@@ -167,7 +167,7 @@ afterEach(async () => {
     rm(directory, { recursive: true, force: true })));
   for (const result of removed) if (result.status === 'rejected') failures.push(result.reason);
   if (failures.length > 0) throw new AggregateError(failures, 'Provider fixture teardown failed');
-}, 90_000);
+}, 120_000);
 
 describe('pgvector rollout remediation', () => {
   it('supports PostgreSQL database-owner control of a hardened public app schema', async () => {
