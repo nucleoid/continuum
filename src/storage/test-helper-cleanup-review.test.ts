@@ -136,3 +136,29 @@ it('honors a finite caller-specific cleanup budget without changing per-statemen
   expect(state.release).toHaveBeenCalledWith(false);
   expect(state.queries.every((sql) => !/\bFORCE\b|pg_(?:terminate|cancel)_backend/i.test(sql))).toBe(true);
 });
+
+
+it('lets default normal cleanup survive a bounded checkpoint beyond sixty seconds', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-10-12T00:00:00Z'));
+  const started = Date.now();
+  const cancellation = Object.assign(new Error('checkpoint still running'), { code: '57014' });
+  const state = fixture({ drop: (attempt, statementMs) => {
+    if (attempt <= 14) {
+      vi.setSystemTime(Date.now() + statementMs);
+      throw cancellation;
+    }
+  } });
+  await expect(dropIsolatedTestDatabase(state.maintenance, 'fixture_default_checkpoint'))
+    .resolves.toBeUndefined();
+  expect(state.drops).toHaveLength(15);
+  expect(Date.now() - started).toBeGreaterThanOrEqual(70_000);
+  expect(Date.now() - started).toBeLessThanOrEqual(90_000);
+  expect(state.drops.every((drop) => drop.statementMs > 0 && drop.statementMs <= 5000
+    && drop.lock === '250ms')).toBe(true);
+  expect(state.checks()).toBeGreaterThanOrEqual(16);
+  expect(state.settings()).toEqual({ statement: '30s', lock: '250ms' });
+  expect(state.release).toHaveBeenCalledTimes(1);
+  expect(state.release).toHaveBeenCalledWith(false);
+  expect(state.queries.every((sql) => !/\bFORCE\b|pg_(?:terminate|cancel)_backend/i.test(sql))).toBe(true);
+});
