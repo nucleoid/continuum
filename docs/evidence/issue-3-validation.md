@@ -17,11 +17,13 @@ Containment used a 768 MiB container memory limit, 128 MiB swap allowance, 384 M
 
 Coverage includes real APP/OP profile upgrade and regrant, canonical callback-ID registry, REST/MCP parity, immutable bounded enrichment, deterministic AGENTS generator parity, exact lease-generation ownership, paid outcome recovery, server-bounded SQL, post-lock eligibility, disabled-destination exclusion and approved resumable outbox erasure. Consumer callbacks remain at least once; downstream copies cannot be retracted by database cleanup.
 
-Seven completed Claude reports form the approved source review chain: five portions plus the e3 and a59 corrections. The portions did not all review one identical head. A separate nonauthor native review covered 69 source paths before this receipt; it is recorded separately from Claude review. This new receipt was not included in those earlier approvals.
+Seven completed Claude reports form the conditionally approved source review chain: five portions plus the e3 and a59 corrections. The portions did not all review one identical head. Approval covers source only, with Low test-cleanup diagnostic and hook-budget residuals; it is not a production guarantee. A separate nonauthor native review covered 69 source paths before this receipt; it is recorded separately from Claude review. This new receipt was not included in those earlier approvals.
+
+Receipt-only head `95d6838` also passed build, packaging, installed CLI and compiled entrypoint checks, plus eight cleanup-helper tests (2.53 seconds, exit zero, no OOM).
 
 ## Rollout and remaining gates
 
-Follow the [extension rollout guide](../extensions.md): quiesce old producers, offboarding processes and every worker replica; migrate as owner with database TEMPORARY privilege; explicitly regrant APP then OP profiles; configure canonical webhook IDs and verify readiness before starting matching binaries. No deployment is claimed.
+Follow the [extension rollout guide](../extensions.md): quiesce old producers, offboarding processes and every worker replica; migrate as owner with database TEMPORARY privilege; explicitly regrant APP then OP profiles; configure canonical webhook IDs, then start matching binaries and require their exact-profile and outbox-readiness startup checks to pass. No deployment is claimed.
 
 Fresh receipt-head CI, PR merge and fresh master CI remain pending. Standup, README reconciliation, final combined documentation and issue 16 completion also remain pending.
 
