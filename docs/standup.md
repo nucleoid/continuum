@@ -67,6 +67,14 @@ SELECT continuum_operator_map_standup_actor(
 
 Namespaces match `^[a-z][a-z0-9.-]{0,99}$`; external identities are 1 through 200 characters and reasons 1 through 500. The database stores a namespace-scoped identity hash rather than the raw external identity. Only enabled users can be mapping targets. A replacement revokes the old mapping and creates a new immutable generation. Events predating the new generation are rejected. Omitted event time is accepted only for the first generation and must still be finite, not future, and at or after its creation.
 
+The GitHub PR adapter captures only `closed` events with `merged=true`; opened,
+edited and other unmerged events produce no memories. Its signed `merged_at`
+can establish source time after a mapping replacement when it satisfies the
+new generation's time bounds. GitHub branch-create payloads have no source
+timestamp. After any mapping replacement, including revoke and remap to the
+same user, branch creates remain ordinary captured memories without trusted
+Standup attribution. Receipt time does not bypass this generation boundary.
+
 Pass a NULL target UUID to `continuum_operator_map_standup_actor` to revoke a mapping. Pass a NULL service UUID to `continuum_operator_bind_standup_producer` to revoke a producer binding. Changing an active producer's principal, namespace or family requires revocation first. Revocation preserves history, and reconfiguration does not reactivate an old generation. Privileged role attributes or membership edges disable producer context and activity recording. Revocation uses the stored role identity even after drift or role removal; an absent active binding is an error. Grant/profile drift causes binding or startup validation to fail closed.
 
 ## Closure, expiry and promotion

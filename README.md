@@ -57,9 +57,12 @@ newly installed application version. Production uses a migration-owner URL for
 that command and a distinct non-owner application URL for running Continuum;
 the offboarding completion ledger relies on that PostgreSQL privilege boundary.
 
-The CLI supports capture, recall, audit, scope membership administration,
+The CLI supports capture, recall, audit, scope membership listing,
 promotion, verification, and AGENTS.md generation through the same authenticated
 HTTP API used by other clients.
+Membership administration uses the separately bound operator workflows in
+[authentication](./docs/authentication.md) and
+[scope provisioning](./docs/scope-provisioning.md).
 
 ## Embedding configuration
 

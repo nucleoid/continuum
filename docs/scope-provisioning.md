@@ -68,11 +68,17 @@ called through `ensure_scope`.
    Org admin permits scope creation, org writes, cross-principal audit access,
    vocabulary administration, and knowledge-gap reports. It does not replace
    the separate DB-bound operator role for protected administration.
-5. Apply every packaged migration through `0088`, finish the owner-only `0081`
+5. Apply every packaged migration through `0090`, finish the owner-only `0081`
    contract backfill, and converge the current application/operator/sync grants
    before starting matching binaries. Follow [offboarding rollout](./offboarding.md)
    and [tag vocabulary rollout](./tag-vocabularies.md). The migration owner
-   needs database `TEMPORARY` for `0083`'s role-planning table. Runtime connections
+   needs database `TEMPORARY` for the role-planning tables in `0083`, `0085`,
+   `0089` and `0090`. Current REST and MCP startup require coordination repair,
+   promotion-outbox readiness and the Standup schema. Quiesce promotion and
+   activity producers, offboarding processes and promotion workers during
+   schema work; explicitly regrant exact APP/OP profiles before restarting.
+   Configure reviewed activity bindings separately as described in
+   [Standup](./standup.md). Runtime connections
    use the application profile and an explicit search path containing only the
    configured `CONTINUUM_APPLICATION_SCHEMA`, which defaults to `public`; keep
    `pg_catalog` implicit.
