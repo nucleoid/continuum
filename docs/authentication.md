@@ -268,11 +268,17 @@ snapshot provisions its immutable user object IDs before activating sourced
 memberships. Sign-in never provisions an unknown user.
 
 This release does not support a mixed-version rolling deployment. Stop every
-API, MCP, admin, membership-sync process and promotion worker built from the old version, then
-apply every packaged migration through `0089_promotion_outbox.sql`, complete
+API, MCP, admin, membership-sync process, activity producer and promotion worker
+built from the old version, then apply every packaged migration through
+`0090_standup_activity.sql`, complete
 the owner-only `0081` contract backfill, converge application/operator/sync grants,
 review the inactive bindings conservatively quarantined by
 `0017_entra_quarantine_state.sql`, then start only the new binaries. The
+0090 role snapshot requires migration-owner database TEMPORARY privilege.
+Explicitly regrant exact APP and OP profiles, configure reviewed activity
+producer bindings and actor mappings, and require all current startup checks
+before serving. Keep serving roles distinct from activity producer roles; see
+[Standup](./standup.md) for binding changes and failed-delivery recovery. The
 migrator recognizes the exact pre-renumber Entra filenames used by review
 builds and records their public sequence aliases under the same advisory lock,
 so it does not replay an already applied identity migration. Unrelated or

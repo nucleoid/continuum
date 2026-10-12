@@ -30,7 +30,7 @@ and taking the nonzero forced-exit path.
 
 ## Current schema and runtime prerequisites
 
-Apply every packaged migration through `0089`, finish the owner-only `0081`
+Apply every packaged migration through `0090`, finish the owner-only `0081`
 coordination backfill, and converge current application/operator/sync profiles
 before starting matching binaries. Use the migration-owner connection for this
 work, then restore the runtime application connection. `0083` needs database
@@ -69,7 +69,7 @@ Use [embedding-backfill.md](./embedding-backfill.md) for bounded preview, count,
 mutating backfill, and migration recovery. Backfill's five-second statement and
 one-second lock limits preserve stricter current settings; keep a finite outer
 process deadline. Drain old writers before the provider-qualified key upgrade.
-The migration owner needs database TEMPORARY for 0083, 0085 and 0089.
+The migration owner needs database TEMPORARY for 0083, 0085, 0089 and 0090.
 
 ## Promotion runtime composition
 
@@ -83,6 +83,16 @@ produces events without starting a consumer. Custom consumers need explicit
 composition and the durable operator-configured ID set. See
 [extensions](./extensions.md) for at-least-once delivery, callback capacity,
 SQL/cancellation/shutdown limits, mixed versions and downstream-copy privacy.
+
+Current startup also checks the 0090 Standup schema and rejects a bound activity
+producer on the serving pool. This check runs at startup, not continuously.
+Use distinct serving and producer roles; stop affected processes before changing
+their bindings, then restart and verify. Quiesce activity producers and
+offboarding during the complete-chain upgrade, regrant exact APP/OP profiles,
+and configure reviewed actor mappings before enabling attributed capture.
+Configured producer identity drift makes deliveries fail closed rather than
+fall back to ordinary capture. See [Standup](./standup.md) for recovery and
+unchanged queued-delivery replay.
 
 ## Capture relation candidates
 

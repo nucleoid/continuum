@@ -33,7 +33,7 @@ SQL queue.
 
 ## Operator backfill procedure
 
-1. Apply the complete packaged chain through 0089, finish owner repair and exact
+1. Apply the complete packaged chain through 0090, finish owner repair and exact
    role grants, and configure the same scope routing used by the API.
 2. Run `npm run embed-backfill -- --count`.
 3. Preview a bounded pass with `--dry-run --max-rows 100` and an optional

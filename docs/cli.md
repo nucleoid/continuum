@@ -187,14 +187,15 @@ select the reviewed owner-controlled application schema first in its
 `search_path`. See [offboarding rollout](./offboarding.md) for exact role and
 provider prerequisites.
 
-Apply every packaged migration through 0089, including the 0080 provider, 0081
-contract, 0082 privacy index, 0083 vocabulary, and 0084-0088 embedding migrations; complete the
+Apply every packaged migration through 0090, including the 0080 provider, 0081
+contract, 0082 privacy index, 0083 vocabulary, 0084-0088 embedding migrations,
+0089 promotion outbox and 0090 trusted activity; complete the
 owner-only backfill before regranting profiles,
 verifying identities, and starting current binaries. Rerunning the same command
 resumes pending 0081 work even when its SQL filename is ledgered. A migration
 ledger entry alone does not prove backfill completion. Runtime and dedicated
 operator roles cannot substitute for the owner-only repair or provenance
-inspection. Migrations 0083, 0085 and 0089 require the owner to have database `TEMPORARY`
+inspection. Migrations 0083, 0085, 0089 and 0090 require the owner to have database `TEMPORARY`
 for their role-planning tables; follow the writer-drain and rollback procedure in
 [tag-vocabularies.md](./tag-vocabularies.md). Keep admin commands on their
 operator connection after this step.
@@ -282,3 +283,10 @@ scopes. Use the checked operator workflow in
 scope changes.
 
 Current REST and MCP startup also require the installed 0089 promotion outbox. Quiesce old producers, offboarding binaries and consumers during rollout, regrant exact APP/OP profiles and configure producer IDs through the audited operator function. This does not add a generic promotion-consumer CLI or authenticated manual-retry endpoint; see [extensions](./extensions.md).
+
+Current REST and MCP also require the 0090 Standup schema. Quiesce activity
+producers during schema work, configure reviewed producer bindings and actor
+mappings, then restart compatible binaries with distinct serving and producer
+roles. Startup rejects a bound producer on the serving pool but does not monitor
+later binding changes. See [Standup](./standup.md) for attributed ingestion and
+recovery; the HTTP CLI has no separate Standup command.
