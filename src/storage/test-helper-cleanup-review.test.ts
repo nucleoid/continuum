@@ -82,11 +82,20 @@ it('does not retry a terminal DROP error or force a newly active target session'
   await expect(dropIsolatedTestDatabase(terminal.maintenance, 'fixture_denied')).rejects.toBe(denied);
   expect(terminal.drops).toHaveLength(1);
   expect(terminal.settings()).toEqual({ statement: '30s', lock: '250ms' });
-  const reconnecting = fixture({ sessions: (check) => check >= 3 ? 1 : 0,
-    drop: () => { throw { code: '55P03' }; } });
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-10-12T00:00:00Z'));
+  let reappearanceStarted: number | undefined;
+  const reconnecting = fixture({ sessions: (check) => {
+    if (check < 3) return 0;
+    reappearanceStarted ??= Date.now();
+    vi.setSystemTime(Date.now() + 1_000);
+    return 1;
+  }, drop: () => { throw { code: '55P03' }; } });
   await expect(dropIsolatedTestDatabase(reconnecting.maintenance, 'fixture_reconnected'))
-    .rejects.toThrow('acquired active sessions');
+    .rejects.toThrow('sessions did not drain within 5 seconds');
   expect(reconnecting.drops).toHaveLength(1);
+  expect(Date.now() - reappearanceStarted!).toBeLessThanOrEqual(5_000);
+  expect(reconnecting.settings()).toEqual({ statement: '30s', lock: '250ms' });
   expect(reconnecting.queries.every((sql) => !/\bFORCE\b|pg_(?:terminate|cancel)_backend/i.test(sql))).toBe(true);
   expect(reconnecting.release).toHaveBeenCalledTimes(1);
   expect(reconnecting.release).toHaveBeenCalledWith(false);

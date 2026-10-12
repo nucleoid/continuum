@@ -42,13 +42,16 @@ export async function dropIsolatedTestDatabase(
         'SELECT count(*)::int AS sessions FROM pg_catalog.pg_stat_activity WHERE datname=$1::text', [database],
       )).rows[0].sessions;
     };
-    const deadline = Math.min(cleanupDeadline, Date.now() + 5_000);
-    for (;;) {
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) throw new Error('Fixture database sessions did not drain within 5 seconds');
-      if (await sessions() === 0) break;
-      await new Promise((resolve) => setTimeout(resolve, Math.min(20, Math.max(1, deadline - Date.now()))));
-    }
+    const drainSessions = async (): Promise<void> => {
+      const deadline = Math.min(cleanupDeadline, Date.now() + 5_000);
+      for (;;) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw new Error('Fixture database sessions did not drain within 5 seconds');
+        if (await sessions() === 0) return;
+        await new Promise((resolve) => setTimeout(resolve, Math.min(20, Math.max(1, deadline - Date.now()))));
+      }
+    };
+    await drainSessions();
     const identifier = '"' + database.replaceAll('"', '""') + '"';
     let lastCancellation: unknown;
     for (;;) {
@@ -56,7 +59,7 @@ export async function dropIsolatedTestDatabase(
       if (remaining <= 0) throw lastCancellation ?? new Error(`Fixture database cleanup exceeded its ${cleanupTimeoutMs}-millisecond deadline`);
       // Check again on every attempt. Never evict a newly connected session or
       // substitute FORCE/termination for orderly fixture socket shutdown.
-      if (await sessions() !== 0) throw new Error('Fixture database acquired active sessions during cleanup');
+      await drainSessions();
       const dropRemaining = cleanupDeadline - Date.now();
       if (dropRemaining <= 0) throw lastCancellation ?? new Error(`Fixture database cleanup exceeded its ${cleanupTimeoutMs}-millisecond deadline`);
       await setLimits(Math.min(statementCap, dropRemaining));

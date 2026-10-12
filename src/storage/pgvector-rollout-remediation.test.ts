@@ -27,6 +27,13 @@ const DATABASE_URL =
   'postgres://continuum:***@localhost:5433/continuum';
 
 const pools: pg.Pool[] = [];
+const clientClosures: Promise<void>[] = [];
+function trackPool(pool: pg.Pool): void {
+  pool.on('connect', (client) => {
+    clientClosures.push(new Promise<void>((resolve) => client.once('end', () => resolve())));
+  });
+  pools.push(pool);
+}
 const directories: string[] = [];
 const roles: string[] = [];
 const databases = new Set<string>();
@@ -60,7 +67,7 @@ function migrationPool(url: string, schema: string, role?: string): pg.Pool {
     options: `-c search_path=${searchPath(schema)}${role ? ` -c role=${role}` : ''}`,
   });
   pool.on('error', () => undefined);
-  pools.push(pool);
+  trackPool(pool);
   return pool;
 }
 
@@ -134,13 +141,13 @@ async function withFreshDatabase(
 ): Promise<void> {
   const database = identifier('continuum_pgvector_rollout');
   const root = new pg.Pool({ connectionString: DATABASE_URL, max: 1 });
-  pools.push(root);
+  trackPool(root);
   await root.query(`CREATE DATABASE ${quoteIdentifier(database)}`);
   databases.add(database);
   const url = databaseUrl(database);
   const target = new pg.Pool({ connectionString: url, max: 1 });
   target.on('error', () => undefined);
-  pools.push(target);
+  trackPool(target);
   // Behavior assertions retain their own test deadline. Normal pool/socket
   // drain and disk-backed DROP belong to the separately bounded teardown hook.
   await run(root, target, url, database);
@@ -150,6 +157,13 @@ afterEach(async () => {
   const failures: unknown[] = [];
   const closed = await Promise.allSettled(pools.splice(0).map((pool) => pool.end()));
   for (const result of closed) if (result.status === 'rejected') failures.push(result.reason);
+  let closeTimer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([Promise.all(clientClosures.splice(0)), new Promise<never>((_, reject) => {
+      closeTimer = setTimeout(() => reject(new Error('Fixture database clients did not close within 5 seconds')), 5_000);
+    })]);
+  } catch (error) { failures.push(error); }
+  finally { if (closeTimer) clearTimeout(closeTimer); }
   const root = new pg.Pool({ connectionString: DATABASE_URL, max: 1 });
   try {
     for (const database of [...databases]) {
@@ -327,7 +341,7 @@ describe('pgvector rollout remediation', () => {
         options: '-c search_path=',
       });
       pool.on('error', () => undefined);
-      pools.push(pool);
+      trackPool(pool);
       const directory = await migrationDirectoryThrough('0001_init.sql');
 
       await expect(runMigrations(pool, directory)).rejects.toThrow(
@@ -1100,7 +1114,7 @@ describe('pgvector rollout remediation', () => {
         options: `-c search_path=${searchPath(plantedSchema)},${searchPath(applicationSchema)}`,
       });
       pool.on('error', () => undefined);
-      pools.push(pool);
+      trackPool(pool);
 
       await expect(runMigrations(
         pool, await migrationDirectoryThrough('0001_init.sql'),
@@ -1569,7 +1583,7 @@ describe('pgvector rollout remediation', () => {
         options: `-c search_path=\"$user\",public -c role=${ownerRole}`,
       });
       pool.on('error', () => undefined);
-      pools.push(pool);
+      trackPool(pool);
 
       await expect(runMigrations(
         pool, await migrationDirectoryThrough('0001_init.sql'),
@@ -1598,7 +1612,7 @@ describe('pgvector rollout remediation', () => {
         options: `-c search_path=${searchPath(plantedSchema)},${searchPath(applicationSchema)}`,
       });
       pool.on('error', () => undefined);
-      pools.push(pool);
+      trackPool(pool);
 
       await expect(runMigrations(
         pool, await migrationDirectoryThrough('0001_init.sql'),
@@ -1636,7 +1650,7 @@ describe('pgvector rollout remediation', () => {
         options: `-c search_path=${searchPath(plantedSchema)},public`,
       });
       pool.on('error', () => undefined);
-      pools.push(pool);
+      trackPool(pool);
 
       await expect(runMigrations(pool, await fullMigrationDirectory()))
         .rejects.toThrow(/owner-controlled|attacker-owned|search_path/i);
@@ -1854,7 +1868,7 @@ describe('pgvector rollout remediation', () => {
         options: `-c search_path=${searchPath(secondSchema)},continuum_extensions -c role=${secondAppRole}`,
       });
       secondRuntime.on('error', () => undefined);
-      pools.push(secondRuntime);
+      trackPool(secondRuntime);
       await expect(vectorSearchMemoryIds(
         secondRuntime, [1, ...Array(767).fill(0)], [secondIds.scope],
         { id: 'test:shared-provider', dim: 768 }, 5,
