@@ -34,6 +34,20 @@ it('accepts the actual PostgreSQL 16 non-superuser creator ADMIN edge for produc
         await value.owner.query(`ALTER FUNCTION ${quote(schema)}.${quote(row.proname)}(${row.args}) OWNER TO ${quote(creatorRole)}`);
       }
       await value.owner.query(`ALTER SCHEMA ${quote(schema)} OWNER TO ${quote(creatorRole)}`);
+      // The provider owner delegates only the extension capabilities required
+      // by the documented grant refresher, not schema CREATE or ownership.
+      const provider = (await value.owner.query(`SELECT n.nspname,t.typname FROM pg_extension e
+        JOIN pg_namespace n ON n.oid=e.extnamespace JOIN pg_type t ON t.typnamespace=n.oid
+        WHERE e.extname='vector' AND t.typname='vector'`)).rows[0];
+      expect(provider).toBeDefined();
+      await value.owner.query(`GRANT USAGE ON SCHEMA ${quote(provider.nspname)} TO ${quote(creatorRole)} WITH GRANT OPTION`);
+      await value.owner.query(`GRANT USAGE ON TYPE ${quote(provider.nspname)}.${quote(provider.typname)} TO ${quote(creatorRole)} WITH GRANT OPTION`);
+      for (const row of (await value.owner.query(`SELECT n.nspname,p.proname,pg_get_function_identity_arguments(p.oid) AS args
+        FROM pg_extension e JOIN pg_depend d ON d.refobjid=e.oid AND d.refclassid='pg_extension'::regclass AND d.deptype='e'
+        JOIN pg_proc p ON p.oid=d.objid AND d.classid='pg_proc'::regclass
+        JOIN pg_namespace n ON n.oid=p.pronamespace WHERE e.extname='vector'`)).rows) {
+        await value.owner.query(`GRANT EXECUTE ON FUNCTION ${quote(row.nspname)}.${quote(row.proname)}(${row.args}) TO ${quote(creatorRole)} WITH GRANT OPTION`);
+      }
       expect((await creator.query('SELECT rolsuper,rolcreaterole FROM pg_roles WHERE rolname=current_user')).rows)
         .toEqual([{ rolsuper: false, rolcreaterole: true }]);
       await creator.query(`CREATE ROLE ${quote(producerRole)} LOGIN PASSWORD ${literal(password)}`);
@@ -46,8 +60,8 @@ it('accepts the actual PostgreSQL 16 non-superuser creator ADMIN edge for produc
       for (const [key, val] of Object.entries({ continuum_schema: schema, continuum_app_role: producerRole }))
         sql = sql.replaceAll(`:"${key}"`, quote(val)).replaceAll(`:'${key}'`, literal(val));
       await creator.query(sql);
-      await value.operator.query('SELECT continuum_operator_bind_standup_producer($1::uuid,$2::name,$3::uuid,$4::text,$5::text)',
-        [value.adminId, producerRole, value.producerId, value.namespace, 'github']);
+      expect((await value.operator.query('SELECT continuum_operator_bind_standup_producer($1::uuid,$2::name,$3::uuid,$4::text,$5::text) AS binding',
+        [value.adminId, producerRole, value.producerId, value.namespace, 'github'])).rows[0].binding).toEqual(expect.any(String));
       expect((await producer.query('SELECT continuum_standup_producer_context() AS context')).rows[0].context)
         .toMatchObject({ principal_id: value.producerId });
       const memory = await createMemory(producer, { scopeId: value.scopeId, scopeKind: 'user', authorId: value.producerId,
