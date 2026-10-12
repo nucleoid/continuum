@@ -238,7 +238,10 @@ availability already committed by a timeout whose response was lost.
 If the failure write itself is unavailable, the worker retains that exact paid
 fence and its chosen retry delay, retries persistence through the same bounded
 reconciliation cohort, and excludes it from shutdown release. Reconciliation
-never invokes the consumer again.
+never invokes the consumer again. The chosen retry delay takes effect only if
+persisted before bounded stop; if the failure write cannot commit by then, the
+remaining retained lease supplies the remaining delay, with the started attempt
+still charged and the settled callback fenced against overlap.
 Leases for ambiguous deliveries are not released or renewed after stop returns. A
 process-wide in-flight fence excludes them from claims by replacement workers
 in the same process until the callback and any retained paid outcome are
