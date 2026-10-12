@@ -113,3 +113,26 @@ it('refuses the maintenance database before issuing any DROP', async () => {
   expect(state.release).toHaveBeenCalledTimes(1);
   expect(state.release).toHaveBeenCalledWith(false);
 });
+
+
+it('honors a finite caller-specific cleanup budget without changing per-statement limits', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-10-12T00:00:00Z'));
+  const started = Date.now();
+  const cancellation = Object.assign(new Error('bounded DROP canceled'), { code: '57014' });
+  const state = fixture({ drop: (_attempt, statementMs) => {
+    vi.setSystemTime(Date.now() + statementMs);
+    throw cancellation;
+  } });
+  await expect(dropIsolatedTestDatabase(state.maintenance, 'fixture_checkpoint', {
+    cleanupTimeoutMs: 90_000,
+  })).rejects.toBe(cancellation);
+  expect(state.drops.length).toBeGreaterThan(12);
+  expect(state.drops.length).toBeLessThanOrEqual(18);
+  expect(state.drops.every((drop) => drop.statementMs > 0 && drop.statementMs <= 5000
+    && drop.lock === '250ms')).toBe(true);
+  expect(Date.now() - started).toBeLessThanOrEqual(90_000);
+  expect(state.settings()).toEqual({ statement: '30s', lock: '250ms' });
+  expect(state.release).toHaveBeenCalledWith(false);
+  expect(state.queries.every((sql) => !/\bFORCE\b|pg_(?:terminate|cancel)_backend/i.test(sql))).toBe(true);
+});

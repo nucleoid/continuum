@@ -5,8 +5,16 @@ import { promoteMemoryWithAudit } from './promote.js';
 const DEFAULT_URL = 'postgres://continuum:continuum@localhost:5433/continuum';
 
 /** Normal fixture cleanup must not terminate clients whose sockets are ending. */
-export async function dropIsolatedTestDatabase(maintenance: pg.Pool, database: string): Promise<void> {
-  const cleanupDeadline = Date.now() + 60_000;
+export async function dropIsolatedTestDatabase(
+  maintenance: pg.Pool,
+  database: string,
+  options: { cleanupTimeoutMs?: number } = {},
+): Promise<void> {
+  const cleanupTimeoutMs = options.cleanupTimeoutMs ?? 60_000;
+  if (!Number.isInteger(cleanupTimeoutMs) || cleanupTimeoutMs < 1 || cleanupTimeoutMs > 90_000) {
+    throw new Error('Fixture cleanup timeout must be an integer from 1 to 90000 milliseconds');
+  }
+  const cleanupDeadline = Date.now() + cleanupTimeoutMs;
   const client = await maintenance.connect();
   let original: { statement: string; lock: string; database: string; statement_ms: string; lock_ms: string } | undefined;
   let failure: unknown;
@@ -45,14 +53,14 @@ export async function dropIsolatedTestDatabase(maintenance: pg.Pool, database: s
     let lastCancellation: unknown;
     for (;;) {
       const remaining = cleanupDeadline - Date.now();
-      if (remaining <= 0) throw lastCancellation ?? new Error('Fixture database cleanup exceeded its 60-second deadline');
+      if (remaining <= 0) throw lastCancellation ?? new Error(`Fixture database cleanup exceeded its ${cleanupTimeoutMs}-millisecond deadline`);
       // Check again on every attempt. Never evict a newly connected session or
       // substitute FORCE/termination for orderly fixture socket shutdown.
       if (await sessions() !== 0) throw new Error('Fixture database acquired active sessions during cleanup');
       const dropRemaining = cleanupDeadline - Date.now();
-      if (dropRemaining <= 0) throw lastCancellation ?? new Error('Fixture database cleanup exceeded its 60-second deadline');
+      if (dropRemaining <= 0) throw lastCancellation ?? new Error(`Fixture database cleanup exceeded its ${cleanupTimeoutMs}-millisecond deadline`);
       await setLimits(Math.min(statementCap, dropRemaining));
-      if (Date.now() >= cleanupDeadline) throw lastCancellation ?? new Error('Fixture database cleanup exceeded its 60-second deadline');
+      if (Date.now() >= cleanupDeadline) throw lastCancellation ?? new Error(`Fixture database cleanup exceeded its ${cleanupTimeoutMs}-millisecond deadline`);
       try {
         await client.query(`DROP DATABASE IF EXISTS ${identifier}`);
         break;
