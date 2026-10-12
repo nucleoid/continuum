@@ -28,6 +28,62 @@ nonzero. The shutdown operation and pool closure are idempotent.
 A second termination signal expedites shutdown by closing remaining sockets
 and taking the nonzero forced-exit path.
 
+## Current schema and runtime prerequisites
+
+Apply every packaged migration through `0089`, finish the owner-only `0081`
+coordination backfill, and converge current application/operator/sync profiles
+before starting matching binaries. Use the migration-owner connection for this
+work, then restore the runtime application connection. `0083` needs database
+`TEMPORARY` for its role-planning table and a reviewed writer-drain window. See
+[offboarding rollout](./offboarding.md) and [tag rollout](./tag-vocabularies.md).
+
+REST and MCP verify their provider profile and trusted `0081` coordination
+readiness capability at startup. That capability proves coordination repair
+completion, not installation of tag/embedding migrations or every later schema object. Identity
+sync keeps its separate provider verification. `/health/ready` checks database
+connectivity and shutdown state, not complete migration or provider health.
+
+Set `CONTINUUM_APPLICATION_SCHEMA` explicitly for a custom tenant (default
+`public`), and use only that schema in the resolved explicit runtime search
+path. Keep `pg_catalog` implicit and omit provider and co-tenant namespaces.
+The migrator's validated `0001` application/provider overlay is a separate
+bootstrap rule, not a runtime search-path exception. Configure the explicit
+authentication mode as described in [authentication.md](./authentication.md).
+
+## Recall diagnostics and embedding maintenance
+
+Optional vector failures preserve full-text candidates for the affected provider
+group. REST recall includes `diagnostics` with `vector` (`used`, `disabled`,
+`failed`, or `partial`) and bounded `groups` entries. MCP preserves its result
+array and uses `_meta.diagnostics`; these diagnostic details retain camelCase,
+including optional `localOnlyUnavailableScopes`. Group fields are provider, dim,
+status, and optional errorCode. This is not a claim that an unavailable database
+or failed required audit can deliver results.
+
+The shared optional-vector deadline is capped at 30 seconds; each provider still
+has its configured chunk deadline. Exact vector scans are provider/dimension
+qualified and may need measured deployment-specific index or partition work.
+Fallback logs use counts and safe status codes, not query text or vectors.
+
+Use [embedding-backfill.md](./embedding-backfill.md) for bounded preview, count,
+mutating backfill, and migration recovery. Backfill's five-second statement and
+one-second lock limits preserve stricter current settings; keep a finite outer
+process deadline. Drain old writers before the provider-qualified key upgrade.
+The migration owner needs database TEMPORARY for 0083, 0085 and 0089.
+
+## Promotion runtime composition
+
+Current REST and stdio MCP startup also verify the trusted promotion-outbox
+readiness capability installed by 0089 before serving, even with empty local
+callback registries. Finish the full migration chain and exact APP/OP regrants
+before starting these binaries. Startup does not repair missing schema or
+change grants, and the connectivity readiness endpoint does not monitor
+consumer progress. Stock REST starts an empty idle webhook registry; stock MCP
+produces events without starting a consumer. Custom consumers need explicit
+composition and the durable operator-configured ID set. See
+[extensions](./extensions.md) for at-least-once delivery, callback capacity,
+SQL/cancellation/shutdown limits, mixed versions and downstream-copy privacy.
+
 ## Capture relation candidates
 
 Successful REST and MCP captures include `related: []`. When an embedding
@@ -51,8 +107,8 @@ candidate IDs are not valid destination-scope evidence. Concurrent duplicate
 writes may miss each other in v0 because detection is intentionally best-effort
 and does not serialize captures.
 
-Issue #15 does not surface candidates in the review queue. Any future issue #12
-decision workflow must reauthorize candidate IDs for the current caller and
+Candidates are not review-queue items. A consumer that acts on them must
+reauthorize candidate IDs for the current caller and
 revalidate scope, state, expiry, provider, dimension, and relation before use.
 Stored candidates never auto-supersede, reject, or mutate memory state.
 
@@ -66,21 +122,31 @@ return `DEPENDENCY_UNAVAILABLE`; failures in optional embedding work after the
 commit degrade to `EMBEDDING_FAILED`. A stale decision must be verified back to
 live before it can be superseded.
 
-Supersession preserves the issue #15 metadata boundary: callers cannot provide
-`metadata.related`, and successors store Continuum-owned `related: []` without
-acting on advisory candidates. Embedding provider I/O runs only after the
-supersession transaction commits. On success, the successor vector replaces the
-archived vector and a derived audit records provider, dimension, and
-`status: "succeeded"` in one short database transaction. On provider, pool
+Capture and supersession reject caller-supplied `metadata.related` and the
+five migration-owned namespaces `continuum_legacy_tags`,
+`continuum_legacy_metadata`, `continuum_tag_migration`,
+`continuum_tag_rollback_compat`, and `continuum_migration_conflicts`, including
+when no tags are requested. Successors store Continuum-owned `related: []`
+without acting on advisory candidates. Tags are normalized and admitted against
+the scope-kind vocabulary before optional provider work and rechecked under
+locks at write time. Unknown tags return `UNKNOWN_TAGS` (HTTP 422) with camelCase
+`scopeKind`, `unknownTags`, and bounded `allowedTags` details in both transports.
+See [tag-vocabularies.md](./tag-vocabularies.md).
+
+The archive transition deletes every provider embedding for the predecessor in the same database
+transaction. Optional provider I/O runs only after supersession commits. On
+success, one short database transaction stores the successor vector and records
+provider, dimension, and `status: "succeeded"` in a derived audit. On provider, pool
 connection, vector storage, or derived-audit failure, the committed supersession
-still succeeds and reports `EMBEDDING_FAILED`; the archived vector is retained.
+still succeeds and reports `EMBEDDING_FAILED`; the predecessor remains
+archived without its derived embeddings.
 Continuum makes a best-effort attempt to record a bounded failed outcome audit,
 but an unavailable database can prevent that derived audit. A local-only route
 with no local provider records `embedding_policy: "local-only-unavailable"`
 best-effort and remains full-text-only without falling through to a hosted
 provider. The live successor remains searchable through full-text recall.
 
-Deploy migrations before routing traffic to the new endpoints. Migration
+The historical supersession constraints are installed in this order. Migration
 `0007_decision_supersession_constraints.sql` follows the existing ingestion
 migrations and adds the self-link check as `NOT VALID`. Migration
 `0008_decision_supersession_validation.sql` validates it only after the add
@@ -88,7 +154,8 @@ migration has committed and released its `ACCESS EXCLUSIVE` lock, so the scan
 does not retain that stronger lock. Migration
 `0009_decision_supersession_unique_index.sql` runs outside a transaction and
 builds the branching-prevention index with `CREATE UNIQUE INDEX CONCURRENTLY`.
-Fresh databases apply `0001` through `0009` in lexical order. Databases that
+These files are part of the full current packaged migration chain, not a
+complete current-install prerequisite by themselves. Databases that
 ran the preview `0005_decision_supersession.sql` are also supported: `0007`
 recognizes its existing check, `0008` validates it, and `0009` safely rebuilds
 its index before the new migration names are recorded. All three migration

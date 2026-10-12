@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import express from 'express';
-import type pg from 'pg';
+import pg from 'pg';
 import { getPool, closePool } from '../storage/pool.js';
 import {
   authModeFromEnv,
@@ -33,13 +33,16 @@ import {
 } from '../services/relations.js';
 import { memoriesRouter } from './routes/memories.js';
 import { ingestRouter } from './routes/ingest.js';
-import { ingestConfigFromEnv, type IngestConfig } from '../ingest/config.js';
+import { ingestConfigFromEnv, type IngestConfig, type IngestPluginId } from '../ingest/config.js';
 import { cliSupportRouter } from './routes/cli.js';
 import { supersedeRouter } from './routes/supersede.js';
 import { offboardingRouter } from './routes/offboarding.js';
 import { locksRouter } from './routes/locks.js';
-import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoordinationContractReady, requirePromotionOutboxReady } from '../storage/provider-lifecycle.js';
+import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoordinationContractReady, requirePromotionOutboxReady, requireStandupReady } from '../storage/provider-lifecycle.js';
 import { tagVocabulariesRouter } from './routes/tag-vocabularies.js';
+import { getPrincipalByExternalId } from '../storage/principals.js';
+import { standupRouter } from './routes/standup.js';
+import { producerContext, requireProducerMatch } from '../standup/activity.js';
 import type { CaptureRegistry } from '../capture/plugin.js';
 import {
   enrichmentConfigFromEnv,
@@ -90,6 +93,7 @@ export interface AppOptions {
   gapConfig?: GapConfig;
   relationThreshold?: number;
   ingestConfig?: IngestConfig;
+  ingestProducerPools?: Partial<Record<IngestPluginId, pg.Pool>>;
   authenticator?: Authenticator;
   captureRegistry?: CaptureRegistry;
   retrievalEnrichers?: RetrievalEnricherRegistry;
@@ -322,7 +326,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   });
 
   const v0 = express.Router();
-  v0.use(ingestRouter(pool, provider, ingestConfig, opts.captureRegistry, relationThreshold, authenticator));
+  v0.use(ingestRouter(pool, provider, ingestConfig, opts.captureRegistry, relationThreshold, authenticator, opts.ingestProducerPools));
   v0.use(bearerAuth(pool, authenticator));
   v0.use(captureRouter(pool, provider, relationThreshold));
   const retrievalEnrichers = opts.retrievalEnrichers ?? new RetrievalEnricherRegistry();
@@ -346,6 +350,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   v0.use(offboardingRouter(pool));
   v0.use(locksRouter(pool));
   v0.use(tagVocabulariesRouter(pool));
+  v0.use(standupRouter(pool, () => new Date((opts.clock ?? Date.now)())));
   app.use('/api/v0', v0);
 
   app.use('/api', (_req, res) => {
@@ -382,6 +387,15 @@ export function mapRestError(error: unknown): ServiceError {
   return asServiceError(error);
 }
 
+const servingProducerPools = new Set<pg.Pool>();
+async function closeServingPools(): Promise<void> {
+  const results = await Promise.allSettled([...servingProducerPools].map((pool) => pool.end()));
+  servingProducerPools.clear();
+  await closePool();
+  const failures = results.filter((result) => result.status === 'rejected');
+  if (failures.length) throw new AggregateError(failures.map((result) => result.reason), 'Producer pool cleanup failed');
+}
+
 async function main(): Promise<void> {
   const port = Number(process.env.CONTINUUM_API_PORT ?? 4000);
   const readinessTimeoutMs = positiveIntegerEnv('CONTINUUM_READINESS_TIMEOUT_MS', 1_000);
@@ -391,6 +405,7 @@ async function main(): Promise<void> {
   await reconcilePgvectorProviderGrants(pool, schemaOptions);
   await requireCoordinationContractReady(pool, schemaOptions);
   await requirePromotionOutboxReady(pool, schemaOptions);
+  await requireStandupReady(pool, { ...schemaOptions, servingPool: true });
   const authMode = authModeFromEnv();
   warnOnDevAuthMode(authMode);
   const authenticator = createAuthenticator(
@@ -401,10 +416,29 @@ async function main(): Promise<void> {
   const readiness = createReadinessState();
   const embeddingProvider = makeEmbeddingRouterFromEnv();
   await warnOnMissingEmbeddingRoutingScopes(pool, embeddingProvider);
+  const ingestConfig = ingestConfigFromEnv();
+  const ingestProducerPools: Partial<Record<IngestPluginId, pg.Pool>> = {};
+  for (const [id, configured] of Object.entries(ingestConfig.plugins)) {
+    if (!configured?.producerDatabaseUrl) continue;
+    const producer = new pg.Pool({ connectionString: configured.producerDatabaseUrl,
+      max: 1, connectionTimeoutMillis: 5_000 });
+    servingProducerPools.add(producer);
+    producer.on('error', () => console.error(JSON.stringify({ event: 'standup_producer_connection_failed' })));
+    await reconcilePgvectorProviderGrants(producer, schemaOptions);
+    await requireCoordinationContractReady(producer, schemaOptions);
+    await requirePromotionOutboxReady(producer, schemaOptions);
+    await requireStandupReady(producer, schemaOptions);
+    const principal = await getPrincipalByExternalId(pool, configured.principalExternalId);
+    if (!principal) throw new Error('Configured standup producer principal is unavailable');
+    requireProducerMatch(await producerContext(producer), principal.id, id as IngestPluginId);
+    ingestProducerPools[id as IngestPluginId] = producer;
+  }
   const extensions = defaultExtensionRegistries();
   const enrichmentShutdown = new AbortController();
   const app = createApp(pool, {
     embeddingProvider,
+    ingestConfig,
+    ingestProducerPools,
     readiness,
     readinessTimeoutMs,
     reviewHorizonDays: configuredReviewHorizonDays(),
@@ -426,7 +460,7 @@ async function main(): Promise<void> {
       { stop: () => { enrichmentShutdown.abort(); } },
       promotionWorker,
     ],
-    closePool,
+    closePool: closeServingPools,
     shutdownTimeoutMs,
   });
   console.log(`Continuum API listening on :${port}`);
@@ -452,7 +486,7 @@ if (isDirectEntrypoint(import.meta.url)) {
     process.exitCode = 1;
     // A rejected pre-listening readiness check still opened the shared pool.
     // Drain its sockets so exitCode can terminate startup without forced exit.
-    try { await closePool(); } catch (cleanupError) {
+    try { await closeServingPools(); } catch (cleanupError) {
       console.error(JSON.stringify({
         event: 'startup_cleanup_failed',
         error: formatOperationalError(cleanupError),

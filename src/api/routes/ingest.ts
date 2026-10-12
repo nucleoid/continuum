@@ -11,6 +11,7 @@ import type { Authenticator } from '../auth.js';
 import type { IngestConfig, IngestPluginId } from '../../ingest/config.js';
 import { ServiceError } from '../../services/errors.js';
 import { captureOne, embedCapturedMemory } from '../../services/capture.js';
+import { activityProof, producerContext, requireProducerMatch, recordActivity, type ProducerContext } from '../../standup/activity.js';
 import { DEFAULT_RELATION_THRESHOLD } from '../../services/relations.js';
 import {
   processIngestDelivery,
@@ -40,16 +41,16 @@ const githubPrSchema = z.object({
     merged_by: actor.nullable().optional(),
     user: actor,
     base: z.object({ ref: text(500) }),
-    head: z.object({ ref: text(500) }),
+    head: z.object({ ref: text(500), repo: z.object({ id: z.number().int().positive().safe() }).nullable().optional() }),
   }),
-  repository: z.object({ full_name: text(500), name: text(300) }),
+  repository: z.object({ id: z.number().int().positive().safe().optional(), full_name: text(500), name: text(300) }),
 });
 
 const githubBranchSchema = z.object({
   ref: text(500),
   ref_type: z.enum(['branch', 'tag']),
   master_branch: optionalText(500),
-  repository: z.object({ full_name: text(500), name: text(300), html_url: text(2_000) }),
+  repository: z.object({ id: z.number().int().positive().safe().optional(), full_name: text(500), name: text(300), html_url: text(2_000) }),
   sender: actor,
 });
 
@@ -140,6 +141,8 @@ async function captureContext(
   pool: pg.Pool,
   pluginId: IngestPluginId,
   event: unknown,
+  bound?: ProducerContext | null,
+  configuredActor?: string,
 ): Promise<CaptureContext> {
   let provider: string | undefined;
   let externalActor: string | undefined;
@@ -149,9 +152,20 @@ async function captureContext(
     externalActor = String((event as z.infer<typeof githubBranchSchema>).sender.id);
   } else if (pluginId === 'terminal-summary') {
     provider = 'terminal';
-    externalActor = (event as z.infer<typeof terminalSchema>).actor;
+    externalActor = bound ? configuredActor : (event as z.infer<typeof terminalSchema>).actor;
   }
   if (!provider || !externalActor) return {};
+  if (bound) {
+    const owned = await pool.query<{ name: string }>(`SELECT scope.name FROM actor_principal_mappings mapping
+      JOIN principals actor ON actor.id=mapping.principal_id AND actor.disabled_at IS NULL
+      JOIN principal_user_scopes ownership ON ownership.principal_id=actor.id
+      JOIN scopes scope ON scope.id=ownership.scope_id AND scope.kind='user'
+      WHERE mapping.authority=$1::text AND mapping.external_actor_id=pg_catalog.encode(pg_catalog.sha256(
+        pg_catalog.convert_to($1::text||':'||$2::text,'UTF8')),'hex') AND mapping.revoked_at IS NULL`,
+    [bound.authority, externalActor]);
+    if (owned.rows[0]) return { resolveUserScope: () => owned.rows[0].name };
+    return {};
+  }
   const resolved = await resolvePrincipalAlias(pool, provider, externalActor);
   if (!resolved || resolved.kind !== 'user') {
     throw new ServiceError('INVALID_INPUT', 'External actor alias is not configured');
@@ -166,6 +180,7 @@ export function ingestRouter(
   registry: CaptureRegistry = defaultCaptureRegistry(),
   relationThreshold = DEFAULT_RELATION_THRESHOLD,
   authenticator?: Authenticator,
+  producerPools: Partial<Record<IngestPluginId, pg.Pool>> = {},
 ): Router {
   const router = Router();
   router.post('/ingest/:pluginId', async (req, res) => {
@@ -191,23 +206,27 @@ export function ingestRouter(
     const event = adoResource
       ? ('revision' in adoResource ? adoResource.revision : adoResource)
       : parsed.data;
-    const context = await captureContext(pool, pluginId, event);
+    const producerPool = producerPools[pluginId];
+    const sourcePool = producerPool ?? pool;
+    const bound = producerPool ? await producerContext(producerPool) : null;
+    if (producerPool) requireProducerMatch(bound, principal.id, pluginId);
+    const context = await captureContext(sourcePool, pluginId, event, bound, pluginConfig.activityActorExternalId);
     let inputs: CaptureInput[];
     try {
       inputs = registry.run(pluginId, event, context).map((input) => ({ ...input, source: pluginId }));
     } catch {
       throw new ServiceError('INVALID_INPUT', 'Invalid webhook payload');
     }
-    const result = await processIngestDelivery(pool, pluginId, id, hash, async (client) => {
+    const proof = producerPool ? activityProof(pluginId, event, id, pluginConfig.activityActorExternalId) : null;
+    const result = await processIngestDelivery(sourcePool, pluginId, id, hash, async (client) => {
       const captures = [];
       for (let index = 0; index < inputs.length; index += 1) {
-        captures.push(await captureOne(
-          client, embeddingRouting, principal, inputs[index],
-          { transport: 'ingest' },
-        ));
+        const capture = await captureOne(client, embeddingRouting, principal, inputs[index], { transport: 'ingest' });
+        if (proof) await recordActivity(client, capture.memory.id, proof);
+        captures.push(capture);
       }
       return captures;
-    });
+    }, Boolean(producerPool));
     if (!result.replayed) {
       await Promise.allSettled(
         result.captures.map((capture) => embedCapturedMemory(

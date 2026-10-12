@@ -73,3 +73,20 @@ MCP uses the same record fields in snake_case, including `expires_at`,
 Recall results now include `bodyTruncated` in REST and `body_truncated` in MCP.
 The flag is true exactly when the source body is longer than 200 UTF-16 code
 units. It is derived from the source body, not from excerpt punctuation.
+
+## Recall vector diagnostics
+
+Recall remains an excerpt discovery operation, separate from full-record fetch
+and browse. REST recall returns `{ "results": [...], "diagnostics": {...} }`.
+Diagnostics include `vector` (`used`, `disabled`, `failed`, or `partial`) and
+provider groups with provider, dim, status, and optional errorCode. A missing
+local-only provider may add `localOnlyUnavailableScopes`. MCP retains its result
+array and attaches the same camelCase object at `_meta.diagnostics`.
+
+Optional vector-group failures preserve full-text candidates; current scope,
+live-state, expiry, and required audit checks still determine delivery. The
+shared optional-vector deadline is capped at 30 seconds and does not replace
+database availability or required audit success. See
+[embedding-backfill.md](./embedding-backfill.md) for provider configuration and
+bounded maintenance. Point fetch and browse do not call an embedding provider
+or return this recall diagnostic object.

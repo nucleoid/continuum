@@ -1,17 +1,19 @@
 # Continuum
 
-Vendor-agnostic memory layer for development teams. Captures, scopes, and serves the institutional knowledge that normally lives in people's heads, chat threads, and lost Slack messages.
+Vendor-agnostic memory layer for development teams. Captures, scopes, and serves development knowledge through explicit identity, lifecycle, and audit boundaries.
 
 Continuum is designed for organisations that want their developers (and the AI agents helping them) to share context across people, projects, and time without locking themselves to any one LLM vendor or IDE.
 
 ## What it does
 
-- Captures memory from PRs, work-item comments, branch events, deploy events, terminal session summaries, and (optionally) team chat.
+- Captures supplied PR, work-item, branch, deploy, and terminal-summary events through authenticated adapters.
 - Organises every memory under one of five scopes: `org`, `team`, `project`, `user`, `role`.
-- Serves memory back through the `continuum` CLI, an MCP server (works with Claude Code, Cursor, Copilot Chat, Continue, Zed), a stable HTTP REST API (for internal tooling and CI), and an `AGENTS.md` generator (drops a scope-aware context file into any repo).
-- Enforces per-scope ACLs at the API layer and writes a full audit trail for every read and write.
+- Serves memory through the authenticated HTTP CLI, stdio MCP, REST, and a deterministic AGENTS.md content generator. Clients decide where to save generated content.
+- Applies current scope authorization and required service auditing. Trusted low-level database exports have narrower contracts.
 - Storage is Postgres + pgvector. Embeddings are pluggable (local Ollama for sensitive material, hosted models for the rest).
+- Provides controlled tags, optional retrieval enrichment, durable promotion callbacks, and provider-qualified embeddings.
 - Provides durable, scope-authorized coordination leases as a separate non-memory domain.
+- Renders personal Standup activity from authenticated producer attribution with source citations and durable open-thread closure evidence.
 
 ## What it is not
 
@@ -21,7 +23,7 @@ Continuum is designed for organisations that want their developers (and the AI a
 
 ## Status
 
-v0 design in progress. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the schema, scope model, capture API, and extension points.
+The repository implements the contracts below. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the current boundaries and dedicated runbooks for installation and upgrades. Validation evidence describes executed checks; it does not establish production deployment or adoption.
 
 ## API contracts
 
@@ -39,6 +41,7 @@ v0 design in progress. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the schema, 
 - [Memory fetch and browse API](./docs/memory-api.md)
 - [Atomic scoped coordination leases](./docs/coordination.md)
 - [Retrieval and promotion extensions](./docs/extensions.md)
+- [Personal Standup, trusted activity, and operator rollout](./docs/standup.md)
 
 ## CLI quick start
 

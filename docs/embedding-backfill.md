@@ -33,7 +33,8 @@ SQL queue.
 
 ## Operator backfill procedure
 
-1. Apply migrations and configure the same scope routing used by the API.
+1. Apply the complete packaged chain through 0089, finish owner repair and exact
+   role grants, and configure the same scope routing used by the API.
 2. Run `npm run embed-backfill -- --count`.
 3. Preview a bounded pass with `--dry-run --max-rows 100` and an optional
    `--scope project:name`.
@@ -50,6 +51,9 @@ The 4 MiB aggregate limit uses current database sizes at hydration, including
 rows that grew after the ID scan. Deferred rows are rebatched without replaying
 successfully stored prefixes. Manual `--mark-failed` reads only ID and routing
 metadata, never title or body.
+
+Defaults are `--batch-size 32`, `--max-rows 1000` per provider pass, and `--max-errors 25`.
+Use a finite outer deadline as well as these count budgets.
 
 Useful controls are `--provider`, `--batch-size`, `--max-rows`, `--scope`, and
 `--max-errors`. Deterministic input rejections are bisected to a single memory,
@@ -108,7 +112,7 @@ this is especially important for `--cursor --no-wrap`, whose next run must still
 encounter that row. `--mark-failed` records operator disposition without moving
 sequential scan progress.
 
-## Operator migration 0084 rollout and rollback
+## Operator migration 0084-0088 rollout and rollback
 
 Migration `0084_provider_embeddings_backfill.sql` builds the new unique index
 concurrently, then attaches it as the primary key in a short transaction with a
@@ -125,8 +129,9 @@ without scanning `audit_log`. No released version emitted embedding-backfill
 failure audits before this feature's supported upgrade path, so a whole-audit
 seed index and scan would add rollout cost without recoverable supported data.
 Valid registered APP and OP profiles gain CRUD on both durable backfill tables
-after both exist. SYNC and reporting roles gain no access. Use the current grant
-scripts for explicit profile regrants and verify runtime startup before serving.
+after both exist. SYNC and reporting roles gain no access. Migration 0086 adds durable/suspect failure disposition; 0087 and 0088 build
+and repair the provider-leading scan index. Use current grant scripts for
+explicit profile regrants and verify runtime startup before serving.
 
 The installed migrator polls for one deployment-wide advisory lock until it is
 available. It has no built-in whole acquisition deadline. Run it under a finite
@@ -156,7 +161,6 @@ application. Do not delete ledger rows or downgrade the primary key in place.
 The checked scripts/rollback-embedding-provider-key.sql refuses that unsafe
 operation before changing any data. Multiple provider vectors cannot be
 transparently represented by the former single-memory key.
-
 Prior historical process-memory measurements that escaped their intended
 containment are invalid. They do not establish that the original memory incident
 was fixed. Acceptance requires fresh source-specific, contained local results;

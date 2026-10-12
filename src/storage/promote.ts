@@ -9,6 +9,7 @@ import {
 } from '../scopes/access.js';
 import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
 import { computeExpiry } from './expiry.js';
+import { stripTrustedActivityMetadata } from '../capture/metadata.js';
 import { listAllowedTagNames, lockRequestedTags } from './tag-vocabularies.js';
 import { enqueuePromotionEvent } from './promotion-events.js';
 import type { PromotionEvent } from '../extensions/promotion.js';
@@ -121,7 +122,7 @@ async function promoteOperation(
     );
   }
 
-  const destinationMetadata = { ...source.metadata };
+  const destinationMetadata = stripTrustedActivityMetadata(source.metadata);
   delete destinationMetadata.related;
   const destination = await createMemory(client, {
     scopeId: destinationScope.id,

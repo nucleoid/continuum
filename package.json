@@ -33,6 +33,8 @@
     "docs/memory-api.md",
     "docs/scope-provisioning.md",
     "docs/tag-vocabularies.md",
+    "docs/standup.md",
+    "docs/webhook-ingestion.md",
     "!dist/**/tenants/**",
     "migrations",
     "scripts/ensure-scope.mjs",

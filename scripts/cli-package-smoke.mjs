@@ -82,6 +82,8 @@ try {
     'migrations/0086_embedding_backfill_failure_disposition.sql',
     'migrations/0087_embedding_provider_scan_index.sql',
     'migrations/0088_embedding_provider_scan_index_rebuild.sql',
+    'migrations/0090_standup_activity.sql',
+    'docs/standup.md',
     'dist/maintenance/embed-backfill-cli.js',
     'bin/continuum-migrate.mjs',
     'scripts/ensure-scope.mjs',
@@ -94,6 +96,7 @@ try {
     'docs/memory-api.md',
     'docs/tag-vocabularies.md',
     'docs/embedding-backfill.md',
+    'docs/webhook-ingestion.md',
   ]) {
     if (!existsSync(join(installedRoot, required))) {
       throw new Error(`Packed package is missing required runtime artifact: ${required}`);

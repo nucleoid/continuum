@@ -6,11 +6,16 @@ repository, store repository credentials, or create pull requests. A CI job or
 other authenticated consumer may use these read-only contracts and decide how
 to update its own repository.
 
+Use a validated Entra token or current service API key in Entra mode. An
+existing principal external ID is a bearer only in explicit development mode;
+see [authentication.md](./authentication.md). MCP uses the same configured
+credential verifier, including for these read-only tools.
+
 ## Render and ETag
 
 ```http
 GET /api/v0/agents-md?project=booking-engine&team=payments&limit=20
-Authorization: Bearer <principal external id>
+Authorization: Bearer <credential accepted by the configured auth mode>
 ```
 
 The response body and selection rules are unchanged. The `ETag` is the
@@ -41,7 +46,7 @@ Use the unquoted 64-character lowercase digest from the ETag:
 
 ```http
 GET /api/v0/agents-md/freshness?project=booking-engine&team=payments&limit=20&hash=c6811949431fe8afcb3da4ba7ef725a512d2fbbd82d5d9a9e28824c7771afbec
-Authorization: Bearer <principal external id>
+Authorization: Bearer <credential accepted by the configured auth mode>
 ```
 
 The response is deliberately minimal and does not disclose historical changes:

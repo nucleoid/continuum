@@ -40,6 +40,8 @@ export const RESERVED_MEMORY_METADATA_KEYS = [
   'continuum_tag_migration',
   'continuum_tag_rollback_compat',
   'continuum_migration_conflicts',
+  '_continuum_activity_provenance', '_continuum_activity_epoch_ms',
+  '_continuum_actor_mapping_id', '_continuum_actor_mapping_authority',
 ] as const;
 
 export function validateCaptureContent(input: Pick<CaptureInput,
