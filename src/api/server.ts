@@ -326,7 +326,8 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   });
 
   const v0 = express.Router();
-  v0.use(ingestRouter(pool, provider, ingestConfig, opts.captureRegistry, relationThreshold, authenticator, opts.ingestProducerPools));
+  v0.use(ingestRouter(pool, provider, ingestConfig, opts.captureRegistry, relationThreshold, authenticator, opts.ingestProducerPools,
+    (event) => logger.warn ? logger.warn(event) : defaultLogger.warn!(event)));
   v0.use(bearerAuth(pool, authenticator));
   v0.use(captureRouter(pool, provider, relationThreshold));
   const retrievalEnrichers = opts.retrievalEnrichers ?? new RetrievalEnricherRegistry();

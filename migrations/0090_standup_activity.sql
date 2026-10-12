@@ -134,6 +134,11 @@ BEGIN
     SELECT oid INTO role_id FROM pg_catalog.pg_roles WHERE rolname=database_role AND rolcanlogin
       AND NOT rolsuper AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolreplication AND NOT rolbypassrls;
     IF role_id IS NULL THEN RAISE check_violation USING MESSAGE='standup producer requires a least-privilege LOGIN role'; END IF;
+    IF EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members edge WHERE (edge.member=role_id OR edge.roleid=role_id)
+      AND NOT (edge.roleid=role_id AND edge.member=(SELECT relowner FROM pg_catalog.pg_class WHERE oid='principals'::regclass)
+        AND edge.admin_option AND NOT edge.set_option AND NOT edge.inherit_option)) THEN
+      RAISE check_violation USING MESSAGE='standup producer requires an isolated database role';
+    END IF;
     IF namespace IS NULL OR namespace!~'^[a-z][a-z0-9.-]{0,99}$' OR family IS NULL OR family NOT IN ('github','deploy-event','terminal-summary') THEN
       RAISE check_violation USING MESSAGE='standup producer namespace or source family is invalid';
     END IF;
@@ -173,6 +178,9 @@ BEGIN
   identity_hash:=encode(sha256(convert_to(namespace||':'||external_id,'UTF8')),'hex');
   PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(namespace||':'||identity_hash,0));
   SELECT * INTO previous FROM actor_principal_mappings WHERE authority=namespace AND external_actor_id=identity_hash AND revoked_at IS NULL FOR UPDATE;
+  IF target_id IS NULL AND previous.mapping_id IS NULL THEN
+    RAISE check_violation USING MESSAGE='standup actor mapping does not exist';
+  END IF;
   IF target_id IS NOT NULL THEN
     PERFORM 1 FROM principals WHERE id=target_id AND kind='user' AND disabled_at IS NULL FOR KEY SHARE;
     IF NOT FOUND THEN RAISE check_violation USING MESSAGE='standup actor mapping requires an enabled user'; END IF;
@@ -210,7 +218,9 @@ BEGIN
     ON role.oid=binding.role_oid AND role.rolname=binding.role_name
     WHERE role.rolname=session_user AND role.rolcanlogin AND NOT role.rolsuper AND NOT role.rolcreaterole
       AND NOT role.rolcreatedb AND NOT role.rolreplication AND NOT role.rolbypassrls
-      AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members edge WHERE edge.member=role.oid OR edge.roleid=role.oid)
+      AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members edge WHERE (edge.member=role.oid OR edge.roleid=role.oid)
+        AND NOT (edge.roleid=role.oid AND edge.member=(SELECT relowner FROM pg_catalog.pg_class WHERE oid='principals'::regclass)
+          AND edge.admin_option AND NOT edge.set_option AND NOT edge.inherit_option))
       AND binding.revoked_at IS NULL FOR SHARE OF binding;
   IF producer.binding_id IS NULL THEN RAISE insufficient_privilege USING MESSAGE='standup activity requires a bound producer'; END IF;
   IF jsonb_typeof(proof)<>'object' OR proof IS NULL OR octet_length(proof::text)>8192 THEN
@@ -253,12 +263,12 @@ BEGIN
     source_time:=memory.created_at;
   ELSE
     BEGIN source_time:=(proof->>'event_time')::timestamptz;
-    EXCEPTION WHEN OTHERS THEN RAISE check_violation USING MESSAGE='standup source time is invalid'; END;
+    EXCEPTION WHEN invalid_datetime_format OR datetime_field_overflow THEN RETURN FALSE; END;
   END IF;
   IF NOT isfinite(source_time) OR source_time>statement_timestamp() OR source_time<mapping.created_at THEN RETURN FALSE; END IF;
   -- Canonical key material is derived here, never from a caller closure array.
   IF source_kind_value IN ('github-pr','github-branch') THEN
-    IF COALESCE(proof->>'branch','')='' OR length(proof->>'branch')>200 THEN
+    IF COALESCE(proof->>'branch','')='' OR length(proof->>'branch')>500 THEN
       RAISE check_violation USING MESSAGE='standup branch identity is invalid';
     END IF;
     branch:=producer.authority||':branch:'||(proof->>'repository_id')||':'||(proof->>'branch');
@@ -278,7 +288,7 @@ BEGIN
       END IF;
     ELSE artifact:=branch; END IF;
   ELSE
-    IF COALESCE(proof->>'artifact_id','')='' OR length(proof->>'artifact_id')>200 THEN
+    IF COALESCE(proof->>'artifact_id','')='' OR length(proof->>'artifact_id')>500 THEN
       RAISE check_violation USING MESSAGE='standup source artifact identity is invalid';
     END IF;
     artifact:=producer.authority||':'||source_kind_value||':'||(proof->>'artifact_id');
@@ -493,7 +503,9 @@ CREATE FUNCTION continuum_standup_producer_context() RETURNS JSONB LANGUAGE sql 
       JOIN principals producer ON producer.id=binding.principal_id AND producer.disabled_at IS NULL
       WHERE role.rolname=session_user AND role.rolcanlogin AND NOT role.rolsuper AND NOT role.rolcreaterole
       AND NOT role.rolcreatedb AND NOT role.rolreplication AND NOT role.rolbypassrls
-      AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members edge WHERE edge.member=role.oid OR edge.roleid=role.oid)
+      AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members edge WHERE (edge.member=role.oid OR edge.roleid=role.oid)
+        AND NOT (edge.roleid=role.oid AND edge.member=(SELECT relowner FROM pg_catalog.pg_class WHERE oid='principals'::regclass)
+          AND edge.admin_option AND NOT edge.set_option AND NOT edge.inherit_option))
       AND binding.revoked_at IS NULL
   ) ELSE NULL END;
 $$;

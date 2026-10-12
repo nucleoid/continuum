@@ -181,6 +181,7 @@ export function ingestRouter(
   relationThreshold = DEFAULT_RELATION_THRESHOLD,
   authenticator?: Authenticator,
   producerPools: Partial<Record<IngestPluginId, pg.Pool>> = {},
+  warn: (event: Record<string, unknown>) => void = (event) => console.warn(JSON.stringify(event)),
 ): Router {
   const router = Router();
   router.post('/ingest/:pluginId', async (req, res) => {
@@ -218,16 +219,21 @@ export function ingestRouter(
       throw new ServiceError('INVALID_INPUT', 'Invalid webhook payload');
     }
     const proof = producerPool ? activityProof(pluginId, event, id, pluginConfig.activityActorExternalId) : null;
+    let skippedAttributions = 0;
     const result = await processIngestDelivery(sourcePool, pluginId, id, hash, async (client) => {
       const captures = [];
       for (let index = 0; index < inputs.length; index += 1) {
         const capture = await captureOne(client, embeddingRouting, principal, inputs[index], { transport: 'ingest' });
-        if (proof) await recordActivity(client, capture.memory.id, proof);
+        if (producerPool && (!proof || !await recordActivity(client, capture.memory.id, proof))) skippedAttributions += 1;
         captures.push(capture);
       }
       return captures;
     }, Boolean(producerPool));
     if (!result.replayed) {
+      if (skippedAttributions > 0) {
+        try { warn({ event: 'standup_attribution_skipped', count: skippedAttributions }); }
+        catch { /* Optional operational logging cannot invalidate a committed capture. */ }
+      }
       await Promise.allSettled(
         result.captures.map((capture) => embedCapturedMemory(
           pool,

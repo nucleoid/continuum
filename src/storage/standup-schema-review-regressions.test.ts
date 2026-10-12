@@ -70,6 +70,19 @@ it('accepts the actual PostgreSQL 16 non-superuser creator ADMIN edge for produc
       expect((await producer.query('SELECT continuum_record_standup_activity($1::uuid,$2::jsonb) AS recorded',
         [memory.id, { external_actor_id: '42', repository_id: '100', branch: 'creator-branch' }])).rows)
         .toEqual([{ recorded: true }]);
+      for (const unsafe of ['SET TRUE, INHERIT FALSE', 'SET FALSE, INHERIT TRUE']) {
+        try {
+          await value.owner.query(`GRANT ${quote(producerRole)} TO ${quote(creatorRole)} WITH ADMIN TRUE, ${unsafe}`);
+          expect((await producer.query('SELECT continuum_standup_producer_context() AS context')).rows[0].context).toBeNull();
+          await expect(value.operator.query('SELECT continuum_operator_bind_standup_producer($1::uuid,$2::name,$3::uuid,$4::text,$5::text)',
+            [value.adminId, producerRole, value.producerId, value.namespace, 'github'])).rejects.toMatchObject({ code: '23514' });
+          await expect(producer.query('SELECT continuum_record_standup_activity($1::uuid,$2::jsonb)',
+            [memory.id, { external_actor_id: '42', repository_id: '100', branch: 'creator-branch' }]))
+            .rejects.toMatchObject({ code: '42501' });
+        } finally {
+          await value.owner.query(`GRANT ${quote(producerRole)} TO ${quote(creatorRole)} WITH ADMIN TRUE, SET FALSE, INHERIT FALSE`);
+        }
+      }
     } catch (error) {
       primaryFailure = error;
       throw error;

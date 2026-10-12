@@ -101,7 +101,7 @@ const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
   ['0088_embedding_provider_scan_index_rebuild.sql',
     'e0f21f1cfa4a81fbc7c8fbe65e06ae31157e499dbf562b482b87099185e079e2'],
   ['0089_promotion_outbox.sql', '034fff0c1f04c67d5b9e6e5bab5500e7c0b93b4b9baef5351c8e095fef7dc6ff'],
-  ['0090_standup_activity.sql', '326c07544af6c848dfa7900cdc251a607261a15b5d2afc555075943f81d4d569'],
+  ['0090_standup_activity.sql', 'ddf1f0bb884df857f7b17eb9d9b91da2fa527561990fc96604b43af7af8f657e'],
 ]);
 const FORWARD_MIGRATION_REQUIREMENTS = new Map([
   ['0084_provider_embeddings_backfill.sql', '0083_tag_vocabularies.sql'],
