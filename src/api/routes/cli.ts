@@ -5,6 +5,7 @@ import { accessibleScopes } from '../../services/access.js';
 import { promoteForPrincipal, verifyForPrincipal } from '../../services/lifecycle.js';
 import { ServiceError } from '../../services/errors.js';
 import { getMembership } from '../../storage/memberships.js';
+import { PromotionWebhookRegistry } from '../../extensions/promotion.js';
 
 const idSchema = z.string().uuid();
 const promoteSchema = z.object({
@@ -22,7 +23,10 @@ function invalid(): ServiceError {
   return new ServiceError('INVALID_INPUT', 'Invalid request');
 }
 
-export function cliSupportRouter(pool: pg.Pool): Router {
+export function cliSupportRouter(
+  pool: pg.Pool,
+  promotionWebhooks = new PromotionWebhookRegistry(),
+): Router {
   const router = Router();
 
   router.get('/scopes', async (req, res, next) => {
@@ -51,6 +55,7 @@ export function cliSupportRouter(pool: pg.Pool): Router {
       if (!memoryId.success || !body.success) throw invalid();
       const { source, destination } = await promoteForPrincipal(
         pool, req.principal!, memoryId.data, body.data.targetScope, { transport: 'rest' },
+        promotionWebhooks.ids(),
       );
       res.status(201).json({
         sourceId: source.id,

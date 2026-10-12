@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import pg from 'pg';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { runMigrations } from './migrator.js';
 
 const baseUrl = process.env.CONTINUUM_TEST_DATABASE_URL ?? 'postgres://continuum:continuum@localhost:5433/continuum';
@@ -47,6 +47,15 @@ async function startup(transport: 'server' | 'mcp', url: string, principal: stri
   return { output, errorOutput, exit };
 }
 
+const isolatedCleanups: Array<() => Promise<void>> = [];
+afterEach(async () => {
+  const errors: unknown[] = [];
+  for (const cleanup of isolatedCleanups.splice(0)) {
+    try { await cleanup(); } catch (error) { errors.push(error); }
+  }
+  if (errors.length) throw new AggregateError(errors, 'Isolated fixture cleanup failed');
+}, 120_000);
+
 async function fixture(run: (owner: pg.Pool, url: string, principal: string) => Promise<void>) {
   const admin = new pg.Pool({ connectionString: baseUrl, max: 1 });
   const database = 'startup_' + randomUUID().replaceAll('-', '');
@@ -70,9 +79,12 @@ async function fixture(run: (owner: pg.Pool, url: string, principal: string) => 
     await run(owner, url.toString(), principal);
   } finally {
     await owner?.end();
-    await dropIsolatedTestDatabase(admin, database);
-    await admin.query(`DROP ROLE IF EXISTS ${q(role)}`);
-    await admin.end();
+    isolatedCleanups.push(async () => {
+      try {
+        await dropIsolatedTestDatabase(admin, database);
+        await admin.query(`DROP ROLE IF EXISTS ${q(role)}`);
+      } finally { await admin.end(); }
+    });
   }
 }
 

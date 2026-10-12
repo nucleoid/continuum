@@ -1,38 +1,83 @@
 import pg from 'pg';
 import { runMigrations } from './migrator.js';
+import { promoteMemoryWithAudit } from './promote.js';
 
 const DEFAULT_URL = 'postgres://continuum:continuum@localhost:5433/continuum';
 
 /** Normal fixture cleanup must not terminate clients whose sockets are ending. */
-export async function dropIsolatedTestDatabase(maintenance: pg.Pool, database: string): Promise<void> {
+export async function dropIsolatedTestDatabase(
+  maintenance: pg.Pool,
+  database: string,
+  options: { cleanupTimeoutMs?: number } = {},
+): Promise<void> {
+  const cleanupTimeoutMs = options.cleanupTimeoutMs ?? 90_000;
+  if (!Number.isInteger(cleanupTimeoutMs) || cleanupTimeoutMs < 1 || cleanupTimeoutMs > 90_000) {
+    throw new Error('Fixture cleanup timeout must be an integer from 1 to 90000 milliseconds');
+  }
+  const cleanupDeadline = Date.now() + cleanupTimeoutMs;
   const client = await maintenance.connect();
-  let original: { statement: string; lock: string; database: string } | undefined;
+  let original: { statement: string; lock: string; database: string; statement_ms: string; lock_ms: string } | undefined;
   let failure: unknown;
   let discard = false;
   try {
-    original = (await client.query<{ statement: string; lock: string; database: string }>(
+    original = (await client.query<{ statement: string; lock: string; database: string; statement_ms: string; lock_ms: string }>(
       `SELECT pg_catalog.current_setting('statement_timeout') AS statement,
               pg_catalog.current_setting('lock_timeout') AS lock,
-              pg_catalog.current_database() AS database`,
+              pg_catalog.current_database() AS database,
+              (SELECT setting FROM pg_catalog.pg_settings WHERE name='statement_timeout') AS statement_ms,
+              (SELECT setting FROM pg_catalog.pg_settings WHERE name='lock_timeout') AS lock_ms`,
     )).rows[0];
     if (!database || database.includes('\0') || database === original.database) {
       throw new Error('Fixture cleanup requires a separate, nonempty database name');
     }
-    await client.query("SELECT pg_catalog.set_config('statement_timeout','1s',FALSE), pg_catalog.set_config('lock_timeout','1s',FALSE)");
-    const deadline = Date.now() + 5_000;
-    for (;;) {
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) throw new Error('Fixture database sessions did not drain within 5 seconds');
-      await client.query("SELECT pg_catalog.set_config('statement_timeout',$1,FALSE)", [`${Math.min(1_000, remaining)}ms`]);
-      const sessions = (await client.query<{ sessions: number }>(
+    const statementCap = Number(original.statement_ms) > 0 ? Math.min(5_000, Number(original.statement_ms)) : 5_000;
+    const lockCap = Number(original.lock_ms) > 0 ? Math.min(1_000, Number(original.lock_ms)) : 1_000;
+    const setLimits = async (statementMs: number): Promise<void> => {
+      await client.query("SELECT pg_catalog.set_config('statement_timeout',$1,FALSE), pg_catalog.set_config('lock_timeout',$2,FALSE)",
+        [`${Math.max(1, Math.floor(statementMs))}ms`, `${lockCap}ms`]);
+    };
+    const sessions = async (): Promise<number> => {
+      await setLimits(Math.min(1_000, statementCap, Math.max(1, cleanupDeadline - Date.now())));
+      return (await client.query<{ sessions: number }>(
         'SELECT count(*)::int AS sessions FROM pg_catalog.pg_stat_activity WHERE datname=$1::text', [database],
       )).rows[0].sessions;
-      if (sessions === 0) break;
-      await new Promise((resolve) => setTimeout(resolve, Math.min(20, Math.max(1, deadline - Date.now()))));
-    }
-    await client.query("SELECT pg_catalog.set_config('statement_timeout','5s',FALSE)");
+    };
+    const drainSessions = async (): Promise<void> => {
+      const deadline = Math.min(cleanupDeadline, Date.now() + 5_000);
+      for (;;) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw new Error('Fixture database sessions did not drain within 5 seconds');
+        if (await sessions() === 0) return;
+        await new Promise((resolve) => setTimeout(resolve, Math.min(20, Math.max(1, deadline - Date.now()))));
+      }
+    };
+    await drainSessions();
     const identifier = '"' + database.replaceAll('"', '""') + '"';
-    await client.query(`DROP DATABASE IF EXISTS ${identifier}`);
+    let lastCancellation: unknown;
+    for (;;) {
+      const remaining = cleanupDeadline - Date.now();
+      if (remaining <= 0) throw lastCancellation ?? new Error(`Fixture database cleanup exceeded its ${cleanupTimeoutMs}-millisecond deadline`);
+      // Check again on every attempt. Never evict a newly connected session or
+      // substitute FORCE/termination for orderly fixture socket shutdown.
+      await drainSessions();
+      const dropRemaining = cleanupDeadline - Date.now();
+      if (dropRemaining <= 0) throw lastCancellation ?? new Error(`Fixture database cleanup exceeded its ${cleanupTimeoutMs}-millisecond deadline`);
+      await setLimits(Math.min(statementCap, dropRemaining));
+      if (Date.now() >= cleanupDeadline) throw lastCancellation ?? new Error(`Fixture database cleanup exceeded its ${cleanupTimeoutMs}-millisecond deadline`);
+      try {
+        await client.query(`DROP DATABASE IF EXISTS ${identifier}`);
+        break;
+      } catch (error) {
+        const code = (error as { code?: string }).code;
+        if (code !== '57014' && code !== '55P03') throw error;
+        // Disk-backed checkpoints can outlive one bounded DROP statement.
+        // IF EXISTS is safe to retry after its autocommit cancellation, but
+        // the original SQL error wins when the aggregate deadline is spent.
+        lastCancellation = error;
+        const pause = Math.min(20, cleanupDeadline - Date.now());
+        if (pause > 0) await new Promise((resolve) => setTimeout(resolve, pause));
+      }
+    }
   } catch (error) {
     failure = error;
     throw error;
@@ -88,6 +133,8 @@ export async function resetData(pool: pg.Pool): Promise<void> {
         coordination_resources,
         ingest_deliveries,
         principal_aliases,
+        promotion_event_deliveries,
+        promotion_events,
         audit_log,
         service_api_keys,
         entra_sync_state,
@@ -127,6 +174,8 @@ export async function resetData(pool: pg.Pool): Promise<void> {
         ENABLE TRIGGER preserve_coordination_operator_event_truncate;
     `);
   }
+
+  await pool.query("UPDATE promotion_webhook_registry SET webhook_ids='{}'::text[] WHERE singleton");
 
   // All business rows are gone, so no prior repair cursor or pending phase
   // belongs to the next test. These are the completed states for empty data.
@@ -171,4 +220,14 @@ export async function resetData(pool: pg.Pool): Promise<void> {
        'knowledge-gap'
      ]) AS tag
   `);
+}
+
+/** Owner-only fixture setup, followed by the unchanged production promotion.
+ * Real-role tests configure IDs through the bound OP helper instead. */
+export async function promoteWithConfiguredWebhooksForTest(
+  ...args: Parameters<typeof promoteMemoryWithAudit>
+): ReturnType<typeof promoteMemoryWithAudit> {
+  const ids = [...new Set(args[5] ?? [])].sort();
+  await args[0].query('UPDATE promotion_webhook_registry SET webhook_ids=$1::text[] WHERE singleton', [ids]);
+  return promoteMemoryWithAudit(...args);
 }

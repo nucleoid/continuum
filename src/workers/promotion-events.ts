@@ -1,0 +1,991 @@
+import type pg from 'pg';
+import type { RuntimeWorker } from '../api/runtime.js';
+import type { PromotionWebhookRegistry } from '../extensions/promotion.js';
+import {
+  abandonPromotionDeliveries,
+  claimPromotionDeliveries,
+  completePromotionDelivery,
+  failPromotionDelivery,
+  releasePromotionDeliveries,
+  renewPromotionDeliveries,
+  timeoutPromotionDelivery,
+  type ClaimedPromotionDelivery,
+  type PromotionLeaseRenewalResult,
+} from '../storage/promotion-events.js';
+
+export interface PromotionWorkerLogger {
+  info(event: Record<string, unknown>): void;
+  warn(event: Record<string, unknown>): void;
+  error(event: Record<string, unknown>): void;
+}
+
+export interface PromotionWorkerOptions {
+  owner: string;
+  pollMs: number;
+  claimBatch: number;
+  leaseMs: number;
+  callbackTimeoutMs: number;
+  databaseTimeoutMs: number;
+  shutdownWaitMs: number;
+  maxAttempts: number;
+  baseBackoffMs: number;
+  maxBackoffMs: number;
+  random?: () => number;
+  logger?: PromotionWorkerLogger;
+}
+
+function positiveEnv(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  fallback: number,
+  maximum = Number.MAX_SAFE_INTEGER,
+): number {
+  const raw = env[name];
+  const value = raw === undefined ? fallback : Number(raw);
+  if (!/^\d+$/.test(raw ?? String(fallback))
+    || !Number.isSafeInteger(value) || value < 1 || value > maximum) {
+    throw new Error(`${name} must be a positive integer no greater than ${maximum}`);
+  }
+  return value;
+}
+
+export function promotionWorkerOptionsFromEnv(
+  owner: string,
+  env: NodeJS.ProcessEnv = process.env,
+): PromotionWorkerOptions {
+  return {
+    owner,
+    pollMs: positiveEnv(env, 'CONTINUUM_PROMOTION_POLL_MS', 1_000),
+    claimBatch: positiveEnv(env, 'CONTINUUM_PROMOTION_CLAIM_BATCH', 10, 100),
+    leaseMs: positiveEnv(env, 'CONTINUUM_PROMOTION_LEASE_MS', 30_000),
+    callbackTimeoutMs: positiveEnv(env, 'CONTINUUM_PROMOTION_CALLBACK_TIMEOUT_MS', 5_000),
+    databaseTimeoutMs: positiveEnv(env, 'CONTINUUM_PROMOTION_DATABASE_TIMEOUT_MS', 5_000),
+    shutdownWaitMs: positiveEnv(env, 'CONTINUUM_PROMOTION_SHUTDOWN_WAIT_MS', 5_000),
+    maxAttempts: positiveEnv(env, 'CONTINUUM_PROMOTION_MAX_ATTEMPTS', 10, 1_000),
+    baseBackoffMs: positiveEnv(env, 'CONTINUUM_PROMOTION_BASE_BACKOFF_MS', 1_000),
+    maxBackoffMs: positiveEnv(env, 'CONTINUUM_PROMOTION_MAX_BACKOFF_MS', 300_000),
+  };
+}
+
+const defaultLogger: PromotionWorkerLogger = {
+  info: (event) => { console.info(JSON.stringify(event)); },
+  warn: (event) => { console.warn(JSON.stringify(event)); },
+  error: (event) => { console.error(JSON.stringify(event)); },
+};
+
+export interface PromotionWorkerStore {
+  claim(
+    pool: pg.Pool,
+    input: {
+      owner: string;
+      webhookIds: readonly string[];
+      limit: number;
+      leaseMs: number;
+      maxAttempts: number;
+      perWebhookLimit: number;
+      excluded: readonly ClaimedPromotionDelivery[];
+    },
+  ): Promise<ClaimedPromotionDelivery[]>;
+  complete(
+    pool: pg.Pool,
+    eventId: string,
+    webhookId: string,
+    owner: string,
+    attemptCount: number,
+    leaseGeneration: number,
+  ): Promise<boolean>;
+  fail(
+    pool: pg.Pool,
+    eventId: string,
+    webhookId: string,
+    owner: string,
+    input: {
+      maxAttempts: number;
+      retryDelayMs: number;
+      error: unknown;
+      attemptCount: number;
+      leaseGeneration: number;
+    },
+  ): Promise<'pending' | 'dead_letter' | 'lost_lease'>;
+  timeout(
+    pool: pg.Pool,
+    eventId: string,
+    webhookId: string,
+    owner: string,
+    input: {
+      maxAttempts: number;
+      retryDelayMs: number;
+      attemptCount: number;
+      leaseGeneration: number;
+    },
+  ): Promise<'pending' | 'dead_letter' | 'lost_lease'>;
+  abandon(
+    pool: pg.Pool,
+    owner: string,
+    deliveries: readonly ClaimedPromotionDelivery[],
+  ): Promise<number>;
+  release(
+    pool: pg.Pool,
+    owner: string,
+    retained?: readonly ClaimedPromotionDelivery[],
+  ): Promise<number>;
+  renew(
+    pool: pg.Pool,
+    owner: string,
+    deliveries: readonly ClaimedPromotionDelivery[],
+    leaseMs: number,
+  ): Promise<PromotionLeaseRenewalResult | number>;
+}
+
+const defaultStore: PromotionWorkerStore = {
+  abandon: abandonPromotionDeliveries,
+  claim: claimPromotionDeliveries,
+  complete: completePromotionDelivery,
+  fail: failPromotionDelivery,
+  timeout: timeoutPromotionDelivery,
+  release: releasePromotionDeliveries,
+  renew: renewPromotionDeliveries,
+};
+
+function deliveryKey(delivery: Pick<ClaimedPromotionDelivery, 'webhookId' | 'event'>): string {
+  return `${delivery.event.eventId}\u0000${delivery.webhookId}`;
+}
+
+function exactDeliveryKey(delivery: ClaimedPromotionDelivery): string {
+  return `${deliveryKey(delivery)}\u0000${delivery.attemptCount}\u0000${delivery.leaseGeneration}`;
+}
+
+// Multiple workers can briefly coexist in one process during shutdown/startup handoff. Keep the
+// callback fence process-wide so a lease expiry cannot start a second local callback while the
+// first callback is still ignoring its AbortSignal.
+const inFlightCallbacks = new Map<string, ClaimedPromotionDelivery>();
+const callbackReservations = new Map<string, number>();
+const GLOBAL_CALLBACK_LIMIT = 100;
+
+type CallbackOutcome = 'success' | 'failure' | 'not_started';
+
+export class PromotionEventWorker implements RuntimeWorker {
+  private readonly claimStartedAt = new WeakMap<ClaimedPromotionDelivery, number>();
+  private admissionCursor = 0;
+  private readonly renewedAt = new WeakMap<ClaimedPromotionDelivery, number>();
+  private renewalRetryAt?: number;
+  private lastRetainedFences = 0;
+  private stopped = false;
+  private started = false;
+  private stopPromise?: Promise<void>;
+  private shutdownDeadline?: number;
+  private timer?: NodeJS.Timeout;
+  private leaseTimer?: NodeJS.Timeout;
+  private leaseRenewal?: Promise<void>;
+  private acknowledgementRetry?: Promise<void>;
+  private acknowledgementCursor = 0;
+  private readonly active = new Set<Promise<number>>();
+  private readonly controllers = new Map<AbortController, ClaimedPromotionDelivery>();
+  private readonly retainedLeases = new Map<string, ClaimedPromotionDelivery>();
+  private readonly ownershipLost = new Set<AbortController>();
+  private readonly ownershipUncertain = new Set<AbortController>();
+  private readonly pendingAcknowledgements = new Map<string, AbortController>();
+  private readonly pendingFailures = new Map<string, { controller: AbortController; retryDelayMs: number }>();
+  private readonly logger: PromotionWorkerLogger;
+  private readonly random: () => number;
+
+  constructor(
+    private readonly pool: pg.Pool,
+    private readonly registry: PromotionWebhookRegistry,
+    private readonly options: PromotionWorkerOptions,
+    private readonly store: PromotionWorkerStore = defaultStore,
+  ) {
+    for (const [name, value] of Object.entries({
+      pollMs: options.pollMs,
+      claimBatch: options.claimBatch,
+      leaseMs: options.leaseMs,
+      callbackTimeoutMs: options.callbackTimeoutMs,
+      databaseTimeoutMs: options.databaseTimeoutMs,
+      shutdownWaitMs: options.shutdownWaitMs,
+      maxAttempts: options.maxAttempts,
+      baseBackoffMs: options.baseBackoffMs,
+      maxBackoffMs: options.maxBackoffMs,
+    })) {
+      if (!Number.isSafeInteger(value) || value <= 0) {
+        throw new Error(`${name} must be a positive integer`);
+      }
+    }
+    if (options.claimBatch > 100) throw new Error('claimBatch must not exceed 100');
+    if (options.baseBackoffMs > options.maxBackoffMs) {
+      throw new Error('baseBackoffMs must not exceed maxBackoffMs');
+    }
+    if (options.callbackTimeoutMs >= options.leaseMs) {
+      throw new Error('callbackTimeoutMs must be less than leaseMs');
+    }
+    if (options.databaseTimeoutMs >= options.leaseMs) {
+      throw new Error('databaseTimeoutMs must be less than leaseMs');
+    }
+    if (options.shutdownWaitMs >= options.leaseMs) {
+      throw new Error('shutdownWaitMs must be less than leaseMs');
+    }
+    this.logger = options.logger ?? defaultLogger;
+    this.random = options.random ?? Math.random;
+  }
+
+  start(): void {
+    if (this.started) return;
+    this.started = true;
+    void this.runLoop();
+  }
+
+  drainOnce(): Promise<number> {
+    if (this.stopped) return Promise.resolve(0);
+    const operation = this.drainCycle();
+    this.active.add(operation);
+    void operation.then(
+      () => this.active.delete(operation),
+      () => this.active.delete(operation),
+    );
+    return operation;
+  }
+
+  stop(reason: string): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
+    this.stopped = true;
+    this.shutdownDeadline = Date.now() + this.options.shutdownWaitMs;
+    this.stopPromise = this.stopWorker(reason);
+    return this.stopPromise;
+  }
+
+  private async drainCycle(): Promise<number> {
+    this.reportRetainedCapacity();
+    const webhookIds = this.registry.ids();
+    const inFlightByWebhook = new Map<string, number>();
+    for (const delivery of inFlightCallbacks.values()) {
+      inFlightByWebhook.set(
+        delivery.webhookId,
+        (inFlightByWebhook.get(delivery.webhookId) ?? 0) + 1,
+      );
+    }
+    const reserved = [...callbackReservations.values()].reduce((sum, count) => sum + count, 0);
+    const globalAvailable = Math.max(
+      0,
+      GLOBAL_CALLBACK_LIMIT - inFlightCallbacks.size - reserved,
+    );
+    if (globalAvailable === 0) return 0;
+    const eligibleById = webhookIds
+      .map((webhookId) => ({
+        webhookId,
+        occupied:
+          (inFlightByWebhook.get(webhookId) ?? 0)
+          + (callbackReservations.get(webhookId) ?? 0),
+        available: Math.max(
+          0,
+          this.options.claimBatch
+            - (inFlightByWebhook.get(webhookId) ?? 0)
+            - (callbackReservations.get(webhookId) ?? 0),
+        ),
+      }))
+      .filter(({ available }) => available > 0);
+    if (eligibleById.length === 0) return 0;
+    const start = this.admissionCursor % eligibleById.length;
+    const eligible = [...eligibleById.slice(start), ...eligibleById.slice(0, start)];
+    // Rotate bounded admission even when earlier hooks have no durable backlog.
+    this.admissionCursor = (start + globalAvailable) % eligible.length;
+    let remainingGlobal = globalAvailable;
+    const allocations = new Map<string, number>();
+    while (remainingGlobal > 0) {
+      let leastOccupied = Number.POSITIVE_INFINITY;
+      for (const { webhookId, occupied, available } of eligible) {
+        const allocated = allocations.get(webhookId) ?? 0;
+        if (allocated < available) {
+          leastOccupied = Math.min(leastOccupied, occupied + allocated);
+        }
+      }
+      if (!Number.isFinite(leastOccupied)) break;
+      for (const { webhookId, occupied, available } of eligible) {
+        if (remainingGlobal === 0) break;
+        const allocated = allocations.get(webhookId) ?? 0;
+        if (allocated < available && occupied + allocated === leastOccupied) {
+          allocations.set(webhookId, allocated + 1);
+          remainingGlobal -= 1;
+        }
+      }
+    }
+    const admissions = eligible.flatMap(({ webhookId }) => {
+      const limit = allocations.get(webhookId) ?? 0;
+      return limit > 0 ? [{ webhookId, limit }] : [];
+    });
+    for (const { webhookId, limit } of admissions) {
+      callbackReservations.set(
+        webhookId,
+        (callbackReservations.get(webhookId) ?? 0) + limit,
+      );
+    }
+    const deliveries: ClaimedPromotionDelivery[] = [];
+    try {
+      for (const { webhookId, limit } of admissions) {
+        const claimStarted = Date.now();
+        const claiming = this.store.claim(this.pool, {
+          owner: this.options.owner,
+          webhookIds: [webhookId],
+          limit,
+          leaseMs: this.options.leaseMs,
+          maxAttempts: this.options.maxAttempts,
+          perWebhookLimit: limit,
+          excluded: [...inFlightCallbacks.values(), ...deliveries],
+        });
+        try {
+          const claimed = await this.databaseOperation(claiming);
+          for (const delivery of claimed) this.claimStartedAt.set(delivery, claimStarted);
+          deliveries.push(...claimed);
+        } catch (error) {
+          // A timed-out claim can still commit. Refund only its exact, never-started fences.
+          void claiming.then((late) => this.abandonDeliveries(
+            late, 'promotion_delivery_late_claim_abandoned',
+          )).catch(() => { this.logger.error({ event: 'promotion_delivery_late_claim_cleanup_failed' }); });
+          throw error;
+        }
+      }
+    } catch (error) {
+      await this.abandonDeliveries(deliveries, 'promotion_delivery_sibling_claim_abandoned');
+      throw error;
+    } finally {
+      for (const { webhookId, limit } of admissions) {
+        const remaining = (callbackReservations.get(webhookId) ?? 0) - limit;
+        if (remaining > 0) callbackReservations.set(webhookId, remaining);
+        else callbackReservations.delete(webhookId);
+      }
+    }
+    if (this.stopped) {
+      await this.abandonDeliveries(deliveries, 'promotion_worker_stopped_claim_abandoned');
+      return deliveries.length;
+    }
+    const tasks = deliveries.map((delivery) => {
+      return this.deliver(delivery);
+    });
+    const results = await Promise.allSettled(tasks);
+    const rejected = results.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    if (rejected) throw rejected.reason;
+    return deliveries.length;
+  }
+
+  private async stopWorker(reason: string): Promise<void> {
+    if (this.timer) clearTimeout(this.timer);
+    const deadline = this.shutdownDeadline!;
+    let timeout: NodeJS.Timeout | undefined;
+    const outcome = await Promise.race([
+      Promise.allSettled([...this.active]).then(() => 'drained' as const),
+      new Promise<'timeout'>((resolve) => {
+        timeout = setTimeout(
+          () => resolve('timeout'),
+          Math.max(0, deadline - Date.now()),
+        );
+      }),
+    ]);
+    if (timeout) clearTimeout(timeout);
+    if (outcome === 'timeout') {
+      for (const [controller, delivery] of this.controllers) {
+        this.retainLease(delivery);
+        controller.abort();
+      }
+      this.logger.warn({
+        event: 'promotion_worker_shutdown_timeout',
+        reason,
+        active: this.controllers.size,
+      });
+    }
+    this.shutdownDeadline = undefined;
+    if (this.leaseTimer) clearTimeout(this.leaseTimer);
+    this.leaseTimer = undefined;
+    if (this.leaseRenewal) {
+      await this.beforeDeadline(this.leaseRenewal, deadline);
+    }
+    const retained = [...this.retainedLeases.values()];
+    const release = this.store.release(this.pool, this.options.owner, retained);
+    const released = await this.beforeDeadline(release, deadline);
+    this.logger.info({
+      event: 'promotion_worker_stopped',
+      reason,
+      released: released.settled ? released.value : undefined,
+      retained: retained.length,
+      databaseTimedOut: !released.settled,
+    });
+  }
+
+  private async runLoop(): Promise<void> {
+    if (this.stopped) return;
+    try {
+      await this.drainOnce();
+    } catch {
+      this.logger.error({ event: 'promotion_worker_drain_failed' });
+    } finally {
+      if (!this.stopped) {
+        this.timer = setTimeout(() => { void this.runLoop(); }, this.options.pollMs);
+      }
+    }
+  }
+
+  private async deliver(delivery: ClaimedPromotionDelivery): Promise<void> {
+    const webhook = this.registry.get(delivery.webhookId);
+    if (!webhook) {
+      await this.abandonDeliveries([delivery], 'promotion_delivery_webhook_unavailable');
+      return;
+    }
+    // A serial sibling claim may consume the earlier claim's lease before delivery begins.
+    // Require fresh exact ownership after a material admission delay, before invoking user code.
+    const claimStarted = this.claimStartedAt.get(delivery) ?? Date.now();
+    let renewalAnchor = claimStarted;
+    if (Date.now() - claimStarted >= Math.max(1, Math.floor(this.options.leaseMs / 3))) {
+      let ownership: PromotionLeaseRenewalResult | number;
+      renewalAnchor = Date.now();
+      try {
+        ownership = await this.databaseOperation(this.store.renew(
+          this.pool, this.options.owner, [delivery], this.options.leaseMs,
+        ));
+      } catch (error) {
+        await this.abandonDeliveries([delivery], 'promotion_delivery_admission_refresh_abandoned');
+        throw error;
+      }
+      const owned = typeof ownership === 'number'
+        ? ownership >= 1
+        : ownership.renewed.some((current) => deliveryKey(current) === deliveryKey(delivery)
+          && current.attemptCount === delivery.attemptCount
+          && current.leaseGeneration === delivery.leaseGeneration);
+      if (!owned) {
+        await this.abandonDeliveries([delivery], 'promotion_delivery_stale_admission_abandoned');
+        return;
+      }
+    }
+    const event = Object.freeze({
+      ...delivery.event,
+      occurredAt: new Date(delivery.event.occurredAt),
+      destinationScope: Object.freeze({ ...delivery.event.destinationScope }),
+    });
+    const eventId = event.eventId;
+    const webhookId = delivery.webhookId;
+    const key = deliveryKey(delivery);
+    if (inFlightCallbacks.has(key)) {
+      await this.abandonDeliveries([delivery], 'promotion_delivery_in_flight_abandoned');
+      return;
+    }
+    const controller = new AbortController();
+    this.controllers.set(controller, delivery);
+    this.renewedAt.set(delivery, renewalAnchor);
+    inFlightCallbacks.set(key, delivery);
+    this.ensureLeaseRenewal();
+    this.logger.info({
+      event: 'promotion_delivery_claimed',
+      eventId,
+      webhookId,
+      attempt: delivery.attemptCount,
+      pendingAgeMs: Math.max(0, Date.now() - delivery.event.occurredAt.getTime()),
+      leaseRecovered: delivery.leaseRecovered,
+    });
+
+    let timer: NodeJS.Timeout | undefined;
+    let lateFollower = false;
+    try {
+      let callback: Promise<CallbackOutcome>;
+      if (this.stopped || controller.signal.aborted) {
+        callback = Promise.resolve('not_started');
+      } else {
+        try {
+          callback = Promise.resolve(webhook.onPromoted(
+            event,
+            { signal: controller.signal },
+          )).then(() => 'success', () => 'failure');
+        } catch {
+          callback = Promise.resolve('failure');
+        }
+      }
+      const timeout = new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => {
+          resolve('timeout');
+          controller.abort();
+        }, this.options.callbackTimeoutMs);
+      });
+      const shutdown = new Promise<'shutdown'>((resolve) => {
+        controller.signal.addEventListener('abort', () => resolve('shutdown'), { once: true });
+      });
+      const outcome = await Promise.race([callback, timeout, shutdown]);
+      if (timer) clearTimeout(timer);
+
+      let resolveTimeoutDisposition!: (committed: boolean) => void;
+      const timeoutDisposition = new Promise<boolean>((resolve) => { resolveTimeoutDisposition = resolve; });
+      if (outcome === 'timeout') {
+        controller.abort();
+        this.retainLease(delivery);
+        lateFollower = true;
+        this.followLateCallback(delivery, controller, callback, 'timeout', timeoutDisposition);
+      }
+
+      if (outcome === 'success') {
+        if (!await this.persistCallbackOutcome(delivery, controller, outcome)) {
+          lateFollower = true;
+        }
+        return;
+      }
+      if (outcome === 'timeout') {
+        const retryDelayMs = this.retryDelay(delivery.attemptCount);
+        let state: 'pending' | 'dead_letter' | 'lost_lease';
+        try {
+          state = await this.databaseOperation(this.store.timeout(
+            this.pool,
+            eventId,
+            webhookId,
+            this.options.owner,
+            {
+              maxAttempts: this.options.maxAttempts,
+              retryDelayMs,
+              attemptCount: delivery.attemptCount,
+              leaseGeneration: delivery.leaseGeneration,
+            },
+          ));
+          resolveTimeoutDisposition(true);
+        } catch (error) {
+          resolveTimeoutDisposition(false);
+          // Uncertainty does not prove loss. The exact owner/attempt/generation
+          // recheck can safely renew while an abort-ignoring callback is unsettled.
+          this.abortForOwnershipUncertainty(controller);
+          throw error;
+        }
+        this.logger.warn({
+          event: 'promotion_delivery_timed_out',
+          eventId,
+          webhookId,
+          attempt: delivery.attemptCount,
+          leaseRetained: true,
+          state,
+          retryDelayMs: state === 'pending' ? retryDelayMs : undefined,
+        });
+        // Keep the exact pending lease alive while an abort-ignoring callback can still produce
+        // a side effect. Abort-honoring callbacks remove themselves through the late follower.
+        if (state === 'dead_letter' || state === 'lost_lease') {
+          this.stopLeaseRenewal(controller);
+        }
+        return;
+      }
+      if (outcome === 'shutdown') {
+        const abortReason = this.ownershipUncertain.has(controller)
+          ? 'ownership_uncertain'
+          : this.ownershipLost.has(controller) ? 'ownership_loss' : 'shutdown';
+        if (abortReason === 'shutdown') this.retainLease(delivery);
+        lateFollower = true;
+        this.followLateCallback(delivery, controller, callback, abortReason);
+        return;
+      }
+      if (outcome === 'not_started') {
+        await this.abandonDeliveries([delivery], 'promotion_delivery_not_started_abandoned');
+        return;
+      }
+      await this.persistCallbackOutcome(delivery, controller, outcome);
+    } finally {
+      if (timer) clearTimeout(timer);
+      // A retained lease is only useful while an actual callback follower owns its cleanup.
+      // Persistence errors before follower installation must never strand fences or renewals.
+      if (!lateFollower && this.pendingFailures.get(key)?.controller !== controller) this.finishCallback(delivery, controller);
+    }
+  }
+
+  private reportRetainedCapacity(): void {
+    const retainedFences = [...this.retainedLeases.values()].filter((delivery) => {
+      const held = inFlightCallbacks.get(deliveryKey(delivery));
+      return held && exactDeliveryKey(held) === exactDeliveryKey(delivery)
+        && !this.pendingAcknowledgements.has(deliveryKey(delivery));
+    }).length;
+    if (retainedFences === 0 && this.lastRetainedFences === 0) return;
+    this.lastRetainedFences = retainedFences;
+    try {
+      this.logger.info({ event: 'promotion_worker_capacity', retainedFences,
+        processInFlight: inFlightCallbacks.size, processCapacity: GLOBAL_CALLBACK_LIMIT });
+    } catch { /* optional operational signal cannot prevent draining */ }
+  }
+
+  private ensureLeaseRenewal(): void {
+    if ((this.stopped && (this.shutdownDeadline === undefined || Date.now() >= this.shutdownDeadline))
+      || this.controllers.size === 0 || this.leaseTimer || this.leaseRenewal) return;
+    const interval = Math.max(1, Math.floor(this.options.leaseMs / 3));
+    const now = Date.now();
+    const due = Math.min(...[...this.controllers.values()].map((delivery) =>
+      (this.renewedAt.get(delivery) ?? now) + interval));
+    const delay = Math.max(1, (this.renewalRetryAt ?? due) - now);
+    if (this.stopped && now + delay >= this.shutdownDeadline!) return;
+    this.leaseTimer = setTimeout(() => {
+      this.leaseTimer = undefined;
+      if (this.stopped && (this.shutdownDeadline === undefined || Date.now() >= this.shutdownDeadline)) return;
+      const deliveries = [...this.controllers.values()];
+      this.leaseRenewal = this.renewLeases(deliveries, Math.min(this.options.databaseTimeoutMs, interval)).finally(() => {
+        this.leaseRenewal = undefined;
+        if (this.controllers.size > 0) this.ensureLeaseRenewal();
+      });
+    }, delay);
+  }
+
+  private async renewLeases(
+    deliveries: readonly ClaimedPromotionDelivery[],
+    timeoutMs: number,
+  ): Promise<void> {
+    if (deliveries.length === 0) return;
+    const started = Date.now();
+    const snapshot = new Set(deliveries.map(exactDeliveryKey));
+    let timer: NodeJS.Timeout | undefined;
+    const operation = Promise.resolve().then(() => this.store.renew(
+      this.pool, this.options.owner, deliveries, this.options.leaseMs,
+    ));
+    const result = await Promise.race([
+      operation.then((renewal) => ({ state: 'settled' as const, renewal }), () => ({ state: 'failed' as const })),
+      new Promise<{ state: 'timeout' }>((resolve) => {
+        timer = setTimeout(() => resolve({ state: 'timeout' }), timeoutMs);
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+    const current = [...this.controllers].filter(([, delivery]) => snapshot.has(exactDeliveryKey(delivery)));
+    if (result.state === 'settled' && typeof result.renewal !== 'number') {
+      const renewed = new Set(result.renewal.renewed.map(exactDeliveryKey));
+      const terminal = new Set(result.renewal.terminalOwned.map(exactDeliveryKey));
+      const lost = new Set(result.renewal.lost.map(exactDeliveryKey));
+      for (const [controller, delivery] of current) {
+        const key = exactDeliveryKey(delivery);
+        if (lost.has(key)) {
+          if (this.hasPendingWrite(delivery, controller)) this.finishCallback(delivery, controller);
+          else this.abortForOwnershipLoss(controller);
+        } else if (terminal.has(key) && !this.hasPendingWrite(delivery, controller)) {
+          this.stopLeaseRenewal(controller);
+        } else if (renewed.has(key) || terminal.has(key)) {
+          // Issuance is a conservative lower bound on the committed SQL clock.
+          // Using response time could overstate expiry after a slow response.
+          this.renewedAt.set(delivery, started);
+        }
+      }
+      this.renewalRetryAt = undefined;
+      const owned = [...result.renewal.renewed, ...result.renewal.terminalOwned]
+        .filter((delivery) => snapshot.has(exactDeliveryKey(delivery)));
+      this.scheduleAcknowledgements(owned);
+      if (lost.size === 0) return;
+    } else if (result.state === 'settled') {
+      this.renewalRetryAt = undefined;
+      if ((result.renewal as number) >= deliveries.length) {
+        for (const [, delivery] of current) this.renewedAt.set(delivery, started);
+        this.scheduleAcknowledgements(deliveries);
+        return;
+      }
+      // A short aggregate count cannot identify which exact delivery was lost.
+      // Keep paid ACKs reconcilable and signal uncertainty to live callbacks.
+      for (const [controller, delivery] of current) {
+        this.retainLease(delivery);
+        if (!this.hasPendingWrite(delivery, controller)) this.abortForOwnershipUncertainty(controller);
+      }
+      this.renewalRetryAt = current.length > 0 ? Date.now()
+        + Math.max(1, Math.min(this.options.databaseTimeoutMs, Math.floor(this.options.leaseMs / 12))) : undefined;
+      this.scheduleAcknowledgements(current.map(([, delivery]) => delivery));
+    } else {
+      void operation.catch(() => undefined);
+      for (const [controller, delivery] of current) {
+        this.retainLease(delivery);
+        if (!this.hasPendingWrite(delivery, controller)) this.abortForOwnershipUncertainty(controller);
+      }
+      // A finite prompt retry retains a positive margin after one slow attempt.
+      this.renewalRetryAt = current.length > 0 ? Date.now()
+        + Math.max(1, Math.min(this.options.databaseTimeoutMs, Math.floor(this.options.leaseMs / 12))) : undefined;
+    }
+    this.logger.error({
+      event: 'promotion_worker_lease_renewal_failed', reason: result.state, expected: deliveries.length,
+      renewed: result.state === 'settled'
+        ? typeof result.renewal === 'number' ? result.renewal : result.renewal.renewed.length : undefined,
+    });
+  }
+
+  private retryDelay(attempt: number): number {
+    const exponential = Math.min(
+      this.options.maxBackoffMs,
+      this.options.baseBackoffMs * (2 ** Math.max(0, attempt - 1)),
+    );
+    const jittered = Math.floor(exponential * (0.5 + this.random()));
+    return Math.max(1, Math.min(this.options.maxBackoffMs, jittered));
+  }
+
+  private retainLease(delivery: ClaimedPromotionDelivery): void {
+    this.retainedLeases.set(deliveryKey(delivery), delivery);
+  }
+
+  private followLateCallback(
+    delivery: ClaimedPromotionDelivery,
+    controller: AbortController,
+    callback: Promise<CallbackOutcome>,
+    abortReason: 'timeout' | 'shutdown' | 'ownership_loss' | 'ownership_uncertain',
+    timeoutDisposition?: Promise<boolean>,
+  ): void {
+    void callback.then(async (outcome) => {
+      if (outcome === 'success') {
+        return !await this.persistCallbackOutcome(delivery, controller, outcome);
+      } else if (outcome === 'failure' && abortReason === 'timeout') {
+        // Wait for the bounded write disposition. A committed timeout already
+        // installed its chosen backoff; only a failed write needs charged failure.
+        if (timeoutDisposition && !await timeoutDisposition) await this.persistCallbackOutcome(delivery, controller, outcome);
+      } else if (outcome === 'failure' && abortReason === 'shutdown') {
+        // A callback that rejects after this worker signalled shutdown is not evidence that the
+        // consumer failed. Return the owned claim without charging an attempt so another worker
+        // can make a clean delivery attempt.
+        await this.abandonDeliveries(
+          [delivery],
+          'promotion_delivery_shutdown_abort_abandoned',
+        );
+      } else if (outcome === 'failure' && abortReason === 'ownership_uncertain') {
+        // User code actually started. Only shutdown cancellation refunds an
+        // invocation; uncertainty preserves its attempt and bounded backoff.
+        await this.persistCallbackOutcome(delivery, controller, outcome);
+      } else if (outcome === 'failure' && abortReason === 'ownership_loss') {
+        await this.persistCallbackOutcome(delivery, controller, outcome);
+      }
+      return false;
+    }).catch(() => {
+      this.logger.error({ event: 'promotion_delivery_late_settlement_failed' });
+      return this.pendingFailures.get(deliveryKey(delivery))?.controller === controller;
+    }).then((keepFence) => {
+      if (!keepFence) this.finishCallback(delivery, controller);
+    });
+  }
+
+  private async persistCallbackOutcome(
+    delivery: ClaimedPromotionDelivery,
+    controller: AbortController,
+    outcome: Exclude<CallbackOutcome, 'not_started'>,
+  ): Promise<boolean> {
+    const eventId = delivery.event.eventId;
+    const webhookId = delivery.webhookId;
+    if (outcome === 'success') {
+      let acknowledged: boolean;
+      const acknowledging = Promise.resolve().then(() => this.store.complete(
+        this.pool, eventId, webhookId, this.options.owner,
+        delivery.attemptCount, delivery.leaseGeneration,
+      ));
+      try {
+        acknowledged = await this.databaseOperation(acknowledging);
+      } catch {
+        this.retainLease(delivery);
+        const key = deliveryKey(delivery);
+        this.pendingAcknowledgements.set(key, controller);
+        // Ownership uncertainty may have removed this callback's renewal entry
+        // before its late success. Re-register only the completed callback's
+        // exact fence for ACK reconciliation, never for another invocation.
+        this.controllers.set(controller, delivery);
+        // Observe a late committed ACK even when the deadline race has already returned.
+        void acknowledging.then(() => {
+          if (this.pendingAcknowledgements.get(key) === controller) {
+            this.finishCallback(delivery, controller);
+          }
+        }, () => undefined);
+        this.ensureLeaseRenewal();
+        this.logger.error({
+          event: 'promotion_delivery_acknowledgement_failed', eventId, webhookId,
+          attempt: delivery.attemptCount,
+        });
+        return false;
+      }
+      this.logger.info({
+        event: 'promotion_delivery_succeeded', eventId, webhookId,
+        attempt: delivery.attemptCount, acknowledged,
+      });
+      return true;
+    }
+    const pending = this.pendingFailures.get(deliveryKey(delivery));
+    const retryDelayMs = pending?.controller === controller ? pending.retryDelayMs : this.retryDelay(delivery.attemptCount);
+    const failing = Promise.resolve().then(() => this.store.fail(
+      this.pool, eventId, webhookId, this.options.owner,
+      { maxAttempts: this.options.maxAttempts, retryDelayMs, error: new Error('callback failed'),
+        attemptCount: delivery.attemptCount, leaseGeneration: delivery.leaseGeneration },
+    ));
+    let state: 'pending' | 'dead_letter' | 'lost_lease';
+    try {
+      state = await this.databaseOperation(failing);
+    } catch (error) {
+      this.retainLease(delivery);
+      this.pendingFailures.set(deliveryKey(delivery), { controller, retryDelayMs });
+      this.controllers.set(controller, delivery);
+      // An observed late write proves this exact paid settlement completed.
+      void failing.then(() => {
+        if (this.pendingFailures.get(deliveryKey(delivery))?.controller === controller) this.finishCallback(delivery, controller);
+      }, () => undefined);
+      this.ensureLeaseRenewal();
+      throw error;
+    }
+    this.logger.warn({
+      event: 'promotion_delivery_failed', eventId, webhookId,
+      attempt: delivery.attemptCount, reason: 'error', state,
+      retryDelayMs: state === 'pending' ? retryDelayMs : undefined,
+    });
+    return true;
+  }
+
+  private hasPendingWrite(delivery: ClaimedPromotionDelivery, controller: AbortController): boolean {
+    const key = deliveryKey(delivery);
+    return this.pendingAcknowledgements.get(key) === controller || this.pendingFailures.get(key)?.controller === controller;
+  }
+
+  private scheduleAcknowledgements(deliveries: readonly ClaimedPromotionDelivery[]): void {
+    if (this.acknowledgementRetry) return;
+    const pending = deliveries.filter((delivery) => {
+      const controller = this.pendingAcknowledgements.get(deliveryKey(delivery))
+        ?? this.pendingFailures.get(deliveryKey(delivery))?.controller;
+      const current = controller && this.controllers.get(controller);
+      return current && exactDeliveryKey(current) === exactDeliveryKey(delivery);
+    });
+    if (pending.length === 0) return;
+    const start = this.acknowledgementCursor % pending.length;
+    // A bounded rotating cohort cannot monopolize renewal or starve later paid
+    // outcomes. Database deadlines apply concurrently, never serially per write.
+    const cohort = [...pending.slice(start), ...pending.slice(0, start)].slice(0, 10);
+    this.acknowledgementCursor = (start + cohort.length) % pending.length;
+    this.acknowledgementRetry = this.retryAcknowledgements(cohort).catch(() => {
+      try { this.logger.error({ event: 'promotion_worker_acknowledgement_retry_failed' }); } catch { /* optional logger */ }
+    }).finally(() => { this.acknowledgementRetry = undefined; });
+  }
+
+  private async retryAcknowledgements(
+    deliveries: readonly ClaimedPromotionDelivery[],
+  ): Promise<void> {
+    await Promise.all(deliveries.map(async (delivery) => {
+      const key = deliveryKey(delivery);
+      const controller = this.pendingAcknowledgements.get(key) ?? this.pendingFailures.get(key)?.controller;
+      if (!controller || !this.controllers.get(controller)
+        || exactDeliveryKey(this.controllers.get(controller)!) !== exactDeliveryKey(delivery)) return;
+      try {
+        if (this.pendingFailures.get(key)?.controller === controller) {
+          await this.persistCallbackOutcome(delivery, controller, 'failure');
+          this.finishCallback(delivery, controller);
+          return;
+        }
+        const acknowledged = await this.databaseOperation(this.store.complete(
+          this.pool,
+          delivery.event.eventId,
+          delivery.webhookId,
+          this.options.owner,
+          delivery.attemptCount,
+          delivery.leaseGeneration,
+        ));
+        this.logger.info({
+          event: 'promotion_delivery_succeeded',
+          eventId: delivery.event.eventId,
+          webhookId: delivery.webhookId,
+          attempt: delivery.attemptCount,
+          acknowledged,
+          retried: true,
+        });
+        this.finishCallback(delivery, controller);
+      } catch {
+        this.logger.error({
+          event: this.pendingFailures.get(key)?.controller === controller
+            ? 'promotion_delivery_failure_persistence_failed' : 'promotion_delivery_acknowledgement_failed',
+          eventId: delivery.event.eventId,
+          webhookId: delivery.webhookId,
+          attempt: delivery.attemptCount,
+          retried: true,
+        });
+      }
+    }));
+  }
+
+  private finishCallback(
+    delivery: ClaimedPromotionDelivery,
+    controller: AbortController,
+  ): void {
+    const current = this.controllers.get(controller);
+    if (current && exactDeliveryKey(current) !== exactDeliveryKey(delivery)) return;
+    const key = deliveryKey(delivery);
+    this.stopRenewingCallback(controller);
+    if (this.pendingAcknowledgements.get(key) === controller) this.pendingAcknowledgements.delete(key);
+    if (this.pendingFailures.get(key)?.controller === controller) this.pendingFailures.delete(key);
+    const retained = this.retainedLeases.get(key);
+    if (retained && exactDeliveryKey(retained) === exactDeliveryKey(delivery)) this.retainedLeases.delete(key);
+    const held = inFlightCallbacks.get(key);
+    if (held && exactDeliveryKey(held) === exactDeliveryKey(delivery)) inFlightCallbacks.delete(key);
+  }
+
+  private stopRenewingCallback(controller: AbortController): void {
+    this.ownershipLost.delete(controller);
+    this.ownershipUncertain.delete(controller);
+    this.controllers.delete(controller);
+    if (this.controllers.size === 0 && this.leaseTimer) {
+      clearTimeout(this.leaseTimer);
+      this.leaseTimer = undefined;
+    }
+  }
+
+  private stopLeaseRenewal(controller: AbortController): void {
+    this.controllers.delete(controller);
+    if (this.controllers.size === 0 && this.leaseTimer) {
+      clearTimeout(this.leaseTimer);
+      this.leaseTimer = undefined;
+    }
+  }
+
+  private abortForOwnershipLoss(controller: AbortController): void {
+    this.ownershipLost.add(controller);
+    this.stopLeaseRenewal(controller);
+    controller.abort();
+  }
+
+  private abortForOwnershipUncertainty(controller: AbortController): void {
+    this.ownershipUncertain.add(controller);
+    // Retain an unsettled exact fence through recoverable failure. A later
+    // definite lost result, terminal state or callback settlement removes it.
+    controller.abort();
+  }
+
+  private async abandonDeliveries(
+    deliveries: readonly ClaimedPromotionDelivery[],
+    event: string,
+  ): Promise<void> {
+    if (deliveries.length === 0) return;
+    try {
+      const abandoned = await this.databaseOperation(
+        this.store.abandon(this.pool, this.options.owner, deliveries),
+      );
+      this.logger.warn({ event, deliveries: deliveries.length, abandoned });
+    } catch {
+      this.logger.error({ event: `${event}_failed`, deliveries: deliveries.length });
+      throw new Error(event);
+    }
+  }
+
+  private async databaseOperation<T>(operation: Promise<T>): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    const result = await Promise.race([
+      operation.then(
+        (value) => ({ state: 'settled' as const, value }),
+        (error: unknown) => ({ state: 'failed' as const, error }),
+      ),
+      new Promise<{ state: 'timeout' }>((resolve) => {
+        timer = setTimeout(
+          () => resolve({ state: 'timeout' }),
+          this.options.databaseTimeoutMs,
+        );
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+    if (result.state === 'settled') return result.value;
+    if (result.state === 'failed') throw result.error;
+    throw new Error('promotion database operation timed out');
+  }
+
+  private async beforeDeadline<T>(
+    operation: Promise<T>,
+    deadline: number,
+  ): Promise<{ settled: true; value: T } | { settled: false }> {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      void operation.catch(() => undefined);
+      return { settled: false };
+    }
+    let timer: NodeJS.Timeout | undefined;
+    const result = await Promise.race([
+      operation.then(
+        (value) => ({ settled: true as const, value }),
+        () => ({ settled: false as const }),
+      ),
+      new Promise<{ settled: false }>((resolve) => {
+        timer = setTimeout(() => resolve({ settled: false }), remainingMs);
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+    return result;
+  }
+}

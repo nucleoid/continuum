@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pg, { type PoolConfig } from 'pg';
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { addMembership } from './memberships.js';
 import { runMigrations } from './migrator.js';
 import { createPrincipal } from './principals.js';
@@ -30,6 +30,15 @@ async function applyGrantScript(
   }
   await database.query(sql);
 }
+
+const isolatedCleanups: Array<() => Promise<void>> = [];
+afterEach(async () => {
+  const errors: unknown[] = [];
+  for (const cleanup of isolatedCleanups.splice(0)) {
+    try { await cleanup(); } catch (error) { errors.push(error); }
+  }
+  if (errors.length) throw new AggregateError(errors, 'Isolated fixture cleanup failed');
+}, 120_000);
 
 describe('issue 7 final remediation review 2 PostgreSQL proofs', () => {
   let pool: pg.Pool;
@@ -778,16 +787,19 @@ describe('issue 7 final remediation review 2 PostgreSQL proofs', () => {
       )).rows).toEqual([{ live_history: false, recovery_kind: 'superseded' }]);
     } finally {
       await fresh?.end();
-      await dropIsolatedTestDatabase(maintenance, databaseName);
-      for (const role of Object.values(roles)) {
-        await maintenance.query(`REVOKE ${quoteRole(role)} FROM CURRENT_USER`)
-          .catch(() => undefined);
-      }
-      for (const role of Object.values(roles).reverse()) {
-        await maintenance.query(`DROP ROLE IF EXISTS ${quoteRole(role)}`)
-          .catch(() => undefined);
-      }
-      await maintenance.end();
+      isolatedCleanups.push(async () => {
+        try {
+          await dropIsolatedTestDatabase(maintenance, databaseName);
+          for (const role of Object.values(roles)) {
+            await maintenance.query(`REVOKE ${quoteRole(role)} FROM CURRENT_USER`)
+              .catch(() => undefined);
+          }
+          for (const role of Object.values(roles).reverse()) {
+            await maintenance.query(`DROP ROLE IF EXISTS ${quoteRole(role)}`)
+              .catch(() => undefined);
+          }
+        } finally { await maintenance.end(); }
+      });
     }
   }, 60_000);
 

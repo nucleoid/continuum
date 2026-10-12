@@ -9,6 +9,7 @@ import { reconcilePgvectorProviderGrants } from './provider-lifecycle.js';
 import { createPrincipal } from './principals.js';
 import { getScopeByRef } from './scopes.js';
 import { addMembership } from './memberships.js';
+import { dropIsolatedTestDatabase } from './test-helpers.js';
 
 const databaseUrl = process.env.CONTINUUM_TEST_DATABASE_URL ?? 'postgres://continuum:continuum@localhost:5433/continuum';
 const name = (prefix: string) => `${prefix}_${randomUUID().replaceAll('-', '')}`;
@@ -85,18 +86,9 @@ async function isolated(run: (context: {
         closeTimer = setTimeout(() => reject(new Error('Fixture database clients did not close within 5 seconds')), 5_000);
       })]);
     } finally { if (closeTimer) clearTimeout(closeTimer); }
-    await root.query("SET statement_timeout='1s'");
-    const drainDeadline = Date.now() + 5_000;
-    for (;;) {
-      const sessions = (await root.query<{ sessions: number }>(
-        'SELECT count(*)::int AS sessions FROM pg_catalog.pg_stat_activity WHERE datname=$1', [database],
-      )).rows[0].sessions;
-      if (sessions === 0) break;
-      if (Date.now() >= drainDeadline) throw new Error(`Fixture database still has ${sessions} sessions after client shutdown`);
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    await root.query("SET statement_timeout='5s'");
-    await root.query(`DROP DATABASE ${q(database)}`);
+    // A disk-backed forced checkpoint observed during the full suite took
+    // 74 seconds. Keep each DROP bounded while allowing finite normal retries.
+    await dropIsolatedTestDatabase(root, database, { cleanupTimeoutMs: 90_000 });
     for (const role of roles) await root.query(`DROP ROLE IF EXISTS ${q(role)}`);
     await root.end();
     for (const directory of directories) await rm(directory, { recursive: true, force: true });

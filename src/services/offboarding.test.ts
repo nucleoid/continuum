@@ -708,10 +708,10 @@ describe('offboarding and erasure', () => {
     )).rows[0].run_id as string;
     const verifierSource = (await pool.query(
       `SELECT prosrc FROM pg_proc
-        WHERE oid = 'continuum_offboarding_lifecycle_state_is_erased(uuid)'::regprocedure`,
+        WHERE oid = 'continuum_offboarding_lifecycle_state_is_erased_pre_extensions(uuid)'::regprocedure`,
     )).rows[0].prosrc as string;
     expect(verifierSource.match(/target_run_id/g)).toHaveLength(1);
-    const exactVerifierQuery = verifierSource.replace('target_run_id', '$1::uuid');
+    const exactVerifierQuery = verifierSource.replaceAll('target_run_id', '$1::uuid');
     const plan = (await pool.query(
       `EXPLAIN (FORMAT JSON) ${exactVerifierQuery}`,
       [runId],
@@ -729,6 +729,24 @@ describe('offboarding and erasure', () => {
     expect(indexes).toContain('audit_log_offboarding_scope_ids_cursor_idx');
     expect(indexes).not.toContain('principal_offboarding_audit_requests_pkey');
     expect(indexes).not.toContain('audit_log_request_cursor_idx');
+    // The additive outbox wrapper calls this unchanged lifecycle predicate.
+    // Inspect both actual installed bodies; a security-definer call is not
+    // inlined by EXPLAIN and must not conceal the original audit index proof.
+    const outboxVerifier = (await pool.query(`SELECT prosrc FROM pg_proc
+      WHERE oid='continuum_offboarding_lifecycle_state_is_erased(uuid)'::regprocedure`)).rows[0].prosrc as string;
+    expect(outboxVerifier).toContain('continuum_offboarding_lifecycle_state_is_erased_pre_extensions(target_run_id)');
+    expect(outboxVerifier.match(/target_run_id/g)).toHaveLength(2);
+    const outboxPlan = (await pool.query(`EXPLAIN (FORMAT JSON) ${outboxVerifier.replaceAll('target_run_id', '$1::uuid')}`, [runId]))
+      .rows[0]['QUERY PLAN'][0].Plan as Record<string, unknown>;
+    const coreNodeCount = nodes.length;
+    visit(outboxPlan);
+    const outboxRelations = nodes.slice(coreNodeCount).map((node) => node['Relation Name']);
+    expect(outboxRelations).toContain('promotion_events');
+    expect(outboxRelations).toContain('promotion_event_deliveries');
+    const privacyIndex = await pool.query(`SELECT indexdef FROM pg_indexes WHERE schemaname=current_schema()
+      AND tablename='promotion_events' AND indexname='promotion_events_scope_privacy_idx'`);
+    expect(privacyIndex.rows[0].indexdef).toContain('(destination_scope_id, id)');
+
     expect(nodes.filter((node) =>
       node['Node Type'] === 'Seq Scan'
       && ['audit_log', 'audit_log_offboarding_scopes'].includes(String(node['Relation Name'])),

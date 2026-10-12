@@ -38,9 +38,20 @@ import { cliSupportRouter } from './routes/cli.js';
 import { supersedeRouter } from './routes/supersede.js';
 import { offboardingRouter } from './routes/offboarding.js';
 import { locksRouter } from './routes/locks.js';
-import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoordinationContractReady } from '../storage/provider-lifecycle.js';
+import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoordinationContractReady, requirePromotionOutboxReady } from '../storage/provider-lifecycle.js';
 import { tagVocabulariesRouter } from './routes/tag-vocabularies.js';
 import type { CaptureRegistry } from '../capture/plugin.js';
+import {
+  enrichmentConfigFromEnv,
+  RetrievalEnricherRegistry,
+  type EnrichmentOptions,
+} from '../extensions/retrieval.js';
+import { defaultExtensionRegistries } from '../extensions/index.js';
+import {
+  PromotionEventWorker,
+  promotionWorkerOptionsFromEnv,
+} from '../workers/promotion-events.js';
+import { PromotionWebhookRegistry } from '../extensions/promotion.js';
 
 export { createReadinessState } from './readiness.js';
 
@@ -65,6 +76,7 @@ export interface CompletionLog {
 
 export interface OperationalLogger extends ServiceLogger {
   info?(event: CompletionLog | Record<string, unknown>): void;
+  warn?(event: Record<string, unknown>): void;
 }
 
 export interface AppOptions {
@@ -80,6 +92,9 @@ export interface AppOptions {
   ingestConfig?: IngestConfig;
   authenticator?: Authenticator;
   captureRegistry?: CaptureRegistry;
+  retrievalEnrichers?: RetrievalEnricherRegistry;
+  promotionWebhooks?: PromotionWebhookRegistry;
+  enrichment?: Omit<EnrichmentOptions, 'logger'>;
 }
 
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
@@ -107,6 +122,9 @@ const defaultLogger: OperationalLogger = {
   },
   error(message, detail) {
     console.error(JSON.stringify({ message, detail }));
+  },
+  warn(event) {
+    console.warn(JSON.stringify(event));
   },
 };
 
@@ -307,11 +325,21 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   v0.use(ingestRouter(pool, provider, ingestConfig, opts.captureRegistry, relationThreshold, authenticator));
   v0.use(bearerAuth(pool, authenticator));
   v0.use(captureRouter(pool, provider, relationThreshold));
-  v0.use(recallRouter(pool, provider, logger));
+  const retrievalEnrichers = opts.retrievalEnrichers ?? new RetrievalEnricherRegistry();
+  const enrichment = opts.enrichment ?? enrichmentConfigFromEnv();
+  v0.use(recallRouter(pool, provider, logger, {
+    registry: retrievalEnrichers,
+    options: {
+      ...enrichment,
+      logger: {
+        warn: (event) => (logger.warn ?? defaultLogger.warn)!(event),
+      },
+    },
+  }));
   v0.use(memoriesRouter(pool));
   v0.use(agentsMdRouter(pool));
   v0.use(auditRouter(pool));
-  v0.use(cliSupportRouter(pool));
+  v0.use(cliSupportRouter(pool, opts.promotionWebhooks));
   v0.use(reviewQueueRouter(pool, opts.reviewHorizonDays));
   v0.use(insightsRouter(pool, provider, gapConfig, () => new Date((opts.clock ?? Date.now)())));
   v0.use(supersedeRouter(pool, provider));
@@ -362,6 +390,7 @@ async function main(): Promise<void> {
   const schemaOptions = { expectedSchema: applicationSchemaFromEnv() };
   await reconcilePgvectorProviderGrants(pool, schemaOptions);
   await requireCoordinationContractReady(pool, schemaOptions);
+  await requirePromotionOutboxReady(pool, schemaOptions);
   const authMode = authModeFromEnv();
   warnOnDevAuthMode(authMode);
   const authenticator = createAuthenticator(
@@ -372,6 +401,8 @@ async function main(): Promise<void> {
   const readiness = createReadinessState();
   const embeddingProvider = makeEmbeddingRouterFromEnv();
   await warnOnMissingEmbeddingRoutingScopes(pool, embeddingProvider);
+  const extensions = defaultExtensionRegistries();
+  const enrichmentShutdown = new AbortController();
   const app = createApp(pool, {
     embeddingProvider,
     readiness,
@@ -379,8 +410,25 @@ async function main(): Promise<void> {
     reviewHorizonDays: configuredReviewHorizonDays(),
     relationThreshold: relationThresholdFromEnv(),
     authenticator,
+    retrievalEnrichers: extensions.retrievalEnrichers,
+    promotionWebhooks: extensions.promotionWebhooks,
+    enrichment: { ...enrichmentConfigFromEnv(), signal: enrichmentShutdown.signal },
   });
-  await startRuntime(app, { port, readiness, closePool, shutdownTimeoutMs });
+  const promotionWorker = new PromotionEventWorker(
+    pool,
+    extensions.promotionWebhooks,
+    promotionWorkerOptionsFromEnv(`api:${process.pid}:${randomUUID()}`),
+  );
+  await startRuntime(app, {
+    port,
+    readiness,
+    workers: [
+      { stop: () => { enrichmentShutdown.abort(); } },
+      promotionWorker,
+    ],
+    closePool,
+    shutdownTimeoutMs,
+  });
   console.log(`Continuum API listening on :${port}`);
 }
 
@@ -396,11 +444,19 @@ function positiveIntegerEnv(name: string, fallback: number): number {
 }
 
 if (isDirectEntrypoint(import.meta.url)) {
-  void main().catch((error: unknown) => {
+  void main().catch(async (error: unknown) => {
     console.error(JSON.stringify({
       event: 'startup_failed',
       error: formatOperationalError(error),
     }));
     process.exitCode = 1;
+    // A rejected pre-listening readiness check still opened the shared pool.
+    // Drain its sockets so exitCode can terminate startup without forced exit.
+    try { await closePool(); } catch (cleanupError) {
+      console.error(JSON.stringify({
+        event: 'startup_cleanup_failed',
+        error: formatOperationalError(cleanupError),
+      }));
+    }
   });
 }

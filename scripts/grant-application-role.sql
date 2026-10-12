@@ -10,7 +10,7 @@
 
 -- Run as the migration owner after continuum-migrate. The role is deliberately
 -- not granted CREATE on the schema or any privilege on capability tables.
--- The transaction makes re-profiling an existing operator fail atomically.
+-- The transaction removes operator-only capabilities before checking the application profile.
 BEGIN;
 GRANT USAGE ON SCHEMA :"continuum_schema" TO :"continuum_app_role";
 
@@ -269,6 +269,8 @@ BEGIN
     'continuum_operator_list_coordination_privacy_repairs(uuid,uuid,uuid,integer)',
     'continuum_operator_list_coordination_privacy_repair_page(uuid,uuid,integer)',
     'continuum_operator_coordination_scope_privacy_state(uuid,uuid)',
+    'continuum_operator_scrub_promotion_scope(uuid,uuid,uuid,integer)',
+    'continuum_operator_set_promotion_webhook_ids(uuid,text[])',
     'continuum_operator_offboarding_actual_state_is_erased(uuid,uuid)'
   ] LOOP
     IF to_regprocedure(format('%I.%s', schema_name, signature)) IS NOT NULL THEN
@@ -325,6 +327,11 @@ BEGIN
   IF to_regclass(format('%I.tag_vocabularies',schema_name)) IS NOT NULL THEN
     EXECUTE format('GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE %I.tag_vocabularies TO %I',schema_name,target_role);
   END IF;
+  IF to_regclass(format('%I.promotion_events',schema_name)) IS NOT NULL
+    AND to_regclass(format('%I.promotion_event_deliveries',schema_name)) IS NOT NULL THEN
+    EXECUTE format('GRANT SELECT,INSERT ON TABLE %I.promotion_events TO %I',schema_name,target_role);
+    EXECUTE format('GRANT SELECT,INSERT,UPDATE ON TABLE %I.promotion_event_deliveries TO %I',schema_name,target_role);
+  END IF;
   IF to_regclass(format('%I.embedding_backfill_checkpoints',schema_name)) IS NOT NULL
     AND to_regclass(format('%I.embedding_backfill_failures',schema_name)) IS NOT NULL THEN
     EXECUTE format('GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE %I.embedding_backfill_checkpoints,%I.embedding_backfill_failures TO %I',
@@ -333,6 +340,14 @@ BEGIN
 END;
 $tag_profile$;
 
+DO $promotion_registry_readers$
+DECLARE schema_name TEXT:=current_setting('continuum.application_grant_schema'); target_role NAME:=current_setting('continuum.application_grant_target');
+BEGIN
+  IF to_regprocedure(format('%I.continuum_promotion_webhook_ids()',schema_name)) IS NOT NULL THEN
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_promotion_webhook_ids(),%I.continuum_promotion_outbox_is_ready() TO %I',schema_name,schema_name,target_role);
+  END IF;
+END;
+$promotion_registry_readers$;
 DO $provider_runtime_gate$
 DECLARE schema_name TEXT := current_setting('continuum.application_grant_schema');
         target_role NAME := current_setting('continuum.application_grant_target')::name;

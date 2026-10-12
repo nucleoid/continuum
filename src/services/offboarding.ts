@@ -759,6 +759,22 @@ export async function mapOwnedUserScope(
   } finally { client.release(); }
 }
 
+async function scrubPromotionScope(client: pg.PoolClient, actorId: string, principalId: string,
+  scopeId: string, batchSize: number): Promise<{ complete: boolean; processed: number; batch_full?: boolean }> {
+  const available = await client.query<{ installed: boolean; available: boolean }>(
+    `SELECT pg_catalog.to_regclass('promotion_events') IS NOT NULL AS installed,
+      pg_catalog.to_regprocedure('continuum_operator_scrub_promotion_scope(uuid,uuid,uuid,integer)') IS NOT NULL AS available`,
+  );
+  // Older schemas have no outbox. Once present, its erasure capability is mandatory.
+  if (!available.rows[0]?.installed) return { complete: true, processed: 0 };
+  if (!available.rows[0].available) throw new ServiceError('DEPENDENCY_UNAVAILABLE', 'Promotion privacy migration is required');
+  const result = await client.query<{ privacy: { complete: boolean; processed: number; batch_full?: boolean } }>(
+    `SELECT continuum_operator_scrub_promotion_scope($1::uuid,$2::uuid,$3::uuid,$4::integer) AS privacy`,
+    [actorId, principalId, scopeId, Math.min(batchSize, 1_000)],
+  );
+  return result.rows[0]?.privacy ?? { complete: false, processed: 0 };
+}
+
 const PRESERVED_AUDIT_OPERATIONS = [
   'principal_user_scope_mapped',
   'principal_user_scope_acknowledgement_replaced',
@@ -766,6 +782,7 @@ const PRESERVED_AUDIT_OPERATIONS = [
   'principal_offboarded',
   'principal_offboarding_repaired',
   'principal_offboarding_access_revoked',
+  'principal_promotion_privacy_repaired',
 ] as const;
 
 const AUDIT_EXPECTED_METADATA =
@@ -1390,6 +1407,15 @@ async function offboardPrincipalCore(
           ? initialOwnedPrivacy?.live_lease_until ?? null : null;
       }
     }
+    if (!dryRun && scrubBeforeVerification && wasOffboarded) {
+      const outboxPrivacy = await scrubPromotionScope(client, actor.id, principalId, scopeId, batchSize);
+      coordinationPrivacyComplete = coordinationPrivacyComplete && outboxPrivacy.complete;
+      coordinationPrivacyProgressed = coordinationPrivacyProgressed || outboxPrivacy.processed > 0;
+      coordinationPrivacyMutated = coordinationPrivacyMutated || outboxPrivacy.processed > 0;
+      if (!outboxPrivacy.complete && !outboxPrivacy.batch_full && coordinationPrivacyReason === null) {
+        coordinationPrivacyReason = 'lock_busy';
+      }
+    }
     let actualStateErased = false;
     // A bounded scrub must commit independently of the full-history predicate.
     // Verify on the next invocation once privacy is complete. Shared-role
@@ -1546,6 +1572,12 @@ async function offboardPrincipalCore(
           ? new Date(coordinationPrivacy.rows[0].privacy.blocked_until!) : null;
         coordinationPrivacyReason = privacyBatchReason(coordinationPrivacy.rows[0]?.privacy);
         aliasCount = aliasDelete.rowCount ?? 0;
+        const outboxPrivacy = await scrubPromotionScope(client, actor.id, principalId, scopeId, batchSize);
+        coordinationPrivacyComplete = coordinationPrivacyComplete && outboxPrivacy.complete;
+        coordinationPrivacyProgressed = coordinationPrivacyProgressed || outboxPrivacy.processed > 0;
+        if (!outboxPrivacy.complete && !outboxPrivacy.batch_full && coordinationPrivacyReason === null) {
+          coordinationPrivacyReason = 'lock_busy';
+        }
         if (ownedCoordinationComplete && coordinationPrivacyComplete) {
           await writeOffboardingRun(client, principalId, actor.id, 'scope_complete');
         }
@@ -1738,6 +1770,22 @@ async function offboardPrincipalCore(
     const durableProgress = durableOffboardingProgressed(
       durableProgressBefore, currentRun.rows[0] as Record<string, unknown>,
     );
+    if (!completionReady && coordinationPrivacyReason === 'lock_busy'
+        && !durableProgress && !coordinationPrivacyProgressed
+        && memoryCandidates === 0 && auditedRows === 0 && auditedQueries === 0
+        && (targetEmbeddingDelete.rowCount ?? 0) === 0
+        && membershipCount === 0 && aliasCount === 0 && entraCount === 0) {
+      // A skipped locked outbox row is an incomplete proof, not a new erasure
+      // batch. Preserve the last durable counters after all access/approval
+      // checks and cursor phases have run without changing their state.
+      await client.query('COMMIT');
+      return { ...baseResult, dryRun: false, alreadyOffboarded: false, complete: false, progressed: false,
+        blockedUntil: coordinationPrivacyBlockedUntil, reason: coordinationPrivacyReason,
+        progress: { batch: Number(run.rows[0].batches), batchSize,
+          memoriesProcessed: Number(run.rows[0].memories_processed),
+          auditRowsProcessed: Number(run.rows[0].audit_rows_processed),
+          memoriesRemaining: memoryComplete ? 0 : 1, auditRowsRemaining: remainingAudit ? 1 : 0 } };
+    }
     const progressUpdate = await writeOffboardingRun(
       client, principalId, actor.id, 'add_progress', {
         memories: memoryBatch, audit_rows: auditedRows,

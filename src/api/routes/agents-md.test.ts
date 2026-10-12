@@ -1,9 +1,10 @@
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import type pg from 'pg';
 import request from 'supertest';
 import { makeTestPool, resetData } from '../../storage/test-helpers.js';
 import { createApp } from '../server.js';
+import { RetrievalEnricherRegistry } from '../../extensions/retrieval.js';
 import { createPrincipal } from '../../storage/principals.js';
 import { createScope, getScopeByRef } from '../../storage/scopes.js';
 import { addMembership } from '../../storage/memberships.js';
@@ -108,6 +109,31 @@ describe('GET /api/v0/agents-md', () => {
       me, orgMemory, teamMemory, projectMemory, secretMemory, roleMemory, contextMemory,
     };
   }
+
+  it('keeps generator bytes, hash, selected IDs and read audit identical with enabled retrieval enrichment', async () => {
+    await seed();
+    const url = '/api/v0/agents-md?project=booking-engine&team=payments&limit=1';
+    const first = await request(app).get(url).set('Authorization', 'Bearer entra:user:bundle');
+    expect(first.status).toBe(200);
+    const initial = await pool.query(`SELECT id, memory_id, scope_id, query, metadata FROM audit_log WHERE action='read' ORDER BY id`);
+    const registry = new RetrievalEnricherRegistry();
+    const enrich = vi.fn(async () => []);
+    registry.register({ id: 'generator-review', enrich });
+    const enabled = createApp(pool, { retrievalEnrichers: registry });
+    const second = await request(enabled).get(url).set('Authorization', 'Bearer entra:user:bundle');
+    expect(second.status).toBe(200);
+    expect(second.text).toBe(first.text);
+    expect(second.headers.etag).toBe(first.headers.etag);
+    expect(second.headers.etag).toBe(`"${createHash('sha256').update(first.text, 'utf8').digest('hex')}"`);
+    expect(enrich).not.toHaveBeenCalled();
+    const following = await pool.query(`SELECT memory_id, scope_id, query, metadata FROM audit_log WHERE action='read' AND id>$1::bigint ORDER BY id`, [initial.rows.at(-1).id]);
+    const normalized = (rows: Record<string, any>[]) => rows.map((row) => {
+      const { request_id: _requestId, ...metadata } = row.metadata;
+      return { memory_id: row.memory_id, scope_id: row.scope_id, query: row.query, metadata };
+    });
+    expect(normalized(following.rows)).toEqual(normalized(initial.rows));
+    expect(following.rows[0].metadata).toMatchObject({ view: 'agents-md', vector_status: 'not_applicable', record_kind: 'summary', transport: 'rest', hits: 4 });
+  });
 
   it('always includes org and the principal role scopes, with no project/team', async () => {
     await seed();

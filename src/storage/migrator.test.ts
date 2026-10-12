@@ -54,14 +54,21 @@ async function grantApplicationRole(
   await pool.query(sql);
 }
 
+const isolatedCleanups: Array<() => Promise<void>> = [];
+
 afterEach(async () => {
+  const errors: unknown[] = [];
+  for (const cleanup of isolatedCleanups.splice(0)) {
+    try { await cleanup(); } catch (error) { errors.push(error); }
+  }
   await Promise.all(pools.splice(0).map((pool) => pool.end()));
   await Promise.all(
     directories.splice(0).map((directory) =>
       rm(directory, { recursive: true, force: true }),
     ),
   );
-});
+  if (errors.length) throw new AggregateError(errors, 'Isolated fixture cleanup failed');
+}, 120_000);
 
 describe('runMigrations', () => {
   it('serializes pgvector bootstrap when concurrent fresh migrations use different public-less schemas', async () => {
@@ -162,9 +169,12 @@ describe('runMigrations', () => {
         endings,
         new Promise((resolve) => setTimeout(resolve, 5_000)),
       ]);
-      await dropIsolatedTestDatabase(admin, database);
-      await endings;
-      await admin.end();
+      isolatedCleanups.push(async () => {
+        try {
+          await dropIsolatedTestDatabase(admin, database);
+          await endings;
+        } finally { await admin.end(); }
+      });
     }
   }, 60_000);
 

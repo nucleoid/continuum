@@ -1,550 +1,222 @@
-# Continuum Architecture (v0)
-
-Status: design, pre-implementation. This document is the source of truth for the v0 schema, scope model, capture API, retrieval surface, and extension points.
-
-## Design principles
-
-1. **Vendor-agnostic at every layer**. No memory ever requires a specific LLM provider, IDE, or embedding model to be read.
-2. **Scopes are first-class**. Every memory belongs to exactly one scope. Read access is inherited; write access is explicit.
-3. **Capture is plugin-shaped**. Every ingestion source is interchangeable. Adding a new one does not modify core.
-4. **Audit everything**. Every read and every write is logged. The audit log is queryable.
-5. **Decay is per-type**. A decision does not decay like a context snapshot. The taxonomy drives the lifecycle.
-6. **Build for the next milestone, not the next decade**. No speculative interfaces.
-
-## Coordination domain
-
-Coordination leases are a dedicated PostgreSQL domain, separate from memories,
-embeddings, capture, recall, and generated AGENTS.md content. The public
-contract is documented in [docs/coordination.md](./docs/coordination.md).
-
-`coordination_resources` preserves a monotonic `BIGINT` fencing counter for
-each unreclaimed scope/resource pair, with an owner-only scope floor preserving
-monotonicity after reclaim or erasure. `coordination_leases` records lease
-generations whose identity and token are immutable while expiry and release
-time are lifecycle fields.
-`coordination_operation_receipts` stores typed idempotency outcomes, while
-scope and principal usage tables enforce hard resource and retained-receipt
-limits. Each principal has one 10,000-receipt budget across all operation types,
-with receipts retained for at least 24 hours. Saturation rejects every fresh
-mutation, including release, with `COORDINATION_QUOTA_EXCEEDED` (409); exact
-authorized replays remain available. Receipts are not evicted to admit a fresh
-operation. Bounded operator maintenance
-uses durable cleanup eligibility rather than rescanning current expired leases,
-and may reclaim inactive keys after preserving the scope fencing floor.
-
-Only current explicit writer/admin membership on the exact scope grants access.
-A fresh coordination mutation locks principal, membership and Entra freshness
-state, then its request and receipt state. Bounded cleanup and the principal
-usage lock precede resource and lease locks, so mutations sharing a principal
-can serialize on its quota row. It samples `clock_timestamp()` after row
-waits and revalidates authorization and cancellation immediately before commit.
-Lease mutation, receipt, quota, and bounded metadata commit together. Resource
-audit metadata records its UTF-8 byte count without the resource key or digest.
-Owned user-scope coordination rows are erased in
-bounded resumable phases after preserving the scope fencing floor. Team,
-project, and organization history is detached to a noninteractive principal
-with fresh run identifiers and random payload hashes.
-
-REST and MCP are thin naming adapters over one service. REST uses camelCase and
-MCP uses snake_case. Contention is success, stale or denied generations are
-masked as `LEASE_LOST`, and another holder's identifiers are never returned.
-Server-side lock and statement timeouts bound waits without allowing a locally
-timed-out mutating query to continue ambiguously.
-
-This service supplies ownership coordination, not end-to-end side-effect
-fencing. Downstream systems must validate fencing tokens for them to have
-effect. GitHub and ordinary filesystems do not do this natively, so
-orchestrator-only publication, exact-head checks, and branch protection remain
-required.
-
-Runtime startup verifies the tenant's registered pgvector role profiles in a
-bounded server-side transaction without changing live grants. Migration-owner
-verification fails promptly when an online migrator owns the advisory key;
-explicit owner grant commands perform permission reconciliation. Existing
-OID-bound sync identities retain their hardened installation and retirement
-rules during provider-profile upgrades. Privacy erasure keeps its operator and
-identity authorization and deletes stored vectors without depending on
-provider execution grants. See `docs/offboarding.md` for profile preflight,
-grant convergence, and restart order.
-
-## Scope model
-
-Five scopes:
-
-| Scope | Cardinality | Example contents |
-|-------|-------------|------------------|
-| `org` | one per deployment | architectural decisions, security policies, naming conventions, "we use ADO not Jira" |
-| `team:{name}` | many | squad runbooks, on-call notes, sprint context |
-| `project:{name}` | many | per-codebase API quirks, deployment gotchas, business rules |
-| `user:{id}` | one per user | personal scratch, "what was I doing yesterday", preferences |
-| `role:{name}` | many | cross-cutting (security, design, ops, PM) |
-
-**Write rule**: every memory is written to exactly one scope. The writer must be a member of that scope.
-
-**Read rule**: a `user` reads its own `user` scope plus every `team`, `project`, and `role` scope it belongs to, plus `org`. Scope membership is sourced from Entra ID groups (or a configurable equivalent).
-
-**Promotion**: a memory can be promoted to a higher scope via an explicit `PromoteMemory` operation. Promotion requires an approver (lead for `user` to `team`, architect or org admin for `team` to `org`). Promotion creates a new record in the destination scope and marks the source as `promoted_to: <new_id>`.
-
-## Memory taxonomy
-
-Five types. Each type has its own decay rule and review cadence.
-
-| Type | Decay | Review |
-|------|-------|--------|
-| `fact` | re-verified every 90 days; flagged stale if verification fails | owner re-confirms |
-| `decision` | does not decay; immutable after write | owner can supersede with new decision linked by `supersedes_id` |
-| `context` | aggressive: half-life of 14 days for `user` scope, 60 days for `team`/`project` | auto-archived past threshold |
-| `playbook` | versioned; current version always live; reviewed every 180 days | owner sign-off recorded |
-| `relationship` | re-verified every 180 days against source-of-truth (org chart) | auto-flagged if mismatch |
-
-## Storage schema (PostgreSQL + pgvector)
-
-```sql
--- Identity and scope membership come from Entra; we cache for query speed.
-CREATE TABLE principals (
-  id              UUID PRIMARY KEY,
-  external_id     TEXT NOT NULL UNIQUE,  -- Entra object id, or service-account id
-  kind            TEXT NOT NULL,         -- 'user' | 'service'
-  display_name    TEXT NOT NULL,
-  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE TABLE scopes (
-  id              UUID PRIMARY KEY,
-  kind            TEXT NOT NULL,         -- 'org' | 'team' | 'project' | 'user' | 'role'
-  name            TEXT NOT NULL,         -- '' for org, otherwise the scope name
-  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (kind, name)
-);
-
-CREATE TABLE scope_memberships (
-  principal_id    UUID NOT NULL REFERENCES principals(id),
-  scope_id        UUID NOT NULL REFERENCES scopes(id),
-  role            TEXT NOT NULL,         -- 'reader' | 'writer' | 'admin'
-  added_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (principal_id, scope_id)
-);
-
-CREATE TABLE memories (
-  id              UUID PRIMARY KEY,
-  scope_id        UUID NOT NULL REFERENCES scopes(id),
-  type            TEXT NOT NULL,         -- 'fact' | 'decision' | 'context' | 'playbook' | 'relationship'
-  title           TEXT NOT NULL,
-  body            TEXT NOT NULL,
-  metadata        JSONB NOT NULL DEFAULT '{}'::jsonb,
-  tags            TEXT[] NOT NULL DEFAULT '{}',  -- controlled vocabulary, validated
-  author_id       UUID NOT NULL REFERENCES principals(id),
-  source          TEXT NOT NULL,         -- capture plugin id, e.g. 'github-pr', 'ado-workitem', 'terminal-summary', 'manual'
-  source_ref      TEXT,                  -- external identifier, e.g. PR url or work-item id
-  state           TEXT NOT NULL DEFAULT 'live',  -- 'live' | 'stale' | 'archived' | 'promoted'
-  supersedes_id   UUID REFERENCES memories(id),
-  promoted_to_id  UUID REFERENCES memories(id),
-  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  expires_at      TIMESTAMPTZ,           -- type-dependent
-  last_verified   TIMESTAMPTZ
-);
-
-CREATE INDEX memories_scope_state_idx ON memories (scope_id, state);
-CREATE INDEX memories_type_idx        ON memories (type);
-CREATE INDEX memories_tags_gin        ON memories USING gin (tags);
-CREATE INDEX memories_metadata_gin    ON memories USING gin (metadata);
-
-CREATE TABLE tag_vocabularies (
-  scope_kind  TEXT NOT NULL,
-  tag         TEXT NOT NULL,
-  description TEXT NOT NULL DEFAULT '',
-  created_by  UUID REFERENCES principals(id) ON DELETE RESTRICT,
-  is_system   BOOLEAN NOT NULL DEFAULT false,
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (scope_kind, tag)
-);
-
-CREATE TABLE memory_embeddings (
-  memory_id       UUID NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
-  provider        TEXT NOT NULL,         -- 'ollama:nomic-embed-text', 'voyage-3', etc.
-  dim             INT  NOT NULL,
-  embedding       VECTOR,                -- pgvector
-  embedded_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (memory_id, provider, dim)
-);
-
-CREATE INDEX memory_embeddings_ivf ON memory_embeddings USING ivfflat (embedding vector_cosine_ops);
-
--- Deterministic provider input failures are durable operational state. Audit
--- retention may remove their corresponding event rows, so backfill resume
--- must not use audit_log as its retry-suppression store.
-CREATE TABLE embedding_backfill_failures (
-  memory_id      UUID NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
-  provider       TEXT NOT NULL,
-  dim            INT NOT NULL CHECK (dim > 0),
-  disposition    TEXT NOT NULL CHECK (disposition IN ('durable', 'suspect')),
-  reason         TEXT NOT NULL,
-  failed_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (memory_id, provider, dim)
-);
-
-CREATE TABLE embedding_backfill_checkpoints (
-  provider       TEXT NOT NULL,
-  dim            INT NOT NULL,
-  scope_filter   TEXT NOT NULL DEFAULT '',
-  cursor         UUID,
-  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (provider, dim, scope_filter)
-);
-
-CREATE TABLE audit_log (
-  id              BIGSERIAL PRIMARY KEY,
-  at              TIMESTAMPTZ NOT NULL DEFAULT now(),
-  principal_id    UUID NOT NULL REFERENCES principals(id),
-  action          TEXT NOT NULL,         -- 'read' | 'write' | 'promote' | 'archive' | 'verify'
-  memory_id       UUID,
-  scope_id        UUID,
-  query           TEXT,
-  metadata        JSONB
-);
-
-CREATE INDEX audit_log_principal_idx ON audit_log (principal_id, at DESC);
-CREATE INDEX audit_log_memory_idx    ON audit_log (memory_id);
-```
-
-## Capture API (v0)
-
-The authenticated manual capture endpoint is shared by REST and MCP callers.
-
-```
-POST /api/v0/capture
-Authorization: Bearer <token>
-Content-Type: application/json
-
-{
-  "scope":      { "kind": "project", "name": "booking-engine" },
-  "type":       "context",
-  "title":      "Started branch feature/checkout-v2 off main",
-  "body":       "Working on the new checkout flow. PR #4421 in flight, blocked on Security Reviewer review.",
-  "tags":       ["branch", "session"],
-  "source":     "github-branch",
-  "source_ref": "https://github.com/exampleorg/booking-engine/tree/feature/checkout-v2",
-  "metadata":   { "branch": "feature/checkout-v2", "base": "main" }
-}
-```
-
-Response:
-```
-{
-  "id": "01HXY...",
-  "scope_id": "...",
-  "expires_at": "2026-06-16T02:44:05Z",
-  "embedded": true,
-  "related": []
-}
-```
-
-Validation rules:
-- `scope` must exist; caller must have `writer` role on it.
-- `type` must be valid; `expires_at` is computed from type + scope kind.
-- `tags` are trimmed, lowercased, bounded, and validated against the controlled
-  vocabulary for the scope kind. Org admins manage vocabularies through REST or
-  CLI. Unknown tags fail with `UNKNOWN_TAGS` before embedding or persistence.
-- `source` must be a registered capture plugin id or `"manual"`.
-
-When embedding is configured, capture computes the new vector once and probes
-at most five live, unexpired memories from the target scope plus org using the
-same provider and dimension. The default cosine-similarity threshold is 0.92
-and can be changed with `CONTINUUM_RELATION_THRESHOLD` (0 through 1). Exact
-normalized title and body matches are `possible-duplicate`. Nonidentical
-fact/fact and decision/decision matches are `possible-conflict`; all other
-matches are `possible-duplicate`. These are similarity candidates, not claims
-that content contradicts, and capture never mutates or supersedes an existing
-memory.
-
-`metadata.related` is reserved for Continuum-owned relation data. REST, MCP,
-and service callers that supply that key receive `INVALID_INPUT`; callers
-cannot forge candidate metadata. Promotion removes stored `related` metadata
-because candidate IDs were authorized and ranked for the source scope, not the
-destination scope.
-
-REST and MCP capture responses include the same safe `related` array. Each
-stored candidate contains only `id`, `similarity`, `relation`, `provider`,
-`threshold`, and `detectedAt`. Provider or embedding-storage failure is
-nonblocking: the memory and write audit still commit, `embedded` is false, and
-the audit contains only `EMBEDDING_FAILED`. Candidate probe or metadata
-persistence failure is also nonblocking: the valid provider embedding remains
-stored, `embedded` is true, `related` is empty, and the audit contains only
-`RELATION_DETECTION_FAILED`. With no serializing lock, two concurrent duplicate
-captures may both miss each other in v0; a later reconciliation sweep can
-address that limitation.
-
-Relation candidates are not surfaced in the review queue in issue #15. Any
-future issue #12 decision workflow must reauthorize candidate IDs for its
-caller and revalidate scope, lifecycle state, expiry, provider, dimension, and
-relation before acting. Stored advisory metadata is not durable authorization
-and never triggers automatic supersede, reject, or state mutation.
-
-Provider webhooks enter through `POST /api/v0/ingest/:pluginId`, which verifies
-provider credentials before dispatching to the built-in capture registry. The
-route binds source to the selected plugin, resolves its configured service
-principal, requires explicit writer or admin membership on every target scope,
-and reuses the shared capture service. Delivery identities are durable: a new
-capture returns `202`, a valid ignored event returns `204`, and a completed
-replay returns `200` with the original memory IDs. Reusing an idempotency key
-with different request bytes fails closed. GitHub delivery identity is derived
-from the signed request bytes instead of its unsigned delivery header. Derived
-embedding provenance is appended as a new audit row; committed audit rows are
-not updated. See
-[`docs/webhook-ingestion.md`](./docs/webhook-ingestion.md).
-
-## Retrieval API (v0)
-
-```
-POST /api/v0/recall
-Authorization: Bearer <token>
-Content-Type: application/json
-
-{
-  "query":   "where is the checkout retry policy defined",
-  "scopes":  ["project:booking-engine", "team:payments", "org"],
-  "types":   ["fact", "decision", "playbook"],
-  "limit":   10
-}
-```
-
-Response includes ranked memories with `score`, `scope`, `type`, `source_ref`, and a short `excerpt`. Reading is logged to `audit_log` per principal.
-
-Search is hybrid: vector similarity on `memory_embeddings` plus full-text on `memories.body`, fused by reciprocal rank fusion. Scope filter is applied pre-rank.
-Routed vector arms run concurrently under one shared overall deadline. Its
-implicit value is the longest configured routed-provider timeout, capped at 30
-seconds; each provider also retains its local request timeout. A provider or vector
-query failure degrades only that arm to full-text search and is returned as
-sanitized retrieval diagnostics. Provider qualification is materialized before
-distance ordering so rows from another provider cannot consume approximate-index
-candidates and underfill the requested route. This makes the provider arm an
-exact scan of that provider's rows rather than an ANN lookup; the shared
-statement deadline bounds recall degradation as the table grows. Deployments
-that outgrow exact provider scans need provider-specific vector partitions or
-indexes before removing that correctness fence. AGENTS.md generation remains deterministic
-scope-ordered retrieval and does not depend on embedding availability.
-Every serving query also excludes memories whose `expires_at` is at or before
-the database's current time. The full-text and vector candidate queries apply
-this filter before ranking, and recall hydration repeats it so a memory that
-expires while a request is in flight is not returned. The AGENTS.md generator
-uses the same database-clock rule. A null `expires_at` remains non-expiring.
-
-## AGENTS.md generator
-
-```
-GET /api/v0/agents-md?project=booking-engine&team=payments
-```
-
-Returns a markdown document containing:
-1. The `org` section (always included).
-2. The requested `project` scope.
-3. The requested `team` scope.
-4. Any `role` scopes the requesting principal belongs to.
-
-Memory selection is tuned for "bootstrap an agent": prefers `playbook` and `decision` over `context`, prefers high-score retrievals against a configured set of "what should an agent know on day one" queries per scope.
-
-Output is plain markdown. No vendor-specific tokens. Suitable to drop at the root of any repo and have any agent read first.
-
-The authenticated REST response carries a private, deterministic ETag equal to
-the quoted lowercase SHA-256 digest of the exact rendered UTF-8 bytes. It
-honours strong, weak, multiple, and wildcard `If-None-Match` validators for
-bodyless 304 responses. The authenticated freshness endpoint and
-`continuum.agents_md_fresh` MCP tool compare a caller-supplied digest with the
-current bundle and return only `{ "fresh": boolean }`. They use the same scope
-selection, ACLs, expiry rules, type filters, limits, and rendering path as the
-document. Historical manifests and repository writes are not part of this
-contract; repository automation remains an external authenticated consumer.
-See [docs/agents-md-freshness.md](./docs/agents-md-freshness.md).
-
-The generated document treats memory content as contributed reference data, not
-as system policy. Every entry carries its scope, memory ID, source, author ID,
-and source reference. Titles, provenance values, and bodies are rendered with
-deterministic Markdown and HTML punctuation escaping after CRLF normalization;
-control and Unicode format characters are shown as explicit code-point text.
-Bodies retain every line, including blanks, inside a blockquoted data container
-with generated begin and end delimiters. Each contributed line has an explicit
-`DATA:` prefix so contributed text cannot imitate a generated boundary. This
-prevents contributed text from creating headings, lists, links, HTML, or fences
-outside its entry while preserving the content and the renderer's existing
-section and ranking order.
-
-This formatting is a defense-in-depth trust boundary, not a semantic prompt
-injection filter. Instruction-like natural language remains readable inside the
-data container, so consumers must continue to treat it as untrusted reference
-material. The endpoint, MIME type, and storage schema are unchanged, but clients
-that compare exact generated output must accept the hardened format. Rendering
-happens on read, so existing memories need no backfill.
-
-## Capture plugins (v0 set)
-
-Each plugin lives in `src/capture/{plugin}/`, registers an id, and posts to the internal capture API with a service-account token.
-
-1. `github-pr`: webhook on PR merged. Summarises body + review thread via configured LLM. Writes `context` to `project` scope.
-2. `ado-workitem`: webhook on work-item updated. Summarises comments and state changes. Writes `context` to `project` scope (or `decision` if a "decision" label is present).
-3. `github-branch`: webhook on branch ref created. Writes `context` to author's `user` scope.
-4. `deploy-event`: CD pipeline webhook. Writes `fact` to `project` scope ("v1.42 deployed to PROD at <time>, PR #X").
-5. `terminal-summary`: receives end-of-session summary from an agent hook. Writes `context` to author's `user` scope. The agent hook is published as a small shell helper and an MCP server method.
-6. `teams-chat` (v1.5, gated on Security Reviewer signoff + consent flow): Microsoft Graph subscription on opted-in channels. Extracts decisions and Q&A. Writes `decision` or `fact` to `team` scope.
-
-## MCP server surface
-
-Methods:
-- `continuum.capture(scope, type, title, body, ...)`
-- `continuum.recall(query, scopes?, types?, limit?)`
-- `continuum.get_memory(memory_id)`
-- `continuum.list_memories(scope?, type?, state?, limit?, offset?)`
-- `continuum.supersede(superseded_id, title, body, ...)`
-- `continuum.decision_history(decision_id)`
-- `continuum.promote(memory_id, target_scope)`
-- `continuum.verify(memory_id, still_true: bool, note?)`
-- `continuum.list_scopes()`
-- `continuum.agents_md(project?, team?, limit?)`
-- `continuum.agents_md_fresh(hash, project?, team?, limit?)`
-- `continuum.gaps(since?, limit?, min_frequency?, threshold?)`
-
-ACLs are enforced server-side from the bearer token's principal. The MCP client never sees memories outside its caller's read set.
-
-`continuum.ensure_scope` is a tenant-administration operation. Every scope kind,
-including the singleton org scope, requires an explicit `admin` membership on
-org. The initial org admin is provisioned through a trusted operator path after
-the migration seeds org; MCP has no bootstrap bypass. Successful ensure calls
-are audited even when the scope already exists, and concurrent calls converge
-on one scope without issuing no-op updates. The checked operator procedure is
-documented in `docs/scope-provisioning.md`; running MCP processes must be
-restarted to load this policy.
-
-This authorization is enforced at Continuum's service boundary. The v0 stdio
-MCP principal and REST bearer identity remain self-asserted placeholders until
-Entra validation lands in M4, so database and process-launch access remain
-trusted administrative capabilities rather than security boundaries. The v0
-REST bearer is the principal `external_id`; org-admin bootstrap therefore uses
-a high-entropy identity and requires trusted-network REST restriction.
-
-## Shared service layer
-
-REST, MCP, and the AGENTS.md generator share canonical scope and access resolution under `src/services/`. Transport adapters parse protocol-specific input and serialize their existing wire formats. Services own scope validation, ACL decisions, persistence orchestration, and audit policy.
-
-The org scope is implicitly readable by every authenticated principal across recall and AGENTS.md generation. Other scopes require membership for every read path. Every source mutation requires an explicit `writer` or `admin` membership on that source scope: this includes verification updates (`state`, `last_verified`, and `expires_at`) and promotion (`state` and `promoted_to_id`). Authorship, implicit org access, and explicit `reader` membership are read-only. Promotion additionally requires `admin` on an org destination or `writer`/`admin` on any other destination. Lifecycle authorization is checked inside the mutation transaction with membership rows locked so concurrent revocation has deterministic ordering. Verification and promotion lock the memory row before locking source membership, so they serialize with one another and concurrent membership changes without reversing lock order. Verification checks source membership before reporting a terminal-state conflict, preventing unauthorized callers from learning whether a memory is promoted or archived. It rejects terminal states so it cannot overwrite a concurrent promotion or archive. For a live or stale memory, `still_true=true` moves the memory to `live` and renews its expiry from the verification instant; this is the recovery path for a stale memory that its owner re-confirms. `still_true=false` moves it to `stale` without renewing expiry. Capture commits the memory mutation and required write audit in one transaction. The embedding provider network call happens before `BEGIN`; the vector insert and advisory relation metadata update use separate transaction savepoints so candidate failures cannot roll back a valid embedding. A provider or embedding-storage failure is reduced to the safe `EMBEDDING_FAILED` code. A candidate probe or metadata-storage failure is reduced to `RELATION_DETECTION_FAILED`. In either case the memory and its audit may still commit together. Recall auditing is required; results are not returned when its audit entry cannot be persisted. Service errors retain internal causes for server-side diagnostics but transports serialize only stable codes and safe public messages.
-
-Decision supersession requires explicit writer or admin membership on the
-decision scope. Only a `live` decision may be superseded; a `stale` decision
-must first be verified back to `live`, and attempting to supersede it returns a
-conflict. The write path makes missing and unreadable predecessor IDs
-indistinguishable, while a caller who can read the predecessor but lacks writer
-or admin membership receives a forbidden response. It locks the live
-predecessor, creates one linked decision in the same scope, archives the
-predecessor, and writes both audits in one transaction. The schema prevents
-self-links and branching. Supersession stores Continuum-owned `related: []`
-metadata and rejects caller-supplied `metadata.related`; issue #15 relation
-candidates remain advisory and never authorize or trigger supersession. After
-commit, provider I/O embeds the new chain head outside the write transaction.
-The successor vector, archived-vector removal, and a bounded provider/status
-audit then commit together. Provider, post-commit pool, vector-storage, or
-derived-audit failure returns `EMBEDDING_FAILED`; the archived vector is already
-deleted transactionally with supersession, and the live successor remains
-available to full-text recall. A failed outcome
-audit is best-effort because the database failure may also make observability
-unavailable. If a local-only route has no local provider, a best-effort derived
-audit records `embedding_policy: "local-only-unavailable"`; the successor stays
-full-text-only and is never sent to a hosted provider.
-Recall and AGENTS.md serve only the live head and may expose its predecessor ID,
-never the archived content. Decision history is read-authorized, audited,
-cycle-safe, and returned oldest to newest with the current head ID.
-
-### Transport error and audit contracts
-
-REST errors use `{ "code": "...", "error": "..." }` with the HTTP status derived from the stable service code. Request-schema failures use `INVALID_INPUT`; malformed JSON uses `INVALID_INPUT`; bodies above the 1 MB parser limit use `PAYLOAD_TOO_LARGE`. No raw database or provider message is included. MCP tool failures set `isError: true` and return `{ "error": { "code": "...", "message": "..." } }` as JSON text. The MCP envelope is intentionally different because MCP tool results are content blocks rather than HTTP responses. Successful REST and MCP response shapes remain transport-specific and unchanged.
-
-Capture write-audit metadata is `{ source, type, embedded }`. When embedding fails, it additionally contains `embedding_error_code: "EMBEDDING_FAILED"`; when advisory relation work fails, it contains `relation_error_code: "RELATION_DETECTION_FAILED"`. Raw provider messages, database details, and captured memory text are never copied into audit metadata. Promotion audit metadata contains `destination_id`. Verification audit metadata contains `still_true` and nullable `note`; it is committed atomically with the verification update and is absent when verification fails. Recall audit metadata contains scope count, effective scope IDs, hit count, and whether vector recall was requested. Effective scope IDs let derived knowledge-gap resolution report exact scope fidelity for new requests; historical rows without them remain `unknown`. Knowledge-gap reports write one query-free `read` audit with `metadata.view: "insights-gaps"`; their internal resolution checks do not emit recursive read audits.
-
-## Extension points
-
-Five interfaces. Engram and any future system integrate through these. Continuum core has zero knowledge of Engram.
-
-1. **CapturePlugin**: implements `capture(event) -> CaptureRecord[]`. Registered at startup. Engram could write a plugin that turns its code-archaeology findings into `decision` memories.
-2. **RetrievalEnricher**: receives a `RecallResult` and may attach additional context. Engram could attach work-item linkages to results without Continuum knowing what a work item is.
-3. **PromotionWebhook**: fires on every promotion. Engram could subscribe and re-index the AGENTS.md output for affected repos.
-4. **EmbeddingProvider**: implements `embed(texts) -> vectors`. Default impls: `ollama`, `voyage`, `openai`. Sensitive scopes pin to local-only providers.
-5. **Transport**: today MCP + REST + AGENTS.md. New transports (Teams bot, Slack command) implement this and reuse all ACL/audit machinery.
-
-## Authentication
-
-- End-user auth: Entra ID SSO (OIDC). Discovery and JWKS validation enforce
-  signature, tenant issuer, audience, and expiry. The immutable `oid` claim is
-  principal identity; `name` is mutable display metadata.
-- Service accounts: high-entropy API keys are stored only as SHA-256 hashes,
-  expire after the quarterly rotation window, and can be restricted to one
-  capture source. Entra service tokens require a pre-provisioned service
-  principal and never create or reactivate one during authentication.
-- All tokens map to a `principal` row. Audit log references principals, never raw tokens.
-
-Principal disablement deactivates all memberships and permanently revokes all
-current service keys at the database boundary. Explicit audited reactivation
-does not restore either. Database triggers also prevent deletion, demotion, or
-disablement of the final effective manually managed org administrator.
-
-Reactivation has two audit records with distinct trust semantics. Its database
-capability validates that a presented UUID is an effective org administrator,
-then attributes mandatory guard evidence to the noninteractive lifecycle
-principal. The application service separately attributes the operator event to
-its authenticated actor in the same transaction. Continuum uses one shared
-database role and has no per-request database identity, so the presented UUID
-is authorization evidence, not proof of the SQL caller. Execute permission is
-revoked from `PUBLIC`, but the shared function-owning role and database-owner
-access remain trusted administrative capabilities.
-
-Offboarding uses an explicit `principal_user_scopes` UUID mapping; mutable names
-never establish ownership. Mapping requires target membership history and
-rejects other active members unless an operator records the explicit shared
-scope override. The acknowledgement is bound to a bounded sorted UUID set and
-hash, so newly observed member or author evidence fails closed. An org-admin
-operation locks against membership sync, immediately closes access and applies
-stable UUID-derived pseudonyms, then resumably tombstones only the mapped user
-scope and redacts linked audit rows in bounded transactions. It deletes
-embeddings and aliases, revokes and quarantines scope-targeting Entra bindings,
-deactivates every membership on that scope, and writes per-memory plus
-operation-summary audit records. Immutable approval and completion ledgers bind
-the approver, reviewed UUIDs, evidence hash, bounded preview semantics, exact
-cumulative completion counts, and batch progress.
-Database guards close an offboarded owned scope to non-tombstone writes, active
-memberships, and active Entra bindings. Durable memory, scope-cleanup, direct
-audit, and linked-audit phases establish completion without rescanning the
-subject's full history on every retry. Memory and `scope_ids` audit relationships
-are maintained in an ordered selector relation; principal, scope, request, and
-selector branches all advance on indexed keyset cursors. Mutable or recursive
-name matching is not an erasure criterion.
-Shared scopes and stable UUID references remain intact. Database archive and
-embedding triggers enforce cleanup for lifecycle, supersession, offboarding,
-and direct state transitions. See `docs/offboarding.md` for limits, retry
-semantics, operator surfaces, and the application-data privacy boundary.
-
-Entra groups are explicitly approved by immutable object ID and bound to one
-exact scope and role before sync. Renames only update group display metadata.
-Missing groups and missing
-members soft-deactivate only their Entra-sourced membership rows, retaining
-history and preserving manual or differently sourced grants. A durable
-last-success deadline denies stale Entra-sourced rows after 48 hours by default,
-allowing a delayed nightly run and token refresh/recovery;
-failed attempts after the deadline soft-deactivate those rows and audit the
-count. Sync is bounded, org-admin controlled, serialized, and atomically audited. See
-`docs/authentication.md` for the operational contract.
-
-## What is explicitly out of scope for v0
-
-- A web UI. CLI + agent integration is the v0 surface.
-- Multi-region deployment.
-- Cross-tenant federation (one Continuum instance per tenant).
-- LLM-side summarisation as a built-in feature; summarisation happens in capture plugins, not in core.
-- Anything Engram does. Engram remains a separate product. Integration is via the extension points above.
-
-## Next milestones
-
-- **M0 (current)**: design (this document) reviewed and signed off.
-- **M1**: schema migrations + scope model + capture API + REST recall. No plugins yet; manual capture only.
-- **M2**: MCP server transport + AGENTS.md generator.
-- **M3**: `github-pr`, `ado-workitem`, `github-branch`, `deploy-event`, `terminal-summary` capture plugins.
-- **M4**: Entra SSO end-to-end, audit log queryable via CLI, Security Reviewer signoff on ACL/audit/PII story.
-- **M5**: Pilot rollout to one ExampleOrg squad.
-- **M6**: `teams-chat` plugin behind consent flow.
+# Continuum architecture
+
+Continuum is a standalone memory service with explicit identity, scope, lifecycle, and audit boundaries. PostgreSQL holds the authoritative data; pgvector supports optional semantic retrieval. REST, stdio MCP, the HTTP CLI, and the AGENTS.md generator share service and storage code.
+
+## Design and implementation boundaries
+
+1. Keep memory usable without a particular LLM vendor, embedding model, or IDE.
+2. Give every memory one scope. Derive access from current identity and membership rather than names or client assertions.
+3. Keep capture transforms, embedding providers, and protocol adapters separate from core storage behavior.
+4. Couple required service audits to writes and delivered reads. Distinguish trusted low-level exports from authenticated operations.
+5. Use explicit lifecycle transitions and fixed expiry timestamps.
+6. Preserve coordination as a separate non-memory domain.
+7. Build the next required milestone without speculative infrastructure.
+
+The migration chain is the schema authority. [migrations/0001_init.sql](./migrations/0001_init.sql) defines the initial model; later migrations add identity, sourced memberships, erasure, provider profiles, and coordination. Do not recreate the current database from an abbreviated schema example. Every migration already on public master remains immutable, including the original 0052 through 0079 chain and later published files; reviewed forward work carries its own checksums and prerequisites.
+
+## Code organization
+
+| Area | Responsibility |
+| --- | --- |
+| `src/api` | REST and stdio MCP adapters, authentication, startup, readiness, shutdown |
+| `src/services` | Shared validation, authorization, capture, retrieval, lifecycle, and administration |
+| `src/storage` | PostgreSQL queries, migrations, vector storage, and execution provenance |
+| `src/scopes` | Scope syntax and effective access rules |
+| `src/identity` | Entra Graph sync and database administration entrypoints |
+| `src/capture` | Capture transform interface, registry, and built-in plugins |
+| `src/ingest` | Source configuration and webhook authentication |
+| `src/embeddings` | Provider interface, adapters, routing, deadlines |
+| `src/agents-md` | Deterministic contributed-data rendering |
+| `src/audit`, `src/maintenance` | Audit records, queries, and retention |
+| `src/lifecycle`, `src/insights` | Sweeping and knowledge-gap analysis |
+| `src/coordination` | Wire-neutral lease model |
+| `src/extensions`, `src/workers` | Retrieval enrichment, promotion callbacks, and leased outbox consumers |
+| `src/cli` | Authenticated HTTP command client |
+
+[src/index.ts](./src/index.ts) defines the public library exports. Some storage exports are deliberately lower-level and do not perform every service authorization or audit step. Consumers must choose the appropriate boundary.
+
+## Identity and database authority
+
+Principals are users or services with immutable internal UUIDs. Membership roles are reader, writer, and admin. Authentication identifies an existing principal; it does not create a personal scope or establish its ownership.
+
+Serving entrypoints require explicit `CONTINUUM_AUTH_MODE`:
+
+- `dev` accepts an existing principal external ID as a bearer credential and is restricted to trusted development use.
+- `entra` validates tenant v2 issuer, signature, audience, expiry, allowed client, identity type, and configured scope or application role. The principal must already exist. User authentication also requires active effective membership.
+
+Service API keys use a random `ctm_` credential stored as a SHA-256 hash. Issue and rotation expose the secret once; prefix and last-four values are non-secret diagnostics. Keys may restrict capture source. Disablement revokes current keys and memberships; audited reactivation does not restore them. The reserved lifecycle and detached-coordination principals have separate database guards.
+
+PostgreSQL roles are another authority boundary. Use a migration-owner connection for schema and owner-only repair, a non-owner application connection for serving, and bound operator or sync sessions for privileged workflows. An org-admin UUID passed to a shared database connection does not turn that connection into a migration owner or bound operator. See [authentication](./docs/authentication.md) and [offboarding role rollout](./docs/offboarding.md).
+
+Entra group bindings use immutable external object IDs and explicitly approved scope/role mappings. Sync maintains sourced membership rows, preserving manual grants and history. Group renames do not retarget access. The default staleness bound is 48 hours; expired Entra freshness makes those memberships ineffective. Sync is serialized, bounded, and guarded against unintended mass deactivation. Provider/profile drift can stop sync before Graph reconciliation, so restore the approved profile and verify sync after provider maintenance.
+
+## Scopes and memory storage
+
+| Kind | Meaning |
+| --- | --- |
+| `org` | Singleton organization scope with an empty name |
+| `team` | Shared team knowledge |
+| `project` | Per-project knowledge |
+| `user` | User-oriented knowledge with explicit memberships |
+| `role` | Cross-cutting role knowledge |
+
+An enabled principal reads org implicitly and other scopes through current effective membership. Mutation requires explicit writer or admin membership. Scope creation requires explicit org admin. A user scope's name is routing data, not ownership proof. Erasure uses an approved UUID mapping with bounded reviewed member and author evidence.
+
+Memory rows carry scope, author, type, title, body, metadata, tags, source/reference, state, lifecycle timestamps, and promotion/supersession links. Controlled tags are shared by scope kind within the application schema, not by individual named scope. The initial vector column is fixed at 768 dimensions, with provider identity and dimension recorded alongside each stored embedding. The provider-qualified primary key is `(memory_id, provider, dim)`, permitting multiple provider vectors for one memory.
+
+## Controlled tag vocabularies
+
+`tag_vocabularies` has a `(scope_kind, tag)` primary key, a description of at most 500 characters, creator attribution for custom entries, and a system flag. Each scope kind starts with `ado`, `branch`, `decision`, `deploy`, `github`, `knowledge-gap`, `merged`, `pr`, `session`, and `terminal`.
+
+Capture and supersession normalize tags by trimming and lowercasing, reject duplicates after normalization, and enforce at most 32 tags. Each tag is 1 through 64 lowercase letters or numbers separated by single hyphens. Admission uses the target scope kind's vocabulary before provider work and rechecks it with matching-row locks in the write transaction. Promotion validates the source's active tags against the destination vocabulary. Unknown tags fail atomically with `UNKNOWN_TAGS`/HTTP 422 and sorted unknown values plus at most 100 allowed values. Shared MCP error details retain the service's `scopeKind`, `unknownTags`, and `allowedTags` keys.
+
+REST lists through `GET /api/v0/tag-vocabularies?scopeKind=project`; create, description update, and delete use POST, PATCH, and DELETE on that resource. Any active authenticated principal can list; service mutations require explicit org-admin membership. Successful reads and mutations audit atomically. System entries cannot be deleted. Custom deletion is blocked by use in any memory of the same scope kind, regardless of lifecycle state. No memory-tag edit or automatic restoration endpoint exists. MCP applies admission to capture and supersession but does not register vocabulary-management tools.
+
+Migration 0083 keeps only normalized unique built-ins active on historical memories. Unknown original values stay in ordered `metadata.continuum_legacy_tags`; original arrays and non-object metadata receive protected provenance. Historical collisions are retained separately instead of being trusted as migration output. Capture, ingestion, MCP, and supersession reject the five migration-owned namespaces even on empty-tag requests. Promotion may inherit them only through its existing authorized source relationship, with a reciprocal database constraint; approved erasure clears them through the canonical tombstone path.
+
+The SQL trigger enforces strict vocabulary membership for direct and older writers too. Owner-only compatibility mode can normalize and quarantine bounded legacy writes during an application rollback, preserving exact original values without silently dropping the memory. Malformed or oversized input still fails. The mode changes policy rather than removing definer functions, grants, or provenance checks. Restoring a verified backup is the supported reversal of the migration's data rewrite; adding a vocabulary entry does not reattach quarantined historical tags.
+
+The separate `continuum-tags` executable supports list/add/update/remove, reads `CONTINUUM_BEARER`, defaults its API URL to `http://localhost:4000`, and bounds the whole request/body read to 30 seconds and 1 MiB. It does not inherit the ordinary HTTP client's profile or exit-code table. See [tag vocabularies](./docs/tag-vocabularies.md), [src/services/tag-vocabularies.ts](./src/services/tag-vocabularies.ts), and [migration 0083](./migrations/0083_tag_vocabularies.sql).
+
+## Lifecycle
+
+| Type | Initial expiry | Lifecycle behavior |
+| --- | --- | --- |
+| `fact` | 90 days | Expired live rows become stale; positive verification renews expiry |
+| `relationship` | 180 days | Expired live rows become stale; positive verification renews expiry |
+| `context` | 14 days in user scope, 60 elsewhere | Expired live rows archive |
+| `decision` | None | Explicit linked supersession |
+| `playbook` | None | Review due indication after 180 days |
+
+[src/storage/expiry.ts](./src/storage/expiry.ts) computes fixed timestamps. There is no exponential half-life implementation. The sweeper runs bounded ordered batches with SKIP LOCKED and audit records; operators schedule it. Positive verification sets live and recomputes applicable expiry from database time, while negative verification sets stale without extending expiry. Archived and promoted memories are terminal for verification.
+
+Promotion is an explicit transaction. A destination mapped to a disabled user is unavailable, even if a separately acknowledged shared-scope capture override permits capture. It locks a live, unpromoted source, requires source writer authority and destination writer authority, or admin when the destination is org. It validates destination tags, creates a destination memory, strips advisory relation metadata, inherits permitted tag provenance, records `metadata.promoted_from`, and marks the source promoted with `promoted_to_id`. It does not infer a hierarchy or a separate lead/architect approval taxonomy.
+
+Decision supersession creates a successor linked through `supersedes_id`. Decision history follows authorized links and is audited. These operations do not imply a blanket immutable-content guarantee for every direct database access path. See [lifecycle](./docs/lifecycle.md), [src/storage/promote.ts](./src/storage/promote.ts), and [src/storage/supersede.ts](./src/storage/supersede.ts).
+
+## Capture and ingestion
+
+`CapturePlugin.transform(event, context)` returns capture inputs. The built-ins format supplied GitHub PR/branch, ADO work-item, deploy, and terminal-summary fields. They do not invoke a built-in LLM summarizer or fetch review threads. The default registry and source allowlists are explicit; adding a transform object alone does not make an arbitrary source ID available through every transport.
+
+Manual REST capture accepts a scope object and camelCase fields such as `sourceRef`. MCP capture uses `scope_kind`, `scope_name`, and `source_ref`, with `manual` as its default source. Both delegate to the shared capture service and require current write authority. REST capture returns `scopeId` and `expiresAt`; MCP returns a scope label and `expires_at`.
+
+Webhook ingestion is disabled per source unless configured. GitHub uses signed request bytes and expected event types, ADO uses configured basic credentials, and deploy/terminal sources use authenticated bearer credentials for their configured producer. Delivery identity and payload hashes protect replay; mismatched delivery content fails. Capture author and scope authority come from the authenticated producer and current memberships, not an external display name.
+
+When embedding is configured, capture can probe at most five matching-provider live, unexpired memories in its target scope and org. The default threshold is 0.92. These are advisory possible-duplicate or possible-conflict candidates, not contradiction judgments. `metadata.related` is reserved. Capture never automatically supersedes an existing memory.
+
+Embedding failure can leave valid capture committed with `embedded: false`; relation work failure can leave a valid embedding with an empty candidate list. Required write auditing remains part of success. See [webhook ingestion](./docs/webhook-ingestion.md), [src/services/capture.ts](./src/services/capture.ts), and [src/services/relations.ts](./src/services/relations.ts).
+
+## Retrieval and providers
+
+Recall resolves readable scope UUIDs before candidate selection. English full-text search and optional provider-qualified cosine searches feed reciprocal-rank fusion with K=60. Candidate queries filter live state and expiry before ranking; hydration repeats eligibility checks. The default recall limit is 10, with a maximum of 100. Results carry bounded excerpts and a truncation flag; authorized fetch provides full content.
+
+Browse defaults to live state, 50 results, and a maximum of 100 with offset at most 10,000. Fetch and browse require an enabled caller, effective scope access, and an unexpired row. Fetch does not require live state. See [memory API](./docs/memory-api.md).
+
+`EmbeddingProvider` declares provider identity, dimension, embedding operation, optional cancellation, request deadline, batch size, and explicit locality. Routing uses exact scope, then kind, then default selection. A local-only route cannot fall back to hosted processing. The factory reads `CONTINUUM_EMBEDDING_CONFIG` for multi-provider routing or the single-provider Ollama settings otherwise. Hosted keys come from provider-specific environment variables; inline secrets are rejected. A local non-loopback Ollama endpoint emits a warning. Configuration is not proof of network residency.
+
+Storage remains fixed at 768 dimensions. Compatible Ollama configurations and OpenAI text-embedding-3-small/large are supported; incompatible OpenAI models and current Voyage dimensions are rejected at construction. Provider identity and dimension qualify writes, existence checks, and vector searches. Matching vectors from different providers coexist, and changing a routing rule does not automatically replace historical vectors.
+
+Adapters send arrays in chunks of at most the configured batch size, default 32 and maximum 1000. Ollama uses `/api/embed` and requires a compatible Ollama version. Each HTTP chunk has its own deadline, default 10000 milliseconds, configurable from 1 through 300000. A success must contain exactly one finite vector of the configured dimension per input. Successful HTTP response bodies are bounded by the lesser of 64 MiB and `16 KiB + inputCount * dimension * 32` bytes. Classified error bodies are capped at 8 KiB. Adapters do not promise automatic retries for authentication, rate-limit, timeout, or network failures; backfill's separate bounded diagnostic probing is described below.
+
+Recall computes full-text candidates first. The longest routed provider deadline determines one shared optional-vector budget, capped at 30000 milliseconds. Provider-local limits still apply; remaining SQL budget is recomputed before vector catalog and distance queries. Exact provider/dimension scans may need deployment-specific partitioning or indexes at larger volume; the provider-leading B-tree index is not an ANN redesign. Vector validation, embedding, or vector search failures affect only that group. Required read audits and safe borrowed-transaction cleanup remain success boundaries.
+
+REST recall adds `diagnostics` with `vector: used|disabled|failed|partial` and `groups` containing provider, dim, status, and optional bounded errorCode. MCP keeps its existing result array and adds `_meta.diagnostics`. An unavailable local-only route may add `localOnlyUnavailableScopes`. Audit summaries carry vector status and bounded group information; operational fallback logs use counts without queries, bodies, vectors, or raw errors. Borrowed-client SQL is serialized and preserves the caller's transaction, settings, and locks; provider I/O remains independent.
+
+Provider infrastructure may be separately DBA-owned and shared under reviewed grants. Runtime SQL qualifies the extension vector type and distance operator without adding the provider schema to its path. Vector storage locks and rechecks the parent as live and unexpired at current database time. Archive transitions delete all vectors for that memory; offboarding's physical proof checks derived vectors, not just one provider. See [factory](./src/embeddings/factory.ts), [vector storage](./src/storage/embeddings.ts), and [provider lifecycle](./src/storage/provider-lifecycle.ts).
+
+### Routed embedding backfill
+
+`npm run embed-backfill` uses the same routing configuration and trusted application schema/profile prerequisites. It checks provider profiles and coordination readiness before invoking the scanner. Its database maintenance authority is not the HTTP CLI's bearer/profile configuration. Registered application and operator profiles get the bounded backfill state permissions; sync and reporting profiles do not.
+
+Defaults are batch-size 32 (1..1000), max-rows 1000 (1..1000000), and max-errors 25 (1..10000). Rows are limited per provider pass; these are not a whole-run deadline or a guarantee that every eligible memory is processed. ID pages contain routing metadata and byte counts. One count- and byte-bounded batch then hydrates title/body, with a 4 MiB aggregate budget checked against current sizes. Oversized individual input becomes a durable sanitized failure without loading its body. Count-only and manual failure marking never load memory text.
+
+Checkpoints are keyed by provider, dimension, and scope filter. UUID scans wrap once unless explicit cursor/no-wrap selects only the upper range. Durable deterministic item failures require explicit provider-scoped retry clearing; ambiguous isolated failures are retryable suspects. A cursor never advances beyond an unresolved suspect even when later batches succeed. Manual `--mark-failed` changes disposition without advancing sequential progress and reports incomplete. Success reports include per-provider completion, counters, sanitized error codes, full unresolved counts, and samples of at most 25 UUIDs.
+
+Authentication, rate-limit, network, and timeout failures stop that provider. Ambiguous failures use diagnostic bisection capped at 64 sub-batch requests and stop after more than eight ambiguous probe failures. If all leaves fail, treat it as provider outage rather than suppressing every row. A one-item ambiguous batch cannot distinguish item failure from outage and stops without advancing. Provider-local database/lock failures do not stop later routed providers; any incomplete/error report makes the command exit 1 after its JSON report.
+
+Backfill SQL keeps five-second statement and one-second lock limits while retaining stricter preexisting limits. Prior settings are restored before releasing an owned client; failed restoration discards it. These limits and HTTP chunk deadlines do not bound total run duration. Schedule with a finite outer process deadline and inspect counts before increasing budgets. See [embedding backfill](./docs/embedding-backfill.md) for operational controls and migration recovery.
+
+## Retrieval enrichment and promotion delivery
+
+The exported `RetrievalEnricherRegistry` and `PromotionWebhookRegistry` validate IDs against `^[a-z][a-z0-9.-]{0,63}$`, reject duplicates, and enumerate IDs in sorted order. Callback implementations are registered at the composition boundary, not loaded from memory data or external request fields. See [extensions](./docs/extensions.md).
+
+A retrieval enricher receives an immutable cloned snapshot of already authorized, ranked results, a principal UUID, and an abort signal. It returns a plain JSON object or null per result. Accepted output appears only under `enrichments[enricherId]`; it cannot change core memory fields, scores, excerpts, or ordering. REST and MCP expose the same namespace. The deterministic AGENTS.md renderer does not serialize enrichment output.
+
+The shared enrichment deadline defaults to 250 milliseconds, configurable through `CONTINUUM_ENRICHER_TIMEOUT_MS` from 1 through 5000. Combined serialized output is limited to 16 KiB. Invalid JSON shapes, errors, timeout, or admission saturation omit the affected optional output without failing core recall. Safe logs contain IDs and categories, not callback error text or memory data.
+
+Per process, admission permits four healthy unsettled calls per ID and 16 unsettled calls overall. A detached timed-out or aborted call prevents new calls for that ID until actual settlement. Input accounting limits each snapshot to an estimated 1 MiB and retained snapshots to an estimated 8 MiB, with bounded depth and node traversal. These are conservative accounting limits, not measured heap limits. A JavaScript deadline cannot force an abort-ignoring callback to settle; retained admission slots are released only at settlement.
+
+Promotion creates an immutable event identity and delivery rows in the same transaction as the destination memory, source transition, and required promotion audit. The installation-wide producer ID set comes from a durable operator-owned singleton. A current manual org administrator using a bound operator session sets it through `continuum_operator_set_promotion_webhook_ids(actor, ids)`, with an audit and at most 1024 valid IDs. APP cannot configure that registry; SYNC and reporting receive no outbox privileges. Exact APP/OP grants permit the reviewed event and delivery operations, not arbitrary schema ownership.
+
+An empty producer registry uses the durable configured set. A nonempty local producer registry must match it exactly; disagreement returns `CONFLICT` and commits no promotion. Callback implementations remain local to consumers. Stock REST starts a worker with its empty callback registry, so it stays idle while configured deliveries remain pending. Stdio MCP produces deliveries but does not start a webhook consumer. Register implementations in a custom REST composition or dedicated worker, with the same expected ID set across replicas.
+
+Workers claim bounded requested work with `FOR UPDATE SKIP LOCKED`, commit ownership before invoking callbacks, and fence subsequent writes by event, webhook, owner, attempt and generation. Expired ownership is rechecked after locking so stale ranking cannot steal a fresh lease or redeliver a completed row. Indexed claim and release paths target requested webhook backlogs. Exhausted-row normalization skips locked rows, but a locked eligible head can delay a poll when its selected prefix receives only one slot. This is limited fairness, not universal progress past every locked row. Delivery is at least once: consumers must deduplicate stable `event.eventId`, including after a crash between callback success and acknowledgement.
+
+Claims and raw manual retry exclude destinations mapped to disabled users through statement-snapshot mapping predicates; claims also recheck eligibility after locking. An already in-flight pre-disable statement or a payload already loaded by a consumer is not retracted. Disabled-destination pending rows remain parked until approved privacy scrub cancels them or legitimate access-only reactivation restores eligibility, except exhausted interrupted rows may be normalized to dead letters without dispatch or retry. Each poll filters excluded heads before its prefix LIMIT; scanning those excluded rows is not constant work or a universal row bound. Backlog size and replica count affect scan cost within the five-second server statement budget. Quiesce producers and workers and confirm process exit when a strict cutoff is required.
+
+Defaults are a 1000-millisecond poll, claim batch 10 (maximum 100), 30000-millisecond lease, 5000-millisecond callback and database deadlines, 5000-millisecond shutdown wait, ten attempts, and exponential backoff from 1000 to 300000 milliseconds with jitter. Claims and owned Pool-backed writes use server-side five-second statement and one-second lock budgets, preserving stricter settings. Borrowed clients retain caller transaction and timeout ownership. These per-operation bounds are not a whole-worker deadline.
+
+Dead letters require deliberate recovery. `manualRetryPromotionDelivery` is an unaudited low-level database export with no actor authorization. It is not an authenticated operator endpoint. Use trusted connections after quiescing old replicas and confirming settlement or process exit. Any end-user retry surface must add authorization and mandatory audit in its own transaction. Stable event IDs survive retry; privacy-cancelled deliveries cannot be retried.
+
+Shutdown stops new claims, handles in-flight claims, requests callback abort, and makes bounded lease/reconciliation progress. It cannot retract a payload already given to a consumer or forcibly stop JavaScript. Process-wide retained delivery fences have a finite capacity of 100; sufficiently many abort-ignoring callbacks can exhaust it and halt otherwise healthy work. Replacement workers in the same process cannot evade those fences. Restart affected replicas through bounded shutdown rather than treating deadline expiry as successful cancellation.
+
+## Generated AGENTS.md
+
+The generator reads authorized live, unexpired decisions, playbooks, facts, and relationships. It excludes user/context memories and all coordination data. Selection is SQL-based, not semantic recall against configured day-one queries. Sections are org, sorted role scopes, requested team, then requested project. Within each scope, SQL orders by type and verification/update/creation timestamps. The per-scope default is 20, with a transport maximum of 200.
+
+Rendering contributes no current timestamp. It escapes Markdown-active punctuation and control/format characters, identifies provenance, and places contributed body lines inside explicit data blocks. Consumers must still treat instruction-like content as untrusted reference data. This is formatting and provenance, not a semantic prompt-injection detector.
+
+The SHA-256 of exact rendered bytes forms the ETag. REST conditional reads support bodyless 304; the freshness endpoint and MCP freshness tool return only a boolean. Reads use private cache headers and authorization variation, and required read audits distinguish delivered memories from freshness/304 checks. The generator does not write repository files or run publication automation. See [freshness](./docs/agents-md-freshness.md) and [src/agents-md/render.ts](./src/agents-md/render.ts).
+
+## Knowledge-gap insights
+
+Explicit org administrators can query `GET /api/v0/insights/gaps` or `continuum.gaps` for bounded grouping of zero-hit recall request summaries. Exact normalized query groups are selected before optional semantic clustering; unavailable or invalid embeddings fall back to exact groups. Reports omit principal identities, include effective limits and truncation, and derive resolution from current live memory with known scope fidelity. MCP renders query-derived values inside escaped data boundaries. This is an on-demand analysis surface, not an automated digest or channel publisher. See [knowledge-gap insights](./docs/knowledge-gap-insights.md).
+## Audit and operations
+
+Required service write audits commit with mutations. Recall and generated-bundle delivery require successful read auditing before returning success. Audit query visibility is principal-limited unless current org-admin authority permits cross-principal access. Trusted low-level exports, dry-run previews, and some metadata operations have different contracts; do not claim every direct database read or write is audited.
+
+Retention deletes eligible rows in bounded reviewed runs, preserves protected approval/completion and retention evidence, and optionally exports under filesystem and database policy. Default batch size is 100, maximum batches 10, and maximum rows 1,000. Durable export is not supported on Windows; deletion without export has a separate contract. See [audit API](./docs/audit-api.md) and [retention](./docs/audit-retention.md).
+
+REST uses `/api/v0`. MCP uses stdio tools with a `continuum.` prefix. The HTTP CLI implements capture, recall, audit, scopes, promote, verify, and agents-md; database administration and maintenance are separate entrypoints. Transport naming and error envelopes remain distinct. MCP revalidates credentials periodically, so revocation can have up to a 30-second credential-check interval; operation-specific principal and membership checks remain fresh.
+
+REST defaults to port 4000, a 1 MiB JSON body limit, a 1-second readiness query, and a 10-second shutdown budget. Liveness is separate from DB connectivity readiness. Readiness does not probe embedding endpoints or rerun migration/erasure verification. Startup verifies the configured application schema, provider profiles, complete coordination contract state, and the promotion outbox before serving. A missing 0089 outbox fails startup even when no callbacks are registered. Shutdown marks not-ready, drains the configured runtime work, closes the pool, and bounds overdue connections. See [API operations](./docs/api-operations.md) and [CLI](./docs/cli.md).
+
+## Offboarding
+
+Offboarding requires current org-admin authorization, a database-bound operator session, an approved principal-to-user-scope mapping, and confirmation of that exact scope UUID. Reviewed membership and author evidence is bounded and hashed. New unacknowledged evidence fails closed. Final effective manual org-admin authority remains protected.
+
+Initial access revocation can commit and record immutable evidence even when migration readiness or an owned live lease blocks privacy. Names and the offboarded timestamp need not change in that access-only transaction. Unchanged blocked retries do not create duplicate permanent access receipts.
+
+Memory, scope, audit, and coordination privacy work proceeds in bounded durable phases. Personal memory tombstones, every provider embedding, aliases, and linked audit data are erased; shared memories remain. Owned destination outbox snapshots are pseudonymized and their deliveries become privacy-cancelled in bounded operator-authorized work, included in physical completion proof. Owned coordination resources are erased after preserving floors, and shared lease/receipt identities are detached. A scope label alone is never an erasure selector.
+
+Completion requires physical state and database-verified lifecycle evidence, not counters alone. A completed clean retry performs full actual-state verification under a configurable budget, default 30 seconds. Reopened completed runs repair privacy before lifecycle verification or restart. An ordinary advancing run can continue memory/audit batches during a typed privacy block when meaningful work remains; a privacy-only block stops progress. Coordination-only repair completion does not close an open offboarding lifecycle run.
+
+Canonical post-erasure lock audit metadata retains operation, outcome, transport, and own-lease evidence; it removes identifiers, tokens, and byte counts that could link shared keys back to the subject. Forward repair clears legacy UUID compatibility links and rewrites fenced lock audits in bounded owner windows without changing run IDs, approvals, or completion events. Older temporal correlation and retained backups remain separate policy concerns. [Offboarding](./docs/offboarding.md) defines exact reasons, witness timestamps, retry/once exit statuses, and recovery.
+
+A consumer may already hold an event snapshot or have sent it downstream. Stored-state completion does not erase that in-process or downstream copy. Quiesce producers and all replicas, confirm exit for abort-ignoring callbacks, and apply downstream erasure policy separately.
+
+## Coordination
+
+Coordination resources, generations, receipts, and usage are separate from memories. Resource keys are exact case-sensitive Unicode strings of 1 through 512 UTF-8 bytes, excluding controls and edge whitespace. Default lease TTL is 300 seconds, with a 30 through 900 range. Acquisition is exclusive and non-reentrant; contention is a successful outcome.
+
+Fencing tokens are positive decimal-string BIGINT values. Resource counters and persistent scope floors preserve monotonicity after reclaim and erasure. Fresh mutations revalidate current explicit writer/admin authority, use a fresh database clock, and commit lease, receipt, quota, and audit changes together. Server-side timeouts bound waits.
+
+Each scope has a hard 10,000-key ceiling. Each principal has one combined 10,000-receipt budget across operation types, retained at least 24 hours. Fresh renewals and releases can fail when saturated; unexpired evidence is not evicted to admit new operations. Replay requires its documented authorization, generation, retention, and privacy conditions. Clients must budget renewals and contention polling.
+
+Lease ownership is not an end-to-end side-effect fence. Downstream resources must reject stale tokens; ordinary filesystems and GitHub do not do this automatically. Publication still requires orchestrator control and repository protection. REST uses camelCase and MCP snake_case naming over the shared service. See [coordination](./docs/coordination.md).
+
+## Migration and rollout
+
+The current schema includes provider-profile and coordination repairs through 0082, tag vocabularies in 0083, embedding storage/backfill/index migrations 0084 through 0088, and the promotion outbox in 0089. A migration filename in the ledger does not prove bounded coordination backfill completion. Owner-only schema work, backfill, effective-body verification, and execution evidence have separate roles. Execution provenance stores hashes, counts, and named variants without storing raw SQL or credential bindings; older execution history can remain unknown.
+
+Tag rollout pauses webhook intake and all memory writers, preserves queued deliveries, backs up data, migrates, deploys compatible instances, and then replays unchanged delivery identities and bytes. Migration 0083 takes an EXCLUSIVE memory-table lock, with a five-second lock wait and per-statement 60-second budget. The historical rewrite and trigger installation commit together. These limits do not bound total transaction or exclusive-lock duration. Its temporary role-planning table also requires the migration owner's database TEMPORARY privilege. Use a measured maintenance rehearsal and finite outer deadline; do not infer universal volume support from a small fixture. Exact application/operator profiles gain only the reviewed vocabulary table permissions, and sync/reporting profiles remain separate. See the dedicated rollout and rollback guide.
+
+Embedding migration 0084 builds the provider-qualified unique index concurrently and attaches it as the primary key in a bounded lock transaction. Migration 0085 creates durable failure state and snapshots exact role profiles using a temporary table, requiring owner database TEMPORARY. Migration 0086 adds durable/suspect disposition; 0087 builds the provider-leading scan index; 0088 repairs invalid matching artifacts. Valid application/operator profiles gain only the reviewed state table grants, not sync/reporting privileges. Five-second lock and per-statement 60-second DDL budgets do not bound advisory-lock acquisition or the whole deployment. The current migrator polls for its deployment lock without an internal acquisition deadline; enforce a finite external process deadline.
+
+Drain old memory/embedding writers before the 0084 key change: their memory-only conflict target is incompatible with the new composite key. Keep them stopped until every API, MCP, lifecycle, and maintenance writer is compatible. Reversing schema requires a verified pre-upgrade backup including migration ledgers, with deliberate replay of later writes/deliveries; the rollback script rejects in-place downgrade. Do not delete ledger rows or collapse multiple vectors silently.
+
+Ordinary packaged migration work uses the trusted application-only path. Only 0001 receives its validated application/provider overlay. Initial catalog and advisory operations are qualified, and caller path restoration is part of safe connection cleanup. Current runtime entrypoints require the resolved explicit path to contain exactly the configured application schema. Provider-profile reconciliation does not automatically revoke global PUBLIC/shared-provider privileges or transfer ownership.
+
+Maintenance must quiesce affected serving readers and writers, including authentication traffic, while schema locks and repair gates are active. Long parked histories can exceed finite migration deadlines; repeated volume-bound failures require measured owner-reviewed recovery, not an unbounded override. Finish repair and exact grants before restarting current processes. Existing running nodes have a different pending-repair replay boundary from processes whose startup gate refuses service. The [role and migration runbook](./docs/offboarding.md) is the detailed operational authority.
+
+Migration 0089 requires migration-owner database TEMPORARY privilege for its role snapshot. Quiesce all old promotion producers, offboarding processes, and workers, migrate, explicitly regrant APP and OP profiles, configure the durable ID set, and restart compatible binaries. Invalid registered role profiles are not silently broadened; explicit regrant and startup verification remain required. Old producers can omit deliveries and old offboarding code cannot repair the outbox. A binary-only rollback cannot reconstruct omitted events or reverse erasure. Use the verified backup and forward-recovery runbooks.
