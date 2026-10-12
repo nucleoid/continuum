@@ -15,7 +15,7 @@ The complete fresh local run passed: **173 files, 1,749 passing tests and two ex
 
 Containment used a 768 MiB container memory limit, 128 MiB swap allowance, 384 MiB Node heap, one test worker and a finite 3,600-second outer wall. The separate 52-test affected gate passed; it is component evidence rather than a replacement for the complete run.
 
-Coverage includes real APP/OP profile upgrade and regrant, canonical producer registration, REST/MCP parity, immutable bounded enrichment, deterministic AGENTS generator parity, exact lease-generation ownership, paid outcome recovery, server-bounded SQL, post-lock eligibility, disabled-destination exclusion and approved resumable outbox erasure. Consumer callbacks remain at least once; downstream copies cannot be retracted by database cleanup.
+Coverage includes real APP/OP profile upgrade and regrant, canonical callback-ID registry, REST/MCP parity, immutable bounded enrichment, deterministic AGENTS generator parity, exact lease-generation ownership, paid outcome recovery, server-bounded SQL, post-lock eligibility, disabled-destination exclusion and approved resumable outbox erasure. Consumer callbacks remain at least once; downstream copies cannot be retracted by database cleanup.
 
 Seven completed Claude reports form the approved source review chain: five portions plus the e3 and a59 corrections. The portions did not all review one identical head. A separate nonauthor native review covered 69 source paths before this receipt; it is recorded separately from Claude review. This new receipt was not included in those earlier approvals.
 
