@@ -49,9 +49,25 @@ An adapter with no producer URL captures ordinary memories without attribution. 
 
 Attribution and authenticated capture commit in the same delivery transaction; a failure rolls back that delivery. Duplicate delivery identities keep the existing ingestion behavior.
 
+When an otherwise valid capture cannot be attributed, it remains an ordinary
+memory. After a newly committed delivery, the adapter emits the optional warning
+`{event: 'standup_attribution_skipped', count: N}` with only the skipped count;
+replays do not emit it again. The warning contains no actor, branch, body,
+credential or delivery identity and does not identify the particular cause.
+Review the configured identity mapping and source-time bounds before changing
+configuration. A source time that cannot be parsed, is nonfinite, is in the
+future or predates its mapping generation does not gain attribution. This
+unattributed outcome does not relax authentication or bound-producer checks.
+
 ## Operator configuration
 
 First establish approved personal ownership with the existing `map-user-scope` workflow in [offboarding](./offboarding.md). Grant producer roles the reviewed APP profile and bind an OP LOGIN to its current manual org administrator using the existing grant scripts. Use that actual operator connection with the trusted application-only search path. Do not run these examples through the serving APP URL or substitute a passed administrator UUID for bound operator authority.
+
+The producer role must have no privileged role attributes or role-membership
+edges, except the PostgreSQL 16 creator edge from the owner of `principals` to
+the producer with ADMIN enabled and both SET and INHERIT disabled. This narrow
+owner edge is accepted consistently at binding, context lookup and recording;
+other incoming or outgoing memberships remain disallowed.
 
 The following psql calls illustrate the two narrow, audited configuration routines. Supply variables through a protected operator process, not committed credentials:
 
@@ -75,7 +91,7 @@ timestamp. After any mapping replacement, including revoke and remap to the
 same user, branch creates remain ordinary captured memories without trusted
 Standup attribution. Receipt time does not bypass this generation boundary.
 
-Pass a NULL target UUID to `continuum_operator_map_standup_actor` to revoke a mapping. Pass a NULL service UUID to `continuum_operator_bind_standup_producer` to revoke a producer binding. Changing an active producer's principal, namespace or family requires revocation first. Revocation preserves history, and reconfiguration does not reactivate an old generation. Privileged role attributes or membership edges disable producer context and activity recording. Revocation uses the stored role identity even after drift or role removal; an absent active binding is an error. Grant/profile drift causes binding or startup validation to fail closed.
+Pass a NULL target UUID to `continuum_operator_map_standup_actor` to revoke a mapping. If no active mapping exists for that namespace and external identity, it raises SQLSTATE `23514` (`standup actor mapping does not exist`) before writing a success audit. Use the stable numeric GitHub actor ID rather than its login. Pass a NULL service UUID to `continuum_operator_bind_standup_producer` to revoke a producer binding. Changing an active producer's principal, namespace or family requires revocation first. Revocation preserves history, and reconfiguration does not reactivate an old generation. Privileged role attributes or disallowed membership edges disable producer context and activity recording. Revocation uses the stored role identity even after drift or role removal; an absent active binding is an error. Grant/profile drift causes binding or startup validation to fail closed.
 
 ## Closure, expiry and promotion
 
