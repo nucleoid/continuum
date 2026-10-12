@@ -209,7 +209,9 @@ claim and skips locked rows, so available work for the same ID can continue.
 Several polls can be needed to normalize a large exhausted backlog.
 Claims and raw manual retry exclude destinations mapped to disabled users.
 Disabled-destination pending rows stay parked until approved privacy scrub
-cancels them or legitimate access-only reactivation restores eligibility. Each
+cancels them or legitimate access-only reactivation restores eligibility, except
+exhausted interrupted rows may be normalized to dead letters without dispatch
+or retry. Each
 poll applies the mapping exclusion before its prefix LIMIT, so an excluded head
 does not occupy the returned quota. That predicate can inspect many excluded
 rows; the quota is not a bound on all scan work and does not guarantee universal
