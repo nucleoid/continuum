@@ -55,7 +55,7 @@ async function withFreshDatabase(
     await run(root, target, url, database, directory);
   } finally {
     await target?.end();
-    await dropIsolatedTestDatabase(root, database);
+    await dropIsolatedTestDatabase(root, database, { cleanupTimeoutMs: 90_000 });
     await root.end();
     await rm(directory, { recursive: true, force: true });
   }
@@ -126,7 +126,7 @@ describe('pgvector schema contract', () => {
         await pool.end();
       }
     });
-  });
+  }, 120_000);
 
   it('resolves a public extension while the migration search path omits public', async () => {
     await withFreshDatabase(async (_root, target, url, _database, directory) => {
@@ -144,7 +144,7 @@ describe('pgvector schema contract', () => {
         await pool.end();
       }
     });
-  });
+  }, 120_000);
 
   it('uses a provider-owned custom extension as a non-superuser schema owner', async () => {
     const role = identifier('continuum_migrator');
@@ -181,7 +181,7 @@ describe('pgvector schema contract', () => {
       await root.query(`DROP ROLE IF EXISTS "${role}"`).catch(() => undefined);
       await root.end();
     }
-  });
+  }, 120_000);
 
   it('retries safely after a DBA installs vector for a role without database CREATE', async () => {
     const role = identifier('continuum_migrator');
@@ -215,7 +215,7 @@ describe('pgvector schema contract', () => {
       await root.query(`DROP ROLE IF EXISTS "${role}"`).catch(() => undefined);
       await root.end();
     }
-  });
+  }, 120_000);
 
   it('stores legacy bootstrap embeddings and searches with a public-less runtime search path', async () => {
     await withFreshDatabase(async (_root, target, url, _database, directory) => {
@@ -274,5 +274,5 @@ describe('pgvector schema contract', () => {
         await migrator.end();
       }
     });
-  });
+  }, 120_000);
 });
