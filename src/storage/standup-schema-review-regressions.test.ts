@@ -22,6 +22,7 @@ it('accepts the actual PostgreSQL 16 non-superuser creator ADMIN edge for produc
     const producer = new pg.Pool({ connectionString: producerUrl.toString(), max: 1,
       options: `-c search_path=${schema} -c statement_timeout=5000 -c lock_timeout=1000` });
     let producerCreated = false;
+    let primaryFailure: unknown;
     await value.owner.query(`CREATE ROLE ${quote(creatorRole)} LOGIN CREATEROLE PASSWORD ${literal(password)}`);
     try {
       // Model a supported ownership handoff using real DDL, not catalog edits.
@@ -69,15 +70,28 @@ it('accepts the actual PostgreSQL 16 non-superuser creator ADMIN edge for produc
       expect((await producer.query('SELECT continuum_record_standup_activity($1::uuid,$2::jsonb) AS recorded',
         [memory.id, { external_actor_id: '42', repository_id: '100', branch: 'creator-branch' }])).rows)
         .toEqual([{ recorded: true }]);
+    } catch (error) {
+      primaryFailure = error;
+      throw error;
     } finally {
-      await Promise.all([producer.end(), creator.end()]);
-      if (producerCreated) {
-        await value.owner.query(`DROP OWNED BY ${quote(producerRole)}`);
-        await value.owner.query(`DROP ROLE ${quote(producerRole)}`);
+      const cleanupFailures: unknown[] = [];
+      for (const result of await Promise.allSettled([producer.end(), creator.end()])) {
+        if (result.status === 'rejected') cleanupFailures.push(result.reason);
       }
-      await value.owner.query(`REASSIGN OWNED BY ${quote(creatorRole)} TO ${quote(originalOwner)}`);
-      await value.owner.query(`DROP OWNED BY ${quote(creatorRole)}`);
-      await value.owner.query(`DROP ROLE ${quote(creatorRole)}`);
+      try {
+        // Restore this fixture's objects before dropping its creator defaults.
+        // The latter can themselves hold privileges referencing the producer.
+        await value.owner.query(`REASSIGN OWNED BY ${quote(creatorRole)} TO ${quote(originalOwner)}`);
+        await value.owner.query(`DROP OWNED BY ${quote(creatorRole)}`);
+        if (producerCreated) {
+          await value.owner.query(`DROP OWNED BY ${quote(producerRole)}`);
+          await value.owner.query(`DROP ROLE ${quote(producerRole)}`);
+        }
+        await value.owner.query(`DROP ROLE ${quote(creatorRole)}`);
+      } catch (error) { cleanupFailures.push(error); }
+      if (cleanupFailures.length) throw new AggregateError(
+        [...(primaryFailure === undefined ? [] : [primaryFailure]), ...cleanupFailures],
+        'Creator fixture failed with retained primary and cleanup evidence', { cause: primaryFailure });
     }
   });
 }, 180_000);
