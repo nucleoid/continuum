@@ -162,3 +162,21 @@ it('lets default normal cleanup survive a bounded checkpoint beyond sixty second
   expect(state.release).toHaveBeenCalledWith(false);
   expect(state.queries.every((sql) => !/\bFORCE\b|pg_(?:terminate|cancel)_backend/i.test(sql))).toBe(true);
 });
+
+
+it('normally drains a transient session that appears after the first zero-session check', async () => {
+  let observedChecks = 0;
+  const state = fixture({
+    sessions: (check) => { observedChecks = check; return check === 2 ? 1 : 0; },
+    drop: () => { expect(observedChecks).toBeGreaterThanOrEqual(3); },
+  });
+  await expect(dropIsolatedTestDatabase(state.maintenance, 'fixture_late_session'))
+    .resolves.toBeUndefined();
+  expect(state.drops).toHaveLength(1);
+  expect(state.checks()).toBeGreaterThanOrEqual(3);
+  expect(state.drops[0]).toMatchObject({ statementMs: 5000, lock: '250ms' });
+  expect(state.settings()).toEqual({ statement: '30s', lock: '250ms' });
+  expect(state.release).toHaveBeenCalledTimes(1);
+  expect(state.release).toHaveBeenCalledWith(false);
+  expect(state.queries.every((sql) => !/\bFORCE\b|pg_(?:terminate|cancel)_backend/i.test(sql))).toBe(true);
+});
