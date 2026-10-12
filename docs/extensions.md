@@ -207,6 +207,17 @@ extend that transient range cost. Server SQL budgets still bound each statement.
 Interrupted-delivery normalization changes at most 100 exhausted rows per
 claim and skips locked rows, so available work for the same ID can continue.
 Several polls can be needed to normalize a large exhausted backlog.
+Claims and raw manual retry exclude destinations mapped to disabled users.
+Disabled-destination pending rows stay parked until approved privacy scrub
+cancels them or legitimate access-only reactivation restores eligibility. Each
+poll applies the mapping exclusion before its prefix LIMIT, so an excluded head
+does not occupy the returned quota. That predicate can inspect many excluded
+rows; the quota is not a bound on all scan work and does not guarantee universal
+progress. Backlog size and concurrent replicas affect cost within the existing
+five-second server statement budget. The predicate uses the statement snapshot
+and is rechecked after candidate locking. Already in-flight pre-disable statements
+and payloads already loaded by callbacks are not retracted; strict cutoff requires
+producer and worker quiescence and confirmed process exit.
 Every post-claim mutation is fenced by event ID,
 webhook ID, lease owner, attempt number, and a monotonic lease generation that
 is not reset by manual retry. A late write from an older claim cannot mutate a
