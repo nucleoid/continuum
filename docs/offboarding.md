@@ -691,8 +691,9 @@ take and verify a **backup**; **migrate** every packaged file, including 0080 an
 0081, as the migration/schema owner; finish the owner-only 0081 backfill;
 **regrant** every shared app, dedicated operator, and sync profile; **verify**
 the exact identities and provider profiles; then **start** only matching current
-binaries. Published history through 0079 stays unchanged; 0080 and 0081 are the
-current unreleased forward repair files. Keep offboarding and coordination
+binaries. Published migrations through 0088, including 0080 and 0081, are
+immutable. Migration 0089 is the current unpublished extension candidate. Keep
+offboarding and coordination
 mutation traffic drained until the complete schema, repair and grants converge.
 Do not run old binaries or schedulers through this maintenance window.
 
