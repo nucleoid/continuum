@@ -54,7 +54,7 @@ it('pins ordinary migration DDL to its trusted application schema and restores a
     expect((await pool.query('SELECT is_called FROM later_hostile.intercept_probe')).rows)
       .toEqual([{is_called:false}]);
   } finally {
-    await pool?.end();await dropIsolatedTestDatabase(admin, database);
+    await pool?.end();await dropIsolatedTestDatabase(admin, database, { cleanupTimeoutMs: 90_000 });
     await admin.query(`DROP ROLE IF EXISTS "${attacker}"`);await admin.end();
     await rm(directory,{recursive:true,force:true});
   }
