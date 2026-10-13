@@ -12,3 +12,17 @@ export function safeBootstrapFailure(output) {
   if (/FATAL: {1,2}password authentication failed for user/.test(text)) return { code: 'DATABASE_AUTH_FAILURE', phase: 'connect', sqlstate: null };
   return { code: 'BOOTSTRAP_FAILURE_UNCLASSIFIED', phase: null, sqlstate: null };
 }
+// Only recognized client/orchestration error lines may leave private capture.
+// Scrub before bounding, then check the complete result for every known secret.
+export function sanitizedBootstrapLines(output, secrets) {
+ if (!Array.isArray(secrets) || secrets.length !== 5 || secrets.some(value=>typeof value !== 'string' || value.length<32)) return [];
+ let text = String(output);
+ for (const secret of secrets) text = text.replaceAll(secret, '[redacted-secret]');
+ text = text.replace(/[a-z][a-z0-9+.-]*:\/\/[^\s]+/gi, '[redacted-url]')
+  .replace(/[a-f0-9]{32,}/gi, '[redacted-token]')
+  .replace(/(?:[A-Za-z]:[\\/]|\/)[^\s:;"']+/g, '[redacted-path]');
+ const lines = text.split(/\r?\n/).filter(line=>/^(?:psql:|cat:|Error response from daemon:|the input device|\[redacted-path\]:)/.test(line))
+  .slice(0,8).map(line=>line.replace(/[\x00-\x1f\x7f]/g,' ').slice(0,240));
+ if (secrets.some(secret=>lines.some(line=>line.includes(secret)))) return [];
+ return lines;
+}

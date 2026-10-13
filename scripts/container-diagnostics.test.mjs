@@ -22,7 +22,7 @@ test('unrecognized phase strings never become public diagnostics', () => {
 
 test('unclassified diagnostics scrub credentials, URLs and paths before bounding error lines', () => {
  const password = 'SyntheticOnlySecretValue01234567890123456789';
- const result = sanitizedBootstrapLines(`progress ignored\n/bin/sh: /private/path/job: ${password}\npsql: error: postgres://role:${password}@host/db failed\nError response from daemon: input device is not a TTY`, [password]);
+ const result = sanitizedBootstrapLines(`progress ignored\n/bin/sh: /private/path/job: ${password}\npsql: error: postgres://role:${password}@host/db failed\nError response from daemon: input device is not a TTY`, [password, password, password, password, password]);
  assert.ok(result.some(line => line.includes('input device is not a TTY')));
  assert.ok(!JSON.stringify(result).includes(password));
  assert.ok(!JSON.stringify(result).includes('postgres://'));
