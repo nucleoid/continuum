@@ -97,4 +97,33 @@ describe('remote mocked Entra verifier lifecycle', () => {
     const before = verifications.calls; expect((await post()).status).toBe(429); expect(verifications.calls).toBe(before);
   });
 
+  it.each([
+    ['ERR_JWKS_NO_MATCHING_KEY', 401], ['ERR_JOSE_NOT_SUPPORTED', 401], ['ERR_JWKS_MULTIPLE_MATCHING_KEYS', 401],
+    ['ERR_JWKS_TIMEOUT', 503], ['ERR_UNEXPECTED_VERIFICATION_FAILURE', 503],
+  ] as const)('reports verifier %s with the correct denial/availability status', async (code, status) => {
+    const tenant = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'; const clientId = '44444444-4444-4444-8444-444444444444';
+    failures.set('classified-jwt', code);
+    const app = express(); server = await new Promise<Server>((resolve) => {
+      const listener = app.listen(0, '127.0.0.1', () => resolve(listener));
+    });
+    const url = new URL(`http://127.0.0.1:${(server.address() as { port: number }).port}/mcp`);
+    const config = mcpHttpConfigFromEnv({ CONTINUUM_MCP_HTTP_ENABLED: 'true', CONTINUUM_MCP_PUBLIC_URL: url.href,
+      CONTINUUM_MCP_HTTP_LOOPBACK_DEV: 'true' }, 'entra')!;
+    controller = createMcpHttpController(config, { pool: {} as never, embeddingProvider: null,
+      authenticator: createAuthenticator({} as never, 'entra', { tenant, audience: 'api', userScope: 'read',
+        serviceAppRole: 'serve', allowedClientIds: [clientId], fetcher: async () => new Response(JSON.stringify({
+          issuer: `https://login.microsoftonline.com/${tenant}/v2.0`,
+          jwks_uri: `https://login.microsoftonline.com/${tenant}/discovery/keys`,
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+      }) });
+    app.use('/mcp', controller.router);
+    const response = await fetch(url, { method: 'POST', headers: { Authorization: 'Bearer classified-jwt',
+      Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {
+        protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'jose-classification', version: '1' },
+      } }) });
+    expect(response.status).toBe(status);
+    expect(await response.text()).not.toContain('classified-jwt');
+  });
 });
+
