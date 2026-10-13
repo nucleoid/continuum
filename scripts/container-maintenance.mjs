@@ -1,9 +1,22 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, openSync, closeSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, openSync, closeSync, readSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+function hashFile(file) {
+ const fd = openSync(file, 'r');
+ const hash = createHash('sha256');
+ const buffer = Buffer.alloc(65536);
+ try {
+  for (;;) {
+   const length = readSync(fd, buffer, 0, buffer.length, null);
+   if (!length) break;
+   hash.update(buffer.subarray(0, length));
+  }
+  return hash.digest('hex');
+ } finally { closeSync(fd); }
+}
 function docker(args, timeout = 60000, allowedFailure = false) {
  const result = spawnSync('docker', args, { encoding: 'utf8', timeout,
   killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024 });
@@ -90,7 +103,7 @@ export function runMaintenance(mode, envFile, composeFile, { deadlineMs = 900000
    if (result.error || result.status !== 0) throw new Error('Role backup failed; retain installation stopped');
   } finally { closeSync(rolesFd); }
   const sums = [backup, `${backup}.roles.sql`].map(file =>
-   `${createHash('sha256').update(readFileSync(file)).digest('hex')}  ${file}`).join('\n');
+   `${hashFile(file)}  ${file}`).join('\n');
   writeFileSync(`${backup}.sha256`, `${sums}\n`, { flag: 'wx', mode: 0o600 });
  }
  phase('migrate');
@@ -115,5 +128,6 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
   process.stdout.write(`${JSON.stringify(runMaintenance(mode, envFile, composeFile))}\n`);
  } catch (error) { process.stderr.write(`continuum-maintenance: ${error.message}\n`); process.exitCode = 1; }
 }
+
 
 
