@@ -1,6 +1,6 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
-import { writeFileSync, readFileSync, mkdtempSync, mkdirSync, readdirSync, copyFileSync, rmSync, chmodSync } from 'node:fs';
+import { writeFileSync, readFileSync, mkdtempSync, mkdirSync, readdirSync, copyFileSync, cpSync, rmSync, chmodSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { runMaintenance } from './container-maintenance.mjs';
@@ -166,9 +166,46 @@ function verifyLedger(p) {
   check(sql(p, "SELECT count(*) FROM pg_extension WHERE extname='vector'", 'DBA') === '1', 'pgvector missing');
   check(sql(p, "SELECT NOT has_schema_privilege(current_user,'continuum','CREATE')", 'APP') === 't', 'APP has schema creation authority');
 }
+function writeMaintenanceEnvironment(p, file, overrides = {}) {
+ writeFileSync(file, Object.entries({...p.env,...overrides})
+  .filter(([key])=>key==='COMPOSE_PROJECT_NAME'||key.startsWith('CONTINUUM_'))
+  .map(([key,value])=>`${key}=${JSON.stringify(value)}`).join('\n'),{mode:0o600});
+}
+function maintenanceCli(mode,p,file,backupFile) {
+ const stdout=execFileSync(process.execPath,[resolve('scripts/container-maintenance.mjs'),mode,file,resolve(assets,'deploy/compose.production.yml')],{
+  encoding:'utf8',timeout:300000,maxBuffer:1024*1024,
+  env:{...process.env,CONTINUUM_QUIESCENCE_CONFIRMED:'yes',CONTINUUM_MAINTENANCE_DEADLINE_SECONDS:'120',CONTINUUM_BACKUP_DEADLINE_SECONDS:'120',...(backupFile?{CONTINUUM_BACKUP_FILE:backupFile}: {})},
+ });
+ const receipt=JSON.parse(stdout);
+ check(receipt.mode===mode&&receipt.project===p.project&&receipt.imageId===image,'Successful wrapper selected wrong installation/image');
+ check(receipt.deadlineMs===120000&&receipt.backupDeadlineMs===120000,'CLI did not record explicit independent operator budgets');
+ return receipt;
+}
+function verifyWrapperBackup(file,p) {
+ const roleFile=`${file}.roles.sql`, sumsFile=`${file}.sha256`;
+ const rows=readFileSync(sumsFile,'utf8').trim().split('\n');
+ const expected=[file,roleFile].map(path=>`${createHash('sha256').update(readFileSync(path)).digest('hex')}  ${path}`);
+ check(JSON.stringify(rows)===JSON.stringify(expected),'Wrapper backup checksum sidecar differs from real files');
+ check(readFileSync(file).subarray(0,5).toString('ascii')==='PGDMP','Wrapper backup is not custom format');
+ const roles=readFileSync(roleFile,'utf8');
+ check(!/\bPASSWORD\b|SCRAM-SHA-256/i.test(roles)&&!Object.values(p.passwords).some(value=>roles.includes(value)),'Wrapper role definitions contain credentials');
+ for(const name of ['continuum_dba','continuum_owner','continuum_app','continuum_operator','continuum_sync']) check(roles.includes(name),'Wrapper role definitions are incomplete');
+ return createHash('sha256').update(readFileSync(file)).digest('hex');
+}
 try {
   const fresh = setup('fresh');
   startDatabase(fresh);
+  const wrapperFresh = setup('wrapper-fresh');
+  const wrapperFreshEnv = join(wrapperFresh.directory,'maintenance.env');
+  writeMaintenanceEnvironment(wrapperFresh,wrapperFreshEnv);
+  results.wrapperFresh = maintenanceCli('fresh',wrapperFresh,wrapperFreshEnv);
+  verifyLedger(wrapperFresh);
+  await api(wrapperFresh,'/health/ready');
+  const wrapperApi = JSON.parse(run(['inspect',compose(wrapperFresh,['ps','-q','api']).trim()]))[0];
+  check(wrapperApi.Config.Env.includes('CONTINUUM_AUTH_MODE=entra'),'Fresh wrapper did not start production Entra API');
+  compose(wrapperFresh,['stop','-t','15','api']);
+  results.passed.push('documented fresh CLI wrapper completes DBA/bootstrap/migrate/admin/profile/image gate and Entra API readiness with recorded bounded budgets');
+
   results.bootstrapPlaintextLogCanaryPassed=bootstrapLogCanary(fresh);
   results.passed.push('fresh and specifically refused repeated bootstrap expose no generated plaintext passwords in privately captured job output or verbose PostgreSQL logs; logging settings restored');
   check(sql(fresh, "SELECT rolcreaterole AND NOT rolsuper AND NOT rolcreatedb AND NOT rolreplication AND NOT rolbypassrls FROM pg_roles WHERE rolname='continuum_owner'", 'DBA') === 't', 'Migration owner lacks the exact existing retirement authority');
@@ -252,11 +289,7 @@ try {
   results.passed.push('same-image compatible replacement preserves data/UUID/ledger; SIGTERM shutdown; database outage changes readiness to 503');
 
   const envFile = join(fresh.directory,'maintenance.env');
-  function maintenanceEnv(overrides = {}) {
-    writeFileSync(envFile, Object.entries({...fresh.env,...overrides})
-      .filter(([key])=> key === 'COMPOSE_PROJECT_NAME' || key.startsWith('CONTINUUM_'))
-      .map(([key,value])=>`${key}=${JSON.stringify(value)}`).join('\n'), {mode:0o600});
-  }
+  function maintenanceEnv(overrides = {}) { writeMaintenanceEnvironment(fresh,envFile,overrides); }
   const productionCompose = resolve(assets,'deploy/compose.production.yml');
   maintenanceEnv();
   expectFailure(() => runMaintenance('fresh',envFile,productionCompose), 'Fresh installation refuses an existing volume', 'Existing volume refusal');
@@ -288,6 +321,51 @@ try {
   check(storedBindings()===originalBindings && credentialSnapshot()===originalCredentials,'Upgrade grants changed correct stored bindings or role credentials');
   results.passed.push('upgrade refuses changed enabled admin/SYNC UUIDs, role names and same-name foreign role OID before grants; stored bindings and role credentials stay unchanged and correct grants converge');
 
+  // A selected-image asset mismatch must refuse before stopping a ready API.
+  compose(fresh,['up','-d','--force-recreate','--wait','--wait-timeout','120','api']);
+  const driftAssets=join(fresh.directory,'drift-assets'); mkdirSync(driftAssets,{mode:0o755});
+  copyFileSync(join(assets,'package.json'),join(driftAssets,'package.json'));
+  for(const dir of ['deploy','migrations','scripts']){cpSync(join(assets,dir),join(driftAssets,dir),{recursive:true});chmodSync(join(driftAssets,dir),0o755);}
+  const driftSql=join(driftAssets,'scripts/verify-database-identities.sql'); chmodSync(driftSql,0o644);
+  writeFileSync(driftSql,readFileSync(driftSql,'utf8')+'\n-- synthetic asset drift\n');
+  const driftBackup=join(temporary,'asset-drift-refused.dump');
+  process.env.CONTINUUM_BACKUP_FILE=driftBackup;
+  maintenanceEnv({CONTINUUM_RUNTIME_ASSETS:driftAssets});
+  const assetError=expectFailure(()=>runMaintenance('upgrade',envFile,productionCompose,{deadlineMs:120000}), 'ASSET_MISMATCH', 'Selected image/host asset drift');
+  check(assetError.code==='ASSET_MISMATCH','Asset drift received unrelated failure');
+  check(compose(fresh,['ps','--status','running','-q','api']).trim()!=='','Asset preflight stopped API before refusing drift');
+  check(!existsSync(driftBackup),'Asset preflight reserved a backup before refusal');
+  maintenanceEnv();
+
+  // An independently owned synthetic writer is refused, not terminated by wrapper.
+  const writerName=`outside-writer-${randomUUID()}`;
+  const writer=spawn('docker',[...fresh.base,'exec','-T','-e','PGPASSWORD','-e','PGAPPNAME','postgres','psql','-X','-h','127.0.0.1','-U','continuum_owner','-d','continuum','-v','ON_ERROR_STOP=1','-c','SELECT pg_sleep(120)'],{env:{...fresh.env,PGPASSWORD:fresh.passwords.OWNER,PGAPPNAME:writerName},stdio:'ignore'});
+  const writerPredicate=`usename='continuum_owner' AND datname='continuum' AND application_name='${writerName}'`;
+  try{
+   const connectedEnd=Date.now()+10000;
+   while(sql(fresh,`SELECT count(*) FROM pg_stat_activity WHERE ${writerPredicate}`,'DBA')!=='1'&&Date.now()<connectedEnd){}
+   check(sql(fresh,`SELECT count(*) FROM pg_stat_activity WHERE ${writerPredicate}`,'DBA')==='1','Outside writer fixture did not connect');
+   const refusedBackup=join(temporary,'active-writer-refused.dump');process.env.CONTINUUM_BACKUP_FILE=refusedBackup;
+   const writerError=expectFailure(()=>runMaintenance('upgrade',envFile,productionCompose,{deadlineMs:120000}), 'ACTIVE_WRITERS', 'Outside writer quiescence');
+   check(writerError.code==='ACTIVE_WRITERS'&&writerError.phase==='quiescence','Writer received unrelated preflight failure');
+   check(sql(fresh,`SELECT count(*) FROM pg_stat_activity WHERE ${writerPredicate}`,'DBA')==='1','Wrapper forcibly terminated outside writer');
+   check(statSync(refusedBackup).size===0,'Wrapper backed up before quiescence');
+   check(sql(fresh,`SELECT id::text || ':' || title FROM memories WHERE id='${captured.id}'`)===before,'Writer refusal changed database content');
+  }finally{
+   // The fixture owns only this generated session and performs its own cleanup.
+   sql(fresh,`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE ${writerPredicate} AND pid<>pg_backend_pid()`,'DBA');
+   writer.kill('SIGTERM');
+   check(sql(fresh,`SELECT count(*) FROM pg_stat_activity WHERE ${writerPredicate}`,'DBA')==='0','Owned writer fixture cleanup did not settle');
+  }
+  results.passed.push('selected-image host asset drift refuses before API stop/backup; outside owner session is refused after project stop before backup/mutation without killing it');
+  // Exercise the exact operator upgrade success tail and use its real backup.
+  maintenanceEnv();
+  const successfulBackup = join(temporary,'successful-wrapper-upgrade.dump');
+  results.wrapperUpgrade = maintenanceCli('upgrade',fresh,envFile,successfulBackup);
+  const wrapperBackupHash = verifyWrapperBackup(successfulBackup,fresh);
+  await api(fresh,'/health/ready');
+  check(sql(fresh, `SELECT id::text || ':' || title FROM memories WHERE id='${captured.id}'`) === before, 'Successful upgrade wrapper changed stored data');
+  results.passed.push('documented upgrade CLI wrapper completes migration/grants/image gate/Entra readiness; real custom and password-free role backups match checksum sidecar');
   // The wrapper must surface this exact grant preflight error, and a successful
   // exited one-shot must not bypass it or leave an API process running.
   process.env.CONTINUUM_BACKUP_FILE=join(temporary,'failed-upgrade.dump');
@@ -319,11 +397,9 @@ try {
   results.passed.push('maintenance rejects existing fresh volume; specific failed grant and real database migration deadline keep API stopped despite successful stale job; timed-out client/backend gone and advisory lock released; packaged downgrade guard specifically rejects');
 
   // Backup/restore uses another isolated volume; only synthetic data and roles.
-  const backup = join(temporary, 'backup.dump');
-  const pgid = compose(fresh, ['ps', '-q', 'postgres']).trim();
-  writeCommandOutput('docker', ['exec', pgid, 'pg_dump', '-U', 'continuum_dba', '-d', 'continuum', '-Fc'], backup);
-  check(readFileSync(backup).subarray(0,5).toString('ascii') === 'PGDMP', 'Restore backup is not PostgreSQL custom format');
-  const backupHash = createHash('sha256').update(readFileSync(backup)).digest('hex');
+  const backup = successfulBackup;
+  const backupHash = wrapperBackupHash;
+  check(verifyWrapperBackup(backup,fresh) === backupHash,'Wrapper backup changed before restore');
   const restored = setup('restore');
   // Deliberately restore existing reviewed identity UUIDs, with new role OIDs.
   for (const key of ['CONTINUUM_ADMIN_PRINCIPAL_ID','CONTINUUM_ADMIN_ENTRA_OBJECT_ID','CONTINUUM_SYNC_PRINCIPAL_ID']) restored.env[key] = fresh.env[key];

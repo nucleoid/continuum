@@ -1,9 +1,11 @@
 import test from 'node:test';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, closeSync, existsSync, rmSync, statSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, closeSync, existsSync, rmSync, statSync, mkdirSync, writeSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { reserveBackupTargets, maintenanceBudgets, runtimeAssetManifest, assertRuntimeAssets, assertAssetMounts, quiescenceSql, assertQuiescence } from './container-maintenance.mjs';
+import { reserveBackupTargets, maintenanceBudgets, runtimeAssetManifest, assertRuntimeAssets, assertAssetMounts, quiescenceSql, assertQuiescence, runMaintenance } from './container-maintenance.mjs';
 
 test('upgrade preflight refuses missing output, missing parent and every existing sidecar', () => {
  const root = mkdtempSync(join(tmpdir(), 'continuum-backup-preflight-'));
@@ -81,4 +83,60 @@ test('quiescence refuses any outside APP OP SYNC owner connection, without termi
  assert.ok(sql.includes('synthetic-db')); assert.ok(!sql.includes('pg_terminate_backend'));
  assertQuiescence('0');
  for(const count of ['1','12','unclassified']) assert.throws(()=>assertQuiescence(count),e=>e.code==='ACTIVE_WRITERS'&&e.phase==='quiescence');
+});
+
+test('wrapper gives backup a separate budget and rejects parity drift before stopping serving', () => {
+ const root=mkdtempSync(join(tmpdir(),'continuum-wrapper-'));
+ const originalSpawn=childProcess.spawnSync, originalNow=Date.now;
+ const originalBackup=process.env.CONTINUUM_BACKUP_FILE, originalQuiescence=process.env.CONTINUUM_QUIESCENCE_CONFIRMED;
+ try {
+  for(const dir of ['deploy','scripts','migrations']) mkdirSync(join(root,dir));
+  writeFileSync(join(root,'package.json'),'{}');
+  writeFileSync(join(root,'deploy','compose.production.yml'),'public');
+  writeFileSync(join(root,'scripts','grant.sql'),'SELECT 1;');
+  writeFileSync(join(root,'migrations','0001.sql'),'SELECT 2;');
+  const reference=runtimeAssetManifest(root), appImage='sha256:'+'a'.repeat(64),pgImage='sha256:'+'b'.repeat(64);
+  const job=()=>({image:pgImage,volumes:[{type:'bind',source:root,target:'/assets',read_only:true}]});
+  const config={name:'synthetic-maintenance',volumes:{pgdata:{name:'synthetic-pgdata'}},services:{
+   api:{image:appImage,environment:{CONTINUUM_AUTH_MODE:'entra'}},
+   postgres:{image:pgImage,environment:{POSTGRES_DB:'synthetic'}},
+   migrate:{image:appImage,environment:{CONTINUUM_MIGRATION_OWNER_ROLE:'owner'}},
+   bootstrap:job(),'provision-admin':job(),grant:{...job(),environment:{PGUSER:'owner',CONTINUUM_APP_ROLE:'app',CONTINUUM_OPERATOR_ROLE:'op',CONTINUUM_SYNC_ROLE:'sync'}}
+  }};
+  let time=10000; Date.now=()=>time;
+  const calls=[];
+  childProcess.spawnSync=(command,args,options)=>{
+   assert.equal(command,'docker'); calls.push({args,timeout:options.timeout});
+   let stdout='';
+   if(args.includes('config')) stdout=JSON.stringify(config);
+   else if(args[0]==='image') stdout=JSON.stringify([{Id:args[2],Os:'linux',Architecture:'amd64'}]);
+   else if(args[0]==='volume') stdout='synthetic-pgdata\n';
+   else if(args[0]==='ps') stdout=args.includes('label=com.docker.compose.project=synthetic-maintenance')?'synthetic-api\n':'';
+   else if(args[0]==='inspect') stdout=JSON.stringify([{Config:{Labels:{'com.docker.compose.project':config.name,'com.docker.compose.service':'api'}}}]);
+   else if(args[0]==='run') {
+    assert.ok(args.includes('none'));assert.ok(args.includes('--read-only'));assert.ok(args.includes('10001:10001'));
+    assert.ok(args.includes('--cap-drop'));assert.ok(args.includes('no-new-privileges:true'));assert.ok(!args.includes('--mount')&&!args.includes('-v'));
+    stdout=JSON.stringify(reference);
+   } else if(args.some(arg=>arg.includes('exec pg_dump'))) {
+    writeSync(options.stdio[1],'synthetic private dump'); time+=400;
+   } else if(args.includes('exec')) stdout='0\n';
+   return {status:0,stdout,stderr:''};
+  };
+  syncBuiltinESMExports();
+  process.env.CONTINUUM_BACKUP_FILE=join(root,'backup.dump');process.env.CONTINUUM_QUIESCENCE_CONFIRMED='yes';
+  const result=runMaintenance('upgrade',join(root,'private.env'),join(root,'deploy','compose.production.yml'),{deadlineMs:1000,backupDeadlineMs:1000});
+  assert.equal(result.deadlineMs,1000);assert.equal(result.backupDeadlineMs,1000);
+  const migrate=calls.find(call=>call.args.includes('run')&&call.args.at(-1)==='migrate');
+  assert.equal(migrate.timeout,1000,'800ms of backup must not consume the migration budget');
+  assert.equal(calls.filter(call=>call.args.some(arg=>arg.includes('pg_catalog.pg_stat_activity'))).length,2);
+  assert.match(readFileSync(join(root,'backup.dump.sha256'),'utf8'),/^[a-f0-9]{64}  /);
+  calls.length=0;writeFileSync(join(root,'scripts','grant.sql'),'tampered');
+  assert.throws(()=>runMaintenance('upgrade',join(root,'private.env'),join(root,'deploy','compose.production.yml'),{deadlineMs:1000}),e=>e.code==='ASSET_MISMATCH');
+  assert.ok(!calls.some(call=>call.args[0]==='stop'||call.args.includes('up')),'drift refusal must precede downtime');
+ } finally {
+  childProcess.spawnSync=originalSpawn;syncBuiltinESMExports();Date.now=originalNow;
+  if(originalBackup===undefined)delete process.env.CONTINUUM_BACKUP_FILE;else process.env.CONTINUUM_BACKUP_FILE=originalBackup;
+  if(originalQuiescence===undefined)delete process.env.CONTINUUM_QUIESCENCE_CONFIRMED;else process.env.CONTINUUM_QUIESCENCE_CONFIRMED=originalQuiescence;
+  rmSync(root,{recursive:true,force:true});
+ }
 });

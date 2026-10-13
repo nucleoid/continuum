@@ -4,7 +4,7 @@ The container workflow builds and tests Linux amd64 on hosted GitHub runners. De
 
 ## Verify and import
 
-Download both `continuum-linux-amd64-<source SHA>` and its matching smoke results from the same successful workflow run. Keep the archive, `SHA256SUMS`, source metadata, manifest/config digests and `runtime-assets.tgz` together. Use the helper scripts from that exact source checkout, with Node 22:
+Download both `continuum-linux-amd64-<source SHA>` and its matching smoke results from the same successful workflow run. Keep the archive, `SHA256SUMS`, source metadata, manifest/config digests and `runtime-assets.tgz` together. Before upgrading, retain both the current and previous verified artifact sets in operator-managed storage, including each host's `loaded-identity.json` and matching source-test and downloaded-image smoke receipts. CI artifacts expire after 14 days; that retention is not a backup or rollback policy. Use the helper scripts from that exact source checkout, with Node 22:
 
 ```sh
 SOURCE_SHA=<reviewed-source-SHA> node scripts/container-artifact.mjs verify /private/artifact
@@ -27,7 +27,7 @@ SOURCE_SHA=<reviewed-source-SHA> node scripts/container-artifact.mjs verify-load
 
 Set and export `SOURCE_SHA` to the approved exact source SHA before import. The helper verifies the loaded image by hashing its actual exported config bytes against the OCI config digest and checking the source label and platform. Set `CONTINUUM_APP_IMAGE` to `loaded-identity.json.imageId`, the immutable ID reported by that deployment daemon, after verification. Keep the temporary import tag out of production configuration. Classic Docker stores use a config digest as image ID; containerd stores can report a manifest digest. The OCI manifest digest, portable config digest and daemon image ID are distinct recorded values. Verify on each deployment host rather than assuming its image store matches CI. Registry use, publication, multi-platform support and PostgreSQL major upgrades need separate validation.
 
-Extract the verified runtime asset archive into a new private directory. Its package root contains `deploy/`, `scripts/` and all published migrations. Set `CONTINUUM_RUNTIME_ASSETS` to that root. Never replace its SQL with an unrelated working directory. Base inputs and actions are digest/commit pinned; CI normalizes source timestamps and compares uncached builds. Read measured reproducibility output rather than assuming byte equivalence across toolchain versions.
+Extract the verified runtime asset archive into a new private directory. Its package root contains `deploy/`, `scripts/` and all published migrations. Set `CONTINUUM_RUNTIME_ASSETS` to that root. Never replace its SQL with an unrelated working directory. Before stopping any project writers, maintenance compares the host assets with the selected image's `/opt/continuum` package: `package.json`, `deploy/`, every migration and every public `scripts/*.sql` file must match exactly. An incomplete, extra or changed asset set is refused before downtime. Base inputs and actions are digest/commit pinned; CI normalizes source timestamps and compares uncached builds. Read measured reproducibility output rather than assuming byte equivalence across toolchain versions.
 
 ## Private configuration and authority
 
@@ -52,6 +52,8 @@ Each file must be a regular, non-symlink file directly under `/run/secrets`, at 
 
 ## Explicit fresh installation
 
+Use the extracted, verified public package from `runtime-assets.tgz` as `CONTINUUM_RUNTIME_ASSETS`, not a source checkout. The checkout contains tests and other files absent from the installed package, so its asset manifest must fail parity. Keep private configuration and secret files outside this verified asset directory; run helper scripts from the exact source checkout separately.
+
 Import and verify the image and runtime assets first. Set the PostgreSQL input to the exact tested pgvector/PostgreSQL 16 digest recorded by CI. Review the private configuration and approved identities. From the exact checked source's helper scripts, run:
 
 ```sh
@@ -59,9 +61,22 @@ node scripts/container-maintenance.mjs fresh \
   /private/config/production.env /private/assets/deploy/compose.production.yml
 ```
 
-The wrapper never builds or pulls images. It refuses a conflicting fresh volume, starts the private database, runs DBA bootstrap, migrates the complete packaged chain under a finite outer deadline, provisions the reviewed first admin, applies APP/OP/SYNC profiles and their complete identity verifier, then recreates API. Failure keeps serving stopped and retains the volume. DBA bootstrap and first-admin provisioning are fresh-only and deliberately fail on repeated execution. Correct role-profile maintenance can converge on retry; mismatched or foreign stored bindings fail before grants. Upgrades verify the retained OP/SYNC role names, OIDs, principals and authority flags against reviewed configuration before reapplying exact profiles. They do not rotate credentials or retarget bindings. A separately approved identity rotation or restore must establish current bindings before updating deployment inputs.
+The wrapper never builds or pulls images. It refuses a conflicting fresh volume, starts the private database, runs DBA bootstrap, migrates the complete packaged chain under a finite outer deadline, provisions the reviewed first admin, applies APP/OP/SYNC profiles and their complete identity verifier, then recreates API. Failure keeps serving stopped and retains the volume. DBA bootstrap and first-admin provisioning are fresh-only and deliberately fail on repeated execution. The role-profile script can converge on matching bindings, but the fresh wrapper refuses a retained project or volume rather than resuming partially completed installation. Use the failed-fresh procedure below; mismatched or foreign stored bindings fail before grants. Upgrades verify the retained OP/SYNC role names, OIDs, principals and authority flags against reviewed configuration before reapplying exact profiles. They do not rotate credentials or retarget bindings. A separately approved identity rotation or restore must establish current bindings before updating deployment inputs.
 
 The complete maintenance sequence, not an old exited job or readiness response, permits serving. Do not bypass the wrapper by starting the `serving` profile directly. Database initialization must work under UID 999 with no capability or permission repair; hostile volume ownership fails safely.
+
+### Failed fresh installation
+
+Keep serving stopped and retain the failed project and volume while investigating. Record the exact Compose project, volume name, selected source SHA, loaded image identity and failed phase. Preserve private configuration, logs, migration ledger and execution evidence before considering disposal. Keep credentials private; evidence capture must not copy secret values into a support report.
+
+An operator may approve discard only for a new isolated installation that never served or routed production traffic and contains no application or workload data beyond the reviewed installation-administrator and dormant SYNC seed metadata. Those seed UUIDs alone do not make failed-fresh recovery impossible. There must be no imported or captured data, queued producer work, deliveries or downstream effects. Apply this procedure through the operator's own change process:
+
+1. Confirm those conditions from retained evidence, including that no production serving or routing was enabled. Stop all project and external processes and verify that no client or producer can reconnect.
+2. Inspect the exact containers, their Compose ownership labels and mounts, and the exact named volume's ownership labels. Confirm that the PostgreSQL mount maps that volume to the configured PGDATA path, that its database belongs to this failed installation, and that no other container or installation uses it. Names alone are insufficient. Uncertain ownership or data history means preserve and investigate.
+3. Retain a private backup, evidence and approved secret records outside that volume and obtain explicit operator approval identifying the exact failed project and volume to remove. Only the operator performs any approved removal. Do not use a blanket `down -v` command or remove resources selected by a name prefix.
+4. Correct the diagnosed cause, choose a new unique project and a new volume, verify the artifact and assets again, and rerun `fresh`. Do not repurpose the old volume or bypass the wrapper.
+
+This exception does not apply to an installation that served or contains production data. Preserve its volume, ledger and evidence and use reviewed forward recovery or a verified separate-volume restore.
 
 API publishes no host port. PostgreSQL stays only on an internal backend network, with no host port or edge attachment. An approved TLS reverse proxy may join the edge network. Edge/TLS deployment is a separate operation. For a private operator test only, a separate reviewed override can map `127.0.0.1:4000:4000`; avoid a public bind.
 
@@ -79,6 +94,10 @@ Readiness uses `/health/ready` and a one-second database deadline. Liveness uses
 
 ## Upgrade, backup, restore and rollback
 
+Set `CONTINUUM_MAINTENANCE_DEADLINE_SECONDS` and `CONTINUUM_BACKUP_DEADLINE_SECONDS` explicitly for the approved window when needed. Each defaults to 900 seconds and is capped at 14400 seconds. Backup has its own budget; dumping the database does not consume the fresh or upgrade migration/grant budget. Maintenance output records the selected budgets in milliseconds as `deadlineMs` and `backupDeadlineMs`. A larger deadline does not change the migration's statement and lock limits.
+
+Size both budgets from a rehearsal on a restored copy with representative current data, locks and resource limits. Measure backup and migration/grant durations separately and include operational margin. If the measured work cannot fit within the bounded window, keep serving stopped and plan reviewed recovery rather than repeatedly applying the same insufficient budget. Synthetic CI fixtures establish neither production-volume support nor a maintenance-time SLO.
+
 An upgrade is a maintenance window, not a mixed-version rolling deployment. Stop all API/MCP, sync, activity, lifecycle, admin and maintenance producers, webhook intake, schedulers and callback consumers, including processes outside this Compose project. Confirm process exit for abort-ignoring callbacks. Preserve queued delivery identities and bytes. Select and verify the new compatible artifact before starting:
 
 ```sh
@@ -88,7 +107,7 @@ node scripts/container-maintenance.mjs upgrade \
   /private/config/production.env /private/assets/deploy/compose.production.yml
 ```
 
-The wrapper validates immutable inputs and reserves all new private backup output files before stopping project writers, then creates custom-format database and password-free role-definition backups with checksums, migrates and reapplies/verifies existing profiles, then recreates API. It skips fresh bootstrap and first-admin provisioning. Keep DBA role definitions and provider/ledger/source provenance with the backup; checksum the backup and protect its retained personal data. Role credentials remain separate private operator records. The role dump uses `--no-role-passwords`; supply approved current passwords separately during restore. Resume schedulers and replay unchanged deliveries only after all gates succeed.
+The wrapper validates immutable inputs and exact image/host asset parity and reserves all new private backup output files before stopping project writers. After stopping them, its DBA check refuses any APP, OP, SYNC or owner session in the selected database, excluding the check's own session. This is a point-in-time check and does not prevent reconnection: operators must keep all external clients, producers and schedulers stopped throughout the window. Only then does the wrapper create custom-format database and password-free role-definition backups with checksums, migrate and reapply/verify existing profiles, then recreate API. It skips fresh bootstrap and first-admin provisioning. Keep DBA role definitions and provider/ledger/source provenance with the backup; checksum the backup and protect its retained personal data. Role credentials remain separate private operator records. The role dump uses `--no-role-passwords`; supply approved current passwords separately during restore. Resume schedulers and replay unchanged deliveries only after all gates succeed.
 
 Test restore into a separate new volume before relying on a backup. Use the tested PostgreSQL 16 tools, reviewed role definitions, provider ownership, full ledger/execution evidence and [OID rebind runbook](offboarding.md), then reapply exact profiles and verify current runtime gates. Preserve the original volume. Restoring may reintroduce subject data erased since backup; reconcile privacy and downstream state before serving. CI's synthetic restore rehearsal is bounded evidence for its fixture, not a measured production recovery time.
 

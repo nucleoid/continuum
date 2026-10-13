@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, openSync, closeSync, readSync, writeSync, statSync, unlinkSync } from 'node:fs';
+import { existsSync, openSync, closeSync, readSync, writeSync, statSync, unlinkSync, lstatSync, readdirSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { validateTmpfsMounts } from './container-compose-model.mjs';
 
@@ -45,9 +45,97 @@ function docker(args, timeout = 60000) {
  return result;
 }
 const literal = value => `'${String(value).replaceAll("'", "''")}'`;
-export function runMaintenance(mode, envFile, composeFile, { deadlineMs = 900000 } = {}) {
- if (!['fresh', 'upgrade'].includes(mode) || !Number.isSafeInteger(deadlineMs)
-  || deadlineMs < 1000 || deadlineMs > 900000) throw new Error('Invalid maintenance request');
+
+export function maintenanceBudgets(options = {}, env = process.env) {
+ const budget = (override, setting, label) => {
+  const input = env[setting];
+  const value = override ?? (input === undefined ? 900000 : /^\d+$/.test(input) ? Number(input) * 1000 : NaN);
+  if (!Number.isSafeInteger(value) || value < 1000 || value > 14400000) throw new Error('Invalid ' + label + ' deadline');
+  return value;
+ };
+ return { deadlineMs: budget(options.deadlineMs, 'CONTINUUM_MAINTENANCE_DEADLINE_SECONDS', 'maintenance'),
+  backupDeadlineMs: budget(options.backupDeadlineMs, 'CONTINUUM_BACKUP_DEADLINE_SECONDS', 'backup') };
+}
+export function runtimeAssetManifest(root) {
+ root = resolve(root);
+ if (!lstatSync(root).isDirectory()) throw new Error('Invalid assets');
+ const files = []; let total = 0;
+ const add = name => {
+  const file = join(root, name), stat = lstatSync(file);
+  if (!stat.isFile() || stat.size > 16 * 1024 * 1024 || (total += stat.size) > 128 * 1024 * 1024 || files.length >= 10000) throw new Error('Invalid assets');
+  files.push({ name, sha256: hashFile(file) });
+ };
+ const deploy = (directory, depth = 0) => {
+  if (depth > 8 || !lstatSync(join(root,directory)).isDirectory()) throw new Error('Invalid assets');
+  for (const entry of readdirSync(join(root,directory)).sort()) {
+   const name = directory + '/' + entry, stat = lstatSync(join(root,name));
+   if (stat.isDirectory()) deploy(name, depth + 1); else add(name);
+  }
+ };
+ add('package.json'); deploy('deploy');
+ for (const directory of ['migrations', 'scripts']) {
+  if (!lstatSync(join(root,directory)).isDirectory()) throw new Error('Invalid assets');
+  for (const name of readdirSync(join(root,directory)).sort()) if (name.endsWith('.sql')) add(directory + '/' + name);
+ }
+ return files.sort((a,b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+}
+export function assertRuntimeAssets(root, reference) {
+ try {
+  if (!Array.isArray(reference) || reference.length < 4 || reference.length > 10000) throw new Error();
+  const names = new Set();
+  for (const item of reference) {
+   if (!item || Object.keys(item).sort().join(',') !== 'name,sha256' || typeof item.name !== 'string'
+    || !/^(package\.json|deploy\/[a-zA-Z0-9_.\/-]+|(?:migrations|scripts)\/[a-zA-Z0-9_.-]+\.sql)$/.test(item.name)
+    || item.name.split('/').some(part => part === '.' || part === '..' || !part)
+    || !/^[a-f0-9]{64}$/.test(item.sha256) || names.has(item.name)) throw new Error();
+   names.add(item.name);
+  }
+  const expected = [...reference].sort((a,b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+  if (JSON.stringify(runtimeAssetManifest(root)) !== JSON.stringify(expected)) throw new Error();
+ } catch { throw new MaintenanceFailure('ASSET_MISMATCH', 'preflight'); }
+}
+export function assertAssetMounts(services, root) {
+ try {
+  root = resolve(root);
+  for (const name of ['bootstrap','provision-admin','grant']) {
+   if (services[name]?.volumes?.filter(mount=>mount.target === '/assets').length !== 1) throw new Error();
+  }
+  for (const service of Object.values(services)) for (const mount of service.volumes ?? []) {
+   if (mount.target === '/assets' && (mount.type !== 'bind' || mount.read_only !== true || resolve(mount.source) !== root)) throw new Error();
+   if (mount.target?.startsWith('/assets/')) throw new Error();
+  }
+ } catch { throw new MaintenanceFailure('ASSET_MISMATCH', 'preflight'); }
+}
+export function quiescenceSql(database, roles) {
+ if (!database || roles.length !== 4 || roles.some(role=>typeof role !== 'string' || !role)) throw new Error('Maintenance database authority is missing');
+ return 'SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname=' + literal(database)
+  + ' AND usename IN (' + roles.map(literal).join(',') + ') AND pid<>pg_backend_pid()';
+}
+export function assertQuiescence(count) {
+ if (count !== '0') throw new MaintenanceFailure('ACTIVE_WRITERS', 'quiescence');
+}
+function imageAssetManifest(image, project) {
+ const token = randomBytes(12).toString('hex'), name = project + '-assets-' + token;
+ const script = "import {openSync,closeSync,readSync,lstatSync,readdirSync} from 'node:fs';import {createHash} from 'node:crypto';import {resolve,join} from 'node:path';"
+  + hashFile.toString() + runtimeAssetManifest.toString() + ";process.stdout.write(JSON.stringify(runtimeAssetManifest('/opt/continuum')));";
+ try {
+  return JSON.parse(docker(['run','--rm','--pull','never','--name',name,'--label','io.continuum.maintenance.probe=' + token,
+   '--network','none','--read-only','--user','10001:10001','--cap-drop','ALL','--security-opt','no-new-privileges:true',
+   '--pids-limit','32','--memory','128m','--cpus','1','--entrypoint','node',image,'--input-type=module','-e',script],30000).stdout);
+ } catch {
+  const id = docker(['ps','-aq','--filter','name=^/' + name + '$']).stdout.trim();
+  if (id) {
+   const container = JSON.parse(docker(['inspect',id]).stdout)[0];
+   if (container.Name !== '/' + name || container.Config.Labels['io.continuum.maintenance.probe'] !== token) throw new MaintenanceFailure('OWNERSHIP_MISMATCH', 'preflight');
+   docker(['stop','--time','5',id],10000);
+   if (docker(['ps','-aq','--filter','name=^/' + name + '$']).stdout.trim()) docker(['rm',id]);
+  }
+  throw new MaintenanceFailure('ASSET_MISMATCH', 'preflight');
+ }
+}
+export function runMaintenance(mode, envFile, composeFile, options = {}) {
+ const {deadlineMs,backupDeadlineMs} = maintenanceBudgets(options);
+ if (!['fresh', 'upgrade'].includes(mode)) throw new Error('Invalid maintenance request');
  const compose = ['compose', '--env-file', resolve(envFile), '-f', resolve(composeFile),
   '--profile', 'maintenance', '--profile', 'serving'];
  const readConfig = () => JSON.parse(docker([...compose, 'config', '--format', 'json']).stdout);
@@ -77,6 +165,12 @@ export function runMaintenance(mode, envFile, composeFile, { deadlineMs = 900000
   ?? config.services.grant?.environment.PGUSER;
  const database = config.services.postgres.environment.POSTGRES_DB;
  if (!ownerRole || !database) throw new Error('Maintenance database authority is missing');
+ const roles = [ownerRole,...['CONTINUUM_APP_ROLE','CONTINUUM_OPERATOR_ROLE','CONTINUUM_SYNC_ROLE'].map(key=>config.services.grant?.environment[key])];
+ const activitySql = quiescenceSql(database,roles);
+ const assets = config.services.grant?.volumes?.find(mount=>mount.target === '/assets')?.source;
+ if (!assets || config.services.migrate.image !== appImage || ['bootstrap','provision-admin','grant'].some(name=>config.services[name]?.image !== pgImage)) throw new MaintenanceFailure('ASSET_MISMATCH','preflight');
+ assertAssetMounts(config.services,assets);
+ assertRuntimeAssets(assets,imageAssetManifest(selectedId,project));
  // Reserve all outputs before taking any serving process down. Never overwrite.
  const backups = mode === 'upgrade' ? reserveBackupTargets(process.env.CONTINUUM_BACKUP_FILE) : [];
  try {
@@ -85,7 +179,7 @@ export function runMaintenance(mode, envFile, composeFile, { deadlineMs = 900000
    if (container.Config.Labels['com.docker.compose.project'] !== project) throw new Error('Maintenance ownership mismatch');
    if (container.Config.Labels['com.docker.compose.service'] !== 'postgres') docker(['stop', '--time', '15', id], 25000);
   }
-  const overallEnd = Date.now() + deadlineMs;
+  let overallEnd;
   const dbaSql = sql => docker([...compose, 'exec', '-T', 'postgres', '/bin/sh', '-ec',
    'export PGPASSWORD="$(cat /run/secrets/dba_password)"; exec psql -X -qAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"', '--', sql], 10000).stdout.trim();
   const settleMigration = name => {
@@ -120,17 +214,21 @@ export function runMaintenance(mode, envFile, composeFile, { deadlineMs = 900000
    }
   };
   docker([...compose, 'up', '-d', '--pull', 'never', '--wait', '--wait-timeout', '120', 'postgres'], 150000);
-  if (mode === 'fresh') phase('bootstrap');
+  assertQuiescence(dbaSql(activitySql));
+  if (mode === 'fresh') { overallEnd = Date.now() + deadlineMs; phase('bootstrap'); }
   if (mode === 'upgrade') {
+   const backupEnd = Date.now() + backupDeadlineMs;
    for (const [index, tool] of ['pg_dump -Fc', 'pg_dumpall --roles-only --no-role-passwords'].entries()) {
     const result = spawnSync('docker', [...compose, 'exec', '-T', 'postgres', '/bin/sh', '-ec',
      `export PGPASSWORD="$(cat /run/secrets/dba_password)"; exec ${tool} -U "$POSTGRES_USER"${index === 0 ? ' -d "$POSTGRES_DB"' : ''}`],
-     { stdio: ['ignore', backups[index].fd, 'pipe'], timeout: Math.max(1, overallEnd - Date.now()), killSignal: 'SIGKILL' });
+     { stdio: ['ignore', backups[index].fd, 'pipe'], timeout: Math.max(1, backupEnd - Date.now()), killSignal: 'SIGKILL' });
     if (result.error || result.status !== 0) throw new MaintenanceFailure('BACKUP_FAILED');
    }
    const sums = backups.slice(0, 2).map(item => `${hashFile(item.path)}  ${item.path}`).join('\n');
    writeSync(backups[2].fd, `${sums}\n`);
+   overallEnd = Date.now() + deadlineMs;
   }
+  assertQuiescence(dbaSql(activitySql));
   phase('migrate');
   if (mode === 'fresh') phase('provision-admin');
   phase('grant');
@@ -139,7 +237,7 @@ export function runMaintenance(mode, envFile, composeFile, { deadlineMs = 900000
   try {
    docker([...compose, 'up', '-d', '--pull', 'never', '--no-deps', '--force-recreate', '--wait', '--wait-timeout', '60', 'api'], 90000);
   } catch (error) { docker([...compose, 'stop', '--timeout', '15', 'api'], 25000); throw error; }
-  return { imageId: selectedId, mode, project, volume };
+  return { imageId: selectedId, mode, project, volume, deadlineMs, backupDeadlineMs };
  } finally { for (const item of backups) closeSync(item.fd); }
 }
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
