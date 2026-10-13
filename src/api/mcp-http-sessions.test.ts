@@ -45,3 +45,12 @@ describe('remote MCP admission', () => {
     expect(sessions.admit('b', 1)).toBe(false);
   });
 });
+
+it('bounds retained SDK response bytes process-wide until explicit release', () => {
+  const first = new McpHttpSessions({ ...limits, outputBytes: 10 });
+  const second = new McpHttpSessions({ ...limits, outputBytes: 10 });
+  const release = first.reserveResponse(7)!;
+  expect(second.reserveResponse(4)).toBeUndefined(); first.clear();
+  expect(second.reserveResponse(4)).toBeUndefined(); release(); release();
+  const recovered = second.reserveResponse(10); expect(recovered).toBeTypeOf('function'); recovered!();
+});

@@ -2,12 +2,13 @@ import { createHmac, randomBytes } from 'node:crypto';
 import type { AuthenticatedPrincipal } from '../types.js';
 interface Limits {
   sessions: number; principalSessions: number; calls: number; principalCalls: number;
-  idleMs: number; lifetimeMs: number; messageRate: number; messageBurst: number;
+  outputBytes?: number; idleMs: number; lifetimeMs: number; messageRate: number; messageBurst: number;
   proxyRate?: number; proxyBurst?: number; proxyInitializeRate?: number; proxyInitializeBurst?: number; unsettledGraceMs?: number; buckets: number; peerRate: number; peerBurst: number; peers: number; streams: number;
 }
 interface Bucket { tokens: number; updated: number }
 const retainedExecutions = new Map<string, number>();
 let retainedCalls = 0;
+let retainedResponseBytes = 0;
 const cancelledFences = new Map<symbol, number>();
 export type ExecutionRelease = (() => void) & { markUnsettled(deadline?: number): void };
 export class McpHttpSessions {
@@ -56,6 +57,12 @@ export class McpHttpSessions {
       retainedCalls--; cancelledFences.delete(fence); release(); };
     releaseExecution.markUnsettled = (deadline = this.now()) => { if (!active || cancelledFences.has(fence)) return; cancelledFences.set(fence, deadline + (this.limits.unsettledGraceMs ?? 5000)); };
     return releaseExecution;
+  }
+  reserveResponse(bytes: number): (() => void) | undefined {
+    if (!Number.isSafeInteger(bytes) || bytes < 0 || retainedResponseBytes + bytes > (this.limits.outputBytes ?? 1048576)) return;
+    retainedResponseBytes += bytes;
+    let active = true;
+    return () => { if (!active) return; active = false; retainedResponseBytes -= bytes; };
   }
   reserveStream(): (() => void) | undefined {
     if (this.streams >= this.limits.streams) return;

@@ -661,7 +661,8 @@ it('bounds SDK retained mixed-batch responses and recovers their budget on sessi
         { jsonrpc: '2.0', id: `list-${index}`, method: 'tools/list' },
         { jsonrpc: '2.0', id: `cancel-${index}`, method: 'tools/call', params: { name: 'continuum.list_scopes', arguments: {} } },
       ]) }).then((result) => result.text()).catch(() => '');
-      await entered[index].promise;
+      const admitted = await Promise.race([entered[index].promise.then(() => true), response.then(() => false)]);
+      if (!admitted) { expect(index).toBeGreaterThan(0); exhausted = true; break; }
       expect((await fetch(active.address, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled',
         params: { requestId: `cancel-${index}` } }) })).status).toBe(202);
       await response; gates[index].resolve({ rows: [] });

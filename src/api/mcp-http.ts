@@ -13,10 +13,10 @@ let pendingAuthentications = 0;
 let bodyReaders = 0;
 let reservedControlReaders = 0;
 interface Call { release: ExecutionRelease; started: boolean; done: boolean }
-interface Context { deadline: number; abort: AbortController; calls: Map<string | number, Call>; waiting: Set<string | number>; finish: () => void }
+interface Context { deadline: number; abort: AbortController; calls: Map<string | number, Call>; waiting: Set<string | number>; cancelled: boolean; responses: Array<() => void>; finish: () => void }
 interface Entry {
-  id?: string; credentialTag: string; cancelledIds: Set<string | number>; binding: string; principal: string; expires: number; idle: number;
-  ready: boolean; closed: boolean; release: () => void;
+  id?: string; credentialTag: string; credentialKind: 'dev' | 'entra' | 'api-key'; cancelledIds: Set<string | number>; binding: string; principal: string; expires: number; idle: number;
+  ready: boolean; closed: boolean; responseReleases: Set<() => void>; release: () => void;
   server: ReturnType<typeof buildMcpServer>; transport: StreamableHTTPServerTransport;
   contexts: Set<Context>; ids: Set<string | number>; stream?: express.Response;
   initializationDeadline: number; protocol?: string;
@@ -50,7 +50,8 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
     for (const ctx of entry.contexts) ctx.abort.abort();
     entry.stream?.destroy();
     event('close', entry, { reason });
-    try { await entry.server.close(); } catch { event('cleanup_failed', entry); }
+    try { await entry.server.close(); for (const release of entry.responseReleases) release(); entry.responseReleases.clear(); }
+    catch { event('cleanup_failed', entry); }
   };
   const sweep = () => {
     const now = Date.now();
@@ -106,13 +107,14 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
     const header = req.headers.authorization ?? '';
     const match = /^(Bearer|ApiKey) ([^\s]+)$/i.exec(header);
     if (!match) { rejectAuth('Authentication required'); return; }
+    const hintId = req.headers['mcp-session-id'];
+    const hint = typeof hintId === 'string' ? sessions.get(hintId) : undefined;
+    const matchedHint = hint && !hint.closed && Date.now() < hint.expires && Date.now() < hint.idle
+      && hint.credentialTag === admission.credentialTag(match[2])
+      && (hint.credentialKind === 'api-key' || match[1].toLowerCase() === 'bearer') ? hint : undefined;
     if (trustedProxy && !admission.proxyAvailable(req.socket.remoteAddress!)) {
-      const hintId = req.headers['mcp-session-id'];
-      const hint = typeof hintId === 'string' ? sessions.get(hintId) : undefined;
-      const established = hint && !hint.closed && Date.now() < hint.expires && Date.now() < hint.idle
-        && hint.credentialTag === admission.credentialTag(match[2]);
       // A digest is only a cheap resource-admission hint. Fresh authentication below remains mandatory.
-      if (!established && !(req.method === 'POST' && hintId === undefined && admission.admitProxyInitialize(req.socket.remoteAddress!))) {
+      if (!matchedHint && !(req.method === 'POST' && hintId === undefined && admission.admitProxyInitialize(req.socket.remoteAddress!))) {
         fail(res, 429, 'Authentication admission limit exceeded'); return;
       }
     }
@@ -126,12 +128,15 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
     let auth;
     if (pendingAuthentications >= limits.authentications) { fail(res, 503, 'Authentication capacity exceeded'); return; }
     pendingAuthentications++;
-    try { auth = await deps.authenticator.authenticate(match[1], match[2]); }
-    catch { fail(res, 503, 'Authentication unavailable'); return; }
+    try { const authenticate = deps.authenticator.authenticateWithAvailability ?? deps.authenticator.authenticate;
+      auth = await authenticate.call(deps.authenticator, match[1], match[2]); }
+    catch { if (trustedProxy && !matchedHint) admission.admitProxy(req.socket.remoteAddress!);
+      fail(res, 503, 'Authentication unavailable'); return; }
     finally { pendingAuthentications--; }
     if (stopped) { fail(res, 503, 'Remote MCP is stopping'); return; }
     if (abort.signal.aborted || res.destroyed) return;
     if (!auth || isLifecyclePrincipal(auth.principal) || (auth.expiresAt && auth.expiresAt.getTime() <= Date.now())) {
+      if (matchedHint) await close(matchedHint, 'credential_invalid');
       rejectAuth('Invalid credential'); return;
     }
     req.principal = auth.principal;
@@ -151,6 +156,7 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
       || (req.method === 'GET' && !accepts('text/event-stream'))) { fail(res, 406, 'Unsupported content negotiation'); return; }
     const id = req.headers['mcp-session-id'];
     let entry = typeof id === 'string' ? sessions.get(id) : undefined;
+    if (entry && matchedHint === entry && entry.binding !== binding) await close(entry, 'binding_changed');
     if (id !== undefined && (!entry || entry.closed || entry.binding !== binding || Date.now() >= entry.expires
       || Date.now() >= entry.idle || (!entry.ready && req.method !== 'POST'))) {
       if (entry && (Date.now() >= entry.expires || Date.now() >= entry.idle)) void close(entry, 'expired');
@@ -244,9 +250,9 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
       try { server = buildMcpServer({ ...deps, logger: { error: () => event('service_error') },
         principal: auth.principal, allowedSource: auth.allowedSource, readBudgetBytes: limits.outputBytes, executionGuard: guard }); }
       catch { release(); await transport.close(); fail(res, 500, 'Initialization failed'); return; }
-      entry = { binding, credentialTag: admission.credentialTag(match[2]), cancelledIds: new Set(), principal: auth.principal.id, expires: Math.min(Date.now() + limits.lifetimeMs,
+      entry = { binding, credentialTag: admission.credentialTag(match[2]), credentialKind: auth.credential, cancelledIds: new Set(), principal: auth.principal.id, expires: Math.min(Date.now() + limits.lifetimeMs,
         auth.expiresAt?.getTime() ?? Infinity), idle: Date.now() + limits.idleMs, ready: false,
-        initializationDeadline: Date.now() + limits.initializeMs, closed: false, release, server, transport,
+        initializationDeadline: Date.now() + limits.initializeMs, closed: false, responseReleases: new Set(), release, server, transport,
         contexts: new Set(), ids: new Set(), protocol: 'params' in rpc[0]
           && typeof rpc[0].params?.protocolVersion === 'string'
           && SUPPORTED_PROTOCOL_VERSIONS.includes(rpc[0].params.protocolVersion)
@@ -259,10 +265,10 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
       event('initialize', entry);
     }
     const selected = entry!;
-    const context: Context = { deadline, abort, calls: new Map(), waiting: new Set(), finish: () => undefined };
+    const context: Context = { deadline, abort, calls: new Map(), waiting: new Set(), cancelled: false, responses: [], finish: () => undefined };
     const claimed: Array<string | number> = [];
     for (const message of rpc) {
-      if (!('id' in message) || message.id === undefined) continue;
+      if (!('method' in message) || !('id' in message) || message.id === undefined) continue;
       if (selected.ids.has(message.id) || selected.cancelledIds.has(message.id)) { for (const requestId of claimed) selected.ids.delete(requestId);
         for (const call of context.calls.values()) call.release(); fail(res, 409, 'Request ID already active'); return; }
       selected.ids.add(message.id); claimed.push(message.id);
@@ -287,11 +293,25 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
     // Bound both SDK serialization and Node's queued response bytes. Slow clients lose their session.
     const send = selected.transport.send.bind(selected.transport);
     if (initializing) selected.transport.send = async (message, options) => {
-      if (Buffer.byteLength(JSON.stringify(message)) > limits.outputBytes) { void close(selected, 'output_limit'); throw new Error('Response limit exceeded'); }
+      if (selected.closed) throw new Error('Session closed');
       if ('id' in message && message.id !== undefined && selected.cancelledIds.has(message.id)) return;
+      const bytes = Buffer.byteLength(JSON.stringify(message));
+      if (bytes > limits.outputBytes) { void close(selected, 'output_limit'); throw new Error('Response limit exceeded'); }
+      const current = 'id' in message && message.id !== undefined && !('method' in message)
+        ? [...selected.contexts].find((context) => context.waiting.has(message.id!)) : undefined;
+      if (current) {
+        const release = admission.reserveResponse(bytes);
+        if (!release) { void close(selected, 'response_retention_limit'); throw new Error('Response retention limit exceeded'); }
+        const clear = () => { release(); selected.responseReleases.delete(clear); };
+        selected.responseReleases.add(clear); current.responses.push(clear);
+      }
       await send(message, options);
-      if ('id' in message && message.id !== undefined && !('method' in message)) {
-        for (const current of selected.contexts) if (current.waiting.delete(message.id)) current.finish();
+      if (current && 'id' in message && message.id !== undefined) {
+        current.waiting.delete(message.id);
+        // A normal complete POST has been cleared by public SDK send. Cancelled batches
+        // keep their cached normal responses until public server.close clears the maps.
+        if (!current.cancelled && !current.waiting.size) { current.responses.forEach((release) => release()); current.responses = []; }
+        current.finish();
       }
     };
     const originalWrite = res.write.bind(res);
@@ -316,6 +336,7 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
     for (const message of rpc) if ('method' in message && message.method === 'notifications/cancelled') {
       const requestId = message.params!.requestId as string | number;
       for (const current of selected.contexts) if (current.waiting.delete(requestId)) {
+        current.cancelled = true;
         selected.cancelledIds.add(requestId);
         current.finish();
       }
