@@ -98,16 +98,16 @@ END;
 $bindings$;
 COMMIT;
 \set continuum_app_role :profile_app_role
-\i :'application_grant'
+\i :application_grant
 \set continuum_app_role :profile_operator_role
-\i :'application_grant'
+\i :application_grant
 \set continuum_operator_role :profile_operator_role
 \set continuum_principal_id :profile_admin_id
-\i :'operator_grant'
+\i :operator_grant
 \set continuum_sync_role :profile_sync_role
 \set continuum_principal_id :profile_sync_id
-\i :'sync_grant'
+\i :sync_grant
 \set continuum_app_role :profile_app_role
-\i :'identity_verifier'
+\i :identity_verifier
 SELECT pg_catalog.pg_advisory_unlock(7215328273579717613::bigint);
 SQL
