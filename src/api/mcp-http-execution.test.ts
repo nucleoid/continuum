@@ -26,3 +26,16 @@ describe('remote per-call execution context', () => {
     first.abort(); expect(observed[0].aborted).toBe(true); expect(observed[1].aborted).toBe(false);
   });
 });
+
+it('retains provider work hidden by a handler response deadline until real settlement', async () => {
+  let settle!: () => void;
+  const late = new Promise<number[][]>((resolve) => { settle = () => resolve([[]]); });
+  const context = remoteExecutionContext({} as never, { id: 'late', dim: 768, embed: () => late });
+  let completed = false;
+  const work = context.run(new AbortController().signal, async () => {
+    void context.routing.providers()[0].embed(['one']);
+    return 'handler-settled';
+  }).then(() => { completed = true; });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(completed).toBe(false); settle(); await work; expect(completed).toBe(true);
+});
