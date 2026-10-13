@@ -170,6 +170,9 @@ try {
   startDatabase(fresh);
   results.bootstrapPlaintextLogCanaryPassed=bootstrapLogCanary(fresh);
   results.passed.push('fresh and specifically refused repeated bootstrap expose no generated plaintext passwords in privately captured job output or verbose PostgreSQL logs; logging settings restored');
+  check(sql(fresh, "SELECT rolcreaterole AND NOT rolsuper AND NOT rolcreatedb AND NOT rolreplication AND NOT rolbypassrls FROM pg_roles WHERE rolname='continuum_owner'", 'DBA') === 't', 'Migration owner lacks the exact existing retirement authority');
+  check(sql(fresh, "SELECT count(*) FROM pg_roles WHERE rolname IN ('continuum_app','continuum_operator','continuum_sync') AND (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls)", 'DBA') === '0', 'Runtime role gained administrative attributes');
+  check(sql(fresh, "SELECT count(*) FROM pg_auth_members m JOIN pg_roles target ON target.oid=m.roleid JOIN pg_roles member ON member.oid=m.member WHERE target.rolname='continuum_sync' AND member.rolname='continuum_owner' AND m.admin_option AND NOT m.set_option AND NOT m.inherit_option", 'DBA') === '1', 'Owner SYNC retirement edge permits runtime impersonation or lacks administration');
   for (const name of ['migrate', 'provision-admin', 'grant']) phase(fresh, name);
   verifyLedger(fresh);
   phase(fresh, 'migrate'); phase(fresh, 'grant');
