@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   pull_request:
   push:
-    branches: [master]
+    branches: [master, codex/feat/19-container-packaging]
 
 permissions:
   contents: read
@@ -54,10 +54,13 @@ jobs:
       - name: Prepare public artifact and excluded markers
         id: source
         run: |
-          mkdir -p container-artifact .handoff src/plugins/tenants/Synthetic
+          mkdir -p container-artifact .handoff src/plugins/tenants/Synthetic src/capture/.handoff src/capture/.codex
           printf 'CONTINUUM_PRIVATE_CONTEXT_SENTINEL_19\n' > .handoff/continuum-private-marker
           printf 'CONTINUUM_PRIVATE_CONTEXT_SENTINEL_19\n' > src/plugins/tenants/Synthetic/continuum-private-marker.ts
           printf 'CONTINUUM_PRIVATE_CONTEXT_SENTINEL_19\n' > .env
+          printf 'CONTINUUM_PRIVATE_CONTEXT_SENTINEL_19\n' > src/capture/.env
+          printf 'CONTINUUM_PRIVATE_CONTEXT_SENTINEL_19\n' > src/capture/.handoff/private-marker
+          printf 'CONTINUUM_PRIVATE_CONTEXT_SENTINEL_19\n' > src/capture/.codex/private-marker
           npm pack --ignore-scripts --pack-destination container-artifact
           mv container-artifact/continuum-core-*.tgz container-artifact/runtime-assets.tgz
           echo "epoch=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"

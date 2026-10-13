@@ -9,6 +9,7 @@ COPY scripts ./scripts
 COPY deploy ./deploy
 COPY docs ./docs
 COPY README.md ./
+RUN test ! -e src/capture/.env && test ! -e src/capture/.handoff && test ! -e src/capture/.codex
 RUN npm run build && npm pack --ignore-scripts --pack-destination /tmp
 
 FROM node:22.23.3-bookworm@sha256:c4d5523090a817b7aa86d2111241fdd4f66d1e27782b44160e6aa63b357ecb2d AS dependencies

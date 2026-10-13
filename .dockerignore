@@ -45,3 +45,26 @@ src/plugins/tenants/**
 !docs/standup.md
 !docs/webhook-ingestion.md
 !docs/deployment.md
+# Private files remain excluded inside otherwise public source directories.
+**/.git
+**/.git/**
+**/.fire-off
+**/.fire-off/**
+**/.handoff
+**/.handoff/**
+**/.worktrees
+**/.worktrees/**
+**/.agents
+**/.agents/**
+**/.codex
+**/.codex/**
+**/.env
+**/.env.*
+**/node_modules
+**/node_modules/**
+**/coverage
+**/coverage/**
+**/test-results
+**/test-results/**
+**/tenants
+**/tenants/**
