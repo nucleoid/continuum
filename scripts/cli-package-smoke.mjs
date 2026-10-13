@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -84,6 +84,13 @@ try {
     'migrations/0088_embedding_provider_scan_index_rebuild.sql',
     'migrations/0090_standup_activity.sql',
     'docs/standup.md',
+    'docs/deployment.md',
+    'deploy/container-entrypoint.mjs',
+    'deploy/compose.production.yml',
+    'deploy/production.env.example',
+    'deploy/bootstrap-database.sql',
+    'deploy/bootstrap-production-admin.sql',
+    'deploy/apply-role-profiles.sh',
     'dist/maintenance/embed-backfill-cli.js',
     'bin/continuum-migrate.mjs',
     'scripts/ensure-scope.mjs',
@@ -101,6 +108,22 @@ try {
     if (!existsSync(join(installedRoot, required))) {
       throw new Error(`Packed package is missing required runtime artifact: ${required}`);
     }
+  }
+  for (const directory of ['migrations', 'scripts']) {
+    for (const name of readdirSync(join(root, directory)).filter(name => name.endsWith('.sql'))) {
+      const relative = join(directory, name);
+      if (!readFileSync(join(root, relative)).equals(readFileSync(join(installedRoot, relative)))) {
+        throw new Error(`Packaged SQL differs from its committed source: ${relative}`);
+      }
+    }
+  }
+  const containerHelp = execFileSync(process.execPath,
+    [join(installedRoot, 'deploy/container-entrypoint.mjs'), 'continuum', '--help'], {
+      cwd: temporary, encoding: 'utf8', timeout: 10000,
+      env: { ...process.env, CONTINUUM_TOKEN: undefined },
+    });
+  if (!containerHelp.startsWith('Usage: continuum <command>')) {
+    throw new Error('Installed container launcher did not preserve wrapper argv');
   }
   const installedTagLauncher = join(
     temporary,
@@ -254,3 +277,4 @@ try {
 } finally {
   rmSync(temporary, { recursive: true, force: true });
 }
+
