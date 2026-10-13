@@ -40,3 +40,25 @@ test('dispatch permits only installed public entrypoints', () => {
  for (const args of [['sh', '-c', 'anything'], ['node', '-e', 'anything'],
   ['node', '../dist/api/server.js'], ['dist/test.js']]) assert.throws(() => resolveCommand(args));
 });
+
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+test('executable errors are bounded and never write protocol stdout', () => {
+ const launcher = fileURLToPath(new URL('./container-entrypoint.mjs', import.meta.url));
+ for (const env of [
+  { CONTINUUM_TOKEN_FILE: '/outside/synthetic-sensitive' },
+  { CONTINUUM_TOKEN_FILE: '/run/secrets/missing', CONTINUUM_TOKEN: 'synthetic-sensitive' },
+ ]) {
+  const child = spawnSync(process.execPath, [launcher, 'continuum', '--help'], {
+   encoding: 'utf8', timeout: 5000, env: { ...process.env, ...env },
+  });
+  assert.equal(child.status, 1);
+  assert.equal(child.stdout, '');
+  assert.equal(child.stderr, 'continuum-container: Invalid container secret setting: CONTINUUM_TOKEN\n');
+ }
+});
+test('valid environment values retain meaningful bytes', () => {
+ const env = { CONTINUUM_TOKEN: '  synthetic token  ' };
+ loadSecretFiles(env);
+ assert.equal(env.CONTINUUM_TOKEN, '  synthetic token  ');
+});

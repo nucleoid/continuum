@@ -76,3 +76,7 @@ Use separate migration-owner, application, operator, and sync profiles according
 Build with `npm run build` and run relevant existing tests. Run the required full checks and package validation before describing a change as ready. Match tests to behavior and material risk; avoid tests that merely mirror a reversible implementation detail. Keep test helpers and tenant-specific code out of the public package according to `package.json`.
 
 Documentation changes must state implemented behavior, actual defaults, operational limits, and prerequisites. Do not claim production deployment, adoption, review approval, or validation at a different head. Keep review evidence and private working artifacts separate from public product guarantees.
+
+## Container packaging
+
+Production container packaging uses hosted-built immutable Linux amd64 OCI artifacts, checksum-verified runtime assets and separate DBA, owner, APP, OP and SYNC authority. See [the deployment guide](docs/deployment.md) for explicit maintenance, private secrets, resource limits and volume-preserving recovery. The development Compose file is not a production installation. Packaging does not authorize live deployment or historical database operations.

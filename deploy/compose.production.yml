@@ -1,0 +1,196 @@
+# Consume only the tested immutable archive and checksum-verified runtime assets.
+# Maintenance commands must run explicitly under the host's finite deadline.
+name: ${COMPOSE_PROJECT_NAME:?choose a new unique project}
+x-job: &job
+  image: ${CONTINUUM_POSTGRES_IMAGE:?pinned pgvector PostgreSQL 16 digest required}
+  user: "999:999"
+  profiles: [maintenance]
+  restart: "no"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 128
+  mem_limit: 256m
+  cpus: 1.0
+  tmpfs: [/tmp:rw,noexec,nosuid,size=16m,uid=999,gid=999]
+  networks: [backend]
+  depends_on:
+    postgres: {condition: service_healthy}
+  volumes:
+    - ${CONTINUUM_RUNTIME_ASSETS:?verified runtime assets directory}:/assets:ro
+  logging: &logs
+    driver: json-file
+    options: {max-size: 10m, max-file: "3"}
+x-owner-env: &owner-env
+  PGHOST: postgres
+  PGPORT: "5432"
+  PGDATABASE: ${CONTINUUM_DATABASE:?database required}
+  PGUSER: ${CONTINUUM_OWNER_ROLE:?owner role required}
+  PGCONNECT_TIMEOUT: "5"
+  PGOPTIONS: -c search_path=${CONTINUUM_APPLICATION_SCHEMA:?application schema required} -c statement_timeout=60000 -c lock_timeout=5000
+  CONTINUUM_APPLICATION_SCHEMA: ${CONTINUUM_APPLICATION_SCHEMA}
+  CONTINUUM_APP_ROLE: ${CONTINUUM_APP_ROLE:?APP role required}
+  CONTINUUM_OPERATOR_ROLE: ${CONTINUUM_OPERATOR_ROLE:?OP role required}
+  CONTINUUM_SYNC_ROLE: ${CONTINUUM_SYNC_ROLE:?SYNC role required}
+  CONTINUUM_ADMIN_PRINCIPAL_ID: ${CONTINUUM_ADMIN_PRINCIPAL_ID:?approved internal admin UUID required}
+  CONTINUUM_ADMIN_ENTRA_OBJECT_ID: ${CONTINUUM_ADMIN_ENTRA_OBJECT_ID:?approved Entra user object UUID required}
+  CONTINUUM_ADMIN_DISPLAY_NAME: ${CONTINUUM_ADMIN_DISPLAY_NAME:?approved admin label required}
+  CONTINUUM_SYNC_PRINCIPAL_ID: ${CONTINUUM_SYNC_PRINCIPAL_ID:?distinct sync service UUID required}
+  CONTINUUM_SYNC_EXTERNAL_ID: ${CONTINUUM_SYNC_EXTERNAL_ID:?distinct sync service external ID required}
+services:
+  postgres:
+    image: ${CONTINUUM_POSTGRES_IMAGE}
+    user: "999:999"
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    mem_limit: 1g
+    cpus: 1.0
+    shm_size: 128m
+    environment:
+      POSTGRES_USER: ${CONTINUUM_DBA_ROLE:?private initialization DBA required}
+      POSTGRES_DB: ${CONTINUUM_DATABASE}
+      POSTGRES_PASSWORD_FILE: /run/secrets/dba_password
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    command: [postgres, -c, max_connections=50, -c, shared_buffers=128MB, -c, work_mem=4MB]
+    secrets: [dba_password]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    tmpfs:
+      - /var/run/postgresql:rw,noexec,nosuid,size=16m,uid=999,gid=999
+      - /tmp:rw,noexec,nosuid,size=64m,uid=999,gid=999
+    networks: [backend]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    stop_grace_period: 30s
+    logging: *logs
+  bootstrap:
+    <<: *job
+    environment:
+      <<: *owner-env
+      PGUSER: ${CONTINUUM_DBA_ROLE}
+      CONTINUUM_DATABASE: ${CONTINUUM_DATABASE}
+      CONTINUUM_PROVIDER_SCHEMA: ${CONTINUUM_PROVIDER_SCHEMA:?provider schema required}
+      CONTINUUM_OWNER_ROLE: ${CONTINUUM_OWNER_ROLE}
+    secrets: [dba_password, owner_password, app_password, operator_password, sync_password]
+    entrypoint: [/bin/sh, -ec]
+    command:
+      - |
+        export PGPASSWORD="$$(cat /run/secrets/dba_password)"
+        export CONTINUUM_OWNER_PASSWORD="$$(cat /run/secrets/owner_password)"
+        export CONTINUUM_APP_PASSWORD="$$(cat /run/secrets/app_password)"
+        export CONTINUUM_OPERATOR_PASSWORD="$$(cat /run/secrets/operator_password)"
+        export CONTINUUM_SYNC_PASSWORD="$$(cat /run/secrets/sync_password)"
+        exec psql -X -v ON_ERROR_STOP=1 -v VERBOSITY=terse \
+          -v continuum_database="$$CONTINUUM_DATABASE" -v continuum_schema="$$CONTINUUM_APPLICATION_SCHEMA" \
+          -v continuum_provider_schema="$$CONTINUUM_PROVIDER_SCHEMA" -v continuum_owner_role="$$CONTINUUM_OWNER_ROLE" \
+          -v continuum_app_role="$$CONTINUUM_APP_ROLE" -v continuum_operator_role="$$CONTINUUM_OPERATOR_ROLE" \
+          -v continuum_sync_role="$$CONTINUUM_SYNC_ROLE" -f /assets/deploy/bootstrap-database.sql
+  migrate:
+    image: ${CONTINUUM_APP_IMAGE:?tested immutable application image required}
+    profiles: [maintenance]
+    restart: "no"
+    user: "10001:10001"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    tmpfs: [/tmp:rw,noexec,nosuid,size=64m,uid=10001,gid=10001]
+    networks: [backend]
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      CONTINUUM_DATABASE_URL_FILE: /run/secrets/owner_database_url
+      CONTINUUM_APPLICATION_SCHEMA: ${CONTINUUM_APPLICATION_SCHEMA}
+      NODE_OPTIONS: --max-old-space-size=384
+    secrets: [owner_database_url]
+    command: [continuum-migrate]
+    stop_grace_period: 15s
+    logging: *logs
+  provision-admin:
+    <<: *job
+    environment: *owner-env
+    secrets: [owner_password]
+    entrypoint: [/bin/sh, -ec]
+    command:
+      - |
+        export PGPASSWORD="$$(cat /run/secrets/owner_password)"
+        exec psql -X -v ON_ERROR_STOP=1 -v VERBOSITY=terse \
+          -v continuum_schema="$$CONTINUUM_APPLICATION_SCHEMA" \
+          -v continuum_admin_principal_id="$$CONTINUUM_ADMIN_PRINCIPAL_ID" \
+          -v continuum_admin_entra_object_id="$$CONTINUUM_ADMIN_ENTRA_OBJECT_ID" \
+          -v continuum_admin_display_name="$$CONTINUUM_ADMIN_DISPLAY_NAME" \
+          -v continuum_sync_principal_id="$$CONTINUUM_SYNC_PRINCIPAL_ID" \
+          -v continuum_sync_external_id="$$CONTINUUM_SYNC_EXTERNAL_ID" \
+          -f /assets/deploy/bootstrap-production-admin.sql
+  grant:
+    <<: *job
+    environment: *owner-env
+    secrets: [owner_password]
+    entrypoint: [/bin/sh, -ec]
+    command:
+      - |
+        export PGPASSWORD="$$(cat /run/secrets/owner_password)"
+        exec /bin/sh /assets/deploy/apply-role-profiles.sh
+  api:
+    image: ${CONTINUUM_APP_IMAGE}
+    profiles: [serving]
+    user: "10001:10001"
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    tmpfs: [/tmp:rw,noexec,nosuid,size=64m,uid=10001,gid=10001]
+    networks: [backend, edge]
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      CONTINUUM_DATABASE_URL_FILE: /run/secrets/app_database_url
+      CONTINUUM_APPLICATION_SCHEMA: ${CONTINUUM_APPLICATION_SCHEMA}
+      CONTINUUM_AUTH_MODE: entra
+      CONTINUUM_ENTRA_TENANT: ${CONTINUUM_ENTRA_TENANT:?approved tenant UUID required}
+      CONTINUUM_ENTRA_AUDIENCE: ${CONTINUUM_ENTRA_AUDIENCE:?approved audience required}
+      CONTINUUM_ENTRA_USER_SCOPE: ${CONTINUUM_ENTRA_USER_SCOPE:?approved user scope required}
+      CONTINUUM_ENTRA_SERVICE_APP_ROLE: ${CONTINUUM_ENTRA_SERVICE_APP_ROLE:?approved app role required}
+      CONTINUUM_ENTRA_ALLOWED_CLIENT_IDS: ${CONTINUUM_ENTRA_ALLOWED_CLIENT_IDS:?approved clients required}
+      CONTINUUM_EMBEDDING_PROVIDER: none
+      CONTINUUM_DB_POOL_MAX: "5"
+      CONTINUUM_DB_CONNECTION_TIMEOUT_MS: "5000"
+      CONTINUUM_DB_IDLE_TIMEOUT_MS: "10000"
+      CONTINUUM_READINESS_TIMEOUT_MS: "1000"
+      CONTINUUM_SHUTDOWN_TIMEOUT_MS: "10000"
+      NODE_OPTIONS: --max-old-space-size=384
+    secrets: [app_database_url]
+    command: [node, dist/api/server.js]
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:4000/health/ready',{signal:AbortSignal.timeout(1500)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 2s
+      retries: 3
+      start_period: 20s
+    stop_grace_period: 15s
+    logging: *logs
+networks:
+  backend: {internal: true}
+  edge: {}
+volumes:
+  pgdata:
+    name: ${CONTINUUM_PGDATA_VOLUME:?new uniquely named fresh volume required}
+secrets:
+  dba_password: {file: '${CONTINUUM_DBA_PASSWORD_FILE:?private DBA password file required}'}
+  owner_password: {file: '${CONTINUUM_OWNER_PASSWORD_FILE:?private owner password file required}'}
+  app_password: {file: '${CONTINUUM_APP_PASSWORD_FILE:?private APP password file required}'}
+  operator_password: {file: '${CONTINUUM_OPERATOR_PASSWORD_FILE:?private OP password file required}'}
+  sync_password: {file: '${CONTINUUM_SYNC_PASSWORD_FILE:?private SYNC password file required}'}
+  owner_database_url: {file: '${CONTINUUM_OWNER_DATABASE_URL_FILE:?private owner URL file required}'}
+  app_database_url: {file: '${CONTINUUM_APP_DATABASE_URL_FILE:?private APP URL file required}'}
