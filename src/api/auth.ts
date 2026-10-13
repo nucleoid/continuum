@@ -162,7 +162,8 @@ export function createAuthenticator(
         if (availability) {
           const code = typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : '';
           const denied = ['ERR_JWT_EXPIRED', 'ERR_JWT_CLAIM_VALIDATION_FAILED', 'ERR_JWT_INVALID',
-            'ERR_JWS_INVALID', 'ERR_JWS_SIGNATURE_VERIFICATION_FAILED', 'ERR_JOSE_ALG_NOT_ALLOWED'].includes(code);
+            'ERR_JWS_INVALID', 'ERR_JWS_SIGNATURE_VERIFICATION_FAILED', 'ERR_JOSE_ALG_NOT_ALLOWED',
+            'ERR_JWKS_NO_MATCHING_KEY', 'ERR_JOSE_NOT_SUPPORTED', 'ERR_JWKS_MULTIPLE_MATCHING_KEYS'].includes(code);
           if (!denied) throw new Error('Authentication verification unavailable');
         }
         return null;
