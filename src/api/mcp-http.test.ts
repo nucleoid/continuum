@@ -668,42 +668,32 @@ it('sheds unavailable authentication for unknown proxy callers while preserving 
   } finally { await client.close(); await active.close(); }
 });
 
-it('bounds SDK retained mixed-batch responses and recovers their budget on session close', async () => {
-  const entered: Array<ReturnType<typeof Promise.withResolvers<void>>> = [];
-  const gates: Array<ReturnType<typeof Promise.withResolvers<{ rows: never[] }>>> = [];
-  const active = await harness({ CONTINUUM_MCP_HTTP_OUTPUT_BYTES: '60000' }, { query: () => {
-    const index = gates.length; const gate = Promise.withResolvers<{ rows: never[] }>(); gates.push(gate); entered[index].resolve(); return gate.promise;
-  } });
-  const client = new Client({ name: 'mixed-retention', version: '1' });
+it('rejects multiple requests but accepts one request and bounded notification batches', async () => {
+  let queries = 0;
+  const active = await harness({}, { query: async () => { queries++; return { rows: [] }; } });
+  const client = new Client({ name: 'batch-boundary', version: '1' });
   const transport = new StreamableHTTPClientTransport(active.address, { requestInit: { headers: { Authorization: 'Bearer synthetic' } } });
   await client.connect(transport);
   const headers = { Authorization: 'Bearer synthetic', 'Mcp-Session-Id': transport.sessionId!, 'Mcp-Protocol-Version': '2025-11-25',
     Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json' };
-  let exhausted = false;
   try {
-    for (let index = 0; index < 10; index++) {
-      entered.push(Promise.withResolvers<void>());
-      const response = fetch(active.address, { method: 'POST', headers, body: JSON.stringify([
-        { jsonrpc: '2.0', id: `list-${index}`, method: 'tools/list' },
-        { jsonrpc: '2.0', id: `cancel-${index}`, method: 'tools/call', params: { name: 'continuum.list_scopes', arguments: {} } },
-      ]) }).then((result) => result.text()).catch(() => '');
-      const admitted = await Promise.race([entered[index].promise.then(() => true), response.then(() => false)]);
-      if (!admitted) { expect(index).toBeGreaterThan(0); exhausted = true; break; }
-      expect((await fetch(active.address, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled',
-        params: { requestId: `cancel-${index}` } }) })).status).toBe(202);
-      await response; gates[index].resolve({ rows: [] });
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      const valid = await client.listTools(undefined, { timeout: 500 }).then(() => true, () => false);
-      if (!valid) { exhausted = true; break; }
-      if (!index) expect(valid).toBe(true);
-    }
-    expect(exhausted).toBe(true);
-    await client.close(); await active.close();
-    const replacement = await harness({ CONTINUUM_MCP_HTTP_OUTPUT_BYTES: '60000' });
-    const next = new Client({ name: 'retention-recovered', version: '1' });
-    try { await next.connect(new StreamableHTTPClientTransport(replacement.address, { requestInit: { headers: { Authorization: 'Bearer synthetic' } } }));
-      expect((await next.listTools()).tools.length).toBeGreaterThan(10);
-    } finally { await next.close(); await replacement.close(); }
-  } finally { gates.forEach((gate) => gate.resolve({ rows: [] })); await client.close(); await active.close(); }
+    const rejected = await fetch(active.address, { method: 'POST', headers, body: JSON.stringify([
+      { jsonrpc: '2.0', id: 'list', method: 'tools/list' },
+      { jsonrpc: '2.0', id: 'call', method: 'tools/call', params: { name: 'continuum.list_scopes', arguments: {} } },
+      { jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 'call' } },
+    ]) });
+    expect(rejected.status).toBe(400); await rejected.body?.cancel(); expect(queries).toBe(0);
+    const notifications = await fetch(active.address, { method: 'POST', headers, body: JSON.stringify([
+      { jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 'absent-first' } },
+      { jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 'absent-second' } },
+    ]) });
+    expect(notifications.status).toBe(202);
+    const single = await fetch(active.address, { method: 'POST', headers, body: JSON.stringify([
+      { jsonrpc: '2.0', id: 'ping', method: 'ping' },
+      { jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 'absent-third' } },
+    ]) });
+    expect(single.status).toBe(200); expect(await single.text()).toContain('ping');
+    expect((await client.listTools()).tools.length).toBeGreaterThan(10);
+  } finally { await client.close(); await active.close(); }
 });
 

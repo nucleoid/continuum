@@ -226,6 +226,11 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
     const prefix = usingControlRate ? 'control:' : '';
     if (!admission.admit(`${prefix}principal:${auth.principal.id}`, messages.length - 1)
       || !admission.admit(`${prefix}credential:${binding}`, messages.length - 1)) { fail(res, 429, 'Message limit exceeded'); return; }
+    // A cancelled multi-request POST retains unrelated normal responses inside SDK1.29.
+    // One request per POST removes that cross-session retention path; notifications still batch.
+    if (rpc.filter((message) => 'method' in message && 'id' in message).length > 1) {
+      fail(res, 400, 'Only one JSON-RPC request is allowed per POST'); return;
+    }
     if (rpc.some((message) => 'id' in message && (typeof message.id === 'string' ? Buffer.byteLength(message.id) > 128
       : !Number.isSafeInteger(message.id)))) { fail(res, 400, 'Invalid request ID'); return; }
     if (rpc.some((message) => 'method' in message && message.method === 'notifications/cancelled'
@@ -354,3 +359,4 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
       await Promise.allSettled([...executing]); admission.clear();
     } };
 }
+
