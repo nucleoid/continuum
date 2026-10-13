@@ -63,17 +63,18 @@ test('upgrade binding refusal prevents every grant and verifier invocation', () 
   assert.ok(!result.calls[0].includes('--file='));
   assert.match(result.calls[0], /--set=maintenance_mode=upgrade/);
 });
-test('fresh and upgrade preflight before the existing exact grant scripts', () => {
+test('fresh and upgrade retain one maintenance session across the existing exact grant scripts', () => {
   for (const mode of ['fresh', 'upgrade']) {
     const result = run(mode);
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.calls.length, 6);
+    assert.equal(result.calls.length, 1);
     assert.ok(!result.calls[0].includes('--file='));
     assert.match(result.calls[0], new RegExp(`--set=maintenance_mode=${mode}`));
-    assert.match(result.calls[1], /grant-application-role.sql/);
-    assert.match(result.calls[2], /grant-application-role.sql/);
-    assert.match(result.calls[3], /grant-operator-role.sql/);
-    assert.match(result.calls[4], /grant-sync-role.sql/);
-    assert.match(result.calls[5], /verify-database-identities.sql/);
+    assert.match(result.sql, /pg_try_advisory_lock\(7215328273579717613/);
+    assert.match(result.sql, /pg_advisory_unlock\(7215328273579717613/);
+    assert.equal((result.sql.match(/\\i :'application_grant'/g) ?? []).length, 2);
+    assert.match(result.sql, /\\i :'operator_grant'/);
+    assert.match(result.sql, /\\i :'sync_grant'/);
+    assert.match(result.sql, /\\i :'identity_verifier'/);
   }
 });
