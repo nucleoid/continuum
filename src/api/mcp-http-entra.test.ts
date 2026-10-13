@@ -126,4 +126,3 @@ describe('remote mocked Entra verifier lifecycle', () => {
     expect(await response.text()).not.toContain('classified-jwt');
   });
 });
-

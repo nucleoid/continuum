@@ -696,4 +696,3 @@ it('rejects multiple requests but accepts one request and bounded notification b
     expect((await client.listTools()).tools.length).toBeGreaterThan(10);
   } finally { await client.close(); await active.close(); }
 });
-

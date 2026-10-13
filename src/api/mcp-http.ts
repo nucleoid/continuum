@@ -359,4 +359,3 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
       await Promise.allSettled([...executing]); admission.clear();
     } };
 }
-

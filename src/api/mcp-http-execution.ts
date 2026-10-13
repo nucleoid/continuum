@@ -80,4 +80,3 @@ export function remoteExecutionContext(pool: pg.Pool, routing: EmbeddingRouting)
     finally { await Promise.allSettled([...scope.pending]); }
   } };
 }
-

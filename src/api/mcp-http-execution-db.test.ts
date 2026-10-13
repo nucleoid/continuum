@@ -59,4 +59,3 @@ describe('real queued PostgreSQL request cancellation', () => {
     } finally { borrowed.release(); }
   });
 });
-
