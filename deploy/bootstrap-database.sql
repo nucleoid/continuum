@@ -27,7 +27,7 @@ SELECT :'continuum_database'::text AS database_name,
              :'continuum_operator_role', :'continuum_sync_role']::text[] AS roles,
        ARRAY[:'owner_password', :'app_password', :'operator_password', :'sync_password']::text[] AS passwords;
 DO $bootstrap$
-DECLARE i RECORD; n INTEGER;
+DECLARE i RECORD; n INTEGER; phase TEXT := 'validation';
 BEGIN
   SELECT * INTO STRICT i FROM bootstrap_input;
   IF NOT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user)
@@ -49,28 +49,36 @@ BEGIN
                 WHERE s.nspname NOT IN ('pg_catalog','information_schema') AND s.nspname !~ '^pg_') THEN
     RAISE EXCEPTION 'fresh bootstrap input or existing database state is invalid; use the upgrade runbook';
   END IF;
+  phase := 'create-roles';
   FOR n IN 1..4 LOOP
     EXECUTE format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', i.roles[n], i.passwords[n]);
   END LOOP;
+  phase := 'database-grants';
   EXECUTE format('REVOKE ALL ON DATABASE %I FROM PUBLIC', i.database_name);
   EXECUTE format('REVOKE ALL ON SCHEMA public FROM PUBLIC');
   FOR n IN 1..4 LOOP
     EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', i.database_name, i.roles[n]);
   END LOOP;
   EXECUTE format('GRANT TEMPORARY ON DATABASE %I TO %I', i.database_name, i.roles[1]);
+  phase := 'sync-administration';
   EXECUTE format('GRANT %I TO %I WITH ADMIN OPTION, SET FALSE, INHERIT FALSE', i.roles[4], i.roles[1]);
+  phase := 'application-schema';
   EXECUTE format('CREATE SCHEMA %I AUTHORIZATION %I', i.app_schema, i.roles[1]);
   EXECUTE format('REVOKE ALL ON SCHEMA %I FROM PUBLIC', i.app_schema);
+  phase := 'provider-schema';
   EXECUTE format('CREATE SCHEMA %I', i.provider_schema);
   EXECUTE format('REVOKE ALL ON SCHEMA %I FROM PUBLIC', i.provider_schema);
+  phase := 'provider-extension';
   EXECUTE format('CREATE EXTENSION vector WITH SCHEMA %I', i.provider_schema);
+  phase := 'provider-grants';
   EXECUTE format('REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA %I FROM PUBLIC', i.provider_schema);
   EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I WITH GRANT OPTION', i.provider_schema, i.roles[1]);
   EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA %I TO %I WITH GRANT OPTION', i.provider_schema, i.roles[1]);
+  phase := 'default-privileges';
   EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC', i.roles[1]);
 EXCEPTION WHEN OTHERS THEN
   -- Never propagate a dynamic CREATE ROLE's plaintext SQL via error context.
-  RAISE EXCEPTION 'fresh database bootstrap failed; review approved inputs and database state' USING ERRCODE = SQLSTATE;
+  RAISE EXCEPTION 'fresh database bootstrap failed at % (%); review approved inputs and database state', phase, SQLSTATE USING ERRCODE = SQLSTATE;
 END;
 $bootstrap$;
 COMMIT;

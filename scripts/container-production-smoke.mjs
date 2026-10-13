@@ -4,6 +4,7 @@ import { writeFileSync, readFileSync, mkdtempSync, mkdirSync, readdirSync, copyF
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { runMaintenance } from './container-maintenance.mjs';
+import { safeBootstrapFailure } from './container-diagnostics.mjs';
 
 if (process.env.GITHUB_ACTIONS !== 'true' || process.platform !== 'linux') throw new Error('Hosted Linux CI required');
 const output = resolve(process.argv[2]);
@@ -101,9 +102,9 @@ function bootstrapLogCanary(p) {
     check(awaitSettings(settings),'Bootstrap canary verbose logging was not active');
     dbaStatement("SELECT 'continuum_bootstrap_log_canary'");
     const success = captureJob();
-    check(success.status===0,'Bootstrap log canary fresh job failed');
+    check(success.status===0, 'Bootstrap log canary fresh job failed: ' + JSON.stringify(safeBootstrapFailure(captured.at(-1))));
     const repeated = captureJob();
-    check(repeated.status!==0 && `${repeated.stdout ?? ''}${repeated.stderr ?? ''}`.includes('fresh database bootstrap failed; review approved inputs and database state'),
+    check(repeated.status!==0 && `${repeated.stdout ?? ''}${repeated.stderr ?? ''}`.includes('fresh database bootstrap failed at validation (P0001); review approved inputs and database state'),
       'Bootstrap log canary did not receive the specific repeated-bootstrap refusal');
     const postgresId = compose(p,['ps','-q','postgres']).trim();
     const logs = spawnSync('docker',['logs',postgresId],{
