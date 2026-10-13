@@ -77,9 +77,22 @@ export function resolveCommand(args) {
  if (!SCRIPTS.has(selected)) throw new Error('Unsupported container command');
  return [selected, ...supplied.slice(1)];
 }
+export function maintenanceDatabaseUrl(value, name) {
+ try {
+  if (!/^ctm-migrate-[a-f0-9]{24}$/.test(name)) throw new Error();
+  const url = new URL(value);
+  if (!['postgres:', 'postgresql:'].includes(url.protocol)
+   || (url.searchParams.has('application_name') && url.searchParams.get('application_name') !== name)) throw new Error();
+  url.searchParams.set('application_name', name);
+  return url.href;
+ } catch { throw new Error('Invalid container maintenance connection identity'); }
+}
 async function main() {
  loadSecretFiles(process.env);
  const [selected, ...args] = resolveCommand(process.argv.slice(2));
+ if (process.env.PGAPPNAME && ['bin/continuum-migrate.mjs', 'dist/storage/migrate-cli.js'].includes(selected)) {
+  process.env.CONTINUUM_DATABASE_URL = maintenanceDatabaseUrl(process.env.CONTINUUM_DATABASE_URL, process.env.PGAPPNAME);
+ }
  const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
  const target = resolve(root, selected);
  process.argv = [process.execPath, target, ...args];
@@ -89,7 +102,8 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
  try { await main(); }
  catch (error) {
   const safe = error.message?.startsWith('Invalid container secret setting:')
-   || error.message === 'Unsupported container command';
+   || error.message === 'Unsupported container command'
+   || error.message === 'Invalid container maintenance connection identity';
   process.stderr.write(`continuum-container: ${safe ? error.message : 'Runtime launch failed'}\n`);
   process.exitCode = 1;
  }
