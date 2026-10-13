@@ -3,13 +3,13 @@ import type { AuthenticatedPrincipal } from '../types.js';
 interface Limits {
   sessions: number; principalSessions: number; calls: number; principalCalls: number;
   idleMs: number; lifetimeMs: number; messageRate: number; messageBurst: number;
-  proxyRate?: number; proxyBurst?: number; buckets: number; peerRate: number; peerBurst: number; peers: number; streams: number;
+  proxyRate?: number; proxyBurst?: number; proxyInitializeRate?: number; proxyInitializeBurst?: number; unsettledGraceMs?: number; buckets: number; peerRate: number; peerBurst: number; peers: number; streams: number;
 }
 interface Bucket { tokens: number; updated: number }
 const retainedExecutions = new Map<string, number>();
 let retainedCalls = 0;
-let cancelledUnsettled = 0;
-export type ExecutionRelease = (() => void) & { markUnsettled(): void };
+const cancelledFences = new Map<symbol, number>();
+export type ExecutionRelease = (() => void) & { markUnsettled(deadline?: number): void };
 export class McpHttpSessions {
   private readonly key = randomBytes(32);
   private readonly principals = new Map<string, number>();
@@ -26,6 +26,7 @@ export class McpHttpSessions {
       auth.principal.id, auth.principal.kind, auth.credential, credential, auth.allowedSource ?? null,
     ])).digest('hex');
   }
+  credentialTag(credential: string): string { return createHmac('sha256', this.key).update(credential).digest('hex'); }
   correlation(id: string): string { return createHmac('sha256', this.key).update(id).digest('hex').slice(0, 24); }
   private reserveCounter(map: Map<string, number>, principal: string, max: number): (() => void) | undefined {
     if ((map.get(principal) ?? 0) >= max) return;
@@ -50,10 +51,10 @@ export class McpHttpSessions {
     if (!release) return;
     retainedCalls++;
     let active = true;
-    let cancelled = false;
+    const fence = Symbol();
     const releaseExecution = () => { if (!active) return; active = false;
-      retainedCalls--; if (cancelled) cancelledUnsettled--; release(); };
-    releaseExecution.markUnsettled = () => { if (!active || cancelled) return; cancelled = true; cancelledUnsettled++; };
+      retainedCalls--; cancelledFences.delete(fence); release(); };
+    releaseExecution.markUnsettled = (deadline = this.now()) => { if (!active || cancelledFences.has(fence)) return; cancelledFences.set(fence, deadline + (this.limits.unsettledGraceMs ?? 5000)); };
     return releaseExecution;
   }
   reserveStream(): (() => void) | undefined {
@@ -62,7 +63,7 @@ export class McpHttpSessions {
     let active = true;
     return () => { if (!active) return; active = false; this.streams--; };
   }
-  private take(map: Map<string, Bucket>, key: string, count: number, rate: number, burst: number, cap: number): boolean {
+  private take(map: Map<string, Bucket>, key: string, count: number, rate: number, burst: number, cap: number, consume = true): boolean {
     const now = this.now();
     // Eviction only after a full refill preserves the original admission history.
     for (const [id, bucket] of map) if (now - bucket.updated >= burst * 60_000 / rate) map.delete(id);
@@ -74,7 +75,7 @@ export class McpHttpSessions {
     bucket.tokens = Math.min(burst, bucket.tokens + Math.max(0, now - bucket.updated) * rate / 60_000);
     bucket.updated = now;
     if (count > bucket.tokens) return false;
-    bucket.tokens -= count; return true;
+    if (consume) bucket.tokens -= count; return true;
   }
   admit(key: string, count: number): boolean {
     return this.take(this.buckets, key, count, this.limits.messageRate, this.limits.messageBurst, this.limits.buckets);
@@ -86,7 +87,13 @@ export class McpHttpSessions {
     return this.take(this.peers, `proxy:${peer}`, 1, this.limits.proxyRate ?? 6000,
       this.limits.proxyBurst ?? 1000, this.limits.peers);
   }
+  proxyAvailable(peer: string): boolean {
+    return this.take(this.peers, `proxy:${peer}`, 1, this.limits.proxyRate ?? 6000, this.limits.proxyBurst ?? 1000, this.limits.peers, false);
+  }
+  admitProxyInitialize(peer: string): boolean {
+    return this.take(this.peers, `initialize:${peer}`, 1, this.limits.proxyInitializeRate ?? 6, this.limits.proxyInitializeBurst ?? 2, this.limits.peers);
+  }
   clear(): void { this.buckets.clear(); this.peers.clear(); }
-  isHealthy(): boolean { return cancelledUnsettled < this.limits.calls; }
+  isHealthy(): boolean { return [...cancelledFences.values()].filter((deadline) => this.now() >= deadline).length < this.limits.calls; }
   get unsettled(): number { return retainedCalls; }
 }

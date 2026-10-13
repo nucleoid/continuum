@@ -1,11 +1,11 @@
 import { ServiceError } from '../services/errors.js';
 /** Compact incremental preparation bounds protocol-escaped text before allocating a whole result. */
-export function boundedJsonText(value: unknown, maxBytes: number): string {
+export function boundedJsonText(value: unknown, maxBytes: number, wireText = true): string {
   const chunks: string[] = [];
   let bytes = 512; // JSON-RPC/content wrapper and request ID allowance.
   const append = (text: string) => {
     if (Buffer.byteLength(text) > maxBytes) throw oversized();
-    bytes += Buffer.byteLength(JSON.stringify(text)) - 2;
+    bytes += wireText ? Buffer.byteLength(JSON.stringify(text)) - 2 : Buffer.byteLength(text);
     if (bytes > maxBytes) throw oversized();
     chunks.push(text);
   };

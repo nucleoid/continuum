@@ -22,10 +22,13 @@ describe('remote MCP admission', () => {
     const next = sessions.reserveCall('b'); expect(next).toBeTypeOf('function'); next!();
   });
   it('distinguishes ordinary capacity from cancelled unsettled fences', () => {
-    const sessions = new McpHttpSessions(limits, () => 0);
+    let now = 0;
+    const sessions = new McpHttpSessions({ ...limits, unsettledGraceMs: 10 }, () => now);
     const release = sessions.reserveCall('a')!;
     expect(sessions.isHealthy()).toBe(true);
-    release.markUnsettled(); expect(sessions.isHealthy()).toBe(false);
+    release.markUnsettled(100); expect(sessions.isHealthy()).toBe(true);
+    now = 109; expect(sessions.isHealthy()).toBe(true);
+    now = 110; expect(sessions.isHealthy()).toBe(false);
     release(); expect(sessions.isHealthy()).toBe(true);
   });
   it('binds exact credentials with canonical service-key schemes', () => {

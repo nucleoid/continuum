@@ -1,3 +1,6 @@
+import { recallForPrincipal } from './recall.js';
+import { RetrievalEnricherRegistry } from '../extensions/retrieval.js';
+import { ServiceError } from './errors.js';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import type pg from 'pg';
 import { createPrincipal } from '../storage/principals.js';
@@ -243,7 +246,7 @@ describe('memory read service', () => {
     const ids: string[] = [];
     for (let index = 0; index < 10; index++) ids.push((await createMemory(pool, {
       scopeId: org.id, scopeKind: 'org', type: 'decision', title: `Large ${index}`,
-      body: '界'.repeat(11000), authorId: author.id, source: 'manual',
+      body: '界'.repeat(40000), authorId: author.id, source: 'manual',
     })).id);
     const queries: string[] = [];
     const observed = poolObserving(pool, queries);
@@ -285,6 +288,34 @@ describe('memory read service', () => {
     });
     await expect(listMemoriesForPrincipal(observed, reader, {}, {}, 16384)).rejects.toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
     expect(inserted).toBe(true);
+    expect((await pool.query('SELECT 1 FROM audit_log')).rowCount).toBe(0);
+  });
+  it('rejects nested protocol escaping before point or browse success audits', async () => {
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    const memory = await createMemory(pool, { scopeId: org.id, scopeKind: 'org', type: 'decision', title: 'Escaping',
+      body: '\\'.repeat(300000), authorId: author.id, source: 'manual' });
+    const validate = (result: unknown) => {
+      if (Buffer.byteLength(JSON.stringify(JSON.stringify(result))) + 512 > 1048576) {
+        throw new ServiceError('PAYLOAD_TOO_LARGE', 'Output exceeds budget');
+      }
+    };
+    await expect(getMemoryForPrincipal(pool, reader, memory.id, {}, 1048576, validate)).rejects.toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
+    await expect(listMemoriesForPrincipal(pool, reader, {}, {}, 1048576, validate)).rejects.toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
+    expect((await pool.query('SELECT 1 FROM audit_log')).rowCount).toBe(0);
+  });
+  it('validates enriched recall projection before recording delivered reads', async () => {
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await createMemory(pool, { scopeId: org.id, scopeKind: 'org', type: 'decision', title: 'Reference budget',
+      body: 'Reference budget content', authorId: author.id, source: 'manual' });
+    const registry = new RetrievalEnricherRegistry();
+    registry.register({ id: 'fixture', enrich: async (results) => results.map(() => ({ note: 'enriched' })) });
+    await expect(recallForPrincipal(pool, null, reader, { query: 'reference' }, {}, undefined, {
+      readBudgetBytes: 1048576, registry, options: { timeoutMs: 250, maxBytes: 16384 }, validateResult: (result) => {
+        expect(result.results).toHaveLength(1);
+        expect(result.results[0].enrichments).toEqual({ fixture: { note: 'enriched' } });
+        throw new ServiceError('PAYLOAD_TOO_LARGE', 'Output exceeds budget');
+      },
+    })).rejects.toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
     expect((await pool.query('SELECT 1 FROM audit_log')).rowCount).toBe(0);
   });
   it('admits fifty ordinary 2 KiB memories at the default remote browse limit', async () => {

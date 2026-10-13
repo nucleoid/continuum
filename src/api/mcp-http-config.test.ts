@@ -126,3 +126,10 @@ it('classifies configured direct proxy peers without using forwarded client head
   const dev = mcpHttpConfigFromEnv({ ...production, CONTINUUM_MCP_HTTP_LOOPBACK_DEV: 'true', CONTINUUM_MCP_PUBLIC_URL: 'http://127.0.0.1:4000/mcp' }, 'dev')!;
   expect(isTrustedMcpProxyPeer(request({}, '192.0.2.4'), dev)).toBe(false);
 });
+
+it('normalizes configured HTTPS port443 and requires its canonical Host', () => {
+  const config = mcpHttpConfigFromEnv({ ...production, CONTINUUM_MCP_PUBLIC_URL: 'https://mcp.example.com:443/mcp' }, 'entra')!;
+  expect(config.authority).toBe('mcp.example.com');
+  expect(validateMcpHttpRequest(request({ host: 'mcp.example.com', 'x-forwarded-proto': 'https' }, '192.0.2.4'), config)).toBe(true);
+  expect(validateMcpHttpRequest(request({ host: 'mcp.example.com:443', 'x-forwarded-proto': 'https' }, '192.0.2.4'), config)).toBe(false);
+});

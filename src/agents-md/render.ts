@@ -231,7 +231,7 @@ async function boundedRenderScopes(pool: pg.Pool, opts: RenderOptions): Promise<
           AND (s.kind = 'org' OR EXISTS (SELECT 1 FROM scope_memberships sm
             WHERE sm.principal_id = $1 AND sm.scope_id = s.id AND sm.active
               AND continuum_membership_is_effective(sm.active, sm.source_kind)))
-     ), scope_budget AS (SELECT COALESCE(sum(512::bigint + 16::bigint * octet_length(name)::bigint), 0) + 1024 > $4::bigint AS budget_exceeded FROM selected)
+     ), scope_budget AS (SELECT COALESCE(sum(512::bigint + octet_length(name)::bigint), 0) + 1024 > $4::bigint AS budget_exceeded FROM selected)
      SELECT scope_budget.budget_exceeded, selected.* FROM scope_budget
        LEFT JOIN selected ON NOT scope_budget.budget_exceeded`,
     [opts.principalId, opts.team ?? null, opts.project ?? null, opts.readBudgetBytes]);
@@ -251,10 +251,9 @@ async function fetchSectionMemories(
       [scopeId, TYPE_ORDER, limit]);
     return rows.map(rowToMemory);
   }
-  // Six-fold escaping in JSON and quoted body lines can expand content again in Markdown.
-  // Reserve a conservative sixteen-fold bound before hydrating a section.
-  const estimatedBytes = MEMORY_READ_BUDGET_BYTES_SQL.replace('12::bigint *', '16::bigint *');
-  const metadataSql = `SELECT m.id, ${estimatedBytes} + 16::bigint * octet_length(s.name)::bigint AS budget_bytes,
+  // Bound raw hydration first. Escaped rendering and its JSON wire text are checked
+  // separately before the service can record a successful delivery audit.
+  const metadataSql = `SELECT m.id, ${MEMORY_READ_BUDGET_BYTES_SQL} + octet_length(s.name)::bigint AS budget_bytes,
     row_number() OVER (ORDER BY array_position($2::text[], m.type), COALESCE(m.last_verified, m.updated_at) DESC, m.created_at DESC, m.id) AS position
     FROM memories m JOIN scopes s ON s.id = m.scope_id
     WHERE m.scope_id = $1 AND m.state = 'live' AND (m.expires_at IS NULL OR m.expires_at > now())

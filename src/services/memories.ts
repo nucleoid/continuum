@@ -54,6 +54,7 @@ export async function getMemoryForPrincipal(
   memoryId: string,
   auditMetadata: Record<string, unknown> = {},
   readBudgetBytes?: number,
+  validateResult?: (result: MemoryReadRecord) => void,
 ): Promise<MemoryReadRecord> {
   if (!UUID.safeParse(memoryId).success) {
     throw new ServiceError('INVALID_INPUT', 'memoryId must be a valid UUID');
@@ -68,6 +69,7 @@ export async function getMemoryForPrincipal(
       throw new ServiceError('MEMORY_NOT_FOUND', 'Memory not found');
     }
     if (readBudgetBytes !== undefined) requireReadBudget(Buffer.byteLength(JSON.stringify(recordValue), 'utf8') + 1024, readBudgetBytes);
+    validateResult?.(recordValue);
     await recordRead(client, {
       principalId: principal.id,
       operation: 'get_memory',
@@ -100,6 +102,7 @@ export async function listMemoriesForPrincipal(
   input: ListMemoriesInput = {},
   auditMetadata: Record<string, unknown> = {},
   readBudgetBytes?: number,
+  validateResult?: (result: ListMemoriesResult) => void,
 ): Promise<ListMemoriesResult> {
   let client: pg.PoolClient | undefined;
   let destroyClient = false;
@@ -122,6 +125,7 @@ export async function listMemoriesForPrincipal(
       scope, type: input.type, state, limit, offset,
     }, readBudgetBytes);
     if (readBudgetBytes !== undefined) requireReadBudget(Buffer.byteLength(JSON.stringify({ items, limit, offset }), 'utf8') + 1024, readBudgetBytes);
+    validateResult?.({ items, limit, offset });
     await recordRead(client, {
       principalId: principal.id,
       operation: 'list_memories',

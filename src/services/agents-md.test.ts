@@ -19,7 +19,7 @@ describe('bounded remote AGENTS.md reads', () => {
   it('rejects aggregate oversized generator data before body hydration and success read audit', async () => {
     const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
     for (let index = 0; index < 10; index++) await createMemory(pool, {
-      scopeId: org.id, scopeKind: 'org', type: 'decision', title: `Large ${index}`, body: '界'.repeat(4000), authorId: reader.id, source: 'manual',
+      scopeId: org.id, scopeKind: 'org', type: 'decision', title: `Large ${index}`, body: '界'.repeat(40000), authorId: reader.id, source: 'manual',
     });
     const sql: string[] = [];
     const observed = observing(pool, sql);
@@ -28,6 +28,13 @@ describe('bounded remote AGENTS.md reads', () => {
     expect(sql.some((value) => value.includes('SELECT m.id, m.scope_id'))).toBe(false);
     expect((await pool.query('SELECT 1 FROM audit_log')).rowCount).toBe(0);
     await expect(prepareAgentsMdForPrincipal(observed, reader, {}, 1048576)).rejects.toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
+  });
+  it('rejects actual escaped Markdown wire growth before generator delivery audit', async () => {
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await createMemory(pool, { scopeId: org.id, scopeKind: 'org', type: 'decision', title: 'Escaping',
+      body: '\u0001'.repeat(150000), authorId: reader.id, source: 'manual' });
+    await expect(renderAgentsMdForPrincipal(pool, reader, {}, {}, 1048576)).rejects.toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
+    expect((await pool.query('SELECT 1 FROM audit_log')).rowCount).toBe(0);
   });
   it('admits default org plus project bundles of forty ordinary 2 KiB memories', async () => {
     const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;

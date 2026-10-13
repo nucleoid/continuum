@@ -10,13 +10,12 @@ import type { McpHttpConfig } from './mcp-http-config.js';
 import { validateMcpHttpRequest, isTrustedMcpProxyPeer } from './mcp-http-config.js';
 import { McpHttpSessions, type ExecutionRelease } from './mcp-http-sessions.js';
 let pendingAuthentications = 0;
-const MAX_PENDING_AUTHENTICATIONS = 100;
 let bodyReaders = 0;
 let reservedControlReaders = 0;
 interface Call { release: ExecutionRelease; started: boolean; done: boolean }
-interface Context { deadline: number; abort: AbortController; calls: Map<string | number, Call> }
+interface Context { deadline: number; abort: AbortController; calls: Map<string | number, Call>; waiting: Set<string | number>; finish: () => void }
 interface Entry {
-  id?: string; binding: string; principal: string; expires: number; idle: number;
+  id?: string; credentialTag: string; cancelledIds: Set<string | number>; binding: string; principal: string; expires: number; idle: number;
   ready: boolean; closed: boolean; release: () => void;
   server: ReturnType<typeof buildMcpServer>; transport: StreamableHTTPServerTransport;
   contexts: Set<Context>; ids: Set<string | number>; stream?: express.Response;
@@ -27,6 +26,7 @@ export interface McpHttpDeps extends Omit<McpDeps, 'principal' | 'executionGuard
   info?: (event: Record<string, unknown>) => void;
 }
 export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps) {
+  if (!config.loopbackDev && deps.authenticator.mode !== 'entra') throw new Error('Remote MCP requires entra authentication');
   const limits = config.limits;
   const admission = new McpHttpSessions(limits);
   const sessions = new Map<string, Entry>();
@@ -106,6 +106,16 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
     const header = req.headers.authorization ?? '';
     const match = /^(Bearer|ApiKey) ([^\s]+)$/i.exec(header);
     if (!match) { rejectAuth('Authentication required'); return; }
+    if (trustedProxy && !admission.proxyAvailable(req.socket.remoteAddress!)) {
+      const hintId = req.headers['mcp-session-id'];
+      const hint = typeof hintId === 'string' ? sessions.get(hintId) : undefined;
+      const established = hint && !hint.closed && Date.now() < hint.expires && Date.now() < hint.idle
+        && hint.credentialTag === admission.credentialTag(match[2]);
+      // A digest is only a cheap resource-admission hint. Fresh authentication below remains mandatory.
+      if (!established && !(req.method === 'POST' && hintId === undefined && admission.admitProxyInitialize(req.socket.remoteAddress!))) {
+        fail(res, 429, 'Authentication admission limit exceeded'); return;
+      }
+    }
     const abort = new AbortController();
     requests.set(res, abort);
     let deadline = Date.now() + limits.requestMs;
@@ -114,7 +124,7 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
     let deadlineTimer = setTimeout(expire, limits.requestMs);
     res.once('close', () => { clearTimeout(deadlineTimer); requests.delete(res); abort.abort(); });
     let auth;
-    if (pendingAuthentications >= MAX_PENDING_AUTHENTICATIONS) { fail(res, 503, 'Authentication capacity exceeded'); return; }
+    if (pendingAuthentications >= limits.authentications) { fail(res, 503, 'Authentication capacity exceeded'); return; }
     pendingAuthentications++;
     try { auth = await deps.authenticator.authenticate(match[1], match[2]); }
     catch { fail(res, 503, 'Authentication unavailable'); return; }
@@ -234,7 +244,7 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
       try { server = buildMcpServer({ ...deps, logger: { error: () => event('service_error') },
         principal: auth.principal, allowedSource: auth.allowedSource, readBudgetBytes: limits.outputBytes, executionGuard: guard }); }
       catch { release(); await transport.close(); fail(res, 500, 'Initialization failed'); return; }
-      entry = { binding, principal: auth.principal.id, expires: Math.min(Date.now() + limits.lifetimeMs,
+      entry = { binding, credentialTag: admission.credentialTag(match[2]), cancelledIds: new Set(), principal: auth.principal.id, expires: Math.min(Date.now() + limits.lifetimeMs,
         auth.expiresAt?.getTime() ?? Infinity), idle: Date.now() + limits.idleMs, ready: false,
         initializationDeadline: Date.now() + limits.initializeMs, closed: false, release, server, transport,
         contexts: new Set(), ids: new Set(), protocol: 'params' in rpc[0]
@@ -249,11 +259,11 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
       event('initialize', entry);
     }
     const selected = entry!;
-    const context: Context = { deadline, abort, calls: new Map() };
+    const context: Context = { deadline, abort, calls: new Map(), waiting: new Set(), finish: () => undefined };
     const claimed: Array<string | number> = [];
     for (const message of rpc) {
       if (!('id' in message) || message.id === undefined) continue;
-      if (selected.ids.has(message.id)) { for (const requestId of claimed) selected.ids.delete(requestId);
+      if (selected.ids.has(message.id) || selected.cancelledIds.has(message.id)) { for (const requestId of claimed) selected.ids.delete(requestId);
         for (const call of context.calls.values()) call.release(); fail(res, 409, 'Request ID already active'); return; }
       selected.ids.add(message.id); claimed.push(message.id);
       if ('method' in message && message.method === 'tools/call') {
@@ -263,6 +273,11 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
         context.calls.set(message.id, { release, started: false, done: false });
       }
     }
+    context.waiting = new Set(claimed);
+    context.finish = () => {
+      if (context.waiting.size || !claimed.length || res.writableFinished || res.destroyed) return;
+      selected.transport.closeSSEStream(claimed[0]);
+    };
     selected.contexts.add(context);
     selected.idle = Date.now() + limits.idleMs;
     const authInfo: AuthInfo = { token: binding, clientId: auth.principal.id, scopes: [],
@@ -273,7 +288,11 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
     const send = selected.transport.send.bind(selected.transport);
     if (initializing) selected.transport.send = async (message, options) => {
       if (Buffer.byteLength(JSON.stringify(message)) > limits.outputBytes) { void close(selected, 'output_limit'); throw new Error('Response limit exceeded'); }
-      return send(message, options);
+      if ('id' in message && message.id !== undefined && selected.cancelledIds.has(message.id)) return;
+      await send(message, options);
+      if ('id' in message && message.id !== undefined && !('method' in message)) {
+        for (const current of selected.contexts) if (current.waiting.delete(message.id)) current.finish();
+      }
     };
     const originalWrite = res.write.bind(res);
     let bytes = 0;
@@ -289,11 +308,20 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
       if (!res.writableFinished) void close(selected, 'disconnect');
     });
     abort.signal.addEventListener('abort', () => {
-      for (const call of context.calls.values()) if (call.started && !call.done) call.release.markUnsettled();
+      for (const call of context.calls.values()) if (call.started && !call.done) call.release.markUnsettled(context.deadline);
       if (!res.writableFinished) { event('deadline', selected); void close(selected, 'deadline'); }
     }, { once: true });
     if (rpc.some((message) => 'method' in message && message.method === 'notifications/initialized')) selected.ready = true;
     if (protocol) selected.protocol ??= protocol;
+    for (const message of rpc) if ('method' in message && message.method === 'notifications/cancelled') {
+      const requestId = message.params!.requestId as string | number;
+      for (const current of selected.contexts) if (current.waiting.delete(requestId)) {
+        selected.cancelledIds.add(requestId);
+        current.finish();
+      }
+      // SDK1.29 keeps cancelled request-to-stream tombstones; cap them without touching private SDK state.
+      if (selected.cancelledIds.size >= limits.cancelledIds) { await close(selected, 'cancellation_limit'); res.status(202).end(); return; }
+    }
     try { await selected.transport.handleRequest(authenticatedRequest, res, req.body); }
     catch { fail(res, 400, 'Invalid MCP request'); if (initializing) await close(selected, 'initialize_failed'); }
     if (initializing && (res.statusCode >= 400 || !selected.id)) await close(selected, 'initialize_failed');

@@ -18,7 +18,7 @@ import { isDirectEntrypoint } from './entrypoint.js';
 import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoordinationContractReady, requirePromotionOutboxReady, requireStandupReady } from '../storage/provider-lifecycle.js';
 import { accessibleScopes } from '../services/access.js';
 import { captureMemory } from '../services/capture.js';
-import { recallForPrincipal } from '../services/recall.js';
+import { recallForPrincipal, type PrincipalRecallResult } from '../services/recall.js';
 import {
   asServiceError,
   logInternalServiceError,
@@ -58,9 +58,10 @@ import {
 import {
   getMemoryForPrincipal,
   listMemoriesForPrincipal,
+  type ListMemoriesResult,
 } from '../services/memories.js';
 import type { MemoryReadRecord } from '../storage/memory-reads.js';
-import type { MemoryState, MemoryType } from '../types.js';
+import type { Memory, MemoryState, MemoryType } from '../types.js';
 import { decisionHistoryForPrincipal, supersedeForPrincipal } from '../services/supersede.js';
 import {
   acquireLease,
@@ -188,8 +189,25 @@ export function buildMcpServer(deps: McpDeps): McpServer {
   const embeddingProvider = invocation?.routing ?? deps.embeddingProvider;
   const principal = deps.principal;
   // Remote JSON stays compact so adversarial metadata nesting cannot expand pretty-print indentation.
-  const jsonResult = (value: unknown) => textResult(deps.readBudgetBytes === undefined
-    ? JSON.stringify(value, null, 2) : boundedJsonText(value, deps.readBudgetBytes));
+  const jsonResult = (value: unknown, meta?: Record<string, unknown>) => {
+    const result = { ...textResult(deps.readBudgetBytes === undefined
+      ? JSON.stringify(value, null, 2) : boundedJsonText(value, deps.readBudgetBytes)), ...(meta ? { _meta: meta } : {}) };
+    if (deps.readBudgetBytes !== undefined) boundedJsonText(result, deps.readBudgetBytes, false);
+    return result;
+  };
+  const listProjection = (result: ListMemoriesResult) => ({ items: result.items.map(mcpMemory), limit: result.limit, offset: result.offset });
+  const historyProjection = (result: { decisions: Memory[]; currentId: string }) => ({
+    current_id: result.currentId,
+    decisions: result.decisions.map((memory) => ({ id: memory.id, title: memory.title, body: memory.body, tags: memory.tags,
+      metadata: memory.metadata, author_id: memory.authorId, source: memory.source, source_ref: memory.sourceRef,
+      state: memory.state, supersedes_id: memory.supersedesId, created_at: memory.createdAt })),
+  });
+  const recallProjection = ({ results, accessible }: PrincipalRecallResult) => results.map((r) => ({
+    id: r.memory.id, score: r.score, scope: accessible.get(r.memory.scopeId)?.label ?? null, type: r.memory.type,
+    title: r.memory.title, excerpt: r.excerpt, body_truncated: r.bodyTruncated, source_ref: r.memory.sourceRef,
+    ...(r.memory.supersedesId ? { supersedes_id: r.memory.supersedesId } : {}), created_at: r.memory.createdAt,
+    ...(r.enrichments ? { enrichments: r.enrichments } : {}),
+  }));
   const relationThreshold = validateRelationThreshold(
     deps.relationThreshold ?? DEFAULT_RELATION_THRESHOLD,
   );
@@ -465,24 +483,10 @@ export function buildMcpServer(deps: McpDeps): McpServer {
             registry: retrievalEnrichers,
             options: { ...enrichment, signal: deps.executionGuard ? (enrichment.signal ? AbortSignal.any([extra.signal, enrichment.signal]) : extra.signal) : enrichment.signal, logger: deps.enrichmentLogger },
             readBudgetBytes: deps.readBudgetBytes,
+            validateResult: deps.readBudgetBytes === undefined ? undefined : (value) => { jsonResult(recallProjection(value), { diagnostics: value.diagnostics }); },
           },
         );
-        return {
-          ...jsonResult(results.map((r) => ({
-            id: r.memory.id,
-            score: r.score,
-            scope: accessible.get(r.memory.scopeId)?.label ?? null,
-            type: r.memory.type,
-            title: r.memory.title,
-            excerpt: r.excerpt,
-            body_truncated: r.bodyTruncated,
-            source_ref: r.memory.sourceRef,
-            ...(r.memory.supersedesId ? { supersedes_id: r.memory.supersedesId } : {}),
-            created_at: r.memory.createdAt,
-            ...(r.enrichments ? { enrichments: r.enrichments } : {}),
-          }))),
-          _meta: { diagnostics },
-        };
+        return jsonResult(recallProjection({ results, accessible, diagnostics }), { diagnostics });
       } catch (error) {
         return errorResult(error);
       }
@@ -499,6 +503,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       try {
         const result = await getMemoryForPrincipal(
           pool, principal, args.memory_id, { transport: 'mcp' }, deps.readBudgetBytes,
+          deps.readBudgetBytes === undefined ? undefined : (value) => { jsonResult(mcpMemory(value)); },
         );
         return jsonResult(mcpMemory(result));
       } catch (error) {
@@ -527,12 +532,9 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           state: args.state as MemoryState | undefined,
           limit: args.limit,
           offset: args.offset,
-        }, { transport: 'mcp' }, deps.readBudgetBytes);
-        return jsonResult({
-          items: result.items.map(mcpMemory),
-          limit: result.limit,
-          offset: result.offset,
-        });
+        }, { transport: 'mcp' }, deps.readBudgetBytes,
+          deps.readBudgetBytes === undefined ? undefined : (value) => { jsonResult(listProjection(value)); });
+        return jsonResult(listProjection(result));
       } catch (error) {
         return errorResult(error);
       }
@@ -581,16 +583,9 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       try {
         const result = await decisionHistoryForPrincipal(
           pool, principal, args.decision_id, { transport: 'mcp' }, deps.readBudgetBytes,
+          deps.readBudgetBytes === undefined ? undefined : (value) => { jsonResult(historyProjection(value)); },
         );
-        return jsonResult({
-          current_id: result.currentId,
-          decisions: result.decisions.map((memory) => ({
-            id: memory.id, title: memory.title, body: memory.body, tags: memory.tags,
-            metadata: memory.metadata, author_id: memory.authorId, source: memory.source,
-            source_ref: memory.sourceRef, state: memory.state,
-            supersedes_id: memory.supersedesId, created_at: memory.createdAt,
-          })),
-        });
+        return jsonResult(historyProjection(result));
       } catch (error) {
         return errorResult(error);
       }

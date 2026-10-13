@@ -187,6 +187,7 @@ export async function decisionHistoryForPrincipal(
   pool: pg.Pool, principal: Principal, decisionId: string,
   auditMetadata: Record<string, unknown> = {},
   readBudgetBytes?: number,
+  validateResult?: (result: { decisions: Memory[]; currentId: string }) => void,
 ): Promise<{ decisions: Memory[]; currentId: string }> {
   let client: pg.PoolClient | undefined;
   let destroyClient = false;
@@ -201,6 +202,7 @@ export async function decisionHistoryForPrincipal(
       throw new ServiceError('INTERNAL', 'An internal error occurred');
     }
     const currentId = history.memories.at(-1)!.id;
+    validateResult?.({ decisions: history.memories, currentId });
     await recordReadAudit(client, {
       principalId: principal.id,
       metadata: {

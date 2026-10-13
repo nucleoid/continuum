@@ -20,8 +20,8 @@ function eligibility(principalParameter: string): string {
       WHERE sm.principal_id = ${principalParameter} AND sm.scope_id = m.scope_id AND sm.active
       AND continuum_membership_is_effective(sm.active, sm.source_kind)))`;
 }
-/** UTF-8 content lengths only, not memory bodies. Twelve-fold nested JSON text escaping plus bounded field overhead. */
-export const MEMORY_READ_BUDGET_BYTES_SQL = `(4096::bigint + 12::bigint * (
+/** Raw hydration admission, separate from exact rendered/wire validation before delivery audit. */
+export const MEMORY_READ_BUDGET_BYTES_SQL = `(4096::bigint + (
   octet_length(m.body)::bigint + octet_length(m.title)::bigint
   + COALESCE(octet_length(m.metadata::text), 0)::bigint
   + COALESCE(octet_length(array_to_json(m.tags)::text), 0)::bigint
@@ -59,7 +59,7 @@ async function readRows(
 ): Promise<MemoryReadRow[]> {
   if (readBudgetBytes === undefined) return (await queryable.query<MemoryReadRow>(`SELECT ${READ_SELECT} ${JOINS} WHERE ${where} ${suffix}`, values)).rows;
   const metadataSql = `SELECT m.id, ${MEMORY_READ_BUDGET_BYTES_SQL}
-    + 12::bigint * (octet_length(s.name)::bigint + octet_length(p.display_name)::bigint) AS budget_bytes,
+    + (octet_length(s.name)::bigint + octet_length(p.display_name)::bigint) AS budget_bytes,
     row_number() OVER (ORDER BY m.updated_at DESC, m.id DESC) AS position
     ${JOINS} WHERE ${where} ${suffix}`;
   return boundedMemoryReadRows<MemoryReadRow>(queryable, metadataSql, values,

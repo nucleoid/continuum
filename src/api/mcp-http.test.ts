@@ -170,6 +170,73 @@ describe('real SDK remote MCP with current database authority', () => {
     } finally { await cleanup(); }
   }, 30000);
 
+  it('serves realistic default AGENTS freshness and fifty complete list items over the SDK', async () => {
+    try {
+      const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+      for (let index = 0; index < 50; index++) await createMemory(pool, { scopeId: index < 20 ? org.id : scopeId,
+        scopeKind: index < 20 ? 'org' : 'project', type: 'decision', title: `Reference ${index}`,
+        body: 'Ordinary reference text with punctuation. '.repeat(52), source: 'manual', authorId: principalId });
+      const listed = await client.callTool({ name: 'continuum.list_memories', arguments: {} });
+      expect(listed.isError).not.toBe(true);
+      expect(JSON.parse((listed.content as Array<{ text: string }>)[0].text).items).toHaveLength(50);
+      const bundle = await client.callTool({ name: 'continuum.agents_md', arguments: { project: 'remote' } });
+      expect(bundle.isError).not.toBe(true);
+      const markdown = (bundle.content as Array<{ text: string }>)[0].text;
+      const fresh = await client.callTool({ name: 'continuum.agents_md_fresh', arguments: { project: 'remote',
+        hash: createHash('sha256').update(markdown).digest('hex') } });
+      expect(fresh.isError).not.toBe(true);
+      expect(JSON.parse((fresh.content as Array<{ text: string }>)[0].text)).toEqual({ fresh: true });
+    } finally { await cleanup(); }
+  }, 30000);
+  it('rejects escaped wire expansion before successful remote browse audits', async () => {
+    try {
+      const memory = await createMemory(pool, { scopeId, scopeKind: 'project', type: 'decision', title: 'Escaping',
+        body: String.fromCharCode(92).repeat(300000), source: 'manual', authorId: principalId });
+      const before = Number((await pool.query('SELECT count(*) FROM audit_log')).rows[0].count);
+      for (const [name, args] of [['continuum.get_memory', { memory_id: memory.id }], ['continuum.list_memories', {}]] as const) {
+        const result = await client.callTool({ name, arguments: args });
+        expect(result.isError).toBe(true); expect(JSON.stringify(result)).toContain('PAYLOAD_TOO_LARGE');
+      }
+      expect(Number((await pool.query('SELECT count(*) FROM audit_log')).rows[0].count)).toBe(before);
+    } finally { await cleanup(); }
+  });
+  it('sheds random service-key database lookups while established proxy sessions still reauthenticate', async () => {
+    let keyLookups = 0;
+    const observed = new Proxy(pool, { get(target, property) {
+      const value = Reflect.get(target, property);
+      if (property === 'query') return (...args: unknown[]) => {
+        if (typeof args[0] === 'string' && args[0].includes('FROM service_api_keys')) keyLookups++;
+        return Reflect.apply(value, target, args);
+      };
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    const app = express();
+    const proxyServer = await new Promise<Server>((resolve) => { const listener = app.listen(0, '127.0.0.1', () => resolve(listener)); });
+    const address = new URL(`http://127.0.0.1:${(proxyServer.address() as { port: number }).port}/mcp`);
+    const policy = mcpHttpConfigFromEnv({ CONTINUUM_MCP_HTTP_ENABLED: 'true', CONTINUUM_MCP_PUBLIC_URL: address.href.replace('http:', 'https:'),
+      CONTINUUM_MCP_TRUSTED_PROXY_CIDRS: '127.0.0.1/32', CONTINUUM_MCP_HTTP_PROXY_BURST: '1', CONTINUUM_MCP_HTTP_PROXY_RATE: '1' }, 'entra')!;
+    const remote = createMcpHttpController(policy, { pool: observed, embeddingProvider: null,
+      authenticator: createAuthenticator(observed, 'entra', entra) });
+    app.use('/mcp', remote.router);
+    const proxyClient = new Client({ name: 'real-key-admission', version: '1' });
+    const proxyTransport = new StreamableHTTPClientTransport(address, { requestInit: { headers: {
+      Authorization: `ApiKey ${key}`, 'X-Forwarded-Proto': 'https' } } });
+    try {
+      await proxyClient.connect(proxyTransport);
+      const randomKey = () => `ctm_${randomBytes(32).toString('base64url')}`;
+      const rejected = async () => fetch(address, { headers: { Authorization: `ApiKey ${randomKey()}`, 'X-Forwarded-Proto': 'https' } });
+      expect((await rejected()).status).toBe(401);
+      const before = keyLookups;
+      for (let index = 0; index < 8; index++) expect((await rejected()).status).toBe(429);
+      expect(keyLookups).toBe(before);
+      expect((await proxyClient.listTools()).tools.length).toBeGreaterThan(10);
+      expect(keyLookups).toBe(before + 1);
+      await pool.query('UPDATE service_api_keys SET revoked_at=now() WHERE key_hash=$1', [createHash('sha256').update(key).digest()]);
+      await expect(proxyClient.listTools()).rejects.toThrow();
+      expect(keyLookups).toBe(before + 2);
+    } finally { await proxyClient.close(); await remote.stop('test'); proxyServer.closeAllConnections();
+      await new Promise<void>((resolve) => proxyServer.close(() => resolve())); await cleanup(); }
+  });
   it('preserves membership lock and commit ordering when revocation overlaps a mutation', async () => {
     let entered!: () => void; let resume!: () => void;
     const enteredWrite = new Promise<void>((resolve) => { entered = resolve; });
@@ -266,7 +333,7 @@ describe('remote protocol and lifecycle limits', () => {
     let resolveQuery!: (result: { rows: never[] }) => void;
     const query = new Promise<{ rows: never[] }>((resolve) => { resolveQuery = resolve; });
     const active = await harness({ CONTINUUM_MCP_HTTP_CALLS: '1', CONTINUUM_MCP_HTTP_PRINCIPAL_CALLS: '1',
-      CONTINUUM_MCP_HTTP_REQUEST_MS: '100' }, { query: () => query });
+      CONTINUUM_MCP_HTTP_REQUEST_MS: '100', CONTINUUM_MCP_HTTP_UNSETTLED_GRACE_MS: '20' }, { query: () => query });
     const transport = new StreamableHTTPClientTransport(active.address, { requestInit: { headers: { Authorization: 'Bearer synthetic' } } });
     const client = new Client({ name: 'deadline-test', version: '1' });
     await client.connect(transport);
@@ -469,4 +536,44 @@ it('rejects a nonloopback controller composed with a development authenticator',
     CONTINUUM_MCP_TRUSTED_PROXY_CIDRS: '192.0.2.1/32' }, 'entra')!;
   expect(() => createMcpHttpController(remote, { pool: {} as never, embeddingProvider: null,
     authenticator: { mode: 'dev', authenticate: async () => null } })).toThrow(/entra/);
+});
+
+it('bounds reserved initialize authentication after proxy failures exhaust admission', async () => {
+  const active = await harness({ CONTINUUM_MCP_HTTP_PROXY_BURST: '1', CONTINUUM_MCP_HTTP_PROXY_RATE: '1',
+    CONTINUUM_MCP_HTTP_PROXY_INITIALIZE_BURST: '2', CONTINUUM_MCP_HTTP_PROXY_INITIALIZE_RATE: '1' }, {}, undefined, true);
+  try {
+    const headers = { Authorization: 'Bearer invalid', 'X-Forwarded-Proto': 'https',
+      Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json' };
+    expect((await fetch(active.address, { headers })).status).toBe(401);
+    const before = active.authenticationChecks;
+    for (let index = 0; index < 5; index++) expect((await fetch(active.address, { method: 'POST', headers, body: '{}' })).status).toBe(429);
+    expect(active.authenticationChecks).toBe(before + 2);
+  } finally { await active.close(); }
+});
+it('caps cancelled SDK tombstones without releasing underlying execution fences', async () => {
+  const entered = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+  const queries = [Promise.withResolvers<{ rows: never[] }>(), Promise.withResolvers<{ rows: never[] }>()];
+  let calls = 0;
+  const active = await harness({ CONTINUUM_MCP_HTTP_CANCELLED_IDS: '2' }, { query: () => {
+    const index = calls++; entered[index].resolve(); return queries[index].promise;
+  } });
+  const transport = new StreamableHTTPClientTransport(active.address, { requestInit: { headers: { Authorization: 'Bearer synthetic' } } });
+  const client = new Client({ name: 'cancellation-limit', version: '1' }); await client.connect(transport);
+  const headers = { Authorization: 'Bearer synthetic', 'Mcp-Session-Id': transport.sessionId!, 'Mcp-Protocol-Version': '2025-11-25',
+    Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json' };
+  try {
+    for (let index = 0; index < 2; index++) {
+      const call = fetch(active.address, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: `cancel-${index}`,
+        method: 'tools/call', params: { name: 'continuum.list_scopes', arguments: {} } }) }).then((response) => response.text()).catch(() => '');
+      await entered[index].promise;
+      expect((await fetch(active.address, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled',
+        params: { requestId: `cancel-${index}` } }) })).status).toBe(202);
+      await call;
+      if (!index) expect((await fetch(active.address, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: 'cancel-0', method: 'ping' }) })).status).toBe(409);
+    }
+    expect((await fetch(active.address, { method: 'DELETE', headers })).status).toBe(404);
+    let drained = false; const stop = active.controller.stop('test').then(() => { drained = true; });
+    await new Promise((resolve) => setTimeout(resolve, 20)); expect(drained).toBe(false);
+    queries.forEach((query) => query.resolve({ rows: [] })); await stop;
+  } finally { queries.forEach((query) => query.resolve({ rows: [] })); await client.close(); await active.close(); }
 });

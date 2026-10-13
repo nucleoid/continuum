@@ -6,7 +6,7 @@ export interface McpHttpLimits {
   idleMs: number; lifetimeMs: number; streams: number; principalCalls: number; calls: number;
   requestMs: number; streamMs: number; messageRate: number; messageBurst: number;
   peerRate: number; peerBurst: number; peers: number; outputBytes: number;
-  buckets: number; batchMessages: number; proxyRate: number; proxyBurst: number; bodyReadMs: number;
+  buckets: number; batchMessages: number; proxyRate: number; proxyBurst: number; bodyReadMs: number; authentications: number; proxyInitializeRate: number; proxyInitializeBurst: number; unsettledGraceMs: number; cancelledIds: number;
 }
 export interface McpHttpConfig {
   publicUrl: URL;
@@ -21,14 +21,14 @@ export const DEFAULT_MCP_HTTP_LIMITS: Readonly<McpHttpLimits> = Object.freeze({
   idleMs: 600000, lifetimeMs: 3600000, streams: 100, principalCalls: 4, calls: 20,
   requestMs: 30000, streamMs: 30000, messageRate: 120, messageBurst: 20,
   peerRate: 60, peerBurst: 10, peers: 1000, outputBytes: 1048576,
-  buckets: 2000, batchMessages: 20, proxyRate: 6000, proxyBurst: 1000, bodyReadMs: 5000,
+  buckets: 2000, batchMessages: 20, proxyRate: 6000, proxyBurst: 1000, bodyReadMs: 5000, authentications: 100, proxyInitializeRate: 6, proxyInitializeBurst: 2, unsettledGraceMs: 5000, cancelledIds: 100,
 });
 export const MAX_MCP_HTTP_LIMITS: Readonly<McpHttpLimits> = Object.freeze({
   bodyBytes: 16777216, sessions: 10000, principalSessions: 100, initializeMs: 30000,
   idleMs: 3600000, lifetimeMs: 86400000, streams: 10000, principalCalls: 100, calls: 1000,
   requestMs: 300000, streamMs: 300000, messageRate: 10000, messageBurst: 1000,
   peerRate: 10000, peerBurst: 1000, peers: 100000, outputBytes: 16777216,
-  buckets: 100000, batchMessages: 20, proxyRate: 60000, proxyBurst: 10000, bodyReadMs: 30000,
+  buckets: 100000, batchMessages: 20, proxyRate: 60000, proxyBurst: 10000, bodyReadMs: 30000, authentications: 1000, proxyInitializeRate: 60, proxyInitializeBurst: 20, unsettledGraceMs: 60000, cancelledIds: 10000,
 });
 
 function enabled(value: string | undefined, name: string): boolean {
