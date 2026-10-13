@@ -331,7 +331,33 @@ describe('real SDK remote MCP with current database authority', () => {
       expect((await fetch(url, { method: 'DELETE', headers })).status).toBe(404);
     } finally { await cleanup(); }
   });
-});
+  it('rejects multi-request retention attacks before dispatch while another principal remains usable', async () => {
+    const victim = await createPrincipal(pool, { externalId: 'batch-victim', kind: 'service', displayName: 'Batch victim' });
+    const credential = `ctm_${randomBytes(32).toString('base64url')}`;
+    await pool.query('INSERT INTO service_api_keys(id,principal_id,key_hash,prefix,last_four) VALUES($1,$2,$3,$4,$5)',
+      [randomUUID(), victim.id, createHash('sha256').update(credential).digest(), 'ctm_test', credential.slice(-4)]);
+    const second = new Client({ name: 'batch-victim', version: '1' });
+    const secondTransport = new StreamableHTTPClientTransport(url, { requestInit: { headers: { Authorization: `ApiKey ${credential}` } } });
+    try {
+      await second.connect(secondTransport);
+      const session = secondTransport.sessionId;
+      const headers = { Authorization: `ApiKey ${key}`, 'Mcp-Session-Id': transport.sessionId!,
+        'Mcp-Protocol-Version': '2025-11-25', Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json' };
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const call = `batch-cancel-${attempt}`;
+        const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify([
+          ...Array.from({ length: 18 }, (_, index) => ({ jsonrpc: '2.0', id: `batch-list-${attempt}-${index}`, method: 'tools/list' })),
+          { jsonrpc: '2.0', id: call, method: 'tools/call', params: { name: 'continuum.list_scopes', arguments: {} } },
+          { jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: call } },
+        ]) });
+        await response.body?.cancel();
+        expect(response.status).toBe(400);
+        expect((await second.listTools()).tools.length).toBeGreaterThan(10);
+        expect(secondTransport.sessionId).toBe(session);
+      }
+      expect((await client.listTools()).tools.length).toBeGreaterThan(10);
+    } finally { await second.close(); await cleanup(); }
+  });});
 const syntheticPrincipal = { id: '11111111-1111-4111-8111-111111111111', externalId: 'synthetic',
   kind: 'service' as const, displayName: 'Synthetic', createdAt: new Date(0) };
 async function harness(overrides: Record<string, string> = {}, selectedPool: unknown = {}, info?: (event: Record<string, unknown>) => void, proxy = false) {
@@ -680,3 +706,4 @@ it('bounds SDK retained mixed-batch responses and recovers their budget on sessi
     } finally { await next.close(); await replacement.close(); }
   } finally { gates.forEach((gate) => gate.resolve({ rows: [] })); await client.close(); await active.close(); }
 });
+
