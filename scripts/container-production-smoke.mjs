@@ -331,11 +331,18 @@ try {
   const driftBackup=join(temporary,'asset-drift-refused.dump');
   process.env.CONTINUUM_BACKUP_FILE=driftBackup;
   maintenanceEnv({CONTINUUM_RUNTIME_ASSETS:driftAssets});
-  const assetError=expectFailure(()=>runMaintenance('upgrade',envFile,productionCompose,{deadlineMs:120000}), 'ASSET_MISMATCH', 'Selected image/host asset drift');
-  check(assetError.code==='ASSET_MISMATCH','Asset drift received unrelated failure');
-  check(compose(fresh,['ps','--status','running','-q','api']).trim()!=='','Asset preflight stopped API before refusing drift');
-  check(!existsSync(driftBackup),'Asset preflight reserved a backup before refusal');
-  maintenanceEnv();
+  const previousAssetsEnv=process.env.CONTINUUM_RUNTIME_ASSETS;
+  try{
+   // Compose environment takes precedence over its explicitly supplied env file.
+   process.env.CONTINUUM_RUNTIME_ASSETS=driftAssets;
+   const assetError=expectFailure(()=>runMaintenance('upgrade',envFile,productionCompose,{deadlineMs:120000}), 'ASSET_MISMATCH', 'Selected image/host asset drift');
+   check(assetError.code==='ASSET_MISMATCH','Asset drift received unrelated failure');
+   check(compose(fresh,['ps','--status','running','-q','api']).trim()!=='','Asset preflight stopped API before refusing drift');
+   check(!existsSync(driftBackup),'Asset preflight reserved a backup before refusal');
+  }finally{
+   if(previousAssetsEnv===undefined)delete process.env.CONTINUUM_RUNTIME_ASSETS;else process.env.CONTINUUM_RUNTIME_ASSETS=previousAssetsEnv;
+   maintenanceEnv();
+  }
 
   // An independently owned synthetic writer is refused, not terminated by wrapper.
   const writerName=`outside-writer-${randomUUID()}`;
