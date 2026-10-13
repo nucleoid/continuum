@@ -438,7 +438,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
             metadata: args.metadata,
           },
           { transport: 'mcp' },
-          { relationThreshold },
+          { relationThreshold, readBudgetBytes: deps.readBudgetBytes },
         );
         return jsonResult({
           id: result.memory.id,

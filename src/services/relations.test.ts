@@ -9,6 +9,7 @@ import { captureMemory } from './capture.js';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   classifyRelation,
+  detectRelatedMemories,
   relationThresholdFromEnv,
   safeRelationProviderId,
   validateRelationThreshold,
@@ -67,6 +68,38 @@ describe('bounded remote capture relation hydration', () => {
   let pool: pg.Pool;
   beforeEach(async () => { pool ??= await makeTestPool(); await resetData(pool); });
   afterAll(async () => { await pool?.end(); });
+  it('preserves fitting candidate classification and rejects growth in the hydration snapshot', async () => {
+    const principal = await createPrincipal(pool, { externalId: 'relation-growth', kind: 'user', displayName: 'Reader' });
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    const vector = [1, ...Array(767).fill(0)];
+    const provider = { id: 'relation-growth:fixture', dim: 768 };
+    const input = { type: 'decision' as const, title: 'Reference', body: 'Ordinary reference. '.repeat(100) };
+    const legacy = await createMemory(pool, { scopeId: org.id, scopeKind: 'org', ...input, authorId: principal.id, source: 'manual' });
+    await storeMemoryEmbeddingVector(pool, legacy.id, vector, provider);
+    const excluded = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const now = () => new Date('2026-01-01T00:00:00Z');
+    const ordinary = await detectRelatedMemories(pool, vector, [org.id], provider, input, excluded, 0.92, now);
+    expect(await detectRelatedMemories(pool, vector, [org.id], provider, input, excluded, 0.92, now, 1048576)).toEqual(ordinary);
+    expect(ordinary).toMatchObject([{ id: legacy.id, relation: 'possible-duplicate', similarity: 1 }]);
+    let grew = false;
+    let gated = false;
+    const observed = { query: async (text: string, ...args: unknown[]) => {
+      const result = await (pool.query as (...queryArgs: unknown[]) => Promise<any>)(text, ...args);
+      if (!grew && text.includes('octet_length(m.body)') && !text.includes('WITH budget_candidates')) {
+        grew = true;
+        await pool.query("UPDATE memories SET body=repeat('legacy-body ',200000) WHERE id=$1", [legacy.id]);
+      }
+      if (text.includes('WITH budget_candidates')) {
+        gated = true;
+        expect(result.rows.every((row: any) => row.title == null && row.body == null)).toBe(true);
+      }
+      return result;
+    } };
+    await expect(detectRelatedMemories(observed, vector, [org.id], provider, input, excluded, 0.92, now, 1048576))
+      .rejects.toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
+    expect(grew && gated).toBe(true);
+    expect((await pool.query('SELECT 1 FROM audit_log')).rowCount).toBe(0);
+  });
   it('keeps a new capture and its audit but rejects oversized ranked legacy bodies before hydration', async () => {
     const principal = await createPrincipal(pool, { externalId: 'relation-budget', kind: 'user', displayName: 'Reader' });
     const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
