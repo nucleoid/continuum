@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, rmSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { extractRuntimePackage } from './container-assets-extract.mjs';
 
@@ -42,7 +42,18 @@ try {
   created.push(inspectName);
   const installed = join(directory, 'installed-assets');
   mkdirSync(installed);
-  docker('cp', `${inspectName}:/opt/continuum/.`, installed);
+  const inspection = JSON.parse(docker('inspect', inspectName))[0];
+  assertion(inspection.Config.Labels['continuum.ci.owner'] === owner && !inspection.State.Running
+    && inspection.Mounts.length === 0, 'Asset export must use only the owned unstarted container without volumes');
+  const exportedFilesystem = join(directory, 'inspection-filesystem.tar');
+  assertion(!existsSync(exportedFilesystem), 'Refusing to overwrite a previous inspection archive');
+  try {
+    // Docker writes directly to the owned host file, not an exec output buffer.
+    docker('export', '--output', exportedFilesystem, inspectName);
+    extractRuntimePackage(exportedFilesystem, installed);
+  } finally {
+    if (existsSync(exportedFilesystem)) rmSync(exportedFilesystem);
+  }
   const packageFiles = listFiles(assets);
   for (const path of packageFiles) {
     const expected = readFileSync(join(assets, path));
