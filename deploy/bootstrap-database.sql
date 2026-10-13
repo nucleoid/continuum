@@ -53,6 +53,9 @@ BEGIN
   FOR n IN 1..4 LOOP
     EXECUTE format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', i.roles[n], i.passwords[n]);
   END LOOP;
+  -- Existing offboarding retirement requires CREATEROLE only on its definer.
+  -- APP/OP/SYNC remain NOCREATEROLE; the owner cannot SET/inherit SYNC.
+  EXECUTE format('ALTER ROLE %I CREATEROLE', i.roles[1]);
   phase := 'database-grants';
   EXECUTE format('REVOKE ALL ON DATABASE %I FROM PUBLIC', i.database_name);
   EXECUTE format('REVOKE ALL ON SCHEMA public FROM PUBLIC');
