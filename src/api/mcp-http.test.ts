@@ -234,6 +234,9 @@ describe('real SDK remote MCP with current database authority', () => {
       await pool.query('UPDATE service_api_keys SET revoked_at=now() WHERE key_hash=$1', [createHash('sha256').update(key).digest()]);
       await expect(proxyClient.listTools()).rejects.toThrow();
       expect(keyLookups).toBe(before + 2);
+      const invalidatedLookups = keyLookups;
+      await expect(proxyClient.listTools()).rejects.toThrow();
+      expect(keyLookups).toBe(invalidatedLookups);
     } finally { await proxyClient.close(); await remote.stop('test'); proxyServer.closeAllConnections();
       await new Promise<void>((resolve) => proxyServer.close(() => resolve())); await cleanup(); }
   });
