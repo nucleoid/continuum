@@ -1,0 +1,81 @@
+import { createHmac, randomBytes } from 'node:crypto';
+import type { AuthenticatedPrincipal } from '../types.js';
+interface Limits {
+  sessions: number; principalSessions: number; calls: number; principalCalls: number;
+  idleMs: number; lifetimeMs: number; messageRate: number; messageBurst: number;
+  buckets: number; peerRate: number; peerBurst: number; peers: number; streams: number;
+}
+interface Bucket { tokens: number; updated: number }
+export class McpHttpSessions {
+  private readonly key = randomBytes(32);
+  private readonly principals = new Map<string, number>();
+  private readonly executing = new Map<string, number>();
+  private readonly buckets = new Map<string, Bucket>();
+  private readonly peers = new Map<string, Bucket>();
+  private reservations = 0;
+  private calls = 0;
+  private streams = 0;
+  constructor(readonly limits: Limits, private readonly now: () => number = Date.now) {}
+  binding(auth: Pick<AuthenticatedPrincipal, 'principal' | 'credential' | 'allowedSource'> | {
+    principal: { id: string; kind: string }; credential: string; allowedSource?: string;
+  }, credential: string): string {
+    return createHmac('sha256', this.key).update(JSON.stringify([
+      auth.principal.id, auth.principal.kind, auth.credential, credential, auth.allowedSource ?? null,
+    ])).digest('hex');
+  }
+  correlation(id: string): string { return createHmac('sha256', this.key).update(id).digest('hex').slice(0, 24); }
+  private reserveCounter(map: Map<string, number>, principal: string, max: number): (() => void) | undefined {
+    if ((map.get(principal) ?? 0) >= max) return;
+    map.set(principal, (map.get(principal) ?? 0) + 1);
+    let active = true;
+    return () => { if (!active) return; active = false;
+      const next = map.get(principal)! - 1;
+      if (next) map.set(principal, next); else map.delete(principal);
+    };
+  }
+  reserve(principal: string): (() => void) | undefined {
+    if (this.reservations >= this.limits.sessions) return;
+    const release = this.reserveCounter(this.principals, principal, this.limits.principalSessions);
+    if (!release) return;
+    this.reservations++;
+    let active = true;
+    return () => { if (!active) return; active = false; this.reservations--; release(); };
+  }
+  reserveCall(principal: string): (() => void) | undefined {
+    if (this.calls >= this.limits.calls) return;
+    const release = this.reserveCounter(this.executing, principal, this.limits.principalCalls);
+    if (!release) return;
+    this.calls++;
+    let active = true;
+    return () => { if (!active) return; active = false; this.calls--; release(); };
+  }
+  reserveStream(): (() => void) | undefined {
+    if (this.streams >= this.limits.streams) return;
+    this.streams++;
+    let active = true;
+    return () => { if (!active) return; active = false; this.streams--; };
+  }
+  private take(map: Map<string, Bucket>, key: string, count: number, rate: number, burst: number, cap: number): boolean {
+    const now = this.now();
+    // Eviction only after a full refill preserves the original admission history.
+    for (const [id, bucket] of map) if (now - bucket.updated >= burst * 60_000 / rate) map.delete(id);
+    let bucket = map.get(key);
+    if (!bucket) {
+      if (map.size >= cap) return false;
+      bucket = { tokens: burst, updated: now }; map.set(key, bucket);
+    }
+    bucket.tokens = Math.min(burst, bucket.tokens + Math.max(0, now - bucket.updated) * rate / 60_000);
+    bucket.updated = now;
+    if (count > bucket.tokens) return false;
+    bucket.tokens -= count; return true;
+  }
+  admit(key: string, count: number): boolean {
+    return this.take(this.buckets, key, count, this.limits.messageRate, this.limits.messageBurst, this.limits.buckets);
+  }
+  admitPeer(peer: string): boolean {
+    return this.take(this.peers, peer, 1, this.limits.peerRate, this.limits.peerBurst, this.limits.peers);
+  }
+  clear(): void { this.buckets.clear(); this.peers.clear(); }
+  isHealthy(): boolean { return this.calls < this.limits.calls; }
+  get unsettled(): number { return this.calls; }
+}
