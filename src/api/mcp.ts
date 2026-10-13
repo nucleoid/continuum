@@ -1,5 +1,8 @@
+import { remoteExecutionContext } from './mcp-http-execution.js';
 import type pg from 'pg';
 import { z } from 'zod';
+import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
+import type { CallToolResult, ServerRequest, ServerNotification } from '@modelcontextprotocol/sdk/types.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
@@ -76,7 +79,12 @@ import { defaultExtensionRegistries } from '../extensions/index.js';
 const SCOPE_KINDS = ['org', 'team', 'project', 'user', 'role'] as const;
 const MEMORY_TYPES = ['fact', 'decision', 'context', 'playbook', 'relationship'] as const;
 
+export type McpExecutionGuard = (name: string,
+  extra: RequestHandlerExtra<ServerRequest, ServerNotification>,
+  execute: (signal: AbortSignal) => Promise<CallToolResult>) => Promise<CallToolResult>;
+
 export interface McpDeps {
+  executionGuard?: McpExecutionGuard;
   pool: pg.Pool;
   embeddingProvider: EmbeddingRouting;
   principal: Principal;
@@ -173,7 +181,10 @@ function strictCoordinationInput(
 }
 
 export function buildMcpServer(deps: McpDeps): McpServer {
-  const { pool, embeddingProvider, principal } = deps;
+  const invocation = deps.executionGuard ? remoteExecutionContext(deps.pool, deps.embeddingProvider) : undefined;
+  const pool = invocation?.pool ?? deps.pool;
+  const embeddingProvider = invocation?.routing ?? deps.embeddingProvider;
+  const principal = deps.principal;
   const relationThreshold = validateRelationThreshold(
     deps.relationThreshold ?? DEFAULT_RELATION_THRESHOLD,
   );
@@ -193,13 +204,28 @@ export function buildMcpServer(deps: McpDeps): McpServer {
   const now = deps.now ?? (() => new Date());
   const errorResult = (error: unknown) => serviceErrorResult(error, logger);
   const retrievalEnrichers = deps.retrievalEnrichers ?? new RetrievalEnricherRegistry();
-  const enrichment = deps.enrichment ?? enrichmentConfigFromEnv();
+  const enrichment: Omit<EnrichmentOptions, 'logger'> = deps.enrichment ?? enrichmentConfigFromEnv();
   const promotionWebhooks = deps.promotionWebhooks ?? new PromotionWebhookRegistry();
 
   const server = new McpServer({
     name: 'continuum',
     version: '0.1.0',
   });
+
+  if (deps.executionGuard) {
+    const guard = deps.executionGuard;
+    server.registerTool = new Proxy(server.registerTool, {
+      apply(target, thisArg, args: unknown[]) {
+        const name = args[0] as string;
+        const callback = args[args.length - 1] as (input: unknown,
+          extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => Promise<CallToolResult>;
+        args[args.length - 1] = (input: unknown,
+          extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => guard(name, extra,
+            (signal) => invocation!.run(signal, () => callback(input, { ...extra, signal })));
+        return Reflect.apply(target, thisArg, args);
+      },
+    });
+  }
 
   server.registerTool(
     'continuum.lock_acquire',
@@ -365,7 +391,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         metadata: z.record(z.unknown()).optional(),
       },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
         if (deps.allowedSource && deps.allowedSource !== args.source) {
           throw new ServiceError(
@@ -421,7 +447,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         limit: z.number().int().min(1).max(100).default(10),
       },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
         const { results, accessible, diagnostics } = await recallForPrincipal(
           pool,
@@ -432,7 +458,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           logger,
           {
             registry: retrievalEnrichers,
-            options: { ...enrichment, logger: deps.enrichmentLogger },
+            options: { ...enrichment, signal: enrichment.signal ? AbortSignal.any([extra.signal, enrichment.signal]) : extra.signal, logger: deps.enrichmentLogger },
           },
         );
         return {
@@ -463,7 +489,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       description: 'Fetch one complete readable memory. Missing and inaccessible IDs are both reported as not found.',
       inputSchema: { memory_id: z.string() },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
         const result = await getMemoryForPrincipal(
           pool, principal, args.memory_id, { transport: 'mcp' },
@@ -487,7 +513,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         offset: z.number().optional(),
       },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
         const result = await listMemoriesForPrincipal(pool, principal, {
           scope: args.scope,
@@ -521,7 +547,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         metadata: z.record(z.unknown()).optional(),
       },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
         const result = await supersedeForPrincipal(pool, embeddingProvider, principal, {
           supersededId: args.superseded_id, title: args.title, body: args.body,
@@ -545,7 +571,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       description: 'Return a decision supersession chain from oldest to newest.',
       inputSchema: { decision_id: z.string().uuid() },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
         const result = await decisionHistoryForPrincipal(
           pool, principal, args.decision_id, { transport: 'mcp' },
@@ -578,7 +604,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         horizon_days: z.number().int().min(0).max(365).optional(),
       },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
         const result = await reviewQueueForPrincipal(pool, principal, {
           scopes: args.scopes,
@@ -624,7 +650,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         target_scope_name: z.string(),
       },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
         const { source, destination } = await promoteForPrincipal(
           pool,
@@ -660,7 +686,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           .optional(),
       },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
         const memory = await verifyForPrincipal(
           pool,
@@ -692,7 +718,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         limit: z.number().int().min(1).max(200).optional(),
       },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
         const md = await renderAgentsMdForPrincipal(pool, principal, {
           project: args.project,
@@ -718,7 +744,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         limit: z.number().int().min(1).max(200).optional(),
       },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
         const input = {
           project: args.project,
@@ -754,7 +780,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         open_thread_limit: z.number().int().min(1).max(100).optional(),
       },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
         const result = await standupForPrincipal(pool, principal, {
           sinceHours: args.since === undefined ? undefined : Number(args.since.slice(0, -1)),
@@ -785,7 +811,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         threshold: z.number().min(0).max(1).default(gapConfig.threshold),
       },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
         const sinceDays = Number(args.since.slice(0, -1));
         if (sinceDays > 365) {
@@ -826,7 +852,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         name: z.string(),
       },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
         const ref = validateScopeRef({
           kind: args.kind as ScopeKind,

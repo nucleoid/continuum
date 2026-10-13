@@ -6,14 +6,15 @@ interface Limits {
   buckets: number; peerRate: number; peerBurst: number; peers: number; streams: number;
 }
 interface Bucket { tokens: number; updated: number }
+const retainedExecutions = new Map<string, number>();
+let retainedCalls = 0;
 export class McpHttpSessions {
   private readonly key = randomBytes(32);
   private readonly principals = new Map<string, number>();
-  private readonly executing = new Map<string, number>();
+  private readonly executing = retainedExecutions;
   private readonly buckets = new Map<string, Bucket>();
   private readonly peers = new Map<string, Bucket>();
   private reservations = 0;
-  private calls = 0;
   private streams = 0;
   constructor(readonly limits: Limits, private readonly now: () => number = Date.now) {}
   binding(auth: Pick<AuthenticatedPrincipal, 'principal' | 'credential' | 'allowedSource'> | {
@@ -42,12 +43,12 @@ export class McpHttpSessions {
     return () => { if (!active) return; active = false; this.reservations--; release(); };
   }
   reserveCall(principal: string): (() => void) | undefined {
-    if (this.calls >= this.limits.calls) return;
+    if (retainedCalls >= this.limits.calls) return;
     const release = this.reserveCounter(this.executing, principal, this.limits.principalCalls);
     if (!release) return;
-    this.calls++;
+    retainedCalls++;
     let active = true;
-    return () => { if (!active) return; active = false; this.calls--; release(); };
+    return () => { if (!active) return; active = false; retainedCalls--; release(); };
   }
   reserveStream(): (() => void) | undefined {
     if (this.streams >= this.limits.streams) return;
@@ -76,6 +77,6 @@ export class McpHttpSessions {
     return this.take(this.peers, peer, 1, this.limits.peerRate, this.limits.peerBurst, this.limits.peers);
   }
   clear(): void { this.buckets.clear(); this.peers.clear(); }
-  isHealthy(): boolean { return this.calls < this.limits.calls; }
-  get unsettled(): number { return this.calls; }
+  isHealthy(): boolean { return retainedCalls < this.limits.calls; }
+  get unsettled(): number { return retainedCalls; }
 }

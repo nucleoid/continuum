@@ -21,6 +21,7 @@
     "docs/agents-md-freshness.md",
     "docs/api-operations.md",
     "docs/authentication.md",
+    "docs/remote-mcp.md",
     "docs/audit-api.md",
     "docs/audit-retention.md",
     "docs/cli.md",
@@ -70,7 +71,7 @@
     "embed-backfill:dev": "tsx src/maintenance/embed-backfill-cli.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@modelcontextprotocol/sdk": "1.29.0",
     "express": "^5.2.1",
     "jose": "^6.2.12",
     "pg": "^8.20.0",

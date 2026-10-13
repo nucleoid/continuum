@@ -19,7 +19,7 @@ describe('remote MCP admission', () => {
     sessions.clear();
     expect(sessions.reserveCall('b')).toBeUndefined();
     release!();
-    expect(sessions.reserveCall('b')).toBeTypeOf('function');
+    const next = sessions.reserveCall('b'); expect(next).toBeTypeOf('function'); next!();
   });
   it('binds exact credentials with canonical service-key schemes', () => {
     const sessions = new McpHttpSessions(limits, () => 0);

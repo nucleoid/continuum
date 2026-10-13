@@ -1,3 +1,6 @@
+import { mcpHttpConfigFromEnv, type McpHttpConfig } from './mcp-http-config.js';
+import { createMcpHttpController } from './mcp-http.js';
+import { createMcpHttpPool } from '../storage/pool.js';
 import { randomUUID } from 'node:crypto';
 import express from 'express';
 import pg from 'pg';
@@ -83,6 +86,9 @@ export interface OperationalLogger extends ServiceLogger {
 }
 
 export interface AppOptions {
+  mcpHttpConfig?: McpHttpConfig;
+  mcpHttpPool?: pg.Pool;
+  mcpHttpController?: ReturnType<typeof createMcpHttpController>;
   embeddingProvider?: EmbeddingRouting;
   logger?: OperationalLogger;
   requestIdFactory?: () => string;
@@ -104,7 +110,7 @@ export interface AppOptions {
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 const SAFE_PROVIDER_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 const KNOWN_LOG_PATHS = new Set([
-  '/health', '/health/live', '/health/ready',
+  '/health', '/health/live', '/health/ready', '/mcp',
   '/api/v0/capture', '/api/v0/recall', '/api/v0/agents-md', '/api/v0/audit',
   '/api/v0/agents-md/freshness',
   '/api/v0/review-queue',
@@ -296,6 +302,16 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
     opts.requestIdFactory ?? randomUUID,
     opts.clock ?? Date.now,
   ));
+  if (opts.mcpHttpConfig && !opts.mcpHttpPool && !opts.mcpHttpController) throw new Error('Remote MCP requires a separate serving pool');
+  const remote = opts.mcpHttpController ?? (opts.mcpHttpConfig && authenticator
+    ? createMcpHttpController(opts.mcpHttpConfig, {
+      pool: opts.mcpHttpPool ?? pool, embeddingProvider: provider, authenticator,
+      retrievalEnrichers: opts.retrievalEnrichers, promotionWebhooks: opts.promotionWebhooks,
+      enrichment: opts.enrichment, gapConfig, relationThreshold,
+      reviewHorizonDays: opts.reviewHorizonDays, info: (event) => logger.info?.(event),
+    }) : undefined);
+  if (opts.mcpHttpConfig && !authenticator) throw new Error('Remote MCP requires an explicit authenticator');
+  if (remote) app.use('/mcp', remote.router);
   app.use(express.json({
     limit: '1mb',
     verify(req, _res, buffer) {
@@ -308,12 +324,17 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   app.get('/health/live', liveness);
   app.get('/health/ready', async (req, res) => {
     const embedding = embeddingStatus(provider);
+    if (remote && !remote.isHealthy() && readiness.isReady()) {
+      res.status(503).json({ ok: false, database: 'ready', remoteMcp: 'capacity_exhausted', embedding });
+      return;
+    }
     if (!readiness.isReady()) {
       res.status(503).json({ ok: false, database: 'shutting_down', embedding });
       return;
     }
     try {
       await queryWithTimeout(pool, readinessTimeoutMs);
+      if (opts.mcpHttpPool) await queryWithTimeout(opts.mcpHttpPool, readinessTimeoutMs);
       res.json({ ok: true, database: 'ready', embedding });
     } catch (error) {
       logger.error('REST: readiness dependency unavailable', {
@@ -414,6 +435,16 @@ async function main(): Promise<void> {
     authMode,
     authMode === 'entra' ? entraConfigFromEnv() : undefined,
   );
+  const mcpHttpConfig = mcpHttpConfigFromEnv(process.env, authMode);
+  let mcpHttpPool: pg.Pool | undefined;
+  if (mcpHttpConfig) {
+    mcpHttpPool = createMcpHttpPool(process.env.CONTINUUM_DATABASE_URL!);
+    servingProducerPools.add(mcpHttpPool);
+    await reconcilePgvectorProviderGrants(mcpHttpPool, schemaOptions);
+    await requireCoordinationContractReady(mcpHttpPool, schemaOptions);
+    await requirePromotionOutboxReady(mcpHttpPool, schemaOptions);
+    await requireStandupReady(mcpHttpPool, { ...schemaOptions, servingPool: true });
+  }
   const readiness = createReadinessState();
   const embeddingProvider = makeEmbeddingRouterFromEnv();
   await warnOnMissingEmbeddingRoutingScopes(pool, embeddingProvider);
@@ -436,7 +467,16 @@ async function main(): Promise<void> {
   }
   const extensions = defaultExtensionRegistries();
   const enrichmentShutdown = new AbortController();
+  const mcpHttpController = mcpHttpConfig && mcpHttpPool ? createMcpHttpController(mcpHttpConfig, {
+    pool: mcpHttpPool, embeddingProvider, authenticator: createAuthenticator(mcpHttpPool, authMode,
+      authMode === 'entra' ? entraConfigFromEnv() : undefined),
+    retrievalEnrichers: extensions.retrievalEnrichers, promotionWebhooks: extensions.promotionWebhooks,
+    enrichment: { ...enrichmentConfigFromEnv(), signal: enrichmentShutdown.signal },
+    gapConfig: gapConfigFromEnv(), relationThreshold: relationThresholdFromEnv(),
+    reviewHorizonDays: configuredReviewHorizonDays(), info: (event) => defaultLogger.info?.(event),
+  }) : undefined;
   const app = createApp(pool, {
+    mcpHttpConfig, mcpHttpPool, mcpHttpController,
     embeddingProvider,
     ingestConfig,
     ingestProducerPools,
@@ -460,6 +500,7 @@ async function main(): Promise<void> {
     workers: [
       { stop: () => { enrichmentShutdown.abort(); } },
       promotionWorker,
+      ...(mcpHttpController ? [mcpHttpController] : []),
     ],
     closePool: closeServingPools,
     shutdownTimeoutMs,

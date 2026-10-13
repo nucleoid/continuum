@@ -304,3 +304,7 @@ Pause external schedulers for
 the entire stop/migrate/start window. Treat the schema as forward-only: do not
 restart old binaries after migration and do not roll back by dropping audit,
 credential, binding, or provenance data.
+
+## Optional remote MCP
+
+The API process can serve authenticated Streamable HTTP at `/mcp`, disabled by default. It uses the same tool registrations, current memberships, source restrictions and required domain audits as stdio. See [remote MCP](./remote-mcp.md) for the explicit HTTPS proxy policy, limits, session lifecycle and rollout. Stdio remains available through `npm run mcp`.

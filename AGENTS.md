@@ -76,3 +76,7 @@ Use separate migration-owner, application, operator, and sync profiles according
 Build with `npm run build` and run relevant existing tests. Run the required full checks and package validation before describing a change as ready. Match tests to behavior and material risk; avoid tests that merely mirror a reversible implementation detail. Keep test helpers and tenant-specific code out of the public package according to `package.json`.
 
 Documentation changes must state implemented behavior, actual defaults, operational limits, and prerequisites. Do not claim production deployment, adoption, review approval, or validation at a different head. Keep review evidence and private working artifacts separate from public product guarantees.
+
+## Optional remote MCP
+
+The API process can serve authenticated Streamable HTTP at `/mcp`, disabled by default. It uses the same tool registrations, current memberships, source restrictions and required domain audits as stdio. See [remote MCP](./docs/remote-mcp.md) for the explicit HTTPS proxy policy, limits, session lifecycle and rollout. Stdio remains available through `npm run mcp`.
