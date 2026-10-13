@@ -34,6 +34,7 @@ import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { createPrincipal } from '../storage/principals.js';
 import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { createMemory } from '../storage/memories.js';
+import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
 import { addMembership } from '../storage/memberships.js';
 import { buildMcpServer } from './mcp.js';
 import { createAuthenticator } from './auth.js';
@@ -240,6 +241,45 @@ describe('real SDK remote MCP with current database authority', () => {
     } finally { await proxyClient.close(); await remote.stop('test'); proxyServer.closeAllConnections();
       await new Promise<void>((resolve) => proxyServer.close(() => resolve())); await cleanup(); }
   });
+  it('bounds legacy candidate hydration through actual SDK capture option wiring', async () => {
+    const vector = [1, ...Array(767).fill(0)];
+    const provider = { id: 'sdk-relation-budget:fixture', dim: 768, embed: async (texts: string[]) => texts.map(() => vector) };
+    const legacy = await createMemory(pool, { scopeId, scopeKind: 'project', type: 'decision', title: 'Legacy',
+      body: 'legacy-body '.repeat(200000), source: 'manual', authorId: principalId });
+    await storeMemoryEmbeddingVector(pool, legacy.id, vector, provider);
+    const queries: string[] = [];
+    const observed = new Proxy(pool, { get(target, property) {
+      const value = Reflect.get(target, property);
+      if (property === 'query') return (...args: unknown[]) => { if (typeof args[0] === 'string') queries.push(args[0]); return Reflect.apply(value, target, args); };
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    const app = express();
+    const sdkServer = await new Promise<Server>((resolve) => { const listener = app.listen(0, '127.0.0.1', () => resolve(listener)); });
+    const address = new URL(`http://127.0.0.1:${(sdkServer.address() as { port: number }).port}/mcp`);
+    const policy = mcpHttpConfigFromEnv({ CONTINUUM_MCP_HTTP_ENABLED: 'true', CONTINUUM_MCP_PUBLIC_URL: address.href,
+      CONTINUUM_MCP_HTTP_LOOPBACK_DEV: 'true' }, 'entra')!;
+    const remote = createMcpHttpController(policy, { pool: observed, embeddingProvider: provider,
+      authenticator: createAuthenticator(observed, 'entra', entra) });
+    app.use('/mcp', remote.router);
+    const sdk = new Client({ name: 'sdk-capture-budget', version: '1' });
+    try {
+      await sdk.connect(new StreamableHTTPClientTransport(address, { requestInit: { headers: { Authorization: `ApiKey ${key}` } } }));
+      const result = await sdk.callTool({ name: 'continuum.capture', arguments: { scope_kind: 'project', scope_name: 'remote',
+        type: 'decision', title: 'New reference', body: 'New reference', source: 'manual' } });
+      expect(result.isError).not.toBe(true);
+      const captured = JSON.parse((result.content as Array<{ text: string }>)[0].text);
+      expect(captured).toMatchObject({ embedded: true, related: [] });
+      expect(JSON.stringify(result)).not.toContain('legacy-body');
+      expect(queries.some((sql) => sql.includes('octet_length(m.body)'))).toBe(true);
+      expect(queries.some((sql) => /SELECT[^;]*m\.title, m\.body/.test(sql))).toBe(false);
+      expect((await pool.query('SELECT md5(body) AS hash,state,metadata FROM memories WHERE id=$1', [legacy.id])).rows[0])
+        .toEqual({ hash: createHash('md5').update(legacy.body).digest('hex'), state: 'live', metadata: {} });
+      expect((await pool.query('SELECT metadata FROM audit_log WHERE memory_id=$1', [captured.id])).rows[0].metadata)
+        .toMatchObject({ embedded: true, relation_error_code: 'RELATION_DETECTION_FAILED' });
+      expect((await pool.query('SELECT 1 FROM audit_log WHERE memory_id=$1', [legacy.id])).rowCount).toBe(0);
+    } finally { await sdk.close(); await remote.stop('test'); sdkServer.closeAllConnections();
+      await new Promise<void>((resolve) => sdkServer.close(() => resolve())); await cleanup(); }
+  });
   it('preserves membership lock and commit ordering when revocation overlaps a mutation', async () => {
     let entered!: () => void; let resume!: () => void;
     const enteredWrite = new Promise<void>((resolve) => { entered = resolve; });
@@ -304,10 +344,11 @@ async function harness(overrides: Record<string, string> = {}, selectedPool: unk
     ...overrides }, proxy ? 'entra' : 'dev')!;
   let authenticationChecks = 0;
   const denied = new Set<string>();
+  const unavailable = new Set<string>();
   const controller = createMcpHttpController(selected, { pool: selectedPool as never, embeddingProvider: null, info,
-    authenticator: { mode: proxy ? 'entra' : 'dev', authenticate: async (_scheme: string, credential: string) => { authenticationChecks++; return denied.has(credential) || credential.startsWith('invalid') ? null : ({ principal: syntheticPrincipal, credential: 'dev' }); } } });
+    authenticator: { mode: proxy ? 'entra' : 'dev', authenticate: async (_scheme: string, credential: string) => { authenticationChecks++; if (unavailable.has(credential)) throw new Error('Synthetic dependency unavailable'); return denied.has(credential) || credential.startsWith('invalid') ? null : ({ principal: syntheticPrincipal, credential: 'dev' }); } } });
   app.use('/mcp', controller.router);
-  return { address, controller, listener, denied, get authenticationChecks() { return authenticationChecks; }, async close() { await controller.stop('test');
+  return { address, controller, listener, denied, unavailable, get authenticationChecks() { return authenticationChecks; }, async close() { await controller.stop('test');
     listener.closeAllConnections(); await new Promise<void>((resolve) => listener.close(() => resolve())); } };
 }
 describe('remote protocol and lifecycle limits', () => {
@@ -505,6 +546,10 @@ it('sheds exhausted proxy authentication work while freshly authenticating estab
     expect((await second.client.listTools()).tools.length).toBeGreaterThan(10);
     expect(active.authenticationChecks).toBeGreaterThan(before);
     const next = await connect('synthetic-new'); await next.client.close();
+    active.unavailable.add('synthetic-a');
+    await expect(first.client.listTools()).rejects.toThrow();
+    active.unavailable.delete('synthetic-a');
+    expect((await first.client.listTools()).tools.length).toBeGreaterThan(10);
     active.denied.add('synthetic-a');
     await expect(first.client.listTools()).rejects.toThrow();
     expect((await second.client.listTools()).tools.length).toBeGreaterThan(10);
@@ -579,4 +624,58 @@ it('caps cancelled SDK tombstones without releasing underlying execution fences'
     await new Promise((resolve) => setTimeout(resolve, 20)); expect(drained).toBe(false);
     queries.forEach((query) => query.resolve({ rows: [] })); await stop;
   } finally { queries.forEach((query) => query.resolve({ rows: [] })); await client.close(); await active.close(); }
+});
+
+it('sheds unavailable authentication for unknown proxy callers while preserving established hints', async () => {
+  const active = await harness({ CONTINUUM_MCP_HTTP_PROXY_BURST: '1', CONTINUUM_MCP_HTTP_PROXY_RATE: '1' }, {}, undefined, true);
+  const transport = new StreamableHTTPClientTransport(active.address, { requestInit: { headers: {
+    Authorization: 'Bearer established', 'X-Forwarded-Proto': 'https' } } });
+  const client = new Client({ name: 'availability-admission', version: '1' }); await client.connect(transport);
+  try {
+    active.unavailable.add('unknown');
+    const headers = { Authorization: 'Bearer unknown', 'X-Forwarded-Proto': 'https' };
+    expect((await fetch(active.address, { headers })).status).toBe(503);
+    const before = active.authenticationChecks;
+    for (let index = 0; index < 3; index++) expect((await fetch(active.address, { headers })).status).toBe(429);
+    expect(active.authenticationChecks).toBe(before);
+    expect((await client.listTools()).tools.length).toBeGreaterThan(10);
+  } finally { await client.close(); await active.close(); }
+});
+
+it('bounds SDK retained mixed-batch responses and recovers their budget on session close', async () => {
+  const entered: Array<ReturnType<typeof Promise.withResolvers<void>>> = [];
+  const gates: Array<ReturnType<typeof Promise.withResolvers<{ rows: never[] }>>> = [];
+  const active = await harness({ CONTINUUM_MCP_HTTP_OUTPUT_BYTES: '60000' }, { query: () => {
+    const index = gates.length; const gate = Promise.withResolvers<{ rows: never[] }>(); gates.push(gate); entered[index].resolve(); return gate.promise;
+  } });
+  const client = new Client({ name: 'mixed-retention', version: '1' });
+  const transport = new StreamableHTTPClientTransport(active.address, { requestInit: { headers: { Authorization: 'Bearer synthetic' } } });
+  await client.connect(transport);
+  const headers = { Authorization: 'Bearer synthetic', 'Mcp-Session-Id': transport.sessionId!, 'Mcp-Protocol-Version': '2025-11-25',
+    Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json' };
+  let exhausted = false;
+  try {
+    for (let index = 0; index < 10; index++) {
+      entered.push(Promise.withResolvers<void>());
+      const response = fetch(active.address, { method: 'POST', headers, body: JSON.stringify([
+        { jsonrpc: '2.0', id: `list-${index}`, method: 'tools/list' },
+        { jsonrpc: '2.0', id: `cancel-${index}`, method: 'tools/call', params: { name: 'continuum.list_scopes', arguments: {} } },
+      ]) }).then((result) => result.text()).catch(() => '');
+      await entered[index].promise;
+      expect((await fetch(active.address, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled',
+        params: { requestId: `cancel-${index}` } }) })).status).toBe(202);
+      await response; gates[index].resolve({ rows: [] });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const valid = await client.listTools(undefined, { timeout: 500 }).then(() => true, () => false);
+      if (!valid) { exhausted = true; break; }
+      if (!index) expect(valid).toBe(true);
+    }
+    expect(exhausted).toBe(true);
+    await client.close(); await active.close();
+    const replacement = await harness({ CONTINUUM_MCP_HTTP_OUTPUT_BYTES: '60000' });
+    const next = new Client({ name: 'retention-recovered', version: '1' });
+    try { await next.connect(new StreamableHTTPClientTransport(replacement.address, { requestInit: { headers: { Authorization: 'Bearer synthetic' } } }));
+      expect((await next.listTools()).tools.length).toBeGreaterThan(10);
+    } finally { await next.close(); await replacement.close(); }
+  } finally { gates.forEach((gate) => gate.resolve({ rows: [] })); await client.close(); await active.close(); }
 });
