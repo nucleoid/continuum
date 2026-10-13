@@ -4,6 +4,7 @@ import { writeFileSync, readFileSync, mkdtempSync, mkdirSync, readdirSync, copyF
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { runMaintenance } from './container-maintenance.mjs';
+import { validateTmpfsMounts } from './container-compose-model.mjs';
 import { safeBootstrapFailure, sanitizedBootstrapLines } from './container-diagnostics.mjs';
 
 if (process.env.GITHUB_ACTIONS !== 'true' || process.platform !== 'linux') throw new Error('Hosted Linux CI required');
@@ -55,6 +56,7 @@ function setup(suffix) {
   writeFileSync(override, 'services:\n  api:\n    environment:\n      CONTINUUM_AUTH_MODE: dev\n');
   const base = ['compose', '-f', resolve(assets, 'deploy/compose.production.yml'), '-f', override, '--profile', 'maintenance', '--profile', 'serving'];
   const item = { project, directory, env, passwords, base };
+  validateTmpfsMounts(JSON.parse(compose(item, ['config', '--format', 'json'])).services);
   projects.push(item);
   return item;
 }

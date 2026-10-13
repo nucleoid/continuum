@@ -12,7 +12,7 @@ x-job: &job
   pids_limit: 128
   mem_limit: 256m
   cpus: 1.0
-  tmpfs: [/tmp:rw,noexec,nosuid,size=16m,uid=999,gid=999]
+  tmpfs: ['/tmp:rw,noexec,nosuid,size=16m,uid=999,gid=999']
   networks: [backend]
   depends_on:
     postgres: {condition: service_healthy}
@@ -101,7 +101,7 @@ services:
     pids_limit: 128
     mem_limit: 512m
     cpus: 1.0
-    tmpfs: [/tmp:rw,noexec,nosuid,size=64m,uid=10001,gid=10001]
+    tmpfs: ['/tmp:rw,noexec,nosuid,size=64m,uid=10001,gid=10001']
     networks: [backend]
     depends_on:
       postgres: {condition: service_healthy}
@@ -152,7 +152,7 @@ services:
     pids_limit: 128
     mem_limit: 512m
     cpus: 1.0
-    tmpfs: [/tmp:rw,noexec,nosuid,size=64m,uid=10001,gid=10001]
+    tmpfs: ['/tmp:rw,noexec,nosuid,size=64m,uid=10001,gid=10001']
     networks: [backend, edge]
     depends_on:
       postgres: {condition: service_healthy}

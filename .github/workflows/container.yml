@@ -47,7 +47,7 @@ jobs:
           npm test -- --reporter=json --outputFile=test-results.json
           npm pack --dry-run
           npm run smoke:cli-package
-          node --test deploy/container-entrypoint.test.mjs deploy/apply-role-profiles.test.mjs scripts/container-maintenance.test.mjs scripts/container-artifact.test.mjs scripts/container-assets-extract.test.mjs scripts/container-diagnostics.test.mjs
+          node --test deploy/container-entrypoint.test.mjs deploy/apply-role-profiles.test.mjs scripts/container-maintenance.test.mjs scripts/container-artifact.test.mjs scripts/container-assets-extract.test.mjs scripts/container-diagnostics.test.mjs scripts/container-compose-model.test.mjs
           node scripts/container-check-tests.mjs test-results.json
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
@@ -121,7 +121,7 @@ jobs:
       - run: npx vitest run src/api/entrypoint.test.ts src/api/entrypoint-callers.test.ts
       - run: npx vitest run src/cli/config.test.ts src/cli/http.test.ts src/cli/index.test.ts
       - run: node scripts/windows-entrypoint-smoke.mjs
-      - run: node --test deploy/container-entrypoint.test.mjs deploy/apply-role-profiles.test.mjs scripts/container-maintenance.test.mjs scripts/container-artifact.test.mjs scripts/container-assets-extract.test.mjs scripts/container-diagnostics.test.mjs
+      - run: node --test deploy/container-entrypoint.test.mjs deploy/apply-role-profiles.test.mjs scripts/container-maintenance.test.mjs scripts/container-artifact.test.mjs scripts/container-assets-extract.test.mjs scripts/container-diagnostics.test.mjs scripts/container-compose-model.test.mjs
       - run: npm pack --dry-run
       - run: npm run smoke:cli-package
 

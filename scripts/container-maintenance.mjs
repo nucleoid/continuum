@@ -3,6 +3,7 @@ import { existsSync, openSync, closeSync, readSync, writeSync, statSync, unlinkS
 import { createHash, randomBytes } from 'node:crypto';
 import { resolve, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { validateTmpfsMounts } from './container-compose-model.mjs';
 
 export class MaintenanceFailure extends Error {
  constructor(code, phase = '') { super(`Container maintenance ${phase ? `${phase}: ` : ''}${code}`); this.code = code; this.phase = phase; }
@@ -51,6 +52,7 @@ export function runMaintenance(mode, envFile, composeFile, { deadlineMs = 900000
   '--profile', 'maintenance', '--profile', 'serving'];
  const readConfig = () => JSON.parse(docker([...compose, 'config', '--format', 'json']).stdout);
  const config = readConfig();
+ validateTmpfsMounts(config.services);
  if (!config.services?.api || !config.services?.migrate || !config.services?.postgres || !config.volumes?.pgdata) {
   throw new Error('Production configuration is missing maintenance or serving services');
  }
