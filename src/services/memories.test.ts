@@ -238,6 +238,63 @@ describe('memory read service', () => {
     )).rejects.toMatchObject({ code: 'INTERNAL' });
     expect((await pool.query('SELECT 1 FROM audit_log')).rowCount).toBe(0);
   });
+  it('rejects oversized authorized browse and point reads before bulk body hydration or success audit', async () => {
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    const ids: string[] = [];
+    for (let index = 0; index < 10; index++) ids.push((await createMemory(pool, {
+      scopeId: org.id, scopeKind: 'org', type: 'decision', title: `Large ${index}`,
+      body: '界'.repeat(11000), authorId: author.id, source: 'manual',
+    })).id);
+    const queries: string[] = [];
+    const observed = poolObserving(pool, queries);
+    await expect(listMemoriesForPrincipal(observed, reader, { limit: 100 }, {}, 1048576)).rejects.toMatchObject({ code: 'PAYLOAD_TOO_LARGE', status: 413 });
+    expect(queries.some((sql) => sql.includes('octet_length(m.body)'))).toBe(true);
+    expect(queries.some((sql) => sql.includes('SELECT m.id, m.scope_id'))).toBe(false);
+    expect((await pool.query('SELECT 1 FROM audit_log')).rowCount).toBe(0);
+    queries.length = 0;
+    await expect(getMemoryForPrincipal(observed, reader, ids[0], {}, 16384)).rejects.toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
+    expect(queries.some((sql) => sql.includes('SELECT m.id, m.scope_id'))).toBe(false);
+    expect((await pool.query('SELECT 1 FROM audit_log')).rowCount).toBe(0);
+  });
+  it('gates growth between metadata preflight and hydration in the hydration snapshot', async () => {
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    const memory = await createMemory(pool, { scopeId: org.id, scopeKind: 'org', type: 'decision', title: 'Growth', body: 'small', authorId: author.id, source: 'manual' });
+    let grew = false;
+    const queries: string[] = [];
+    const observed = poolObserving(pool, queries, async (sql, result) => {
+      if (!grew && sql.includes('octet_length(m.body)') && !sql.includes('WITH budget_candidates')) {
+        grew = true;
+        await pool.query('UPDATE memories SET body = repeat($1, 20000) WHERE id = $2', ['界', memory.id]);
+      }
+      if (sql.includes('WITH budget_candidates')) expect(result.rows.every((row: Record<string, unknown>) => row.body == null)).toBe(true);
+    });
+    await expect(listMemoriesForPrincipal(observed, reader, {}, {}, 16384)).rejects.toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
+    expect(grew).toBe(true);
+    expect((await pool.query('SELECT 1 FROM audit_log')).rowCount).toBe(0);
+  });
+  it('rechecks newly selected oversized rows after preflight without hydrating them', async () => {
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await createMemory(pool, { scopeId: org.id, scopeKind: 'org', type: 'decision', title: 'Initial', body: 'small', authorId: author.id, source: 'manual' });
+    let inserted = false;
+    const observed = poolObserving(pool, [], async (sql, result) => {
+      if (!inserted && sql.includes('octet_length(m.body)') && !sql.includes('WITH budget_candidates')) {
+        inserted = true;
+        await createMemory(pool, { scopeId: org.id, scopeKind: 'org', type: 'decision', title: 'New large row', body: '界'.repeat(20000), authorId: author.id, source: 'manual' });
+      }
+      if (sql.includes('WITH budget_candidates')) expect(result.rows.every((row: Record<string, unknown>) => row.body == null)).toBe(true);
+    });
+    await expect(listMemoriesForPrincipal(observed, reader, {}, {}, 16384)).rejects.toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
+    expect(inserted).toBe(true);
+    expect((await pool.query('SELECT 1 FROM audit_log')).rowCount).toBe(0);
+  });
+  it('preserves complete small remote reads and ordinary unbounded browse defaults', async () => {
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    const memory = await createMemory(pool, { scopeId: org.id, scopeKind: 'org', type: 'decision', title: 'Small', body: '界 and punctuation \\ "', authorId: author.id, source: 'manual' });
+    expect((await getMemoryForPrincipal(pool, reader, memory.id, {}, 16384)).memory.body).toBe(memory.body);
+    expect((await listMemoriesForPrincipal(pool, reader, {}, {}, 16384)).items).toHaveLength(1);
+    await pool.query('UPDATE memories SET body = repeat($1, 20000) WHERE id = $2', ['界', memory.id]);
+    expect((await listMemoriesForPrincipal(pool, reader)).items[0].memory.body.length).toBe(20000);
+  });
 });
 
 function poolRejecting(pool: pg.Pool, sqlFragment: string): pg.Pool {
@@ -258,4 +315,21 @@ function poolRejecting(pool: pg.Pool, sqlFragment: string): pg.Pool {
       });
     },
   } as unknown as pg.Pool;
+}
+
+
+function poolObserving(pool: pg.Pool, queries: string[], afterQuery?: (sql: string, result: any) => Promise<void>): pg.Pool {
+  return { connect: async () => {
+    const client = await pool.connect();
+    return new Proxy(client, { get(target, property) {
+      if (property === 'query') return async (sql: string, ...args: unknown[]) => {
+        queries.push(sql);
+        const result = await (target.query as (...queryArgs: unknown[]) => Promise<any>)(sql, ...args);
+        await afterQuery?.(sql, result);
+        return result;
+      };
+      const value = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+  } } as unknown as pg.Pool;
 }

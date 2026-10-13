@@ -1,3 +1,4 @@
+import { boundedJsonText } from './mcp-http-output.js';
 import { remoteExecutionContext } from './mcp-http-execution.js';
 import type pg from 'pg';
 import { z } from 'zod';
@@ -85,6 +86,7 @@ export type McpExecutionGuard = (name: string,
 
 export interface McpDeps {
   executionGuard?: McpExecutionGuard;
+  readBudgetBytes?: number;
   pool: pg.Pool;
   embeddingProvider: EmbeddingRouting;
   principal: Principal;
@@ -185,6 +187,9 @@ export function buildMcpServer(deps: McpDeps): McpServer {
   const pool = invocation?.pool ?? deps.pool;
   const embeddingProvider = invocation?.routing ?? deps.embeddingProvider;
   const principal = deps.principal;
+  // Remote JSON stays compact so adversarial metadata nesting cannot expand pretty-print indentation.
+  const jsonResult = (value: unknown) => textResult(deps.readBudgetBytes === undefined
+    ? JSON.stringify(value, null, 2) : boundedJsonText(value, deps.readBudgetBytes));
   const relationThreshold = validateRelationThreshold(
     deps.relationThreshold ?? DEFAULT_RELATION_THRESHOLD,
   );
@@ -458,7 +463,8 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           logger,
           {
             registry: retrievalEnrichers,
-            options: { ...enrichment, signal: enrichment.signal ? AbortSignal.any([extra.signal, enrichment.signal]) : extra.signal, logger: deps.enrichmentLogger },
+            options: { ...enrichment, signal: deps.executionGuard ? (enrichment.signal ? AbortSignal.any([extra.signal, enrichment.signal]) : extra.signal) : enrichment.signal, logger: deps.enrichmentLogger },
+            readBudgetBytes: deps.readBudgetBytes,
           },
         );
         return {
@@ -492,7 +498,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     async (args, extra) => {
       try {
         const result = await getMemoryForPrincipal(
-          pool, principal, args.memory_id, { transport: 'mcp' },
+          pool, principal, args.memory_id, { transport: 'mcp' }, deps.readBudgetBytes,
         );
         return jsonResult(mcpMemory(result));
       } catch (error) {
@@ -521,7 +527,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           state: args.state as MemoryState | undefined,
           limit: args.limit,
           offset: args.offset,
-        }, { transport: 'mcp' });
+        }, { transport: 'mcp' }, deps.readBudgetBytes);
         return jsonResult({
           items: result.items.map(mcpMemory),
           limit: result.limit,
@@ -552,7 +558,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         const result = await supersedeForPrincipal(pool, embeddingProvider, principal, {
           supersededId: args.superseded_id, title: args.title, body: args.body,
           tags: args.tags, source: args.source, sourceRef: args.source_ref, metadata: args.metadata,
-        }, { transport: 'mcp' }, deps.allowedSource);
+        }, { transport: 'mcp' }, deps.allowedSource, deps.readBudgetBytes);
         return jsonResult({
           superseded_id: result.predecessor.id, successor_id: result.successor.id,
           scope_id: result.successor.scopeId, predecessor_state: result.predecessor.state,
@@ -574,7 +580,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     async (args, extra) => {
       try {
         const result = await decisionHistoryForPrincipal(
-          pool, principal, args.decision_id, { transport: 'mcp' },
+          pool, principal, args.decision_id, { transport: 'mcp' }, deps.readBudgetBytes,
         );
         return jsonResult({
           current_id: result.currentId,
@@ -659,6 +665,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           { kind: args.target_scope_kind as ScopeKind, name: args.target_scope_name },
           { transport: 'mcp' },
           promotionWebhooks.ids(),
+          deps.readBudgetBytes,
         );
         return jsonResult({
           source_id: source.id,
@@ -695,6 +702,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           args.still_true,
           args.note,
           { transport: 'mcp' },
+          deps.readBudgetBytes,
         );
         return jsonResult({
           id: memory.id,
@@ -724,7 +732,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           project: args.project,
           team: args.team,
           limit: args.limit,
-        }, { transport: 'mcp' });
+        }, { transport: 'mcp' }, deps.readBudgetBytes);
         return textResult(md);
       } catch (error) {
         return errorResult(error);
@@ -751,7 +759,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           team: args.team,
           limit: args.limit,
         };
-        const bundle = await prepareAgentsMdForPrincipal(pool, principal, input);
+        const bundle = await prepareAgentsMdForPrincipal(pool, principal, input, deps.readBudgetBytes);
         const fresh = bundle.hash === args.hash;
         await auditAgentsMdRead(pool, principal, input, bundle, false, {
           transport: 'mcp',

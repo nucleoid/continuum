@@ -1,3 +1,4 @@
+import { boundedMemoryReadRows, MEMORY_READ_BUDGET_BYTES_SQL } from './memory-reads.js';
 import pg from 'pg';
 import type { MemoryType, RecallResult } from '../types.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
@@ -10,6 +11,7 @@ export const DEFAULT_RECALL_EMBEDDING_DEADLINE_MS = 10_000;
 export const MAX_RECALL_EMBEDDING_DEADLINE_MS = 30_000;
 
 export interface RecallOptions {
+  readBudgetBytes?: number;
   query: string;
   scopeIds: string[];
   types?: MemoryType[];
@@ -328,6 +330,7 @@ async function hydrate(
   fusedScores: Map<string, number>,
   scopeIds: string[],
   types: MemoryType[] | undefined,
+  readBudgetBytes?: number,
 ): Promise<RecallResult[]> {
   if (ids.length === 0) return [];
   const params: unknown[] = [ids, scopeIds];
@@ -336,16 +339,15 @@ async function hydrate(
     params.push(types);
     typeFilter = ` AND type = ANY($${params.length}::text[])`;
   }
-  const { rows } = await pool.query(
-    `SELECT ${MEMORY_COLUMNS}
-       FROM memories
-      WHERE id = ANY($1::uuid[])
-        AND scope_id = ANY($2::uuid[])
-        AND state = 'live'
-        AND (expires_at IS NULL OR expires_at > pg_catalog.clock_timestamp())
-        ${typeFilter}`,
-    params,
-  );
+  const where = `id = ANY($1::uuid[]) AND scope_id = ANY($2::uuid[])
+    AND state = 'live' AND (expires_at IS NULL OR expires_at > pg_catalog.clock_timestamp()) ${typeFilter}`;
+  const rows = readBudgetBytes === undefined
+    ? (await pool.query(`SELECT ${MEMORY_COLUMNS} FROM memories WHERE ${where}`, params)).rows
+    : await boundedMemoryReadRows(pool,
+      `SELECT m.id, ${MEMORY_READ_BUDGET_BYTES_SQL} AS budget_bytes,
+         array_position($1::uuid[], m.id) AS position FROM memories m WHERE ${where}`, params,
+      `SELECT ${MEMORY_COLUMNS.split(',').map((column) => `m.${column.trim()}`).join(', ')}
+         FROM memories m JOIN budget_candidates c ON c.id=m.id ORDER BY c.position`, readBudgetBytes);
   const byId = new Map(rows.map((r) => [r.id as string, rowToMemory(r)]));
   return ids
     .filter((id) => byId.has(id))
@@ -497,7 +499,7 @@ export async function recall(
     : failed === 0
       ? 'used'
       : used === 0 ? 'failed' : 'partial';
-  const hydrateResults = () => hydrate(pool, ranked, opts.query, fused, opts.scopeIds, opts.types);
+  const hydrateResults = () => hydrate(pool, ranked, opts.query, fused, opts.scopeIds, opts.types, opts.readBudgetBytes);
   return {
     results: await (borrowed ? queueBorrowedSql(pool, hydrateResults) : hydrateResults()),
     diagnostics: { vector, groups: diagnosticGroups },

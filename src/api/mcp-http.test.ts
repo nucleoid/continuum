@@ -33,6 +33,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { createPrincipal } from '../storage/principals.js';
 import { createScope, getScopeByRef } from '../storage/scopes.js';
+import { createMemory } from '../storage/memories.js';
 import { addMembership } from '../storage/memberships.js';
 import { buildMcpServer } from './mcp.js';
 import { createAuthenticator } from './auth.js';
@@ -58,6 +59,8 @@ describe('real SDK remote MCP with current database authority', () => {
     await addMembership(pool, principal.id, scope.id, 'writer');
     const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
     await addMembership(pool, principal.id, org.id, 'admin');
+    const fallback = await createPrincipal(pool, { externalId: 'remote-test-breakglass', kind: 'service', displayName: 'Test admin' });
+    await addMembership(pool, fallback.id, org.id, 'admin');
     const issue = async () => { const credential = `ctm_${randomBytes(32).toString('base64url')}`;
       await pool.query('INSERT INTO service_api_keys (id,principal_id,key_hash,prefix,last_four) VALUES ($1,$2,$3,$4,$5)',
         [randomUUID(), principal.id, createHash('sha256').update(credential).digest(), 'ctm_test', credential.slice(-4)]);
@@ -127,6 +130,12 @@ describe('real SDK remote MCP with current database authority', () => {
       await pool.query("UPDATE scope_memberships SET role='reader' WHERE principal_id=$1 AND scope_id=$2", [principalId, scopeId]);
       const denied = await client.callTool({ name: 'continuum.capture', arguments: input });
       expect(denied.isError).toBe(true); expect(JSON.stringify(denied)).toContain('FORBIDDEN');
+      const memoryId = JSON.parse((success.content as Array<{ text: string }>)[0].text).id;
+      expect((await client.callTool({ name: 'continuum.get_memory', arguments: { memory_id: memoryId } })).isError).not.toBe(true);
+      await pool.query('UPDATE scope_memberships SET active=false WHERE principal_id=$1 AND scope_id=$2', [principalId, scopeId]);
+      expect(JSON.stringify(await client.callTool({ name: 'continuum.get_memory', arguments: { memory_id: memoryId } }))).toContain('MEMORY_NOT_FOUND');
+      await pool.query("UPDATE scope_memberships SET active=false WHERE principal_id=$1 AND scope_id=(SELECT id FROM scopes WHERE kind='org')", [principalId]);
+      expect(JSON.stringify(await client.callTool({ name: 'continuum.gaps', arguments: {} }))).toContain('FORBIDDEN');
       await pool.query('UPDATE service_api_keys SET revoked_at=now() WHERE key_hash=$1', [createHash('sha256').update(key).digest()]);
       for (const method of ['POST', 'GET', 'DELETE']) {
         const response = await fetch(url, { method, headers: { Authorization: `ApiKey ${key}`, 'Mcp-Session-Id': transport.sessionId! } });
@@ -134,6 +143,67 @@ describe('real SDK remote MCP with current database authority', () => {
       }
     } finally { await cleanup(); }
   });
+  it('rejects oversized legacy content before browse/generator hydration or mutation with no success audit', async () => {
+    try {
+      const memory = await createMemory(pool, { scopeId, scopeKind: 'project', type: 'decision', title: 'Oversized legacy',
+        body: 'x'.repeat(2 * 1024 * 1024), authorId: principalId, source: 'manual', tags: [] });
+      const before = Number((await pool.query('SELECT count(*) AS count FROM audit_log')).rows[0].count);
+      const calls = [
+        { name: 'continuum.get_memory', arguments: { memory_id: memory.id } },
+        { name: 'continuum.list_memories', arguments: { scope: 'project:remote' } },
+        { name: 'continuum.recall', arguments: { query: 'Oversized', scopes: ['project:remote'] } },
+        { name: 'continuum.decision_history', arguments: { decision_id: memory.id } },
+        { name: 'continuum.agents_md', arguments: { project: 'remote' } },
+        { name: 'continuum.agents_md_fresh', arguments: { project: 'remote', hash: '0'.repeat(64) } },
+        { name: 'continuum.promote', arguments: { memory_id: memory.id, target_scope_kind: 'org', target_scope_name: '' } },
+        { name: 'continuum.verify', arguments: { memory_id: memory.id, still_true: true } },
+        { name: 'continuum.supersede', arguments: { superseded_id: memory.id, title: 'Small replacement', body: 'Small' } },
+      ];
+      for (const call of calls) {
+        const result = await client.callTool(call);
+        expect(result.isError).toBe(true); expect(JSON.stringify(result)).toContain('PAYLOAD_TOO_LARGE');
+      }
+      expect(Number((await pool.query('SELECT count(*) AS count FROM audit_log')).rows[0].count)).toBe(before);
+      expect((await pool.query('SELECT state,promoted_to_id FROM memories WHERE id=$1', [memory.id])).rows[0])
+        .toEqual({ state: 'live', promoted_to_id: null });
+      expect(Number((await pool.query('SELECT count(*) AS count FROM memories')).rows[0].count)).toBe(1);
+    } finally { await cleanup(); }
+  }, 30000);
+
+  it('preserves membership lock and commit ordering when revocation overlaps a mutation', async () => {
+    let entered!: () => void; let resume!: () => void;
+    const enteredWrite = new Promise<void>((resolve) => { entered = resolve; });
+    const continueWrite = new Promise<void>((resolve) => { resume = resolve; });
+    const originalConnect = pool.connect;
+    let paused = false;
+    pool.connect = new Proxy(originalConnect, { apply(target, thisArg, args) {
+      const work = Reflect.apply(target, thisArg, args);
+      if (args.length) return work;
+      return (work as Promise<pg.PoolClient>).then((client) => new Proxy(client, { get(target, property) {
+        const value = Reflect.get(target, property);
+        if (property === 'query') return async (...args: unknown[]) => {
+          const result = await Reflect.apply(value, target, args);
+          if (!paused && typeof args[0] === 'string' && args[0].includes('FROM scope_memberships') && args[0].includes('FOR UPDATE')) {
+            paused = true; entered(); await continueWrite;
+          }
+          return result;
+        };
+        return typeof value === 'function' ? value.bind(target) : value;
+      } }));
+    } });
+    try {
+      const input = { scope_kind: 'project', scope_name: 'remote', type: 'decision', title: 'Overlap', body: 'Body' };
+      const writing = client.callTool({ name: 'continuum.capture', arguments: input });
+      await enteredWrite;
+      let revoked = false;
+      const revoking = pool.query('UPDATE scope_memberships SET active=false WHERE principal_id=$1 AND scope_id=$2',
+        [principalId, scopeId]).then(() => { revoked = true; });
+      await new Promise((resolve) => setTimeout(resolve, 30)); expect(revoked).toBe(false);
+      resume(); expect((await writing).isError).not.toBe(true); await revoking;
+      expect(JSON.stringify(await client.callTool({ name: 'continuum.capture', arguments: input }))).toContain('FORBIDDEN');
+    } finally { resume(); pool.connect = originalConnect; await cleanup(); }
+  });
+
   it('supports live authenticated GET reconnect and DELETE without historical replay', async () => {
     try {
       const headers = { Authorization: `Bearer ${key}`, 'Mcp-Session-Id': transport.sessionId!, Accept: 'text/event-stream',

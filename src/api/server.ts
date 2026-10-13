@@ -334,7 +334,10 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
     }
     try {
       await queryWithTimeout(pool, readinessTimeoutMs);
-      if (opts.mcpHttpPool) await queryWithTimeout(opts.mcpHttpPool, readinessTimeoutMs);
+      if (opts.mcpHttpPool && (opts.mcpHttpPool.idleCount > 0
+        || opts.mcpHttpPool.totalCount < (opts.mcpHttpPool.options.max ?? 5))) {
+        await queryWithTimeout(opts.mcpHttpPool, readinessTimeoutMs);
+      }
       res.json({ ok: true, database: 'ready', embedding });
     } catch (error) {
       logger.error('REST: readiness dependency unavailable', {
@@ -437,9 +440,12 @@ async function main(): Promise<void> {
   );
   const mcpHttpConfig = mcpHttpConfigFromEnv(process.env, authMode);
   let mcpHttpPool: pg.Pool | undefined;
+  let mcpHttpAuthPool: pg.Pool | undefined;
   if (mcpHttpConfig) {
     mcpHttpPool = createMcpHttpPool(process.env.CONTINUUM_DATABASE_URL!);
     servingProducerPools.add(mcpHttpPool);
+    mcpHttpAuthPool = createMcpHttpPool(process.env.CONTINUUM_DATABASE_URL!, 2);
+    servingProducerPools.add(mcpHttpAuthPool);
     await reconcilePgvectorProviderGrants(mcpHttpPool, schemaOptions);
     await requireCoordinationContractReady(mcpHttpPool, schemaOptions);
     await requirePromotionOutboxReady(mcpHttpPool, schemaOptions);
@@ -468,7 +474,7 @@ async function main(): Promise<void> {
   const extensions = defaultExtensionRegistries();
   const enrichmentShutdown = new AbortController();
   const mcpHttpController = mcpHttpConfig && mcpHttpPool ? createMcpHttpController(mcpHttpConfig, {
-    pool: mcpHttpPool, embeddingProvider, authenticator: createAuthenticator(mcpHttpPool, authMode,
+    pool: mcpHttpPool, embeddingProvider, authenticator: createAuthenticator(mcpHttpAuthPool!, authMode,
       authMode === 'entra' ? entraConfigFromEnv() : undefined),
     retrievalEnrichers: extensions.retrievalEnrichers, promotionWebhooks: extensions.promotionWebhooks,
     enrichment: { ...enrichmentConfigFromEnv(), signal: enrichmentShutdown.signal },

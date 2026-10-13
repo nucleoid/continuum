@@ -71,7 +71,7 @@
     "embed-backfill:dev": "tsx src/maintenance/embed-backfill-cli.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/sdk": "^1.27.1",
     "express": "^5.2.1",
     "jose": "^6.2.12",
     "pg": "^8.20.0",

@@ -7,13 +7,13 @@ import { buildMcpServer, type McpDeps, type McpExecutionGuard } from './mcp.js';
 import type { Authenticator } from './auth.js';
 import { isLifecyclePrincipal } from '../lifecycle/principal.js';
 import type { McpHttpConfig } from './mcp-http-config.js';
-import { validateMcpHttpRequest } from './mcp-http-config.js';
-import { McpHttpSessions } from './mcp-http-sessions.js';
+import { validateMcpHttpRequest, isTrustedMcpProxyPeer } from './mcp-http-config.js';
+import { McpHttpSessions, type ExecutionRelease } from './mcp-http-sessions.js';
 let pendingAuthentications = 0;
 const MAX_PENDING_AUTHENTICATIONS = 100;
 let bodyReaders = 0;
 let reservedControlReaders = 0;
-interface Call { release: () => void; started: boolean; done: boolean }
+interface Call { release: ExecutionRelease; started: boolean; done: boolean }
 interface Context { deadline: number; abort: AbortController; calls: Map<string | number, Call> }
 interface Entry {
   id?: string; binding: string; principal: string; expires: number; idle: number;
@@ -33,6 +33,8 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
   const pending = new Set<Entry>();
   const contexts = new WeakMap<AuthInfo, Context>();
   const executing = new Set<Promise<unknown>>();
+  const principalReaders = new Map<string, number>();
+  const controlReaders = new Map<string, number>();
   const requests = new Map<express.Response, AbortController>();
   let stopped = false;
   const event = (outcome: string, entry?: Entry, extra: Record<string, unknown> = {}) => deps.info?.({
@@ -93,15 +95,17 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
     res.setHeader('Cache-Control', 'private, no-store');
     if (req.originalUrl.split('?', 1)[0] !== '/mcp' || req.path !== '/' || !['POST', 'GET', 'DELETE'].includes(req.method)) { fail(res, 405, 'Unsupported method'); return; }
     if (stopped) { fail(res, 503, 'Remote MCP is stopping'); return; }
-    if (!admission.admitPeer(req.socket.remoteAddress ?? 'unknown')) { fail(res, 429, 'Request limit exceeded'); return; }
     if (req.headers['last-event-id']) { fail(res, 400, 'Historical resumption is unsupported'); return; }
     if (!validateMcpHttpRequest(req, config)) { fail(res, 400, 'Invalid remote request'); return; }
+    const trustedProxy = isTrustedMcpProxyPeer(req, config);
+    if (!trustedProxy && !admission.admitPeer(req.socket.remoteAddress!)) { fail(res, 429, 'Request limit exceeded'); return; }
+    const rejectAuth = (message: string) => fail(res, trustedProxy && !admission.admitProxy(req.socket.remoteAddress!) ? 429 : 401, message);
     if (req.method !== 'POST' && (req.headers['transfer-encoding'] || Number(req.headers['content-length'] ?? 0) > 0)) {
       fail(res, 400, 'Request body is unsupported'); return;
     }
     const header = req.headers.authorization ?? '';
     const match = /^(Bearer|ApiKey) ([^\s]+)$/i.exec(header);
-    if (!match) { fail(res, 401, 'Authentication required'); return; }
+    if (!match) { rejectAuth('Authentication required'); return; }
     const abort = new AbortController();
     requests.set(res, abort);
     let deadline = Date.now() + limits.requestMs;
@@ -118,7 +122,7 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
     if (stopped) { fail(res, 503, 'Remote MCP is stopping'); return; }
     if (abort.signal.aborted || res.destroyed) return;
     if (!auth || isLifecyclePrincipal(auth.principal) || (auth.expiresAt && auth.expiresAt.getTime() <= Date.now())) {
-      fail(res, 401, 'Invalid credential'); return;
+      rejectAuth('Invalid credential'); return;
     }
     req.principal = auth.principal;
     const binding = admission.binding(auth, match[2]);
@@ -166,27 +170,51 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
     if (req.headers['content-encoding'] || !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(req.headers['content-type'] ?? '')) {
       fail(res, 415, 'Uncompressed application/json required'); return;
     }
-    const borrowingControl = bodyReaders >= limits.calls;
+    const principal = auth.principal.id;
     const smallBody = Number(req.headers['content-length'] ?? 0) > 0 && Number(req.headers['content-length']) <= 512;
-    if (borrowingControl && (!smallBody || reservedControlReaders >= 4)) { fail(res, 503, 'Body admission capacity exceeded'); return; }
+    let usingControlRate = false;
+    if (!admission.admit(`principal:${principal}`, 1) || !admission.admit(`credential:${binding}`, 1)) {
+      if (!smallBody || !admission.admit(`control:principal:${principal}`, 1)
+        || !admission.admit(`control:credential:${binding}`, 1)) { fail(res, 429, 'Message limit exceeded'); return; }
+      usingControlRate = true;
+    }
+    const borrowingControl = bodyReaders >= limits.calls || (principalReaders.get(principal) ?? 0) >= limits.principalCalls;
+    if (borrowingControl && (!smallBody || reservedControlReaders >= 4 || controlReaders.has(principal))) {
+      fail(res, 503, 'Body admission capacity exceeded'); return;
+    }
+    const readerMap = borrowingControl ? controlReaders : principalReaders;
+    readerMap.set(principal, (readerMap.get(principal) ?? 0) + 1);
     if (borrowingControl) reservedControlReaders++; else bodyReaders++;
-    try { await new Promise<void>((resolve, reject) => parse(req, res, (error?: unknown) => error ? reject(error) : resolve())); }
+    const bodyTimer = setTimeout(expire, Math.min(limits.bodyReadMs, Math.max(1, deadline - Date.now())));
+    try { await new Promise<void>((resolve, reject) => {
+      const aborted = () => reject(new Error('Body read aborted'));
+      abort.signal.addEventListener('abort', aborted, { once: true });
+      parse(req, res, (error?: unknown) => { abort.signal.removeEventListener('abort', aborted); error ? reject(error) : resolve(); });
+    }); }
     catch (error) { fail(res, (error as { status?: number }).status === 413 ? 413 : 400, 'Invalid JSON body'); return; }
-    finally { if (borrowingControl) reservedControlReaders--; else bodyReaders--; }
+    finally { clearTimeout(bodyTimer); if (borrowingControl) reservedControlReaders--; else bodyReaders--;
+      const count = readerMap.get(principal)! - 1; if (count) readerMap.set(principal, count); else readerMap.delete(principal); }
     if (stopped) { fail(res, 503, 'Remote MCP is stopping'); return; }
     if (abort.signal.aborted || res.destroyed) return;
+    if (entry && (entry.closed || Date.now() >= entry.expires || Date.now() >= entry.idle)) {
+      await close(entry, 'expired'); fail(res, 404, 'Session not found'); return;
+    }
     const messages: unknown[] = Array.isArray(req.body) ? req.body : [req.body];
     if (!messages.length || messages.length > limits.batchMessages) { fail(res, 400, 'Invalid message batch'); return; }
     const parsed = messages.map((message) => JSONRPCMessageSchema.safeParse(message));
     if (parsed.some((value) => !value.success)) { fail(res, 400, 'Invalid JSON-RPC message'); return; }
     const rpc = parsed.map((value) => value.data!);
     const control = rpc.every((message) => 'method' in message && ['notifications/initialized', 'notifications/cancelled'].includes(message.method));
+    if (usingControlRate && !control) { fail(res, 429, 'Message limit exceeded'); return; }
     if (borrowingControl && !control) { fail(res, 503, 'Reserved control admission required'); return; }
-    const prefix = control ? 'control:' : '';
-    if (!admission.admit(`${prefix}principal:${auth.principal.id}`, messages.length)
-      || !admission.admit(`${prefix}credential:${binding}`, messages.length)) { fail(res, 429, 'Message limit exceeded'); return; }
+    const prefix = usingControlRate ? 'control:' : '';
+    if (!admission.admit(`${prefix}principal:${auth.principal.id}`, messages.length - 1)
+      || !admission.admit(`${prefix}credential:${binding}`, messages.length - 1)) { fail(res, 429, 'Message limit exceeded'); return; }
     if (rpc.some((message) => 'id' in message && (typeof message.id === 'string' ? Buffer.byteLength(message.id) > 128
       : !Number.isSafeInteger(message.id)))) { fail(res, 400, 'Invalid request ID'); return; }
+    if (rpc.some((message) => 'method' in message && message.method === 'notifications/cancelled'
+      && (typeof message.params?.requestId === 'string' ? Buffer.byteLength(message.params.requestId) > 128
+        : !Number.isSafeInteger(message.params?.requestId)))) { fail(res, 400, 'Invalid cancellation ID'); return; }
     const initializing = !entry;
     if (initializing && (rpc.length !== 1 || !isInitializeRequest(rpc[0]))) { fail(res, 400, 'Initialize required'); return; }
     if (entry && rpc.some(isInitializeRequest)) { fail(res, 400, 'Session already initialized'); return; }
@@ -204,7 +232,7 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
         onsessionclosed: () => { void close(entry!, 'sdk_closed'); } });
       let server: ReturnType<typeof buildMcpServer>;
       try { server = buildMcpServer({ ...deps, logger: { error: () => event('service_error') },
-        principal: auth.principal, allowedSource: auth.allowedSource, executionGuard: guard }); }
+        principal: auth.principal, allowedSource: auth.allowedSource, readBudgetBytes: limits.outputBytes, executionGuard: guard }); }
       catch { release(); await transport.close(); fail(res, 500, 'Initialization failed'); return; }
       entry = { binding, principal: auth.principal.id, expires: Math.min(Date.now() + limits.lifetimeMs,
         auth.expiresAt?.getTime() ?? Infinity), idle: Date.now() + limits.idleMs, ready: false,
@@ -261,6 +289,7 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
       if (!res.writableFinished) void close(selected, 'disconnect');
     });
     abort.signal.addEventListener('abort', () => {
+      for (const call of context.calls.values()) if (call.started && !call.done) call.release.markUnsettled();
       if (!res.writableFinished) { event('deadline', selected); void close(selected, 'deadline'); }
     }, { once: true });
     if (rpc.some((message) => 'method' in message && message.method === 'notifications/initialized')) selected.ready = true;

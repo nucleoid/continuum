@@ -45,9 +45,9 @@ export async function closePool(): Promise<void> {
 }
 
 /** Separate remote serving pool. Initialization completes before any client is admitted. */
-export function createMcpHttpPool(connectionString: string): pg.Pool {
+export function createMcpHttpPool(connectionString: string, max = 5): pg.Pool {
   const options: pg.PoolConfig & { verify: (client: pg.PoolClient, done: (error?: Error) => void) => void } = {
-    connectionString, max: 5, connectionTimeoutMillis: 1000, idleTimeoutMillis: 10000, query_timeout: 5000,
+    connectionString, max, connectionTimeoutMillis: 1000, idleTimeoutMillis: 10000, query_timeout: 5000,
     verify(client, done) {
       void client.query(`SELECT pg_catalog.set_config('statement_timeout',
         (CASE WHEN setting::int > 0 THEN least(setting::int,5000) ELSE 5000 END)::text, false)

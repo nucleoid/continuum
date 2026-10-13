@@ -160,6 +160,7 @@ export async function supersedeForPrincipal(
   pool: pg.Pool, embeddingRouting: EmbeddingRouting, principal: Principal,
   input: SupersedeInput, auditMetadata: Record<string, unknown> = {},
   allowedSource?: string,
+  readBudgetBytes?: number,
 ): Promise<SupersedeResult> {
   try {
     const source = input.source ?? 'manual';
@@ -171,7 +172,7 @@ export async function supersedeForPrincipal(
     let result;
     try {
       result = await supersedeDecision(pool, {
-        ...input, tags, source, principalId: principal.id, auditMetadata,
+        ...input, tags, source, principalId: principal.id, auditMetadata, readBudgetBytes,
       });
     } catch (error) {
       if (error instanceof SupersedeStorageError) throw mapStorageError(error);
@@ -185,13 +186,14 @@ export async function supersedeForPrincipal(
 export async function decisionHistoryForPrincipal(
   pool: pg.Pool, principal: Principal, decisionId: string,
   auditMetadata: Record<string, unknown> = {},
+  readBudgetBytes?: number,
 ): Promise<{ decisions: Memory[]; currentId: string }> {
   let client: pg.PoolClient | undefined;
   let destroyClient = false;
   try {
     client = await pool.connect();
     await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
-    const history = await getDecisionHistory(client, principal.id, decisionId);
+    const history = await getDecisionHistory(client, principal.id, decisionId, readBudgetBytes);
     if (!history) throw new ServiceError('MEMORY_NOT_FOUND', 'Memory not found');
     const anchor = history.memories.find((memory) => memory.id === decisionId)!;
     if (anchor.type !== 'decision') throw new ServiceError('INVALID_INPUT', 'Memory is not a decision');

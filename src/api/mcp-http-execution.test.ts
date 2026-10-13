@@ -3,7 +3,8 @@ import { remoteExecutionContext } from './mcp-http-execution.js';
 describe('remote per-call execution context', () => {
   it('prevents post-cancellation SQL side effects but permits transactional rollback', async () => {
     const calls: string[] = [];
-    const client = { query: async (text: string) => { calls.push(text); return { rows: [] }; }, release: () => undefined };
+    const released: unknown[] = [];
+    const client = { query: async (text: string) => { calls.push(text); return { rows: [] }; }, release: (error?: unknown) => { released.push(error); } };
     const pool = { connect: async () => client, query: client.query };
     const context = remoteExecutionContext(pool as never, null);
     const abort = new AbortController();
@@ -14,6 +15,7 @@ describe('remote per-call execution context', () => {
       await borrowed.query('ROLLBACK'); borrowed.release();
     });
     expect(calls).toEqual(['BEGIN', 'ROLLBACK']);
+    expect(released).toEqual([true]);
   });
   it('keeps concurrent provider cancellation local to each invocation', async () => {
     const observed: AbortSignal[] = [];

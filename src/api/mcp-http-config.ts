@@ -6,7 +6,7 @@ export interface McpHttpLimits {
   idleMs: number; lifetimeMs: number; streams: number; principalCalls: number; calls: number;
   requestMs: number; streamMs: number; messageRate: number; messageBurst: number;
   peerRate: number; peerBurst: number; peers: number; outputBytes: number;
-  buckets: number; batchMessages: number;
+  buckets: number; batchMessages: number; proxyRate: number; proxyBurst: number; bodyReadMs: number;
 }
 export interface McpHttpConfig {
   publicUrl: URL;
@@ -21,14 +21,14 @@ export const DEFAULT_MCP_HTTP_LIMITS: Readonly<McpHttpLimits> = Object.freeze({
   idleMs: 600000, lifetimeMs: 3600000, streams: 100, principalCalls: 4, calls: 20,
   requestMs: 30000, streamMs: 30000, messageRate: 120, messageBurst: 20,
   peerRate: 60, peerBurst: 10, peers: 1000, outputBytes: 1048576,
-  buckets: 2000, batchMessages: 20,
+  buckets: 2000, batchMessages: 20, proxyRate: 6000, proxyBurst: 1000, bodyReadMs: 5000,
 });
 export const MAX_MCP_HTTP_LIMITS: Readonly<McpHttpLimits> = Object.freeze({
   bodyBytes: 16777216, sessions: 10000, principalSessions: 100, initializeMs: 30000,
   idleMs: 3600000, lifetimeMs: 86400000, streams: 10000, principalCalls: 100, calls: 1000,
   requestMs: 300000, streamMs: 300000, messageRate: 10000, messageBurst: 1000,
   peerRate: 10000, peerBurst: 1000, peers: 100000, outputBytes: 16777216,
-  buckets: 100000, batchMessages: 20,
+  buckets: 100000, batchMessages: 20, proxyRate: 60000, proxyBurst: 10000, bodyReadMs: 30000,
 });
 
 function enabled(value: string | undefined, name: string): boolean {
@@ -127,5 +127,10 @@ export function validateMcpHttpRequest(req: Pick<IncomingMessage, 'headers' | 'r
   if (origin !== undefined && !config.allowedOrigins.includes(origin)) return false;
   if (req.headers['last-event-id']) return false;
   if (config.loopbackDev) return addressAllowed(loopback, req.socket.remoteAddress);
-  return addressAllowed(config.trustedProxy, req.socket.remoteAddress) && req.headers['x-forwarded-proto'] === 'https';
+  return isTrustedMcpProxyPeer(req, config) && req.headers['x-forwarded-proto'] === 'https';
+}
+
+/** Proxy aggregation uses only the direct socket peer; forwarded client addresses are untrusted. */
+export function isTrustedMcpProxyPeer(req: Pick<IncomingMessage, 'socket'>, config: McpHttpConfig): boolean {
+  return !config.loopbackDev && addressAllowed(config.trustedProxy, req.socket.remoteAddress);
 }

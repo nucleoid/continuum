@@ -24,6 +24,7 @@ export interface RecallLogger {
 }
 
 export interface RecallEnrichment {
+  readBudgetBytes?: number;
   registry: RetrievalEnricherRegistry;
   options: EnrichmentOptions;
 }
@@ -70,6 +71,7 @@ export async function recallForPrincipal(
       types: input.types,
       limit: input.limit ?? 10,
       embeddingGroups,
+      readBudgetBytes: enrichment?.readBudgetBytes,
     });
     const embeddingAuditGroups = recalled.diagnostics.groups.map((group) => ({
       provider: group.provider,

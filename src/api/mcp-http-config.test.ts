@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { IncomingMessage } from 'node:http';
-import { mcpHttpConfigFromEnv, validateMcpHttpRequest } from './mcp-http-config.js';
+import { mcpHttpConfigFromEnv, validateMcpHttpRequest, isTrustedMcpProxyPeer } from './mcp-http-config.js';
 
 const production = { CONTINUUM_MCP_HTTP_ENABLED: 'true', CONTINUUM_MCP_PUBLIC_URL: 'https://mcp.example:8443/mcp', CONTINUUM_MCP_TRUSTED_PROXY_CIDRS: '192.0.2.0/24,2001:db8::/32', CONTINUUM_MCP_ALLOWED_ORIGINS: 'https://client.example' };
 function request(headers: Record<string, string> = {}, peer = '192.0.2.4', url = '/mcp'): IncomingMessage {
@@ -98,4 +98,31 @@ it('rejects array, control-character and overlong noncredential headers', () => 
   expect(validateMcpHttpRequest(req, config)).toBe(false);
   expect(validateMcpHttpRequest(request({ origin: 'x'.repeat(2049) }), config)).toBe(false);
   expect(validateMcpHttpRequest(request({ 'x-test': 'value\r\nInjected: value' }), config)).toBe(false);
+});
+
+
+it('bounds aggregate proxy admission and body read deadlines independently of direct peer limits', () => {
+  const config = mcpHttpConfigFromEnv(production, 'entra')!;
+  expect(config.limits.proxyRate).toBe(6000);
+  expect(config.limits.proxyBurst).toBe(1000);
+  expect(config.limits.bodyReadMs).toBe(5000);
+  expect(config.limits.peerRate).toBe(60);
+  expect(config.limits.peerBurst).toBe(10);
+  const overridden = mcpHttpConfigFromEnv({ ...production, CONTINUUM_MCP_HTTP_PROXY_RATE: '60000', CONTINUUM_MCP_HTTP_PROXY_BURST: '10000', CONTINUUM_MCP_HTTP_BODY_READ_MS: '30000' }, 'entra')!;
+  expect(overridden.limits.proxyRate).toBe(60000);
+  expect(overridden.limits.proxyBurst).toBe(10000);
+  expect(overridden.limits.bodyReadMs).toBe(30000);
+  for (const [name, ceiling] of [['PROXY_RATE', 60000], ['PROXY_BURST', 10000], ['BODY_READ_MS', 30000]] as const) {
+    for (const raw of ['0', '1.5', 'Infinity', String(ceiling + 1)]) expect(() => mcpHttpConfigFromEnv({ ...production, [`CONTINUUM_MCP_HTTP_${name}`]: raw }, 'entra')).toThrow();
+  }
+});
+it('classifies configured direct proxy peers without using forwarded client headers', () => {
+  const config = mcpHttpConfigFromEnv(production, 'entra')!;
+  for (const peer of ['192.0.2.4', '::ffff:192.0.2.4', '2001:db8::1']) expect(isTrustedMcpProxyPeer(request({}, peer), config)).toBe(true);
+  expect(isTrustedMcpProxyPeer(request({ 'x-forwarded-for': '192.0.2.4' }, '198.51.100.1'), config)).toBe(false);
+  const unknown = request();
+  unknown.socket.remoteAddress = undefined;
+  expect(isTrustedMcpProxyPeer(unknown, config)).toBe(false);
+  const dev = mcpHttpConfigFromEnv({ ...production, CONTINUUM_MCP_HTTP_LOOPBACK_DEV: 'true', CONTINUUM_MCP_PUBLIC_URL: 'http://127.0.0.1:4000/mcp' }, 'dev')!;
+  expect(isTrustedMcpProxyPeer(request({}, '192.0.2.4'), dev)).toBe(false);
 });

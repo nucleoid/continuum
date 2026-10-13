@@ -239,3 +239,5 @@ Migration 0090 requires the migration owner's database TEMPORARY privilege for i
 ## Optional remote MCP
 
 The API process can serve authenticated Streamable HTTP at `/mcp`, disabled by default. It uses the same tool registrations, current memberships, source restrictions and required domain audits as stdio. See [remote MCP](./docs/remote-mcp.md) for the explicit HTTPS proxy policy, limits, session lifecycle and rollout. Stdio remains available through `npm run mcp`.
+
+Remote MCP passes optional aggregate read budgets into shared memory, recall, history and generator paths. Metadata-only admission and a repeated same-snapshot gate prevent oversized hydration; mutation source probes lock admitted rows before reading their contents. Generator limits include all selected scopes and escaped rendering. Budget failures precede success delivery audits and writes without truncating content or changing default transport selection.

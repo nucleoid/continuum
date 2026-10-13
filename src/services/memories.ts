@@ -5,6 +5,7 @@ import {
   getReadableMemory,
   listReadableMemories,
   type MemoryReadRecord,
+  requireReadBudget,
 } from '../storage/memory-reads.js';
 import type { MemoryState, MemoryType, Principal } from '../types.js';
 import { asServiceError, ServiceError } from './errors.js';
@@ -52,6 +53,7 @@ export async function getMemoryForPrincipal(
   principal: Principal,
   memoryId: string,
   auditMetadata: Record<string, unknown> = {},
+  readBudgetBytes?: number,
 ): Promise<MemoryReadRecord> {
   if (!UUID.safeParse(memoryId).success) {
     throw new ServiceError('INVALID_INPUT', 'memoryId must be a valid UUID');
@@ -61,10 +63,11 @@ export async function getMemoryForPrincipal(
   try {
     client = await pool.connect();
     await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
-    const recordValue = await getReadableMemory(client, principal.id, memoryId);
+    const recordValue = await getReadableMemory(client, principal.id, memoryId, readBudgetBytes);
     if (!recordValue) {
       throw new ServiceError('MEMORY_NOT_FOUND', 'Memory not found');
     }
+    if (readBudgetBytes !== undefined) requireReadBudget(Buffer.byteLength(JSON.stringify(recordValue), 'utf8') + 1024, readBudgetBytes);
     await recordRead(client, {
       principalId: principal.id,
       operation: 'get_memory',
@@ -96,6 +99,7 @@ export async function listMemoriesForPrincipal(
   principal: Principal,
   input: ListMemoriesInput = {},
   auditMetadata: Record<string, unknown> = {},
+  readBudgetBytes?: number,
 ): Promise<ListMemoriesResult> {
   let client: pg.PoolClient | undefined;
   let destroyClient = false;
@@ -116,7 +120,8 @@ export async function listMemoriesForPrincipal(
     await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
     const items = await listReadableMemories(client, principal.id, {
       scope, type: input.type, state, limit, offset,
-    });
+    }, readBudgetBytes);
+    if (readBudgetBytes !== undefined) requireReadBudget(Buffer.byteLength(JSON.stringify({ items, limit, offset }), 'utf8') + 1024, readBudgetBytes);
     await recordRead(client, {
       principalId: principal.id,
       operation: 'list_memories',
