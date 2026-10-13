@@ -19,6 +19,7 @@ RUN tar -xzf /tmp/package.tgz --strip-components=1 && rm /tmp/package.tgz
 COPY package-lock.json ./package-lock.json
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund && rm package-lock.json && \
     find node_modules -type f \( -name '*.map' -o -name '*.test.*' -o -name '*.spec.*' \) -delete && \
+    if [ -d node_modules/@types ]; then rmdir node_modules/@types; fi && \
     chmod -R a-w /opt/continuum
 
 FROM node:22.23.3-bookworm-slim@sha256:efd0ab5780c2d9ab1f0f869571a00d5edb17793bff4cce4a2792e3eb0ffc7562 AS runtime

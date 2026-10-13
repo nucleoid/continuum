@@ -49,7 +49,8 @@ async function inspect(file) {
       // Base-image distribution assets are outside the application package.
       const applicationPaths = paths.filter(path => path.replace(/^\.\//, '').startsWith('opt/continuum/'));
       if (applicationPaths.some(path => forbidden.test(path))) throw new Error(`Forbidden application path in layer ${i}`);
-      if (applicationPaths.some(path => /node_modules\/(?:typescript|vitest|tsx|@types)\//.test(path))) throw new Error('Build-only dependency in runtime layer');
+      const buildOnly = applicationPaths.find(path => /node_modules\/(?:typescript|vitest|tsx|@types)\//.test(path));
+      if (buildOnly) throw new Error(`Build-only dependency in runtime layer ${i}: ${buildOnly.replace(/[\u0000-\u001f\u007f]/g, '?').slice(0, 256)}`);
       await new Promise((resolve, reject) => {
         const child = spawn('tar', ['-xOf', file], { stdio: ['ignore', 'pipe', 'ignore'] });
         const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('Layer inspection deadline exceeded')); }, 120_000);
