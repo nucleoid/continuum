@@ -7,7 +7,7 @@ The container workflow builds and tests Linux amd64 on hosted GitHub runners. De
 Download both `continuum-linux-amd64-<source SHA>` and its matching smoke results from the same successful workflow run. Keep the archive, `SHA256SUMS`, source metadata, manifest/config digests and `runtime-assets.tgz` together. Use the helper scripts from that exact source checkout, with Node 22:
 
 ```sh
-GITHUB_SHA=<reviewed-source-SHA> node scripts/container-artifact.mjs verify /private/artifact
+SOURCE_SHA=<reviewed-source-SHA> node scripts/container-artifact.mjs verify /private/artifact
 ```
 
 The helper verifies source identity, OCI blob digests and every layer before import. Inspect the metadata to confirm the expected reviewed source SHA. Checksums protect transfer integrity; obtain artifacts through the authenticated workflow and verify the selected run independently. They are not a separate signing authority.
@@ -20,12 +20,12 @@ docker run --rm \
   -v /private/artifact:/input:ro -v /private/import:/output \
   quay.io/skopeo/stable@sha256:ab4c269c9e2bd11affe2666b860fb651a15afec121c15986b052b02e09d86239 \
   copy --override-os linux --override-arch amd64 \
-  oci-archive:/input/image.oci.tar docker-archive:/output/image.docker.tar:continuum:verified
+  oci-archive:/input/image.oci.tar docker-archive:/output/image.docker.tar:continuum:import-${SOURCE_SHA}
 docker load --input /private/import/image.docker.tar
-docker image inspect continuum:verified
+SOURCE_SHA=<reviewed-source-SHA> node scripts/container-artifact.mjs verify-loaded /private/artifact continuum:import-${SOURCE_SHA}
 ```
 
-Compare the loaded image ID with the artifact config digest. Set `CONTINUUM_APP_IMAGE` to that `sha256:<config>` ID, not the temporary import tag. OCI manifest digest identifies the archive's image manifest; it is distinct from the loaded config/image ID. Registry use, publication, multi-platform support and PostgreSQL major upgrades need separate validation.
+Set and export `SOURCE_SHA` to the approved exact source SHA before import. The helper verifies the loaded image by hashing its actual exported config bytes against the OCI config digest and checking the source label and platform. Set `CONTINUUM_APP_IMAGE` to `loaded-identity.json.imageId`, the immutable ID reported by that deployment daemon, after verification. Keep the temporary import tag out of production configuration. Classic Docker stores use a config digest as image ID; containerd stores can report a manifest digest. The OCI manifest digest, portable config digest and daemon image ID are distinct recorded values. Verify on each deployment host rather than assuming its image store matches CI. Registry use, publication, multi-platform support and PostgreSQL major upgrades need separate validation.
 
 Extract the verified runtime asset archive into a new private directory. Its package root contains `deploy/`, `scripts/` and all published migrations. Set `CONTINUUM_RUNTIME_ASSETS` to that root. Never replace its SQL with an unrelated working directory. Base inputs and actions are digest/commit pinned; CI normalizes source timestamps and compares uncached builds. Read measured reproducibility output rather than assuming byte equivalence across toolchain versions.
 
@@ -59,7 +59,7 @@ node scripts/container-maintenance.mjs fresh \
   /private/config/production.env /private/assets/deploy/compose.production.yml
 ```
 
-The wrapper never builds or pulls images. It refuses a conflicting fresh volume, starts the private database, runs DBA bootstrap, migrates the complete packaged chain under a finite outer deadline, provisions the reviewed first admin, applies APP/OP/SYNC profiles and their complete identity verifier, then recreates API. Failure keeps serving stopped and retains the volume. DBA bootstrap and first-admin provisioning are fresh-only and deliberately fail on repeated execution; upgrades do not rotate credentials or retarget bindings.
+The wrapper never builds or pulls images. It refuses a conflicting fresh volume, starts the private database, runs DBA bootstrap, migrates the complete packaged chain under a finite outer deadline, provisions the reviewed first admin, applies APP/OP/SYNC profiles and their complete identity verifier, then recreates API. Failure keeps serving stopped and retains the volume. DBA bootstrap and first-admin provisioning are fresh-only and deliberately fail on repeated execution. Correct role-profile maintenance can converge on retry; mismatched or foreign stored bindings fail before grants. Upgrades verify the retained OP/SYNC role names, OIDs, principals and authority flags against reviewed configuration before reapplying exact profiles. They do not rotate credentials or retarget bindings. A separately approved identity rotation or restore must establish current bindings before updating deployment inputs.
 
 The complete maintenance sequence, not an old exited job or readiness response, permits serving. Do not bypass the wrapper by starting the `serving` profile directly. Database initialization must work under UID 999 with no capability or permission repair; hostile volume ownership fails safely.
 
@@ -88,10 +88,10 @@ node scripts/container-maintenance.mjs upgrade \
   /private/config/production.env /private/assets/deploy/compose.production.yml
 ```
 
-The wrapper stops project writers, creates new custom-format database and role-definition backups with checksums, migrates and reapplies/verifies existing profiles, then recreates API. It skips fresh bootstrap and first-admin provisioning. Keep DBA role definitions and provider/ledger/source provenance with the backup; checksum the backup and protect its retained personal data. Role credentials remain separate private operator records. Resume schedulers and replay unchanged deliveries only after all gates succeed.
+The wrapper validates immutable inputs and reserves all new private backup output files before stopping project writers, then creates custom-format database and password-free role-definition backups with checksums, migrates and reapplies/verifies existing profiles, then recreates API. It skips fresh bootstrap and first-admin provisioning. Keep DBA role definitions and provider/ledger/source provenance with the backup; checksum the backup and protect its retained personal data. Role credentials remain separate private operator records. The role dump uses `--no-role-passwords`; supply approved current passwords separately during restore. Resume schedulers and replay unchanged deliveries only after all gates succeed.
 
 Test restore into a separate new volume before relying on a backup. Use the tested PostgreSQL 16 tools, reviewed role definitions, provider ownership, full ledger/execution evidence and [OID rebind runbook](offboarding.md), then reapply exact profiles and verify current runtime gates. Preserve the original volume. Restoring may reintroduce subject data erased since backup; reconcile privacy and downstream state before serving. CI's synthetic restore rehearsal is bounded evidence for its fixture, not a measured production recovery time.
 
-A lock wait or outer deadline can leave earlier forward migration phases committed. Keep applications stopped, preserve the volume and ledger/execution evidence, inspect the failure and retry the same compatible artifact. Never delete migration receipts, skip required backfill or give REST owner credentials to recover.
+Supervised migration connections use a unique bounded maintenance application name. On failure or deadline the wrapper stops its named client container, asks the DBA to terminate only matching owner/database backends and checks that they have disappeared. If settlement cannot be verified, keep serving stopped and investigate; a killed client alone does not prove database work stopped. A lock wait or outer deadline can leave earlier forward migration phases committed. Keep applications stopped, preserve the volume and ledger/execution evidence, inspect the failure and retry the same compatible artifact. Never delete migration receipts, skip required backfill or give REST owner credentials to recover.
 
 Rollback first quiesces new writers. Use binary-only rollback only for a demonstrated compatible artifact on the current schema. Unsupported historical binaries and in-place provider-key downgrade are rejected. Otherwise recover forward, or restore a verified pre-upgrade backup into a separate new volume with deliberate later-write, delivery, identity/OID and privacy reconciliation. Do not automatically downgrade schema, recreate volumes, erase ledgers, restore old credentials or run `down -v`. Packaging does not deploy to a live installation or operate on historical databases.

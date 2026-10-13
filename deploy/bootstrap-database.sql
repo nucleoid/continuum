@@ -8,6 +8,15 @@
 \getenv operator_password CONTINUUM_OPERATOR_PASSWORD
 \getenv sync_password CONTINUUM_SYNC_PASSWORD
 BEGIN;
+-- Suppress statement/error/duration logging before the first secret-bearing
+-- statement. Superuser settings are transaction-local and restore on rollback.
+SET LOCAL log_statement = 'none';
+SET LOCAL log_min_error_statement = 'panic';
+SET LOCAL log_error_verbosity = 'terse';
+SET LOCAL log_min_duration_statement = -1;
+SET LOCAL log_min_duration_sample = -1;
+SET LOCAL log_duration = off;
+SET LOCAL password_encryption = 'scram-sha-256';
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '30s';
 CREATE TEMP TABLE bootstrap_input ON COMMIT DROP AS
@@ -59,6 +68,9 @@ BEGIN
   EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I WITH GRANT OPTION', i.provider_schema, i.roles[1]);
   EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA %I TO %I WITH GRANT OPTION', i.provider_schema, i.roles[1]);
   EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC', i.roles[1]);
+EXCEPTION WHEN OTHERS THEN
+  -- Never propagate a dynamic CREATE ROLE's plaintext SQL via error context.
+  RAISE EXCEPTION 'fresh database bootstrap failed; review approved inputs and database state' USING ERRCODE = SQLSTATE;
 END;
 $bootstrap$;
 COMMIT;

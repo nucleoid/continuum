@@ -131,7 +131,9 @@ services:
           -f /assets/deploy/bootstrap-production-admin.sql
   grant:
     <<: *job
-    environment: *owner-env
+    environment:
+      <<: *owner-env
+      CONTINUUM_MAINTENANCE_MODE: ${CONTINUUM_MAINTENANCE_MODE:-}
     secrets: [owner_password]
     entrypoint: [/bin/sh, -ec]
     command:
