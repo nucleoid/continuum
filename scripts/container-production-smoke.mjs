@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { writeFileSync, readFileSync, mkdtempSync, mkdirSync, readdirSync, copyFileSync, rmSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -13,10 +13,19 @@ const assets = process.env.CONTINUUM_RUNTIME_ASSETS;
 if (!/^sha256:[a-f0-9]{64}$/.test(image ?? '') || !/^continuum-ci-[a-f0-9-]+$/.test(owner ?? '')) throw new Error('Verified smoke inputs required');
 const temporary = mkdtempSync(join(tmpdir(), 'continuum-operational-'));
 chmodSync(temporary, 0o755);
-const results = { sourceSha: process.env.GITHUB_SHA, imageId: image, passed: [], unmet: [] };
+const results = { sourceSha: process.env.SOURCE_SHA, imageId: image, passed: [], unmet: [] };
 const projects = [];
 const run = (args, options = {}) => execFileSync('docker', args, { encoding: 'utf8', timeout: 120_000, maxBuffer: 16 * 1024 * 1024, ...options });
 const check = (condition, message) => { if (!condition) throw new Error(message); };
+function failureText(error) {
+  return [error?.message, error?.stderr?.toString('utf8'), error?.cause?.message, error?.cause?.stderr?.toString('utf8')].filter(Boolean).join('\n');
+}
+function expectFailure(action, expected, label) {
+  let actual;
+  try { action(); } catch (error) { actual = error; }
+  check(actual && failureText(actual).includes(expected), `${label}: did not receive the specific expected failure`);
+  return actual;
+}
 function setup(suffix) {
   const project = `${owner}-${suffix}`;
   const directory = join(temporary, suffix);
@@ -53,9 +62,74 @@ function sql(p, statement, role = 'OWNER', options = {}) {
   // Secret values stay in environment, not command arguments or log output.
   return compose(p, ['exec', '-T', '-e', 'PGPASSWORD', 'postgres', 'psql', '-X', '-qAt', '-h', '127.0.0.1', '-U', `continuum_${role.toLowerCase()}`, '-d', 'continuum', '-v', 'ON_ERROR_STOP=1', '-c', `SET search_path TO continuum; ${statement}`], { ...options, env: { ...p.env, PGPASSWORD: p.passwords[role] } }).trim();
 }
+function bootstrapLogCanary(p) {
+  const dbaStatement = statement => compose(p, ['exec', '-T', '-e', 'PGPASSWORD', 'postgres',
+    'psql', '-X', '-qAt', '-h', '127.0.0.1', '-U', 'continuum_dba', '-d', 'continuum',
+    '-v', 'ON_ERROR_STOP=1', '-c', statement], { env: { ...p.env, PGPASSWORD: p.passwords.DBA } }).trim();
+  const settings = {
+    log_statement: 'all', log_error_verbosity: 'verbose', log_min_error_statement: 'error',
+    log_min_duration_statement: '0', log_min_duration_sample: '0', log_duration: 'on',
+  };
+  const quoted = value => `'${String(value).replaceAll("'", "''")}'`;
+  const settingNames = Object.keys(settings).map(quoted).join(',');
+  const readSettings = () => JSON.parse(dbaStatement(`SELECT json_object_agg(name,setting) FROM pg_settings WHERE name IN (${settingNames})`));
+  const awaitSettings = expected => {
+    const deadline = Date.now()+5000;
+    do {
+      const active=readSettings();
+      if(Object.entries(expected).every(([name,value])=>active[name]===value)) return true;
+    } while(Date.now()<deadline);
+    return false;
+  };
+  const original = readSettings();
+  const job = `${p.project}-bootstrap`;
+  const captured = [];
+  const captureJob = () => {
+    const result = spawnSync('docker', [...p.base, 'run', '--rm', '--name', job, 'bootstrap'], {
+      env: p.env, encoding: 'utf8', timeout: 120_000, killSignal: 'SIGKILL', maxBuffer: 16 * 1024 * 1024,
+    });
+    captured.push(`${result.stdout ?? ''}${result.stderr ?? ''}`);
+    // Never propagate an Error containing raw captured output into public results.
+    check(!result.error && result.signal === null && Number.isInteger(result.status), 'Bootstrap log canary job did not settle within its deadline');
+    return result;
+  };
+  try {
+    // ALTER SYSTEM cannot run in the compound SET-prefixed sql() helper.
+    // Each setting therefore runs as its own direct DBA psql statement.
+    for (const [name,value] of Object.entries(settings)) dbaStatement(`ALTER SYSTEM SET ${name} = ${quoted(value)}`);
+    check(dbaStatement('SELECT pg_reload_conf()')==='t','Bootstrap canary logging reload failed');
+    check(awaitSettings(settings),'Bootstrap canary verbose logging was not active');
+    dbaStatement("SELECT 'continuum_bootstrap_log_canary'");
+    const success = captureJob();
+    check(success.status===0,'Bootstrap log canary fresh job failed');
+    const repeated = captureJob();
+    check(repeated.status!==0 && `${repeated.stdout ?? ''}${repeated.stderr ?? ''}`.includes('fresh database bootstrap failed; review approved inputs and database state'),
+      'Bootstrap log canary did not receive the specific repeated-bootstrap refusal');
+    const postgresId = compose(p,['ps','-q','postgres']).trim();
+    const logs = spawnSync('docker',['logs',postgresId],{
+      encoding:'utf8',timeout:30_000,killSignal:'SIGKILL',maxBuffer:16*1024*1024,
+    });
+    check(!logs.error && logs.signal===null && logs.status===0,'Bootstrap log canary could not privately capture PostgreSQL logs');
+    captured.push(`${logs.stdout ?? ''}${logs.stderr ?? ''}`);
+    check(captured.at(-1).includes('continuum_bootstrap_log_canary'),'Bootstrap log canary did not capture its statement-logging control');
+    check(!Object.values(p.passwords).some(password=>captured.some(text=>text.includes(password))),
+      'Bootstrap plaintext log canary failed');
+    return true;
+  } finally {
+    // Restore before migrations and transport tests to keep CI log volume bounded.
+    for (const [name,value] of Object.entries(original)) dbaStatement(`ALTER SYSTEM SET ${name} = ${quoted(value)}`);
+    check(dbaStatement('SELECT pg_reload_conf()')==='t','Bootstrap canary logging restoration failed');
+    check(awaitSettings(original),'Bootstrap canary logging settings were not restored');
+    captured.length=0;
+  }
+}
 function phase(p, name, timeout = 900_000) {
   const job = `${p.project}-${name}`;
-  try { compose(p, ['run', '--rm', '--name', job, name], { timeout }); }
+  const mode = p.granted ? 'upgrade' : 'fresh';
+  try {
+    compose(p, ['run', '--rm', '--name', job, ...(name === 'grant' ? ['-e', `CONTINUUM_MAINTENANCE_MODE=${mode}`] : []), name], { timeout });
+    if (name === 'grant') p.granted = true;
+  }
   catch (error) {
     try {
       const info = JSON.parse(run(['inspect', job]))[0];
@@ -63,7 +137,7 @@ function phase(p, name, timeout = 900_000) {
       run(['stop', '-t', '10', job]);
       run(['rm', '-f', job]);
     } catch { /* A completed --rm job is already absent. */ }
-    throw new Error(`${name} maintenance failed or exceeded deadline`);
+    throw new Error(`${name} maintenance failed or exceeded deadline`, { cause: error });
   }
 }
 function startDatabase(p) {
@@ -91,13 +165,22 @@ function verifyLedger(p) {
 try {
   const fresh = setup('fresh');
   startDatabase(fresh);
-  for (const name of ['bootstrap', 'migrate', 'provision-admin', 'grant']) phase(fresh, name);
+  results.bootstrapPlaintextLogCanaryPassed=bootstrapLogCanary(fresh);
+  results.passed.push('fresh and specifically refused repeated bootstrap expose no generated plaintext passwords in privately captured job output or verbose PostgreSQL logs; logging settings restored');
+  for (const name of ['migrate', 'provision-admin', 'grant']) phase(fresh, name);
   verifyLedger(fresh);
-  let refused = false;
-  try { phase(fresh, 'bootstrap'); } catch { refused = true; }
-  check(refused, 'Repeated fresh bootstrap unexpectedly succeeded');
   phase(fresh, 'migrate'); phase(fresh, 'grant');
-  compose(fresh, ['up', '-d', '--wait', '--wait-timeout', '120', 'api']);
+
+  // Entra discovery/JWKS are fetched lazily on token authentication. This tests
+  // the actual production configuration and startup gates without external IDs.
+  run(['compose', '-f', resolve(assets,'deploy/compose.production.yml'), '--profile', 'serving', 'up', '-d', '--force-recreate', '--wait', '--wait-timeout', '120', 'api'], { env: fresh.env });
+  const entraApi = JSON.parse(run(['inspect', compose(fresh,['ps','-q','api']).trim()]))[0];
+  check(entraApi.Config.Env.includes('CONTINUUM_AUTH_MODE=entra'), 'Production Entra process was not selected');
+  check(JSON.stringify(entraApi.Mounts.filter(mount=>mount.Destination.startsWith('/run/secrets/')).map(mount=>mount.Destination))===JSON.stringify(['/run/secrets/app_database_url']), 'Serving process mounted an unexpected authority secret');
+  check(!Object.values(entraApi.NetworkSettings.Ports??{}).some(Boolean),'Production API unexpectedly publishes a host port');
+  await api(fresh,'/health/ready');
+  results.passed.push('production Entra configuration boots and passes readiness; synthetic dev mode is used only for later transport requests; JWT validation is covered by the source authentication suite');
+  compose(fresh, ['up', '-d', '--force-recreate', '--wait', '--wait-timeout', '120', 'api']);
   await api(fresh, '/health/ready');
   const captured = JSON.parse((await api(fresh, '/api/v0/capture', { scope: { kind: 'org', name: '' }, type: 'decision', title: 'Synthetic immutable packaging decision', body: 'Synthetic packaging persistence evidence.', source: 'manual', tags: ['decision'] }, 201)).body);
   const recall = JSON.parse((await api(fresh, '/api/v0/recall', { query: 'packaging persistence' })).body);
@@ -169,19 +252,41 @@ try {
   }
   const productionCompose = resolve(assets,'deploy/compose.production.yml');
   maintenanceEnv();
-  let preexistingRefused = false;
-  try { runMaintenance('fresh',envFile,productionCompose); } catch(error) { preexistingRefused = error.message.includes('existing volume'); }
-  check(preexistingRefused,'Fresh maintenance accepted an existing volume');
+  expectFailure(() => runMaintenance('fresh',envFile,productionCompose), 'Fresh installation refuses an existing volume', 'Existing volume refusal');
   process.env.CONTINUUM_QUIESCENCE_CONFIRMED='yes';
-  process.env.CONTINUUM_BACKUP_FILE=join(temporary,'failed-upgrade.dump');
   const stale = `${fresh.project}-stale-migration`;
   run(['create','--name',stale,'--label',`com.docker.compose.project=${fresh.project}`,'--label','com.docker.compose.service=migrate',image,'continuum','--help']);
   run(['start','-a',stale]);
   check(JSON.parse(run(['inspect',stale]))[0].State.ExitCode===0,'Synthetic stale job fixture did not complete');
-  maintenanceEnv({CONTINUUM_APP_ROLE:'nonexistent_synthetic_role'});
-  let grantFailed = false;
-  try { runMaintenance('upgrade',envFile,productionCompose,{deadlineMs:120_000}); } catch { grantFailed=true; }
-  check(grantFailed,'Invalid grant phase unexpectedly succeeded');
+  const alternativeAdmin = randomUUID(), alternativeSync = randomUUID();
+  sql(fresh, `INSERT INTO principals(id,external_id,kind,display_name) VALUES ('${alternativeAdmin}','${randomUUID()}','user','Synthetic alternative administrator'), ('${alternativeSync}','synthetic-alternative-sync','service','Synthetic alternative sync'); INSERT INTO scope_memberships(principal_id,scope_id,role,source_kind,source_id,active) VALUES('${alternativeAdmin}',continuum_org_scope_id(),'admin','manual','manual',true)`);
+  const storedBindings = () => sql(fresh, 'SELECT jsonb_agg(to_jsonb(t) ORDER BY database_role)::text FROM continuum_trusted_database_identities t');
+  const originalBindings = storedBindings();
+  const credentialSnapshot = () => sql(fresh, "SELECT jsonb_object_agg(rolname,md5(coalesce(rolpassword,'')))::text FROM pg_authid WHERE rolname IN ('continuum_dba','continuum_owner','continuum_app','continuum_operator','continuum_sync')", 'DBA');
+  const originalCredentials = credentialSnapshot();
+  const driftMessage = 'upgrade role binding does not match stored identity; use reviewed rotation or restore procedure';
+  for (const [setting,value] of [['CONTINUUM_ADMIN_PRINCIPAL_ID',alternativeAdmin],['CONTINUUM_SYNC_PRINCIPAL_ID',alternativeSync],['CONTINUUM_OPERATOR_ROLE','synthetic_other_operator'],['CONTINUUM_SYNC_ROLE','synthetic_other_sync']]) {
+    const original = fresh.env[setting];
+    try {
+      fresh.env[setting]=value;
+      expectFailure(() => phase(fresh,'grant'),driftMessage,`Upgrade ${setting} drift refusal`);
+    } finally { fresh.env[setting]=original; }
+    check(storedBindings()===originalBindings,'Rejected upgrade changed authority bindings');
+  }
+  sql(fresh,'ALTER ROLE continuum_operator RENAME TO synthetic_preserved_operator; CREATE ROLE continuum_operator LOGIN','DBA');
+  try { expectFailure(() => phase(fresh,'grant'),driftMessage,'Upgrade same-name different-OID refusal'); }
+  finally { sql(fresh,'DROP ROLE continuum_operator; ALTER ROLE synthetic_preserved_operator RENAME TO continuum_operator','DBA'); }
+  check(storedBindings()===originalBindings,'Rejected role-OID drift changed authority bindings');
+  phase(fresh,'grant');
+  check(storedBindings()===originalBindings && credentialSnapshot()===originalCredentials,'Upgrade grants changed correct stored bindings or role credentials');
+  results.passed.push('upgrade refuses changed enabled admin/SYNC UUIDs, role names and same-name foreign role OID before grants; stored bindings and role credentials stay unchanged and correct grants converge');
+
+  // The wrapper must surface this exact grant preflight error, and a successful
+  // exited one-shot must not bypass it or leave an API process running.
+  process.env.CONTINUUM_BACKUP_FILE=join(temporary,'failed-upgrade.dump');
+  maintenanceEnv({CONTINUUM_ADMIN_PRINCIPAL_ID:alternativeAdmin});
+  const bindingError = expectFailure(() => runMaintenance('upgrade',envFile,productionCompose,{deadlineMs:120_000}), 'BINDING_MISMATCH', 'Failed wrapper grant with stale successful job');
+  check(bindingError.code==='BINDING_MISMATCH' && bindingError.phase==='grant','Wrapper did not identify the exact grant binding failure');
   check(compose(fresh,['ps','--status','running','-q','api']).trim()==='', 'Failed maintenance left API serving');
   maintenanceEnv();
   process.env.CONTINUUM_BACKUP_FILE=join(temporary,'deadline-upgrade.dump');
@@ -191,22 +296,22 @@ try {
   const timeoutProof = join(fresh.directory,'timeout-proof');
   mkdirSync(timeoutProof,{mode:0o777}); chmodSync(timeoutProof,0o777);
   timeoutConfig.services.migrate.volumes=[...(timeoutConfig.services.migrate.volumes??[]),{type:'bind',source:timeoutProof,target:'/proof'}];
-  timeoutConfig.services.migrate.entrypoint=['node','-e',"require('fs').writeFileSync('/proof/started','started');setInterval(()=>{},1000)"];
+  timeoutConfig.services.migrate.entrypoint=['node','--input-type=module','-e',"import {loadSecretFiles} from './deploy/container-entrypoint.mjs';import fs from 'node:fs';loadSecretFiles(process.env);const {Client}=await import('pg');const c=new Client({connectionString:process.env.CONTINUUM_DATABASE_URL,application_name:process.env.PGAPPNAME});await c.connect();await c.query('SELECT pg_advisory_lock(7215328273579717613::bigint)');const {rows}=await c.query(\"SELECT pg_backend_pid() AS pid,current_setting('application_name') AS name\");fs.writeFileSync('/proof/started',JSON.stringify(rows[0]));await c.query('SELECT pg_sleep(300)');"];
   timeoutConfig.services.migrate.command=[];
   writeFileSync(timeoutCompose,JSON.stringify(timeoutConfig),{mode:0o600});
-  let deadlineFailed=false;
-  try { runMaintenance('upgrade',envFile,timeoutCompose,{deadlineMs:10000}); } catch { deadlineFailed=true; }
-  check(readFileSync(join(timeoutProof,'started'),'utf8')==='started','Deadline fixture never launched its migration process');
-  check(deadlineFailed && compose(fresh,['ps','--status','running','-q','api']).trim()==='', 'Finite migration deadline did not keep API stopped');
+  const deadlineError = expectFailure(() => runMaintenance('upgrade',envFile,timeoutCompose,{deadlineMs:10000}), 'DEADLINE_EXCEEDED', 'Real database migration timeout');
+  check(deadlineError.code==='DEADLINE_EXCEEDED' && deadlineError.phase==='migrate','Deadline test received an unrelated maintenance failure');
+  const backendProof = JSON.parse(readFileSync(join(timeoutProof,'started'),'utf8'));
+  check(/^ctm-migrate-[a-f0-9]{24}$/.test(backendProof.name) && Number.isInteger(backendProof.pid),'Deadline fixture did not acquire its reviewed named database session');
+  check(sql(fresh,`SELECT count(*) FROM pg_stat_activity WHERE pid=${backendProof.pid} OR application_name='${backendProof.name}'`,'DBA')==='0','Timed-out backend survived client termination');
+  check(sql(fresh,'SELECT pg_try_advisory_lock(7215328273579717613::bigint)')==='t','Timed-out migration retained its deployment advisory lock');
+  check(compose(fresh,['ps','--status','running','-q','api']).trim()==='', 'Finite migration deadline did not keep API stopped');
   check(run(['ps','-aq','--filter',`name=^/${fresh.project}-maintenance-migrate-${process.pid}$`]).trim()==='', 'Timed-out one-shot migration remained running');
-  let downgradeRefused=false;
   // Run the actual immutable packaged rollback guard, not a missing-file error.
   const guardContainer = compose(fresh,['ps','-q','postgres']).trim();
   run(['cp',join(assets,'scripts/rollback-embedding-provider-key.sql'),`${guardContainer}:/tmp/rollback-guard.sql`]);
-  downgradeRefused=false;
-  try { compose(fresh,['exec','-T','-e','PGPASSWORD','postgres','psql','-X','-h','127.0.0.1','-U','continuum_owner','-d','continuum','-v','ON_ERROR_STOP=1','-f','/tmp/rollback-guard.sql'],{env:{...fresh.env,PGPASSWORD:fresh.passwords.OWNER}}); } catch { downgradeRefused=true; }
-  check(downgradeRefused,'Packaged in-place embedding downgrade guard did not reject');
-  results.passed.push('maintenance rejects existing fresh volume; failed exact grant and synthetic hung-job deadline keep API stopped despite successful stale job; timed-out job removed; packaged in-place embedding downgrade guard rejects');
+  expectFailure(() => compose(fresh,['exec','-T','-e','PGPASSWORD','postgres','psql','-X','-h','127.0.0.1','-U','continuum_owner','-d','continuum','-v','ON_ERROR_STOP=1','-f','/tmp/rollback-guard.sql'],{env:{...fresh.env,PGPASSWORD:fresh.passwords.OWNER}}), 'Embedding schema rollback requires a verified pre-upgrade database backup; in-place migration ledger deletion is not supported','Packaged downgrade refusal');
+  results.passed.push('maintenance rejects existing fresh volume; specific failed grant and real database migration deadline keep API stopped despite successful stale job; timed-out client/backend gone and advisory lock released; packaged downgrade guard specifically rejects');
 
   // Backup/restore uses another isolated volume; only synthetic data and roles.
   const backup = join(temporary, 'backup.dump');
@@ -226,6 +331,7 @@ try {
   // Provider infrastructure is DBA-created; application schema restore retains owner.
   run(['exec', restoreId, 'pg_restore', '-U', 'continuum_dba', '-d', 'continuum', '--exit-on-error', '--clean', '--if-exists', '--schema=continuum', '/tmp/backup.dump']);
   sql(restored, "SELECT continuum_rebind_database_identity_oids('REBIND DATABASE IDENTITIES','FOREIGN OID NAMESPACE')");
+  restored.granted = true;
   phase(restored, 'grant'); verifyLedger(restored);
   check(sql(restored, `SELECT id::text || ':' || title FROM memories WHERE id='${captured.id}'`) === before, 'Restored data/UUID differs');
   compose(restored, ['up', '-d', '--wait', '--wait-timeout', '120', 'api']);

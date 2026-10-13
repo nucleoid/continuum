@@ -11,11 +11,13 @@ permissions:
 
 env:
   NODE_OPTIONS: --max-old-space-size=384
+  SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
   PG_IMAGE: pgvector/pgvector@sha256:eac621400b7b7ff52493883e41e930e3d104695fea5b68cc0c42370cf7880067
   SKOPEO_IMAGE: quay.io/skopeo/stable@sha256:ab4c269c9e2bd11affe2666b860fb651a15afec121c15986b052b02e09d86239
 
 jobs:
   build:
+    needs: windows
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     services:
@@ -32,7 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ env.SOURCE_SHA }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22.23.3
@@ -45,7 +47,7 @@ jobs:
           npm test -- --reporter=json --outputFile=test-results.json
           npm pack --dry-run
           npm run smoke:cli-package
-          node --test deploy/container-entrypoint.test.mjs
+          node --test deploy/container-entrypoint.test.mjs deploy/apply-role-profiles.test.mjs scripts/container-maintenance.test.mjs scripts/container-artifact.test.mjs
           node scripts/container-check-tests.mjs test-results.json
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
@@ -66,6 +68,7 @@ jobs:
           echo "epoch=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
           docker version > container-artifact/docker-version.txt
           docker buildx version > container-artifact/buildx-version.txt
+          docker buildx inspect --bootstrap > container-artifact/buildkit-inspect.txt
           docker compose version > container-artifact/compose-version.txt
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -75,7 +78,7 @@ jobs:
           provenance: false
           sbom: false
           build-args: |
-            SOURCE_SHA=${{ github.sha }}
+            SOURCE_SHA=${{ env.SOURCE_SHA }}
             SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
           outputs: type=oci,dest=container-artifact/image.oci.tar,rewrite-timestamp=true
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -87,7 +90,7 @@ jobs:
           sbom: false
           no-cache: true
           build-args: |
-            SOURCE_SHA=${{ github.sha }}
+            SOURCE_SHA=${{ env.SOURCE_SHA }}
             SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
           outputs: type=oci,dest=container-artifact/repeat.oci.tar,rewrite-timestamp=true
       - name: Inspect every layer and record immutable identity
@@ -97,7 +100,7 @@ jobs:
           cp test-results.json container-artifact/
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: continuum-linux-amd64-${{ github.sha }}
+          name: continuum-linux-amd64-${{ env.SOURCE_SHA }}
           path: container-artifact/
           compression-level: 0
           if-no-files-found: error
@@ -109,15 +112,16 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ env.SOURCE_SHA }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22.23.3
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run build
-      - run: npx vitest run src/api/entrypoint.test.ts src/api/entrypoint-callers.test.ts src/cli/config.test.ts src/cli/http.test.ts src/cli/index.test.ts
+      - run: npx vitest run src/api/entrypoint.test.ts src/api/entrypoint-callers.test.ts
+      - run: npx vitest run src/cli/config.test.ts src/cli/http.test.ts src/cli/index.test.ts
       - run: node scripts/windows-entrypoint-smoke.mjs
-      - run: node --test deploy/container-entrypoint.test.mjs
+      - run: node --test deploy/container-entrypoint.test.mjs deploy/apply-role-profiles.test.mjs scripts/container-maintenance.test.mjs scripts/container-artifact.test.mjs
       - run: npm pack --dry-run
       - run: npm run smoke:cli-package
 
@@ -128,26 +132,31 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ env.SOURCE_SHA }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22.23.3
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: continuum-linux-amd64-${{ github.sha }}
+          name: continuum-linux-amd64-${{ env.SOURCE_SHA }}
           path: container-artifact
       - name: Verify downloaded archive before OCI-aware import
         run: |
           node scripts/container-artifact.mjs verify container-artifact
           docker run --rm "$SKOPEO_IMAGE" --version | tee container-artifact/skopeo-version.txt
           grep -F '1.22.3' container-artifact/skopeo-version.txt
-          docker run --rm -v "$PWD/container-artifact:/input:ro" -v "$RUNNER_TEMP:/output" "$SKOPEO_IMAGE" copy --override-os linux --override-arch amd64 oci-archive:/input/image.oci.tar docker-archive:/output/continuum.docker.tar:continuum:verified
+          IMPORT_TAG="continuum:import-${SOURCE_SHA}"
+          docker run --rm -v "$PWD/container-artifact:/input:ro" -v "$RUNNER_TEMP:/output" "$SKOPEO_IMAGE" copy --override-os linux --override-arch amd64 oci-archive:/input/image.oci.tar "docker-archive:/output/continuum.docker.tar:${IMPORT_TAG}"
           docker load --input "$RUNNER_TEMP/continuum.docker.tar"
           rm "$RUNNER_TEMP/continuum.docker.tar"
+          node scripts/container-artifact.mjs verify-loaded container-artifact "$IMPORT_TAG"
           node scripts/container-smoke.mjs container-artifact
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: continuum-smoke-${{ github.sha }}
-          path: container-artifact/*results*.json
+          name: continuum-smoke-${{ env.SOURCE_SHA }}
+          path: |
+            container-artifact/*results*.json
+            container-artifact/loaded-identity.json
+            container-artifact/skopeo-version.txt
           if-no-files-found: error

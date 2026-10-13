@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'node:fs';
 import { resolve, join } from 'node:path';
@@ -6,13 +6,16 @@ import { resolve, join } from 'node:path';
 if (process.env.GITHUB_ACTIONS !== 'true' || process.platform !== 'linux') throw new Error('Container smoke is restricted to hosted Linux CI');
 const directory = resolve(process.argv[2] ?? 'container-artifact');
 const metadata = JSON.parse(readFileSync(join(directory, 'source.json')));
-const source = process.env.GITHUB_SHA;
+const source = process.env.SOURCE_SHA;
 if (metadata.sourceSha !== source || !/^sha256:[a-f0-9]{64}$/.test(metadata.configDigest)) throw new Error('Unverified image identity');
 execFileSync(process.execPath, ['scripts/container-artifact.mjs', 'verify', directory], { stdio: 'inherit', timeout: 600_000 });
-const image = metadata.configDigest;
+const loadedIdentity = JSON.parse(readFileSync(join(directory, 'loaded-identity.json')));
+if (loadedIdentity.sourceSha !== source || loadedIdentity.configDigest !== metadata.configDigest
+    || !/^sha256:[a-f0-9]{64}$/.test(loadedIdentity.imageId)) throw new Error('Missing verified imported image identity');
+const image = loadedIdentity.imageId;
 const owner = `continuum-ci-${randomUUID()}`;
 const created = [];
-const results = { sourceSha: source, imageId: image, mode: 'full-text-only', remoteMcp: 'unavailable: separate transport issue', passed: [], unmet: [] };
+const results = { sourceSha: source, imageId: image, configDigest: metadata.configDigest, dockerStore: loadedIdentity.dockerStore, mode: 'full-text-only', remoteMcp: 'unavailable: separate transport issue', passed: [], unmet: [] };
 const command = (bin, args, options = {}) => execFileSync(bin, args, { encoding: 'utf8', timeout: 120_000, maxBuffer: 16 * 1024 * 1024, ...options });
 const docker = (...args) => command('docker', args);
 const assertion = (condition, message) => { if (!condition) throw new Error(message); };
@@ -22,10 +25,10 @@ function listFiles(root, prefix = '') {
 }
 try {
   const loaded = JSON.parse(docker('image', 'inspect', image))[0];
-  assertion(loaded.Id === image && loaded.Os === 'linux' && loaded.Architecture === 'amd64', 'Imported image config/platform differs from verified OCI');
+  assertion(loaded.Id === image && loaded.Os === 'linux' && loaded.Architecture === 'amd64', 'Imported image ID/platform differs from verified loaded identity');
   assertion(loaded.Config.Labels['org.opencontainers.image.revision'] === source, 'Imported source label differs');
   assertion(loaded.Config.User === '10001:10001', 'Image is not fixed non-root UID');
-  results.passed.push('downloaded OCI integrity, platform, source and imported config ID');
+  results.passed.push('downloaded OCI integrity, platform, source, exported config-byte hash and pinned daemon image ID');
 
   const assets = join(directory, 'runtime-assets');
   mkdirSync(assets, { recursive: false });
@@ -55,10 +58,11 @@ try {
   created.push(securityName);
   const config = JSON.parse(docker('inspect', securityName))[0];
   assertion(config.HostConfig.ReadonlyRootfs && config.HostConfig.Memory === 536870912 && config.HostConfig.NanoCpus === 1000000000 && config.HostConfig.PidsLimit === 128, 'Effective container resource configuration mismatch');
-  docker('exec', securityName, 'node', '-e', `const fs=require('fs');const status=fs.readFileSync('/proc/self/status','utf8');if(process.getuid()!==10001||!/^NoNewPrivs:\\s+1$/m.test(status)||!/^CapEff:\\s+0+$/m.test(status))process.exit(1);try{fs.writeFileSync('/opt/continuum/forbidden','x');process.exit(1)}catch(e){if(e.code!=='EROFS')throw e}if(fs.readFileSync('/sys/fs/cgroup/memory.max','utf8').trim()!=='536870912'||fs.readFileSync('/sys/fs/cgroup/pids.max','utf8').trim()!=='128'||fs.readFileSync('/sys/fs/cgroup/cpu.max','utf8').trim()!=='100000 100000')process.exit(1);`);
+  docker('exec', securityName, 'node', '-e', `const fs=require('fs');const status=fs.readFileSync('/proc/self/status','utf8');if(process.getuid()!==10001||process.version!=='v22.23.3'||!/^NoNewPrivs:\\s+1$/m.test(status)||!/^CapEff:\\s+0+$/m.test(status))process.exit(1);for(const path of ['/opt/continuum','/opt/continuum/dist','/opt/continuum/migrations','/opt/continuum/deploy','/opt/continuum/scripts']){const stat=fs.statSync(path);if(stat.uid!==0||(stat.mode&0o222)!==0)process.exit(1)}const mounts=fs.readFileSync('/proc/self/mountinfo','utf8').split('\\n');const root=mounts.find(line=>line.split(' ')[4]==='/');if(!root||!root.split(' ')[5].split(',').includes('ro'))process.exit(1);const tmp=mounts.find(line=>line.split(' ')[4]==='/tmp');const tmpSize=fs.statfsSync('/tmp',{bigint:true});if(!tmp||!['noexec','nosuid'].every(option=>tmp.split(' ')[5].split(',').includes(option))||tmpSize.bsize*tmpSize.blocks!==67108864n)process.exit(1);try{fs.writeFileSync('/opt/continuum/forbidden','x');process.exit(1)}catch(e){if(!['EACCES','EROFS'].includes(e.code))throw e}if(fs.readFileSync('/sys/fs/cgroup/memory.max','utf8').trim()!=='536870912'||fs.readFileSync('/sys/fs/cgroup/pids.max','utf8').trim()!=='128'||fs.readFileSync('/sys/fs/cgroup/cpu.max','utf8').trim()!=='100000 100000')process.exit(1);`);
+  docker('run', '--rm', '--cap-drop=ALL', '--security-opt=no-new-privileges:true', '--entrypoint', 'node', image, '-e', `const fs=require('fs');for(const path of ['/opt/continuum/dist/forbidden','/opt/continuum/migrations/forbidden','/opt/continuum/deploy/forbidden']){try{fs.writeFileSync(path,'x');process.exit(1)}catch(e){if(e.code!=='EACCES')throw e}}`);
   const help = docker('run', '--rm', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges:true', image, 'continuum', '--help');
   assertion(help.startsWith('Usage: continuum <command>'), 'Installed CLI launcher failed');
-  results.passed.push('actual UID, capabilities, no-new-privileges, root write denial and cgroup CPU/memory/PID limits; installed CLI help');
+  results.passed.push('actual UID and Node version, capabilities, no-new-privileges, root-owned nonwritable package even without read-only flag, read-only root mount, bounded noexec/nosuid tmpfs and cgroup CPU/memory/PID limits; installed CLI help');
 
   const operational = resolve('scripts/container-production-smoke.mjs');
   assertion(existsSync(operational), 'Required fresh/upgrade/restore operational harness is missing');
