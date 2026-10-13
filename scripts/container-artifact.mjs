@@ -88,4 +88,3 @@ if (mode === 'record') {
   if (Object.keys(actual).some(key => actual[key] !== metadata[key])) throw new Error('OCI identity metadata mismatch');
   process.stdout.write(`${JSON.stringify(actual)}\n`);
 } else { throw new Error('Usage: container-artifact.mjs record|verify DIRECTORY'); }
-

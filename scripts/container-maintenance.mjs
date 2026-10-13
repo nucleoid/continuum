@@ -128,6 +128,3 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
   process.stdout.write(`${JSON.stringify(runMaintenance(mode, envFile, composeFile))}\n`);
  } catch (error) { process.stderr.write(`continuum-maintenance: ${error.message}\n`); process.exitCode = 1; }
 }
-
-
-

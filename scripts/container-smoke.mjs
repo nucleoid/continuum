@@ -81,4 +81,3 @@ try {
   writeFileSync(join(directory, 'smoke-results.json'), `${JSON.stringify(results, null, 2)}\n`);
   process.stdout.write(`${JSON.stringify(results)}\n`);
 }
-

@@ -267,4 +267,3 @@ try {
   writeFileSync(join(output,'operational-results.json'),`${JSON.stringify(results,null,2)}\n`);
   process.stdout.write(`${JSON.stringify(results)}\n`);
 }
-
