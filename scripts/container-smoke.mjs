@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'node:fs';
 import { resolve, join } from 'node:path';
+import { extractRuntimePackage } from './container-assets-extract.mjs';
 
 if (process.env.GITHUB_ACTIONS !== 'true' || process.platform !== 'linux') throw new Error('Container smoke is restricted to hosted Linux CI');
 const directory = resolve(process.argv[2] ?? 'container-artifact');

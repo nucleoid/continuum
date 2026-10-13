@@ -19,7 +19,7 @@ test('extracts immutable package directories after their children into a new own
   chmodSync(join(bin, 'continuum-migrate.mjs'), 0o444);
   chmodSync(bin, 0o555);
   const archive = join(root, 'filesystem.tar');
-  execFileSync(tar, ['-cf', archive, '-C', source, 'opt'], { timeout: 10000 });
+  execFileSync(tar, ['--force-local', '-cf', archive, '-C', source, 'opt'], { timeout: 10000 });
   extractRuntimePackage(archive, destination, tar);
   assert.equal(readFileSync(join(destination, 'bin', 'continuum-migrate.mjs'), 'utf8'), 'synthetic immutable asset\n');
  } finally {
