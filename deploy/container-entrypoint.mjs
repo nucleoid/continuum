@@ -77,11 +77,12 @@ export function resolveCommand(args) {
  if (!SCRIPTS.has(selected)) throw new Error('Unsupported container command');
  return [selected, ...supplied.slice(1)];
 }
-export function maintenanceDatabaseUrl(value, name) {
+export function maintenanceDatabaseUrl(value, name, ownerRole) {
  try {
   if (!/^ctm-migrate-[a-f0-9]{24}$/.test(name)) throw new Error();
   const url = new URL(value);
-  if (!['postgres:', 'postgresql:'].includes(url.protocol)
+  if ((ownerRole !== undefined && decodeURIComponent(url.username) !== ownerRole)
+   || !['postgres:', 'postgresql:'].includes(url.protocol)
    || (url.searchParams.has('application_name') && url.searchParams.get('application_name') !== name)) throw new Error();
   url.searchParams.set('application_name', name);
   return url.href;
@@ -90,8 +91,9 @@ export function maintenanceDatabaseUrl(value, name) {
 async function main() {
  loadSecretFiles(process.env);
  const [selected, ...args] = resolveCommand(process.argv.slice(2));
- if (process.env.PGAPPNAME && ['bin/continuum-migrate.mjs', 'dist/storage/migrate-cli.js'].includes(selected)) {
-  process.env.CONTINUUM_DATABASE_URL = maintenanceDatabaseUrl(process.env.CONTINUUM_DATABASE_URL, process.env.PGAPPNAME);
+ if (process.env.CONTINUUM_CONTAINER_MAINTENANCE_NAME && ['bin/continuum-migrate.mjs', 'dist/storage/migrate-cli.js'].includes(selected)) {
+  if (!process.env.CONTINUUM_MIGRATION_OWNER_ROLE) throw new Error('Invalid container maintenance connection identity');
+  process.env.CONTINUUM_DATABASE_URL = maintenanceDatabaseUrl(process.env.CONTINUUM_DATABASE_URL, process.env.CONTINUUM_CONTAINER_MAINTENANCE_NAME, process.env.CONTINUUM_MIGRATION_OWNER_ROLE);
  }
  const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
  const target = resolve(root, selected);

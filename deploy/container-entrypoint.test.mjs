@@ -68,6 +68,7 @@ test('maintenance names cannot be overridden by the private connection URL', () 
  const name = 'ctm-migrate-0123456789abcdef01234567';
  const value = maintenanceDatabaseUrl('postgres://synthetic:synthetic@db/example?options=-csearch_path%3Dexample', name);
  assert.equal(new URL(value).searchParams.get('application_name'), name);
+ assert.throws(() => maintenanceDatabaseUrl('postgres://different@db/example', name, 'synthetic'), /maintenance connection identity/);
  assert.equal(new URL(value).searchParams.get('options'), '-csearch_path=example');
  assert.throws(() => maintenanceDatabaseUrl('postgres://synthetic@db/example?application_name=another', name), /maintenance connection identity/);
  assert.throws(() => maintenanceDatabaseUrl('postgres://synthetic@db/example', 'unbounded-or-other-name'), /maintenance connection identity/);

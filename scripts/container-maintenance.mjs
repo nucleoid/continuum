@@ -101,7 +101,9 @@ export function runMaintenance(mode, envFile, composeFile, { deadlineMs = 900000
    try {
     docker([...compose, 'run', '--rm', '--no-deps', '--pull', 'never', '--name', name,
      '-e', `CONTINUUM_MAINTENANCE_MODE=${mode}`,
-     ...(service === 'migrate' ? ['-e', `PGAPPNAME=${applicationName}`] : []), service], Math.max(1, overallEnd - Date.now()));
+     ...(service === 'migrate' ? ['-e', `PGAPPNAME=${applicationName}`,
+      '-e', `CONTINUUM_CONTAINER_MAINTENANCE_NAME=${applicationName}`,
+      '-e', `CONTINUUM_MIGRATION_OWNER_ROLE=${ownerRole}`] : []), service], Math.max(1, overallEnd - Date.now()));
    } catch (error) {
     const id = docker(['ps', '-aq', '--filter', `name=^/${name}$`]).stdout.trim();
     if (id) {
