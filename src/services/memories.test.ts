@@ -287,6 +287,17 @@ describe('memory read service', () => {
     expect(inserted).toBe(true);
     expect((await pool.query('SELECT 1 FROM audit_log')).rowCount).toBe(0);
   });
+  it('admits fifty ordinary 2 KiB memories at the default remote browse limit', async () => {
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    for (let index = 0; index < 50; index++) await createMemory(pool, {
+      scopeId: org.id, scopeKind: 'org', type: 'decision', title: `Reference ${index}`,
+      body: 'Ordinary reference text with punctuation. '.repeat(52), authorId: author.id, source: 'manual',
+    });
+    const result = await listMemoriesForPrincipal(pool, reader, {}, {}, 1048576);
+    expect(result.items).toHaveLength(50);
+    expect(result.limit).toBe(50);
+    expect((await pool.query('SELECT 1 FROM audit_log')).rowCount).toBeGreaterThan(0);
+  });
   it('preserves complete small remote reads and ordinary unbounded browse defaults', async () => {
     const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
     const memory = await createMemory(pool, { scopeId: org.id, scopeKind: 'org', type: 'decision', title: 'Small', body: '界 and punctuation \\ "', authorId: author.id, source: 'manual' });

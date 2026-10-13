@@ -232,10 +232,12 @@ async function harness(overrides: Record<string, string> = {}, selectedPool: unk
     ...(proxy ? { CONTINUUM_MCP_PUBLIC_URL: address.href.replace('http:', 'https:'), CONTINUUM_MCP_TRUSTED_PROXY_CIDRS: '127.0.0.1/32' }
       : { CONTINUUM_MCP_HTTP_LOOPBACK_DEV: 'true', CONTINUUM_MCP_HTTP_PEER_BURST: '100', CONTINUUM_MCP_HTTP_MESSAGE_BURST: '100' }),
     ...overrides }, proxy ? 'entra' : 'dev')!;
+  let authenticationChecks = 0;
+  const denied = new Set<string>();
   const controller = createMcpHttpController(selected, { pool: selectedPool as never, embeddingProvider: null, info,
-    authenticator: { mode: 'dev', authenticate: async (_scheme: string, credential: string) => credential === 'invalid' ? null : ({ principal: syntheticPrincipal, credential: 'dev' }) } });
+    authenticator: { mode: proxy ? 'entra' : 'dev', authenticate: async (_scheme: string, credential: string) => { authenticationChecks++; return denied.has(credential) || credential.startsWith('invalid') ? null : ({ principal: syntheticPrincipal, credential: 'dev' }); } } });
   app.use('/mcp', controller.router);
-  return { address, controller, listener, async close() { await controller.stop('test');
+  return { address, controller, listener, denied, get authenticationChecks() { return authenticationChecks; }, async close() { await controller.stop('test');
     listener.closeAllConnections(); await new Promise<void>((resolve) => listener.close(() => resolve())); } };
 }
 describe('remote protocol and lifecycle limits', () => {
@@ -410,4 +412,61 @@ it('rejects a session that expires while its admitted POST body is still arrivin
     setTimeout(() => upload.end(body.slice(10)), 250);
   });
   expect(await result).toBe(404); await client.close(); await active.close();
+});
+
+it('sheds exhausted proxy authentication work while freshly authenticating established clients', async () => {
+  const active = await harness({ CONTINUUM_MCP_HTTP_PROXY_BURST: '1', CONTINUUM_MCP_HTTP_PROXY_RATE: '1' }, {}, undefined, true);
+  const connect = async (credential: string) => {
+    const transport = new StreamableHTTPClientTransport(active.address, { requestInit: { headers: {
+      Authorization: `Bearer ${credential}`, 'X-Forwarded-Proto': 'https' } } });
+    const client = new Client({ name: 'admission-hint', version: '1' }); await client.connect(transport); return { client, transport };
+  };
+  const first = await connect('synthetic-a'); const second = await connect('synthetic-b');
+  try {
+    expect((await fetch(active.address, { headers: { Authorization: 'Bearer invalid', 'X-Forwarded-Proto': 'https' } })).status).toBe(401);
+    const before = active.authenticationChecks;
+    for (let index = 0; index < 8; index++) expect((await fetch(active.address, { headers: {
+      Authorization: `ApiKey invalid-${index}`, 'X-Forwarded-Proto': 'https' } })).status).toBe(429);
+    expect(active.authenticationChecks).toBe(before);
+    expect((await fetch(active.address, { headers: { Authorization: 'Bearer wrong-credential',
+      'Mcp-Session-Id': first.transport.sessionId!, 'X-Forwarded-Proto': 'https' } })).status).toBe(429);
+    expect(active.authenticationChecks).toBe(before);
+    expect((await first.client.listTools()).tools.length).toBeGreaterThan(10);
+    expect((await second.client.listTools()).tools.length).toBeGreaterThan(10);
+    expect(active.authenticationChecks).toBeGreaterThan(before);
+    const next = await connect('synthetic-new'); await next.client.close();
+    active.denied.add('synthetic-a');
+    await expect(first.client.listTools()).rejects.toThrow();
+    expect((await second.client.listTools()).tools.length).toBeGreaterThan(10);
+  } finally { await first.client.close(); await second.client.close(); await active.close(); }
+});
+it('preserves an SDK session and sibling calls after AbortSignal cancellation', async () => {
+  const firstEntered = Promise.withResolvers<void>(); const otherEntered = Promise.withResolvers<void>();
+  const firstQuery = Promise.withResolvers<{ rows: never[] }>(); const otherQuery = Promise.withResolvers<{ rows: never[] }>();
+  let queries = 0;
+  const active = await harness({ CONTINUUM_MCP_HTTP_REQUEST_MS: '150' }, { query: () => {
+    if (++queries === 1) { firstEntered.resolve(); return firstQuery.promise; }
+    if (queries === 2) { otherEntered.resolve(); return otherQuery.promise; } return Promise.resolve({ rows: [] });
+  } });
+  const transport = new StreamableHTTPClientTransport(active.address, { requestInit: { headers: { Authorization: 'Bearer synthetic' } } });
+  const client = new Client({ name: 'sdk-cancellation', version: '1' }); await client.connect(transport);
+  const session = transport.sessionId;
+  try {
+    const abort = new AbortController();
+    const cancelled = client.callTool({ name: 'continuum.list_scopes', arguments: {} }, undefined,
+      { signal: abort.signal, timeout: 1000 }).catch((error) => error);
+    await firstEntered.promise;
+    const sibling = client.callTool({ name: 'continuum.list_scopes', arguments: {} }, undefined, { timeout: 1000 });
+    await otherEntered.promise; abort.abort(); await cancelled;
+    otherQuery.resolve({ rows: [] }); expect((await sibling).isError).not.toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect((await client.callTool({ name: 'continuum.list_scopes', arguments: {} }, undefined, { timeout: 1000 })).isError).not.toBe(true);
+    expect(transport.sessionId).toBe(session);
+  } finally { firstQuery.resolve({ rows: [] }); otherQuery.resolve({ rows: [] }); await client.close(); await active.close(); }
+});
+it('rejects a nonloopback controller composed with a development authenticator', () => {
+  const remote = mcpHttpConfigFromEnv({ CONTINUUM_MCP_HTTP_ENABLED: 'true', CONTINUUM_MCP_PUBLIC_URL: 'https://mcp.example.com/mcp',
+    CONTINUUM_MCP_TRUSTED_PROXY_CIDRS: '192.0.2.1/32' }, 'entra')!;
+  expect(() => createMcpHttpController(remote, { pool: {} as never, embeddingProvider: null,
+    authenticator: { mode: 'dev', authenticate: async () => null } })).toThrow(/entra/);
 });
