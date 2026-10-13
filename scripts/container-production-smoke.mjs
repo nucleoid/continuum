@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { runMaintenance } from './container-maintenance.mjs';
 import { validateTmpfsMounts } from './container-compose-model.mjs';
+import { writeCommandOutput, readCommandInput } from './container-binary-transfer.mjs';
 import { safeBootstrapFailure, sanitizedBootstrapLines } from './container-diagnostics.mjs';
 
 if (process.env.GITHUB_ACTIONS !== 'true' || process.platform !== 'linux') throw new Error('Hosted Linux CI required');
@@ -314,16 +315,14 @@ try {
   check(compose(fresh,['ps','--status','running','-q','api']).trim()==='', 'Finite migration deadline did not keep API stopped');
   check(run(['ps','-aq','--filter',`name=^/${fresh.project}-maintenance-migrate-${process.pid}$`]).trim()==='', 'Timed-out one-shot migration remained running');
   // Run the actual immutable packaged rollback guard, not a missing-file error.
-  const guardContainer = compose(fresh,['ps','-q','postgres']).trim();
-  run(['cp',join(assets,'scripts/rollback-embedding-provider-key.sql'),`${guardContainer}:/tmp/rollback-guard.sql`]);
-  expectFailure(() => compose(fresh,['exec','-T','-e','PGPASSWORD','postgres','psql','-X','-h','127.0.0.1','-U','continuum_owner','-d','continuum','-v','ON_ERROR_STOP=1','-f','/tmp/rollback-guard.sql'],{env:{...fresh.env,PGPASSWORD:fresh.passwords.OWNER}}), 'Embedding schema rollback requires a verified pre-upgrade database backup; in-place migration ledger deletion is not supported','Packaged downgrade refusal');
+  expectFailure(() => compose(fresh,['exec','-T','-e','PGPASSWORD','postgres','psql','-X','-h','127.0.0.1','-U','continuum_owner','-d','continuum','-v','ON_ERROR_STOP=1','-f','-'],{input:readFileSync(join(assets,'scripts/rollback-embedding-provider-key.sql')),env:{...fresh.env,PGPASSWORD:fresh.passwords.OWNER}}), 'Embedding schema rollback requires a verified pre-upgrade database backup; in-place migration ledger deletion is not supported','Packaged downgrade refusal');
   results.passed.push('maintenance rejects existing fresh volume; specific failed grant and real database migration deadline keep API stopped despite successful stale job; timed-out client/backend gone and advisory lock released; packaged downgrade guard specifically rejects');
 
   // Backup/restore uses another isolated volume; only synthetic data and roles.
   const backup = join(temporary, 'backup.dump');
   const pgid = compose(fresh, ['ps', '-q', 'postgres']).trim();
-  run(['exec', pgid, 'pg_dump', '-U', 'continuum_dba', '-d', 'continuum', '-Fc', '-f', '/tmp/backup.dump']);
-  run(['cp', `${pgid}:/tmp/backup.dump`, backup]);
+  writeCommandOutput('docker', ['exec', pgid, 'pg_dump', '-U', 'continuum_dba', '-d', 'continuum', '-Fc'], backup);
+  check(readFileSync(backup).subarray(0,5).toString('ascii') === 'PGDMP', 'Restore backup is not PostgreSQL custom format');
   const backupHash = createHash('sha256').update(readFileSync(backup)).digest('hex');
   const restored = setup('restore');
   // Deliberately restore existing reviewed identity UUIDs, with new role OIDs.
@@ -333,9 +332,8 @@ try {
   phase(restored, 'bootstrap');
   const restoreId = compose(restored, ['ps', '-q', 'postgres']).trim();
   check(createHash('sha256').update(readFileSync(backup)).digest('hex') === backupHash, 'Backup checksum mismatch');
-  run(['cp', backup, `${restoreId}:/tmp/backup.dump`]);
   // Provider infrastructure is DBA-created; application schema restore retains owner.
-  run(['exec', restoreId, 'pg_restore', '-U', 'continuum_dba', '-d', 'continuum', '--exit-on-error', '--clean', '--if-exists', '--schema=continuum', '/tmp/backup.dump']);
+  readCommandInput('docker', ['exec', '-i', restoreId, 'pg_restore', '-U', 'continuum_dba', '-d', 'continuum', '--exit-on-error', '--clean', '--if-exists', '--schema=continuum'], backup);
   sql(restored, "SELECT continuum_rebind_database_identity_oids('REBIND DATABASE IDENTITIES','FOREIGN OID NAMESPACE')");
   restored.granted = true;
   phase(restored, 'grant'); verifyLedger(restored);
@@ -353,7 +351,10 @@ try {
   const legacyId = randomUUID();
   sql(historical, `INSERT INTO memories(id,scope_id,type,title,body,tags,author_id,source) VALUES('${legacyId}',continuum_org_scope_id(),'decision','Synthetic historical packaging','Synthetic pre0083 memory',ARRAY['Decision','legacy-synthetic'],'${historical.env.CONTINUUM_ADMIN_PRINCIPAL_ID}','container-ci'); INSERT INTO memory_embeddings(memory_id,provider,dim,embedding) VALUES('${legacyId}','synthetic-fixture',768,('[1,'||repeat('0,',766)||'0]')::continuum_vector.vector);`);
   const historyPg = compose(historical, ['ps','-q','postgres']).trim();
-  run(['exec',historyPg,'pg_dump','-U','continuum_dba','-d','continuum','-Fc','-f','/tmp/pre-upgrade.dump']);
+  const historicalBackup = join(historical.directory, 'pre-upgrade.dump');
+  writeCommandOutput('docker', ['exec', historyPg, 'pg_dump', '-U', 'continuum_dba', '-d', 'continuum', '-Fc'], historicalBackup);
+  check(readFileSync(historicalBackup).subarray(0,5).toString('ascii') === 'PGDMP', 'Historical backup is not PostgreSQL custom format');
+  results.historicalBackupSha256 = createHash('sha256').update(readFileSync(historicalBackup)).digest('hex');
   phase(historical, 'migrate'); phase(historical,'grant'); verifyLedger(historical);
   check(sql(historical, `SELECT tags::text FROM memories WHERE id='${legacyId}'`) === '{decision}', 'Historical tag normalization failed');
   check(sql(historical, `SELECT metadata->'continuum_legacy_tags' FROM memories WHERE id='${legacyId}'`).includes('legacy-synthetic'), 'Legacy tags were not quarantined');
