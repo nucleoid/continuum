@@ -99,6 +99,9 @@ describe('real SDK remote MCP with current database authority', () => {
       expect(JSON.parse((fresh.content as Array<{ text: string }>)[0].text)).toEqual({ fresh: true });
       expect(await client.callTool({ name: 'continuum.standup', arguments: {} })).toEqual(
         await local.callTool({ name: 'continuum.standup', arguments: {} }));
+      const strict = await client.callTool({ name: 'continuum.lock_acquire', arguments: {
+        scope: 'project:remote', resource: 'one', run_id: 'run', request_id: 'request', unknown: true } });
+      expect(strict.isError).toBe(true); expect(JSON.stringify(strict)).toContain('INVALID_INPUT');
       await local.close(); await shared.close();
     } finally { await cleanup(); }
   });
@@ -151,14 +154,14 @@ describe('real SDK remote MCP with current database authority', () => {
 });
 const syntheticPrincipal = { id: '11111111-1111-4111-8111-111111111111', externalId: 'synthetic',
   kind: 'service' as const, displayName: 'Synthetic', createdAt: new Date(0) };
-async function harness(overrides: Record<string, string> = {}, selectedPool: unknown = {}) {
+async function harness(overrides: Record<string, string> = {}, selectedPool: unknown = {}, info?: (event: Record<string, unknown>) => void) {
   const app = express();
   const listener = await new Promise<Server>((resolve) => { const active = app.listen(0, '127.0.0.1', () => resolve(active)); });
   const address = new URL(`http://127.0.0.1:${(listener.address() as { port: number }).port}/mcp`);
   const selected = mcpHttpConfigFromEnv({ CONTINUUM_MCP_HTTP_ENABLED: 'true', CONTINUUM_MCP_PUBLIC_URL: address.href,
     CONTINUUM_MCP_HTTP_LOOPBACK_DEV: 'true', CONTINUUM_MCP_HTTP_PEER_BURST: '100', CONTINUUM_MCP_HTTP_MESSAGE_BURST: '100',
     ...overrides }, 'dev')!;
-  const controller = createMcpHttpController(selected, { pool: selectedPool as never, embeddingProvider: null,
+  const controller = createMcpHttpController(selected, { pool: selectedPool as never, embeddingProvider: null, info,
     authenticator: { mode: 'dev', authenticate: async () => ({ principal: syntheticPrincipal, credential: 'dev' }) } });
   app.use('/mcp', controller.router);
   return { address, controller, listener, async close() { await controller.stop('test');
@@ -221,5 +224,31 @@ describe('remote protocol and lifecycle limits', () => {
     expect((await fetch(active.address, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0',
       method: 'notifications/cancelled', params: { requestId: 'active' } }) })).status).toBe(202);
     resolveQuery({ rows: [] }); abort.abort(); await first; await client.close(); await active.close();
+  });
+});
+describe('remote expiry and operational safety', () => {
+  it('reclaims idle sessions and requires initialize after expiry', async () => {
+    const active = await harness({ CONTINUUM_MCP_HTTP_IDLE_MS: '100', CONTINUUM_MCP_HTTP_LIFETIME_MS: '200' });
+    const connect = async () => { const transport = new StreamableHTTPClientTransport(active.address,
+      { requestInit: { headers: { Authorization: 'Bearer synthetic' } } });
+      const client = new Client({ name: 'expiry-test', version: '1' }); await client.connect(transport); return { client, transport }; };
+    const first = await connect();
+    await new Promise((resolve) => setTimeout(resolve, 230));
+    expect((await fetch(active.address, { method: 'DELETE', headers: { Authorization: 'Bearer synthetic',
+      'Mcp-Session-Id': first.transport.sessionId!, 'Mcp-Protocol-Version': '2025-11-25' } })).status).toBe(404);
+    const second = await connect(); expect(second.transport.sessionId).not.toBe(first.transport.sessionId);
+    await first.client.close(); await second.client.close(); await active.close();
+  });
+  it('never logs arbitrary service errors, credentials, arguments or headers', async () => {
+    const logs: Record<string, unknown>[] = [];
+    const active = await harness({}, { query: async () => { throw new Error('sentinel-token sentinel-body sentinel-header'); } },
+      (entry) => logs.push(entry));
+    const transport = new StreamableHTTPClientTransport(active.address, { requestInit: { headers: {
+      Authorization: 'Bearer sentinel-token', 'X-Arbitrary': 'sentinel-header' } } });
+    const client = new Client({ name: 'log-test', version: '1' }); await client.connect(transport);
+    const result = await client.callTool({ name: 'continuum.list_scopes', arguments: { ignored: 'sentinel-body' } });
+    expect(result.isError).toBe(true); expect(JSON.stringify(result)).toContain('INTERNAL');
+    await client.close(); await active.close();
+    expect(JSON.stringify(logs)).not.toContain('sentinel-'); expect(logs.length).toBeGreaterThan(0);
   });
 });

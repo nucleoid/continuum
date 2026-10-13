@@ -11,6 +11,8 @@ import { validateMcpHttpRequest } from './mcp-http-config.js';
 import { McpHttpSessions } from './mcp-http-sessions.js';
 let pendingAuthentications = 0;
 const MAX_PENDING_AUTHENTICATIONS = 100;
+let bodyReaders = 0;
+let reservedControlReaders = 0;
 interface Call { release: () => void; started: boolean; done: boolean }
 interface Context { deadline: number; abort: AbortController; calls: Map<string | number, Call> }
 interface Entry {
@@ -31,6 +33,7 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
   const pending = new Set<Entry>();
   const contexts = new WeakMap<AuthInfo, Context>();
   const executing = new Set<Promise<unknown>>();
+  const requests = new Map<express.Response, AbortController>();
   let stopped = false;
   const event = (outcome: string, entry?: Entry, extra: Record<string, unknown> = {}) => deps.info?.({
     event: 'mcp_http', correlationId: randomUUID(), action: outcome,
@@ -88,7 +91,7 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
     type: 'application/json' });
   router.use(async (req, res) => {
     res.setHeader('Cache-Control', 'private, no-store');
-    if (req.path !== '/' || !['POST', 'GET', 'DELETE'].includes(req.method)) { fail(res, 405, 'Unsupported method'); return; }
+    if (req.originalUrl.split('?', 1)[0] !== '/mcp' || req.path !== '/' || !['POST', 'GET', 'DELETE'].includes(req.method)) { fail(res, 405, 'Unsupported method'); return; }
     if (stopped) { fail(res, 503, 'Remote MCP is stopping'); return; }
     if (!admission.admitPeer(req.socket.remoteAddress ?? 'unknown')) { fail(res, 429, 'Request limit exceeded'); return; }
     if (req.headers['last-event-id']) { fail(res, 400, 'Historical resumption is unsupported'); return; }
@@ -100,17 +103,19 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
     const match = /^(Bearer|ApiKey) ([^\s]+)$/i.exec(header);
     if (!match) { fail(res, 401, 'Authentication required'); return; }
     const abort = new AbortController();
+    requests.set(res, abort);
     let deadline = Date.now() + limits.requestMs;
     const expire = () => { abort.abort(); fail(res, 504, 'Request deadline exceeded');
       if (!req.complete) req.destroy(); };
     let deadlineTimer = setTimeout(expire, limits.requestMs);
-    res.once('close', () => { clearTimeout(deadlineTimer); abort.abort(); });
+    res.once('close', () => { clearTimeout(deadlineTimer); requests.delete(res); abort.abort(); });
     let auth;
     if (pendingAuthentications >= MAX_PENDING_AUTHENTICATIONS) { fail(res, 503, 'Authentication capacity exceeded'); return; }
     pendingAuthentications++;
     try { auth = await deps.authenticator.authenticate(match[1], match[2]); }
     catch { fail(res, 503, 'Authentication unavailable'); return; }
     finally { pendingAuthentications--; }
+    if (stopped) { fail(res, 503, 'Remote MCP is stopping'); return; }
     if (abort.signal.aborted || res.destroyed) return;
     if (!auth || isLifecyclePrincipal(auth.principal) || (auth.expiresAt && auth.expiresAt.getTime() <= Date.now())) {
       fail(res, 401, 'Invalid credential'); return;
@@ -161,8 +166,14 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
     if (req.headers['content-encoding'] || !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(req.headers['content-type'] ?? '')) {
       fail(res, 415, 'Uncompressed application/json required'); return;
     }
+    const borrowingControl = bodyReaders >= limits.calls;
+    const smallBody = Number(req.headers['content-length'] ?? 0) > 0 && Number(req.headers['content-length']) <= 512;
+    if (borrowingControl && (!smallBody || reservedControlReaders >= 4)) { fail(res, 503, 'Body admission capacity exceeded'); return; }
+    if (borrowingControl) reservedControlReaders++; else bodyReaders++;
     try { await new Promise<void>((resolve, reject) => parse(req, res, (error?: unknown) => error ? reject(error) : resolve())); }
     catch (error) { fail(res, (error as { status?: number }).status === 413 ? 413 : 400, 'Invalid JSON body'); return; }
+    finally { if (borrowingControl) reservedControlReaders--; else bodyReaders--; }
+    if (stopped) { fail(res, 503, 'Remote MCP is stopping'); return; }
     if (abort.signal.aborted || res.destroyed) return;
     const messages: unknown[] = Array.isArray(req.body) ? req.body : [req.body];
     if (!messages.length || messages.length > limits.batchMessages) { fail(res, 400, 'Invalid message batch'); return; }
@@ -170,6 +181,7 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
     if (parsed.some((value) => !value.success)) { fail(res, 400, 'Invalid JSON-RPC message'); return; }
     const rpc = parsed.map((value) => value.data!);
     const control = rpc.every((message) => 'method' in message && ['notifications/initialized', 'notifications/cancelled'].includes(message.method));
+    if (borrowingControl && !control) { fail(res, 503, 'Reserved control admission required'); return; }
     const prefix = control ? 'control:' : '';
     if (!admission.admit(`${prefix}principal:${auth.principal.id}`, messages.length)
       || !admission.admit(`${prefix}credential:${binding}`, messages.length)) { fail(res, 429, 'Message limit exceeded'); return; }
@@ -203,6 +215,7 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
           ? rpc[0].params.protocolVersion : LATEST_PROTOCOL_VERSION };
       pending.add(entry);
       try { await server.connect(transport); } catch { await close(entry, 'connect_failed'); fail(res, 500, 'Initialization failed'); return; }
+      if (stopped || abort.signal.aborted) { await close(entry, 'stopping'); fail(res, 503, 'Remote MCP is stopping'); return; }
       const sdkClose = transport.onclose;
       transport.onclose = () => { sdkClose?.(); void close(entry!, 'sdk_closed'); };
       event('initialize', entry);
@@ -258,6 +271,7 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
   });
   return { router, isHealthy: () => !stopped && admission.isHealthy(),
     async stop(reason: string) { stopped = true; clearInterval(timer);
+      for (const [response, abort] of requests) { abort.abort(); response.destroy(); }
       await Promise.all([...new Set([...sessions.values(), ...pending])].map((entry) => close(entry, 'shutdown')));
       await Promise.allSettled([...executing]); admission.clear();
     } };
