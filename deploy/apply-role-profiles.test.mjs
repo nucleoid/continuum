@@ -72,9 +72,9 @@ test('fresh and upgrade retain one maintenance session across the existing exact
     assert.match(result.calls[0], new RegExp(`--set=maintenance_mode=${mode}`));
     assert.match(result.sql, /pg_try_advisory_lock\(7215328273579717613/);
     assert.match(result.sql, /pg_advisory_unlock\(7215328273579717613/);
-    assert.equal((result.sql.match(/\\i :'application_grant'/g) ?? []).length, 2);
-    assert.match(result.sql, /\\i :'operator_grant'/);
-    assert.match(result.sql, /\\i :'sync_grant'/);
-    assert.match(result.sql, /\\i :'identity_verifier'/);
+    assert.equal((result.sql.match(/\\i :application_grant/g) ?? []).length, 2);
+    assert.match(result.sql, /\\i :operator_grant/);
+    assert.match(result.sql, /\\i :sync_grant/);
+    assert.match(result.sql, /\\i :identity_verifier/);
   }
 });
