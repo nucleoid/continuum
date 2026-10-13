@@ -188,11 +188,15 @@ try {
   const timeoutCompose = join(fresh.directory,'timeout-compose.json');
   const timeoutConfig = JSON.parse(compose(fresh,['config','--format','json']));
   timeoutConfig.services.api.environment.CONTINUUM_AUTH_MODE='entra';
-  timeoutConfig.services.migrate.entrypoint=['node','-e','setInterval(()=>{},1000)'];
+  const timeoutProof = join(fresh.directory,'timeout-proof');
+  mkdirSync(timeoutProof,{mode:0o777}); chmodSync(timeoutProof,0o777);
+  timeoutConfig.services.migrate.volumes=[...(timeoutConfig.services.migrate.volumes??[]),{type:'bind',source:timeoutProof,target:'/proof'}];
+  timeoutConfig.services.migrate.entrypoint=['node','-e',"require('fs').writeFileSync('/proof/started','started');setInterval(()=>{},1000)"];
   timeoutConfig.services.migrate.command=[];
   writeFileSync(timeoutCompose,JSON.stringify(timeoutConfig),{mode:0o600});
   let deadlineFailed=false;
-  try { runMaintenance('upgrade',envFile,timeoutCompose,{deadlineMs:1000}); } catch { deadlineFailed=true; }
+  try { runMaintenance('upgrade',envFile,timeoutCompose,{deadlineMs:10000}); } catch { deadlineFailed=true; }
+  check(readFileSync(join(timeoutProof,'started'),'utf8')==='started','Deadline fixture never launched its migration process');
   check(deadlineFailed && compose(fresh,['ps','--status','running','-q','api']).trim()==='', 'Finite migration deadline did not keep API stopped');
   check(run(['ps','-aq','--filter',`name=^/${fresh.project}-maintenance-migrate-${process.pid}$`]).trim()==='', 'Timed-out one-shot migration remained running');
   let downgradeRefused=false;
@@ -213,7 +217,9 @@ try {
   const restored = setup('restore');
   // Deliberately restore existing reviewed identity UUIDs, with new role OIDs.
   for (const key of ['CONTINUUM_ADMIN_PRINCIPAL_ID','CONTINUUM_ADMIN_ENTRA_OBJECT_ID','CONTINUUM_SYNC_PRINCIPAL_ID']) restored.env[key] = fresh.env[key];
-  startDatabase(restored); phase(restored, 'bootstrap');
+  startDatabase(restored);
+  sql(restored, 'CREATE ROLE synthetic_oid_offset NOLOGIN', 'DBA');
+  phase(restored, 'bootstrap');
   const restoreId = compose(restored, ['ps', '-q', 'postgres']).trim();
   check(createHash('sha256').update(readFileSync(backup)).digest('hex') === backupHash, 'Backup checksum mismatch');
   run(['cp', backup, `${restoreId}:/tmp/backup.dump`]);
@@ -261,3 +267,4 @@ try {
   writeFileSync(join(output,'operational-results.json'),`${JSON.stringify(results,null,2)}\n`);
   process.stdout.write(`${JSON.stringify(results)}\n`);
 }
+
