@@ -8,7 +8,7 @@ COPY migrations ./migrations
 COPY scripts ./scripts
 COPY deploy ./deploy
 COPY docs ./docs
-COPY README.md ./
+COPY README.md LICENSE ./
 RUN test ! -e src/capture/.env && test ! -e src/capture/.handoff && test ! -e src/capture/.codex
 RUN npm run build && npm pack --ignore-scripts --pack-destination /tmp
 
