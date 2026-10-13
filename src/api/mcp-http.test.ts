@@ -154,15 +154,16 @@ describe('real SDK remote MCP with current database authority', () => {
 });
 const syntheticPrincipal = { id: '11111111-1111-4111-8111-111111111111', externalId: 'synthetic',
   kind: 'service' as const, displayName: 'Synthetic', createdAt: new Date(0) };
-async function harness(overrides: Record<string, string> = {}, selectedPool: unknown = {}, info?: (event: Record<string, unknown>) => void) {
+async function harness(overrides: Record<string, string> = {}, selectedPool: unknown = {}, info?: (event: Record<string, unknown>) => void, proxy = false) {
   const app = express();
   const listener = await new Promise<Server>((resolve) => { const active = app.listen(0, '127.0.0.1', () => resolve(active)); });
   const address = new URL(`http://127.0.0.1:${(listener.address() as { port: number }).port}/mcp`);
   const selected = mcpHttpConfigFromEnv({ CONTINUUM_MCP_HTTP_ENABLED: 'true', CONTINUUM_MCP_PUBLIC_URL: address.href,
-    CONTINUUM_MCP_HTTP_LOOPBACK_DEV: 'true', CONTINUUM_MCP_HTTP_PEER_BURST: '100', CONTINUUM_MCP_HTTP_MESSAGE_BURST: '100',
-    ...overrides }, 'dev')!;
+    ...(proxy ? { CONTINUUM_MCP_PUBLIC_URL: address.href.replace('http:', 'https:'), CONTINUUM_MCP_TRUSTED_PROXY_CIDRS: '127.0.0.1/32' }
+      : { CONTINUUM_MCP_HTTP_LOOPBACK_DEV: 'true', CONTINUUM_MCP_HTTP_PEER_BURST: '100', CONTINUUM_MCP_HTTP_MESSAGE_BURST: '100' }),
+    ...overrides }, proxy ? 'entra' : 'dev')!;
   const controller = createMcpHttpController(selected, { pool: selectedPool as never, embeddingProvider: null, info,
-    authenticator: { mode: 'dev', authenticate: async () => ({ principal: syntheticPrincipal, credential: 'dev' }) } });
+    authenticator: { mode: 'dev', authenticate: async (_scheme: string, credential: string) => credential === 'invalid' ? null : ({ principal: syntheticPrincipal, credential: 'dev' }) } });
   app.use('/mcp', controller.router);
   return { address, controller, listener, async close() { await controller.stop('test');
     listener.closeAllConnections(); await new Promise<void>((resolve) => listener.close(() => resolve())); } };
@@ -251,4 +252,92 @@ describe('remote expiry and operational safety', () => {
     await client.close(); await active.close();
     expect(JSON.stringify(logs)).not.toContain('sentinel-'); expect(logs.length).toBeGreaterThan(0);
   });
+});
+import { request as nodeRequest } from 'node:http';
+it('admits several real SDK clients behind one trusted proxy with default aggregate limits', async () => {
+  const active = await harness({}, {}, undefined, true);
+  const clients: Client[] = [];
+  try {
+    for (let index = 0; index < 12; index++) expect((await fetch(active.address, { headers: { 'X-Forwarded-Proto': 'https' } })).status).toBe(401);
+    for (let index = 0; index < 3; index++) {
+      const transport = new StreamableHTTPClientTransport(active.address, { requestInit: { headers: {
+        Authorization: 'Bearer synthetic', 'X-Forwarded-Proto': 'https' } } });
+      const client = new Client({ name: `proxy-${index}`, version: '1' }); clients.push(client);
+      await client.connect(transport); expect((await client.listTools()).tools.length).toBeGreaterThan(10);
+    }
+  } finally { await Promise.all(clients.map((client) => client.close())); await active.close(); }
+});
+it('reclaims a timed-out slow body and prevents one principal monopolizing readers', async () => {
+  const active = await harness({ CONTINUUM_MCP_HTTP_CALLS: '2', CONTINUUM_MCP_HTTP_PRINCIPAL_CALLS: '1',
+    CONTINUUM_MCP_HTTP_BODY_READ_MS: '50', CONTINUUM_MCP_HTTP_REQUEST_MS: '1000' });
+  const upload = () => {
+    let request!: ReturnType<typeof nodeRequest>;
+    const result = new Promise<number>((resolve) => {
+      request = nodeRequest(active.address, { method: 'POST', headers: { Authorization: 'Bearer synthetic',
+        Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json', 'Content-Length': '1024' } },
+        (response) => { response.resume(); resolve(response.statusCode!); });
+      request.on('error', () => resolve(0)); request.flushHeaders(); request.write('{');
+    }); return { request, result };
+  };
+  const first = upload(); await new Promise((resolve) => setTimeout(resolve, 15));
+  const second = upload(); expect(await second.result).toBe(503); second.request.destroy();
+  expect([0, 504]).toContain(await first.result); first.request.destroy();
+  const transport = new StreamableHTTPClientTransport(active.address, { requestInit: { headers: { Authorization: 'Bearer synthetic' } } });
+  const client = new Client({ name: 'reader-recovery', version: '1' }); await client.connect(transport);
+  await client.close(); await active.close();
+});
+
+it('never charges valid proxy clients against exhausted invalid-auth failure buckets', async () => {
+  const active = await harness({ CONTINUUM_MCP_HTTP_PROXY_BURST: '1', CONTINUUM_MCP_HTTP_PROXY_RATE: '1' }, {}, undefined, true);
+  const headers = { Authorization: 'Bearer invalid', 'X-Forwarded-Proto': 'https' };
+  expect((await fetch(active.address, { headers })).status).toBe(401);
+  expect((await fetch(active.address, { headers })).status).toBe(429);
+  const transport = new StreamableHTTPClientTransport(active.address, { requestInit: { headers: {
+    Authorization: 'Bearer synthetic', 'X-Forwarded-Proto': 'https' } } });
+  const client = new Client({ name: 'valid-proxy', version: '1' }); await client.connect(transport);
+  expect((await client.listTools()).tools.length).toBeGreaterThan(10); await client.close(); await active.close();
+});
+it('atomically reserves the last session slot and releases it on DELETE', async () => {
+  const active = await harness({ CONTINUUM_MCP_HTTP_SESSIONS: '1', CONTINUUM_MCP_HTTP_PRINCIPAL_SESSIONS: '1' });
+  const transports = [0, 1].map(() => new StreamableHTTPClientTransport(active.address,
+    { requestInit: { headers: { Authorization: 'Bearer synthetic' } } }));
+  const clients = transports.map((_, index) => new Client({ name: `race-${index}`, version: '1' }));
+  const results = await Promise.allSettled(clients.map((client, index) => client.connect(transports[index])));
+  expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+  const winner = results.findIndex((result) => result.status === 'fulfilled');
+  await transports[winner].terminateSession();
+  const next = new Client({ name: 'replacement', version: '1' });
+  await next.connect(new StreamableHTTPClientTransport(active.address,
+    { requestInit: { headers: { Authorization: 'Bearer synthetic' } } }));
+  await Promise.all(clients.map((client) => client.close())); await next.close(); await active.close();
+});
+it('closes oversized output and rejects old session IDs after process-local restart', async () => {
+  const active = await harness({ CONTINUUM_MCP_HTTP_OUTPUT_BYTES: '2000' });
+  const transport = new StreamableHTTPClientTransport(active.address, { requestInit: { headers: { Authorization: 'Bearer synthetic' } } });
+  const client = new Client({ name: 'output-test', version: '1' }); await client.connect(transport);
+  const session = transport.sessionId!;
+  await expect(client.listTools(undefined, { timeout: 200 })).rejects.toThrow();
+  expect((await fetch(active.address, { method: 'DELETE', headers: { Authorization: 'Bearer synthetic',
+    'Mcp-Session-Id': session, 'Mcp-Protocol-Version': '2025-11-25' } })).status).toBe(404);
+  await client.close(); await active.close();
+  const restarted = await harness();
+  expect((await fetch(restarted.address, { method: 'DELETE', headers: { Authorization: 'Bearer synthetic',
+    'Mcp-Session-Id': session, 'Mcp-Protocol-Version': '2025-11-25' } })).status).toBe(404);
+  await restarted.close();
+});
+it('rejects a session that expires while its admitted POST body is still arriving', async () => {
+  const active = await harness({ CONTINUUM_MCP_HTTP_IDLE_MS: '100', CONTINUUM_MCP_HTTP_LIFETIME_MS: '150',
+    CONTINUUM_MCP_HTTP_BODY_READ_MS: '500', CONTINUUM_MCP_HTTP_REQUEST_MS: '1000' });
+  const transport = new StreamableHTTPClientTransport(active.address, { requestInit: { headers: { Authorization: 'Bearer synthetic' } } });
+  const client = new Client({ name: 'expiry-upload', version: '1' }); await client.connect(transport);
+  const body = JSON.stringify({ jsonrpc: '2.0', id: 99, method: 'tools/list' });
+  const result = new Promise<number>((resolve) => {
+    const upload = nodeRequest(active.address, { method: 'POST', headers: { Authorization: 'Bearer synthetic',
+      'Mcp-Session-Id': transport.sessionId!, 'Mcp-Protocol-Version': '2025-11-25',
+      Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } },
+      (response) => { response.resume(); resolve(response.statusCode!); });
+    upload.on('error', () => resolve(0)); upload.write(body.slice(0, 10));
+    setTimeout(() => upload.end(body.slice(10)), 250);
+  });
+  expect(await result).toBe(404); await client.close(); await active.close();
 });
