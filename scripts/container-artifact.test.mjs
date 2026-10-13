@@ -25,7 +25,7 @@ Object.assign(childEnvironment, {
   GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'safe.directory', GIT_CONFIG_VALUE_0: repository,
 });
 
-function fixture(context, { corruptConfig = false, privateContent = false, multipleImages = false } = {}) {
+function fixture(context, { corruptConfig = false, privateContent = false, multipleImages = false, emptyTypeScope = false } = {}) {
   const temporary = mkdtempSync(join(tmpdir(), 'continuum-oci-source-test-'));
   context.after(() => rmSync(temporary, { recursive: true, force: true }));
   const artifact = join(temporary, 'artifact');
@@ -34,6 +34,7 @@ function fixture(context, { corruptConfig = false, privateContent = false, multi
   mkdirSync(artifact);
   mkdirSync(join(layer, 'opt', 'continuum'), { recursive: true });
   mkdirSync(join(layout, 'blobs', 'sha256'), { recursive: true });
+  if (emptyTypeScope) mkdirSync(join(layer, 'opt', 'continuum', 'node_modules', '@types'), { recursive: true });
   writeFileSync(join(layer, 'opt', 'continuum', 'package.json'),
     privateContent ? 'CONTINUUM_PRIVATE_CONTEXT_SENTINEL_19' : '{"name":"synthetic-fixture"}');
 
@@ -109,4 +110,9 @@ test('rejects forbidden marker bytes hidden inside an otherwise allowed layer fi
 
 test('rejects multiple application descriptors inside a nested OCI index', { timeout: 20_000 }, context => {
   rejected(fixture(context, { multipleImages: true }).artifact, 'Expected one bounded application image descriptor');
+});
+
+test('identifies an empty build-only scope directory without weakening the layer gate', { timeout: 20_000 }, context => {
+  rejected(fixture(context, { emptyTypeScope: true }).artifact,
+    'Build-only dependency in runtime layer 0: opt/continuum/node_modules/@types/');
 });
