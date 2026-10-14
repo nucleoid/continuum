@@ -41,7 +41,7 @@ export function isProvenPreconnectionFailure(rawOutput,{status,code,signal,timed
   else return false;
  } catch {return false;}
  if(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(text))return false;
- text=text.replace(/\r\n/g,'\n').replace(/\n$/,'');
+ text=text.replace(/\r\n/g,'\n').replace(/\n+$/,'');
  if(typeof jobName==='string' && /^[a-z0-9][a-z0-9_-]{0,127}-maintenance-eligibility-[a-f0-9]{24}$/.test(jobName)) {
   const lifecycle=new Set(['Creating','Created','Starting','Started'].map(state=>`Container ${jobName} ${state}`));
   text=text.split('\n').filter(line=>!lifecycle.has(line.replace(/[\t ]+/g,' ').trim())).join('\n');
