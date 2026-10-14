@@ -65,7 +65,7 @@ export function collectSecretValues(config) {
   return [...values].sort((a,b)=>b.length-a.length);
  } catch { fail('SECRET_EVIDENCE_PREFLIGHT_FAILED'); }
 }
-function sanitizedLines(rawOutput,secrets) {
+export function sanitizedMaintenanceLines(rawOutput,secrets) {
  let text=String(rawOutput ?? '');
  for(const secret of [...secrets].filter(value=>typeof value==='string'&&value).sort((a,b)=>b.length-a.length)) text=text.replaceAll(secret,'[redacted-secret]');
  text=text.replace(/[a-z][a-z0-9+.-]*:\/\/[^\s]+/gi,'[redacted-url]')
@@ -73,7 +73,7 @@ function sanitizedLines(rawOutput,secrets) {
   .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g,'[redacted-token]')
   .replace(/\bctm_[A-Za-z0-9_-]+/g,'[redacted-token]')
   .replace(/\b(?:password|passwd|token|secret|api[_-]?key)\s*(?:=|:|\s)\s*(?:'[^']*'|"[^"]*"|[^\s;,]+)/gi,'credential [redacted-secret]')
-  .replace(/(?:[A-Za-z]:[\\/]|\\\\|\/)[^\s:;"']+/g,'[redacted-path]')
+  .replace(/(?:\b[A-Za-z]:[\\/]|\\\\|\/)[^\s:;"']+/g,'[redacted-path]')
   .replace(/\b[a-f0-9]{32,}\b/gi,'[redacted-token]');
  const lines=[];
  for(const line of text.split(/\r?\n/)) {
@@ -91,7 +91,7 @@ export function writeFailureEvidence(reservation,fields={},rawOutput='',secrets=
   const budget=value=>Number.isSafeInteger(value)&&value>=1000&&value<=14400000?value:null;
   const record={version:1,phase:phases.has(fields.phase)?fields.phase:null,code:codes.has(fields.code)?fields.code:null,
    image:/^sha256:[a-f0-9]{64}$/.test(fields.image ?? '')?fields.image:null,mode:['fresh','upgrade'].includes(fields.mode)?fields.mode:null,
-   deadlineMs:budget(fields.deadlineMs),backupDeadlineMs:budget(fields.backupDeadlineMs),lines:sanitizedLines(rawOutput,secrets)};
+   deadlineMs:budget(fields.deadlineMs),backupDeadlineMs:budget(fields.backupDeadlineMs),lines:sanitizedMaintenanceLines(rawOutput,secrets)};
   let data=Buffer.from(JSON.stringify(record,null,2)+'\n');
   while(data.length>MAX_BYTES&&record.lines.length) {record.lines.pop();data=Buffer.from(JSON.stringify(record,null,2)+'\n');}
   if(data.length>MAX_BYTES)throw new Error();

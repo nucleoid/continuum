@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { runMaintenance, acquireMaintenanceLock, releaseMaintenanceLock } from './container-maintenance.mjs';
 import { validateTmpfsMounts } from './container-compose-model.mjs';
+import { sanitizedMaintenanceLines } from './container-maintenance-evidence.mjs';
 import { writeCommandOutput, readCommandInput } from './container-binary-transfer.mjs';
 import { safeBootstrapFailure, sanitizedBootstrapLines } from './container-diagnostics.mjs';
 
@@ -34,7 +35,7 @@ function expectFailure(action, expected, label) {
     try{
      const info=statSync(actual.evidencePath);check(info.isFile()&&info.size<=65536,'Private evidence is not bounded');
      const record=JSON.parse(readFileSync(actual.evidencePath,'utf8'));
-     if(Array.isArray(record.lines)&&record.lines.every(line=>typeof line==='string'&&line.length<=1000))diagnostic.evidenceLines=sanitizedBootstrapLines(record.lines.join('\n'),projects.flatMap(p=>Object.values(p.passwords))).slice(0,8);
+     if(Array.isArray(record.lines)&&record.lines.every(line=>typeof line==='string'&&line.length<=1000))diagnostic.evidenceLines=sanitizedMaintenanceLines(record.lines.join('\n'),projects.flatMap(p=>Object.values(p.passwords))).slice(0,8);
     }catch{diagnostic.evidenceUnavailable=true;}
    }
    throw new Error(`${label}: did not receive the specific expected failure; actual=${JSON.stringify(diagnostic)}`);
@@ -561,7 +562,8 @@ SELECT row_to_json(t)::text FROM observed_grant t;`,{mode:0o600});
   check(bindingError.evidencePath&&existsSync(bindingError.evidencePath),'Failed grant execution evidence was discarded');
   const grantEvidence=readFileSync(bindingError.evidencePath,'utf8');
   check(statSync(bindingError.evidencePath).size<=65536&&(statSync(bindingError.evidencePath).mode&0o777)===0o600,'Grant evidence is not private/bounded');
-  check(grantEvidence.includes('synthetic reviewed grant refusal'),'Grant evidence omitted actionable SQL failure');
+  const grantRecord=JSON.parse(grantEvidence);
+  check(grantEvidence.includes('synthetic reviewed grant refusal'),'Grant evidence omitted actionable SQL failure; actual='+JSON.stringify({code:bindingError.code,phase:bindingError.phase,evidenceLines:sanitizedMaintenanceLines(grantRecord.lines.join('\n'),Object.values(fresh.passwords)).slice(0,8)}));
   check(!Object.values(fresh.passwords).some(value=>grantEvidence.includes(value))&&!grantEvidence.includes('postgres://'),'Grant evidence exposed private credentials or URL');
   check(sql(fresh,"SELECT count(*) FROM pg_stat_activity WHERE usename='continuum_owner' AND application_name~'^ctm-grant-[a-f0-9]{24}$'",'DBA')==='0','Failed grant backend remained');
   check(sql(fresh,'SELECT pg_try_advisory_lock(7215328273579717613::bigint)')==='t','Failed grant retained maintenance advisory lock');
