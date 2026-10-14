@@ -30,3 +30,13 @@ test('unclassified diagnostics scrub credentials, URLs and paths before bounding
  assert.ok(!JSON.stringify(result).includes('progress ignored'));
  assert.ok(result.every(line=>line.length<=240));
 });
+test('eligibility observer exact session marker survives PostgreSQL application-name bounds', async () => {
+ const {readFileSync}=await import('node:fs');
+ const source=readFileSync(new URL('./container-production-smoke.mjs',import.meta.url),'utf8');
+ const prefix=source.match(/const windowName='([^']+)'\+randomUUID\(\);/)?.[1];
+ assert.ok(prefix,'Actual observer name construction must be checked');
+ const marker=prefix+'00000000-0000-0000-0000-000000000000';
+ assert.equal(Buffer.from(marker).subarray(0,63).toString('utf8'),marker,'Server truncation must not invalidate the exact scoped predicate or cleanup marker');
+ assert.ok(Buffer.byteLength(marker,'utf8')<=63);
+ assert.ok(source.includes("application_name='${windowName}'"),'Observer and owned cleanup use the same full marker');
+});
