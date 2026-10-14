@@ -155,7 +155,7 @@ function wrapperFixture(check) {
   const job=()=>({image:pgImage,volumes:[{type:'bind',source:root,target:'/assets',read_only:true}]});
   const project='synthetic-maintenance',volume='synthetic-pgdata';
   const config={name:project,volumes:{pgdata:{name:volume}},services:{api:{image:appImage,environment:{CONTINUUM_AUTH_MODE:'entra'}},postgres:{image:pgImage,environment:{POSTGRES_DB:'synthetic',POSTGRES_USER:'dba'}},migrate:{image:appImage,environment:{CONTINUUM_MIGRATION_OWNER_ROLE:'owner'}},bootstrap:job(),'provision-admin':job(),grant:{...job(),environment:{PGUSER:'owner',CONTINUUM_APPLICATION_SCHEMA:'synthetic',CONTINUUM_ADMIN_PRINCIPAL_ID:'11111111-1111-4111-8111-111111111111',CONTINUUM_SYNC_PRINCIPAL_ID:'22222222-2222-4222-8222-222222222222',CONTINUUM_APP_ROLE:'app',CONTINUUM_OPERATOR_ROLE:'op',CONTINUUM_SYNC_ROLE:'sync'}}}};
-  const container=(id,service='api',owner=project,running=true)=>({Id:id,Name:'/'+id,State:{Running:running},Config:{Labels:{'com.docker.compose.project':owner,'com.docker.compose.service':service}},Mounts:[{Type:'volume',Name:volume,Destination:'/var/lib/postgresql/data'}]});
+  const container=(id,service='api',owner=project,running=true)=>({Id:id,Image:pgImage,Name:'/'+id,State:{Running:running},Config:{Labels:{'com.docker.compose.project':owner,'com.docker.compose.service':service}},Mounts:[{Type:'volume',Name:volume,Destination:'/var/lib/postgresql/data'}]});
   const state={volumeOwner:project,consumers:[container('synthetic-postgres','postgres')],calls:[],time:10000};
   Date.now=()=>state.time;
   process.env.CONTINUUM_BACKUP_FILE=join(root,'backup.dump');process.env.CONTINUUM_QUIESCENCE_CONFIRMED='yes';
@@ -165,14 +165,16 @@ function wrapperFixture(check) {
    else if(args[0]==='image') stdout=JSON.stringify([{Id:args[2],Os:'linux',Architecture:'amd64'}]);
    else if(args[0]==='volume') stdout=args[1]==='inspect'?JSON.stringify([{Name:volume,Labels:{'com.docker.compose.project':state.volumeOwner}}]):volume+'\n';
    else if(args[0]==='ps') stdout=args.includes('volume='+volume)?state.consumers.map(c=>c.Id).join('\n'):args.includes('label=com.docker.compose.project='+project)?'synthetic-api\nsynthetic-postgres\n':'';
-   else if(args[0]==='inspect') stdout=JSON.stringify([state.consumers.find(c=>c.Id===args[1])??container(args[1],args[1]==='synthetic-postgres'?'postgres':'api')]);
+   else if(args[0]==='inspect') {const record=state.consumers.find(c=>c.Id===args[1])??container(args[1],args[1]==='synthetic-postgres'?'postgres':'api');stdout=JSON.stringify([record]);}
    else if(args[0]==='run') stdout=JSON.stringify(reference);
    else if(args.some(arg=>arg.includes('exec pg_dump'))) {writeSync(options.stdio[1],'synthetic dump');if(state.failBackup)return {status:null,stdout:'',stderr:'ERROR: synthetic backup lock wait',error:{code:'ETIMEDOUT'}};}
    else if(args.includes('exec')) stdout='0\n';
-   if(args.some(arg=>arg.includes('operator identity must be an effective manual org administrator'))&&state.ineligible) return {status:1,stdout:'',stderr:'ERROR: role binding is ineligible'};
+   if(args.some(arg=>arg.includes('operator identity must be an effective manual org administrator'))) state.eligibilityChecks=(state.eligibilityChecks??0)+1;
+   if(args.some(arg=>arg.includes('operator identity must be an effective manual org administrator'))&&(state.ineligible || state.changeEligibility && state.eligibilityChecks>1)) return {status:1,stdout:'',stderr:'ERROR: role binding is ineligible'};
    if(args.includes('run')&&args.at(-1)==='grant'&&state.expireAtGrant) state.time+=1001;
    if(args.includes('run')&&args.at(-1)==='grant'&&state.failGrant) return {status:1,stdout:'',stderr:'ERROR: synthetic lock timeout '+state.privateSecret+'\nCONTEXT: PASSWORD '+state.privateSecret};
    if(args.includes('up')&&args.at(-1)==='api'&&state.failApi) return {status:1,stdout:'',stderr:'Container synthetic API unhealthy'};
+   if(args.some(arg=>arg.includes('pg_terminate_backend'))&&state.failSettlement) return {status:1,stdout:'',stderr:'ERROR: synthetic settlement unavailable'};
    if(args.includes('logs')) stdout='Error: synthetic startup failure '+state.privateSecret;
    return {status:0,stdout,stderr:''};
   };syncBuiltinESMExports();
@@ -303,3 +305,36 @@ test('successful windows sync the backups before migrate and remove their owned 
  const roles=state.calls.find(call=>call.args.some(arg=>arg.includes('pg_dumpall')));
  assert.ok(roles.args.some(arg=>arg.includes('pg_dumpall --roles-only --no-role-passwords -l "$POSTGRES_DB"')));
 }));
+
+
+test('unsettled failed grant retains a durable unresolved lock and reports the primary and side failures',()=>wrapperFixture(({root,state,run})=>{
+ state.failGrant=true;state.failSettlement=true;let error;try{run();}catch(value){error=value;}
+ assert.equal(error.code,'COMMAND_FAILED');assert.equal(error.phase,'grant');assert.equal(error.settlementError,'BACKEND_SETTLEMENT_FAILED');
+ const path=join(root,'.continuum-maintenance-locks','synthetic-maintenance.lock');assert.ok(existsSync(path));
+ const marker=JSON.parse(readFileSync(path,'utf8'));assert.equal(marker.unresolved.state,'settlement-unresolved');
+ assert.match(marker.unresolved.sessions[0].applicationName,/^ctm-grant-[a-f0-9]{24}$/);
+ assert.equal(JSON.parse(readFileSync(error.evidencePath,'utf8')).settlementError,'BACKEND_SETTLEMENT_FAILED');
+ assert.throws(run,e=>e.code==='MAINTENANCE_LOCKED');
+}));
+
+test('identity eligibility changing during the window refuses before migration',()=>wrapperFixture(({state,run})=>{
+ state.changeEligibility=true;assert.throws(run,e=>e.code==='BINDING_INELIGIBLE'&&e.phase==='quiescence');
+ assert.equal(state.eligibilityChecks,2);assert.ok(!state.calls.some(call=>call.args.includes('run')&&call.args.at(-1)==='migrate'));
+}));
+
+test('upgrade refuses a different running PostgreSQL image before downtime or output reservations',()=>wrapperFixture(({root,state,run})=>{
+ state.consumers[0].Image='sha256:'+'c'.repeat(64);
+ assert.throws(run,e=>e.code==='PG_IMAGE_MISMATCH'&&e.phase==='preflight');
+ assert.equal(existsSync(join(root,'backup.dump')),false);
+ assert.ok(!state.calls.some(call=>call.args[0]==='stop'||call.args.includes('up')||call.args[0]==='run'));
+}));
+
+test('CLI failure formatter exposes only controlled side-error codes without private diagnostic text',async()=>{
+ const {formatMaintenanceFailure}=await import('./container-maintenance.mjs');
+ const error=new Error('Container maintenance grant: COMMAND_FAILED');
+ Object.assign(error,{settlementError:'BACKEND_SETTLEMENT_FAILED',cleanupError:'OWNERSHIP_MISMATCH',evidenceError:'EVIDENCE_WRITE_FAILED',lockError:'MAINTENANCE_LOCK_MARKER_FAILED',privateData:'SyntheticPrivate0123456789'});
+ const text=formatMaintenanceFailure(error);
+ for(const key of ['settlementError','cleanupError','evidenceError','lockError']) assert.ok(text.includes(key+'='+error[key]));
+ error.cleanupError='SyntheticPrivate0123456789';assert.ok(!formatMaintenanceFailure(error).includes(error.cleanupError));
+ assert.ok(!text.includes(error.privateData));assert.ok(text.startsWith('Container maintenance grant: COMMAND_FAILED'));
+});
