@@ -94,6 +94,33 @@ BEGIN
   ELSE
     RAISE EXCEPTION 'role profile preflight requires fresh or upgrade mode';
   END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM principals principal JOIN scope_memberships membership ON membership.principal_id = principal.id
+    WHERE principal.id = i.admin_id AND principal.kind = 'user' AND principal.disabled_at IS NULL
+      AND membership.scope_id = continuum_org_scope_id() AND membership.source_kind = 'manual'
+      AND membership.source_id = 'manual' AND membership.role = 'admin' AND membership.active
+  ) THEN RAISE EXCEPTION 'role binding is ineligible: operator identity must be an effective manual org administrator'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM principals principal WHERE principal.id = i.sync_id
+    AND principal.kind = 'service' AND principal.disabled_at IS NULL) THEN
+    RAISE EXCEPTION 'role binding is ineligible: sync identity must be an enabled service principal';
+  END IF;
+  IF EXISTS (SELECT 1 FROM continuum_unresolved_retired_sync_database_identities
+    WHERE database_role IN (i.operator_role::name,i.sync_role::name) AND resolution_kind = 'restore_pending')
+    OR EXISTS (SELECT 1 FROM continuum_retired_sync_database_identities
+      WHERE database_role_oid IN (SELECT oid FROM pg_roles WHERE rolname IN (i.operator_role,i.sync_role)))
+    OR EXISTS (SELECT 1 FROM continuum_unresolved_retired_sync_database_identities
+      WHERE previous_database_role_oid IN (SELECT oid FROM pg_roles WHERE rolname IN (i.operator_role,i.sync_role))
+        AND cluster_epoch = (SELECT epoch FROM continuum_database_identity_epoch WHERE singleton)) THEN
+    RAISE EXCEPTION 'role binding is ineligible: retired identity requires reviewed recovery';
+  END IF;
+  BEGIN
+    PERFORM continuum_validate_trusted_database_role(i.sync_role::name,'sync',EXISTS(
+      SELECT 1 FROM continuum_trusted_database_identities WHERE database_role = i.sync_role::name
+        AND principal_id = i.sync_id AND can_sync AND NOT can_approve));
+    IF NOT (SELECT rolcanlogin FROM pg_roles WHERE rolname = i.sync_role) THEN RAISE EXCEPTION 'sync role is not LOGIN-capable'; END IF;
+    PERFORM continuum_require_sync_retirement_authority((SELECT oid FROM pg_roles WHERE rolname = i.sync_role));
+  EXCEPTION WHEN OTHERS THEN RAISE EXCEPTION 'role binding is ineligible: sync installation prerequisites require reviewed recovery';
+  END;
 END;
 $bindings$;
 COMMIT;

@@ -1,19 +1,43 @@
-import { constants, openSync, closeSync, lstatSync, fstatSync, readSync, writeSync, ftruncateSync, fsyncSync } from 'node:fs';
+import { constants, openSync, closeSync, lstatSync, fstatSync, readSync, writeSync, ftruncateSync, fsyncSync, unlinkSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { resolve, join } from 'node:path';
+import { resolve, join, dirname } from 'node:path';
 const MAX_BYTES = 65536;
 const phases = new Set(['preflight','backup','bootstrap','migrate','provision-admin','grant','api','settlement','quiescence']);
-const codes = new Set(['COMMAND_FAILED','DEADLINE_EXCEEDED','BINDING_MISMATCH','INVALID_APPLICATION_ROLE','BACKEND_SETTLEMENT_FAILED','COMPLETED_AFTER_DEADLINE','BACKUP_FAILED','ACTIVE_WRITERS','OWNERSHIP_MISMATCH','MIGRATION_BACKEND_REMAINS']);
+const codes = new Set(['COMMAND_FAILED','DEADLINE_EXCEEDED','BINDING_MISMATCH','INVALID_APPLICATION_ROLE','BACKEND_SETTLEMENT_FAILED','COMPLETED_AFTER_DEADLINE','BACKUP_FAILED','ACTIVE_WRITERS','OWNERSHIP_MISMATCH','MIGRATION_BACKEND_REMAINS','BINDING_INELIGIBLE','MAINTENANCE_LOCKED','BACKUP_DURABILITY_FAILED']);
 const fail = code => { throw new Error(code); };
+function syncDirectory(directory) {
+ // Deployment is supported on Linux. Node cannot open directory fds on Windows.
+ if(process.platform==='win32')return;
+ const fd=openSync(directory,constants.O_RDONLY | (constants.O_DIRECTORY ?? 0));
+ try {fsyncSync(fd);} finally {closeSync(fd);}
+}
 export function reserveEvidence(directory) {
+ let reservation, opened;
  try {
   const root=resolve(directory); if(!lstatSync(root).isDirectory()) throw new Error();
   const path=join(root,`continuum-maintenance-failure-${randomBytes(16).toString('hex')}.json`);
-  return {path,fd:openSync(path,'wx',0o600),written:false};
- } catch { fail('EVIDENCE_RESERVATION_FAILED'); }
+  const fd=openSync(path,'wx',0o600);opened={path,fd};
+  const identity=fstatSync(fd);
+  reservation={path,fd,written:false,ino:identity.ino,dev:identity.dev};
+  fsyncSync(fd);syncDirectory(root);return reservation;
+ } catch {
+  if(opened) {
+   try {closeSync(opened.fd);} catch { /* Preserve the reservation failure code. */ }
+   try {unlinkSync(opened.path);syncDirectory(dirname(opened.path));} catch { /* Preflight still refuses downtime. */ }
+  }
+  fail('EVIDENCE_RESERVATION_FAILED');
+ }
 }
-export function closeEvidence(reservation) {
- if(reservation && Number.isInteger(reservation.fd)) { const fd=reservation.fd;reservation.fd=null;closeSync(fd); }
+export function closeEvidence(reservation, successful=false) {
+ if(!reservation)return;
+ try {
+  if(Number.isInteger(reservation.fd)) {const fd=reservation.fd;reservation.fd=null;closeSync(fd);}
+  if(successful===true && !reservation.written && !reservation.removed) {
+   const current=lstatSync(reservation.path);
+   if(!current.isFile() || current.ino!==reservation.ino || current.dev!==reservation.dev)throw new Error();
+   unlinkSync(reservation.path);reservation.removed=true;syncDirectory(dirname(reservation.path));
+  }
+ } catch {fail('EVIDENCE_CLOSE_FAILED');}
 }
 export function collectSecretValues(config) {
  const values=new Set();
@@ -72,6 +96,6 @@ export function writeFailureEvidence(reservation,fields={},rawOutput='',secrets=
   while(data.length>MAX_BYTES&&record.lines.length) {record.lines.pop();data=Buffer.from(JSON.stringify(record,null,2)+'\n');}
   if(data.length>MAX_BYTES)throw new Error();
   ftruncateSync(reservation.fd,0);let offset=0;while(offset<data.length)offset+=writeSync(reservation.fd,data,offset,data.length-offset,offset);
-  fsyncSync(reservation.fd);reservation.written=true;return reservation.path;
+  fsyncSync(reservation.fd);syncDirectory(dirname(reservation.path));reservation.written=true;return reservation.path;
  } catch { fail('EVIDENCE_WRITE_FAILED'); }
 }

@@ -1,7 +1,8 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, openSync, closeSync, readSync, writeSync, statSync, unlinkSync, lstatSync, readdirSync } from 'node:fs';
+import { existsSync, openSync, closeSync, readSync, writeSync, statSync, unlinkSync, lstatSync, readdirSync, mkdirSync, fstatSync, fsyncSync, readFileSync, constants } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { resolve, dirname, join } from 'node:path';
+import { homedir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { validateTmpfsMounts } from './container-compose-model.mjs';
 import { reserveEvidence, closeEvidence, collectSecretValues, writeFailureEvidence } from './container-maintenance-evidence.mjs';
@@ -25,6 +26,41 @@ export function reserveBackupTargets(value) {
   throw new Error('Unable to reserve private backup output files');
  }
 }
+function syncDirectory(directory) {
+ // Hosted operational support is Linux; Node cannot open a directory on Windows.
+ if (process.platform === 'win32') return;
+ const fd=openSync(directory,constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+ try {fsyncSync(fd);} finally {closeSync(fd);}
+}
+export function acquireMaintenanceLock(project) {
+ if (!/^[a-z0-9][a-z0-9_-]+$/.test(project)) throw new MaintenanceFailure('MAINTENANCE_LOCK_INVALID','preflight');
+ const directory=join(homedir(),'.continuum-maintenance-locks');
+ try {mkdirSync(directory,{mode:0o700});} catch(error) {if(error.code !== 'EEXIST') throw new MaintenanceFailure('MAINTENANCE_LOCK_INVALID','preflight');}
+ const stat=lstatSync(directory);
+ if (!stat.isDirectory() || stat.isSymbolicLink() || (process.platform !== 'win32' && ((stat.mode & 0o777) !== 0o700 || stat.uid !== process.getuid()))) throw new MaintenanceFailure('MAINTENANCE_LOCK_INVALID','preflight');
+ const path=join(directory,project+'.lock'),token=randomBytes(24).toString('hex');let fd;
+ try {fd=openSync(path,constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0),0o600);}
+ catch(error) {throw new MaintenanceFailure(error.code === 'EEXIST' ? 'MAINTENANCE_LOCKED' : 'MAINTENANCE_LOCK_INVALID','preflight');}
+ const record={version:1,project,pid:process.pid,token};
+ const lock={path,directory,fd,record,stat:fstatSync(fd)};
+ try {writeSync(fd,JSON.stringify(record)+'\n');fsyncSync(fd);syncDirectory(directory);return lock;}
+ catch(error) {try {releaseMaintenanceLock(lock);} catch { /* Preserve acquisition error. */ }throw error;}
+}
+export function releaseMaintenanceLock(lock) {
+ if (!lock || lock.fd === null) return;
+ try {
+  const stat=lstatSync(lock.path),actual=JSON.parse(readFileSync(lock.path,'utf8'));
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 1024 || stat.ino !== lock.stat.ino || stat.dev !== lock.stat.dev || JSON.stringify(actual) !== JSON.stringify(lock.record)) throw new MaintenanceFailure('MAINTENANCE_LOCK_OWNERSHIP_MISMATCH','preflight');
+  unlinkSync(lock.path);syncDirectory(lock.directory);
+ } finally {closeSync(lock.fd);lock.fd=null;}
+}
+export function durableBackupOutputs(backups) {
+ for(const item of backups.slice(0,2)) fsyncSync(item.fd);
+ const sums=backups.slice(0,2).map(item=>`${hashFile(item.path)}  ${item.path}`).join('\n')+'\n';
+ writeSync(backups[2].fd,sums);fsyncSync(backups[2].fd);syncDirectory(dirname(backups[0].path));
+ const rechecked=backups.slice(0,2).map(item=>`${hashFile(item.path)}  ${item.path}`).join('\n')+'\n';
+ if(rechecked !== sums || readFileSync(backups[2].path,'utf8') !== sums) throw new MaintenanceFailure('BACKUP_VERIFICATION_FAILED','backup');
+}
 function hashFile(file) {
  const fd = openSync(file, 'r'), hash = createHash('sha256'), buffer = Buffer.alloc(65536);
  try {
@@ -44,6 +80,7 @@ function docker(args, timeout = 60000) {
   const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
   const code = result.error?.code === 'ETIMEDOUT' ? 'DEADLINE_EXCEEDED'
    : output.includes('upgrade role binding does not match stored identity') ? 'BINDING_MISMATCH'
+   : output.includes('role binding is ineligible') ? 'BINDING_INELIGIBLE'
    : output.includes('non-owner application role') ? 'INVALID_APPLICATION_ROLE'
    : 'COMMAND_FAILED';
   const error = new MaintenanceFailure(code);
@@ -122,6 +159,52 @@ export function quiescenceSql(database, roles) {
 export function assertQuiescence(count) {
  if (count !== '0') throw new MaintenanceFailure('ACTIVE_WRITERS', 'quiescence');
 }
+export function bindingPreflightSql(environment) {
+ const schema=environment.CONTINUUM_APPLICATION_SCHEMA;
+ const admin=environment.CONTINUUM_ADMIN_PRINCIPAL_ID,sync=environment.CONTINUUM_SYNC_PRINCIPAL_ID;
+ if(typeof schema !== 'string' || !schema || !/^[a-f0-9-]{36}$/i.test(admin ?? '') || !/^[a-f0-9-]{36}$/i.test(sync ?? '')) throw new MaintenanceFailure('BINDING_INELIGIBLE','preflight');
+ return `BEGIN READ ONLY; SET LOCAL statement_timeout='5000'; SET LOCAL lock_timeout='2000';
+ SET LOCAL search_path="${schema.replaceAll('"','""')}";
+ DO $bindings$ DECLARE i RECORD; BEGIN
+ SELECT ${literal(environment.CONTINUUM_OPERATOR_ROLE)}::text AS operator_role,
+ ${literal(environment.CONTINUUM_SYNC_ROLE)}::text AS sync_role,${literal(admin)}::uuid AS admin_id,${literal(sync)}::uuid AS sync_id INTO i;
+ IF NOT EXISTS (SELECT 1 FROM continuum_trusted_database_identities identity JOIN pg_roles role ON role.oid=identity.database_role_oid
+   WHERE identity.database_role::text=i.operator_role AND role.rolname::text=i.operator_role
+   AND identity.principal_id=i.admin_id AND identity.can_approve AND NOT identity.can_sync)
+ OR NOT EXISTS (SELECT 1 FROM continuum_trusted_database_identities identity JOIN pg_roles role ON role.oid=identity.database_role_oid
+   WHERE identity.database_role::text=i.sync_role AND role.rolname::text=i.sync_role
+   AND identity.principal_id=i.sync_id AND identity.can_sync AND NOT identity.can_approve)
+ OR (SELECT count(*) FROM continuum_trusted_database_identities WHERE can_sync)<>1 THEN
+ RAISE EXCEPTION 'upgrade role binding does not match stored identity'; END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM principals principal JOIN scope_memberships membership ON membership.principal_id = principal.id
+    WHERE principal.id = i.admin_id AND principal.kind = 'user' AND principal.disabled_at IS NULL
+      AND membership.scope_id = continuum_org_scope_id() AND membership.source_kind = 'manual'
+      AND membership.source_id = 'manual' AND membership.role = 'admin' AND membership.active
+  ) THEN RAISE EXCEPTION 'role binding is ineligible: operator identity must be an effective manual org administrator'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM principals principal WHERE principal.id = i.sync_id
+    AND principal.kind = 'service' AND principal.disabled_at IS NULL) THEN
+    RAISE EXCEPTION 'role binding is ineligible: sync identity must be an enabled service principal';
+  END IF;
+  IF EXISTS (SELECT 1 FROM continuum_unresolved_retired_sync_database_identities
+    WHERE database_role IN (i.operator_role::name,i.sync_role::name) AND resolution_kind = 'restore_pending')
+    OR EXISTS (SELECT 1 FROM continuum_retired_sync_database_identities
+      WHERE database_role_oid IN (SELECT oid FROM pg_roles WHERE rolname IN (i.operator_role,i.sync_role)))
+    OR EXISTS (SELECT 1 FROM continuum_unresolved_retired_sync_database_identities
+      WHERE previous_database_role_oid IN (SELECT oid FROM pg_roles WHERE rolname IN (i.operator_role,i.sync_role))
+        AND cluster_epoch = (SELECT epoch FROM continuum_database_identity_epoch WHERE singleton)) THEN
+    RAISE EXCEPTION 'role binding is ineligible: retired identity requires reviewed recovery';
+  END IF;
+  BEGIN
+    PERFORM continuum_validate_trusted_database_role(i.sync_role::name,'sync',EXISTS(
+      SELECT 1 FROM continuum_trusted_database_identities WHERE database_role = i.sync_role::name
+        AND principal_id = i.sync_id AND can_sync AND NOT can_approve));
+    IF NOT (SELECT rolcanlogin FROM pg_roles WHERE rolname = i.sync_role) THEN RAISE EXCEPTION 'sync role is not LOGIN-capable'; END IF;
+    PERFORM continuum_require_sync_retirement_authority((SELECT oid FROM pg_roles WHERE rolname = i.sync_role));
+  EXCEPTION WHEN OTHERS THEN RAISE EXCEPTION 'role binding is ineligible: sync installation prerequisites require reviewed recovery';
+  END;
+ END $bindings$; COMMIT;`;
+}
 function imageAssetManifest(image, project) {
  const token = randomBytes(12).toString('hex'), name = project + '-assets-' + token;
  const script = "import {openSync,closeSync,readSync,lstatSync,readdirSync} from 'node:fs';import {createHash} from 'node:crypto';import {resolve,join} from 'node:path';"
@@ -180,6 +263,8 @@ export function runMaintenance(mode, envFile, composeFile, options = {}) {
  const immutable = /^(sha256:[a-f0-9]{64}|[^\s]+@sha256:[a-f0-9]{64})$/;
  if (!/^[a-z0-9][a-z0-9_-]+$/.test(project) || !/^[a-z0-9][a-z0-9_.-]+$/.test(volume)
   || !immutable.test(appImage) || !immutable.test(pgImage)) throw new Error('Unique project/volume and immutable images are required');
+ const lock=acquireMaintenanceLock(project);let outerError;
+ try {
  const imported = JSON.parse(docker(['image', 'inspect', appImage]).stdout)[0];
  const pg = JSON.parse(docker(['image', 'inspect', pgImage]).stdout)[0];
  if (imported.Os !== 'linux' || imported.Architecture !== 'amd64'
@@ -203,11 +288,36 @@ export function runMaintenance(mode, envFile, composeFile, options = {}) {
  if (!assets || config.services.migrate.image !== appImage || ['bootstrap','provision-admin','grant'].some(name=>config.services[name]?.image !== pgImage)) throw new MaintenanceFailure('ASSET_MISMATCH','preflight');
  assertCanonicalCompose(composeFile,assets);
  assertAssetMounts(config.services,assets);
+ const dbaRole=config.services.postgres.environment.POSTGRES_USER;
+ if (!dbaRole) throw new MaintenanceFailure('BINDING_INELIGIBLE','preflight');
+ const applicationName=prefix=>`ctm-${prefix}-${randomBytes(12).toString('hex')}`;
+ const rawDbaSql=(sql,name,timeout=15000)=>docker([...compose,'exec','-T','-e',`PGAPPNAME=${name}`,'postgres','/bin/sh','-ec',
+  'export PGPASSWORD="$(cat /run/secrets/dba_password)" PGCONNECT_TIMEOUT=5 PGOPTIONS="-c statement_timeout=5000 -c lock_timeout=2000"; exec psql -X -qAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"','--',sql],timeout).stdout.trim();
+ const settleBackend=(name,role,phase)=>{
+  const predicate=`application_name=${literal(name)} AND usename=${literal(role)} AND datname=${literal(database)} AND pid<>pg_backend_pid()`;
+  const end=Date.now()+10000;
+  for(let attempts=0;attempts<10 && Date.now()<=end;attempts++) {
+   rawDbaSql(`SELECT pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity WHERE ${predicate}`,applicationName('settle'),Math.max(1,end-Date.now()));
+   if(rawDbaSql(`SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE ${predicate}`,applicationName('settle'),Math.max(1,end-Date.now()))==='0') return;
+  }
+  throw new MaintenanceFailure('BACKEND_SETTLEMENT_FAILED',phase);
+ };
+ const dbaSql=sql=>{
+  const name=applicationName('dba');
+  try {return rawDbaSql(sql,name);} catch(error) {
+   try {settleBackend(name,dbaRole,'settlement');} catch(failure) {error.settlementError=failure.code ?? 'BACKEND_SETTLEMENT_FAILED';}
+   throw error;
+  }
+ };
+ if(mode === 'upgrade') {
+  try {dbaSql(bindingPreflightSql(config.services.grant.environment));}
+  catch(error) {error.phase='preflight';throw error;}
+ }
  assertRuntimeAssets(assets,imageAssetManifest(selectedId,project));
  // Reserve redacted private failure evidence before any downtime.
  const secrets = collectSecretValues(config);
  const evidence = reserveEvidence(process.env.CONTINUUM_MAINTENANCE_EVIDENCE_DIR ?? dirname(mode === 'upgrade' ? process.env.CONTINUUM_BACKUP_FILE ?? envFile : envFile));
- let backups = [], activePhase = 'preflight';
+ let backups = [], activePhase = 'preflight', successful=false, runError;
  try {
   backups = mode === 'upgrade' ? reserveBackupTargets(process.env.CONTINUUM_BACKUP_FILE) : [];
   for (const id of ids) {
@@ -216,39 +326,30 @@ export function runMaintenance(mode, envFile, composeFile, options = {}) {
    if (container.Config.Labels['com.docker.compose.service'] !== 'postgres') docker(['stop', '--time', '15', id], 25000);
   }
   let overallEnd;
-  const dbaSql = sql => docker([...compose, 'exec', '-T', 'postgres', '/bin/sh', '-ec',
-   'export PGPASSWORD="$(cat /run/secrets/dba_password)"; exec psql -X -qAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"', '--', sql], 10000).stdout.trim();
-  const settleMigration = name => {
-   const predicate = `application_name=${literal(name)} AND usename=${literal(ownerRole)} AND datname=${literal(database)} AND pid<>pg_backend_pid()`;
-   const end = Date.now() + 10000;
-   do {
-    dbaSql(`SELECT pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity WHERE ${predicate}`);
-    if (dbaSql(`SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE ${predicate}`) === '0') return;
-   } while (Date.now() < end);
-   throw new MaintenanceFailure('MIGRATION_BACKEND_REMAINS', 'migrate');
-  };
   const phase = service => {
    activePhase = service;
    const name = `${project}-maintenance-${service}-${process.pid}`;
-   const applicationName = `ctm-migrate-${randomBytes(12).toString('hex')}`;
+   const sessionName = applicationName(service === 'provision-admin' ? 'admin' : service);
    try {
     docker([...compose, 'run', '--rm', '--no-deps', '--pull', 'never', '--name', name,
-     '-e', `CONTINUUM_MAINTENANCE_MODE=${mode}`,
-     ...(service === 'migrate' ? ['-e', `PGAPPNAME=${applicationName}`,
-      '-e', `CONTINUUM_CONTAINER_MAINTENANCE_NAME=${applicationName}`,
+     '-e', `CONTINUUM_MAINTENANCE_MODE=${mode}`, '-e', `PGAPPNAME=${sessionName}`,
+     ...(service === 'migrate' ? ['-e', `CONTINUUM_CONTAINER_MAINTENANCE_NAME=${sessionName}`,
       '-e', `CONTINUUM_MIGRATION_OWNER_ROLE=${ownerRole}`] : []), service], Math.max(1, overallEnd - Date.now()));
    } catch (error) {
-    const id = docker(['ps', '-aq', '--filter', `name=^/${name}$`]).stdout.trim();
-    if (id) {
-     const container = JSON.parse(docker(['inspect', id]).stdout)[0];
-     if (container.Config.Labels['com.docker.compose.project'] !== project || container.Name !== `/${name}`) throw new Error('Maintenance ownership mismatch');
-     docker(['stop', '--time', '10', id], 20000);
-     // --rm can remove the container as a result of stop.
-     if (docker(['ps', '-aq', '--filter', `name=^/${name}$`]).stdout.trim()) docker(['rm', id]);
-    }
-    if (service === 'migrate') settleMigration(applicationName);
     const failed = new MaintenanceFailure(error.code ?? 'COMMAND_FAILED', service);
     Object.defineProperty(failed,'rawOutput',{value:error.rawOutput ?? 'Error: ' + error.message});
+    try {
+     const id = docker(['ps', '-aq', '--filter', `name=^/${name}$`]).stdout.trim();
+     if (id) {
+      const container = JSON.parse(docker(['inspect', id]).stdout)[0];
+      if (container.Config.Labels['com.docker.compose.project'] !== project || container.Name !== `/${name}`) throw new MaintenanceFailure('OWNERSHIP_MISMATCH',service);
+      docker(['stop', '--time', '10', id], 20000);
+      if (docker(['ps', '-aq', '--filter', `name=^/${name}$`]).stdout.trim()) docker(['rm', id]);
+     }
+    } catch(cleanup) {failed.cleanupError=cleanup.code ?? 'COMMAND_FAILED';}
+    // Settlement runs even when client/container cleanup itself failed.
+    try {settleBackend(sessionName,service === 'bootstrap' ? dbaRole : ownerRole,service);}
+    catch(failure) {failed.settlementError=failure.code ?? 'BACKEND_SETTLEMENT_FAILED';}
     throw failed;
    }
   };
@@ -257,18 +358,20 @@ export function runMaintenance(mode, envFile, composeFile, options = {}) {
   if (mode === 'fresh') { overallEnd = Date.now() + deadlineMs; phase('bootstrap'); }
   if (mode === 'upgrade') {
    const backupEnd = Date.now() + backupDeadlineMs;
-   for (const [index, tool] of ['pg_dump -Fc', 'pg_dumpall --roles-only --no-role-passwords'].entries()) {
-    const result = spawnSync('docker', [...compose, 'exec', '-T', 'postgres', '/bin/sh', '-ec',
+   for (const [index, tool] of ['pg_dump -Fc --lock-wait-timeout=5000', 'pg_dumpall --roles-only --no-role-passwords -l "$POSTGRES_DB"'].entries()) {
+    const backupName=applicationName('backup');
+    const result = spawnSync('docker', [...compose, 'exec', '-T', '-e', `PGAPPNAME=${backupName}`, 'postgres', '/bin/sh', '-ec',
      `export PGPASSWORD="$(cat /run/secrets/dba_password)"; exec ${tool} -U "$POSTGRES_USER"${index === 0 ? ' -d "$POSTGRES_DB"' : ''}`],
      { stdio: ['ignore', backups[index].fd, 'pipe'], timeout: Math.max(1, backupEnd - Date.now()), killSignal: 'SIGKILL', env: dockerEnvironment() });
     if (result.error || result.status !== 0) {
      const failure = new MaintenanceFailure('BACKUP_FAILED','backup');
+     failure.deadlineExceeded=result.error?.code === 'ETIMEDOUT';
      Object.defineProperty(failure,'rawOutput',{value:result.stderr?.toString('utf8') ?? 'Error: Backup command failed'});
+     try {settleBackend(backupName,dbaRole,'backup');} catch(error) {failure.settlementError=error.code ?? 'BACKEND_SETTLEMENT_FAILED';}
      throw failure;
     }
    }
-   const sums = backups.slice(0, 2).map(item => `${hashFile(item.path)}  ${item.path}`).join('\n');
-   writeSync(backups[2].fd, `${sums}\n`);
+   activePhase='backup';durableBackupOutputs(backups);
    overallEnd = Date.now() + deadlineMs;
   }
   assertQuiescence(dbaSql(activitySql));
@@ -287,11 +390,18 @@ export function runMaintenance(mode, envFile, composeFile, options = {}) {
    docker([...compose, 'stop', '--timeout', '15', 'api'], 25000);
    throw failure;
   }
+  successful=true;
   return { imageId: selectedId, mode, project, volume, deadlineMs, backupDeadlineMs };
  } catch (error) {
-  error.evidencePath = writeFailureEvidence(evidence,{phase:error.phase || activePhase,code:error.code ?? 'COMMAND_FAILED',image:selectedId,mode,deadlineMs,backupDeadlineMs},error.rawOutput ?? 'Error: ' + error.message,secrets);
+  runError=error;
+  try {error.evidencePath = writeFailureEvidence(evidence,{phase:error.phase || activePhase,code:error.code ?? 'COMMAND_FAILED',image:selectedId,mode,deadlineMs,backupDeadlineMs},error.rawOutput ?? 'Error: ' + error.message,secrets);} catch(failure) {error.evidenceError=failure.message === 'EVIDENCE_WRITE_FAILED' ? failure.message : 'EVIDENCE_WRITE_FAILED';}
   throw error;
- } finally { for (const item of backups) closeSync(item.fd); closeEvidence(evidence); }
+ } finally {
+  try {for (const item of backups) closeSync(item.fd);closeEvidence(evidence,successful);}
+  catch(error) {if(runError) runError.evidenceError='EVIDENCE_CLOSE_FAILED';else throw error;}
+ }
+ } catch(error) {outerError=error;throw error;}
+ finally {try {releaseMaintenanceLock(lock);} catch(error) {if(outerError) outerError.lockError=error.code ?? 'MAINTENANCE_LOCK_RELEASE_FAILED';else throw error;}}
 }
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
  try {

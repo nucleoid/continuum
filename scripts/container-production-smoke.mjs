@@ -3,7 +3,7 @@ import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { writeFileSync, readFileSync, mkdtempSync, mkdirSync, readdirSync, copyFileSync, cpSync, rmSync, chmodSync, existsSync, statSync, openSync, closeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
-import { runMaintenance } from './container-maintenance.mjs';
+import { runMaintenance, acquireMaintenanceLock, releaseMaintenanceLock } from './container-maintenance.mjs';
 import { validateTmpfsMounts } from './container-compose-model.mjs';
 import { writeCommandOutput, readCommandInput } from './container-binary-transfer.mjs';
 import { safeBootstrapFailure, sanitizedBootstrapLines } from './container-diagnostics.mjs';
@@ -181,6 +181,18 @@ function maintenanceCli(mode,p,file,backupFile,extraEnv = {}) {
  check(receipt.deadlineMs===120000&&receipt.backupDeadlineMs===120000,'CLI did not record explicit independent operator budgets');
  return receipt;
 }
+function syntheticDbaLock(p,label,statement){
+ const name='synthetic-'+label+'-'+randomUUID();
+ const predicate=`usename='continuum_dba' AND datname='continuum' AND application_name='${name}'`;
+ const child=spawn('docker',[...p.base,'exec','-T','-e','PGPASSWORD','-e','PGAPPNAME','postgres','psql','-X','-qAt','-h','127.0.0.1','-U','continuum_dba','-d','continuum','-v','ON_ERROR_STOP=1','-c','BEGIN; '+statement+'; SELECT pg_sleep(120); ROLLBACK'],{env:{...p.env,PGPASSWORD:p.passwords.DBA,PGAPPNAME:name},stdio:'ignore'});
+ const close=()=>{sql(p,`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE ${predicate} AND pid<>pg_backend_pid()`,'DBA');child.kill('SIGTERM');check(sql(p,`SELECT count(*) FROM pg_stat_activity WHERE ${predicate}`,'DBA')==='0','Owned DBA fixture did not settle');};
+ try{
+  const end=Date.now()+10000;
+  while(sql(p,`SELECT count(*) FROM pg_stat_activity WHERE ${predicate} AND wait_event='PgSleep'`,'DBA')!=='1'&&Date.now()<end){}
+  check(sql(p,`SELECT count(*) FROM pg_stat_activity WHERE ${predicate} AND wait_event='PgSleep'`,'DBA')==='1','Owned DBA fixture did not acquire its lock');
+ }catch(error){close();throw error;}
+ return {predicate,close};
+}
 function verifyWrapperBackup(file,p) {
  const roleFile=`${file}.roles.sql`, sumsFile=`${file}.sha256`;
  const rows=readFileSync(sumsFile,'utf8').trim().split('\n');
@@ -200,6 +212,7 @@ try {
   writeMaintenanceEnvironment(wrapperFresh,wrapperFreshEnv);
   results.wrapperFresh = maintenanceCli('fresh',wrapperFresh,wrapperFreshEnv,undefined,{COMPOSE_PROJECT_NAME:owner+'-ambient-poison',COMPOSE_FILE:'/private/synthetic-unreviewed.yml',CONTINUUM_PGDATA_VOLUME:owner+'-ambient-volume',CONTINUUM_APP_IMAGE:'sha256:'+'f'.repeat(64),CONTINUUM_DBA_PASSWORD_FILE:'/private/synthetic-foreign-secret',CONTINUUM_ADMIN_PRINCIPAL_ID:randomUUID()});
   verifyLedger(wrapperFresh);
+  check(!readdirSync(wrapperFresh.directory).some(name=>/^continuum-maintenance-failure-/.test(name)),'Successful fresh wrapper retained an empty failure reservation');
   await api(wrapperFresh,'/health/ready');
   const wrapperApi = JSON.parse(run(['inspect',compose(wrapperFresh,['ps','-q','api']).trim()]))[0];
   check(wrapperApi.Config.Env.includes('CONTINUUM_AUTH_MODE=entra'),'Fresh wrapper did not start production Entra API');
@@ -323,6 +336,54 @@ try {
 
   // A selected-image asset mismatch must refuse before stopping a ready API.
   compose(fresh,['up','-d','--force-recreate','--wait','--wait-timeout','120','api']);
+  // Current authority eligibility must refuse before reserving outputs or downtime.
+  const adminId=fresh.env.CONTINUUM_ADMIN_PRINCIPAL_ID,syncId=fresh.env.CONTINUUM_SYNC_PRINCIPAL_ID;
+  const ledgerSnapshot=sql(fresh,'SELECT jsonb_agg(to_jsonb(m) ORDER BY name)::text FROM _continuum_migrations m');
+  const eligibilityCases=[
+   ['demoted-op',`UPDATE scope_memberships SET active=false WHERE principal_id='${adminId}' AND scope_id=continuum_org_scope_id() AND source_kind='manual' AND source_id='manual' AND role='admin'`,`UPDATE scope_memberships SET active=true WHERE principal_id='${adminId}' AND scope_id=continuum_org_scope_id() AND source_kind='manual' AND source_id='manual' AND role='admin'`],
+   ['disabled-op',`UPDATE principals SET disabled_at=clock_timestamp() WHERE id='${adminId}'`,`UPDATE principals SET disabled_at=NULL WHERE id='${adminId}'`],
+   ['disabled-sync',`UPDATE principals SET disabled_at=clock_timestamp() WHERE id='${syncId}'`,`UPDATE principals SET disabled_at=NULL WHERE id='${syncId}'`],
+  ];
+  for(const [label,makeIneligible,restore] of eligibilityCases){
+   sql(fresh,makeIneligible);
+   try{
+    const refused=join(temporary,label+'-refused.dump');process.env.CONTINUUM_BACKUP_FILE=refused;
+    const priorFiles=readdirSync(fresh.directory).sort().join(',');
+    const error=expectFailure(()=>runMaintenance('upgrade',envFile,productionCompose,{deadlineMs:120000}),'BINDING_INELIGIBLE',label);
+    check(error.code==='BINDING_INELIGIBLE'&&error.phase==='preflight','Eligibility refusal had unrelated phase/code');
+    check(!existsSync(refused)&&readdirSync(fresh.directory).sort().join(',')===priorFiles,'Eligibility refusal reserved outputs');
+    check(compose(fresh,['ps','--status','running','-q','api']).trim()!=='','Eligibility refusal stopped serving');
+    expectFailure(()=>phase(fresh,'grant'),'role binding is ineligible',label+' direct grant preflight');
+    check(storedBindings()===originalBindings&&credentialSnapshot()===originalCredentials,'Eligibility refusal mutated identity authority');
+    check(sql(fresh,'SELECT jsonb_agg(to_jsonb(m) ORDER BY name)::text FROM _continuum_migrations m')===ledgerSnapshot,'Eligibility refusal changed ledger');
+   }finally{sql(fresh,restore);}
+  }
+  // Separately approved synthetic recovery invokes only the immutable packaged
+  // owner grant/verify procedures, then updates the explicit reviewed env file.
+  const manualGrant=(file,principal,operatorRole='continuum_operator')=>compose(fresh,['exec','-T','-e','PGPASSWORD','postgres','psql','-X','-qAt','-h','127.0.0.1','-U','continuum_owner','-d','continuum','-v','ON_ERROR_STOP=1','-v','continuum_schema=continuum','-v','continuum_app_role=continuum_app','-v',`continuum_operator_role=${operatorRole}`,'-v','continuum_sync_role=continuum_sync','-v',`continuum_principal_id=${principal}`,'-f','-'],{input:readFileSync(join(assets,'scripts',file)),env:{...fresh.env,PGPASSWORD:fresh.passwords.OWNER}});
+  compose(fresh,['stop','-t','15','api']);
+  sql(fresh,`UPDATE principals SET disabled_at=clock_timestamp() WHERE id='${adminId}'`);
+  try{
+   manualGrant('grant-operator-role.sql',alternativeAdmin);
+   manualGrant('verify-database-identities.sql',alternativeAdmin);
+   fresh.env.CONTINUUM_ADMIN_PRINCIPAL_ID=alternativeAdmin;maintenanceEnv();
+   phase(fresh,'grant');
+   check(sql(fresh,`SELECT principal_id::text FROM continuum_trusted_database_identities WHERE database_role='continuum_operator'`)===alternativeAdmin,'Approved OP rebind did not establish selected eligible principal');
+  }finally{
+   sql(fresh,`UPDATE principals SET disabled_at=NULL WHERE id='${adminId}'`);
+   manualGrant('grant-operator-role.sql',adminId);fresh.env.CONTINUUM_ADMIN_PRINCIPAL_ID=adminId;maintenanceEnv();
+  }
+  manualGrant('grant-sync-role.sql',syncId);manualGrant('verify-database-identities.sql',adminId);phase(fresh,'grant');
+  check(storedBindings()===originalBindings&&credentialSnapshot()===originalCredentials,'Approved recovery changed role credentials or did not restore reviewed bindings');
+  compose(fresh,['up','-d','--force-recreate','--wait','--wait-timeout','120','api']);
+  const heldWindow=acquireMaintenanceLock(fresh.project);
+  try{
+   const refused=join(temporary,'overlapping-window-refused.dump');process.env.CONTINUUM_BACKUP_FILE=refused;
+   const overlapping=expectFailure(()=>runMaintenance('upgrade',envFile,productionCompose,{deadlineMs:120000}),'MAINTENANCE_LOCKED','Overlapping project window');
+   check(overlapping.code==='MAINTENANCE_LOCKED'&&!existsSync(refused),'Overlapping window reserved backup');
+   check(compose(fresh,['ps','--status','running','-q','api']).trim()!=='','Overlapping window stopped serving');
+  }finally{releaseMaintenanceLock(heldWindow);}
+  results.passed.push('demoted or disabled bound OP and disabled SYNC refuse read-only before outputs/downtime/ledger changes; separately approved immutable owner grant/verify recovery converges; exclusive project window refuses overlap');
   const driftAssets=join(fresh.directory,'drift-assets'); mkdirSync(driftAssets,{mode:0o755});
   copyFileSync(join(assets,'package.json'),join(driftAssets,'package.json'));
   for(const dir of ['deploy','migrations','scripts']){cpSync(join(assets,dir),join(driftAssets,dir),{recursive:true});chmodSync(join(driftAssets,dir),0o755);}
@@ -362,6 +423,7 @@ try {
   const successfulBackup = join(temporary,'successful-wrapper-upgrade.dump');
   results.wrapperUpgrade = maintenanceCli('upgrade',fresh,envFile,successfulBackup);
   const wrapperBackupHash = verifyWrapperBackup(successfulBackup,fresh);
+  check(!readdirSync(temporary).filter(name=>/^continuum-maintenance-failure-/.test(name)).some(name=>statSync(join(temporary,name)).size===0),'Successful upgrade retained an empty failure reservation');
   await api(fresh,'/health/ready');
   check(sql(fresh, `SELECT id::text || ':' || title FROM memories WHERE id='${captured.id}'`) === before, 'Successful upgrade wrapper changed stored data');
   results.passed.push('documented upgrade CLI wrapper completes migration/grants/image gate/Entra readiness; real custom and password-free role backups match checksum sidecar');
@@ -396,17 +458,52 @@ try {
    run(['rm','-f',consumerName]);
   }
   results.passed.push('reviewed env-file defeats ambient project/volume/image/secret/identity poison; foreign-labelled volume and foreign mounted consumer refuse before backup/downtime/mutation');
-  // The wrapper must surface this exact grant preflight error, and a successful
-  // exited one-shot must not bypass it or leave an API process running.
+  // Real helper backend settlement must never terminate the independent locker.
+  const dbaLocker=syntheticDbaLock(fresh,'dba-preflight','LOCK TABLE continuum.continuum_trusted_database_identities IN ACCESS EXCLUSIVE MODE');
+  try{
+   const refused=join(temporary,'dba-helper-refused.dump');process.env.CONTINUUM_BACKUP_FILE=refused;
+   const error=expectFailure(()=>runMaintenance('upgrade',envFile,productionCompose,{deadlineMs:120000}),'COMMAND_FAILED','Read-only DBA preflight lock limit');
+   check(error.phase==='preflight'&&!existsSync(refused),'DBA preflight failure reserved backup or had wrong phase');
+   check(sql(fresh,"SELECT count(*) FROM pg_stat_activity WHERE usename='continuum_dba' AND application_name~'^ctm-dba-[a-f0-9]{24}$'",'DBA')==='0','Failed DBA helper retained backend');
+   check(sql(fresh,`SELECT count(*) FROM pg_stat_activity WHERE ${dbaLocker.predicate}`,'DBA')==='1','Wrapper terminated external DBA locker');
+   check(compose(fresh,['ps','--status','running','-q','api']).trim()!=='','DBA preflight failure stopped serving');
+  }finally{dbaLocker.close();}
+  const backupLocker=syntheticDbaLock(fresh,'backup','LOCK TABLE continuum._continuum_migrations IN ACCESS EXCLUSIVE MODE');
+  try{
+   process.env.CONTINUUM_BACKUP_FILE=join(temporary,'timed-out-backup.dump');
+   const error=expectFailure(()=>runMaintenance('upgrade',envFile,productionCompose,{deadlineMs:120000,backupDeadlineMs:1000}),'BACKUP_FAILED','Real custom dump deadline');
+   check(error.phase==='backup'&&error.deadlineExceeded===true&&!error.settlementError,'Backup deadline failed backend settlement');
+   check(sql(fresh,"SELECT count(*) FROM pg_stat_activity WHERE usename='continuum_dba' AND application_name~'^ctm-backup-[a-f0-9]{24}$'",'DBA')==='0','Timed-out dump retained DBA backend');
+   check(sql(fresh,`SELECT count(*) FROM pg_stat_activity WHERE ${backupLocker.predicate}`,'DBA')==='1','Wrapper terminated external backup locker');
+   check(sql(fresh,'SELECT jsonb_agg(to_jsonb(m) ORDER BY name)::text FROM _continuum_migrations m')===ledgerSnapshot,'Backup deadline mutated migration ledger');
+  }finally{backupLocker.close();}
+  check(sql(fresh,'SELECT jsonb_agg(to_jsonb(m) ORDER BY name)::text FROM _continuum_migrations m')===ledgerSnapshot,'Backup deadline mutated migration ledger');
+  const grantLocker=syntheticDbaLock(fresh,'grant','SELECT pg_advisory_xact_lock(834641726154302120::bigint)');
+  try{
+   process.env.CONTINUUM_BACKUP_FILE=join(temporary,'timed-out-grant.dump');
+   const error=expectFailure(()=>runMaintenance('upgrade',envFile,productionCompose,{deadlineMs:10000,backupDeadlineMs:120000}),'DEADLINE_EXCEEDED','Real grant deadline');
+   check(error.phase==='grant'&&!error.settlementError,'Grant deadline failed backend settlement or wrong phase');
+   check(sql(fresh,"SELECT count(*) FROM pg_stat_activity WHERE usename='continuum_owner' AND application_name~'^ctm-grant-[a-f0-9]{24}$'",'DBA')==='0','Timed-out grant retained owner backend');
+   check(sql(fresh,'SELECT pg_try_advisory_lock(7215328273579717613::bigint)')==='t','Timed-out grant retained deployment lock');
+   check(sql(fresh,`SELECT count(*) FROM pg_stat_activity WHERE ${grantLocker.predicate}`,'DBA')==='1','Wrapper terminated external grant locker');
+  }finally{grantLocker.close();}
+  results.passed.push('real read-only DBA lock-limit, custom dump deadline and grant deadline settle only uniquely named owned backends; independent DBA lockers survive; failed grant releases deployment advisory lock');
+  // Inject an owned synthetic post-preflight grant refusal, without changing
+  // package SQL or config. The actual grant connection must settle its lock.
   process.env.CONTINUUM_BACKUP_FILE=join(temporary,'failed-upgrade.dump');
-  maintenanceEnv({CONTINUUM_ADMIN_PRINCIPAL_ID:alternativeAdmin});
-  const bindingError = expectFailure(() => runMaintenance('upgrade',envFile,productionCompose,{deadlineMs:120_000}), 'BINDING_MISMATCH', 'Failed wrapper grant with stale successful job');
-  check(bindingError.code==='BINDING_MISMATCH' && bindingError.phase==='grant','Wrapper did not identify the exact grant binding failure');
+  sql(fresh,"CREATE FUNCTION synthetic_refuse_grant() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'synthetic reviewed grant refusal'; END$$; CREATE TRIGGER synthetic_refuse_grant BEFORE INSERT OR UPDATE ON continuum_trusted_database_identities FOR EACH ROW EXECUTE FUNCTION synthetic_refuse_grant()");
+  let bindingError;
+  try{
+   bindingError=expectFailure(()=>runMaintenance('upgrade',envFile,productionCompose,{deadlineMs:120000}),'COMMAND_FAILED','Failed wrapper grant with stale successful job');
+  }finally{sql(fresh,'DROP TRIGGER synthetic_refuse_grant ON continuum_trusted_database_identities; DROP FUNCTION synthetic_refuse_grant()');}
+  check(bindingError.code==='COMMAND_FAILED'&&bindingError.phase==='grant','Wrapper did not identify the exact failed grant phase');
   check(bindingError.evidencePath&&existsSync(bindingError.evidencePath),'Failed grant execution evidence was discarded');
   const grantEvidence=readFileSync(bindingError.evidencePath,'utf8');
   check(statSync(bindingError.evidencePath).size<=65536&&(statSync(bindingError.evidencePath).mode&0o777)===0o600,'Grant evidence is not private/bounded');
-  check(grantEvidence.includes('upgrade role binding does not match stored identity'),'Grant evidence omitted actionable SQL failure');
+  check(grantEvidence.includes('synthetic reviewed grant refusal'),'Grant evidence omitted actionable SQL failure');
   check(!Object.values(fresh.passwords).some(value=>grantEvidence.includes(value))&&!grantEvidence.includes('postgres://'),'Grant evidence exposed private credentials or URL');
+  check(sql(fresh,"SELECT count(*) FROM pg_stat_activity WHERE usename='continuum_owner' AND application_name~'^ctm-grant-[a-f0-9]{24}$'",'DBA')==='0','Failed grant backend remained');
+  check(sql(fresh,'SELECT pg_try_advisory_lock(7215328273579717613::bigint)')==='t','Failed grant retained maintenance advisory lock');
   check(compose(fresh,['ps','--status','running','-q','api']).trim()==='', 'Failed maintenance left API serving');
   maintenanceEnv();
   process.env.CONTINUUM_BACKUP_FILE=join(temporary,'deadline-upgrade.dump');
@@ -419,7 +516,7 @@ try {
 CREATE TEMP TABLE observed_migrator(pid integer,name text,query text,wait text);
 DO $wait$ DECLARE until_time timestamptz:=clock_timestamp()+interval '45 seconds'; BEGIN LOOP
  PERFORM pg_stat_clear_snapshot();
- EXIT WHEN EXISTS(SELECT 1 FROM pg_stat_activity a JOIN pg_locks l ON l.pid=a.pid WHERE a.datname=current_database() AND a.usename='continuum_dba' AND a.application_name='pg_dump' AND l.relation='continuum._continuum_migrations'::regclass AND l.mode='AccessShareLock' AND l.granted);
+ EXIT WHEN EXISTS(SELECT 1 FROM pg_stat_activity a JOIN pg_locks l ON l.pid=a.pid WHERE a.datname=current_database() AND a.usename='continuum_dba' AND a.application_name~'^ctm-backup-[a-f0-9]{24}$' AND l.relation='continuum._continuum_migrations'::regclass AND l.mode='AccessShareLock' AND l.granted);
  IF clock_timestamp()>until_time THEN RAISE EXCEPTION 'synthetic dump lock was not observed'; END IF;
  PERFORM pg_sleep(0.005); END LOOP; END $wait$;
 LOCK TABLE continuum._continuum_migrations IN ACCESS EXCLUSIVE MODE;

@@ -102,9 +102,9 @@ test('wrapper gives backup a separate budget and rejects parity drift before sto
   const job=()=>({image:pgImage,volumes:[{type:'bind',source:root,target:'/assets',read_only:true}]});
   const config={name:'synthetic-maintenance',volumes:{pgdata:{name:'synthetic-pgdata'}},services:{
    api:{image:appImage,environment:{CONTINUUM_AUTH_MODE:'entra'}},
-   postgres:{image:pgImage,environment:{POSTGRES_DB:'synthetic'}},
+   postgres:{image:pgImage,environment:{POSTGRES_DB:'synthetic',POSTGRES_USER:'dba'}},
    migrate:{image:appImage,environment:{CONTINUUM_MIGRATION_OWNER_ROLE:'owner'}},
-   bootstrap:job(),'provision-admin':job(),grant:{...job(),environment:{PGUSER:'owner',CONTINUUM_APP_ROLE:'app',CONTINUUM_OPERATOR_ROLE:'op',CONTINUUM_SYNC_ROLE:'sync'}}
+   bootstrap:job(),'provision-admin':job(),grant:{...job(),environment:{PGUSER:'owner',CONTINUUM_APPLICATION_SCHEMA:'synthetic',CONTINUUM_ADMIN_PRINCIPAL_ID:'11111111-1111-4111-8111-111111111111',CONTINUUM_SYNC_PRINCIPAL_ID:'22222222-2222-4222-8222-222222222222',CONTINUUM_APP_ROLE:'app',CONTINUUM_OPERATOR_ROLE:'op',CONTINUUM_SYNC_ROLE:'sync'}}
   }};
   let time=10000; Date.now=()=>time;
   const calls=[];
@@ -154,7 +154,7 @@ function wrapperFixture(check) {
   const reference=runtimeAssetManifest(root),appImage='sha256:'+'a'.repeat(64),pgImage='sha256:'+'b'.repeat(64);
   const job=()=>({image:pgImage,volumes:[{type:'bind',source:root,target:'/assets',read_only:true}]});
   const project='synthetic-maintenance',volume='synthetic-pgdata';
-  const config={name:project,volumes:{pgdata:{name:volume}},services:{api:{image:appImage,environment:{CONTINUUM_AUTH_MODE:'entra'}},postgres:{image:pgImage,environment:{POSTGRES_DB:'synthetic'}},migrate:{image:appImage,environment:{CONTINUUM_MIGRATION_OWNER_ROLE:'owner'}},bootstrap:job(),'provision-admin':job(),grant:{...job(),environment:{PGUSER:'owner',CONTINUUM_APP_ROLE:'app',CONTINUUM_OPERATOR_ROLE:'op',CONTINUUM_SYNC_ROLE:'sync'}}}};
+  const config={name:project,volumes:{pgdata:{name:volume}},services:{api:{image:appImage,environment:{CONTINUUM_AUTH_MODE:'entra'}},postgres:{image:pgImage,environment:{POSTGRES_DB:'synthetic',POSTGRES_USER:'dba'}},migrate:{image:appImage,environment:{CONTINUUM_MIGRATION_OWNER_ROLE:'owner'}},bootstrap:job(),'provision-admin':job(),grant:{...job(),environment:{PGUSER:'owner',CONTINUUM_APPLICATION_SCHEMA:'synthetic',CONTINUUM_ADMIN_PRINCIPAL_ID:'11111111-1111-4111-8111-111111111111',CONTINUUM_SYNC_PRINCIPAL_ID:'22222222-2222-4222-8222-222222222222',CONTINUUM_APP_ROLE:'app',CONTINUUM_OPERATOR_ROLE:'op',CONTINUUM_SYNC_ROLE:'sync'}}}};
   const container=(id,service='api',owner=project,running=true)=>({Id:id,Name:'/'+id,State:{Running:running},Config:{Labels:{'com.docker.compose.project':owner,'com.docker.compose.service':service}},Mounts:[{Type:'volume',Name:volume,Destination:'/var/lib/postgresql/data'}]});
   const state={volumeOwner:project,consumers:[container('synthetic-postgres','postgres')],calls:[],time:10000};
   Date.now=()=>state.time;
@@ -167,7 +167,7 @@ function wrapperFixture(check) {
    else if(args[0]==='ps') stdout=args.includes('volume='+volume)?state.consumers.map(c=>c.Id).join('\n'):args.includes('label=com.docker.compose.project='+project)?'synthetic-api\nsynthetic-postgres\n':'';
    else if(args[0]==='inspect') stdout=JSON.stringify([state.consumers.find(c=>c.Id===args[1])??container(args[1],args[1]==='synthetic-postgres'?'postgres':'api')]);
    else if(args[0]==='run') stdout=JSON.stringify(reference);
-   else if(args.some(arg=>arg.includes('exec pg_dump'))) writeSync(options.stdio[1],'synthetic dump');
+   else if(args.some(arg=>arg.includes('exec pg_dump'))) {writeSync(options.stdio[1],'synthetic dump');if(state.failBackup)return {status:null,stdout:'',stderr:'ERROR: synthetic backup lock wait',error:{code:'ETIMEDOUT'}};}
    else if(args.includes('exec')) stdout='0\n';
    if(args.some(arg=>arg.includes('operator identity must be an effective manual org administrator'))&&state.ineligible) return {status:1,stdout:'',stderr:'ERROR: role binding is ineligible'};
    if(args.includes('run')&&args.at(-1)==='grant'&&state.expireAtGrant) state.time+=1001;
@@ -251,7 +251,7 @@ test('upgrade eligibility is checked read-only before output reservations and se
 
 test('backup files and directory are made durable before migration and failure prevents migration',()=>wrapperFixture(({state,run})=>{
  const original=fs.fsyncSync;let count=0;
- fs.fsyncSync=fd=>{count++;if(count===1)throw new Error('synthetic fsync failure');return original(fd);};syncBuiltinESMExports();
+ fs.fsyncSync=fd=>{if(new Error().stack.includes('durableBackupOutputs')) {count++;throw new Error('synthetic fsync failure');}return original(fd);};syncBuiltinESMExports();
  try {assert.throws(run);assert.ok(count>0);assert.ok(!state.calls.some(call=>call.args.includes('run')&&call.args.at(-1)==='migrate'));}
  finally {fs.fsyncSync=original;syncBuiltinESMExports();}
 }));
@@ -280,4 +280,26 @@ test('an existing project lock refuses another window before outputs or Docker m
  assert.throws(run,e=>e.code==='MAINTENANCE_LOCKED'&&e.phase==='preflight');
  assert.equal(readFileSync(lock,'utf8'),'retained lock');assert.equal(existsSync(join(root,'backup.dump')),false);
  assert.ok(!state.calls.some(call=>call.args[0]==='stop'||call.args.includes('up')||call.args[0]==='run'));
+}));
+
+
+test('backup timeout terminates only its named DBA session and releases the project window',()=>wrapperFixture(({root,state,run})=>{
+ state.failBackup=true;let error;try{run();}catch(value){error=value;}
+ assert.equal(error.code,'BACKUP_FAILED');assert.equal(error.phase,'backup');assert.equal(error.deadlineExceeded,true);
+ const backup=state.calls.find(call=>call.args.some(arg=>arg.includes('exec pg_dump')));
+ const name=backup.args.find(arg=>/^PGAPPNAME=ctm-backup-[a-f0-9]{24}$/.test(arg)).slice('PGAPPNAME='.length);
+ const terminate=state.calls.find(call=>call.args.some(arg=>arg.includes('pg_terminate_backend')&&arg.includes(name)));
+ assert.ok(terminate);assert.ok(terminate.args.some(arg=>arg.includes("usename='dba'")&&arg.includes("datname='synthetic'")));
+ assert.ok(!state.calls.some(call=>call.args.includes('run')&&call.args.at(-1)==='migrate'));
+ assert.equal(existsSync(join(root,'.continuum-maintenance-locks','synthetic-maintenance.lock')),false);
+}));
+
+test('successful windows sync the backups before migrate and remove their owned lock and empty evidence',()=>wrapperFixture(({root,state,run})=>{
+ const original=fs.fsyncSync;let durable=0;
+ fs.fsyncSync=fd=>{if(new Error().stack.includes('durableBackupOutputs'))durable++;return original(fd);};syncBuiltinESMExports();
+ try {run();assert.ok(durable>=3);}finally{fs.fsyncSync=original;syncBuiltinESMExports();}
+ assert.equal(existsSync(join(root,'.continuum-maintenance-locks','synthetic-maintenance.lock')),false);
+ assert.ok(!fs.readdirSync(root).some(name=>name.startsWith('continuum-maintenance-failure-')));
+ const roles=state.calls.find(call=>call.args.some(arg=>arg.includes('pg_dumpall')));
+ assert.ok(roles.args.some(arg=>arg.includes('pg_dumpall --roles-only --no-role-passwords -l "$POSTGRES_DB"')));
 }));
