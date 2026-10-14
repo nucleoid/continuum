@@ -130,3 +130,14 @@ test('preconnection proof ignores only exact owned eligibility job lifecycle lin
  assert.equal(evidenceHelpers.isProvenPreconnectionFailure(lines,{status:2}),false);
  assert.equal(evidenceHelpers.isProvenPreconnectionFailure(lines,{status:2,jobName,timedOut:true}),false);
 });
+
+test('preconnection proof normalizes only trailing Compose blank lines after the exact owned client refusal',()=>{
+ const jobName='synthetic-maintenance-eligibility-'+'b'.repeat(24);
+ const auth='psql: error: connection to server at "postgres" (192.0.2.10), port 5432 failed: FATAL:  password authentication failed for user "owner"';
+ const raw=' Container '+jobName+' Creating\n Container '+jobName+' Created\n'+auth+'\n\n\n';
+ const options={status:2,jobName};
+ assert.equal(evidenceHelpers.isProvenPreconnectionFailure(raw,options),true);
+ for(const text of [raw+'ERROR: server error\n\n',raw+'NOTICE: server message\n\n',raw+'CONTEXT: SQL statement\n\n',raw+'unknown output\n\n',raw.replace(' Created\n',' Created\n\n'),raw.replace(jobName,'foreign-job')])assert.equal(evidenceHelpers.isProvenPreconnectionFailure(text,options),false);
+ for(const flags of [{...options,status:1},{...options,timedOut:true},{...options,signal:'SIGKILL'}])assert.equal(evidenceHelpers.isProvenPreconnectionFailure(raw,flags),false);
+ assert.equal(evidenceHelpers.isProvenPreconnectionFailure(raw+'\u001b[0m',options),false);
+});
