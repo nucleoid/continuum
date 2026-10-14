@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, statSync, rmSync, symlinkSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import * as evidenceHelpers from './container-maintenance-evidence.mjs';
 import { reserveEvidence, closeEvidence, collectSecretValues, writeFailureEvidence } from './container-maintenance-evidence.mjs';
 const fixture = fn => { const dir = mkdtempSync(join(tmpdir(), 'continuum-evidence-')); try { fn(dir); } finally { rmSync(dir, {recursive:true,force:true}); } };
 test('evidence reservation is private, unique, bounded and never overwrites retained evidence', () => fixture(dir => {
@@ -96,4 +97,26 @@ test('public failure evidence keeps standard password authentication phrase whil
  closeEvidence(reservation);const text=readFileSync(reservation.path,'utf8'),record=JSON.parse(text);
  assert.ok(record.lines.some(line=>line.includes('password authentication failed')));
  assert.ok(!text.includes('unlisted-sensitive-value'));assert.ok(!text.includes('unknown-credential-value'));
+}));
+
+test('preconnection proof accepts exact TCP authentication/refusal or unstarted Docker exec failures only',()=>{
+ const proof=evidenceHelpers.isProvenPreconnectionFailure, options={status:2,code:'COMMAND_FAILED'};
+ const auth='psql: error: connection to server at "postgres" (172.19.0.2), port 5432 failed: FATAL:  password authentication failed for user "owner"\n';
+ const refused='psql: error: connection to server at "postgres" (172.19.0.2), port 5432 failed: Connection refused\n\tIs the server running on that host and accepting TCP/IP connections?\n';
+ assert.equal(proof(auth,options),true);assert.equal(proof(refused,options),true);
+ assert.equal(proof('Error response from daemon: container '+'a'.repeat(64)+' is not running\n',{status:1}),true);
+ assert.equal(proof('service "postgres" is not running\n',{status:1}),true);
+});
+test('preconnection proof refuses forged server text, executed SQL, unknown failures, deadlines and truncated output',()=>{
+ const proof=evidenceHelpers.isProvenPreconnectionFailure;
+ const auth='psql: error: connection to server at "postgres" (172.19.0.2), port 5432 failed: FATAL: password authentication failed for user "owner"';
+ const options={status:2,code:'COMMAND_FAILED'};
+ for(const text of ['ERROR: '+auth,'NOTICE: '+auth,auth+'\nCONTEXT: SQL statement SELECT private_value',auth+'\nDETAIL: private_value','BEGIN\n'+auth,'psql: error: connection to server at "postgres" (172.19.0.2), port 5432 failed: FATAL: server terminated','unknown client failure',auth+'x',auth+'\0',auth+'\n'+'x'.repeat(16384)]) assert.equal(proof(text,options),false);
+ for(const flags of [{status:0},{status:null},{status:2,code:'DEADLINE_EXCEEDED'},{status:2,timedOut:true},{status:2,signal:'SIGKILL'},{}])assert.equal(proof(auth,flags),false);
+});
+test('unavailable preflight evidence retains only the typed code and redacted client output',()=>fixture(dir=>{
+ const secret='SyntheticPreflightCredentialValueLong123456',reservation=reserveEvidence(dir);
+ writeFailureEvidence(reservation,{phase:'preflight',code:'PREFLIGHT_UNAVAILABLE'},'psql: error: connection to server at "postgres" (172.19.0.2), port 5432 failed: FATAL: password authentication failed for user "'+secret+'"',[secret]);
+ closeEvidence(reservation);const record=JSON.parse(readFileSync(reservation.path,'utf8'));
+ assert.equal(record.code,'PREFLIGHT_UNAVAILABLE');assert.ok(!JSON.stringify(record).includes(secret));
 }));

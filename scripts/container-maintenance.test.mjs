@@ -169,6 +169,7 @@ function wrapperFixture(check) {
    else if(args[0]==='run') stdout=JSON.stringify(reference);
    else if(args.some(arg=>arg.includes('exec pg_dump'))) {writeSync(options.stdio[1],'synthetic dump');if(state.failBackup)return {status:null,stdout:'',stderr:'ERROR: synthetic backup lock wait',error:{code:'ETIMEDOUT'}};}
    else if(args.includes('exec')) stdout='0\n';
+   if(args.some(arg=>arg.includes('operator identity must be an effective manual org administrator'))&&state.preconnectionFailure) return {status:2,stdout:'',stderr:'psql: error: connection to server at "postgres" (192.0.2.1), port 5432 failed: FATAL:  password authentication failed for user "owner"\n'};
    if(args.some(arg=>arg.includes('operator identity must be an effective manual org administrator'))) state.eligibilityChecks=(state.eligibilityChecks??0)+1;
    if(args.some(arg=>arg.includes('operator identity must be an effective manual org administrator'))&&(state.ineligible || state.changeEligibility && state.eligibilityChecks>1)) return {status:1,stdout:'',stderr:'ERROR: role binding is ineligible'};
    if(args.includes('run')&&args.at(-1)==='grant'&&state.expireAtGrant) state.time+=1001;
@@ -349,4 +350,27 @@ test('unresolved owned job cleanup retains the window even if its current backen
  assert.ok(formatMaintenanceFailure(error).includes('cleanupError=JOB_CLEANUP_UNRESOLVED'));
  assert.equal(marker.unresolved.reason,'JOB_CLEANUP_UNRESOLVED');assert.match(marker.unresolved.sessions[0].jobName,/^synthetic-maintenance-maintenance-grant-[0-9]+$/);
  assert.throws(run,e=>e.code==='MAINTENANCE_LOCKED');
+}));
+
+
+test('eligibility executes in an inherited hardened owner job over TCP, never in the DBA container',()=>wrapperFixture(({state,run})=>{
+ run();const checks=state.calls.filter(call=>call.args.some(arg=>arg.includes('operator identity must be an effective manual org administrator')));
+ assert.equal(checks.length,2);
+ for(const check of checks) {
+  assert.ok(check.args.includes('run'));assert.ok(check.args.includes('--no-deps'));assert.ok(check.args.includes('--pull'));assert.ok(check.args.includes('--entrypoint'));
+  assert.ok(check.args.some(arg=>/^PGAPPNAME=ctm-eligibility-[a-f0-9]{24}$/.test(arg)));
+  assert.ok(check.args.some(arg=>arg.includes('psql')&&arg.includes('-h "$PGHOST"')&&arg.includes('-U "$PGUSER"')));
+  assert.ok(check.args.some(arg=>arg.includes("session_user")&&arg.includes("'owner'")));
+ }
+ for(const call of state.calls.filter(call=>call.args.includes('exec')&&call.args.includes('postgres')&&!call.args.some(arg=>arg.includes('exec pg_dump')))) {
+  assert.ok(!call.args.some(arg=>arg.includes('continuum_org_scope_id')||arg.includes('continuum_validate_trusted_database_role')||arg.includes('continuum_require_sync_retirement_authority')));
+  assert.ok(call.args.some(arg=>arg.includes('search_path=pg_catalog,pg_temp')));
+ }
+}));
+
+test('proven owner preconnection refusal releases the window without backups, stop or backend termination',()=>wrapperFixture(({root,state,run})=>{
+ state.preconnectionFailure=true;state.failSettlement=true;let error;try{run();}catch(value){error=value;}
+ assert.equal(error.code,'PREFLIGHT_UNAVAILABLE');assert.equal(error.phase,'preflight');assert.equal(error.lockRetained,undefined);
+ assert.equal(existsSync(join(root,'.continuum-maintenance-locks','synthetic-maintenance.lock')),false);assert.equal(existsSync(join(root,'backup.dump')),false);
+ assert.ok(!state.calls.some(call=>call.args[0]==='stop'||call.args.includes('up')||call.args.some(arg=>arg.includes('pg_terminate_backend'))));
 }));
