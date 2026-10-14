@@ -62,3 +62,14 @@ test('reservation, record and cleanup flush files and Linux directory entries in
   assert.deepEqual(events,process.platform==='win32'?['file','file','file']:['file','directory','file','directory','file','directory','directory']);
  } finally {fs.fsyncSync=original;syncBuiltinESMExports();}
 }));
+
+test('file-qualified psql errors retain actionable reasons while every secret and absolute path is redacted',()=>fixture(dir=>{
+ const secret='SyntheticRetainedSecretLongValue1234567890';
+ const reservation=reserveEvidence(dir);
+ const raw=`psql:/assets/scripts/grant-operator-role.sql:20: ERROR: synthetic reviewed grant refusal\npsql:C:\\private\\credentials.sql:9: ERROR: synthetic Windows failure ${secret} postgres://owner:${secret}@postgres/db`;
+ writeFailureEvidence(reservation,{phase:'grant',code:'COMMAND_FAILED'},raw,[secret]);closeEvidence(reservation);
+ const text=readFileSync(reservation.path,'utf8'),record=JSON.parse(text);
+ assert.equal(record.lines.length,2);assert.ok(record.lines.every(line=>line.startsWith('psql:')));
+ assert.ok(text.includes('synthetic reviewed grant refusal'));assert.ok(text.includes('synthetic Windows failure'));
+ for(const value of [secret,'/assets/scripts','C:\\private','postgres://'])assert.ok(!text.includes(value),value);
+}));
