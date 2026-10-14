@@ -40,3 +40,13 @@ test('eligibility observer exact session marker survives PostgreSQL application-
  assert.ok(Buffer.byteLength(marker,'utf8')<=63);
  assert.ok(source.includes("application_name='${windowName}'"),'Observer and owned cleanup use the same full marker');
 });
+test('eligibility observer mutates guarded membership only as owner after its DBA wait', async () => {
+ const {readFileSync}=await import('node:fs');
+ const source=readFileSync(new URL('./container-production-smoke.mjs',import.meta.url),'utf8');
+ const sql=source.match(/const windowSql=`([\s\S]*?)`;/)?.[1];assert.ok(sql);
+ const change=sql.indexOf('UPDATE scope_memberships');assert.ok(change>=0);
+ assert.ok(sql.indexOf('END $window$;')<sql.indexOf('SET LOCAL ROLE continuum_owner'),'The DBA observes the backup before switching effective role');
+ assert.ok(sql.indexOf('SET LOCAL ROLE continuum_owner')<change&&sql.indexOf('SET LOCAL ROLE continuum_owner')>=0,'The published table-owner guard must apply to the actual mutation');
+ assert.match(sql,/GET DIAGNOSTICS changed = ROW_COUNT/);
+ assert.ok(sql.indexOf('RESET ROLE;',change)>change&&sql.indexOf('RESET ROLE;',change)<sql.indexOf('COMMIT;',change));
+});
