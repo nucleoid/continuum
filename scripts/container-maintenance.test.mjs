@@ -140,3 +140,74 @@ test('wrapper gives backup a separate budget and rejects parity drift before sto
   rmSync(root,{recursive:true,force:true});
  }
 });
+
+function wrapperFixture(check) {
+ const root=mkdtempSync(join(tmpdir(),'continuum-wrapper-safety-'));
+ const originalSpawn=childProcess.spawnSync,originalNow=Date.now, saved={...process.env};
+ try {
+  for(const dir of ['deploy','scripts','migrations']) mkdirSync(join(root,dir));
+  for(const [file,value] of [['package.json','{}'],['deploy/compose.production.yml','public'],['scripts/grant.sql','SELECT 1;'],['migrations/0001.sql','SELECT 2;']]) writeFileSync(join(root,file),value);
+  const reference=runtimeAssetManifest(root),appImage='sha256:'+'a'.repeat(64),pgImage='sha256:'+'b'.repeat(64);
+  const job=()=>({image:pgImage,volumes:[{type:'bind',source:root,target:'/assets',read_only:true}]});
+  const project='synthetic-maintenance',volume='synthetic-pgdata';
+  const config={name:project,volumes:{pgdata:{name:volume}},services:{api:{image:appImage,environment:{CONTINUUM_AUTH_MODE:'entra'}},postgres:{image:pgImage,environment:{POSTGRES_DB:'synthetic'}},migrate:{image:appImage,environment:{CONTINUUM_MIGRATION_OWNER_ROLE:'owner'}},bootstrap:job(),'provision-admin':job(),grant:{...job(),environment:{PGUSER:'owner',CONTINUUM_APP_ROLE:'app',CONTINUUM_OPERATOR_ROLE:'op',CONTINUUM_SYNC_ROLE:'sync'}}}};
+  const container=(id,service='api',owner=project,running=true)=>({Id:id,Name:'/'+id,State:{Running:running},Config:{Labels:{'com.docker.compose.project':owner,'com.docker.compose.service':service}},Mounts:[{Type:'volume',Name:volume,Destination:'/var/lib/postgresql/data'}]});
+  const state={volumeOwner:project,consumers:[container('synthetic-postgres','postgres')],calls:[],time:10000};
+  Date.now=()=>state.time;
+  process.env.CONTINUUM_BACKUP_FILE=join(root,'backup.dump');process.env.CONTINUUM_QUIESCENCE_CONFIRMED='yes';
+  childProcess.spawnSync=(command,args,options)=>{
+   assert.equal(command,'docker');state.calls.push({args,options});let stdout='';
+   if(args.includes('config')) stdout=JSON.stringify(config);
+   else if(args[0]==='image') stdout=JSON.stringify([{Id:args[2],Os:'linux',Architecture:'amd64'}]);
+   else if(args[0]==='volume') stdout=args[1]==='inspect'?JSON.stringify([{Name:volume,Labels:{'com.docker.compose.project':state.volumeOwner}}]):volume+'\n';
+   else if(args[0]==='ps') stdout=args.includes('volume='+volume)?state.consumers.map(c=>c.Id).join('\n'):args.includes('label=com.docker.compose.project='+project)?'synthetic-api\nsynthetic-postgres\n':'';
+   else if(args[0]==='inspect') stdout=JSON.stringify([state.consumers.find(c=>c.Id===args[1])??container(args[1],args[1]==='synthetic-postgres'?'postgres':'api')]);
+   else if(args[0]==='run') stdout=JSON.stringify(reference);
+   else if(args.some(arg=>arg.includes('exec pg_dump'))) writeSync(options.stdio[1],'synthetic dump');
+   else if(args.includes('exec')) stdout='0\n';
+   if(args.includes('run')&&args.at(-1)==='grant'&&state.expireAtGrant) state.time+=1001;
+   return {status:0,stdout,stderr:''};
+  };syncBuiltinESMExports();
+  check({root,state,container,run:(compose=join(root,'deploy','compose.production.yml'))=>runMaintenance('upgrade',join(root,'private.env'),compose,{deadlineMs:1000,backupDeadlineMs:1000})});
+ } finally {
+  childProcess.spawnSync=originalSpawn;syncBuiltinESMExports();Date.now=originalNow;
+  for(const key of Object.keys(process.env)) if(!(key in saved)) delete process.env[key];
+  Object.assign(process.env,saved);rmSync(root,{recursive:true,force:true});
+ }
+}
+
+test('all Docker children discard ambient Compose and Continuum settings while wrapper controls remain available',()=>wrapperFixture(({state,run})=>{
+ process.env.COMPOSE_PROJECT_NAME='foreign-project';process.env.CONTINUUM_PGDATA_VOLUME='foreign-volume';process.env.CONTINUUM_ADMIN_PRINCIPAL_ID='foreign-admin';
+ process.env.DOCKER_CONTEXT='synthetic-context';process.env.WRAPPER_TEST_SETTING='preserved';
+ run();
+ assert.ok(state.calls.some(call=>call.args.some(arg=>arg.includes('exec pg_dump'))));
+ for(const call of state.calls) {
+  assert.ok(call.options.env,'every Docker call must receive an explicit environment');
+  assert.ok(!Object.keys(call.options.env).some(key=>/^(CONTINUUM_|COMPOSE_)/i.test(key)));
+  assert.equal(call.options.env.DOCKER_CONTEXT,'synthetic-context');assert.equal(call.options.env.WRAPPER_TEST_SETTING,'preserved');
+ }
+ assert.equal(process.env.CONTINUUM_QUIESCENCE_CONFIRMED,'yes');assert.equal(process.env.COMPOSE_PROJECT_NAME,'foreign-project');
+}));
+
+test('upgrade refuses wrong volume labels and every foreign consumer before backup or downtime',()=>{
+ for(const variant of ['volume-label','foreign-live','foreign-stopped','extra-postgres']) wrapperFixture(({root,state,container,run})=>{
+  if(variant==='volume-label') state.volumeOwner='foreign-project';
+  else state.consumers.push(container('foreign-consumer','postgres',variant==='extra-postgres'?'synthetic-maintenance':'foreign-project',variant!=='foreign-stopped'));
+  assert.throws(run,e=>e.code==='VOLUME_OWNERSHIP_MISMATCH'&&e.phase==='preflight');
+  assert.equal(existsSync(join(root,'backup.dump')),false);
+  assert.ok(!state.calls.some(call=>call.args[0]==='stop'||call.args.includes('up')||call.args[0]==='run'));
+ });
+});
+
+test('only the verified production Compose asset may execute',()=>wrapperFixture(({root,state,run})=>{
+ const alternate=join(root,'alternate-compose.yml');writeFileSync(alternate,'public');
+ assert.throws(()=>run(alternate),e=>e.code==='ASSET_MISMATCH'&&e.phase==='preflight');
+ assert.equal(existsSync(join(root,'backup.dump')),false);
+ assert.ok(!state.calls.some(call=>call.args[0]==='stop'||call.args.includes('up')));
+}));
+
+test('successful grant at the budget boundary still starts the explicitly bounded API gate',()=>wrapperFixture(({state,run})=>{
+ state.expireAtGrant=true;run();
+ const api=state.calls.find(call=>call.args.includes('up')&&call.args.at(-1)==='api');
+ assert.ok(api);assert.equal(api.options.timeout,90000);
+}));
