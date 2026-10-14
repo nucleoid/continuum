@@ -505,8 +505,10 @@ END $window$; COMMIT; SELECT 'eligibility-window-observed';`;
    check(sql(fresh,"SELECT count(*) FROM pg_stat_activity WHERE application_name ~ '^ctm-migrate-[a-f0-9]{24}$'",'DBA')==='0','Eligibility race left a migrator backend');
   }catch(error){
    windowError=error;
-   const lines=statSync(windowStderr).size<=65536?sanitizedMaintenanceLines(readFileSync(windowStderr,'utf8'),projects.flatMap(p=>Object.values(p.passwords))).slice(0,8):['[observer diagnostics exceeded limit]'];
-   process.stderr.write(JSON.stringify({code:'ELIGIBILITY_OBSERVER_FAILED',lines})+'\n');
+   const diagnostic={code:'ELIGIBILITY_OBSERVER_FAILED'};
+   try{diagnostic.lines=statSync(windowStderr).size<=65536?sanitizedMaintenanceLines(readFileSync(windowStderr,'utf8'),projects.flatMap(p=>Object.values(p.passwords))).slice(0,8):['[observer diagnostics exceeded limit]'];}
+   catch{diagnostic.evidenceUnavailable=true;}
+   try{process.stderr.write(JSON.stringify(diagnostic)+'\n');}catch{/* Preserve the original fixture failure. */}
    throw error;
   }finally{
    try{sql(fresh,`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE ${windowPredicate} AND pid<>pg_backend_pid()`,'DBA');windowChild.kill('SIGTERM');closeSync(windowFd);closeSync(windowStderrFd);restoreSyntheticFixture();check(sql(fresh,`SELECT count(*) FROM pg_stat_activity WHERE ${windowPredicate}`,'DBA')==='0','Eligibility observer cleanup did not settle');}
