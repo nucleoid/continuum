@@ -28,7 +28,7 @@ function expectFailure(action, expected, label) {
   let actual;
   try { action(); } catch (error) { actual = error; }
   if(!actual||!failureText(actual).includes(expected)){
-   const knownCodes=new Set(['COMMAND_FAILED','DEADLINE_EXCEEDED','BINDING_MISMATCH','BINDING_INELIGIBLE','ACTIVE_WRITERS','BACKUP_FAILED','BACKEND_SETTLEMENT_FAILED','MIGRATION_BACKEND_REMAINS','MAINTENANCE_LOCKED','ASSET_MISMATCH','VOLUME_OWNERSHIP_MISMATCH']);
+   const knownCodes=new Set(['COMMAND_FAILED','DEADLINE_EXCEEDED','BINDING_MISMATCH','BINDING_INELIGIBLE','ACTIVE_WRITERS','BACKUP_FAILED','BACKEND_SETTLEMENT_FAILED','MIGRATION_BACKEND_REMAINS','MAINTENANCE_LOCKED','ASSET_MISMATCH','VOLUME_OWNERSHIP_MISMATCH','PG_IMAGE_MISMATCH']);
    const knownPhases=new Set(['preflight','backup','bootstrap','migrate','provision-admin','grant','api','settlement','quiescence']);
    const diagnostic={code:actual?(knownCodes.has(actual.code)?actual.code:'UNCLASSIFIED_FAILURE'):'NO_FAILURE',phase:knownPhases.has(actual?.phase)?actual.phase:null};
    if(actual?.evidencePath){
@@ -416,6 +416,24 @@ UPDATE service_api_keys k SET revoked_at=v.revoked_at FROM jsonb_to_recordset(${
    check(compose(fresh,['ps','--status','running','-q','api']).trim()!=='','Overlapping window stopped serving');
   }finally{releaseMaintenanceLock(heldWindow);}
   results.passed.push('demoted or disabled bound OP and disabled SYNC refuse read-only before outputs/downtime/ledger changes; separately approved immutable owner grant/verify recovery converges; exclusive project window refuses overlap');
+  // The existing PG container must stay on its reviewed exact image before any
+  // selected-PG helper runs. The already loaded APP image is a synthetic wrong
+  // pin, and is never started as PostgreSQL.
+  const postgresId=compose(fresh,['ps','--status','running','-q','postgres']).trim();
+  const postgresIdentity=JSON.parse(run(['inspect',postgresId]))[0].Image;
+  const pgMismatchBackup=join(temporary,'pg-image-mismatch-refused.dump');
+  const beforePgMismatchFiles=readdirSync(fresh.directory).sort().join(',');
+  process.env.CONTINUUM_BACKUP_FILE=pgMismatchBackup;
+  maintenanceEnv({CONTINUUM_POSTGRES_IMAGE:image});
+  try{
+   const error=expectFailure(()=>runMaintenance('upgrade',envFile,productionCompose,{deadlineMs:120000}),'PG_IMAGE_MISMATCH','Running PostgreSQL image pin mismatch');
+   check(error.code==='PG_IMAGE_MISMATCH'&&error.phase==='preflight','PG image mismatch received unrelated failure');
+   check(!existsSync(pgMismatchBackup)&&readdirSync(fresh.directory).sort().join(',')===beforePgMismatchFiles,'PG image mismatch reserved outputs');
+   check(compose(fresh,['ps','--status','running','-q','api']).trim()!==''&&compose(fresh,['ps','--status','running','-q','postgres']).trim()===postgresId,'PG image mismatch stopped or replaced installation');
+   check(JSON.parse(run(['inspect',postgresId]))[0].Image===postgresIdentity,'PG image mismatch replaced PostgreSQL image');
+   check(sql(fresh,'SELECT jsonb_agg(to_jsonb(m) ORDER BY name)::text FROM _continuum_migrations m')===ledgerSnapshot,'PG image mismatch changed ledger');
+  }finally{maintenanceEnv();}
+  results.passed.push('exact running PostgreSQL image mismatch refuses before selected-PG helpers, outputs, API stop or PostgreSQL recreation');
   const driftAssets=join(fresh.directory,'drift-assets'); mkdirSync(driftAssets,{mode:0o755});
   copyFileSync(join(assets,'package.json'),join(driftAssets,'package.json'));
   for(const dir of ['deploy','migrations','scripts']){cpSync(join(assets,dir),join(driftAssets,dir),{recursive:true});chmodSync(join(driftAssets,dir),0o755);}
@@ -450,6 +468,44 @@ UPDATE service_api_keys k SET revoked_at=v.revoked_at FROM jsonb_to_recordset(${
    check(sql(fresh,`SELECT count(*) FROM pg_stat_activity WHERE ${writerPredicate}`,'DBA')==='0','Owned writer fixture cleanup did not settle');
   }
   results.passed.push('selected-image host asset drift refuses before API stop/backup; outside owner session is refused after project stop before backup/mutation without killing it');
+  // A DBA-owned transaction changes eligibility after readonly preflight and
+  // before migration. It releases its ledger lock as soon as the real named
+  // pg_dump is observed waiting, well inside its five-second lock timeout.
+  const windowName='synthetic-eligibility-window-'+randomUUID();
+  const windowPredicate=`usename='continuum_dba' AND datname='continuum' AND application_name='${windowName}'`;
+  const windowProof=join(temporary,'eligibility-window-proof.txt');
+  const windowFd=openSync(windowProof,'wx',0o600);
+  const windowSql=`SET search_path=continuum,public; SET statement_timeout='90s'; BEGIN; LOCK TABLE _continuum_migrations IN ACCESS EXCLUSIVE MODE;
+DO $window$ DECLARE until_at timestamptz:=clock_timestamp()+interval '75 seconds'; BEGIN
+ LOOP
+  PERFORM pg_stat_clear_snapshot();
+  IF EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND usename='continuum_dba' AND application_name ~ '^ctm-backup-[a-f0-9]{24}$' AND wait_event_type='Lock') THEN EXIT; END IF;
+  IF clock_timestamp()>until_at THEN RAISE EXCEPTION 'synthetic eligibility observer deadline'; END IF;
+  PERFORM pg_sleep(0.01);
+ END LOOP;
+ UPDATE scope_memberships SET active=false WHERE principal_id='${adminId}' AND scope_id=continuum_org_scope_id() AND source_kind='manual' AND source_id='manual' AND role='admin';
+END $window$; COMMIT; SELECT 'eligibility-window-observed';`;
+  const windowChild=spawn('docker',[...fresh.base,'exec','-T','-e','PGPASSWORD','-e','PGAPPNAME','postgres','psql','-X','-qAt','-h','127.0.0.1','-U','continuum_dba','-d','continuum','-v','ON_ERROR_STOP=1','-c',windowSql],{env:{...fresh.env,PGPASSWORD:fresh.passwords.DBA,PGAPPNAME:windowName},stdio:['ignore',windowFd,'ignore']});
+  let windowError;
+  try{
+   const until=Date.now()+10000;
+   const held=`SELECT count(*) FROM pg_stat_activity a JOIN pg_locks l ON l.pid=a.pid WHERE ${windowPredicate} AND l.relation='continuum._continuum_migrations'::regclass AND l.mode='AccessExclusiveLock' AND l.granted`;
+   while(sql(fresh,held,'DBA')!=='1'&&Date.now()<until){}
+   check(sql(fresh,held,'DBA')==='1','Eligibility observer did not acquire its owned ledger lock');
+   check(eligibilityWitness().op&&eligibilityWitness().sync,'Eligibility race did not start from eligible authority');
+   const windowBackup=join(temporary,'eligibility-window.dump');process.env.CONTINUUM_BACKUP_FILE=windowBackup;
+   const error=expectFailure(()=>runMaintenance('upgrade',envFile,productionCompose,{deadlineMs:120000,backupDeadlineMs:120000}),'BINDING_INELIGIBLE','Eligibility changed during backup window');
+   check(error.code==='BINDING_INELIGIBLE'&&error.phase==='quiescence','Eligibility race did not fail after backup before migration');
+   check(readFileSync(windowProof,'utf8').includes('eligibility-window-observed')&&!eligibilityWitness().op&&eligibilityWitness().sync,'Eligibility race lacked real backup wait and exact predicate witnesses');
+   verifyWrapperBackup(windowBackup,fresh);
+   check(compose(fresh,['ps','--status','running','-q','api']).trim()==='','Eligibility race unexpectedly resumed serving');
+   check(sql(fresh,'SELECT jsonb_agg(to_jsonb(m) ORDER BY name)::text FROM _continuum_migrations m')===ledgerSnapshot&&storedBindings()===originalBindings&&credentialSnapshot()===originalCredentials,'Eligibility race mutated ledger, bindings or role credentials');
+   check(sql(fresh,"SELECT count(*) FROM pg_stat_activity WHERE application_name ~ '^ctm-migrate-[a-f0-9]{24}$'",'DBA')==='0','Eligibility race left a migrator backend');
+  }catch(error){windowError=error;throw error;}finally{
+   try{sql(fresh,`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE ${windowPredicate} AND pid<>pg_backend_pid()`,'DBA');windowChild.kill('SIGTERM');closeSync(windowFd);restoreSyntheticFixture();check(sql(fresh,`SELECT count(*) FROM pg_stat_activity WHERE ${windowPredicate}`,'DBA')==='0','Eligibility observer cleanup did not settle');}
+   catch(error){if(windowError)windowError.fixtureCleanupError='Synthetic eligibility window cleanup failed';else throw error;}
+  }
+  results.passed.push('actual named custom backup wait witnesses mid-window OP demotion; post-quiescence eligibility recheck refuses before migration and preserves authority/ledger; owned fixture fully restores');
   // Exercise the exact operator upgrade success tail and use its real backup.
   maintenanceEnv();
   const successfulBackup = join(temporary,'successful-wrapper-upgrade.dump');

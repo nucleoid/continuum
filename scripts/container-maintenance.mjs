@@ -1,14 +1,18 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, openSync, closeSync, readSync, writeSync, statSync, unlinkSync, lstatSync, readdirSync, mkdirSync, fstatSync, fsyncSync, readFileSync, constants } from 'node:fs';
+import { existsSync, openSync, closeSync, readSync, writeSync, statSync, unlinkSync, lstatSync, readdirSync, mkdirSync, fstatSync, fsyncSync, readFileSync, ftruncateSync, constants } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { resolve, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { validateTmpfsMounts } from './container-compose-model.mjs';
-import { reserveEvidence, closeEvidence, collectSecretValues, writeFailureEvidence } from './container-maintenance-evidence.mjs';
+import { reserveEvidence, closeEvidence, collectSecretValues, writeFailureEvidence, safeMaintenanceSideErrors } from './container-maintenance-evidence.mjs';
 
 export class MaintenanceFailure extends Error {
  constructor(code, phase = '') { super(`Container maintenance ${phase ? `${phase}: ` : ''}${code}`); this.code = code; this.phase = phase; }
+}
+export function formatMaintenanceFailure(error) {
+ const sides=Object.entries(safeMaintenanceSideErrors(error)).map(([key,value])=>`; ${key}=${value}`).join('');
+ return `${error.message}${error.evidencePath ? '; evidence='+error.evidencePath : ''}${sides}${error.lockRetained === true ? '; lockRetained=true' : ''}`;
 }
 export function reserveBackupTargets(value) {
  if (!value) throw new Error('Upgrade requires a new backup output path');
@@ -50,9 +54,21 @@ export function releaseMaintenanceLock(lock) {
  if (!lock || lock.fd === null) return;
  try {
   const stat=lstatSync(lock.path),actual=JSON.parse(readFileSync(lock.path,'utf8'));
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 1024 || stat.ino !== lock.stat.ino || stat.dev !== lock.stat.dev || JSON.stringify(actual) !== JSON.stringify(lock.record)) throw new MaintenanceFailure('MAINTENANCE_LOCK_OWNERSHIP_MISMATCH','preflight');
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 8192 || stat.ino !== lock.stat.ino || stat.dev !== lock.stat.dev || JSON.stringify(actual) !== JSON.stringify(lock.record)) throw new MaintenanceFailure('MAINTENANCE_LOCK_OWNERSHIP_MISMATCH','preflight');
   unlinkSync(lock.path);syncDirectory(lock.directory);
  } finally {closeSync(lock.fd);lock.fd=null;}
+}
+function retainUnresolvedLock(lock, session, reason = 'BACKEND_SETTLEMENT_FAILED') {
+ lock.retain=true;
+ const stat=lstatSync(lock.path),actual=JSON.parse(readFileSync(lock.path,'utf8'));
+ if(!stat.isFile() || stat.isSymbolicLink() || stat.size>8192 || stat.ino!==lock.stat.ino || stat.dev!==lock.stat.dev || JSON.stringify(actual)!==JSON.stringify(lock.record)) throw new MaintenanceFailure('MAINTENANCE_LOCK_OWNERSHIP_MISMATCH');
+ const sessions=lock.record.unresolved?.sessions ?? [];
+ if(!sessions.some(item=>item.applicationName===session.applicationName)) sessions.push(session);
+ if(sessions.length>16)throw new MaintenanceFailure('MAINTENANCE_LOCK_MARKER_FAILED');
+ lock.record.unresolved={state:reason === 'JOB_CLEANUP_UNRESOLVED' ? 'job-cleanup-unresolved' : 'settlement-unresolved',reason,sessions};
+ const bytes=Buffer.from(JSON.stringify(lock.record)+'\n');if(bytes.length>8192)throw new MaintenanceFailure('MAINTENANCE_LOCK_MARKER_FAILED');
+ ftruncateSync(lock.fd,0);let offset=0;while(offset<bytes.length)offset+=writeSync(lock.fd,bytes,offset,bytes.length-offset,offset);
+ fsyncSync(lock.fd);syncDirectory(lock.directory);
 }
 export function durableBackupOutputs(backups) {
  for(const item of backups.slice(0,2)) fsyncSync(item.fd);
@@ -242,6 +258,18 @@ function assertVolumeOwnership(volume, project, projectIds) {
   }
  } catch { throw new MaintenanceFailure('VOLUME_OWNERSHIP_MISMATCH','preflight'); }
 }
+function assertRunningPostgres(ids,project,imageId,volume) {
+ try {
+  const running=[];
+  for(const id of ids) {
+   const container=JSON.parse(docker(['inspect',id]).stdout)[0];
+   if(container.Config?.Labels?.['com.docker.compose.project']!==project) throw new Error();
+   if(container.Config.Labels['com.docker.compose.service']==='postgres' && container.State?.Running===true) running.push(container);
+  }
+  if(running.length!==1 || running[0].Config.Labels['com.docker.compose.oneoff']?.toLowerCase()==='true'
+   || running[0].Image!==imageId || !running[0].Mounts?.some(mount=>mount.Type==='volume'&&mount.Name===volume)) throw new Error();
+ } catch {throw new MaintenanceFailure('PG_IMAGE_MISMATCH','preflight');}
+}
 function assertCanonicalCompose(file, assets) {
  try {
   if (resolve(file) !== join(resolve(assets),'deploy','compose.production.yml') || !lstatSync(resolve(file)).isFile()) throw new Error();
@@ -263,20 +291,20 @@ export function runMaintenance(mode, envFile, composeFile, options = {}) {
  const immutable = /^(sha256:[a-f0-9]{64}|[^\s]+@sha256:[a-f0-9]{64})$/;
  if (!/^[a-z0-9][a-z0-9_-]+$/.test(project) || !/^[a-z0-9][a-z0-9_.-]+$/.test(volume)
   || !immutable.test(appImage) || !immutable.test(pgImage)) throw new Error('Unique project/volume and immutable images are required');
- const lock=acquireMaintenanceLock(project);let outerError;
+ const lock=acquireMaintenanceLock(project);let outerError,evidence,secrets=[],selectedId,activePhase='preflight',successful=false;
  try {
  const imported = JSON.parse(docker(['image', 'inspect', appImage]).stdout)[0];
  const pg = JSON.parse(docker(['image', 'inspect', pgImage]).stdout)[0];
  if (imported.Os !== 'linux' || imported.Architecture !== 'amd64'
   || pg.Os !== 'linux' || pg.Architecture !== 'amd64') throw new Error('Unsupported image platform');
- const selectedId = imported.Id;
+ selectedId = imported.Id;
  if (config.services.api.environment.CONTINUUM_AUTH_MODE !== 'entra') throw new Error('Production serving requires Entra authentication');
  const existing = docker(['volume', 'ls', '--format', '{{.Name}}']).stdout.split(/\r?\n/).includes(volume);
  if (mode === 'fresh' && existing) throw new Error('Fresh installation refuses an existing volume');
  if (mode === 'upgrade' && !existing) throw new Error('Upgrade requires the retained installation volume');
  const ids = docker(['ps', '-aq', '--filter', `label=com.docker.compose.project=${project}`]).stdout.trim().split(/\s+/).filter(Boolean);
  if (mode === 'fresh' && ids.length) throw new Error('Fresh installation refuses an existing project');
- if (mode === 'upgrade') assertVolumeOwnership(volume,project,ids);
+ if (mode === 'upgrade') {assertVolumeOwnership(volume,project,ids);assertRunningPostgres(ids,project,pg.Id,volume);}
  if (mode === 'upgrade' && process.env.CONTINUUM_QUIESCENCE_CONFIRMED !== 'yes') throw new Error('Confirm external writers, schedulers and callback workers are stopped');
  const ownerRole = config.services.migrate.environment.CONTINUUM_MIGRATION_OWNER_ROLE
   ?? config.services.grant?.environment.PGUSER;
@@ -294,6 +322,7 @@ export function runMaintenance(mode, envFile, composeFile, options = {}) {
  const rawDbaSql=(sql,name,timeout=15000)=>docker([...compose,'exec','-T','-e',`PGAPPNAME=${name}`,'postgres','/bin/sh','-ec',
   'export PGPASSWORD="$(cat /run/secrets/dba_password)" PGCONNECT_TIMEOUT=5 PGOPTIONS="-c statement_timeout=5000 -c lock_timeout=2000"; exec psql -X -qAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"','--',sql],timeout).stdout.trim();
  const settleBackend=(name,role,phase)=>{
+  try {
   const predicate=`application_name=${literal(name)} AND usename=${literal(role)} AND datname=${literal(database)} AND pid<>pg_backend_pid()`;
   const end=Date.now()+10000;
   for(let attempts=0;attempts<10 && Date.now()<=end;attempts++) {
@@ -301,6 +330,11 @@ export function runMaintenance(mode, envFile, composeFile, options = {}) {
    if(rawDbaSql(`SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE ${predicate}`,applicationName('settle'),Math.max(1,end-Date.now()))==='0') return;
   }
   throw new MaintenanceFailure('BACKEND_SETTLEMENT_FAILED',phase);
+  } catch(error) {
+   try {retainUnresolvedLock(lock,{applicationName:name,role,database,phase});}
+   catch(marker) {lock.markerError=marker.code === 'MAINTENANCE_LOCK_OWNERSHIP_MISMATCH' ? marker.code : 'MAINTENANCE_LOCK_MARKER_FAILED';}
+   throw new MaintenanceFailure('BACKEND_SETTLEMENT_FAILED',phase);
+  }
  };
  const dbaSql=sql=>{
   const name=applicationName('dba');
@@ -315,9 +349,9 @@ export function runMaintenance(mode, envFile, composeFile, options = {}) {
  }
  assertRuntimeAssets(assets,imageAssetManifest(selectedId,project));
  // Reserve redacted private failure evidence before any downtime.
- const secrets = collectSecretValues(config);
- const evidence = reserveEvidence(process.env.CONTINUUM_MAINTENANCE_EVIDENCE_DIR ?? dirname(mode === 'upgrade' ? process.env.CONTINUUM_BACKUP_FILE ?? envFile : envFile));
- let backups = [], activePhase = 'preflight', successful=false, runError;
+ secrets = collectSecretValues(config);
+ evidence = reserveEvidence(process.env.CONTINUUM_MAINTENANCE_EVIDENCE_DIR ?? dirname(mode === 'upgrade' ? process.env.CONTINUUM_BACKUP_FILE ?? envFile : envFile));
+ let backups = [],runError;
  try {
   backups = mode === 'upgrade' ? reserveBackupTargets(process.env.CONTINUUM_BACKUP_FILE) : [];
   for (const id of ids) {
@@ -346,14 +380,18 @@ export function runMaintenance(mode, envFile, composeFile, options = {}) {
       docker(['stop', '--time', '10', id], 20000);
       if (docker(['ps', '-aq', '--filter', `name=^/${name}$`]).stdout.trim()) docker(['rm', id]);
      }
-    } catch(cleanup) {failed.cleanupError=cleanup.code ?? 'COMMAND_FAILED';}
+    } catch(cleanup) {
+     failed.cleanupError='JOB_CLEANUP_UNRESOLVED';
+     try {retainUnresolvedLock(lock,{applicationName:sessionName,role:service === 'bootstrap' ? dbaRole : ownerRole,database,phase:service,jobName:name},'JOB_CLEANUP_UNRESOLVED');}
+     catch(marker) {lock.markerError=marker.code === 'MAINTENANCE_LOCK_OWNERSHIP_MISMATCH' ? marker.code : 'MAINTENANCE_LOCK_MARKER_FAILED';}
+    }
     // Settlement runs even when client/container cleanup itself failed.
     try {settleBackend(sessionName,service === 'bootstrap' ? dbaRole : ownerRole,service);}
     catch(failure) {failed.settlementError=failure.code ?? 'BACKEND_SETTLEMENT_FAILED';}
     throw failed;
    }
   };
-  docker([...compose, 'up', '-d', '--pull', 'never', '--wait', '--wait-timeout', '120', 'postgres'], 150000);
+  if(mode === 'fresh') docker([...compose, 'up', '-d', '--pull', 'never', '--wait', '--wait-timeout', '120', 'postgres'], 150000);
   assertQuiescence(dbaSql(activitySql));
   if (mode === 'fresh') { overallEnd = Date.now() + deadlineMs; phase('bootstrap'); }
   if (mode === 'upgrade') {
@@ -374,7 +412,12 @@ export function runMaintenance(mode, envFile, composeFile, options = {}) {
    activePhase='backup';durableBackupOutputs(backups);
    overallEnd = Date.now() + deadlineMs;
   }
+  activePhase='quiescence';
   assertQuiescence(dbaSql(activitySql));
+  if(mode === 'upgrade') {
+   try {dbaSql(bindingPreflightSql(config.services.grant.environment));}
+   catch(error) {error.phase='quiescence';throw error;}
+  }
   phase('migrate');
   if (mode === 'fresh') phase('provision-admin');
   phase('grant');
@@ -387,26 +430,41 @@ export function runMaintenance(mode, envFile, composeFile, options = {}) {
    try { logs = docker([...compose,'logs','--no-color','--tail','100','api'],10000).stdout; } catch { /* Keep original failure. */ }
    const failure = new MaintenanceFailure(error.code ?? 'COMMAND_FAILED','api');
    Object.defineProperty(failure,'rawOutput',{value:(error.rawOutput ?? '') + '\n' + logs});
-   docker([...compose, 'stop', '--timeout', '15', 'api'], 25000);
+   try {docker([...compose, 'stop', '--timeout', '15', 'api'], 25000);}
+   catch(cleanup) {failure.cleanupError=cleanup.code ?? 'COMMAND_FAILED';}
    throw failure;
   }
   successful=true;
   return { imageId: selectedId, mode, project, volume, deadlineMs, backupDeadlineMs };
  } catch (error) {
-  runError=error;
-  try {error.evidencePath = writeFailureEvidence(evidence,{phase:error.phase || activePhase,code:error.code ?? 'COMMAND_FAILED',image:selectedId,mode,deadlineMs,backupDeadlineMs},error.rawOutput ?? 'Error: ' + error.message,secrets);} catch(failure) {error.evidenceError=failure.message === 'EVIDENCE_WRITE_FAILED' ? failure.message : 'EVIDENCE_WRITE_FAILED';}
-  throw error;
+  runError=error;throw error;
  } finally {
-  try {for (const item of backups) closeSync(item.fd);closeEvidence(evidence,successful);}
-  catch(error) {if(runError) runError.evidenceError='EVIDENCE_CLOSE_FAILED';else throw error;}
+  try {for (const item of backups) closeSync(item.fd);}
+  catch(error) {if(runError) runError.cleanupError='COMMAND_FAILED';else throw error;}
  }
  } catch(error) {outerError=error;throw error;}
- finally {try {releaseMaintenanceLock(lock);} catch(error) {if(outerError) outerError.lockError=error.code ?? 'MAINTENANCE_LOCK_RELEASE_FAILED';else throw error;}}
+ finally {
+  try {
+   if(lock.retain) {
+    if(outerError) {outerError.lockRetained=true;if(lock.markerError)outerError.lockError=lock.markerError;}
+    closeSync(lock.fd);lock.fd=null;
+   } else releaseMaintenanceLock(lock);
+  } catch(error) {if(outerError) outerError.lockError=error.code ?? 'MAINTENANCE_LOCK_RELEASE_FAILED';else outerError=new MaintenanceFailure(error.code ?? 'MAINTENANCE_LOCK_RELEASE_FAILED');}
+  if(outerError && evidence) {
+   try {outerError.evidencePath=writeFailureEvidence(evidence,{phase:outerError.phase || activePhase,code:outerError.code ?? 'COMMAND_FAILED',image:selectedId,mode,deadlineMs,backupDeadlineMs,lockRetained:outerError.lockRetained,...safeMaintenanceSideErrors(outerError)},outerError.rawOutput ?? 'Error: '+outerError.message,secrets);}
+   catch(error) {outerError.evidenceError='EVIDENCE_WRITE_FAILED';}
+  }
+  try {closeEvidence(evidence,successful && !outerError);}
+  catch(error) {if(outerError)outerError.evidenceCloseError='EVIDENCE_CLOSE_FAILED';else outerError=new MaintenanceFailure('EVIDENCE_CLOSE_FAILED');}
+  // A cleanup-only failure must be surfaced on an otherwise successful window.
+  if(outerError && successful) throw outerError;
+ }
+
 }
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
  try {
   const [mode, envFile, composeFile] = process.argv.slice(2);
   if (!envFile || !composeFile) throw new Error('Usage: container-maintenance.mjs fresh|upgrade env-file compose-file');
   process.stdout.write(`${JSON.stringify(runMaintenance(mode, envFile, composeFile))}\n`);
- } catch (error) { process.stderr.write(`continuum-maintenance: ${error.message}${error.evidencePath ? "; evidence=" + error.evidencePath : ""}\n`); process.exitCode = 1; }
+ } catch (error) { process.stderr.write(`continuum-maintenance: ${formatMaintenanceFailure(error)}\n`); process.exitCode = 1; }
 }

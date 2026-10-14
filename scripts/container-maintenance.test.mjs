@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, writeFileSync, closeSync, existsSync, rmSync, statSync, mkdirSync, writeSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { reserveBackupTargets, maintenanceBudgets, runtimeAssetManifest, assertRuntimeAssets, assertAssetMounts, quiescenceSql, assertQuiescence, runMaintenance } from './container-maintenance.mjs';
+import { reserveBackupTargets, maintenanceBudgets, runtimeAssetManifest, assertRuntimeAssets, assertAssetMounts, quiescenceSql, assertQuiescence, runMaintenance, formatMaintenanceFailure } from './container-maintenance.mjs';
 
 test('upgrade preflight refuses missing output, missing parent and every existing sidecar', () => {
  const root = mkdtempSync(join(tmpdir(), 'continuum-backup-preflight-'));
@@ -114,8 +114,8 @@ test('wrapper gives backup a separate budget and rejects parity drift before sto
    if(args.includes('config')) stdout=JSON.stringify(config);
    else if(args[0]==='image') stdout=JSON.stringify([{Id:args[2],Os:'linux',Architecture:'amd64'}]);
    else if(args[0]==='volume') stdout=args[1]==='inspect'?JSON.stringify([{Name:'synthetic-pgdata',Labels:{'com.docker.compose.project':config.name}}]):'synthetic-pgdata\n';
-   else if(args[0]==='ps') stdout=args.includes('label=com.docker.compose.project=synthetic-maintenance')?'synthetic-api\n':'';
-   else if(args[0]==='inspect') stdout=JSON.stringify([{Config:{Labels:{'com.docker.compose.project':config.name,'com.docker.compose.service':'api'}}}]);
+   else if(args[0]==='ps') stdout=args.includes('label=com.docker.compose.project=synthetic-maintenance')?'synthetic-api\nsynthetic-postgres\n':'';
+   else if(args[0]==='inspect') stdout=JSON.stringify([{Image:pgImage,State:{Running:true},Mounts:[{Type:'volume',Name:'synthetic-pgdata'}],Config:{Labels:{'com.docker.compose.project':config.name,'com.docker.compose.service':args[1]==='synthetic-postgres'?'postgres':'api'}}}]);
    else if(args[0]==='run') {
     assert.ok(args.includes('none'));assert.ok(args.includes('--read-only'));assert.ok(args.includes('10001:10001'));
     assert.ok(args.includes('--cap-drop'));assert.ok(args.includes('no-new-privileges:true'));assert.ok(!args.includes('--mount')&&!args.includes('-v'));
@@ -174,6 +174,7 @@ function wrapperFixture(check) {
    if(args.includes('run')&&args.at(-1)==='grant'&&state.expireAtGrant) state.time+=1001;
    if(args.includes('run')&&args.at(-1)==='grant'&&state.failGrant) return {status:1,stdout:'',stderr:'ERROR: synthetic lock timeout '+state.privateSecret+'\nCONTEXT: PASSWORD '+state.privateSecret};
    if(args.includes('up')&&args.at(-1)==='api'&&state.failApi) return {status:1,stdout:'',stderr:'Container synthetic API unhealthy'};
+   if(args[0]==='ps'&&args.some(arg=>arg.includes('maintenance-grant'))&&state.failJobCleanup) return {status:1,stdout:'',stderr:'Error: synthetic owned job lookup failure'};
    if(args.some(arg=>arg.includes('pg_terminate_backend'))&&state.failSettlement) return {status:1,stdout:'',stderr:'ERROR: synthetic settlement unavailable'};
    if(args.includes('logs')) stdout='Error: synthetic startup failure '+state.privateSecret;
    return {status:0,stdout,stderr:''};
@@ -338,3 +339,14 @@ test('CLI failure formatter exposes only controlled side-error codes without pri
  error.cleanupError='SyntheticPrivate0123456789';assert.ok(!formatMaintenanceFailure(error).includes(error.cleanupError));
  assert.ok(!text.includes(error.privateData));assert.ok(text.startsWith('Container maintenance grant: COMMAND_FAILED'));
 });
+
+
+test('unresolved owned job cleanup retains the window even if its current backend has settled',()=>wrapperFixture(({root,state,run})=>{
+ state.failGrant=true;state.failJobCleanup=true;let error;try{run();}catch(value){error=value;}
+ assert.equal(error.code,'COMMAND_FAILED');assert.equal(error.phase,'grant');assert.equal(error.cleanupError,'JOB_CLEANUP_UNRESOLVED');assert.equal(error.lockRetained,true);
+ const marker=JSON.parse(readFileSync(join(root,'.continuum-maintenance-locks','synthetic-maintenance.lock'),'utf8'));
+ assert.equal(JSON.parse(readFileSync(error.evidencePath,'utf8')).cleanupError,'JOB_CLEANUP_UNRESOLVED');
+ assert.ok(formatMaintenanceFailure(error).includes('cleanupError=JOB_CLEANUP_UNRESOLVED'));
+ assert.equal(marker.unresolved.reason,'JOB_CLEANUP_UNRESOLVED');assert.match(marker.unresolved.sessions[0].jobName,/^synthetic-maintenance-maintenance-grant-[0-9]+$/);
+ assert.throws(run,e=>e.code==='MAINTENANCE_LOCKED');
+}));
