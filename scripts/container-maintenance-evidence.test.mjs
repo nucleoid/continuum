@@ -73,3 +73,27 @@ test('file-qualified psql errors retain actionable reasons while every secret an
  assert.ok(text.includes('synthetic reviewed grant refusal'));assert.ok(text.includes('synthetic Windows failure'));
  for(const value of [secret,'/assets/scripts','C:\\private','postgres://'])assert.ok(!text.includes(value),value);
 }));
+test('public failure evidence records only whitelisted side-error codes and preserves PostgreSQL authentication diagnosis',()=>fixture(dir=>{
+ const reservation=reserveEvidence(dir),secret='SyntheticActualCredentialValue123456';
+ writeFailureEvidence(reservation,{phase:'migrate',code:'DEADLINE_EXCEEDED',
+  settlementError:'BACKEND_SETTLEMENT_FAILED',cleanupError:'OWNERSHIP_MISMATCH',lockError:'MAINTENANCE_LOCK_MARKER_FAILED',
+  evidenceError:new Error('EVIDENCE_WRITE_FAILED'),evidenceCloseError:{code:'EVIDENCE_CLOSE_FAILED',cause:new Error(secret)}},
+  `FATAL: password authentication failed for user "owner"\nCONTEXT: SQL statement ALTER ROLE owner PASSWORD 'unlisted-sensitive-value'\nERROR: password=${secret}\nError: secret file read failed`,[secret]);
+ closeEvidence(reservation);const text=readFileSync(reservation.path,'utf8'),record=JSON.parse(text);
+ assert.equal(record.settlementError,'BACKEND_SETTLEMENT_FAILED');assert.equal(record.cleanupError,'OWNERSHIP_MISMATCH');assert.equal(record.lockError,'MAINTENANCE_LOCK_MARKER_FAILED');
+ assert.equal(record.evidenceError,'EVIDENCE_WRITE_FAILED');assert.equal(record.evidenceCloseError,'EVIDENCE_CLOSE_FAILED');
+ assert.ok(record.lines.some(line=>line.includes('password authentication failed')));
+ for(const value of [secret,'unlisted-sensitive-value'])assert.ok(!text.includes(value),value);
+ const unsafe=reserveEvidence(dir);
+ writeFailureEvidence(unsafe,{phase:'grant',code:'COMMAND_FAILED',settlementError:{code:secret,message:secret,cause:secret},cleanupError:secret,lockError:{rawOutput:secret}},'ERROR: safely classified',[]);
+ closeEvidence(unsafe);const safe=JSON.parse(readFileSync(unsafe.path,'utf8'));
+ assert.equal(safe.settlementError,'SIDE_ERROR_UNCLASSIFIED');assert.equal(safe.cleanupError,'SIDE_ERROR_UNCLASSIFIED');assert.equal(safe.lockError,'SIDE_ERROR_UNCLASSIFIED');assert.ok(!JSON.stringify(safe).includes(secret));
+}));
+
+test('public failure evidence keeps standard password authentication phrase while scrubbing unknown SQL PASSWORD operands',()=>fixture(dir=>{
+ const reservation=reserveEvidence(dir);
+ writeFailureEvidence(reservation,{phase:'bootstrap',code:'COMMAND_FAILED'},`FATAL: password authentication failed for user "owner"\nCONTEXT: SQL statement ALTER ROLE owner PASSWORD 'unlisted-sensitive-value'\nERROR: PASSWORD 'unknown-credential-value'`,[]);
+ closeEvidence(reservation);const text=readFileSync(reservation.path,'utf8'),record=JSON.parse(text);
+ assert.ok(record.lines.some(line=>line.includes('password authentication failed')));
+ assert.ok(!text.includes('unlisted-sensitive-value'));assert.ok(!text.includes('unknown-credential-value'));
+}));
