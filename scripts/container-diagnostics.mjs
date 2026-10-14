@@ -27,5 +27,5 @@ export function sanitizedBootstrapLines(output, secrets) {
  return lines;
 }
 export function buildOwnerBoundaryProbeFunction(definition,probe) {
- return definition.replace('SECURITY DEFINER','SECURITY INVOKER').replace('BEGIN',probe);
+ return definition.replace('SECURITY DEFINER','SECURITY INVOKER').replace('BEGIN',()=>probe);
 }
