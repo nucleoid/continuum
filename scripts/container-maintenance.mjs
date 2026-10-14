@@ -4,6 +4,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { resolve, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { validateTmpfsMounts } from './container-compose-model.mjs';
+import { reserveEvidence, closeEvidence, collectSecretValues, writeFailureEvidence } from './container-maintenance-evidence.mjs';
 
 export class MaintenanceFailure extends Error {
  constructor(code, phase = '') { super(`Container maintenance ${phase ? `${phase}: ` : ''}${code}`); this.code = code; this.phase = phase; }
@@ -31,16 +32,23 @@ function hashFile(file) {
   return hash.digest('hex');
  } finally { closeSync(fd); }
 }
+export function dockerEnvironment(env = process.env) {
+ const result = {...env};
+ for (const key of Object.keys(result)) if (/^(CONTINUUM_|COMPOSE_)/i.test(key)) delete result[key];
+ return result;
+}
 function docker(args, timeout = 60000) {
  const result = spawnSync('docker', args, { encoding: 'utf8', timeout,
-  killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024 });
+  killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024, env: dockerEnvironment() });
  if (result.error || result.status !== 0) {
   const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
   const code = result.error?.code === 'ETIMEDOUT' ? 'DEADLINE_EXCEEDED'
    : output.includes('upgrade role binding does not match stored identity') ? 'BINDING_MISMATCH'
    : output.includes('non-owner application role') ? 'INVALID_APPLICATION_ROLE'
    : 'COMMAND_FAILED';
-  throw new MaintenanceFailure(code);
+  const error = new MaintenanceFailure(code);
+  Object.defineProperty(error,'rawOutput',{value:output});
+  throw error;
  }
  return result;
 }
@@ -133,6 +141,29 @@ function imageAssetManifest(image, project) {
   throw new MaintenanceFailure('ASSET_MISMATCH', 'preflight');
  }
 }
+function assertVolumeOwnership(volume, project, projectIds) {
+ try {
+  const record = JSON.parse(docker(['volume','inspect',volume]).stdout);
+  if (record.length !== 1 || record[0].Name !== volume || record[0].Labels?.['com.docker.compose.project'] !== project) throw new Error();
+  const consumers = docker(['ps','-aq','--filter',`volume=${volume}`]).stdout.trim().split(/\s+/).filter(Boolean);
+  let livePostgres = 0;
+  for (const id of consumers) {
+   const records = JSON.parse(docker(['inspect',id]).stdout), container = records[0];
+   if (records.length !== 1 || container.Config?.Labels?.['com.docker.compose.project'] !== project
+    || !container.Mounts?.some(mount=>mount.Type === 'volume' && mount.Name === volume)) throw new Error();
+   if (container.State?.Running) {
+    if (container.Config.Labels['com.docker.compose.service'] !== 'postgres'
+     || container.Config.Labels['com.docker.compose.oneoff']?.toLowerCase() === 'true'
+     || !projectIds.includes(id) || ++livePostgres > 1) throw new Error();
+   }
+  }
+ } catch { throw new MaintenanceFailure('VOLUME_OWNERSHIP_MISMATCH','preflight'); }
+}
+function assertCanonicalCompose(file, assets) {
+ try {
+  if (resolve(file) !== join(resolve(assets),'deploy','compose.production.yml') || !lstatSync(resolve(file)).isFile()) throw new Error();
+ } catch { throw new MaintenanceFailure('ASSET_MISMATCH','preflight'); }
+}
 export function runMaintenance(mode, envFile, composeFile, options = {}) {
  const {deadlineMs,backupDeadlineMs} = maintenanceBudgets(options);
  if (!['fresh', 'upgrade'].includes(mode)) throw new Error('Invalid maintenance request');
@@ -160,6 +191,7 @@ export function runMaintenance(mode, envFile, composeFile, options = {}) {
  if (mode === 'upgrade' && !existing) throw new Error('Upgrade requires the retained installation volume');
  const ids = docker(['ps', '-aq', '--filter', `label=com.docker.compose.project=${project}`]).stdout.trim().split(/\s+/).filter(Boolean);
  if (mode === 'fresh' && ids.length) throw new Error('Fresh installation refuses an existing project');
+ if (mode === 'upgrade') assertVolumeOwnership(volume,project,ids);
  if (mode === 'upgrade' && process.env.CONTINUUM_QUIESCENCE_CONFIRMED !== 'yes') throw new Error('Confirm external writers, schedulers and callback workers are stopped');
  const ownerRole = config.services.migrate.environment.CONTINUUM_MIGRATION_OWNER_ROLE
   ?? config.services.grant?.environment.PGUSER;
@@ -169,11 +201,15 @@ export function runMaintenance(mode, envFile, composeFile, options = {}) {
  const activitySql = quiescenceSql(database,roles);
  const assets = config.services.grant?.volumes?.find(mount=>mount.target === '/assets')?.source;
  if (!assets || config.services.migrate.image !== appImage || ['bootstrap','provision-admin','grant'].some(name=>config.services[name]?.image !== pgImage)) throw new MaintenanceFailure('ASSET_MISMATCH','preflight');
+ assertCanonicalCompose(composeFile,assets);
  assertAssetMounts(config.services,assets);
  assertRuntimeAssets(assets,imageAssetManifest(selectedId,project));
- // Reserve all outputs before taking any serving process down. Never overwrite.
- const backups = mode === 'upgrade' ? reserveBackupTargets(process.env.CONTINUUM_BACKUP_FILE) : [];
+ // Reserve redacted private failure evidence before any downtime.
+ const secrets = collectSecretValues(config);
+ const evidence = reserveEvidence(process.env.CONTINUUM_MAINTENANCE_EVIDENCE_DIR ?? dirname(mode === 'upgrade' ? process.env.CONTINUUM_BACKUP_FILE ?? envFile : envFile));
+ let backups = [], activePhase = 'preflight';
  try {
+  backups = mode === 'upgrade' ? reserveBackupTargets(process.env.CONTINUUM_BACKUP_FILE) : [];
   for (const id of ids) {
    const container = JSON.parse(docker(['inspect', id]).stdout)[0];
    if (container.Config.Labels['com.docker.compose.project'] !== project) throw new Error('Maintenance ownership mismatch');
@@ -192,6 +228,7 @@ export function runMaintenance(mode, envFile, composeFile, options = {}) {
    throw new MaintenanceFailure('MIGRATION_BACKEND_REMAINS', 'migrate');
   };
   const phase = service => {
+   activePhase = service;
    const name = `${project}-maintenance-${service}-${process.pid}`;
    const applicationName = `ctm-migrate-${randomBytes(12).toString('hex')}`;
    try {
@@ -210,7 +247,9 @@ export function runMaintenance(mode, envFile, composeFile, options = {}) {
      if (docker(['ps', '-aq', '--filter', `name=^/${name}$`]).stdout.trim()) docker(['rm', id]);
     }
     if (service === 'migrate') settleMigration(applicationName);
-    throw new MaintenanceFailure(error.code ?? 'COMMAND_FAILED', service);
+    const failed = new MaintenanceFailure(error.code ?? 'COMMAND_FAILED', service);
+    Object.defineProperty(failed,'rawOutput',{value:error.rawOutput ?? 'Error: ' + error.message});
+    throw failed;
    }
   };
   docker([...compose, 'up', '-d', '--pull', 'never', '--wait', '--wait-timeout', '120', 'postgres'], 150000);
@@ -221,8 +260,12 @@ export function runMaintenance(mode, envFile, composeFile, options = {}) {
    for (const [index, tool] of ['pg_dump -Fc', 'pg_dumpall --roles-only --no-role-passwords'].entries()) {
     const result = spawnSync('docker', [...compose, 'exec', '-T', 'postgres', '/bin/sh', '-ec',
      `export PGPASSWORD="$(cat /run/secrets/dba_password)"; exec ${tool} -U "$POSTGRES_USER"${index === 0 ? ' -d "$POSTGRES_DB"' : ''}`],
-     { stdio: ['ignore', backups[index].fd, 'pipe'], timeout: Math.max(1, backupEnd - Date.now()), killSignal: 'SIGKILL' });
-    if (result.error || result.status !== 0) throw new MaintenanceFailure('BACKUP_FAILED');
+     { stdio: ['ignore', backups[index].fd, 'pipe'], timeout: Math.max(1, backupEnd - Date.now()), killSignal: 'SIGKILL', env: dockerEnvironment() });
+    if (result.error || result.status !== 0) {
+     const failure = new MaintenanceFailure('BACKUP_FAILED','backup');
+     Object.defineProperty(failure,'rawOutput',{value:result.stderr?.toString('utf8') ?? 'Error: Backup command failed'});
+     throw failure;
+    }
    }
    const sums = backups.slice(0, 2).map(item => `${hashFile(item.path)}  ${item.path}`).join('\n');
    writeSync(backups[2].fd, `${sums}\n`);
@@ -232,18 +275,28 @@ export function runMaintenance(mode, envFile, composeFile, options = {}) {
   phase('migrate');
   if (mode === 'fresh') phase('provision-admin');
   phase('grant');
-  if (Date.now() >= overallEnd) throw new MaintenanceFailure('DEADLINE_EXCEEDED');
   if (readConfig().services.api.image !== appImage || JSON.parse(docker(['image', 'inspect', appImage]).stdout)[0].Id !== selectedId) throw new Error('Selected image changed during maintenance');
+  activePhase = 'api';
   try {
    docker([...compose, 'up', '-d', '--pull', 'never', '--no-deps', '--force-recreate', '--wait', '--wait-timeout', '60', 'api'], 90000);
-  } catch (error) { docker([...compose, 'stop', '--timeout', '15', 'api'], 25000); throw error; }
+  } catch (error) {
+   let logs = '';
+   try { logs = docker([...compose,'logs','--no-color','--tail','100','api'],10000).stdout; } catch { /* Keep original failure. */ }
+   const failure = new MaintenanceFailure(error.code ?? 'COMMAND_FAILED','api');
+   Object.defineProperty(failure,'rawOutput',{value:(error.rawOutput ?? '') + '\n' + logs});
+   docker([...compose, 'stop', '--timeout', '15', 'api'], 25000);
+   throw failure;
+  }
   return { imageId: selectedId, mode, project, volume, deadlineMs, backupDeadlineMs };
- } finally { for (const item of backups) closeSync(item.fd); }
+ } catch (error) {
+  error.evidencePath = writeFailureEvidence(evidence,{phase:error.phase || activePhase,code:error.code ?? 'COMMAND_FAILED',image:selectedId,mode,deadlineMs,backupDeadlineMs},error.rawOutput ?? 'Error: ' + error.message,secrets);
+  throw error;
+ } finally { for (const item of backups) closeSync(item.fd); closeEvidence(evidence); }
 }
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
  try {
   const [mode, envFile, composeFile] = process.argv.slice(2);
   if (!envFile || !composeFile) throw new Error('Usage: container-maintenance.mjs fresh|upgrade env-file compose-file');
   process.stdout.write(`${JSON.stringify(runMaintenance(mode, envFile, composeFile))}\n`);
- } catch (error) { process.stderr.write(`continuum-maintenance: ${error.message}\n`); process.exitCode = 1; }
+ } catch (error) { process.stderr.write(`continuum-maintenance: ${error.message}${error.evidencePath ? "; evidence=" + error.evidencePath : ""}\n`); process.exitCode = 1; }
 }

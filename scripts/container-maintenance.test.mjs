@@ -2,7 +2,7 @@ import test from 'node:test';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, closeSync, existsSync, rmSync, statSync, mkdirSync, writeSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, closeSync, existsSync, rmSync, statSync, mkdirSync, writeSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { reserveBackupTargets, maintenanceBudgets, runtimeAssetManifest, assertRuntimeAssets, assertAssetMounts, quiescenceSql, assertQuiescence, runMaintenance } from './container-maintenance.mjs';
@@ -110,7 +110,7 @@ test('wrapper gives backup a separate budget and rejects parity drift before sto
    let stdout='';
    if(args.includes('config')) stdout=JSON.stringify(config);
    else if(args[0]==='image') stdout=JSON.stringify([{Id:args[2],Os:'linux',Architecture:'amd64'}]);
-   else if(args[0]==='volume') stdout='synthetic-pgdata\n';
+   else if(args[0]==='volume') stdout=args[1]==='inspect'?JSON.stringify([{Name:'synthetic-pgdata',Labels:{'com.docker.compose.project':config.name}}]):'synthetic-pgdata\n';
    else if(args[0]==='ps') stdout=args.includes('label=com.docker.compose.project=synthetic-maintenance')?'synthetic-api\n':'';
    else if(args[0]==='inspect') stdout=JSON.stringify([{Config:{Labels:{'com.docker.compose.project':config.name,'com.docker.compose.service':'api'}}}]);
    else if(args[0]==='run') {
@@ -166,9 +166,12 @@ function wrapperFixture(check) {
    else if(args.some(arg=>arg.includes('exec pg_dump'))) writeSync(options.stdio[1],'synthetic dump');
    else if(args.includes('exec')) stdout='0\n';
    if(args.includes('run')&&args.at(-1)==='grant'&&state.expireAtGrant) state.time+=1001;
+   if(args.includes('run')&&args.at(-1)==='grant'&&state.failGrant) return {status:1,stdout:'',stderr:'ERROR: synthetic lock timeout '+state.privateSecret+'\nCONTEXT: PASSWORD '+state.privateSecret};
+   if(args.includes('up')&&args.at(-1)==='api'&&state.failApi) return {status:1,stdout:'',stderr:'Container synthetic API unhealthy'};
+   if(args.includes('logs')) stdout='Error: synthetic startup failure '+state.privateSecret;
    return {status:0,stdout,stderr:''};
   };syncBuiltinESMExports();
-  check({root,state,container,run:(compose=join(root,'deploy','compose.production.yml'))=>runMaintenance('upgrade',join(root,'private.env'),compose,{deadlineMs:1000,backupDeadlineMs:1000})});
+  check({root,state,container,config,run:(compose=join(root,'deploy','compose.production.yml'))=>runMaintenance('upgrade',join(root,'private.env'),compose,{deadlineMs:1000,backupDeadlineMs:1000})});
  } finally {
   childProcess.spawnSync=originalSpawn;syncBuiltinESMExports();Date.now=originalNow;
   for(const key of Object.keys(process.env)) if(!(key in saved)) delete process.env[key];
@@ -210,4 +213,24 @@ test('successful grant at the budget boundary still starts the explicitly bounde
  state.expireAtGrant=true;run();
  const api=state.calls.find(call=>call.args.includes('up')&&call.args.at(-1)==='api');
  assert.ok(api);assert.equal(api.options.timeout,90000);
+}));
+
+test('failed grant retains bounded private redacted SQL evidence after job cleanup',()=>wrapperFixture(({root,state,config,run})=>{
+ const secret='SyntheticPrivatePassword01234567890123456789',file=join(root,'private-secret');writeFileSync(file,secret);
+ config.secrets={synthetic:{file}};state.privateSecret=secret;state.failGrant=true;
+ let error;try{run();}catch(value){error=value;}
+ assert.equal(error.code,'COMMAND_FAILED');assert.equal(error.phase,'grant');
+ const body=readFileSync(error.evidencePath,'utf8'),record=JSON.parse(body);
+ assert.equal(record.phase,'grant');assert.equal(record.code,'COMMAND_FAILED');assert.ok(body.includes('synthetic lock timeout'));assert.ok(!body.includes(secret));
+ assert.ok(Buffer.byteLength(body)<=65536);
+}));
+test('failed API gate retains owned API logs before stopping the unhealthy service',()=>wrapperFixture(({root,state,config,run})=>{
+ const secret='SyntheticPrivatePassword01234567890123456789',file=join(root,'private-secret');writeFileSync(file,secret);
+ config.secrets={synthetic:{file}};state.privateSecret=secret;state.failApi=true;
+ let error;try{run();}catch(value){error=value;}
+ assert.equal(error.phase,'api');const body=readFileSync(error.evidencePath,'utf8');
+ assert.ok(body.includes('synthetic startup failure'));assert.ok(!body.includes(secret));
+ const logIndex=state.calls.findIndex(call=>call.args.includes('logs'));
+ const stopIndex=state.calls.findIndex((call,index)=>index>logIndex&&call.args.includes('stop')&&call.args.at(-1)==='api');
+ assert.ok(logIndex>=0&&stopIndex>logIndex);
 }));

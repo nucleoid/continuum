@@ -1,6 +1,6 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
-import { writeFileSync, readFileSync, mkdtempSync, mkdirSync, readdirSync, copyFileSync, cpSync, rmSync, chmodSync, existsSync, statSync } from 'node:fs';
+import { writeFileSync, readFileSync, mkdtempSync, mkdirSync, readdirSync, copyFileSync, cpSync, rmSync, chmodSync, existsSync, statSync, openSync, closeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { runMaintenance } from './container-maintenance.mjs';
@@ -171,13 +171,13 @@ function writeMaintenanceEnvironment(p, file, overrides = {}) {
   .filter(([key])=>key==='COMPOSE_PROJECT_NAME'||key.startsWith('CONTINUUM_'))
   .map(([key,value])=>`${key}=${JSON.stringify(value)}`).join('\n'),{mode:0o600});
 }
-function maintenanceCli(mode,p,file,backupFile) {
+function maintenanceCli(mode,p,file,backupFile,extraEnv = {}) {
  const stdout=execFileSync(process.execPath,[resolve('scripts/container-maintenance.mjs'),mode,file,resolve(assets,'deploy/compose.production.yml')],{
   encoding:'utf8',timeout:300000,maxBuffer:1024*1024,
-  env:{...process.env,CONTINUUM_QUIESCENCE_CONFIRMED:'yes',CONTINUUM_MAINTENANCE_DEADLINE_SECONDS:'120',CONTINUUM_BACKUP_DEADLINE_SECONDS:'120',...(backupFile?{CONTINUUM_BACKUP_FILE:backupFile}: {})},
+  env:{...process.env,...extraEnv,CONTINUUM_QUIESCENCE_CONFIRMED:'yes',CONTINUUM_MAINTENANCE_DEADLINE_SECONDS:'120',CONTINUUM_BACKUP_DEADLINE_SECONDS:'120',...(backupFile?{CONTINUUM_BACKUP_FILE:backupFile}: {})},
  });
  const receipt=JSON.parse(stdout);
- check(receipt.mode===mode&&receipt.project===p.project&&receipt.imageId===image,'Successful wrapper selected wrong installation/image');
+ check(receipt.mode===mode&&receipt.project===p.project&&receipt.imageId===image&&receipt.volume===p.env.CONTINUUM_PGDATA_VOLUME,'Successful wrapper selected wrong installation/image');
  check(receipt.deadlineMs===120000&&receipt.backupDeadlineMs===120000,'CLI did not record explicit independent operator budgets');
  return receipt;
 }
@@ -198,7 +198,7 @@ try {
   const wrapperFresh = setup('wrapper-fresh');
   const wrapperFreshEnv = join(wrapperFresh.directory,'maintenance.env');
   writeMaintenanceEnvironment(wrapperFresh,wrapperFreshEnv);
-  results.wrapperFresh = maintenanceCli('fresh',wrapperFresh,wrapperFreshEnv);
+  results.wrapperFresh = maintenanceCli('fresh',wrapperFresh,wrapperFreshEnv,undefined,{COMPOSE_PROJECT_NAME:owner+'-ambient-poison',COMPOSE_FILE:'/private/synthetic-unreviewed.yml',CONTINUUM_PGDATA_VOLUME:owner+'-ambient-volume',CONTINUUM_APP_IMAGE:'sha256:'+'f'.repeat(64),CONTINUUM_DBA_PASSWORD_FILE:'/private/synthetic-foreign-secret',CONTINUUM_ADMIN_PRINCIPAL_ID:randomUUID()});
   verifyLedger(wrapperFresh);
   await api(wrapperFresh,'/health/ready');
   const wrapperApi = JSON.parse(run(['inspect',compose(wrapperFresh,['ps','-q','api']).trim()]))[0];
@@ -331,19 +331,11 @@ try {
   const driftBackup=join(temporary,'asset-drift-refused.dump');
   process.env.CONTINUUM_BACKUP_FILE=driftBackup;
   maintenanceEnv({CONTINUUM_RUNTIME_ASSETS:driftAssets});
-  const previousAssetsEnv=process.env.CONTINUUM_RUNTIME_ASSETS;
-  try{
-   // Compose environment takes precedence over its explicitly supplied env file.
-   process.env.CONTINUUM_RUNTIME_ASSETS=driftAssets;
-   const assetError=expectFailure(()=>runMaintenance('upgrade',envFile,productionCompose,{deadlineMs:120000}), 'ASSET_MISMATCH', 'Selected image/host asset drift');
-   check(assetError.code==='ASSET_MISMATCH','Asset drift received unrelated failure');
-   check(compose(fresh,['ps','--status','running','-q','api']).trim()!=='','Asset preflight stopped API before refusing drift');
-   check(!existsSync(driftBackup),'Asset preflight reserved a backup before refusal');
-  }finally{
-   if(previousAssetsEnv===undefined)delete process.env.CONTINUUM_RUNTIME_ASSETS;else process.env.CONTINUUM_RUNTIME_ASSETS=previousAssetsEnv;
-   maintenanceEnv();
-  }
-
+  const assetError=expectFailure(()=>runMaintenance('upgrade',envFile,resolve(driftAssets,'deploy/compose.production.yml'),{deadlineMs:120000}), 'ASSET_MISMATCH', 'Selected image/host asset drift');
+  check(assetError.code==='ASSET_MISMATCH','Asset drift received unrelated failure');
+  check(compose(fresh,['ps','--status','running','-q','api']).trim()!=='','Asset preflight stopped API before refusing drift');
+  check(!existsSync(driftBackup),'Asset preflight reserved a backup before refusal');
+  maintenanceEnv();
   // An independently owned synthetic writer is refused, not terminated by wrapper.
   const writerName=`outside-writer-${randomUUID()}`;
   const writer=spawn('docker',[...fresh.base,'exec','-T','-e','PGPASSWORD','-e','PGAPPNAME','postgres','psql','-X','-h','127.0.0.1','-U','continuum_owner','-d','continuum','-v','ON_ERROR_STOP=1','-c','SELECT pg_sleep(120)'],{env:{...fresh.env,PGPASSWORD:fresh.passwords.OWNER,PGAPPNAME:writerName},stdio:'ignore'});
@@ -373,33 +365,92 @@ try {
   await api(fresh,'/health/ready');
   check(sql(fresh, `SELECT id::text || ':' || title FROM memories WHERE id='${captured.id}'`) === before, 'Successful upgrade wrapper changed stored data');
   results.passed.push('documented upgrade CLI wrapper completes migration/grants/image gate/Entra readiness; real custom and password-free role backups match checksum sidecar');
+  // A foreign-labelled volume and foreign consumer must fail before downtime.
+  const foreignProject=`${owner}-foreign`, foreignVolume=`${owner}-foreign-pgdata`;
+  run(['volume','create','--label',`com.docker.compose.project=${foreignProject}`,'--label',`continuum.ci.owner=${owner}`,foreignVolume]);
+  try{
+   const refused=join(temporary,'foreign-volume-refused.dump');process.env.CONTINUUM_BACKUP_FILE=refused;
+   maintenanceEnv({CONTINUUM_PGDATA_VOLUME:foreignVolume});
+   const error=expectFailure(()=>runMaintenance('upgrade',envFile,productionCompose,{deadlineMs:120000}),'VOLUME_OWNERSHIP_MISMATCH','Foreign volume label');
+   check(error.code==='VOLUME_OWNERSHIP_MISMATCH'&&!existsSync(refused),'Foreign volume mismatch reserved backup');
+   check(compose(fresh,['ps','--status','running','-q','api']).trim()!=='','Foreign volume refusal stopped intended API');
+   check(sql(fresh,`SELECT id::text || ':' || title FROM memories WHERE id='${captured.id}'`)===before,'Foreign volume refusal changed intended data');
+  }finally{
+   maintenanceEnv();
+   const owned=JSON.parse(run(['volume','inspect',foreignVolume]))[0];
+   check(owned.Name===foreignVolume&&owned.Labels['continuum.ci.owner']===owner&&owned.Labels['com.docker.compose.project']===foreignProject,'Foreign fixture volume ownership unclear');
+   check(run(['ps','-aq','--filter',`volume=${foreignVolume}`]).trim()==='','Foreign fixture volume unexpectedly consumed');
+   run(['volume','rm',foreignVolume]);
+  }
+  const consumerName=`${owner}-foreign-consumer`;
+  run(['run','-d','--pull','never','--name',consumerName,'--label',`com.docker.compose.project=${foreignProject}`,'--label',`continuum.ci.owner=${owner}`,'--network','none','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges:true','--user','10001:10001','--memory','128m','--pids-limit','16','--mount',`type=volume,src=${fresh.env.CONTINUUM_PGDATA_VOLUME},dst=/foreign-pgdata,readonly`,'--entrypoint','node',image,'-e','setInterval(()=>{},1000)']);
+  try{
+   const refused=join(temporary,'foreign-consumer-refused.dump');process.env.CONTINUUM_BACKUP_FILE=refused;
+   const error=expectFailure(()=>runMaintenance('upgrade',envFile,productionCompose,{deadlineMs:120000}),'VOLUME_OWNERSHIP_MISMATCH','Foreign mounted consumer');
+   check(error.code==='VOLUME_OWNERSHIP_MISMATCH'&&!existsSync(refused),'Foreign consumer mismatch reserved backup');
+   check(compose(fresh,['ps','--status','running','-q','api']).trim()!=='','Foreign consumer refusal stopped intended API');
+   check(JSON.parse(run(['inspect',consumerName]))[0].State.Running,'Wrapper stopped foreign mounted consumer');
+  }finally{
+   const own=JSON.parse(run(['inspect',consumerName]))[0];
+   check(own.Name===`/${consumerName}`&&own.Config.Labels['continuum.ci.owner']===owner&&own.Config.Labels['com.docker.compose.project']===foreignProject,'Foreign consumer fixture ownership unclear');
+   run(['rm','-f',consumerName]);
+  }
+  results.passed.push('reviewed env-file defeats ambient project/volume/image/secret/identity poison; foreign-labelled volume and foreign mounted consumer refuse before backup/downtime/mutation');
   // The wrapper must surface this exact grant preflight error, and a successful
   // exited one-shot must not bypass it or leave an API process running.
   process.env.CONTINUUM_BACKUP_FILE=join(temporary,'failed-upgrade.dump');
   maintenanceEnv({CONTINUUM_ADMIN_PRINCIPAL_ID:alternativeAdmin});
   const bindingError = expectFailure(() => runMaintenance('upgrade',envFile,productionCompose,{deadlineMs:120_000}), 'BINDING_MISMATCH', 'Failed wrapper grant with stale successful job');
   check(bindingError.code==='BINDING_MISMATCH' && bindingError.phase==='grant','Wrapper did not identify the exact grant binding failure');
+  check(bindingError.evidencePath&&existsSync(bindingError.evidencePath),'Failed grant execution evidence was discarded');
+  const grantEvidence=readFileSync(bindingError.evidencePath,'utf8');
+  check(statSync(bindingError.evidencePath).size<=65536&&(statSync(bindingError.evidencePath).mode&0o777)===0o600,'Grant evidence is not private/bounded');
+  check(grantEvidence.includes('upgrade role binding does not match stored identity'),'Grant evidence omitted actionable SQL failure');
+  check(!Object.values(fresh.passwords).some(value=>grantEvidence.includes(value))&&!grantEvidence.includes('postgres://'),'Grant evidence exposed private credentials or URL');
   check(compose(fresh,['ps','--status','running','-q','api']).trim()==='', 'Failed maintenance left API serving');
   maintenanceEnv();
   process.env.CONTINUUM_BACKUP_FILE=join(temporary,'deadline-upgrade.dump');
-  const timeoutCompose = join(fresh.directory,'timeout-compose.json');
-  const timeoutConfig = JSON.parse(compose(fresh,['config','--format','json']));
-  timeoutConfig.services.api.environment.CONTINUUM_AUTH_MODE='entra';
-  const timeoutProof = join(fresh.directory,'timeout-proof');
-  mkdirSync(timeoutProof,{mode:0o777}); chmodSync(timeoutProof,0o777);
-  timeoutConfig.services.migrate.volumes=[...(timeoutConfig.services.migrate.volumes??[]),{type:'bind',source:timeoutProof,target:'/proof'}];
-  timeoutConfig.services.migrate.entrypoint=['node','--input-type=module','-e',"import {loadSecretFiles} from './deploy/container-entrypoint.mjs';import fs from 'node:fs';loadSecretFiles(process.env);const {Client}=await import('pg');const c=new Client({connectionString:process.env.CONTINUUM_DATABASE_URL,application_name:process.env.PGAPPNAME});await c.connect();await c.query('SELECT pg_advisory_lock(7215328273579717613::bigint)');const {rows}=await c.query(\"SELECT pg_backend_pid() AS pid,current_setting('application_name') AS name\");fs.writeFileSync('/proof/started',JSON.stringify(rows[0]));await c.query('SELECT pg_sleep(300)');"];
-  timeoutConfig.services.migrate.command=[];
-  writeFileSync(timeoutCompose,JSON.stringify(timeoutConfig),{mode:0o600});
-  const deadlineError = expectFailure(() => runMaintenance('upgrade',envFile,timeoutCompose,{deadlineMs:10000}), 'DEADLINE_EXCEEDED', 'Real database migration timeout');
-  check(deadlineError.code==='DEADLINE_EXCEEDED' && deadlineError.phase==='migrate','Deadline test received an unrelated maintenance failure');
-  const backendProof = JSON.parse(readFileSync(join(timeoutProof,'started'),'utf8'));
-  check(/^ctm-migrate-[a-f0-9]{24}$/.test(backendProof.name) && Number.isInteger(backendProof.pid),'Deadline fixture did not acquire its reviewed named database session');
-  check(sql(fresh,`SELECT count(*) FROM pg_stat_activity WHERE pid=${backendProof.pid} OR application_name='${backendProof.name}'`,'DBA')==='0','Timed-out backend survived client termination');
-  check(sql(fresh,'SELECT pg_try_advisory_lock(7215328273579717613::bigint)')==='t','Timed-out migration retained its deployment advisory lock');
-  check(compose(fresh,['ps','--status','running','-q','api']).trim()==='', 'Finite migration deadline did not keep API stopped');
-  check(run(['ps','-aq','--filter',`name=^/${fresh.project}-maintenance-migrate-${process.pid}$`]).trim()==='', 'Timed-out one-shot migration remained running');
-  // Run the actual immutable packaged rollback guard, not a missing-file error.
+  const proofFile=join(fresh.directory,'real-migrator-proof.json'),proofError=join(fresh.directory,'real-migrator-proof.stderr');
+  const proofFd=openSync(proofFile,'wx',0o600),proofErrFd=openSync(proofError,'wx',0o600);
+  const lockerName=`ledger-blocker-${randomUUID()}`;
+  // Wait until the real custom dump holds AccessShare, then queue exclusive.
+  // Its release admits this DBA before the real migrator's ledger query.
+  const lockerSql=`BEGIN; SET LOCAL statement_timeout='90s'; SET LOCAL lock_timeout='60s';
+CREATE TEMP TABLE observed_migrator(pid integer,name text,query text,wait text);
+DO $wait$ DECLARE until_time timestamptz:=clock_timestamp()+interval '45 seconds'; BEGIN LOOP
+ PERFORM pg_stat_clear_snapshot();
+ EXIT WHEN EXISTS(SELECT 1 FROM pg_stat_activity a JOIN pg_locks l ON l.pid=a.pid WHERE a.datname=current_database() AND a.usename='continuum_dba' AND a.application_name='pg_dump' AND l.relation='continuum._continuum_migrations'::regclass AND l.mode='AccessShareLock' AND l.granted);
+ IF clock_timestamp()>until_time THEN RAISE EXCEPTION 'synthetic dump lock was not observed'; END IF;
+ PERFORM pg_sleep(0.005); END LOOP; END $wait$;
+LOCK TABLE continuum._continuum_migrations IN ACCESS EXCLUSIVE MODE;
+DO $observe$ DECLARE until_time timestamptz:=clock_timestamp()+interval '20 seconds'; BEGIN LOOP
+ PERFORM pg_stat_clear_snapshot();
+ INSERT INTO observed_migrator SELECT a.pid,a.application_name,a.query,a.wait_event_type FROM pg_stat_activity a JOIN pg_locks l ON l.pid=a.pid WHERE a.usename='continuum_owner' AND a.datname=current_database() AND a.application_name~'^ctm-migrate-[a-f0-9]{24}$' AND a.wait_event_type='Lock' AND l.relation='continuum._continuum_migrations'::regclass AND NOT l.granted LIMIT 1;
+ EXIT WHEN EXISTS(SELECT 1 FROM observed_migrator);
+ IF clock_timestamp()>until_time THEN RAISE EXCEPTION 'real migrator lock wait was not observed'; END IF;
+ PERFORM pg_sleep(0.005); END LOOP; END $observe$;
+SELECT row_to_json(t)::text FROM observed_migrator t; SELECT pg_sleep(60); ROLLBACK;`;
+  const lockerInput=join(fresh.directory,'real-migrator-locker.sql');writeFileSync(lockerInput,lockerSql,{mode:0o600});
+  const lockerInputFd=openSync(lockerInput,'r');
+  const locker=spawn('docker',[...fresh.base,'exec','-T','-e','PGPASSWORD','-e','PGAPPNAME','postgres','psql','-X','-qAt','-h','127.0.0.1','-U','continuum_dba','-d','continuum','-v','ON_ERROR_STOP=1','-f','-'],{env:{...fresh.env,PGPASSWORD:fresh.passwords.DBA,PGAPPNAME:lockerName},stdio:[lockerInputFd,proofFd,proofErrFd]});
+  let backendProof,deadlineError;
+  try{
+   const waitEnd=Date.now()+10000;
+   while(sql(fresh,`SELECT count(*) FROM pg_stat_activity WHERE application_name='${lockerName}'`,'DBA')!=='1'&&Date.now()<waitEnd){}
+   check(sql(fresh,`SELECT count(*) FROM pg_stat_activity WHERE application_name='${lockerName}'`,'DBA')==='1','Owned DBA deadline locker did not connect');
+   deadlineError=expectFailure(()=>runMaintenance('upgrade',envFile,productionCompose,{deadlineMs:10000,backupDeadlineMs:120000}), 'DEADLINE_EXCEEDED', 'Real installed migrator deadline');
+   check(deadlineError.code==='DEADLINE_EXCEEDED'&&deadlineError.phase==='migrate','Deadline returned unrelated phase or code');
+   backendProof=JSON.parse(readFileSync(proofFile,'utf8').trim().split('\n')[0]);
+   check(/^ctm-migrate-[a-f0-9]{24}$/.test(backendProof.name)&&Number.isInteger(backendProof.pid)&&backendProof.wait==='Lock','Actual entrypoint/pool migrator did not enter observed ledger lock wait');
+   check(sql(fresh,`SELECT count(*) FROM pg_stat_activity WHERE pid=${backendProof.pid} OR application_name='${backendProof.name}'`,'DBA')==='0','Actual migrator backend survived cancellation');
+   check(deadlineError.evidencePath&&existsSync(deadlineError.evidencePath),'Failed real migrator did not retain private evidence');
+  }finally{
+   sql(fresh,`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename='continuum_dba' AND datname='continuum' AND application_name='${lockerName}' AND pid<>pg_backend_pid()`,'DBA');
+   locker.kill('SIGTERM');closeSync(lockerInputFd);closeSync(proofFd);closeSync(proofErrFd);
+  }
+  check(sql(fresh,'SELECT pg_try_advisory_lock(7215328273579717613::bigint)')==='t','Actual migrator retained its deployment advisory lock');
+  check(compose(fresh,['ps','--status','running','-q','api']).trim()==='', 'Real migration deadline did not keep API stopped');
+  check(run(['ps','-aq','--filter',`name=^/${fresh.project}-maintenance-migrate-${process.pid}$`]).trim()==='', 'Timed-out actual migrator container remained');  // Run the actual immutable packaged rollback guard, not a missing-file error.
   expectFailure(() => compose(fresh,['exec','-T','-e','PGPASSWORD','postgres','psql','-X','-h','127.0.0.1','-U','continuum_owner','-d','continuum','-v','ON_ERROR_STOP=1','-f','-'],{input:readFileSync(join(assets,'scripts/rollback-embedding-provider-key.sql')),env:{...fresh.env,PGPASSWORD:fresh.passwords.OWNER}}), 'Embedding schema rollback requires a verified pre-upgrade database backup; in-place migration ledger deletion is not supported','Packaged downgrade refusal');
   results.passed.push('maintenance rejects existing fresh volume; specific failed grant and real database migration deadline keep API stopped despite successful stale job; timed-out client/backend gone and advisory lock released; packaged downgrade guard specifically rejects');
 
