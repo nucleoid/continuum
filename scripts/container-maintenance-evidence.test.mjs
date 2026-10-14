@@ -120,3 +120,13 @@ test('unavailable preflight evidence retains only the typed code and redacted cl
  closeEvidence(reservation);const record=JSON.parse(readFileSync(reservation.path,'utf8'));
  assert.equal(record.code,'PREFLIGHT_UNAVAILABLE');assert.ok(!JSON.stringify(record).includes(secret));
 }));
+
+test('preconnection proof ignores only exact owned eligibility job lifecycle lines',()=>{
+ const jobName='synthetic-maintenance-eligibility-'+'a'.repeat(24);
+ const auth='psql: error: connection to server at "postgres" (172.19.0.2), port 5432 failed: FATAL: password authentication failed for user "owner"';
+ const lines=' Container '+jobName+' Creating\n Container '+jobName+' Created\n'+auth;
+ assert.equal(evidenceHelpers.isProvenPreconnectionFailure(lines,{status:2,jobName}),true);
+ for(const raw of [lines.replace(jobName,'foreign-container'),lines+'\nNOTICE: '+auth,' Network synthetic_backend Created\n'+lines])assert.equal(evidenceHelpers.isProvenPreconnectionFailure(raw,{status:2,jobName}),false);
+ assert.equal(evidenceHelpers.isProvenPreconnectionFailure(lines,{status:2}),false);
+ assert.equal(evidenceHelpers.isProvenPreconnectionFailure(lines,{status:2,jobName,timedOut:true}),false);
+});
