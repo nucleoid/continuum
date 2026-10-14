@@ -471,6 +471,7 @@ UPDATE service_api_keys k SET revoked_at=v.revoked_at FROM jsonb_to_recordset(${
   // A DBA-owned transaction changes eligibility after readonly preflight and
   // before migration. It releases its ledger lock as soon as the real named
   // pg_dump is observed waiting, well inside its five-second lock timeout.
+  check(sql(fresh,"SELECT principal_id::text FROM continuum_trusted_database_identities WHERE database_role='continuum_operator' AND can_approve AND NOT can_sync")===adminId,'Eligibility observer must target the actual bound OP');
   const windowName='synthetic-ew-'+randomUUID();
   check(Buffer.byteLength(windowName,'utf8')<=63,'Eligibility observer application name must not truncate');
   const windowPredicate=`usename='continuum_dba' AND datname='continuum' AND application_name='${windowName}'`;
@@ -485,8 +486,16 @@ DO $window$ DECLARE until_at timestamptz:=clock_timestamp()+interval '75 seconds
   IF clock_timestamp()>until_at THEN RAISE EXCEPTION 'synthetic eligibility observer deadline'; END IF;
   PERFORM pg_sleep(0.01);
  END LOOP;
- UPDATE scope_memberships SET active=false WHERE principal_id='${adminId}' AND scope_id=continuum_org_scope_id() AND source_kind='manual' AND source_id='manual' AND role='admin';
-END $window$; COMMIT; SELECT 'eligibility-window-observed';`;
+END $window$;
+SET LOCAL ROLE continuum_owner;
+DO $change$ DECLARE changed integer; BEGIN
+ IF NOT EXISTS(SELECT 1 FROM continuum_trusted_database_identities WHERE database_role='continuum_operator' AND principal_id='${adminId}' AND can_approve AND NOT can_sync) THEN RAISE EXCEPTION 'synthetic eligibility observer targets the wrong binding'; END IF;
+ UPDATE scope_memberships SET active=false WHERE principal_id='${adminId}' AND scope_id=continuum_org_scope_id() AND source_kind='manual' AND source_id='manual' AND role='admin' AND active;
+ GET DIAGNOSTICS changed = ROW_COUNT;
+ IF changed<>1 THEN RAISE EXCEPTION 'synthetic eligibility observer expected one changed membership'; END IF;
+ IF EXISTS(SELECT 1 FROM principals p JOIN scope_memberships m ON m.principal_id=p.id WHERE p.id='${adminId}' AND p.kind='user' AND p.disabled_at IS NULL AND m.scope_id=continuum_org_scope_id() AND m.source_kind='manual' AND m.source_id='manual' AND m.role='admin' AND m.active) THEN RAISE EXCEPTION 'synthetic eligibility observer did not demote OP'; END IF;
+END $change$; RESET ROLE; COMMIT;
+SELECT jsonb_build_object('marker','eligibility-window-observed','changedRows',1,'operatorBindingMatches',EXISTS(SELECT 1 FROM continuum_trusted_database_identities WHERE database_role='continuum_operator' AND principal_id='${adminId}' AND can_approve AND NOT can_sync),'opEligible',EXISTS(SELECT 1 FROM principals p JOIN scope_memberships m ON m.principal_id=p.id WHERE p.id='${adminId}' AND p.kind='user' AND p.disabled_at IS NULL AND m.scope_id=continuum_org_scope_id() AND m.source_kind='manual' AND m.source_id='manual' AND m.role='admin' AND m.active),'syncEligible',EXISTS(SELECT 1 FROM principals p WHERE p.id='${syncId}' AND p.kind='service' AND p.disabled_at IS NULL));`;
   const windowChild=spawn('docker',[...fresh.base,'exec','-T','-e','PGPASSWORD','-e','PGAPPNAME','postgres','psql','-X','-qAt','-h','127.0.0.1','-U','continuum_dba','-d','continuum','-v','ON_ERROR_STOP=1','-c',windowSql],{env:{...fresh.env,PGPASSWORD:fresh.passwords.DBA,PGAPPNAME:windowName},stdio:['ignore',windowFd,windowStderrFd]});
   let windowError;
   try{
@@ -498,7 +507,8 @@ END $window$; COMMIT; SELECT 'eligibility-window-observed';`;
    const windowBackup=join(temporary,'eligibility-window.dump');process.env.CONTINUUM_BACKUP_FILE=windowBackup;
    const error=expectFailure(()=>runMaintenance('upgrade',envFile,productionCompose,{deadlineMs:120000,backupDeadlineMs:120000}),'BINDING_INELIGIBLE','Eligibility changed during backup window');
    check(error.code==='BINDING_INELIGIBLE'&&error.phase==='quiescence','Eligibility race did not fail after backup before migration');
-   check(readFileSync(windowProof,'utf8').includes('eligibility-window-observed')&&!eligibilityWitness().op&&eligibilityWitness().sync,'Eligibility race lacked real backup wait and exact predicate witnesses');
+   const witness=JSON.parse(readFileSync(windowProof,'utf8'));
+   check(witness.marker==='eligibility-window-observed'&&witness.changedRows===1&&witness.operatorBindingMatches===true&&witness.opEligible===false&&witness.syncEligible===true&&!eligibilityWitness().op&&eligibilityWitness().sync,'Eligibility race lacked committed one-row bound OP and exact predicate witnesses');
    verifyWrapperBackup(windowBackup,fresh);
    check(compose(fresh,['ps','--status','running','-q','api']).trim()==='','Eligibility race unexpectedly resumed serving');
    check(sql(fresh,'SELECT jsonb_agg(to_jsonb(m) ORDER BY name)::text FROM _continuum_migrations m')===ledgerSnapshot&&storedBindings()===originalBindings&&credentialSnapshot()===originalCredentials,'Eligibility race mutated ledger, bindings or role credentials');
@@ -508,6 +518,11 @@ END $window$; COMMIT; SELECT 'eligibility-window-observed';`;
    const diagnostic={code:'ELIGIBILITY_OBSERVER_FAILED'};
    try{diagnostic.lines=statSync(windowStderr).size<=65536?sanitizedMaintenanceLines(readFileSync(windowStderr,'utf8'),projects.flatMap(p=>Object.values(p.passwords))).slice(0,8):['[observer diagnostics exceeded limit]'];}
    catch{diagnostic.evidenceUnavailable=true;}
+   try{
+    check(statSync(windowProof).size<=65536,'Observer witness is not bounded');
+    const witness=JSON.parse(readFileSync(windowProof,'utf8'));
+    diagnostic.witness={committed:witness.marker==='eligibility-window-observed',changedOneRow:witness.changedRows===1,operatorBindingMatches:witness.operatorBindingMatches===true,opEligible:witness.opEligible===true,syncEligible:witness.syncEligible===true};
+   }catch{diagnostic.witnessUnavailable=true;}
    try{process.stderr.write(JSON.stringify(diagnostic)+'\n');}catch{/* Preserve the original fixture failure. */}
    throw error;
   }finally{
