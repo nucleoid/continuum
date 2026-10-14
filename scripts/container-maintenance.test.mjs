@@ -384,3 +384,13 @@ test('successful owner check cannot advance while its named backend disappearanc
  assert.equal(marker.unresolved.sessions[0].role,'owner');assert.match(marker.unresolved.sessions[0].applicationName,/^ctm-eligibility-[a-f0-9]{24}$/);
  assert.equal(existsSync(join(root,'backup.dump')),false);assert.ok(!state.calls.some(call=>call.args[0]==='stop'||call.args.includes('up')));
 }));
+
+test('owner client failure preserves private original streams and flags without exposing them in CLI output',()=>wrapperFixture(({state,run})=>{
+ state.preconnectionFailure=true;let error;try{run();}catch(value){error=value;}
+ assert.ok(error.clientFailure,'Wrapped error must preserve the original client result for private diagnosis');
+ assert.equal(error.clientFailure.status,2);assert.equal(error.clientFailure.stdout,'');
+ assert.match(error.clientFailure.stderr,/password authentication failed/);assert.match(error.clientFailure.jobName,/^synthetic-maintenance-maintenance-eligibility-[a-f0-9]{24}$/);
+ assert.equal(error.clientFailure.preconnectionProven,true);
+ assert.ok(!JSON.stringify(error).includes('psql:'));
+ assert.ok(!formatMaintenanceFailure(error).includes('password authentication failed'));
+}));
