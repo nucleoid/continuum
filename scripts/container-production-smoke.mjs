@@ -471,10 +471,12 @@ UPDATE service_api_keys k SET revoked_at=v.revoked_at FROM jsonb_to_recordset(${
   // A DBA-owned transaction changes eligibility after readonly preflight and
   // before migration. It releases its ledger lock as soon as the real named
   // pg_dump is observed waiting, well inside its five-second lock timeout.
-  const windowName='synthetic-eligibility-window-'+randomUUID();
+  const windowName='synthetic-ew-'+randomUUID();
+  check(Buffer.byteLength(windowName,'utf8')<=63,'Eligibility observer application name must not truncate');
   const windowPredicate=`usename='continuum_dba' AND datname='continuum' AND application_name='${windowName}'`;
   const windowProof=join(temporary,'eligibility-window-proof.txt');
   const windowFd=openSync(windowProof,'wx',0o600);
+  const windowStderr=join(temporary,'eligibility-window-stderr.txt'),windowStderrFd=openSync(windowStderr,'wx',0o600);
   const windowSql=`SET search_path=continuum,public; SET statement_timeout='90s'; BEGIN; LOCK TABLE _continuum_migrations IN ACCESS EXCLUSIVE MODE;
 DO $window$ DECLARE until_at timestamptz:=clock_timestamp()+interval '75 seconds'; BEGIN
  LOOP
@@ -485,7 +487,7 @@ DO $window$ DECLARE until_at timestamptz:=clock_timestamp()+interval '75 seconds
  END LOOP;
  UPDATE scope_memberships SET active=false WHERE principal_id='${adminId}' AND scope_id=continuum_org_scope_id() AND source_kind='manual' AND source_id='manual' AND role='admin';
 END $window$; COMMIT; SELECT 'eligibility-window-observed';`;
-  const windowChild=spawn('docker',[...fresh.base,'exec','-T','-e','PGPASSWORD','-e','PGAPPNAME','postgres','psql','-X','-qAt','-h','127.0.0.1','-U','continuum_dba','-d','continuum','-v','ON_ERROR_STOP=1','-c',windowSql],{env:{...fresh.env,PGPASSWORD:fresh.passwords.DBA,PGAPPNAME:windowName},stdio:['ignore',windowFd,'ignore']});
+  const windowChild=spawn('docker',[...fresh.base,'exec','-T','-e','PGPASSWORD','-e','PGAPPNAME','postgres','psql','-X','-qAt','-h','127.0.0.1','-U','continuum_dba','-d','continuum','-v','ON_ERROR_STOP=1','-c',windowSql],{env:{...fresh.env,PGPASSWORD:fresh.passwords.DBA,PGAPPNAME:windowName},stdio:['ignore',windowFd,windowStderrFd]});
   let windowError;
   try{
    const until=Date.now()+10000;
@@ -501,8 +503,13 @@ END $window$; COMMIT; SELECT 'eligibility-window-observed';`;
    check(compose(fresh,['ps','--status','running','-q','api']).trim()==='','Eligibility race unexpectedly resumed serving');
    check(sql(fresh,'SELECT jsonb_agg(to_jsonb(m) ORDER BY name)::text FROM _continuum_migrations m')===ledgerSnapshot&&storedBindings()===originalBindings&&credentialSnapshot()===originalCredentials,'Eligibility race mutated ledger, bindings or role credentials');
    check(sql(fresh,"SELECT count(*) FROM pg_stat_activity WHERE application_name ~ '^ctm-migrate-[a-f0-9]{24}$'",'DBA')==='0','Eligibility race left a migrator backend');
-  }catch(error){windowError=error;throw error;}finally{
-   try{sql(fresh,`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE ${windowPredicate} AND pid<>pg_backend_pid()`,'DBA');windowChild.kill('SIGTERM');closeSync(windowFd);restoreSyntheticFixture();check(sql(fresh,`SELECT count(*) FROM pg_stat_activity WHERE ${windowPredicate}`,'DBA')==='0','Eligibility observer cleanup did not settle');}
+  }catch(error){
+   windowError=error;
+   const lines=statSync(windowStderr).size<=65536?sanitizedMaintenanceLines(readFileSync(windowStderr,'utf8'),projects.flatMap(p=>Object.values(p.passwords))).slice(0,8):['[observer diagnostics exceeded limit]'];
+   process.stderr.write(JSON.stringify({code:'ELIGIBILITY_OBSERVER_FAILED',lines})+'\n');
+   throw error;
+  }finally{
+   try{sql(fresh,`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE ${windowPredicate} AND pid<>pg_backend_pid()`,'DBA');windowChild.kill('SIGTERM');closeSync(windowFd);closeSync(windowStderrFd);restoreSyntheticFixture();check(sql(fresh,`SELECT count(*) FROM pg_stat_activity WHERE ${windowPredicate}`,'DBA')==='0','Eligibility observer cleanup did not settle');}
    catch(error){if(windowError)windowError.fixtureCleanupError='Synthetic eligibility window cleanup failed';else throw error;}
   }
   results.passed.push('actual named custom backup wait witnesses mid-window OP demotion; post-quiescence eligibility recheck refuses before migration and preserves authority/ledger; owned fixture fully restores');
