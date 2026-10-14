@@ -475,7 +475,6 @@ try {
    check(error.phase==='backup'&&error.deadlineExceeded===true&&!error.settlementError,'Backup deadline failed backend settlement');
    check(sql(fresh,"SELECT count(*) FROM pg_stat_activity WHERE usename='continuum_dba' AND application_name~'^ctm-backup-[a-f0-9]{24}$'",'DBA')==='0','Timed-out dump retained DBA backend');
    check(sql(fresh,`SELECT count(*) FROM pg_stat_activity WHERE ${backupLocker.predicate}`,'DBA')==='1','Wrapper terminated external backup locker');
-   check(sql(fresh,'SELECT jsonb_agg(to_jsonb(m) ORDER BY name)::text FROM _continuum_migrations m')===ledgerSnapshot,'Backup deadline mutated migration ledger');
   }finally{backupLocker.close();}
   check(sql(fresh,'SELECT jsonb_agg(to_jsonb(m) ORDER BY name)::text FROM _continuum_migrations m')===ledgerSnapshot,'Backup deadline mutated migration ledger');
   const grantLocker=syntheticDbaLock(fresh,'grant','SELECT pg_advisory_xact_lock(834641726154302120::bigint)');
