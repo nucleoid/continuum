@@ -1,7 +1,7 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { writeFileSync, readFileSync, mkdtempSync, mkdirSync, readdirSync, copyFileSync, cpSync, rmSync, chmodSync, existsSync, statSync, openSync, closeSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { runMaintenance, acquireMaintenanceLock, releaseMaintenanceLock } from './container-maintenance.mjs';
 import { validateTmpfsMounts } from './container-compose-model.mjs';
@@ -28,7 +28,7 @@ function expectFailure(action, expected, label) {
   let actual;
   try { action(); } catch (error) { actual = error; }
   if(!actual||!failureText(actual).includes(expected)){
-   const knownCodes=new Set(['COMMAND_FAILED','DEADLINE_EXCEEDED','BINDING_MISMATCH','BINDING_INELIGIBLE','ACTIVE_WRITERS','BACKUP_FAILED','BACKEND_SETTLEMENT_FAILED','MIGRATION_BACKEND_REMAINS','MAINTENANCE_LOCKED','ASSET_MISMATCH','VOLUME_OWNERSHIP_MISMATCH','PG_IMAGE_MISMATCH']);
+   const knownCodes=new Set(['COMMAND_FAILED','DEADLINE_EXCEEDED','BINDING_MISMATCH','BINDING_INELIGIBLE','ACTIVE_WRITERS','BACKUP_FAILED','BACKEND_SETTLEMENT_FAILED','MIGRATION_BACKEND_REMAINS','MAINTENANCE_LOCKED','ASSET_MISMATCH','VOLUME_OWNERSHIP_MISMATCH','PG_IMAGE_MISMATCH','PREFLIGHT_UNAVAILABLE']);
    const knownPhases=new Set(['preflight','backup','bootstrap','migrate','provision-admin','grant','api','settlement','quiescence']);
    const diagnostic={code:actual?(knownCodes.has(actual.code)?actual.code:'UNCLASSIFIED_FAILURE'):'NO_FAILURE',phase:knownPhases.has(actual?.phase)?actual.phase:null};
    if(actual?.evidencePath){
@@ -358,6 +358,54 @@ try {
   const fixtureState=()=>sql(fresh,`SELECT jsonb_build_object('principals',(SELECT jsonb_agg(jsonb_build_object('id',id,'disabled_at',disabled_at) ORDER BY id) FROM principals WHERE id IN ('${adminId}','${syncId}')),'memberships',COALESCE((SELECT jsonb_agg(jsonb_build_object('principal_id',principal_id,'scope_id',scope_id,'source_kind',source_kind,'source_id',source_id,'active',active,'deactivated_at',deactivated_at) ORDER BY principal_id,scope_id,source_kind,source_id) FROM scope_memberships WHERE principal_id IN ('${adminId}','${syncId}')),'[]'::jsonb),'keys',COALESCE((SELECT jsonb_agg(jsonb_build_object('id',id,'revoked_at',revoked_at) ORDER BY id) FROM service_api_keys WHERE principal_id IN ('${adminId}','${syncId}')),'[]'::jsonb))::text`);
   const baselineFixtureState=fixtureState(),baseline=JSON.parse(baselineFixtureState);
   check(eligibilityWitness().op&&eligibilityWitness().sync&&eligibleAdmin(alternativeAdmin),'Eligibility fixtures require all original and alternative identities eligible');
+  // A proven TCP authentication refusal never creates an authenticated owner
+  // helper. It must refuse before downtime/outputs and leave this project retryable.
+  const ownerSecret=fresh.env.CONTINUUM_OWNER_PASSWORD_FILE;
+  const unavailableBackup=join(temporary,'owner-preconnect-refused.dump');
+  const unavailableFiles=readdirSync(fresh.directory).sort().join(',');
+  process.env.CONTINUUM_BACKUP_FILE=unavailableBackup;
+  chmodSync(ownerSecret,0o600);writeFileSync(ownerSecret,'SyntheticWrongOwnerPasswordOnly');chmodSync(ownerSecret,0o444);
+  try{
+   const error=expectFailure(()=>runMaintenance('upgrade',envFile,productionCompose,{deadlineMs:120000}),'PREFLIGHT_UNAVAILABLE','Unauthenticated owner preflight');
+   check(error.code==='PREFLIGHT_UNAVAILABLE'&&error.phase==='preflight'&&!error.settlementError&&!error.lockRetained,'Proven unauthenticated preflight retained uncertain settlement');
+   check(!existsSync(unavailableBackup)&&readdirSync(fresh.directory).sort().join(',')===unavailableFiles,'Unavailable owner preflight reserved outputs');
+   check(!existsSync(join(homedir(),'.continuum-maintenance-locks',fresh.project+'.lock')),'Unauthenticated owner preflight retained project lock');
+   check(compose(fresh,['ps','--status','running','-q','api']).trim()!==''&&storedBindings()===originalBindings&&credentialSnapshot()===originalCredentials,'Unavailable owner preflight stopped serving or mutated authority');
+  }finally{chmodSync(ownerSecret,0o600);writeFileSync(ownerSecret,fresh.passwords.OWNER);chmodSync(ownerSecret,0o444);}
+  // Owner-controlled invoker code probes only identities and whether a protected
+  // catalog SELECT is denied. LIMIT 0 reads no catalog values; no shell, program,
+  // privilege change or escalation operation is attempted.
+  const functionSnapshot=()=>sql(fresh,"SELECT jsonb_build_object('definition',pg_catalog.pg_get_functiondef(p.oid),'owner',p.proowner,'acl',p.proacl,'securityDefiner',p.prosecdef,'config',p.proconfig,'volatility',p.provolatile,'language',p.prolang)::text FROM pg_catalog.pg_proc p WHERE p.oid='continuum.continuum_org_scope_id()'::regprocedure");
+  const originalFunctionState=functionSnapshot(),originalFunctionDefinition=JSON.parse(originalFunctionState).definition;
+  check(originalFunctionDefinition.includes('SECURITY DEFINER')&&originalFunctionDefinition.includes('BEGIN'),'Owned function fixture requires exact known original definition');
+  const probe=`BEGIN
+ IF pg_catalog.current_setting('application_name') ~ '^ctm-(eligibility|dba)-[a-f0-9]{24}$' THEN
+  DECLARE denied boolean:=false; BEGIN
+   BEGIN PERFORM 1 FROM pg_catalog.pg_authid LIMIT 0; EXCEPTION WHEN insufficient_privilege THEN denied:=true; END;
+   RAISE NOTICE 'synthetic-owner-boundary %',pg_catalog.json_build_object('currentOwner',current_user='continuum_owner','sessionOwner',session_user='continuum_owner','protectedReadDenied',denied);
+   RAISE EXCEPTION 'synthetic reviewed owner preflight boundary';
+  END;
+ END IF;`;
+  const invokerFunction=originalFunctionDefinition.replace('SECURITY DEFINER','SECURITY INVOKER').replace('BEGIN',probe);
+  const boundaryBackup=join(temporary,'owner-boundary-refused.dump');process.env.CONTINUUM_BACKUP_FILE=boundaryBackup;
+  let boundaryError;
+  try{
+   sql(fresh,invokerFunction);
+   const error=expectFailure(()=>runMaintenance('upgrade',envFile,productionCompose,{deadlineMs:120000}),'COMMAND_FAILED','Direct owner controlled-function boundary');
+   check(error.phase==='preflight'&&!error.settlementError&&!error.lockRetained,'Controlled owner SQL refusal did not settle');
+   const match=(error.rawOutput??'').match(/NOTICE:\s+synthetic-owner-boundary (\{[^\n]+\})/);
+   check(Boolean(match),'Owned function did not report controlled authority witness');
+   const witness=JSON.parse(match[1]);
+   check(witness.currentOwner===true&&witness.sessionOwner===true&&witness.protectedReadDenied===true,'Owner-controlled code inherited DBA authority');
+   check(!existsSync(boundaryBackup)&&readdirSync(fresh.directory).sort().join(',')===unavailableFiles,'Owner boundary preflight reserved outputs');
+   check(compose(fresh,['ps','--status','running','-q','api']).trim()!==''&&!existsSync(join(homedir(),'.continuum-maintenance-locks',fresh.project+'.lock')),'Owner boundary stopped API or blocked healthy retry');
+   check(sql(fresh,"SELECT count(*) FROM pg_stat_activity WHERE usename='continuum_owner' AND datname='continuum' AND application_name ~ '^ctm-eligibility-[a-f0-9]{24}$'",'DBA')==='0','Owned eligibility helper did not settle');
+  }catch(error){boundaryError=error;throw error;}finally{
+   try{sql(fresh,originalFunctionDefinition);check(functionSnapshot()===originalFunctionState,'Owned function definition/security flags/ACL were not restored exactly');}
+   catch(error){if(boundaryError)boundaryError.fixtureCleanupError='Synthetic owner boundary restoration failed';else throw error;}
+  }
+  check(storedBindings()===originalBindings&&credentialSnapshot()===originalCredentials&&sql(fresh,'SELECT jsonb_agg(to_jsonb(m) ORDER BY name)::text FROM _continuum_migrations m')===ledgerSnapshot,'Owner boundary changed bindings, credentials or ledger');
+  results.passed.push('wrong synthetic owner TCP password refuses before outputs/downtime without retained lock; same-project healthy retry executes owner-controlled invoker code with actual session/current OWNER and denied protected catalog SELECT, no DBA authority; exact function definition/security/ACL restored');
   // Synthetic fixture cleanup restores the published disable trigger's membership
   // and key side effects. This is not the production identity recovery procedure.
   const restoreSyntheticFixture=()=>{

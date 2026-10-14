@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { resolve, join, dirname } from 'node:path';
 const MAX_BYTES = 65536;
 const phases = new Set(['preflight','backup','bootstrap','migrate','provision-admin','grant','api','settlement','quiescence']);
-const codes = new Set(['COMMAND_FAILED','DEADLINE_EXCEEDED','BINDING_MISMATCH','INVALID_APPLICATION_ROLE','BACKEND_SETTLEMENT_FAILED','COMPLETED_AFTER_DEADLINE','BACKUP_FAILED','ACTIVE_WRITERS','OWNERSHIP_MISMATCH','MIGRATION_BACKEND_REMAINS','BINDING_INELIGIBLE','MAINTENANCE_LOCKED','BACKUP_DURABILITY_FAILED','PG_IMAGE_MISMATCH']);
+const codes = new Set(['COMMAND_FAILED','DEADLINE_EXCEEDED','BINDING_MISMATCH','INVALID_APPLICATION_ROLE','BACKEND_SETTLEMENT_FAILED','COMPLETED_AFTER_DEADLINE','BACKUP_FAILED','ACTIVE_WRITERS','OWNERSHIP_MISMATCH','MIGRATION_BACKEND_REMAINS','BINDING_INELIGIBLE','MAINTENANCE_LOCKED','BACKUP_DURABILITY_FAILED','PG_IMAGE_MISMATCH','PREFLIGHT_UNAVAILABLE']);
 const sideCodes = {
  settlementError: new Set(['BACKEND_SETTLEMENT_FAILED']),
  cleanupError: new Set(['COMMAND_FAILED','DEADLINE_EXCEEDED','OWNERSHIP_MISMATCH','JOB_CLEANUP_UNRESOLVED']),
@@ -25,6 +25,37 @@ export function safeMaintenanceSideErrors(fields) {
   result[key]=code;
  }
  return result;
+}
+// This proof controls lock release. Ambiguous, partial or server SQL output
+// must fall through to normal owned-session settlement and manual recovery.
+export function isProvenPreconnectionFailure(rawOutput,{status,code,signal,timedOut,jobName}={}) {
+ if(!Number.isInteger(status) || status<=0 || status>255 || timedOut
+  || (signal!==undefined && signal!==null && signal!=='')
+  || (code!==undefined && code!==null && code!=='COMMAND_FAILED'))return false;
+ let text;
+ try {
+  if(Buffer.isBuffer(rawOutput)) {
+   if(rawOutput.length>16384)return false;
+   text=new TextDecoder('utf-8',{fatal:true}).decode(rawOutput);
+  } else if(typeof rawOutput==='string' && Buffer.byteLength(rawOutput,'utf8')<=16384)text=rawOutput;
+  else return false;
+ } catch {return false;}
+ if(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(text))return false;
+ text=text.replace(/\r\n/g,'\n').replace(/\n$/,'');
+ if(typeof jobName==='string' && /^[a-z0-9][a-z0-9_-]{0,127}-maintenance-eligibility-[a-f0-9]{24}$/.test(jobName)) {
+  const lifecycle=new Set(['Creating','Created','Starting','Started'].map(state=>`Container ${jobName} ${state}`));
+  text=text.split('\n').filter(line=>!lifecycle.has(line.replace(/[\t ]+/g,' ').trim())).join('\n');
+ }
+
+ // No ERROR/NOTICE/CONTEXT/SQL-command output is accepted as client proof.
+ if(/(?:^|\n)\s*(?:(?:ERROR|CONTEXT|NOTICE|DETAIL|HINT|WARNING):|(?:BEGIN|SET|SELECT|DO|COMMIT|ROLLBACK)(?:\s|$))/i.test(text))return false;
+ if(status===1 && (/^Error response from daemon: container [a-f0-9]{12,64} is not running$/.test(text)
+  || /^Error response from daemon: No such container: [a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(text)
+  || /^service "(?:postgres|grant)" is not running$/.test(text)))return true;
+ if(status!==2)return false;
+ const authentication=/^psql: error: connection to server at "[a-zA-Z0-9_.:-]{1,253}" \([^\n()]{1,128}\), port [0-9]{1,5} failed: FATAL: +password authentication failed for user "[^"\r\n]{1,63}"$/;
+ const refusal=/^psql: error: connection to server at "[a-zA-Z0-9_.:-]{1,253}" \([^\n()]{1,128}\), port [0-9]{1,5} failed: Connection refused(?:\n[\t ]*Is the server running on that host and accepting TCP\/IP connections\?)?$/;
+ return authentication.test(text) || refusal.test(text);
 }
 const fail = code => { throw new Error(code); };
 function syncDirectory(directory) {

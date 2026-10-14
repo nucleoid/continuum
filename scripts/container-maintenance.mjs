@@ -5,7 +5,7 @@ import { resolve, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { validateTmpfsMounts } from './container-compose-model.mjs';
-import { reserveEvidence, closeEvidence, collectSecretValues, writeFailureEvidence, safeMaintenanceSideErrors } from './container-maintenance-evidence.mjs';
+import { reserveEvidence, closeEvidence, collectSecretValues, writeFailureEvidence, safeMaintenanceSideErrors, isProvenPreconnectionFailure } from './container-maintenance-evidence.mjs';
 
 export class MaintenanceFailure extends Error {
  constructor(code, phase = '') { super(`Container maintenance ${phase ? `${phase}: ` : ''}${code}`); this.code = code; this.phase = phase; }
@@ -101,6 +101,7 @@ function docker(args, timeout = 60000) {
    : 'COMMAND_FAILED';
   const error = new MaintenanceFailure(code);
   Object.defineProperty(error,'rawOutput',{value:output});
+  error.status=result.status;error.signal=result.signal;error.clientCode=result.error?.code;
   throw error;
  }
  return result;
@@ -169,19 +170,23 @@ export function assertAssetMounts(services, root) {
 }
 export function quiescenceSql(database, roles) {
  if (!database || roles.length !== 4 || roles.some(role=>typeof role !== 'string' || !role)) throw new Error('Maintenance database authority is missing');
- return 'SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname=' + literal(database)
-  + ' AND usename IN (' + roles.map(literal).join(',') + ') AND pid<>pg_backend_pid()';
+ return 'SELECT pg_catalog.count(*) FROM pg_catalog.pg_stat_activity WHERE datname=' + literal(database)
+  + ' AND usename IN (' + roles.map(literal).join(',') + ') AND pid<>pg_catalog.pg_backend_pid()';
 }
 export function assertQuiescence(count) {
  if (count !== '0') throw new MaintenanceFailure('ACTIVE_WRITERS', 'quiescence');
 }
-export function bindingPreflightSql(environment) {
+export function bindingPreflightSql(environment, ownerRole = environment.PGUSER) {
  const schema=environment.CONTINUUM_APPLICATION_SCHEMA;
  const admin=environment.CONTINUUM_ADMIN_PRINCIPAL_ID,sync=environment.CONTINUUM_SYNC_PRINCIPAL_ID;
  if(typeof schema !== 'string' || !schema || !/^[a-f0-9-]{36}$/i.test(admin ?? '') || !/^[a-f0-9-]{36}$/i.test(sync ?? '')) throw new MaintenanceFailure('BINDING_INELIGIBLE','preflight');
  return `BEGIN READ ONLY; SET LOCAL statement_timeout='5000'; SET LOCAL lock_timeout='2000';
  SET LOCAL search_path="${schema.replaceAll('"','""')}";
  DO $bindings$ DECLARE i RECORD; BEGIN
+ IF session_user <> ${literal(ownerRole)} OR current_user <> ${literal(ownerRole)}
+ OR current_user::pg_catalog.regrole::oid <> (SELECT relowner FROM pg_catalog.pg_class WHERE oid='principals'::pg_catalog.regclass)
+ OR EXISTS(SELECT 1 FROM pg_catalog.pg_roles WHERE rolname=current_user AND rolsuper) THEN
+ RAISE EXCEPTION 'eligibility requires the direct non-superuser migration owner'; END IF;
  SELECT ${literal(environment.CONTINUUM_OPERATOR_ROLE)}::text AS operator_role,
  ${literal(environment.CONTINUUM_SYNC_ROLE)}::text AS sync_role,${literal(admin)}::uuid AS admin_id,${literal(sync)}::uuid AS sync_id INTO i;
  IF NOT EXISTS (SELECT 1 FROM continuum_trusted_database_identities identity JOIN pg_roles role ON role.oid=identity.database_role_oid
@@ -278,7 +283,7 @@ function assertCanonicalCompose(file, assets) {
 export function runMaintenance(mode, envFile, composeFile, options = {}) {
  const {deadlineMs,backupDeadlineMs} = maintenanceBudgets(options);
  if (!['fresh', 'upgrade'].includes(mode)) throw new Error('Invalid maintenance request');
- const compose = ['compose', '--env-file', resolve(envFile), '-f', resolve(composeFile),
+ const compose = ['compose', '--ansi', 'never', '--env-file', resolve(envFile), '-f', resolve(composeFile),
   '--profile', 'maintenance', '--profile', 'serving'];
  const readConfig = () => JSON.parse(docker([...compose, 'config', '--format', 'json']).stdout);
  const config = readConfig();
@@ -320,14 +325,14 @@ export function runMaintenance(mode, envFile, composeFile, options = {}) {
  if (!dbaRole) throw new MaintenanceFailure('BINDING_INELIGIBLE','preflight');
  const applicationName=prefix=>`ctm-${prefix}-${randomBytes(12).toString('hex')}`;
  const rawDbaSql=(sql,name,timeout=15000)=>docker([...compose,'exec','-T','-e',`PGAPPNAME=${name}`,'postgres','/bin/sh','-ec',
-  'export PGPASSWORD="$(cat /run/secrets/dba_password)" PGCONNECT_TIMEOUT=5 PGOPTIONS="-c statement_timeout=5000 -c lock_timeout=2000"; exec psql -X -qAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"','--',sql],timeout).stdout.trim();
+  'export PGPASSWORD="$(cat /run/secrets/dba_password)" PGCONNECT_TIMEOUT=5 PGOPTIONS="-c search_path=pg_catalog,pg_temp -c statement_timeout=5000 -c lock_timeout=2000"; exec psql -X -qAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"','--',sql],timeout).stdout.trim();
  const settleBackend=(name,role,phase)=>{
   try {
-  const predicate=`application_name=${literal(name)} AND usename=${literal(role)} AND datname=${literal(database)} AND pid<>pg_backend_pid()`;
+  const predicate=`application_name=${literal(name)} AND usename=${literal(role)} AND datname=${literal(database)} AND pid<>pg_catalog.pg_backend_pid()`;
   const end=Date.now()+10000;
   for(let attempts=0;attempts<10 && Date.now()<=end;attempts++) {
-   rawDbaSql(`SELECT pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity WHERE ${predicate}`,applicationName('settle'),Math.max(1,end-Date.now()));
-   if(rawDbaSql(`SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE ${predicate}`,applicationName('settle'),Math.max(1,end-Date.now()))==='0') return;
+   rawDbaSql(`SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity WHERE ${predicate}`,applicationName('settle'),Math.max(1,end-Date.now()));
+   if(rawDbaSql(`SELECT pg_catalog.count(*) FROM pg_catalog.pg_stat_activity WHERE ${predicate}`,applicationName('settle'),Math.max(1,end-Date.now()))==='0') return;
   }
   throw new MaintenanceFailure('BACKEND_SETTLEMENT_FAILED',phase);
   } catch(error) {
@@ -336,17 +341,51 @@ export function runMaintenance(mode, envFile, composeFile, options = {}) {
    throw new MaintenanceFailure('BACKEND_SETTLEMENT_FAILED',phase);
   }
  };
+ const provenPreconnection=(error,jobName)=>isProvenPreconnectionFailure(error.rawOutput,{jobName,status:error.status,code:error.clientCode,signal:error.signal,timedOut:error.code==='DEADLINE_EXCEEDED'});
  const dbaSql=sql=>{
   const name=applicationName('dba');
   try {return rawDbaSql(sql,name);} catch(error) {
+   if(provenPreconnection(error)) {
+    const failure=new MaintenanceFailure('PREFLIGHT_UNAVAILABLE');Object.defineProperty(failure,'rawOutput',{value:error.rawOutput});throw failure;
+   }
    try {settleBackend(name,dbaRole,'settlement');} catch(failure) {error.settlementError=failure.code ?? 'BACKEND_SETTLEMENT_FAILED';}
    throw error;
   }
  };
- if(mode === 'upgrade') {
-  try {dbaSql(bindingPreflightSql(config.services.grant.environment));}
-  catch(error) {error.phase='preflight';throw error;}
- }
+ const cleanupOwnedJob=name=>{
+  const id=docker(['ps','-aq','--filter',`name=^/${name}$`]).stdout.trim();
+  if(!id)return;
+  const container=JSON.parse(docker(['inspect',id]).stdout)[0];
+  if(container.Name!==`/${name}` || container.Config?.Labels?.['com.docker.compose.project']!==project)throw new MaintenanceFailure('OWNERSHIP_MISMATCH');
+  if(container.State?.Running)docker(['stop','--time','10',id],20000);
+  if(docker(['ps','-aq','--filter',`name=^/${name}$`]).stdout.trim())docker(['rm',id]);
+ };
+ const ownerEligibility=phase=>{
+  const sessionName=applicationName('eligibility'),name=`${project}-maintenance-eligibility-${randomBytes(12).toString('hex')}`;
+  const script='export PGPASSWORD="$(cat /run/secrets/owner_password)"; exec psql -X -qAt -v ON_ERROR_STOP=1 -v VERBOSITY=terse -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -c "$1"';
+  try {
+   if(config.services.grant.environment.PGUSER!==ownerRole)throw new MaintenanceFailure('BINDING_INELIGIBLE',phase);
+   docker([...compose,'run','--rm','--no-deps','--pull','never','--name',name,'-e',`PGAPPNAME=${sessionName}`,'--entrypoint','/bin/sh','grant','-ec',script,'--',bindingPreflightSql(config.services.grant.environment,ownerRole)],15000);
+   cleanupOwnedJob(name);
+   const predicate=`application_name=${literal(sessionName)} AND usename=${literal(ownerRole)} AND datname=${literal(database)} AND pid<>pg_catalog.pg_backend_pid()`;
+   if(dbaSql(`SELECT pg_catalog.count(*) FROM pg_catalog.pg_stat_activity WHERE ${predicate}`)!=='0')throw new MaintenanceFailure('BACKEND_SETTLEMENT_FAILED',phase);
+  } catch(error) {
+   const noSession=provenPreconnection(error,name);
+   const failed=new MaintenanceFailure(noSession?'PREFLIGHT_UNAVAILABLE':error.code ?? 'COMMAND_FAILED',phase);
+   Object.defineProperty(failed,'rawOutput',{value:error.rawOutput ?? 'Error: '+error.message});
+   for(const key of ['settlementError','cleanupError','lockError'])if(error[key])failed[key]=error[key];
+   try {cleanupOwnedJob(name);}catch(cleanup) {
+    failed.cleanupError='JOB_CLEANUP_UNRESOLVED';
+    try {retainUnresolvedLock(lock,{applicationName:sessionName,role:ownerRole,database,phase,jobName:name},'JOB_CLEANUP_UNRESOLVED');}
+    catch(marker) {lock.markerError=marker.code === 'MAINTENANCE_LOCK_OWNERSHIP_MISMATCH' ? marker.code : 'MAINTENANCE_LOCK_MARKER_FAILED';}
+   }
+   if(!noSession) {
+    try {settleBackend(sessionName,ownerRole,phase);}catch(failure) {failed.settlementError='BACKEND_SETTLEMENT_FAILED';}
+   }
+   throw failed;
+  }
+ };
+ if(mode === 'upgrade') ownerEligibility('preflight');
  assertRuntimeAssets(assets,imageAssetManifest(selectedId,project));
  // Reserve redacted private failure evidence before any downtime.
  secrets = collectSecretValues(config);
@@ -415,8 +454,7 @@ export function runMaintenance(mode, envFile, composeFile, options = {}) {
   activePhase='quiescence';
   assertQuiescence(dbaSql(activitySql));
   if(mode === 'upgrade') {
-   try {dbaSql(bindingPreflightSql(config.services.grant.environment));}
-   catch(error) {error.phase='quiescence';throw error;}
+   ownerEligibility('quiescence');
   }
   phase('migrate');
   if (mode === 'fresh') phase('provision-admin');

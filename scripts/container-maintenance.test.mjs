@@ -80,7 +80,7 @@ test('all maintenance assets binds require one readonly verified root', () => {
 });
 test('quiescence refuses any outside APP OP SYNC owner connection, without terminating it', () => {
  const sql=quiescenceSql('synthetic-db',['owner','app','op',"sync'quoted"]);
- assert.match(sql,/pg_catalog\.pg_stat_activity/); assert.match(sql,/pid<>pg_backend_pid\(\)/);
+ assert.match(sql,/pg_catalog\.pg_stat_activity/); assert.match(sql,/pid<>pg_catalog\.pg_backend_pid\(\)/);
  for(const role of ['owner','app','op',"sync''quoted"]) assert.ok(sql.includes(role));
  assert.ok(sql.includes('synthetic-db')); assert.ok(!sql.includes('pg_terminate_backend'));
  assertQuiescence('0');
@@ -131,7 +131,7 @@ test('wrapper gives backup a separate budget and rejects parity drift before sto
   assert.equal(result.deadlineMs,1000);assert.equal(result.backupDeadlineMs,1000);
   const migrate=calls.find(call=>call.args.includes('run')&&call.args.at(-1)==='migrate');
   assert.equal(migrate.timeout,1000,'800ms of backup must not consume the migration budget');
-  assert.equal(calls.filter(call=>call.args.some(arg=>arg.includes('pg_catalog.pg_stat_activity'))).length,2);
+  assert.equal(calls.filter(call=>call.args.some(arg=>arg.includes('pg_catalog.pg_stat_activity')&&arg.includes('usename IN'))).length,2);
   assert.match(readFileSync(join(root,'backup.dump.sha256'),'utf8'),/^[a-f0-9]{64}  /);
   calls.length=0;writeFileSync(join(root,'scripts','grant.sql'),'tampered');
   assert.throws(()=>runMaintenance('upgrade',join(root,'private.env'),join(root,'deploy','compose.production.yml'),{deadlineMs:1000}),e=>e.code==='ASSET_MISMATCH');
@@ -169,6 +169,7 @@ function wrapperFixture(check) {
    else if(args[0]==='run') stdout=JSON.stringify(reference);
    else if(args.some(arg=>arg.includes('exec pg_dump'))) {writeSync(options.stdio[1],'synthetic dump');if(state.failBackup)return {status:null,stdout:'',stderr:'ERROR: synthetic backup lock wait',error:{code:'ETIMEDOUT'}};}
    else if(args.includes('exec')) stdout='0\n';
+   if(args.some(arg=>arg.includes('pg_catalog.count(*)')&&arg.includes('ctm-eligibility-'))&&state.remainingEligibility) stdout='1\n';
    if(args.some(arg=>arg.includes('operator identity must be an effective manual org administrator'))&&state.preconnectionFailure) return {status:2,stdout:'',stderr:'psql: error: connection to server at "postgres" (192.0.2.1), port 5432 failed: FATAL:  password authentication failed for user "owner"\n'};
    if(args.some(arg=>arg.includes('operator identity must be an effective manual org administrator'))) state.eligibilityChecks=(state.eligibilityChecks??0)+1;
    if(args.some(arg=>arg.includes('operator identity must be an effective manual org administrator'))&&(state.ineligible || state.changeEligibility && state.eligibilityChecks>1)) return {status:1,stdout:'',stderr:'ERROR: role binding is ineligible'};
@@ -373,4 +374,13 @@ test('proven owner preconnection refusal releases the window without backups, st
  assert.equal(error.code,'PREFLIGHT_UNAVAILABLE');assert.equal(error.phase,'preflight');assert.equal(error.lockRetained,undefined);
  assert.equal(existsSync(join(root,'.continuum-maintenance-locks','synthetic-maintenance.lock')),false);assert.equal(existsSync(join(root,'backup.dump')),false);
  assert.ok(!state.calls.some(call=>call.args[0]==='stop'||call.args.includes('up')||call.args.some(arg=>arg.includes('pg_terminate_backend'))));
+}));
+
+
+test('successful owner check cannot advance while its named backend disappearance is unproven',()=>wrapperFixture(({root,state,run})=>{
+ state.remainingEligibility=true;let error;try{run();}catch(value){error=value;}
+ assert.equal(error.code,'BACKEND_SETTLEMENT_FAILED');assert.equal(error.phase,'preflight');assert.equal(error.settlementError,'BACKEND_SETTLEMENT_FAILED');assert.equal(error.lockRetained,true);
+ const marker=JSON.parse(readFileSync(join(root,'.continuum-maintenance-locks','synthetic-maintenance.lock'),'utf8'));
+ assert.equal(marker.unresolved.sessions[0].role,'owner');assert.match(marker.unresolved.sessions[0].applicationName,/^ctm-eligibility-[a-f0-9]{24}$/);
+ assert.equal(existsSync(join(root,'backup.dump')),false);assert.ok(!state.calls.some(call=>call.args[0]==='stop'||call.args.includes('up')));
 }));
