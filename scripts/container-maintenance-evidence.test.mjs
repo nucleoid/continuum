@@ -1,6 +1,8 @@
 import { test } from 'node:test';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync, statSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, statSync, rmSync, symlinkSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { reserveEvidence, closeEvidence, collectSecretValues, writeFailureEvidence } from './container-maintenance-evidence.mjs';
@@ -41,4 +43,22 @@ test('evidence never serializes arbitrary fields, exception causes or private ph
  writeFailureEvidence(reservation,{phase:'/private/name',code:'raw secret text',image:'private-tag',mode:'unknown',cause:new Error('private-cause'),deadlineMs:-1},'unrecognized private output',[]); closeEvidence(reservation);
  const record=JSON.parse(readFileSync(reservation.path,'utf8'));
  assert.equal(record.phase,null);assert.equal(record.code,null);assert.equal(record.image,null);assert.equal(record.mode,null);assert.deepEqual(record.lines,[]);assert.ok(!JSON.stringify(record).includes('private'));
+}));
+
+test('successful close removes only empty reservations, while failed evidence remains retained', () => fixture(dir => {
+ const success=reserveEvidence(dir); const path=success.path;
+ closeEvidence(success,true); assert.equal(existsSync(path),false); closeEvidence(success,true);
+ const failed=reserveEvidence(dir); writeFailureEvidence(failed,{phase:'migrate',code:'DEADLINE_EXCEEDED'},'ERROR: 55P03 lock timeout',[]);
+ closeEvidence(failed,true); assert.equal(existsSync(failed.path),true); assert.match(readFileSync(failed.path,'utf8'),/55P03/);
+ const interrupted=reserveEvidence(dir); closeEvidence(interrupted); assert.equal(existsSync(interrupted.path),true);
+}));
+
+test('reservation, record and cleanup flush files and Linux directory entries in order', () => fixture(dir => {
+ const original=fs.fsyncSync, events=[];
+ fs.fsyncSync=fd=>{events.push(fs.fstatSync(fd).isDirectory()?'directory':'file');return original(fd);}; syncBuiltinESMExports();
+ try {
+  const failed=reserveEvidence(dir);writeFailureEvidence(failed,{phase:'grant',code:'COMMAND_FAILED'},'ERROR: 42501 permission denied',[]);closeEvidence(failed);
+  const successful=reserveEvidence(dir);closeEvidence(successful,true);
+  assert.deepEqual(events,process.platform==='win32'?['file','file','file']:['file','directory','file','directory','file','directory','directory']);
+ } finally {fs.fsyncSync=original;syncBuiltinESMExports();}
 }));

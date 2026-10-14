@@ -78,3 +78,11 @@ test('fresh and upgrade retain one maintenance session across the existing exact
     assert.match(result.sql, /\\i :identity_verifier/);
   }
 });
+
+
+test('grant preflight rechecks current OP and SYNC eligibility before any grant include',()=>{
+ const result=run('upgrade');assert.equal(result.status,0,result.stderr);
+ const eligibility=result.sql.indexOf('role binding is ineligible');
+ assert.ok(eligibility>=0);assert.ok(eligibility<result.sql.indexOf('\\i :application_grant'));
+ for(const predicate of ["principal.kind = 'user'", "principal.disabled_at IS NULL", "membership.source_kind = 'manual'", "membership.source_id = 'manual'", "membership.role = 'admin' AND membership.active", "principal.kind = 'service'", 'continuum_require_sync_retirement_authority', 'continuum_unresolved_retired_sync_database_identities']) assert.ok(result.sql.includes(predicate),predicate);
+});

@@ -1,5 +1,7 @@
 import test from 'node:test';
 import childProcess from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
 import { syncBuiltinESMExports } from 'node:module';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, writeFileSync, closeSync, existsSync, rmSync, statSync, mkdirSync, writeSync } from 'node:fs';
@@ -87,7 +89,8 @@ test('quiescence refuses any outside APP OP SYNC owner connection, without termi
 
 test('wrapper gives backup a separate budget and rejects parity drift before stopping serving', () => {
  const root=mkdtempSync(join(tmpdir(),'continuum-wrapper-'));
- const originalSpawn=childProcess.spawnSync, originalNow=Date.now;
+ const originalSpawn=childProcess.spawnSync, originalNow=Date.now, originalHome=os.homedir;
+ os.homedir=()=>root;syncBuiltinESMExports();
  const originalBackup=process.env.CONTINUUM_BACKUP_FILE, originalQuiescence=process.env.CONTINUUM_QUIESCENCE_CONFIRMED;
  try {
   for(const dir of ['deploy','scripts','migrations']) mkdirSync(join(root,dir));
@@ -134,7 +137,7 @@ test('wrapper gives backup a separate budget and rejects parity drift before sto
   assert.throws(()=>runMaintenance('upgrade',join(root,'private.env'),join(root,'deploy','compose.production.yml'),{deadlineMs:1000}),e=>e.code==='ASSET_MISMATCH');
   assert.ok(!calls.some(call=>call.args[0]==='stop'||call.args.includes('up')),'drift refusal must precede downtime');
  } finally {
-  childProcess.spawnSync=originalSpawn;syncBuiltinESMExports();Date.now=originalNow;
+  childProcess.spawnSync=originalSpawn;os.homedir=originalHome;syncBuiltinESMExports();Date.now=originalNow;
   if(originalBackup===undefined)delete process.env.CONTINUUM_BACKUP_FILE;else process.env.CONTINUUM_BACKUP_FILE=originalBackup;
   if(originalQuiescence===undefined)delete process.env.CONTINUUM_QUIESCENCE_CONFIRMED;else process.env.CONTINUUM_QUIESCENCE_CONFIRMED=originalQuiescence;
   rmSync(root,{recursive:true,force:true});
@@ -143,7 +146,8 @@ test('wrapper gives backup a separate budget and rejects parity drift before sto
 
 function wrapperFixture(check) {
  const root=mkdtempSync(join(tmpdir(),'continuum-wrapper-safety-'));
- const originalSpawn=childProcess.spawnSync,originalNow=Date.now, saved={...process.env};
+ const originalSpawn=childProcess.spawnSync,originalNow=Date.now,originalHome=os.homedir,saved={...process.env};
+ os.homedir=()=>root;syncBuiltinESMExports();
  try {
   for(const dir of ['deploy','scripts','migrations']) mkdirSync(join(root,dir));
   for(const [file,value] of [['package.json','{}'],['deploy/compose.production.yml','public'],['scripts/grant.sql','SELECT 1;'],['migrations/0001.sql','SELECT 2;']]) writeFileSync(join(root,file),value);
@@ -165,6 +169,7 @@ function wrapperFixture(check) {
    else if(args[0]==='run') stdout=JSON.stringify(reference);
    else if(args.some(arg=>arg.includes('exec pg_dump'))) writeSync(options.stdio[1],'synthetic dump');
    else if(args.includes('exec')) stdout='0\n';
+   if(args.some(arg=>arg.includes('operator identity must be an effective manual org administrator'))&&state.ineligible) return {status:1,stdout:'',stderr:'ERROR: role binding is ineligible'};
    if(args.includes('run')&&args.at(-1)==='grant'&&state.expireAtGrant) state.time+=1001;
    if(args.includes('run')&&args.at(-1)==='grant'&&state.failGrant) return {status:1,stdout:'',stderr:'ERROR: synthetic lock timeout '+state.privateSecret+'\nCONTEXT: PASSWORD '+state.privateSecret};
    if(args.includes('up')&&args.at(-1)==='api'&&state.failApi) return {status:1,stdout:'',stderr:'Container synthetic API unhealthy'};
@@ -173,7 +178,7 @@ function wrapperFixture(check) {
   };syncBuiltinESMExports();
   check({root,state,container,config,run:(compose=join(root,'deploy','compose.production.yml'))=>runMaintenance('upgrade',join(root,'private.env'),compose,{deadlineMs:1000,backupDeadlineMs:1000})});
  } finally {
-  childProcess.spawnSync=originalSpawn;syncBuiltinESMExports();Date.now=originalNow;
+  childProcess.spawnSync=originalSpawn;os.homedir=originalHome;syncBuiltinESMExports();Date.now=originalNow;
   for(const key of Object.keys(process.env)) if(!(key in saved)) delete process.env[key];
   Object.assign(process.env,saved);rmSync(root,{recursive:true,force:true});
  }
@@ -233,4 +238,46 @@ test('failed API gate retains owned API logs before stopping the unhealthy servi
  const logIndex=state.calls.findIndex(call=>call.args.includes('logs'));
  const stopIndex=state.calls.findIndex((call,index)=>index>logIndex&&call.args.includes('stop')&&call.args.at(-1)==='api');
  assert.ok(logIndex>=0&&stopIndex>logIndex);
+}));
+
+test('upgrade eligibility is checked read-only before output reservations and serving stops',()=>wrapperFixture(({root,state,run})=>{
+ state.ineligible=true;
+ assert.throws(run,e=>e.code==='BINDING_INELIGIBLE'&&e.phase==='preflight');
+ assert.equal(existsSync(join(root,'backup.dump')),false);
+ assert.ok(!state.calls.some(call=>call.args[0]==='stop'||call.args.includes('up')));
+ const check=state.calls.find(call=>call.args.some(arg=>arg.includes('operator identity must be an effective manual org administrator')));
+ assert.ok(check);assert.ok(check.args.some(arg=>arg.includes('BEGIN READ ONLY')));
+}));
+
+test('backup files and directory are made durable before migration and failure prevents migration',()=>wrapperFixture(({state,run})=>{
+ const original=fs.fsyncSync;let count=0;
+ fs.fsyncSync=fd=>{count++;if(count===1)throw new Error('synthetic fsync failure');return original(fd);};syncBuiltinESMExports();
+ try {assert.throws(run);assert.ok(count>0);assert.ok(!state.calls.some(call=>call.args.includes('run')&&call.args.at(-1)==='migrate'));}
+ finally {fs.fsyncSync=original;syncBuiltinESMExports();}
+}));
+
+test('backup and grant failure settle only individually named sessions in the configured database',()=>wrapperFixture(({state,run})=>{
+ state.failGrant=true;assert.throws(run);
+ const grant=state.calls.find(call=>call.args.includes('run')&&call.args.at(-1)==='grant');
+ const setting=grant.args.find(arg=>/^PGAPPNAME=ctm-grant-[a-f0-9]{24}$/.test(arg));assert.ok(setting);
+ const name=setting.slice('PGAPPNAME='.length);
+ const terminate=state.calls.find(call=>call.args.some(arg=>arg.includes('pg_terminate_backend')&&arg.includes(name)));
+ assert.ok(terminate);assert.ok(terminate.args.some(arg=>arg.includes("usename='owner'")&&arg.includes("datname='synthetic'")));
+ for(const backup of state.calls.filter(call=>call.args.some(arg=>arg.includes('exec pg_dump')))) assert.ok(backup.args.some(arg=>/^PGAPPNAME=ctm-backup-[a-f0-9]{24}$/.test(arg)));
+}));
+
+test('a failure writing evidence preserves the original grant code and phase',()=>wrapperFixture(({state,run})=>{
+ state.failGrant=true;const original=fs.fsyncSync;
+ fs.fsyncSync=fd=>{if(new Error().stack.includes('writeFailureEvidence'))throw new Error('synthetic evidence fsync failure');return original(fd);};syncBuiltinESMExports();
+ try {let error;try{run();}catch(value){error=value;}assert.equal(error.code,'COMMAND_FAILED');assert.equal(error.phase,'grant');assert.equal(error.evidenceError,'EVIDENCE_WRITE_FAILED');}
+ finally {fs.fsyncSync=original;syncBuiltinESMExports();}
+}));
+
+
+test('an existing project lock refuses another window before outputs or Docker mutations',()=>wrapperFixture(({root,state,run})=>{
+ const dir=join(root,'.continuum-maintenance-locks');mkdirSync(dir,{mode:0o700});
+ const lock=join(dir,'synthetic-maintenance.lock');writeFileSync(lock,'retained lock',{mode:0o600});
+ assert.throws(run,e=>e.code==='MAINTENANCE_LOCKED'&&e.phase==='preflight');
+ assert.equal(readFileSync(lock,'utf8'),'retained lock');assert.equal(existsSync(join(root,'backup.dump')),false);
+ assert.ok(!state.calls.some(call=>call.args[0]==='stop'||call.args.includes('up')||call.args[0]==='run'));
 }));
