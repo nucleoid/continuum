@@ -38,7 +38,8 @@ function expectFailure(action, expected, label) {
      if(Array.isArray(record.lines)&&record.lines.every(line=>typeof line==='string'&&line.length<=1000))diagnostic.evidenceLines=sanitizedMaintenanceLines(record.lines.join('\n'),projects.flatMap(p=>Object.values(p.passwords))).slice(0,8);
     }catch{diagnostic.evidenceUnavailable=true;}
    }
-   throw new Error(`${label}: did not receive the specific expected failure; actual=${JSON.stringify(diagnostic)}`);
+   const mismatch=new Error(`${label}: did not receive the specific expected failure; actual=${JSON.stringify(diagnostic)}`);
+   Object.defineProperty(mismatch,'actualFailure',{value:actual});throw mismatch;
   }
   return actual;
 }
@@ -371,6 +372,21 @@ try {
    check(!existsSync(unavailableBackup)&&readdirSync(fresh.directory).sort().join(',')===unavailableFiles,'Unavailable owner preflight reserved outputs');
    check(!existsSync(join(homedir(),'.continuum-maintenance-locks',fresh.project+'.lock')),'Unauthenticated owner preflight retained project lock');
    check(compose(fresh,['ps','--status','running','-q','api']).trim()!==''&&storedBindings()===originalBindings&&credentialSnapshot()===originalCredentials,'Unavailable owner preflight stopped serving or mutated authority');
+  }catch(error){
+   const actual=error.actualFailure??error,client=actual.clientFailure??{};
+   const diagnostic={code:'OWNER_PREFLIGHT_CLASSIFICATION_FAILED',status:Number.isInteger(client.status)?client.status:null,signal:['SIGKILL','SIGTERM'].includes(client.signal)?client.signal:null,clientCode:['ETIMEDOUT','ENOENT','EPIPE','ENOBUFS'].includes(client.clientCode)?client.clientCode:null,preconnectionProven:client.preconnectionProven===true};
+   try{
+    const raw=actual.rawOutput??'',values=[...projects.flatMap(p=>Object.values(p.passwords)),'SyntheticWrongOwnerPasswordOnly'];
+    check(Buffer.byteLength(raw,'utf8')<=65536,'Owner client diagnostics exceed bound');
+    diagnostic.lines=sanitizedMaintenanceLines(raw,values).slice(0,8);
+    diagnostic.redactedDigest=createHash('sha256').update(diagnostic.lines.join('\n')).digest('hex');
+    diagnostic.stdoutBytes=Buffer.byteLength(client.stdout??'','utf8');diagnostic.stderrBytes=Buffer.byteLength(client.stderr??'','utf8');
+    diagnostic.blankLines=raw.split(/\r?\n/).filter(line=>/^\s*$/.test(line)).length;diagnostic.ansi=raw.includes('\u001b');
+    const ownedStates=['Creating','Created','Starting','Started'];
+    diagnostic.ownedLifecycleStates=ownedStates.filter(state=>raw.split(/\r?\n/).some(line=>line.replace(/[\t ]+/g,' ').trim()===`Container ${client.jobName} ${state}`));
+   }catch{diagnostic.evidenceUnavailable=true;}
+   try{process.stderr.write(JSON.stringify(diagnostic)+'\n');}catch{/* Preserve the original failure. */}
+   throw error;
   }finally{chmodSync(ownerSecret,0o600);writeFileSync(ownerSecret,fresh.passwords.OWNER);chmodSync(ownerSecret,0o444);}
   // Owner-controlled invoker code probes only identities and whether a protected
   // catalog SELECT is denied. LIMIT 0 reads no catalog values; no shell, program,

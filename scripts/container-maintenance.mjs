@@ -101,6 +101,7 @@ function docker(args, timeout = 60000) {
    : 'COMMAND_FAILED';
   const error = new MaintenanceFailure(code);
   Object.defineProperty(error,'rawOutput',{value:output});
+  Object.defineProperty(error,'clientOutput',{value:{stdout:result.stdout ?? '',stderr:result.stderr ?? ''}});
   error.status=result.status;error.signal=result.signal;error.clientCode=result.error?.code;
   throw error;
  }
@@ -373,6 +374,7 @@ export function runMaintenance(mode, envFile, composeFile, options = {}) {
    const noSession=provenPreconnection(error,name);
    const failed=new MaintenanceFailure(noSession?'PREFLIGHT_UNAVAILABLE':error.code ?? 'COMMAND_FAILED',phase);
    Object.defineProperty(failed,'rawOutput',{value:error.rawOutput ?? 'Error: '+error.message});
+   Object.defineProperty(failed,'clientFailure',{value:{status:error.status,signal:error.signal,clientCode:error.clientCode,jobName:name,preconnectionProven:noSession,stdout:error.clientOutput?.stdout,stderr:error.clientOutput?.stderr}});
    for(const key of ['settlementError','cleanupError','lockError'])if(error[key])failed[key]=error[key];
    try {cleanupOwnedJob(name);}catch(cleanup) {
     failed.cleanupError='JOB_CLEANUP_UNRESOLVED';
