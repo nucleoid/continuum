@@ -7,7 +7,7 @@ import { runMaintenance, acquireMaintenanceLock, releaseMaintenanceLock } from '
 import { validateTmpfsMounts } from './container-compose-model.mjs';
 import { sanitizedMaintenanceLines } from './container-maintenance-evidence.mjs';
 import { writeCommandOutput, readCommandInput } from './container-binary-transfer.mjs';
-import { safeBootstrapFailure, sanitizedBootstrapLines } from './container-diagnostics.mjs';
+import { safeBootstrapFailure, sanitizedBootstrapLines, buildOwnerBoundaryProbeFunction } from './container-diagnostics.mjs';
 
 if (process.env.GITHUB_ACTIONS !== 'true' || process.platform !== 'linux') throw new Error('Hosted Linux CI required');
 const output = resolve(process.argv[2]);
@@ -402,7 +402,7 @@ try {
    RAISE EXCEPTION 'synthetic reviewed owner preflight boundary';
   END;
  END IF;`;
-  const invokerFunction=originalFunctionDefinition.replace('SECURITY DEFINER','SECURITY INVOKER').replace('BEGIN',probe);
+  const invokerFunction=buildOwnerBoundaryProbeFunction(originalFunctionDefinition,probe);
   const boundaryBackup=join(temporary,'owner-boundary-refused.dump');process.env.CONTINUUM_BACKUP_FILE=boundaryBackup;
   let boundaryError;
   try{

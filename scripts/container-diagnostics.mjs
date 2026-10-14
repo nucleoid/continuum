@@ -26,3 +26,6 @@ export function sanitizedBootstrapLines(output, secrets) {
  if (secrets.some(secret=>lines.some(line=>line.includes(secret)))) return [];
  return lines;
 }
+export function buildOwnerBoundaryProbeFunction(definition,probe) {
+ return definition.replace('SECURITY DEFINER','SECURITY INVOKER').replace('BEGIN',probe);
+}

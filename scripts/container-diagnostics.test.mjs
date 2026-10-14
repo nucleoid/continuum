@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { safeBootstrapFailure, sanitizedBootstrapLines } from './container-diagnostics.mjs';
+import { safeBootstrapFailure, sanitizedBootstrapLines, buildOwnerBoundaryProbeFunction } from './container-diagnostics.mjs';
 
 test('bootstrap diagnostics return only known phase and SQLSTATE', () => {
  const result = safeBootstrapFailure("ERROR: fresh database bootstrap failed at create-roles (42601); review approved inputs and database state\nCONTEXT: PASSWORD 'synthetic-sensitive-value'");
@@ -49,4 +49,11 @@ test('eligibility observer mutates guarded membership only as owner after its DB
  assert.ok(sql.indexOf('SET LOCAL ROLE continuum_owner')<change&&sql.indexOf('SET LOCAL ROLE continuum_owner')>=0,'The published table-owner guard must apply to the actual mutation');
  assert.match(sql,/GET DIAGNOSTICS changed = ROW_COUNT/);
  assert.ok(sql.indexOf('RESET ROLE;',change)>change&&sql.indexOf('RESET ROLE;',change)<sql.indexOf('COMMIT;',change));
+});
+test('owned boundary fixture preserves SQL regex dollars and original function suffix literally',()=>{
+ const definition="CREATE FUNCTION synthetic_scope() RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER AS $function$\nBEGIN\n RETURN NULL;\nEND;\n$function$;";
+ const probe="BEGIN\n IF pg_catalog.current_setting('application_name') ~ '^ctm-(eligibility|dba)-[a-f0-9]{24}$' THEN\n RAISE EXCEPTION 'synthetic reviewed owner preflight boundary';\n END IF;";
+ const expected="CREATE FUNCTION synthetic_scope() RETURNS uuid LANGUAGE plpgsql SECURITY INVOKER AS $function$\n"+probe+"\n RETURN NULL;\nEND;\n$function$;";
+ assert.equal(buildOwnerBoundaryProbeFunction(definition,probe),expected);
+ assert.equal((buildOwnerBoundaryProbeFunction(definition,probe).match(/RETURN NULL/g)??[]).length,1);
 });
