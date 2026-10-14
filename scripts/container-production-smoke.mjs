@@ -339,39 +339,58 @@ try {
   // Current authority eligibility must refuse before reserving outputs or downtime.
   const adminId=fresh.env.CONTINUUM_ADMIN_PRINCIPAL_ID,syncId=fresh.env.CONTINUUM_SYNC_PRINCIPAL_ID;
   const ledgerSnapshot=sql(fresh,'SELECT jsonb_agg(to_jsonb(m) ORDER BY name)::text FROM _continuum_migrations m');
+  const sqlLiteral=value=>"'"+String(value).replaceAll("'","''")+"'";
+  const eligibleAdmin=principal=>sql(fresh,`SELECT EXISTS(SELECT 1 FROM principals p JOIN scope_memberships m ON m.principal_id=p.id WHERE p.id='${principal}' AND p.kind='user' AND p.disabled_at IS NULL AND m.scope_id=continuum_org_scope_id() AND m.source_kind='manual' AND m.source_id='manual' AND m.role='admin' AND m.active)`)==='t';
+  const eligibilityWitness=()=>({op:eligibleAdmin(adminId),sync:sql(fresh,`SELECT EXISTS(SELECT 1 FROM principals p WHERE p.id='${syncId}' AND p.kind='service' AND p.disabled_at IS NULL)`)==='t'});
+  const fixtureState=()=>sql(fresh,`SELECT jsonb_build_object('principals',(SELECT jsonb_agg(jsonb_build_object('id',id,'disabled_at',disabled_at) ORDER BY id) FROM principals WHERE id IN ('${adminId}','${syncId}')),'memberships',COALESCE((SELECT jsonb_agg(jsonb_build_object('principal_id',principal_id,'scope_id',scope_id,'source_kind',source_kind,'source_id',source_id,'active',active,'deactivated_at',deactivated_at) ORDER BY principal_id,scope_id,source_kind,source_id) FROM scope_memberships WHERE principal_id IN ('${adminId}','${syncId}')),'[]'::jsonb),'keys',COALESCE((SELECT jsonb_agg(jsonb_build_object('id',id,'revoked_at',revoked_at) ORDER BY id) FROM service_api_keys WHERE principal_id IN ('${adminId}','${syncId}')),'[]'::jsonb))::text`);
+  const baselineFixtureState=fixtureState(),baseline=JSON.parse(baselineFixtureState);
+  check(eligibilityWitness().op&&eligibilityWitness().sync&&eligibleAdmin(alternativeAdmin),'Eligibility fixtures require all original and alternative identities eligible');
+  // Synthetic fixture cleanup restores the published disable trigger's membership
+  // and key side effects. This is not the production identity recovery procedure.
+  const restoreSyntheticFixture=()=>{
+   sql(fresh,`UPDATE principals p SET disabled_at=v.disabled_at FROM jsonb_to_recordset(${sqlLiteral(JSON.stringify(baseline.principals))}::jsonb) AS v(id uuid,disabled_at timestamptz) WHERE p.id=v.id;
+UPDATE scope_memberships m SET active=v.active,deactivated_at=v.deactivated_at FROM jsonb_to_recordset(${sqlLiteral(JSON.stringify(baseline.memberships))}::jsonb) AS v(principal_id uuid,scope_id uuid,source_kind text,source_id text,active boolean,deactivated_at timestamptz) WHERE m.principal_id=v.principal_id AND m.scope_id=v.scope_id AND m.source_kind=v.source_kind AND m.source_id=v.source_id;
+UPDATE service_api_keys k SET revoked_at=v.revoked_at FROM jsonb_to_recordset(${sqlLiteral(JSON.stringify(baseline.keys))}::jsonb) AS v(id uuid,revoked_at timestamptz) WHERE k.id=v.id`);
+   check(fixtureState()===baselineFixtureState,'Synthetic disable trigger side effects were not fully restored');
+   check(eligibilityWitness().op&&eligibilityWitness().sync&&eligibleAdmin(alternativeAdmin),'Synthetic eligibility cleanup did not restore all reviewed predicates');
+  };
   const eligibilityCases=[
-   ['demoted-op',`UPDATE scope_memberships SET active=false WHERE principal_id='${adminId}' AND scope_id=continuum_org_scope_id() AND source_kind='manual' AND source_id='manual' AND role='admin'`,`UPDATE scope_memberships SET active=true WHERE principal_id='${adminId}' AND scope_id=continuum_org_scope_id() AND source_kind='manual' AND source_id='manual' AND role='admin'`],
-   ['disabled-op',`UPDATE principals SET disabled_at=clock_timestamp() WHERE id='${adminId}'`,`UPDATE principals SET disabled_at=NULL WHERE id='${adminId}'`],
-   ['disabled-sync',`UPDATE principals SET disabled_at=clock_timestamp() WHERE id='${syncId}'`,`UPDATE principals SET disabled_at=NULL WHERE id='${syncId}'`],
+   ['demoted-op',`UPDATE scope_memberships SET active=false WHERE principal_id='${adminId}' AND scope_id=continuum_org_scope_id() AND source_kind='manual' AND source_id='manual' AND role='admin'`,{op:false,sync:true},'operator identity must be an effective manual org administrator'],
+   ['disabled-op',`UPDATE principals SET disabled_at=clock_timestamp() WHERE id='${adminId}'`,{op:false,sync:true},'operator identity must be an effective manual org administrator'],
+   ['disabled-sync',`UPDATE principals SET disabled_at=clock_timestamp() WHERE id='${syncId}'`,{op:true,sync:false},'sync identity must be an enabled service principal'],
   ];
-  for(const [label,makeIneligible,restore] of eligibilityCases){
+  for(const [label,makeIneligible,expectedWitness,specificReason] of eligibilityCases){
+   check(eligibilityWitness().op&&eligibilityWitness().sync,'Earlier fixture contaminated next eligibility case');
    sql(fresh,makeIneligible);
    try{
+    check(JSON.stringify(eligibilityWitness())===JSON.stringify(expectedWitness),'Eligibility fixture did not establish its exact intended OP/SYNC predicate');
     const refused=join(temporary,label+'-refused.dump');process.env.CONTINUUM_BACKUP_FILE=refused;
     const priorFiles=readdirSync(fresh.directory).sort().join(',');
     const error=expectFailure(()=>runMaintenance('upgrade',envFile,productionCompose,{deadlineMs:120000}),'BINDING_INELIGIBLE',label);
     check(error.code==='BINDING_INELIGIBLE'&&error.phase==='preflight','Eligibility refusal had unrelated phase/code');
     check(!existsSync(refused)&&readdirSync(fresh.directory).sort().join(',')===priorFiles,'Eligibility refusal reserved outputs');
     check(compose(fresh,['ps','--status','running','-q','api']).trim()!=='','Eligibility refusal stopped serving');
-    expectFailure(()=>phase(fresh,'grant'),'role binding is ineligible',label+' direct grant preflight');
+    expectFailure(()=>phase(fresh,'grant'),specificReason,label+' exact direct grant predicate');
     check(storedBindings()===originalBindings&&credentialSnapshot()===originalCredentials,'Eligibility refusal mutated identity authority');
     check(sql(fresh,'SELECT jsonb_agg(to_jsonb(m) ORDER BY name)::text FROM _continuum_migrations m')===ledgerSnapshot,'Eligibility refusal changed ledger');
-   }finally{sql(fresh,restore);}
+   }finally{restoreSyntheticFixture();}
   }
   // Separately approved synthetic recovery invokes only the immutable packaged
   // owner grant/verify procedures, then updates the explicit reviewed env file.
   const manualGrant=(file,principal,operatorRole='continuum_operator')=>compose(fresh,['exec','-T','-e','PGPASSWORD','postgres','psql','-X','-qAt','-h','127.0.0.1','-U','continuum_owner','-d','continuum','-v','ON_ERROR_STOP=1','-v','continuum_schema=continuum','-v','continuum_app_role=continuum_app','-v',`continuum_operator_role=${operatorRole}`,'-v','continuum_sync_role=continuum_sync','-v',`continuum_principal_id=${principal}`,'-f','-'],{input:readFileSync(join(assets,'scripts',file)),env:{...fresh.env,PGPASSWORD:fresh.passwords.OWNER}});
   compose(fresh,['stop','-t','15','api']);
   sql(fresh,`UPDATE principals SET disabled_at=clock_timestamp() WHERE id='${adminId}'`);
+  check(!eligibleAdmin(adminId)&&eligibleAdmin(alternativeAdmin),'Approved synthetic recovery did not have an eligible replacement administrator');
+  let recoveryError;
   try{
    manualGrant('grant-operator-role.sql',alternativeAdmin);
    manualGrant('verify-database-identities.sql',alternativeAdmin);
    fresh.env.CONTINUUM_ADMIN_PRINCIPAL_ID=alternativeAdmin;maintenanceEnv();
    phase(fresh,'grant');
    check(sql(fresh,`SELECT principal_id::text FROM continuum_trusted_database_identities WHERE database_role='continuum_operator'`)===alternativeAdmin,'Approved OP rebind did not establish selected eligible principal');
-  }finally{
-   sql(fresh,`UPDATE principals SET disabled_at=NULL WHERE id='${adminId}'`);
-   manualGrant('grant-operator-role.sql',adminId);fresh.env.CONTINUUM_ADMIN_PRINCIPAL_ID=adminId;maintenanceEnv();
+  }catch(error){recoveryError=error;throw error;}finally{
+   try{restoreSyntheticFixture();manualGrant('grant-operator-role.sql',adminId);fresh.env.CONTINUUM_ADMIN_PRINCIPAL_ID=adminId;maintenanceEnv();}
+   catch(error){if(recoveryError)recoveryError.fixtureCleanupError='Synthetic recovery cleanup failed';else throw error;}
   }
   manualGrant('grant-sync-role.sql',syncId);manualGrant('verify-database-identities.sql',adminId);phase(fresh,'grant');
   check(storedBindings()===originalBindings&&credentialSnapshot()===originalCredentials,'Approved recovery changed role credentials or did not restore reviewed bindings');
