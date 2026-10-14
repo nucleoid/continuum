@@ -26,7 +26,19 @@ function failureText(error) {
 function expectFailure(action, expected, label) {
   let actual;
   try { action(); } catch (error) { actual = error; }
-  check(actual && failureText(actual).includes(expected), `${label}: did not receive the specific expected failure`);
+  if(!actual||!failureText(actual).includes(expected)){
+   const knownCodes=new Set(['COMMAND_FAILED','DEADLINE_EXCEEDED','BINDING_MISMATCH','BINDING_INELIGIBLE','ACTIVE_WRITERS','BACKUP_FAILED','BACKEND_SETTLEMENT_FAILED','MIGRATION_BACKEND_REMAINS','MAINTENANCE_LOCKED','ASSET_MISMATCH','VOLUME_OWNERSHIP_MISMATCH']);
+   const knownPhases=new Set(['preflight','backup','bootstrap','migrate','provision-admin','grant','api','settlement','quiescence']);
+   const diagnostic={code:actual?(knownCodes.has(actual.code)?actual.code:'UNCLASSIFIED_FAILURE'):'NO_FAILURE',phase:knownPhases.has(actual?.phase)?actual.phase:null};
+   if(actual?.evidencePath){
+    try{
+     const info=statSync(actual.evidencePath);check(info.isFile()&&info.size<=65536,'Private evidence is not bounded');
+     const record=JSON.parse(readFileSync(actual.evidencePath,'utf8'));
+     if(Array.isArray(record.lines)&&record.lines.every(line=>typeof line==='string'&&line.length<=1000))diagnostic.evidenceLines=sanitizedBootstrapLines(record.lines.join('\n'),projects.flatMap(p=>Object.values(p.passwords))).slice(0,8);
+    }catch{diagnostic.evidenceUnavailable=true;}
+   }
+   throw new Error(`${label}: did not receive the specific expected failure; actual=${JSON.stringify(diagnostic)}`);
+  }
   return actual;
 }
 function setup(suffix) {
@@ -496,16 +508,47 @@ UPDATE service_api_keys k SET revoked_at=v.revoked_at FROM jsonb_to_recordset(${
    check(sql(fresh,`SELECT count(*) FROM pg_stat_activity WHERE ${backupLocker.predicate}`,'DBA')==='1','Wrapper terminated external backup locker');
   }finally{backupLocker.close();}
   check(sql(fresh,'SELECT jsonb_agg(to_jsonb(m) ORDER BY name)::text FROM _continuum_migrations m')===ledgerSnapshot,'Backup deadline mutated migration ledger');
-  const grantLocker=syntheticDbaLock(fresh,'grant','SELECT pg_advisory_xact_lock(834641726154302120::bigint)');
+  // Canonical grant sessions retain lock_timeout=5s. A lock blocker can fail
+  // before the wrapper deadline, so use an owned INSERT trigger sleep instead.
+  // No published SQL, entrypoint or Compose setting is overridden.
+  sql(fresh,"CREATE FUNCTION synthetic_wait_grant() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN PERFORM pg_sleep(120); RETURN NEW; END$$; CREATE TRIGGER synthetic_wait_grant BEFORE INSERT OR UPDATE ON continuum_trusted_database_identities FOR EACH ROW EXECUTE FUNCTION synthetic_wait_grant()");
+  const grantProof=join(fresh.directory,'real-grant-proof.json'),grantProofErr=join(fresh.directory,'real-grant-proof.stderr');
+  const grantProofFd=openSync(grantProof,'wx',0o600),grantProofErrFd=openSync(grantProofErr,'wx',0o600);
+  const observerName='grant-observer-'+randomUUID();
+  const observerInput=join(fresh.directory,'real-grant-observer.sql');
+  writeFileSync(observerInput,`CREATE TEMP TABLE observed_grant(pid integer,name text,event text,wait text);
+DO $observe$ DECLARE until_time timestamptz:=clock_timestamp()+interval '45 seconds'; BEGIN LOOP
+ PERFORM pg_stat_clear_snapshot();
+ INSERT INTO observed_grant SELECT a.pid,a.application_name,a.wait_event_type,a.wait_event FROM pg_stat_activity a WHERE a.usename='continuum_owner' AND a.datname=current_database() AND a.application_name~'^ctm-grant-[a-f0-9]{24}$' AND a.wait_event='PgSleep' LIMIT 1;
+ EXIT WHEN EXISTS(SELECT 1 FROM observed_grant);
+ IF clock_timestamp()>until_time THEN RAISE EXCEPTION 'real grant sleep was not observed'; END IF;
+ PERFORM pg_sleep(0.005); END LOOP; END $observe$;
+SELECT row_to_json(t)::text FROM observed_grant t;`,{mode:0o600});
+  const observerInputFd=openSync(observerInput,'r');
+  const grantObserver=spawn('docker',[...fresh.base,'exec','-T','-e','PGPASSWORD','-e','PGAPPNAME','postgres','psql','-X','-qAt','-h','127.0.0.1','-U','continuum_dba','-d','continuum','-v','ON_ERROR_STOP=1','-f','-'],{env:{...fresh.env,PGPASSWORD:fresh.passwords.DBA,PGAPPNAME:observerName},stdio:[observerInputFd,grantProofFd,grantProofErrFd]});
+  let grantFailure;
   try{
+   const observerEnd=Date.now()+10000;
+   while(sql(fresh,`SELECT count(*) FROM pg_stat_activity WHERE application_name='${observerName}'`,'DBA')!=='1'&&Date.now()<observerEnd){}
+   check(sql(fresh,`SELECT count(*) FROM pg_stat_activity WHERE application_name='${observerName}'`,'DBA')==='1','Owned real grant observer did not connect');
    process.env.CONTINUUM_BACKUP_FILE=join(temporary,'timed-out-grant.dump');
    const error=expectFailure(()=>runMaintenance('upgrade',envFile,productionCompose,{deadlineMs:10000,backupDeadlineMs:120000}),'DEADLINE_EXCEEDED','Real grant deadline');
    check(error.phase==='grant'&&!error.settlementError,'Grant deadline failed backend settlement or wrong phase');
-   check(sql(fresh,"SELECT count(*) FROM pg_stat_activity WHERE usename='continuum_owner' AND application_name~'^ctm-grant-[a-f0-9]{24}$'",'DBA')==='0','Timed-out grant retained owner backend');
+   const proof=JSON.parse(readFileSync(grantProof,'utf8').trim().split('\n')[0]);
+   check(Number.isInteger(proof.pid)&&/^ctm-grant-[a-f0-9]{24}$/.test(proof.name)&&proof.event==='Timeout'&&proof.wait==='PgSleep','Actual canonical owner grant did not enter observed sleep');
+   check(sql(fresh,`SELECT count(*) FROM pg_stat_activity WHERE usename='continuum_owner' AND datname='continuum' AND (pid=${proof.pid} OR application_name='${proof.name}')`,'DBA')==='0','Timed-out observed grant retained owner backend');
    check(sql(fresh,'SELECT pg_try_advisory_lock(7215328273579717613::bigint)')==='t','Timed-out grant retained deployment lock');
-   check(sql(fresh,`SELECT count(*) FROM pg_stat_activity WHERE ${grantLocker.predicate}`,'DBA')==='1','Wrapper terminated external grant locker');
-  }finally{grantLocker.close();}
-  results.passed.push('real read-only DBA lock-limit, custom dump deadline and grant deadline settle only uniquely named owned backends; independent DBA lockers survive; failed grant releases deployment advisory lock');
+   check(storedBindings()===originalBindings&&credentialSnapshot()===originalCredentials,'Timed-out grant changed reviewed identity binding or credentials');
+   check(sql(fresh,'SELECT jsonb_agg(to_jsonb(m) ORDER BY name)::text FROM _continuum_migrations m')===ledgerSnapshot,'Timed-out grant changed migration ledger');
+  }catch(error){grantFailure=error;throw error;}finally{
+   try{
+    sql(fresh,`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename='continuum_dba' AND datname='continuum' AND application_name='${observerName}' AND pid<>pg_backend_pid()`,'DBA');
+    grantObserver.kill('SIGTERM');
+    sql(fresh,"SET lock_timeout='2s'; DROP TRIGGER synthetic_wait_grant ON continuum_trusted_database_identities; DROP FUNCTION synthetic_wait_grant()",'OWNER',{timeout:15000});
+   }catch(error){if(grantFailure)grantFailure.fixtureCleanupError='Owned grant fixture cleanup failed';else throw error;}
+   finally{closeSync(observerInputFd);closeSync(grantProofFd);closeSync(grantProofErrFd);}
+  }
+  results.passed.push('real read-only DBA lock-limit, custom dump deadline and grant deadline settle only uniquely named owned backends; independent DBA lock fixtures survive; actual sleeping owner grant is observed and cancelled with deployment advisory lock released');
   // Inject an owned synthetic post-preflight grant refusal, without changing
   // package SQL or config. The actual grant connection must settle its lock.
   process.env.CONTINUUM_BACKUP_FILE=join(temporary,'failed-upgrade.dump');
