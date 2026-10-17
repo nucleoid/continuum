@@ -24,6 +24,8 @@ export interface RecallLogger {
 }
 
 export interface RecallEnrichment {
+  readBudgetBytes?: number;
+  validateResult?: (result: PrincipalRecallResult) => void;
   registry: RetrievalEnricherRegistry;
   options: EnrichmentOptions;
 }
@@ -70,6 +72,7 @@ export async function recallForPrincipal(
       types: input.types,
       limit: input.limit ?? 10,
       embeddingGroups,
+      readBudgetBytes: enrichment?.readBudgetBytes,
     });
     const embeddingAuditGroups = recalled.diagnostics.groups.map((group) => ({
       provider: group.provider,
@@ -98,6 +101,13 @@ export async function recallForPrincipal(
     }
     const results = recalled.results;
 
+    // Remote delivery validation includes optional enrichments before the required audit.
+    // Existing callers retain their audit-before-enrichment ordering.
+    const preparedResults = enrichment?.validateResult
+      ? await applyRetrievalEnrichers(results, principal.id, enrichment.registry, enrichment.options)
+      : undefined;
+    enrichment?.validateResult?.({ results: preparedResults!, accessible, diagnostics });
+
     // Recall auditing is required. Results are not returned if this write fails.
     await recordReadAudit(pool, {
       principalId: principal.id,
@@ -123,14 +133,14 @@ export async function recallForPrincipal(
         metadata: { rank: index + 1, score: result.score },
       })),
     });
-    const enrichedResults = enrichment
+    const enrichedResults = preparedResults ?? (enrichment
       ? await applyRetrievalEnrichers(
         results,
         principal.id,
         enrichment.registry,
         enrichment.options,
       )
-      : results;
+      : results);
     return { results: enrichedResults, accessible, diagnostics };
   } catch (error) {
     throw asServiceError(error);

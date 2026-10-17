@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import { boundedMemoryReadRows, MEMORY_READ_BUDGET_BYTES_SQL, requireReadBudget, getBudgetedMemoryForUpdate } from './memory-reads.js';
 import type { Memory, Scope } from '../types.js';
 import { record as recordAudit } from '../audit/log.js';
 import { canMutateScope } from '../scopes/access.js';
@@ -17,6 +18,7 @@ export class SupersedeStorageError extends Error {
 }
 
 export interface SupersedeWriteInput {
+  readBudgetBytes?: number;
   supersededId: string;
   principalId: string;
   title: string;
@@ -50,7 +52,8 @@ export async function supersedeDecision(pool: pg.Pool, input: SupersedeWriteInpu
 }
 
 async function supersedeInTransaction(client: pg.PoolClient, input: SupersedeWriteInput): Promise<SupersedeWriteResult> {
-  const { rows } = await client.query(
+  const predecessor = input.readBudgetBytes === undefined ? await (async () => {
+    const { rows } = await client.query(
     `SELECT ${MEMORY_COLUMNS}
        FROM memories m
       WHERE m.id = $1
@@ -71,8 +74,9 @@ async function supersedeInTransaction(client: pg.PoolClient, input: SupersedeWri
       FOR UPDATE`,
     [input.supersededId, input.principalId],
   );
-  if (!rows[0]) throw new SupersedeStorageError('not_found');
-  const predecessor = rowToMemory(rows[0]);
+    return rows.length ? rowToMemory(rows[0]) : null;
+  })() : await getBudgetedMemoryForUpdate(client, input.supersededId, input.principalId, input.readBudgetBytes);
+  if (!predecessor) throw new SupersedeStorageError('not_found');
   const scope = await getScope(client, predecessor.scopeId);
   if (!scope) throw new Error('memory scope missing');
   if (!(await canMutateScope(client, input.principalId, scope.id))) throw new SupersedeStorageError('forbidden');
@@ -131,7 +135,35 @@ export async function getDecisionHistory(
   queryable: Queryable,
   principalId: string,
   decisionId: string,
+  readBudgetBytes?: number,
 ): Promise<{ memories: Memory[]; cycle: boolean } | null> {
+  if (readBudgetBytes !== undefined) {
+    requireReadBudget(1024, readBudgetBytes);
+    const fields = 'm.id, m.scope_id, m.type, m.supersedes_id';
+    const metadataSql = `WITH RECURSIVE anchor AS (
+      SELECT ${fields}, ${MEMORY_READ_BUDGET_BYTES_SQL} AS bytes
+        FROM memories m JOIN scopes s ON s.id=m.scope_id WHERE m.id=$1
+        AND EXISTS (SELECT 1 FROM principals caller WHERE caller.id=$2 AND caller.disabled_at IS NULL)
+        AND (s.kind='org' OR EXISTS (SELECT 1 FROM scope_memberships sm WHERE sm.principal_id=$2
+          AND sm.scope_id=m.scope_id AND sm.active AND continuum_membership_is_effective(sm.active,sm.source_kind)))
+      ), backward AS (
+        SELECT a.*,0 AS depth,ARRAY[a.id] AS path,false AS cycle,a.bytes AS accumulated FROM anchor a
+        UNION ALL SELECT ${fields},${MEMORY_READ_BUDGET_BYTES_SQL},b.depth+1,b.path||m.id,m.id=ANY(b.path),
+          b.accumulated+${MEMORY_READ_BUDGET_BYTES_SQL}
+          FROM backward b JOIN memories m ON m.id=b.supersedes_id WHERE NOT b.cycle AND b.accumulated <= $3::bigint
+      ), forward AS (
+        SELECT a.*,0 AS depth,ARRAY[a.id] AS path,false AS cycle,a.bytes AS accumulated FROM anchor a
+        UNION ALL SELECT ${fields},${MEMORY_READ_BUDGET_BYTES_SQL},f.depth+1,f.path||m.id,m.id=ANY(f.path),
+          f.accumulated+${MEMORY_READ_BUDGET_BYTES_SQL}
+          FROM forward f JOIN memories m ON m.supersedes_id=f.id WHERE NOT f.cycle AND f.accumulated <= $3::bigint
+      ) SELECT b.id,b.bytes AS budget_bytes,-b.depth AS position,b.cycle FROM backward b
+        UNION ALL SELECT f.id,f.bytes AS budget_bytes,f.depth AS position,f.cycle FROM forward f WHERE f.depth>0`;
+    const rows = await boundedMemoryReadRows(queryable, metadataSql, [decisionId, principalId, readBudgetBytes],
+      `SELECT ${MEMORY_COLUMNS.split(',').map((column) => `m.${column.trim()}`).join(', ')}, c.cycle
+        FROM memories m JOIN budget_candidates c ON c.id=m.id ORDER BY c.position`, readBudgetBytes);
+    if (!rows.length) return null;
+    return { memories: rows.filter((row) => !row.cycle).map(rowToMemory), cycle: rows.some((row) => row.cycle === true) };
+  }
   const { rows } = await queryable.query(
     `WITH RECURSIVE anchor AS (
        SELECT m.*

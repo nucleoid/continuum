@@ -1,3 +1,4 @@
+import { ServiceError } from './errors.js';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import type pg from 'pg';
 import { addMembership } from '../storage/memberships.js';
@@ -57,6 +58,18 @@ describe('decision history service', () => {
     });
   });
 
+  it('validates the final history projection before recording delivered reads', async () => {
+    const scope = await createScope(pool, { kind: 'project', name: 'bounded-history' });
+    await addMembership(pool, reader.id, scope.id, 'reader');
+    const decision = await createMemory(pool, { scopeId: scope.id, scopeKind: scope.kind, type: 'decision',
+      title: 'Reference', body: 'Small body', authorId: author.id, source: 'manual' });
+    await expect(decisionHistoryForPrincipal(pool, reader, decision.id, {}, 1048576, (result) => {
+      expect(result.currentId).toBe(decision.id);
+      expect(result.decisions).toHaveLength(1);
+      throw new ServiceError('PAYLOAD_TOO_LARGE', 'Output exceeds budget');
+    })).rejects.toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
+    expect((await pool.query('SELECT 1 FROM audit_log')).rowCount).toBe(0);
+  });
   it('masks inaccessible and missing decision IDs with the same error and no audit', async () => {
     const hidden = await createScope(pool, { kind: 'project', name: 'hidden-history' });
     const decision = await createMemory(pool, {

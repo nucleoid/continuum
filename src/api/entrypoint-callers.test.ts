@@ -34,7 +34,9 @@ describe('production entrypoint callers', () => {
 
     await import('./server.js');
 
-    expect(entrypointMocks.isDirectEntrypoint).toHaveBeenCalledOnce();
+    // Importing the shared MCP factory also checks its inert stdio entrypoint.
+    expect(entrypointMocks.isDirectEntrypoint.mock.calls.filter((call) =>
+      /\/server\.(?:ts|js)$/.test(String((call as unknown[])[0])))).toHaveLength(1);
     expect(entrypointMocks.isDirectEntrypoint).toHaveBeenCalledWith(
       expect.stringMatching(/\/server\.(?:ts|js)$/),
     );

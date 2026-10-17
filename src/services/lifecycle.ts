@@ -42,11 +42,12 @@ export async function promoteForPrincipal(
   targetScope: ScopeRef,
   auditMetadata: Record<string, unknown> = {},
   promotionWebhookIds: readonly string[] = [],
+  readBudgetBytes?: number,
 ): Promise<PromoteResult> {
   try {
     validateScopeRef(targetScope);
     return await promoteMemoryWithAudit(
-      pool, principal.id, memoryId, targetScope, auditMetadata, promotionWebhookIds,
+      pool, principal.id, memoryId, targetScope, auditMetadata, promotionWebhookIds, readBudgetBytes,
     );
   } catch (error) {
     throw mapLifecycleError(error);
@@ -60,6 +61,7 @@ export async function verifyForPrincipal(
   stillTrue: boolean,
   note?: string,
   auditMetadata: Record<string, unknown> = {},
+  readBudgetBytes?: number,
 ): Promise<Memory> {
   try {
     if (note !== undefined && note.length > VERIFICATION_NOTE_MAX_LENGTH) {
@@ -87,6 +89,7 @@ export async function verifyForPrincipal(
       stillTrue,
       note,
       auditMetadata,
+      readBudgetBytes,
     );
   } catch (error) {
     throw mapLifecycleError(error);

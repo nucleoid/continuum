@@ -201,3 +201,7 @@ cap; this change does not introduce an ANN redesign.
 ## License
 
 Continuum is licensed under the [MIT License](./LICENSE).
+
+## Optional remote MCP
+
+The API process can serve authenticated Streamable HTTP at `/mcp`, disabled by default. It uses the same tool registrations, current memberships, source restrictions and required domain audits as stdio. See [remote MCP](./docs/remote-mcp.md) for the explicit HTTPS proxy policy, limits, session lifecycle and rollout. Stdio remains available through `npm run mcp`.

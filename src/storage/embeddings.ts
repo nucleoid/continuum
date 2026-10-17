@@ -1,3 +1,4 @@
+import { boundedMemoryReadRows } from './memory-reads.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import type { MemoryType } from '../types.js';
 import type { Queryable } from './queryable.js';
@@ -119,11 +120,35 @@ export async function vectorSearchRelatedMemories(
   queryVector: number[],
   scopeIds: string[],
   provider: Pick<EmbeddingProvider, 'id' | 'dim'>,
-  options: { threshold: number; excludeMemoryId: string; limit: number },
+  options: { threshold: number; excludeMemoryId: string; limit: number; readBudgetBytes?: number },
 ): Promise<RelatedMemorySearchHit[]> {
   if (scopeIds.length === 0) return [];
   assertEmbeddingVectorDimension(queryVector, provider);
   const { distanceOperator, vectorType } = await vectorSqlNames(pool);
+  if (options.readBudgetBytes !== undefined) {
+    const metadataSql = `WITH provider_embeddings AS MATERIALIZED (
+       SELECT m.id AS memory_id, e.embedding FROM memory_embeddings e
+         JOIN memories m ON m.id=e.memory_id
+        WHERE e.provider=$3 AND e.dim=$4 AND m.scope_id=ANY($2::uuid[])
+          AND m.state='live' AND (m.expires_at IS NULL OR m.expires_at>pg_catalog.clock_timestamp())
+          AND m.id<>$5::uuid
+     ), ranked AS MATERIALIZED (
+       SELECT e.memory_id, e.embedding ${distanceOperator} $1::${vectorType} AS distance
+         FROM provider_embeddings e
+        WHERE 1-(e.embedding ${distanceOperator} $1::${vectorType}) >= $6
+        ORDER BY distance ASC, e.memory_id ASC LIMIT $7
+     ) SELECT m.id, ranked.distance,
+       4096::bigint + octet_length(m.title)::bigint + octet_length(m.body)::bigint AS budget_bytes,
+       row_number() OVER (ORDER BY ranked.distance ASC, ranked.memory_id ASC) AS position
+       FROM ranked JOIN memories m ON m.id=ranked.memory_id`;
+    const rows = await boundedMemoryReadRows(pool, metadataSql,
+      [toPgVector(queryVector), scopeIds, provider.id, provider.dim,
+        options.excludeMemoryId, options.threshold, options.limit],
+      `SELECT m.id, m.type, m.title, m.body, c.distance FROM memories m
+         JOIN budget_candidates c ON c.id=m.id ORDER BY c.position`, options.readBudgetBytes);
+    return rows.map((row) => ({ id: row.id as string, type: row.type as MemoryType,
+      title: row.title as string, body: row.body as string, distance: Number(row.distance) }));
+  }
   const { rows } = await pool.query(
     `WITH provider_embeddings AS MATERIALIZED (
        SELECT m.id AS memory_id, e.embedding

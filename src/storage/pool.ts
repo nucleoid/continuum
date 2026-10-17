@@ -31,7 +31,7 @@ export function getPool(): pg.Pool {
       connectionTimeoutMillis: positiveInteger('CONTINUUM_DB_CONNECTION_TIMEOUT_MS', 5_000),
     });
     pool.on('error', (error: Error) => {
-      console.error('pg pool idle client error', error);
+      console.error(JSON.stringify({ event: 'pg_pool_idle_client_error', code: 'DEPENDENCY_UNAVAILABLE' }));
     });
   }
   return pool;
@@ -42,4 +42,23 @@ export async function closePool(): Promise<void> {
     await pool.end();
     pool = undefined;
   }
+}
+
+/** Separate remote serving pool. Initialization completes before any client is admitted. */
+export function createMcpHttpPool(connectionString: string, max = 5): pg.Pool {
+  const options: pg.PoolConfig & { verify: (client: pg.PoolClient, done: (error?: Error) => void) => void } = {
+    connectionString, max, connectionTimeoutMillis: 1000, idleTimeoutMillis: 10000, query_timeout: 5000,
+    verify(client, done) {
+      void client.query(`SELECT pg_catalog.set_config('statement_timeout',
+        (CASE WHEN setting::int > 0 THEN least(setting::int,5000) ELSE 5000 END)::text, false)
+        FROM pg_catalog.pg_settings WHERE name='statement_timeout'`)
+        .then(() => client.query(`SELECT pg_catalog.set_config('lock_timeout',
+          (CASE WHEN setting::int > 0 THEN least(setting::int,1000) ELSE 1000 END)::text, false)
+          FROM pg_catalog.pg_settings WHERE name='lock_timeout'`))
+        .then(() => done(), () => done(new Error('Remote database initialization failed')));
+    },
+  };
+  const remote = new pg.Pool(options);
+  remote.on('error', () => console.error(JSON.stringify({ event: 'pg_pool_idle_client_error', code: 'DEPENDENCY_UNAVAILABLE' })));
+  return remote;
 }

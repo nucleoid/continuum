@@ -47,12 +47,17 @@ describe('production pool', () => {
   });
 
   it('logs an idle-client error without exposing the connection string', () => {
-    const error = new Error('synthetic idle client failure');
+    const error = new Error(`synthetic idle client failure ${CONNECTION_STRING}`);
+    error.stack = `private stack ${CONNECTION_STRING}`;
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
     expect(() => getPool().emit('error', error)).not.toThrow();
     expect(consoleError).toHaveBeenCalledOnce();
-    expect(consoleError).toHaveBeenCalledWith('pg pool idle client error', error);
+    expect(consoleError).toHaveBeenCalledWith(JSON.stringify({
+      event: 'pg_pool_idle_client_error', code: 'DEPENDENCY_UNAVAILABLE',
+    }));
+    expect(JSON.stringify(consoleError.mock.calls)).not.toContain('synthetic idle client failure');
+    expect(JSON.stringify(consoleError.mock.calls)).not.toContain('private stack');
     expect(JSON.stringify(consoleError.mock.calls)).not.toContain(CONNECTION_STRING);
     expect(JSON.stringify(consoleError.mock.calls)).not.toContain('pool-secret');
   });
