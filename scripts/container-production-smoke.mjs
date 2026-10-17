@@ -254,7 +254,7 @@ try {
   // Entra discovery/JWKS are fetched lazily on token authentication. This job
   // asserts only Entra-mode startup and readiness. It does not authenticate an
   // Entra request; the later synthetic transport requests explicitly use dev.
-  run(['compose', '-f', resolve(assets,'deploy/compose.production.yml'), '--profile', 'serving', 'up', '-d', '--no-deps', '--force-recreate', '--wait', '--wait-timeout', '120', 'api'], { env: fresh.env });
+  compose(fresh, ['up', '-d', '--no-deps', '--force-recreate', '--wait', '--wait-timeout', '120', 'api']);
   const entraApi = JSON.parse(run(['inspect', compose(fresh,['ps','-q','api']).trim()]))[0];
   check(entraApi.Config.Env.includes('CONTINUUM_AUTH_MODE=entra'), 'Production Entra process was not selected');
   check(JSON.stringify(entraApi.Mounts.filter(mount=>mount.Destination.startsWith('/run/secrets/')).map(mount=>mount.Destination))===JSON.stringify(['/run/secrets/app_database_url']), 'Serving process mounted an unexpected authority secret');
