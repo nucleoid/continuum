@@ -201,3 +201,7 @@ cap; this change does not introduce an ANN redesign.
 ## License
 
 Continuum is licensed under the [MIT License](./LICENSE).
+
+## Container packaging
+
+Production container packaging uses hosted-built immutable Linux amd64 OCI artifacts, checksum-verified runtime assets and separate DBA, owner, APP, OP and SYNC authority. See [the deployment guide](docs/deployment.md) for explicit maintenance, private secrets, resource limits and volume-preserving recovery. The development Compose file is not a production installation. Packaging does not authorize live deployment or historical database operations.

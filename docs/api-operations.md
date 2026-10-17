@@ -186,3 +186,7 @@ principal UUID when available. Headers, cookies, bodies, query values, recall
 text, memory IDs, and raw internal errors are excluded. Startup and internal
 failure logs retain bounded, redacted error messages and safe error codes for
 diagnosis.
+
+## Containers
+
+The production Compose readiness check calls /health/ready; /health/live remains process liveness. Container health does not restart an unhealthy service or certify optional provider health. The application has a ten-second shutdown budget and at least 15-second container stop grace. Use explicit successful maintenance before starting the selected immutable image. See [deployment](deployment.md).
