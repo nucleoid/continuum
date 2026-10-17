@@ -78,13 +78,16 @@ function setup(suffix) {
   for(const item of secretFiles){const info=statSync(item.file);check((info.mode&0o777)===0o640&&info.gid===item.gid,'Synthetic database secret file is not private or readable by its exact container group');}
   const override = join(directory, 'ci.yml');
   writeFileSync(override, 'services:\n  api:\n    environment:\n      CONTINUUM_AUTH_MODE: dev\n');
-  const base = ['compose', '-f', resolve(assets, 'deploy/compose.production.yml'), '-f', override, '--profile', 'maintenance', '--profile', 'serving'];
-  const item = { project, directory, env, passwords, base };
+  const productionCompose = resolve(assets, 'deploy/compose.production.yml');
+  const canonicalBase = ['compose', '-f', productionCompose, '--profile', 'maintenance', '--profile', 'serving'];
+  const base = ['compose', '-f', productionCompose, '-f', override, '--profile', 'maintenance', '--profile', 'serving'];
+  const item = { project, directory, env, passwords, base, canonicalBase };
   validateTmpfsMounts(JSON.parse(compose(item, ['config', '--format', 'json'])).services);
   projects.push(item);
   return item;
 }
 const compose = (p, args, options = {}) => run([...p.base, ...args], { env: p.env, ...options });
+const canonicalCompose = (p, args, options = {}) => run([...p.canonicalBase, ...args], { env: p.env, ...options });
 function sql(p, statement, role = 'OWNER', options = {}) {
   // Secret values stay in environment, not command arguments or log output.
   return compose(p, ['exec', '-T', '-e', 'PGPASSWORD', 'postgres', 'psql', '-X', '-qAt', '-h', '127.0.0.1', '-U', `continuum_${role.toLowerCase()}`, '-d', 'continuum', '-v', 'ON_ERROR_STOP=1', '-c', `SET search_path TO continuum; ${statement}`], { ...options, env: { ...p.env, PGPASSWORD: p.passwords[role] } }).trim();
@@ -254,8 +257,8 @@ try {
   // Entra discovery/JWKS are fetched lazily on token authentication. This job
   // asserts only Entra-mode startup and readiness. It does not authenticate an
   // Entra request; the later synthetic transport requests explicitly use dev.
-  compose(fresh, ['up', '-d', '--no-deps', '--force-recreate', '--wait', '--wait-timeout', '120', 'api']);
-  const entraApi = JSON.parse(run(['inspect', compose(fresh,['ps','-q','api']).trim()]))[0];
+  canonicalCompose(fresh, ['up', '-d', '--no-deps', '--force-recreate', '--wait', '--wait-timeout', '120', 'api']);
+  const entraApi = JSON.parse(run(['inspect', canonicalCompose(fresh,['ps','-q','api']).trim()]))[0];
   check(entraApi.Config.Env.includes('CONTINUUM_AUTH_MODE=entra'), 'Production Entra process was not selected');
   check(JSON.stringify(entraApi.Mounts.filter(mount=>mount.Destination.startsWith('/run/secrets/')).map(mount=>mount.Destination))===JSON.stringify(['/run/secrets/app_database_url']), 'Serving process mounted an unexpected authority secret');
   check(!Object.values(entraApi.NetworkSettings.Ports??{}).some(Boolean),'Production API unexpectedly publishes a host port');
