@@ -16,6 +16,6 @@ test('production Compose requires the PostgreSQL pin and gates direct API startu
 });
 test('operational API probes retain the full profiled Compose model',()=>{
  const source=readFileSync(resolve(import.meta.dirname,'container-production-smoke.mjs'),'utf8');
- assert.doesNotMatch(source,/run\(\['compose',[^\n]*'--profile',\s*'serving'[^\n]*'api'/);
+ assert.match(source,/run\(\['compose', '-f', resolve\(assets,'deploy\/compose\.production\.yml'\), '--profile', 'maintenance', '--profile', 'serving',[\s\S]*?'up', '-d', '--no-deps',[^\n]*'api'\], \{ env: fresh\.env \}\)/);
  assert.match(source,/compose\(fresh, \['up', '-d', '--no-deps', '--force-recreate', '--wait', '--wait-timeout', '120', 'api'\]\)/);
 });
