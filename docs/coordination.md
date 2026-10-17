@@ -857,3 +857,5 @@ checks, branch protection, and normal review gates. There remains a
 check-to-action race. Do not advertise linearizable end-to-end GitHub writes,
 exactly-once publication, general filesystem fencing, force-steal, shared
 leases, hierarchy, fairness, or atomic multi-resource batches.
+
+For the non-publishing acceptance sequence and ownership-loss halt checks, see [Delivery Forge UAT](delivery-forge-uat.md).

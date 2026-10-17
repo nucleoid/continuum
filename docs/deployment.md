@@ -46,7 +46,7 @@ URLs must encode reserved password characters, use service host `postgres:5432`,
 The container-only launcher supports `_FILE` for these exact existing settings:
 
 - `CONTINUUM_DATABASE_URL`, `CONTINUUM_BEARER`, `CONTINUUM_PRINCIPAL_EXTERNAL_ID`, `CONTINUUM_TOKEN`.
-- `OPENAI_API_KEY`, `VOYAGE_API_KEY`, `GEMINI_API_KEY`, `CONTINUUM_EMBEDDING_CONFIG`. A key mapping does not add a provider adapter or make an unsupported provider available.
+- `OPENAI_API_KEY`, `VOYAGE_API_KEY`, `GEMINI_API_KEY`, `CONTINUUM_EMBEDDING_CONFIG`. Gemini is optional through the routed configuration; an explicit supported model/profile is still required.
 - `CONTINUUM_ADMIN_ACTOR`, `CONTINUUM_GRAPH_ACCESS_TOKEN`, `CONTINUUM_MEMBERSHIP_SYNC_ACTOR`, `CONTINUUM_AUDIT_RETENTION_PRINCIPAL_EXTERNAL_ID`.
 - Each `CONTINUUM_INGEST_{GITHUB_PR,GITHUB_BRANCH,ADO_WORKITEM,DEPLOY_EVENT,TERMINAL_SUMMARY}_{PRINCIPAL,DATABASE_URL,ACTOR_EXTERNAL_ID}`; GitHub `SECRET`; ADO `USERNAME` and `PASSWORD`.
 
@@ -162,3 +162,5 @@ Supervised migration, backup, grant and DBA helper connections use unique bounde
 For migration failure or deadline, it also stops the named client container. A lock wait or outer deadline can leave earlier forward migration phases committed. Keep applications stopped, preserve the volume and ledger/execution evidence, inspect the failure and retry the same compatible artifact. Never delete migration receipts, skip required backfill or give REST owner credentials to recover.
 
 Rollback first quiesces new writers. Use binary-only rollback only for a demonstrated compatible artifact on the current schema. Unsupported historical binaries and in-place provider-key downgrade are rejected. Otherwise recover forward, or restore a verified pre-upgrade backup into a separate new volume with deliberate later-write, delivery, identity/OID and privacy reconciliation. Do not automatically downgrade schema, recreate volumes, erase ledgers, restore old credentials or run `down -v`. Packaging does not deploy to a live installation or operate on historical databases.
+
+For the additive tunnel/proxy overlay, explicit Gemini routing and persistent isolated acceptance procedure, see [UAT deployment](uat-deployment.md). Canonical maintenance continues to use only the verified production Compose.

@@ -1,6 +1,7 @@
 import type { EmbeddingProvider } from './provider.js';
 import { OllamaEmbeddingProvider } from './ollama.js';
 import { OpenAIEmbeddingProvider, VoyageEmbeddingProvider } from './hosted.js';
+import { GeminiEmbeddingProvider } from './gemini.js';
 import {
   EmbeddingRegistry,
   ScopeEmbeddingRouter,
@@ -79,7 +80,7 @@ export function makeEmbeddingProviderFromEnv(env: NodeJS.ProcessEnv = process.en
 
 type ProviderDefinition = {
   alias: string;
-  kind: 'ollama' | 'openai' | 'voyage';
+  kind: 'ollama' | 'openai' | 'voyage' | 'gemini';
   model: string;
   dim: number;
   endpoint?: string;
@@ -110,8 +111,8 @@ function providerDefinition(value: unknown): ProviderDefinition {
   if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(raw.model)) {
     throw new Error('Embedding provider model is invalid');
   }
-  if (!['ollama', 'openai', 'voyage'].includes(String(raw.kind))) {
-    throw new Error('Embedding provider kind must be ollama, openai, or voyage');
+  if (!['ollama', 'openai', 'voyage', 'gemini'].includes(String(raw.kind))) {
+    throw new Error('Embedding provider kind must be ollama, openai, voyage, or gemini');
   }
   if (raw.dim !== STORAGE_EMBEDDING_DIM) {
     throw new Error(`Embedding provider dimension must be ${STORAGE_EMBEDDING_DIM} to match database vector(${STORAGE_EMBEDDING_DIM})`);
@@ -242,9 +243,10 @@ function instantiateProvider(
     Object.defineProperty(provider, 'local', { value: definition.local });
     return provider;
   }
-  const keyName = definition.kind === 'openai' ? 'OPENAI_API_KEY' : 'VOYAGE_API_KEY';
+  const keyName = { openai: 'OPENAI_API_KEY', voyage: 'VOYAGE_API_KEY', gemini: 'GEMINI_API_KEY' }[definition.kind];
   const apiKey = env[keyName];
   if (!apiKey) throw new Error(`${keyName} is required for configured ${definition.kind} provider`);
+  if (definition.kind === 'gemini') return new GeminiEmbeddingProvider({ ...common, apiKey });
   return definition.kind === 'openai'
     ? new OpenAIEmbeddingProvider({ ...common, apiKey })
     : new VoyageEmbeddingProvider({ ...common, apiKey });

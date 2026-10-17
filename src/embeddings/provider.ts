@@ -52,7 +52,7 @@ export function isEmbeddingItemError(error: unknown): error is EmbeddingItemErro
   return error instanceof EmbeddingItemError;
 }
 
-export type EmbeddingHttpProvider = 'openai' | 'voyage' | 'ollama';
+export type EmbeddingHttpProvider = 'openai' | 'voyage' | 'ollama' | 'gemini';
 
 const MAX_ERROR_BODY_BYTES = 8 * 1024;
 const ITEM_HTTP_STATUSES = new Set([400, 413, 422]);
@@ -128,6 +128,9 @@ function stringField(value: unknown): string | null {
 }
 
 function isExplicitItemFailure(provider: EmbeddingHttpProvider, body: unknown): boolean {
+  // Google INVALID_ARGUMENT can mean model/configuration failure. Do not mark
+  // memories as poisoned based on another vendor's input-error heuristics.
+  if (provider === 'gemini') return false;
   if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
   const root = body as Record<string, unknown>;
   const nested = root.error && typeof root.error === 'object' && !Array.isArray(root.error)

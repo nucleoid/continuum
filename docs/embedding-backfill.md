@@ -165,3 +165,7 @@ Prior historical process-memory measurements that escaped their intended
 containment are invalid. They do not establish that the original memory incident
 was fixed. Acceptance requires fresh source-specific, contained local results;
 historical server receipts are not current validation evidence.
+
+## Optional Gemini profile
+
+Routed configuration accepts `kind:gemini`, explicit `local:false`, a required exact `gemini-...` model ID and dimension 768. Inject `GEMINI_API_KEY` privately; provider definitions reject inline credentials. Identity is `gemini:<model>`. Synchronous text batches default to 32 and allow at most 100, with ordered exact-count finite vectors and bounded response bytes/deadlines/cancellation. Requests use the `x-goog-api-key` header, never a key-bearing URL, and follow no redirects. No task prompt, title or model substitution is added. Gemini HTTP configuration/input ambiguities remain provider-wide rather than marking memories poisoned. Confirm exact-model availability before enabling. See [UAT deployment](uat-deployment.md) for narrow routing and separate semantic qualification. Generator SQL selection, escaping, ACLs and freshness remain independent of embedding configuration.

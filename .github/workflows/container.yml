@@ -120,6 +120,7 @@ jobs:
       - run: npm run build
       - run: npx vitest run src/api/entrypoint.test.ts src/api/entrypoint-callers.test.ts
       - run: npx vitest run src/cli/config.test.ts src/cli/http.test.ts src/cli/index.test.ts
+      - run: npx vitest run src/embeddings/gemini.test.ts src/embeddings/factory.test.ts src/embeddings/hosted.test.ts src/agents-md/render.test.ts
       - run: node scripts/windows-entrypoint-smoke.mjs
       - run: node --test deploy/container-entrypoint.test.mjs deploy/apply-role-profiles.test.mjs scripts/container-maintenance.test.mjs scripts/container-artifact.test.mjs scripts/container-assets-extract.test.mjs scripts/container-diagnostics.test.mjs scripts/container-compose-model.test.mjs scripts/container-binary-transfer.test.mjs scripts/container-maintenance-evidence.test.mjs
       - run: npm pack --dry-run

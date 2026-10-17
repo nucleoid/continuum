@@ -109,6 +109,24 @@ describe('real SDK remote MCP with current database authority', () => {
       await local.close(); await shared.close();
     } finally { await cleanup(); }
   });
+  it('runs the shipped UAT lease smoke through real SDK clients and isolated PostgreSQL', async () => {
+    const { leaseSmoke, decodeResult, connect } = await import('../../scripts/uat-mcp-smoke.mjs');
+    const other = await createPrincipal(pool, { externalId: 'uat-other-client', kind: 'service', displayName: 'Synthetic UAT B' });
+    await addMembership(pool, other.id, scopeId, 'writer');
+    const credential = `ctm_${randomBytes(32).toString('base64url')}`;
+    await pool.query('INSERT INTO service_api_keys (id,principal_id,key_hash,prefix,last_four) VALUES ($1,$2,$3,$4,$5)',
+      [randomUUID(), other.id, createHash('sha256').update(credential).digest(), 'ctm_test', credential.slice(-4)]);
+    const b = await connect(url, credential);
+    try {
+      const aCall = async (name: string, args: Record<string, unknown>) => decodeResult(await client.callTool({ name: `continuum.${name}`, arguments: args }));
+      const checks = await leaseSmoke(aCall, b.call, 'project:remote', { wait: async (ms: number) => {
+        expect(ms).toBeGreaterThan(30000);
+        // Only the disposable integration fixture advances elapsed lease time.
+        await pool.query(`UPDATE coordination_leases SET acquired_at=clock_timestamp()-interval '2 seconds', expires_at=clock_timestamp()-interval '1 second' WHERE scope_id=$1 AND resource LIKE 'uat:delivery-forge:%' AND released_at IS NULL`, [scopeId]);
+      } });
+      expect(checks).toEqual({ replay: true, contention: true, masking: true, renew: true, release: true, expiry: true, staleGeneration: true });
+    } finally { await b.client.close(); await cleanup(); }
+  });
   it('rejects alternate credentials and source-policy drift with uniform 404', async () => {
     try {
       const headers = { 'Mcp-Session-Id': transport.sessionId!, Accept: 'application/json, text/event-stream' };

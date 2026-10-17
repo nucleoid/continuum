@@ -17,6 +17,7 @@ export * from './embeddings/ollama.js';
 export * from './embeddings/hosted.js';
 export * from './embeddings/router.js';
 export * from './embeddings/factory.js';
+export * from './embeddings/gemini.js';
 export * from './embeddings/text.js';
 export * from './agents-md/render.js';
 export * from './services/errors.js';

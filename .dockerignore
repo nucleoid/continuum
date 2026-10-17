@@ -68,3 +68,12 @@ src/plugins/tenants/**
 **/test-results/**
 **/tenants
 **/tenants/**
+
+!scripts/uat-mcp-smoke.mjs
+!deploy/compose.uat.yml
+!deploy/uat.env.example
+!deploy/uat-proxy.conf.example
+!docs/remote-mcp.md
+!docs/uat-deployment.md
+!docs/uat-client-onboarding.md
+!docs/delivery-forge-uat.md
