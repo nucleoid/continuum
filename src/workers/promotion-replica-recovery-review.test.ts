@@ -92,12 +92,16 @@ describe('promotion replica recovery review', () => {
     const callbackDone = Promise.withResolvers<void>();
     const ackGate = Promise.withResolvers<void>();
     const firstRenewed = Promise.withResolvers<void>();
+    const allPaidStarted = Promise.withResolvers<void>();
     const attempts = new Map<string, number>();
     const pendingWrites = new Set<Promise<boolean>>();
     let unsettled = false;
     let paidCalls = 0;
     const registry = new PromotionWebhookRegistry();
-    for (const hook of paidHooks) registry.register({ id: hook, onPromoted: async () => { paidCalls += 1; } });
+    for (const hook of paidHooks) registry.register({ id: hook, onPromoted: async () => {
+      paidCalls += 1;
+      if (paidCalls === paidHooks.length) allPaidStarted.resolve();
+    } });
     registry.register({ id: 'running-hook', onPromoted: async () => {
       unsettled = true; entered.resolve(); await callbackDone.promise; unsettled = false;
     } });
@@ -120,6 +124,9 @@ describe('promotion replica recovery review', () => {
     try {
       await beforeWatch(entered.promise);
       await beforeWatch(firstRenewed.promise);
+      // An admission renewal can finish before its callback starts. Establish
+      // every paid callback before testing renewal across their stalled ACKs.
+      await beforeWatch(allPaidStarted.promise);
       expect(paidCalls).toBe(paidHooks.length);
       const renewed = (await pool.query('SELECT lease_expires_at FROM promotion_event_deliveries WHERE event_id=$1::uuid',
         [events.get('running-hook')])).rows[0].lease_expires_at as Date;
