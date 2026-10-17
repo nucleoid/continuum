@@ -98,10 +98,14 @@ test('packaged OP and SYNC grants lock and recheck eligibility in their own gran
   assert.match(sql,/role binding is ineligible:/);
  }
  assert.match(operator,/FOR UPDATE OF principal, membership/);
- assert.match(operator,/membership\.source_kind = 'manual'.*membership\.source_id = 'manual'/s);
+ assert.match(operator,/membership\.source_kind = ''manual''.*membership\.source_id = ''manual''/s);
+ assert.match(operator,/DO \$operator_eligibility\$[\s\S]*eligible_count <> 1/);
+ assert.doesNotMatch(operator,/\\gset\s+\\if :operator_eligible/);
  const lock=operator.indexOf('FOR UPDATE OF principal, membership'),nestedApplication=operator.indexOf('\\i :operator_application_grant'),register=operator.indexOf('continuum_register_trusted_database_identity(');
  assert.ok(lock<nestedApplication&&nestedApplication<register,'operator application privileges must remain inside the locked grant transaction');
  assert.match(application,/\\if :continuum_profile_transaction\s+\\else\s+BEGIN;/);
  assert.match(application,/\\if :continuum_profile_transaction\s+\\else\s+COMMIT;/);
- assert.match(sync,/principal\.kind = 'service'.*principal\.disabled_at IS NULL/s);
+ assert.match(sync,/principal\.kind = ''service''.*principal\.disabled_at IS NULL/s);
+ assert.match(sync,/DO \$sync_eligibility\$[\s\S]*eligible_count <> 1/);
+ assert.doesNotMatch(sync,/\\gset\s+\\if :sync_eligible/);
 });
