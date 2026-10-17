@@ -41,7 +41,14 @@
     "scripts/ensure-scope.mjs",
     "scripts/*.sql",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "deploy/container-entrypoint.mjs",
+    "deploy/compose.production.yml",
+    "deploy/production.env.example",
+    "deploy/bootstrap-database.sql",
+    "deploy/bootstrap-production-admin.sql",
+    "deploy/apply-role-profiles.sh",
+    "docs/deployment.md"
   ],
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
@@ -68,7 +75,8 @@
     "tags": "node dist/cli/tag-vocabularies.js",
     "tags:dev": "tsx src/cli/tag-vocabularies.ts",
     "embed-backfill": "node dist/maintenance/embed-backfill-cli.js",
-    "embed-backfill:dev": "tsx src/maintenance/embed-backfill-cli.ts"
+    "embed-backfill:dev": "tsx src/maintenance/embed-backfill-cli.ts",
+    "test:container-entrypoint": "node --test deploy/container-entrypoint.test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",

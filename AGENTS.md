@@ -77,6 +77,10 @@ Build with `npm run build` and run relevant existing tests. Run the required ful
 
 Documentation changes must state implemented behavior, actual defaults, operational limits, and prerequisites. Do not claim production deployment, adoption, review approval, or validation at a different head. Keep review evidence and private working artifacts separate from public product guarantees.
 
+## Container packaging
+
+Production container packaging uses hosted-built immutable Linux amd64 OCI artifacts, checksum-verified runtime assets and separate DBA, owner, APP, OP and SYNC authority. See [the deployment guide](docs/deployment.md) for explicit maintenance, private secrets, resource limits and volume-preserving recovery. The development Compose file is not a production installation. Packaging does not authorize live deployment or historical database operations.
+
 ## Optional remote MCP
 
 The API process can serve authenticated Streamable HTTP at `/mcp`, disabled by default. It uses the same tool registrations, current memberships, source restrictions and required domain audits as stdio. See [remote MCP](./docs/remote-mcp.md) for the explicit HTTPS proxy policy, limits, session lifecycle and rollout. Stdio remains available through `npm run mcp`.

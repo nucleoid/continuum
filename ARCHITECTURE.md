@@ -236,6 +236,10 @@ Migration 0089 requires migration-owner database TEMPORARY privilege for its rol
 
 Migration 0090 requires the migration owner's database TEMPORARY privilege for its exact role snapshot. Quiesce activity producers and offboarding processes, migrate the complete chain, regrant APP and OP profiles, configure reviewed producer bindings and actor mappings, then start compatible binaries whose exact-profile and Standup readiness checks pass. The migration does not manufacture activity from historical caller metadata. Old unbound producers can still capture ordinary memories but cannot supply trusted Standup attribution. A binary-only rollback does not reverse physical erasure or reconstruct omitted activity. Use a verified backup for schema reversal and keep all published migration bytes intact.
 
+## Container packaging
+
+Production container packaging uses hosted-built immutable Linux amd64 OCI artifacts, checksum-verified runtime assets and separate DBA, owner, APP, OP and SYNC authority. See [the deployment guide](docs/deployment.md) for explicit maintenance, private secrets, resource limits and volume-preserving recovery. The development Compose file is not a production installation. Packaging does not authorize live deployment or historical database operations.
+
 ## Optional remote MCP
 
 The API process can serve authenticated Streamable HTTP at `/mcp`, disabled by default. It uses the same tool registrations, current memberships, source restrictions and required domain audits as stdio. See [remote MCP](./docs/remote-mcp.md) for the explicit HTTPS proxy policy, limits, session lifecycle and rollout. Stdio remains available through `npm run mcp`.

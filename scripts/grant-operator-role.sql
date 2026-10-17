@@ -12,9 +12,43 @@
   \set continuum_schema public
 \endif
 
--- First apply grant-application-role.sql to this dedicated operator role, then
--- run this script as the migration owner. Never grant it to the shared app role.
+-- Standalone callers must first apply grant-application-role.sql to this
+-- dedicated operator role, or set operator_application_grant to its verified
+-- path so both profiles commit here. The packaged profile uses the latter.
+-- Never grant this role to the shared app role.
 BEGIN;
+-- Lock the exact authority rows so demotion or disablement cannot commit
+-- between this recheck and the binding/grant transaction.
+SELECT set_config('continuum.operator_grant_schema', :'continuum_schema', TRUE);
+SELECT set_config('continuum.operator_grant_principal_id', :'continuum_principal_id', TRUE);
+DO $operator_eligibility$
+DECLARE
+  schema_name TEXT := current_setting('continuum.operator_grant_schema');
+  principal_id UUID := current_setting('continuum.operator_grant_principal_id')::uuid;
+  eligible_count BIGINT;
+BEGIN
+  EXECUTE format(
+    'SELECT count(*) FROM (
+       SELECT 1 FROM %1$I.principals principal
+       JOIN %1$I.scope_memberships membership ON membership.principal_id = principal.id
+       WHERE principal.id = $1 AND principal.kind = ''user'' AND principal.disabled_at IS NULL
+         AND membership.scope_id = %1$I.continuum_org_scope_id()
+         AND membership.source_kind = ''manual'' AND membership.source_id = ''manual''
+         AND membership.role = ''admin'' AND membership.active
+       FOR UPDATE OF principal, membership
+     ) locked_eligibility', schema_name
+  ) INTO eligible_count USING principal_id;
+  IF eligible_count <> 1 THEN
+    RAISE EXCEPTION 'role binding is ineligible: operator identity must be an effective manual org administrator';
+  END IF;
+END;
+$operator_eligibility$;
+\if :{?operator_application_grant}
+  \set continuum_app_role :continuum_operator_role
+  \set continuum_profile_transaction true
+  \i :operator_application_grant
+  \unset continuum_profile_transaction
+\endif
 SELECT :"continuum_schema".continuum_register_trusted_database_identity(
   :'continuum_operator_role'::name, :'continuum_principal_id'::uuid, TRUE, FALSE
 );

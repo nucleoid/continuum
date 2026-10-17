@@ -1,0 +1,75 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { loadSecretFiles, resolveCommand } from './container-entrypoint.mjs';
+test('secrets preserve whitespace and remove one trailing terminator', () => {
+ const root = mkdtempSync(join(tmpdir(), 'continuum-secrets-'));
+ try {
+  writeFileSync(join(root, 'token'), '  synthetic value  \r\n');
+  const env = { CONTINUUM_TOKEN_FILE: join(root, 'token') };
+  loadSecretFiles(env, root);
+  assert.equal(env.CONTINUUM_TOKEN, '  synthetic value  ');
+  assert.equal(env.CONTINUUM_TOKEN_FILE, undefined);
+ } finally { rmSync(root, { recursive: true, force: true }); }
+});
+test('invalid secrets fail before dispatch without exposing values', () => {
+ const root = mkdtempSync(join(tmpdir(), 'continuum-secrets-'));
+ try {
+  mkdirSync(join(root, 'directory'));
+  for (const env of [
+   { CONTINUUM_TOKEN: 'synthetic-sensitive', CONTINUUM_TOKEN_FILE: join(root, 'missing') },
+   { CONTINUUM_TOKEN_FILE: join(root, 'missing') },
+   { CONTINUUM_TOKEN_FILE: join(root, '..', 'outside') },
+   { CONTINUUM_TOKEN_FILE: join(root, 'directory') },
+   { CONTINUUM_TOKEN: '' }, { CONTINUUM_TOKEN: 'synthetic-sensitive\0' },
+   { CONTINUUM_TOKEN: 'x'.repeat(65537) },
+  ]) assert.throws(() => loadSecretFiles(env, root), e => !e.message.includes('synthetic-sensitive'));
+  for (const value of ['', '\n', 'synthetic-sensitive\0', 'x'.repeat(65537)]) {
+   writeFileSync(join(root, 'token'), value);
+   assert.throws(() => loadSecretFiles({ CONTINUUM_TOKEN_FILE: join(root, 'token') }, root),
+    e => !e.message.includes('synthetic-sensitive'));
+  }
+ } finally { rmSync(root, { recursive: true, force: true }); }
+});
+test('dispatch permits only installed public entrypoints', () => {
+ assert.deepEqual(resolveCommand(['continuum', '--help']), ['bin/continuum.mjs', '--help']);
+ assert.deepEqual(resolveCommand(['node', 'dist/api/mcp.js']), ['dist/api/mcp.js']);
+ assert.deepEqual(resolveCommand([]), ['dist/api/server.js']);
+ for (const args of [['sh', '-c', 'anything'], ['node', '-e', 'anything'],
+  ['node', '../dist/api/server.js'], ['dist/test.js']]) assert.throws(() => resolveCommand(args));
+});
+
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+test('executable errors are bounded and never write protocol stdout', () => {
+ const launcher = fileURLToPath(new URL('./container-entrypoint.mjs', import.meta.url));
+ for (const env of [
+  { CONTINUUM_TOKEN_FILE: '/outside/synthetic-sensitive' },
+  { CONTINUUM_TOKEN_FILE: '/run/secrets/missing', CONTINUUM_TOKEN: 'synthetic-sensitive' },
+ ]) {
+  const child = spawnSync(process.execPath, [launcher, 'continuum', '--help'], {
+   encoding: 'utf8', timeout: 5000, env: { ...process.env, ...env },
+  });
+  assert.equal(child.status, 1);
+  assert.equal(child.stdout, '');
+  assert.equal(child.stderr, 'continuum-container: Invalid container secret setting: CONTINUUM_TOKEN\n');
+ }
+});
+test('valid environment values retain meaningful bytes', () => {
+ const env = { CONTINUUM_TOKEN: '  synthetic token  ' };
+ loadSecretFiles(env);
+ assert.equal(env.CONTINUUM_TOKEN, '  synthetic token  ');
+});
+
+import { maintenanceDatabaseUrl } from './container-entrypoint.mjs';
+test('maintenance names cannot be overridden by the private connection URL', () => {
+ const name = 'ctm-migrate-0123456789abcdef01234567';
+ const value = maintenanceDatabaseUrl('postgres://synthetic:synthetic@db/example?options=-csearch_path%3Dexample', name);
+ assert.equal(new URL(value).searchParams.get('application_name'), name);
+ assert.throws(() => maintenanceDatabaseUrl('postgres://different@db/example', name, 'synthetic'), /maintenance connection identity/);
+ assert.equal(new URL(value).searchParams.get('options'), '-csearch_path=example');
+ assert.throws(() => maintenanceDatabaseUrl('postgres://synthetic@db/example?application_name=another', name), /maintenance connection identity/);
+ assert.throws(() => maintenanceDatabaseUrl('postgres://synthetic@db/example', 'unbounded-or-other-name'), /maintenance connection identity/);
+});

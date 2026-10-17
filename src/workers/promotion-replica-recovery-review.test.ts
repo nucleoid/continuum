@@ -93,6 +93,7 @@ describe('promotion replica recovery review', () => {
     const ackGate = Promise.withResolvers<void>();
     const firstRenewed = Promise.withResolvers<void>();
     const allPaidStarted = Promise.withResolvers<void>();
+    const admissionComplete = Promise.withResolvers<void>();
     const attempts = new Map<string, number>();
     const pendingWrites = new Set<Promise<boolean>>();
     let unsettled = false;
@@ -106,6 +107,11 @@ describe('promotion replica recovery review', () => {
       unsettled = true; entered.resolve(); await callbackDone.promise; unsettled = false;
     } });
     const store: PromotionWorkerStore = { ...actualStore,
+      claim: async (...args) => {
+        const claimed = await claimPromotionDeliveries(...args);
+        if (args[1].webhookIds.includes('running-hook')) admissionComplete.resolve();
+        return claimed;
+      },
       complete: (...args) => {
         const eventId = args[1];
         if (eventId === events.get('running-hook')) return completePromotionDelivery(...args);
@@ -122,6 +128,9 @@ describe('promotion replica recovery review', () => {
     const worker = new PromotionEventWorker(pool, registry, options('primary-ack'), store);
     const draining = worker.drainOnce().then(() => undefined, (error: unknown) => error);
     try {
+      // Admission performs seven real, serialized claims and is setup rather than
+      // the renewal behavior under test. Start the finite behavior watch after it.
+      await admissionComplete.promise;
       await beforeWatch(entered.promise);
       await beforeWatch(firstRenewed.promise);
       // An admission renewal can finish before its callback starts. Establish

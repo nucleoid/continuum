@@ -11,7 +11,14 @@
 -- Run as the migration owner after continuum-migrate. The role is deliberately
 -- not granted CREATE on the schema or any privilege on capability tables.
 -- The transaction removes operator-only capabilities before checking the application profile.
+\if :{?continuum_profile_transaction}
+\else
+  \set continuum_profile_transaction false
+\endif
+\if :continuum_profile_transaction
+\else
 BEGIN;
+\endif
 GRANT USAGE ON SCHEMA :"continuum_schema" TO :"continuum_app_role";
 
 GRANT SELECT, INSERT, UPDATE ON TABLE
@@ -378,4 +385,7 @@ $provider_runtime_gate$;
 SELECT :"continuum_schema".continuum_assert_application_role_allowlist(
   :'continuum_app_role'::name
 );
+\if :continuum_profile_transaction
+\else
 COMMIT;
+\endif
