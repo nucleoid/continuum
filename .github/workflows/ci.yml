@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    branches: [master, codex/feat/18-streamable-http]
   pull_request:
 
 permissions:
@@ -44,9 +44,23 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-      - run: npm test
+      - run: npm test -- --maxWorkers=1 --reporter=default --reporter=json --outputFile=test-results.json
+      - name: Verify complete source test coverage
+        if: always()
+        run: node scripts/verify-ci-test-report.mjs
       - run: npm pack --dry-run
       - run: npm run smoke:cli-package
+      - run: mkdir -p test-artifact && npm pack --ignore-scripts --pack-destination test-artifact
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: continuum-source-validation-${{ github.sha }}
+          path: |
+            test-results.json
+            test-coverage.json
+            test-artifact/*.tgz
+          if-no-files-found: error
+          retention-days: 14
 
   windows:
     name: Windows build and entrypoint test

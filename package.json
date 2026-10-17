@@ -21,6 +21,7 @@
     "docs/agents-md-freshness.md",
     "docs/api-operations.md",
     "docs/authentication.md",
+    "docs/remote-mcp.md",
     "docs/audit-api.md",
     "docs/audit-retention.md",
     "docs/cli.md",

@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import { getBudgetedMemoryForUpdate } from './memory-reads.js';
 import type { Memory, ScopeRef } from '../types.js';
 import { record as recordAudit } from '../audit/log.js';
 import { createMemory } from './memories.js';
@@ -57,9 +58,10 @@ export async function promoteMemoryWithAudit(
   targetScope: ScopeRef,
   auditMetadata: Record<string, unknown> = {},
   webhookIds: readonly string[] = [],
+  readBudgetBytes?: number,
 ): Promise<PromoteResult> {
   return inTransaction(pool, (client) =>
-    promoteOperation(client, principalId, memoryId, targetScope, true, auditMetadata, webhookIds),
+    promoteOperation(client, principalId, memoryId, targetScope, true, auditMetadata, webhookIds, readBudgetBytes),
   );
 }
 
@@ -71,8 +73,9 @@ async function promoteOperation(
   audit: boolean,
   auditMetadata: Record<string, unknown> = {},
   webhookIds: readonly string[] = [],
+  readBudgetBytes?: number,
 ): Promise<PromoteResult> {
-  const source = await getMemoryForUpdate(client, memoryId);
+  const source = await getMemoryForUpdate(client, memoryId, principalId, readBudgetBytes);
   if (!source) throw new PromoteError('memory not found', 404);
   if (source.state !== 'live' || source.promotedToId !== null) {
     throw new PromoteError('memory has already been promoted or is not live', 409);
@@ -182,9 +185,10 @@ export async function verifyMemoryWithAudit(
   stillTrue: boolean,
   note?: string,
   auditMetadata: Record<string, unknown> = {},
+  readBudgetBytes?: number,
 ): Promise<Memory> {
   return inTransaction(pool, async (client) => {
-    const memory = await verifyOperation(client, principalId, memoryId, stillTrue);
+    const memory = await verifyOperation(client, principalId, memoryId, stillTrue, readBudgetBytes);
     await recordAudit(client, {
       principalId,
       action: 'verify',
@@ -201,8 +205,9 @@ async function verifyOperation(
   principalId: string,
   memoryId: string,
   stillTrue: boolean,
+  readBudgetBytes?: number,
 ): Promise<Memory> {
-  const memory = await getMemoryForUpdate(client, memoryId);
+  const memory = await getMemoryForUpdate(client, memoryId, principalId, readBudgetBytes);
   if (!memory) throw new PromoteError('memory not found', 404);
   const memoryScope = await getScope(client, memory.scopeId);
   if (!memoryScope) throw new PromoteError('source scope missing', 500);
@@ -234,7 +239,10 @@ async function verifyOperation(
 async function getMemoryForUpdate(
   client: pg.PoolClient,
   memoryId: string,
+  principalId?: string,
+  readBudgetBytes?: number,
 ): Promise<Memory | null> {
+  if (readBudgetBytes !== undefined) return getBudgetedMemoryForUpdate(client, memoryId, principalId!, readBudgetBytes);
   const { rows } = await client.query(
     `SELECT ${MEMORY_COLUMNS}
        FROM memories

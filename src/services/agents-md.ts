@@ -22,6 +22,7 @@ export async function prepareAgentsMdForPrincipal(
   pool: pg.Pool,
   principal: Principal,
   input: AgentsMdInput,
+  readBudgetBytes?: number,
 ): Promise<AgentsMdBundle> {
   try {
     // This transport deliberately uses the scoped text renderer, not ranked
@@ -34,6 +35,7 @@ export async function prepareAgentsMdForPrincipal(
       project: input.project,
       team: input.team,
       perScopeLimit: input.limit,
+      readBudgetBytes,
     });
     const hash = createHash('sha256').update(markdown, 'utf8').digest('hex');
     return { markdown, hash, etag: `"${hash}"`, memories };
@@ -79,8 +81,9 @@ export async function renderAgentsMdForPrincipal(
   principal: Principal,
   input: AgentsMdInput,
   auditMetadata: Record<string, unknown> = {},
+  readBudgetBytes?: number,
 ): Promise<string> {
-  const bundle = await prepareAgentsMdForPrincipal(pool, principal, input);
+  const bundle = await prepareAgentsMdForPrincipal(pool, principal, input, readBudgetBytes);
   await auditAgentsMdRead(pool, principal, input, bundle, true, auditMetadata);
   return bundle.markdown;
 }
