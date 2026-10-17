@@ -144,7 +144,9 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
     deadline = Math.min(deadline, auth.expiresAt?.getTime() ?? Infinity);
     clearTimeout(deadlineTimer);
     deadlineTimer = setTimeout(expire, Math.max(1, deadline - Date.now()));
-    if (req.method !== 'POST' && (!admission.admit(`control:principal:${auth.principal.id}`, 1) || !admission.admit(`control:credential:${binding}`, 1))) {
+    if (req.method !== 'POST' && !admission.admitAll([
+      [`control:principal:${auth.principal.id}`, 1], [`control:credential:${binding}`, 1],
+    ])) {
       fail(res, 429, 'Message limit exceeded'); return;
     }
     const accepts = (type: string) => (req.headers.accept ?? '').split(',').some((part) => {
@@ -189,9 +191,10 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
     const principal = auth.principal.id;
     const smallBody = Number(req.headers['content-length'] ?? 0) > 0 && Number(req.headers['content-length']) <= 512;
     let usingControlRate = false;
-    if (!admission.admit(`principal:${principal}`, 1) || !admission.admit(`credential:${binding}`, 1)) {
-      if (!smallBody || !admission.admit(`control:principal:${principal}`, 1)
-        || !admission.admit(`control:credential:${binding}`, 1)) { fail(res, 429, 'Message limit exceeded'); return; }
+    if (!admission.admitAll([[`principal:${principal}`, 1], [`credential:${binding}`, 1]])) {
+      if (!smallBody || !admission.admitAll([
+        [`control:principal:${principal}`, 1], [`control:credential:${binding}`, 1],
+      ])) { fail(res, 429, 'Message limit exceeded'); return; }
       usingControlRate = true;
     }
     const borrowingControl = bodyReaders >= limits.calls || (principalReaders.get(principal) ?? 0) >= limits.principalCalls;
@@ -224,8 +227,10 @@ export function createMcpHttpController(config: McpHttpConfig, deps: McpHttpDeps
     if (usingControlRate && !control) { fail(res, 429, 'Message limit exceeded'); return; }
     if (borrowingControl && !control) { fail(res, 503, 'Reserved control admission required'); return; }
     const prefix = usingControlRate ? 'control:' : '';
-    if (!admission.admit(`${prefix}principal:${auth.principal.id}`, messages.length - 1)
-      || !admission.admit(`${prefix}credential:${binding}`, messages.length - 1)) { fail(res, 429, 'Message limit exceeded'); return; }
+    if (!admission.admitAll([
+      [`${prefix}principal:${auth.principal.id}`, messages.length - 1],
+      [`${prefix}credential:${binding}`, messages.length - 1],
+    ])) { fail(res, 429, 'Message limit exceeded'); return; }
     // A cancelled multi-request POST retains unrelated normal responses inside SDK1.29.
     // One request per POST removes that cross-session retention path; notifications still batch.
     if (rpc.filter((message) => 'method' in message && 'id' in message).length > 1) {

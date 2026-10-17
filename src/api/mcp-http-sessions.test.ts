@@ -44,6 +44,31 @@ describe('remote MCP admission', () => {
     expect(sessions.admit('a', 1)).toBe(false);
     expect(sessions.admit('b', 1)).toBe(false);
   });
+  it('does not drain shared principal capacity when a credential bucket rejects', () => {
+    const sessions = new McpHttpSessions({ ...limits, messageBurst: 2 }, () => 0);
+    expect(sessions.admit('credential:rejected', 2)).toBe(true);
+    expect(sessions.admitAll([
+      ['principal:shared', 1], ['credential:rejected', 1],
+    ])).toBe(false);
+    expect(sessions.admitAll([
+      ['principal:shared', 2], ['credential:sibling', 2],
+    ])).toBe(true);
+  });
+  it('does not drain shared control capacity when a session credential rejects', () => {
+    const sessions = new McpHttpSessions({ ...limits, messageBurst: 3 }, () => 0);
+    expect(sessions.admit('control:credential:rejected-session', 3)).toBe(true);
+    expect(sessions.admitAll([
+      ['control:principal:shared', 1], ['control:credential:rejected-session', 1],
+    ])).toBe(false);
+    expect(sessions.admitAll([
+      ['control:principal:shared', 3], ['control:credential:sibling-session', 3],
+    ])).toBe(true);
+  });
+  it('rejects atomic admission without retaining a partial new bucket', () => {
+    const sessions = new McpHttpSessions({ ...limits, buckets: 1 }, () => 0);
+    expect(sessions.admitAll([['principal:new', 1], ['credential:new', 1]])).toBe(false);
+    expect(sessions.admit('credential:sibling', 1)).toBe(true);
+  });
 });
 
 it('bounds retained SDK response bytes process-wide until explicit release', () => {

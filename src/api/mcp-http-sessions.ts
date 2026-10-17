@@ -87,6 +87,28 @@ export class McpHttpSessions {
   admit(key: string, count: number): boolean {
     return this.take(this.buckets, key, count, this.limits.messageRate, this.limits.messageBurst, this.limits.buckets);
   }
+  admitAll(entries: ReadonlyArray<readonly [key: string, count: number]>): boolean {
+    const now = this.now();
+    const { messageRate: rate, messageBurst: burst, buckets: cap } = this.limits;
+    // Expired buckets no longer carry admission history and may be reclaimed before the atomic probe.
+    for (const [id, bucket] of this.buckets) if (now - bucket.updated >= burst * 60_000 / rate) this.buckets.delete(id);
+    const counts = new Map<string, number>();
+    for (const [key, count] of entries) counts.set(key, (counts.get(key) ?? 0) + count);
+    let missing = 0;
+    for (const key of counts.keys()) if (!this.buckets.has(key)) missing++;
+    if (this.buckets.size + missing > cap) return false;
+    const admitted = new Map<string, Bucket>();
+    for (const [key, count] of counts) {
+      const current = this.buckets.get(key);
+      const tokens = current
+        ? Math.min(burst, current.tokens + Math.max(0, now - current.updated) * rate / 60_000)
+        : burst;
+      if (count > tokens) return false;
+      admitted.set(key, { tokens: tokens - count, updated: now });
+    }
+    for (const [key, bucket] of admitted) this.buckets.set(key, bucket);
+    return true;
+  }
   admitPeer(peer: string): boolean {
     return this.take(this.peers, peer, 1, this.limits.peerRate, this.limits.peerBurst, this.limits.peers);
   }
