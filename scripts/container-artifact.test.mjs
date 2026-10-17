@@ -116,3 +116,11 @@ test('identifies an empty build-only scope directory without weakening the layer
   rejected(fixture(context, { emptyTypeScope: true }).artifact,
     'Build-only dependency in runtime layer 0: opt/continuum/node_modules/@types/');
 });
+
+test('removes npm package-bin links before the immutable runtime copy', () => {
+  const dockerfile = readFileSync(join(repository, 'Dockerfile'), 'utf8');
+  assert.match(dockerfile,
+    /find node_modules\/\.bin -mindepth 1 -maxdepth 1 -type l -delete && rmdir node_modules\/\.bin/);
+  assert.match(dockerfile, /! find node_modules -type l -print -quit \| grep -q \./);
+  assert.match(dockerfile, /COPY --from=dependencies --chown=0:0 \/opt\/continuum \.\//);
+});

@@ -18,6 +18,8 @@ COPY --from=build /tmp/*.tgz /tmp/package.tgz
 RUN tar -xzf /tmp/package.tgz --strip-components=1 && rm /tmp/package.tgz
 COPY package-lock.json ./package-lock.json
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund && rm package-lock.json && \
+    find node_modules/.bin -mindepth 1 -maxdepth 1 -type l -delete && rmdir node_modules/.bin && \
+    ! find node_modules -type l -print -quit | grep -q . && \
     find node_modules -type f \( -name '*.map' -o -name '*.test.*' -o -name '*.spec.*' \) -delete && \
     if [ -d node_modules/@types ]; then rmdir node_modules/@types; fi && \
     chmod -R a-w /opt/continuum
