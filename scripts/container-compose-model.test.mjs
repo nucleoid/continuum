@@ -16,18 +16,18 @@ test('production Compose requires the PostgreSQL pin and gates direct API startu
 });
 test('Entra readiness uses canonical production Compose before synthetic dev requests',()=>{
  const source=readFileSync(resolve(import.meta.dirname,'container-production-smoke.mjs'),'utf8');
- assert.doesNotMatch(source,/run\(\['compose',[^\n]*'--profile',\s*'serving'[^\n]*'api'/);
- const canonicalBase=source.match(/const canonicalBase = (\[[^\n]+\]);/)?.[1];
+ assert.doesNotMatch(source,/run\(\['compose',[^\r\n]*'--profile',\s*'serving'[^\r\n]*'api'/);
+ const canonicalBase=source.match(/const canonicalBase = (\[[^\r\n]+\]);/)?.[1];
  assert.ok(canonicalBase);
  assert.doesNotMatch(canonicalBase,/override/);
  assert.match(canonicalBase,/'--profile', 'maintenance', '--profile', 'serving'/);
- const syntheticBase=source.match(/const base = (\[[^\n]+\]);/)?.[1];
+ const syntheticBase=source.match(/const base = (\[[^\r\n]+\]);/)?.[1];
  assert.ok(syntheticBase);
  assert.match(syntheticBase,/'-f', override/);
  const probe=source.match(/\/\/ Entra discovery\/JWKS[\s\S]*?(?=  results\.passed\.push\('production Entra mode)/)?.[0];
  assert.ok(probe);
  assert.match(probe,/canonicalCompose\(fresh, \['up', '-d', '--no-deps', '--force-recreate', '--wait', '--wait-timeout', '120', 'api'\]\)/);
  assert.match(probe,/canonicalCompose\(fresh,\['ps','-q','api'\]\)/);
- assert.doesNotMatch(probe,/(?:^|\n)  compose\(fresh/);
- assert.match(source,/later transport requests explicitly use synthetic dev mode'\);\n  compose\(fresh, \['up', '-d', '--no-deps', '--force-recreate', '--wait', '--wait-timeout', '120', 'api'\]\)/);
+ assert.doesNotMatch(probe,/(?:^|\r?\n)  compose\(fresh/);
+ assert.match(source,/later transport requests explicitly use synthetic dev mode'\);\r?\n  compose\(fresh, \['up', '-d', '--no-deps', '--force-recreate', '--wait', '--wait-timeout', '120', 'api'\]\)/);
 });
