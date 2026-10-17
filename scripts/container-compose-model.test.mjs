@@ -29,5 +29,5 @@ test('Entra readiness uses canonical production Compose before synthetic dev req
  assert.match(probe,/canonicalCompose\(fresh, \['up', '-d', '--no-deps', '--force-recreate', '--wait', '--wait-timeout', '120', 'api'\]\)/);
  assert.match(probe,/canonicalCompose\(fresh,\['ps','-q','api'\]\)/);
  assert.doesNotMatch(probe,/(?:^|\n)  compose\(fresh/);
- assert.match(source,/later transport requests explicitly use synthetic dev mode'\);\n  compose\(fresh, \['up', '-d', '--no-deps', '--force-recreate', '--wait', '--wait-timeout', '120', 'api'\]\)/);
+ assert.match(source,/later transport requests explicitly use synthetic dev mode'\);\r?\n  compose\(fresh, \['up', '-d', '--no-deps', '--force-recreate', '--wait', '--wait-timeout', '120', 'api'\]\)/);
 });
