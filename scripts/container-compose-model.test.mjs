@@ -11,6 +11,6 @@ test('accepts separate absolute mounts with bounded security options', () => {
 });
 test('production Compose requires the PostgreSQL pin and gates direct API startup on a successful grant job',()=>{
  const source=readFileSync(resolve(import.meta.dirname,'../deploy/compose.production.yml'),'utf8');
- assert.match(source,/postgres:\n\s+image: \$\{CONTINUUM_POSTGRES_IMAGE:\?pinned pgvector PostgreSQL 16 digest required\}/);
- assert.match(source,/api:[\s\S]*?depends_on:\n\s+postgres: \{condition: service_healthy\}\n\s+grant: \{condition: service_completed_successfully\}/);
+ assert.match(source,/postgres:\r?\n\s+image: \$\{CONTINUUM_POSTGRES_IMAGE:\?pinned pgvector PostgreSQL 16 digest required\}/);
+ assert.match(source,/api:[\s\S]*?depends_on:\r?\n\s+postgres: \{condition: service_healthy\}\r?\n\s+grant: \{condition: service_completed_successfully\}/);
 });
