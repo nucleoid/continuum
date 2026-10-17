@@ -31,6 +31,8 @@ export interface EntraAuthConfig {
 export interface Authenticator {
   readonly mode: AuthMode;
   authenticate(scheme: string, credential: string): Promise<AuthenticatedPrincipal | null>;
+  /** Optional decisive denial classification: reject when verification is unavailable. */
+  authenticateWithAvailability?(scheme: string, credential: string): Promise<AuthenticatedPrincipal | null>;
 }
 
 export function authModeFromEnv(env: NodeJS.ProcessEnv = process.env): AuthMode {
@@ -138,9 +140,7 @@ export function createAuthenticator(
     metadataPromise.catch(() => { metadataPromise = undefined; });
     return metadataPromise;
   };
-  return {
-    mode,
-    async authenticate(scheme, credential) {
+  const authenticateCredential = async (scheme: string, credential: string, availability: boolean): Promise<AuthenticatedPrincipal | null> => {
       if (scheme.toLowerCase() === 'apikey'
         || (scheme.toLowerCase() === 'bearer' && credential.startsWith('ctm_'))) {
         return authenticateApiKey(pool, credential);
@@ -158,10 +158,21 @@ export function createAuthenticator(
           || (protectedHeader.typ !== undefined && protectedHeader.typ !== 'JWT'
             && protectedHeader.typ !== 'at+jwt')) return null;
         return principalFromClaims(pool, payload, entra);
-      } catch {
+      } catch (error) {
+        if (availability) {
+          const code = typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : '';
+          const denied = ['ERR_JWT_EXPIRED', 'ERR_JWT_CLAIM_VALIDATION_FAILED', 'ERR_JWT_INVALID',
+            'ERR_JWS_INVALID', 'ERR_JWS_SIGNATURE_VERIFICATION_FAILED', 'ERR_JOSE_ALG_NOT_ALLOWED',
+            'ERR_JWKS_NO_MATCHING_KEY', 'ERR_JOSE_NOT_SUPPORTED', 'ERR_JWKS_MULTIPLE_MATCHING_KEYS'].includes(code);
+          if (!denied) throw new Error('Authentication verification unavailable');
+        }
         return null;
       }
-    },
+  };
+  return {
+    mode,
+    authenticate: (scheme, credential) => authenticateCredential(scheme, credential, false),
+    authenticateWithAvailability: (scheme, credential) => authenticateCredential(scheme, credential, true),
   };
 }
 

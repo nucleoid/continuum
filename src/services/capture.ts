@@ -30,6 +30,7 @@ export interface CaptureResult {
 }
 
 export interface CaptureOptions {
+  readBudgetBytes?: number;
   relationThreshold?: number;
 }
 
@@ -186,6 +187,8 @@ export async function embedCapturedMemory(
       result.memory,
       result.memory.id,
       relationThreshold,
+      undefined,
+      options.readBudgetBytes,
     );
   } catch {
     relationErrorCode = 'RELATION_DETECTION_FAILED';
@@ -321,6 +324,8 @@ export async function captureMemory(
           input,
           memoryId,
           relationThreshold,
+          undefined,
+          options.readBudgetBytes,
         );
       } catch {
         related = [];

@@ -79,6 +79,7 @@ export async function detectRelatedMemories(
   excludeMemoryId: string,
   threshold = DEFAULT_RELATION_THRESHOLD,
   now: () => Date = () => new Date(),
+  readBudgetBytes?: number,
 ): Promise<RelatedMemory[]> {
   const validatedThreshold = validateRelationThreshold(threshold);
   const hits = await vectorSearchRelatedMemories(
@@ -86,7 +87,7 @@ export async function detectRelatedMemories(
     vector,
     scopeIds,
     provider,
-    { threshold: validatedThreshold, excludeMemoryId, limit: MAX_CAPTURE_RELATIONS },
+    { threshold: validatedThreshold, excludeMemoryId, limit: MAX_CAPTURE_RELATIONS, readBudgetBytes },
   );
   const detectedAt = now().toISOString();
   return hits.map((hit) => ({
