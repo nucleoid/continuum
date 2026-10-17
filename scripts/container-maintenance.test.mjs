@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, writeFileSync, closeSync, existsSync, rmSync, statSync, mkdirSync, writeSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { reserveBackupTargets, maintenanceBudgets, runtimeAssetManifest, assertRuntimeAssets, assertAssetMounts, quiescenceSql, assertQuiescence, runMaintenance, formatMaintenanceFailure } from './container-maintenance.mjs';
+import { reserveBackupTargets, markBackupTargetsIncomplete, maintenanceBudgets, runtimeAssetManifest, assertRuntimeAssets, assertAssetMounts, quiescenceSql, assertQuiescence, runMaintenance, formatMaintenanceFailure } from './container-maintenance.mjs';
 
 test('upgrade preflight refuses missing output, missing parent and every existing sidecar', () => {
  const root = mkdtempSync(join(tmpdir(), 'continuum-backup-preflight-'));
@@ -34,6 +34,20 @@ test('preflight reserves new private backup outputs without overwriting evidence
   }
   assert.throws(() => reserveBackupTargets(join(root, 'backup.dump')), /existing backup/);
  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+test('failed backup reservations leave only unique incomplete artifacts and permit a clean retry', () => {
+ const root=mkdtempSync(join(tmpdir(),'continuum-backup-incomplete-'));
+ try {
+  const target=join(root,'backup.dump'),collisionToken='00'.repeat(12),retained=target+`.${collisionToken}.incomplete`;writeFileSync(retained,'do not overwrite');
+  const first=reserveBackupTargets(target);for(const item of first)writeSync(item.fd,'partial backup bytes');
+  const tokens=[collisionToken,'01'.repeat(12),'02'.repeat(12),'03'.repeat(12)];
+  const incomplete=markBackupTargetsIncomplete(first,{randomBytes:()=>Buffer.from(tokens.shift(),'hex')});
+  assert.equal(incomplete.length,3);assert.ok(incomplete.every(path=>path.endsWith('.incomplete')&&existsSync(path)));
+  for(const suffix of ['', '.roles.sql', '.sha256'])assert.equal(existsSync(target+suffix),false);
+  assert.equal(readFileSync(retained,'utf8'),'do not overwrite');
+  const retry=reserveBackupTargets(target);for(const item of retry)closeSync(item.fd);
+  assert.throws(()=>reserveBackupTargets(target),/existing backup/);
+ } finally {rmSync(root,{recursive:true,force:true});}
 });
 
 test('operator deadlines are independently bounded and preserve short test budgets', () => {
@@ -296,6 +310,8 @@ test('backup timeout terminates only its named DBA session and releases the proj
  const terminate=state.calls.find(call=>call.args.some(arg=>arg.includes('pg_terminate_backend')&&arg.includes(name)));
  assert.ok(terminate);assert.ok(terminate.args.some(arg=>arg.includes("usename='dba'")&&arg.includes("datname='synthetic'")));
  assert.ok(!state.calls.some(call=>call.args.includes('run')&&call.args.at(-1)==='migrate'));
+ for(const suffix of ['', '.roles.sql', '.sha256'])assert.equal(existsSync(join(root,'backup.dump')+suffix),false);
+ assert.equal(fs.readdirSync(root).filter(name=>name.endsWith('.incomplete')).length,3);
  assert.equal(existsSync(join(root,'.continuum-maintenance-locks','synthetic-maintenance.lock')),false);
 }));
 

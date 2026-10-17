@@ -16,7 +16,10 @@ if (loadedIdentity.sourceSha !== source || loadedIdentity.configDigest !== metad
 const image = loadedIdentity.imageId;
 const owner = `continuum-ci-${randomUUID()}`;
 const created = [];
-const results = { sourceSha: source, imageId: image, configDigest: metadata.configDigest, dockerStore: loadedIdentity.dockerStore, mode: 'full-text-only', remoteMcp: 'unavailable: separate transport issue', passed: [], unmet: [] };
+const results = { sourceSha: source, imageId: image, configDigest: metadata.configDigest, dockerStore: loadedIdentity.dockerStore,
+  mode: 'full-text-only', vector: 'not exercised: embedding provider disabled',
+  entraAuthentication: 'not exercised: Entra-mode startup/readiness only',
+  remoteMcp: 'unavailable: separate transport issue', passed: [], unmet: [] };
 const command = (bin, args, options = {}) => execFileSync(bin, args, { encoding: 'utf8', timeout: 120_000, maxBuffer: 16 * 1024 * 1024, ...options });
 const docker = (...args) => command('docker', args);
 const assertion = (condition, message) => { if (!condition) throw new Error(message); };

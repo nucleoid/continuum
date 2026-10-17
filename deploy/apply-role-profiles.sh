@@ -31,6 +31,7 @@ run --set="maintenance_mode=$CONTINUUM_MAINTENANCE_MODE" \
   --set="profile_admin_id=$CONTINUUM_ADMIN_PRINCIPAL_ID" \
   --set="profile_sync_id=$CONTINUUM_SYNC_PRINCIPAL_ID" \
   --set="application_grant=$CONTINUUM_RUNTIME_ASSETS/scripts/grant-application-role.sql" \
+  --set="operator_application_grant=$CONTINUUM_RUNTIME_ASSETS/scripts/grant-application-role.sql" \
   --set="operator_grant=$CONTINUUM_RUNTIME_ASSETS/scripts/grant-operator-role.sql" \
   --set="sync_grant=$CONTINUUM_RUNTIME_ASSETS/scripts/grant-sync-role.sql" \
   --set="identity_verifier=$CONTINUUM_RUNTIME_ASSETS/scripts/verify-database-identities.sql" <<'SQL'
@@ -125,8 +126,6 @@ END;
 $bindings$;
 COMMIT;
 \set continuum_app_role :profile_app_role
-\i :application_grant
-\set continuum_app_role :profile_operator_role
 \i :application_grant
 \set continuum_operator_role :profile_operator_role
 \set continuum_principal_id :profile_admin_id

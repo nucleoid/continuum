@@ -14,6 +14,20 @@
 
 -- Run as the migration owner. Never grant this role to the shared app role.
 BEGIN;
+-- The principal lock serializes disablement with this binding/grant path.
+SELECT pg_catalog.count(*) = 1 AS sync_eligible
+  FROM (
+    SELECT 1
+      FROM :"continuum_schema".principals principal
+     WHERE principal.id = :'continuum_principal_id'::uuid
+       AND principal.kind = 'service' AND principal.disabled_at IS NULL
+     FOR UPDATE OF principal
+  ) locked_eligibility
+\gset
+\if :sync_eligible
+\else
+  DO $$BEGIN RAISE EXCEPTION 'role binding is ineligible: sync identity must be an enabled service principal'; END$$;
+\endif
 SELECT :"continuum_schema".continuum_register_trusted_database_identity(
   :'continuum_sync_role'::name, :'continuum_principal_id'::uuid, FALSE, TRUE
 );

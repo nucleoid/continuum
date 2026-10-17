@@ -12,9 +12,37 @@
   \set continuum_schema public
 \endif
 
--- First apply grant-application-role.sql to this dedicated operator role, then
--- run this script as the migration owner. Never grant it to the shared app role.
+-- Standalone callers must first apply grant-application-role.sql to this
+-- dedicated operator role, or set operator_application_grant to its verified
+-- path so both profiles commit here. The packaged profile uses the latter.
+-- Never grant this role to the shared app role.
 BEGIN;
+-- Lock the exact authority rows so demotion or disablement cannot commit
+-- between this recheck and the binding/grant transaction.
+SELECT pg_catalog.count(*) = 1 AS operator_eligible
+  FROM (
+    SELECT 1
+      FROM :"continuum_schema".principals principal
+      JOIN :"continuum_schema".scope_memberships membership
+        ON membership.principal_id = principal.id
+     WHERE principal.id = :'continuum_principal_id'::uuid
+       AND principal.kind = 'user' AND principal.disabled_at IS NULL
+       AND membership.scope_id = :"continuum_schema".continuum_org_scope_id()
+       AND membership.source_kind = 'manual' AND membership.source_id = 'manual'
+       AND membership.role = 'admin' AND membership.active
+     FOR UPDATE OF principal, membership
+  ) locked_eligibility
+\gset
+\if :operator_eligible
+\else
+  DO $$BEGIN RAISE EXCEPTION 'role binding is ineligible: operator identity must be an effective manual org administrator'; END$$;
+\endif
+\if :{?operator_application_grant}
+  \set continuum_app_role :continuum_operator_role
+  \set continuum_profile_transaction true
+  \i :operator_application_grant
+  \unset continuum_profile_transaction
+\endif
 SELECT :"continuum_schema".continuum_register_trusted_database_identity(
   :'continuum_operator_role'::name, :'continuum_principal_id'::uuid, TRUE, FALSE
 );

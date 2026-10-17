@@ -99,6 +99,24 @@ test('public failure evidence keeps standard password authentication phrase whil
  assert.ok(!text.includes('unlisted-sensitive-value'));assert.ok(!text.includes('unknown-credential-value'));
 }));
 
+test('failure evidence redacts database password variables and all SQL detail and context payloads',()=>fixture(dir=>{
+ const reservation=reserveEvidence(dir);
+ writeFailureEvidence(reservation,{phase:'backup',code:'BACKUP_FAILED'},[
+  'ERROR: backup client failed',
+  'Error: PGPASSWORD=unlisted-pg-value',
+  'Error: POSTGRES_PASSWORD: "unlisted-postgres-value"',
+  "Error: DB_PASSWORD='unlisted-db-value'",
+  'DETAIL: benign-looking but private server metadata',
+  'CONTEXT: SQL statement SELECT private_runtime_value',
+ ].join('\n'),[]);
+ closeEvidence(reservation);
+ const text=readFileSync(reservation.path,'utf8'),record=JSON.parse(text);
+ for(const value of ['unlisted-pg-value','unlisted-postgres-value','unlisted-db-value','benign-looking','private_runtime_value'])assert.ok(!text.includes(value),value);
+ const contexts=record.lines.filter(line=>/^(?:DETAIL|CONTEXT):/.test(line));assert.equal(contexts.length,2);
+ assert.ok(contexts.every(line=>line.endsWith('[redacted-sensitive-context]')));
+ assert.equal(record.lines.filter(line=>line.includes('credential [redacted-secret]')).length,3);
+}));
+
 test('preconnection proof accepts exact TCP authentication/refusal or unstarted Docker exec failures only',()=>{
  const proof=evidenceHelpers.isProvenPreconnectionFailure, options={status:2,code:'COMMAND_FAILED'};
  const auth='psql: error: connection to server at "postgres" (172.19.0.2), port 5432 failed: FATAL:  password authentication failed for user "owner"\n';

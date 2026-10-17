@@ -17,7 +17,10 @@ const assets = process.env.CONTINUUM_RUNTIME_ASSETS;
 if (!/^sha256:[a-f0-9]{64}$/.test(image ?? '') || !/^continuum-ci-[a-f0-9-]+$/.test(owner ?? '')) throw new Error('Verified smoke inputs required');
 const temporary = mkdtempSync(join(tmpdir(), 'continuum-operational-'));
 chmodSync(temporary, 0o755);
-const results = { sourceSha: process.env.SOURCE_SHA, imageId: image, passed: [], unmet: [] };
+const results = { sourceSha: process.env.SOURCE_SHA, imageId: image,
+  authenticationCoverage: 'Entra-mode startup and readiness only; authenticated transport requests use the synthetic dev mode',
+  vectorCoverage: 'not exercised: production Compose disables the embedding provider; full-text fallback is asserted',
+  passed: [], unmet: [] };
 const projects = [];
 const run = (args, options = {}) => execFileSync('docker', args, { encoding: 'utf8', timeout: 120_000, maxBuffer: 16 * 1024 * 1024, ...options });
 const check = (condition, message) => { if (!condition) throw new Error(message); };
@@ -46,7 +49,7 @@ function expectFailure(action, expected, label) {
 function setup(suffix) {
   const project = `${owner}-${suffix}`;
   const directory = join(temporary, suffix);
-  mkdirSync(directory, { mode: 0o755 });
+  mkdirSync(directory, { mode: 0o700 });
   const env = { ...process.env,
     COMPOSE_PROJECT_NAME: project, CONTINUUM_APP_IMAGE: image, CONTINUUM_POSTGRES_IMAGE: process.env.PG_IMAGE,
     CONTINUUM_RUNTIME_ASSETS: assets, CONTINUUM_PGDATA_VOLUME: `${project}-pgdata`,
@@ -59,14 +62,20 @@ function setup(suffix) {
     CONTINUUM_ENTRA_SERVICE_APP_ROLE: 'synthetic-role', CONTINUUM_ENTRA_ALLOWED_CLIENT_IDS: randomUUID(),
   };
   const passwords = Object.fromEntries(['DBA', 'OWNER', 'APP', 'OPERATOR', 'SYNC'].map(name => [name, randomBytes(32).toString('hex')]));
+  const secretFiles=[];
   function secret(name, value) {
     const file = join(directory, name.toLowerCase());
-    writeFileSync(file, value, { mode: 0o444 });
+    writeFileSync(file, value, { mode: 0o600 });
     env[`CONTINUUM_${name}_FILE`] = file;
+    secretFiles.push({file,containerPath:`/private/${name.toLowerCase()}`,gid:name.endsWith('DATABASE_URL')?10001:999});
     return file;
   }
   for (const [name, value] of Object.entries(passwords)) secret(`${name}_PASSWORD`, value);
   for (const name of ['OWNER', 'APP']) secret(`${name}_DATABASE_URL`, `postgres://continuum_${name.toLowerCase()}:${passwords[name]}@postgres:5432/continuum?options=-csearch_path%3Dcontinuum`);
+  for(const gid of [999,10001])run(['run','--rm','--network','none','--user','0:0','--mount',`type=bind,src=${directory},dst=/private`,'--entrypoint','chgrp',process.env.PG_IMAGE,String(gid),...secretFiles.filter(item=>item.gid===gid).map(item=>item.containerPath)]);
+  for(const item of secretFiles)chmodSync(item.file,0o640);
+  check((statSync(directory).mode&0o777)===0o700,'Synthetic secret directory is not private');
+  for(const item of secretFiles){const info=statSync(item.file);check((info.mode&0o777)===0o640&&info.gid===item.gid,'Synthetic database secret file is not private or readable by its exact container group');}
   const override = join(directory, 'ci.yml');
   writeFileSync(override, 'services:\n  api:\n    environment:\n      CONTINUUM_AUTH_MODE: dev\n');
   const base = ['compose', '-f', resolve(assets, 'deploy/compose.production.yml'), '-f', override, '--profile', 'maintenance', '--profile', 'serving'];
@@ -231,7 +240,7 @@ try {
   const wrapperApi = JSON.parse(run(['inspect',compose(wrapperFresh,['ps','-q','api']).trim()]))[0];
   check(wrapperApi.Config.Env.includes('CONTINUUM_AUTH_MODE=entra'),'Fresh wrapper did not start production Entra API');
   compose(wrapperFresh,['stop','-t','15','api']);
-  results.passed.push('documented fresh CLI wrapper completes DBA/bootstrap/migrate/admin/profile/image gate and Entra API readiness with recorded bounded budgets');
+  results.passed.push('documented fresh CLI wrapper completes DBA/bootstrap/migrate/admin/profile/image gate and Entra-mode startup/readiness with recorded bounded budgets');
 
   results.bootstrapPlaintextLogCanaryPassed=bootstrapLogCanary(fresh);
   results.passed.push('fresh and specifically refused repeated bootstrap expose no generated plaintext passwords in privately captured job output or verbose PostgreSQL logs; logging settings restored');
@@ -242,16 +251,17 @@ try {
   verifyLedger(fresh);
   phase(fresh, 'migrate'); phase(fresh, 'grant');
 
-  // Entra discovery/JWKS are fetched lazily on token authentication. This tests
-  // the actual production configuration and startup gates without external IDs.
-  run(['compose', '-f', resolve(assets,'deploy/compose.production.yml'), '--profile', 'serving', 'up', '-d', '--force-recreate', '--wait', '--wait-timeout', '120', 'api'], { env: fresh.env });
+  // Entra discovery/JWKS are fetched lazily on token authentication. This job
+  // asserts only Entra-mode startup and readiness. It does not authenticate an
+  // Entra request; the later synthetic transport requests explicitly use dev.
+  run(['compose', '-f', resolve(assets,'deploy/compose.production.yml'), '--profile', 'serving', 'up', '-d', '--no-deps', '--force-recreate', '--wait', '--wait-timeout', '120', 'api'], { env: fresh.env });
   const entraApi = JSON.parse(run(['inspect', compose(fresh,['ps','-q','api']).trim()]))[0];
   check(entraApi.Config.Env.includes('CONTINUUM_AUTH_MODE=entra'), 'Production Entra process was not selected');
   check(JSON.stringify(entraApi.Mounts.filter(mount=>mount.Destination.startsWith('/run/secrets/')).map(mount=>mount.Destination))===JSON.stringify(['/run/secrets/app_database_url']), 'Serving process mounted an unexpected authority secret');
   check(!Object.values(entraApi.NetworkSettings.Ports??{}).some(Boolean),'Production API unexpectedly publishes a host port');
   await api(fresh,'/health/ready');
-  results.passed.push('production Entra configuration boots and passes readiness; synthetic dev mode is used only for later transport requests; JWT validation is covered by the source authentication suite');
-  compose(fresh, ['up', '-d', '--force-recreate', '--wait', '--wait-timeout', '120', 'api']);
+  results.passed.push('production Entra mode boots and passes database readiness without claiming token authentication; later transport requests explicitly use synthetic dev mode');
+  compose(fresh, ['up', '-d', '--no-deps', '--force-recreate', '--wait', '--wait-timeout', '120', 'api']);
   await api(fresh, '/health/ready');
   const captured = JSON.parse((await api(fresh, '/api/v0/capture', { scope: { kind: 'org', name: '' }, type: 'decision', title: 'Synthetic immutable packaging decision', body: 'Synthetic packaging persistence evidence.', source: 'manual', tags: ['decision'] }, 201)).body);
   const recall = JSON.parse((await api(fresh, '/api/v0/recall', { query: 'packaging persistence' })).body);
@@ -307,7 +317,7 @@ try {
   check(stoppedApi.State.ExitCode === 0 && !stoppedApi.State.OOMKilled, 'API SIGTERM shutdown was not orderly');
   const before = sql(fresh, `SELECT id::text || ':' || title FROM memories WHERE id='${captured.id}'`);
   phase(fresh, 'migrate'); phase(fresh, 'grant');
-  compose(fresh, ['up', '-d', '--force-recreate', '--wait', '--wait-timeout', '120', 'api']);
+  compose(fresh, ['up', '-d', '--no-deps', '--force-recreate', '--wait', '--wait-timeout', '120', 'api']);
   check(sql(fresh, `SELECT id::text || ':' || title FROM memories WHERE id='${captured.id}'`) === before, 'Container replacement lost UUID/data');
   compose(fresh, ['stop', '-t', '10', 'postgres']);
   await api(fresh, '/health/ready', undefined, 503);
@@ -349,7 +359,7 @@ try {
   results.passed.push('upgrade refuses changed enabled admin/SYNC UUIDs, role names and same-name foreign role OID before grants; stored bindings and role credentials stay unchanged and correct grants converge');
 
   // A selected-image asset mismatch must refuse before stopping a ready API.
-  compose(fresh,['up','-d','--force-recreate','--wait','--wait-timeout','120','api']);
+  compose(fresh,['up','-d','--no-deps','--force-recreate','--wait','--wait-timeout','120','api']);
   // Current authority eligibility must refuse before reserving outputs or downtime.
   const adminId=fresh.env.CONTINUUM_ADMIN_PRINCIPAL_ID,syncId=fresh.env.CONTINUUM_SYNC_PRINCIPAL_ID;
   const ledgerSnapshot=sql(fresh,'SELECT jsonb_agg(to_jsonb(m) ORDER BY name)::text FROM _continuum_migrations m');
@@ -365,7 +375,7 @@ try {
   const unavailableBackup=join(temporary,'owner-preconnect-refused.dump');
   const unavailableFiles=readdirSync(fresh.directory).sort().join(',');
   process.env.CONTINUUM_BACKUP_FILE=unavailableBackup;
-  chmodSync(ownerSecret,0o600);writeFileSync(ownerSecret,'SyntheticWrongOwnerPasswordOnly');chmodSync(ownerSecret,0o444);
+  chmodSync(ownerSecret,0o600);writeFileSync(ownerSecret,'SyntheticWrongOwnerPasswordOnly');chmodSync(ownerSecret,0o640);
   try{
    const error=expectFailure(()=>runMaintenance('upgrade',envFile,productionCompose,{deadlineMs:120000}),'PREFLIGHT_UNAVAILABLE','Unauthenticated owner preflight');
    check(error.code==='PREFLIGHT_UNAVAILABLE'&&error.phase==='preflight'&&!error.settlementError&&!error.lockRetained,'Proven unauthenticated preflight retained uncertain settlement');
@@ -387,7 +397,7 @@ try {
    }catch{diagnostic.evidenceUnavailable=true;}
    try{process.stderr.write(JSON.stringify(diagnostic)+'\n');}catch{/* Preserve the original failure. */}
    throw error;
-  }finally{chmodSync(ownerSecret,0o600);writeFileSync(ownerSecret,fresh.passwords.OWNER);chmodSync(ownerSecret,0o444);}
+  }finally{chmodSync(ownerSecret,0o600);writeFileSync(ownerSecret,fresh.passwords.OWNER);chmodSync(ownerSecret,0o640);}
   // Owner-controlled invoker code probes only identities and whether a protected
   // catalog SELECT is denied. LIMIT 0 reads no catalog values; no shell, program,
   // privilege change or escalation operation is attempted.
@@ -471,7 +481,7 @@ UPDATE service_api_keys k SET revoked_at=v.revoked_at FROM jsonb_to_recordset(${
   }
   manualGrant('grant-sync-role.sql',syncId);manualGrant('verify-database-identities.sql',adminId);phase(fresh,'grant');
   check(storedBindings()===originalBindings&&credentialSnapshot()===originalCredentials,'Approved recovery changed role credentials or did not restore reviewed bindings');
-  compose(fresh,['up','-d','--force-recreate','--wait','--wait-timeout','120','api']);
+  compose(fresh,['up','-d','--no-deps','--force-recreate','--wait','--wait-timeout','120','api']);
   const heldWindow=acquireMaintenanceLock(fresh.project);
   try{
    const refused=join(temporary,'overlapping-window-refused.dump');process.env.CONTINUUM_BACKUP_FILE=refused;
@@ -602,7 +612,7 @@ SELECT jsonb_build_object('marker','eligibility-window-observed','changedRows',1
   check(!readdirSync(temporary).filter(name=>/^continuum-maintenance-failure-/.test(name)).some(name=>statSync(join(temporary,name)).size===0),'Successful upgrade retained an empty failure reservation');
   await api(fresh,'/health/ready');
   check(sql(fresh, `SELECT id::text || ':' || title FROM memories WHERE id='${captured.id}'`) === before, 'Successful upgrade wrapper changed stored data');
-  results.passed.push('documented upgrade CLI wrapper completes migration/grants/image gate/Entra readiness; real custom and password-free role backups match checksum sidecar');
+  results.passed.push('documented upgrade CLI wrapper completes migration/grants/image gate/Entra-mode readiness; real custom and password-free role backups match checksum sidecar');
   // A foreign-labelled volume and foreign consumer must fail before downtime.
   const foreignProject=`${owner}-foreign`, foreignVolume=`${owner}-foreign-pgdata`;
   run(['volume','create','--label',`com.docker.compose.project=${foreignProject}`,'--label',`continuum.ci.owner=${owner}`,foreignVolume]);
@@ -776,7 +786,7 @@ SELECT row_to_json(t)::text FROM observed_migrator t; SELECT pg_sleep(60); ROLLB
   restored.granted = true;
   phase(restored, 'grant'); verifyLedger(restored);
   check(sql(restored, `SELECT id::text || ':' || title FROM memories WHERE id='${captured.id}'`) === before, 'Restored data/UUID differs');
-  compose(restored, ['up', '-d', '--wait', '--wait-timeout', '120', 'api']);
+  compose(restored, ['up', '-d', '--no-deps', '--wait', '--wait-timeout', '120', 'api']);
   await api(restored, '/health/ready'); compose(restored, ['stop','-t','15','api']);
   results.passed.push(`real custom backup checksum ${backupHash}; separate-volume restore, foreign OID rebind, exact profile and readiness verification; original volume retained during restore`);
 
@@ -798,7 +808,7 @@ SELECT row_to_json(t)::text FROM observed_migrator t; SELECT pg_sleep(60); ROLLB
   check(sql(historical, `SELECT metadata->'continuum_legacy_tags' FROM memories WHERE id='${legacyId}'`).includes('legacy-synthetic'), 'Legacy tags were not quarantined');
   check(sql(historical, `SELECT provider || ':' || dim FROM memory_embeddings WHERE memory_id='${legacyId}'`) === 'synthetic-fixture:768', 'Historical vector lost');
   check(sql(historical, 'SELECT count(*) FROM memory_activity_attributions') === '0', 'Historical activity was invented');
-  compose(historical,['up','-d','--wait','--wait-timeout','120','api']); await api(historical,'/health/ready');
+  compose(historical,['up','-d','--no-deps','--wait','--wait-timeout','120','api']); await api(historical,'/health/ready');
   results.passed.push('checksum-verified synthetic pre0083 schema fixture, real pre-upgrade custom backup, exact current image migration CLI, tag quarantine, vector preservation, identity/profile/contract/Standup startup; fixture does not run a historical binary');
 } catch (error) {
   results.unmet.push(error.message); process.exitCode = 1;

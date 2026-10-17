@@ -10,6 +10,11 @@ export function extractRuntimePackage(archive, destination, tar = 'tar') {
   .trim().split('\n');
  if (!entries.length || entries.some(path => path.startsWith('/') || path.split('/').includes('..')
   || !path.startsWith('opt/continuum/'))) throw new Error('Unsafe exported runtime package path');
+ const types = execFileSync(tar, ['--force-local', '-tvf', resolve(archive), 'opt/continuum'],
+  { encoding: 'utf8', timeout: 120000, maxBuffer: 16 * 1024 * 1024 }).trim().split('\n');
+ if (types.length !== entries.length || types.some(line => !['-', 'd'].includes(line[0]))) {
+  throw new Error('Exported runtime package contains unsupported links or special files');
+ }
  // Directory write permissions are restored after descendants have been read.
  // This affects only the inspection copy, never the image or serving package.
  execFileSync(tar, ['--force-local', '-xf', resolve(archive), '-C', target,

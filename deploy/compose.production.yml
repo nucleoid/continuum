@@ -39,7 +39,7 @@ x-owner-env: &owner-env
   CONTINUUM_SYNC_EXTERNAL_ID: ${CONTINUUM_SYNC_EXTERNAL_ID:?distinct sync service external ID required}
 services:
   postgres:
-    image: ${CONTINUUM_POSTGRES_IMAGE}
+    image: ${CONTINUUM_POSTGRES_IMAGE:?pinned pgvector PostgreSQL 16 digest required}
     user: "999:999"
     restart: unless-stopped
     cap_drop: [ALL]
@@ -156,6 +156,7 @@ services:
     networks: [backend, edge]
     depends_on:
       postgres: {condition: service_healthy}
+      grant: {condition: service_completed_successfully}
     environment:
       CONTINUUM_DATABASE_URL_FILE: /run/secrets/app_database_url
       CONTINUUM_APPLICATION_SCHEMA: ${CONTINUUM_APPLICATION_SCHEMA}

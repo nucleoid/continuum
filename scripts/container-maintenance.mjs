@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, openSync, closeSync, readSync, writeSync, statSync, unlinkSync, lstatSync, readdirSync, mkdirSync, fstatSync, fsyncSync, readFileSync, ftruncateSync, constants } from 'node:fs';
+import { existsSync, openSync, closeSync, readSync, writeSync, statSync, unlinkSync, lstatSync, readdirSync, mkdirSync, fstatSync, fsyncSync, readFileSync, ftruncateSync, linkSync, constants } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { resolve, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
@@ -35,6 +35,37 @@ function syncDirectory(directory) {
  if (process.platform === 'win32') return;
  const fd=openSync(directory,constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
  try {fsyncSync(fd);} finally {closeSync(fd);}
+}
+export function markBackupTargetsIncomplete(backups, options = {}) {
+ const random=options.randomBytes ?? randomBytes,renamed=[];
+ if(!Array.isArray(backups)||backups.length!==3)throw new Error('Invalid backup reservations');
+ try {
+  for(const item of backups) {
+   if(Number.isInteger(item.fd)){closeSync(item.fd);item.fd=null;}
+   let incomplete;
+   for(let attempt=0;attempt<8;attempt+=1) {
+    const candidate=`${item.path}.${random(12).toString('hex')}.incomplete`;
+    try {
+     // Creating the second name is atomic and fails on collision. Removing the
+     // trusted name afterward cannot overwrite retained incomplete evidence.
+     linkSync(item.path,candidate);incomplete=candidate;break;
+    } catch(error) {if(error?.code!=='EEXIST')throw error;}
+   }
+   if(!incomplete)throw new Error('Incomplete backup target collision');
+   unlinkSync(item.path);item.incompletePath=incomplete;renamed.push(incomplete);
+  }
+  syncDirectory(dirname(backups[0].path));
+  return renamed;
+ } catch(error) {
+  // A failed name transition must not leave a corrupt artifact under a trusted
+  // backup name. Already linked private evidence remains explicitly incomplete.
+  for(const item of backups) {
+   try {if(Number.isInteger(item.fd)){closeSync(item.fd);item.fd=null;}} catch { /* Continue clearing trusted names. */ }
+   try {if(existsSync(item.path))unlinkSync(item.path);} catch { /* Report cleanup failure below. */ }
+  }
+  try {syncDirectory(dirname(backups[0].path));} catch { /* Report one controlled failure. */ }
+  throw new MaintenanceFailure('BACKUP_CLEANUP_FAILED','backup');
+ }
 }
 export function acquireMaintenanceLock(project) {
  if (!/^[a-z0-9][a-z0-9_-]+$/.test(project)) throw new MaintenanceFailure('MAINTENANCE_LOCK_INVALID','preflight');
@@ -392,7 +423,7 @@ export function runMaintenance(mode, envFile, composeFile, options = {}) {
  // Reserve redacted private failure evidence before any downtime.
  secrets = collectSecretValues(config);
  evidence = reserveEvidence(process.env.CONTINUUM_MAINTENANCE_EVIDENCE_DIR ?? dirname(mode === 'upgrade' ? process.env.CONTINUUM_BACKUP_FILE ?? envFile : envFile));
- let backups = [],runError;
+ let backups = [],runError,backupStarted=false,backupsDurable=mode==='fresh';
  try {
   backups = mode === 'upgrade' ? reserveBackupTargets(process.env.CONTINUUM_BACKUP_FILE) : [];
   for (const id of ids) {
@@ -436,6 +467,7 @@ export function runMaintenance(mode, envFile, composeFile, options = {}) {
   assertQuiescence(dbaSql(activitySql));
   if (mode === 'fresh') { overallEnd = Date.now() + deadlineMs; phase('bootstrap'); }
   if (mode === 'upgrade') {
+   activePhase='backup';backupStarted=true;
    const backupEnd = Date.now() + backupDeadlineMs;
    for (const [index, tool] of ['pg_dump -Fc --lock-wait-timeout=5000', 'pg_dumpall --roles-only --no-role-passwords -l "$POSTGRES_DB"'].entries()) {
     const backupName=applicationName('backup');
@@ -450,7 +482,7 @@ export function runMaintenance(mode, envFile, composeFile, options = {}) {
      throw failure;
     }
    }
-   activePhase='backup';durableBackupOutputs(backups);
+   durableBackupOutputs(backups);backupsDurable=true;
    overallEnd = Date.now() + deadlineMs;
   }
   activePhase='quiescence';
@@ -477,9 +509,14 @@ export function runMaintenance(mode, envFile, composeFile, options = {}) {
   successful=true;
   return { imageId: selectedId, mode, project, volume, deadlineMs, backupDeadlineMs };
  } catch (error) {
-  runError=error;throw error;
+  runError=error;
+  if(backupStarted&&!backupsDurable) {
+   try {markBackupTargetsIncomplete(backups);}
+   catch {error.cleanupError='BACKUP_CLEANUP_FAILED';}
+  }
+  throw error;
  } finally {
-  try {for (const item of backups) closeSync(item.fd);}
+  try {for (const item of backups) if(Number.isInteger(item.fd)){closeSync(item.fd);item.fd=null;}}
   catch(error) {if(runError) runError.cleanupError='COMMAND_FAILED';else throw error;}
  }
  } catch(error) {outerError=error;throw error;}

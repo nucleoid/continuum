@@ -3,10 +3,10 @@ import { randomBytes } from 'node:crypto';
 import { resolve, join, dirname } from 'node:path';
 const MAX_BYTES = 65536;
 const phases = new Set(['preflight','backup','bootstrap','migrate','provision-admin','grant','api','settlement','quiescence']);
-const codes = new Set(['COMMAND_FAILED','DEADLINE_EXCEEDED','BINDING_MISMATCH','INVALID_APPLICATION_ROLE','BACKEND_SETTLEMENT_FAILED','COMPLETED_AFTER_DEADLINE','BACKUP_FAILED','ACTIVE_WRITERS','OWNERSHIP_MISMATCH','MIGRATION_BACKEND_REMAINS','BINDING_INELIGIBLE','MAINTENANCE_LOCKED','BACKUP_DURABILITY_FAILED','PG_IMAGE_MISMATCH','PREFLIGHT_UNAVAILABLE']);
+const codes = new Set(['COMMAND_FAILED','DEADLINE_EXCEEDED','BINDING_MISMATCH','INVALID_APPLICATION_ROLE','BACKEND_SETTLEMENT_FAILED','COMPLETED_AFTER_DEADLINE','BACKUP_FAILED','BACKUP_VERIFICATION_FAILED','BACKUP_CLEANUP_FAILED','ACTIVE_WRITERS','OWNERSHIP_MISMATCH','MIGRATION_BACKEND_REMAINS','BINDING_INELIGIBLE','MAINTENANCE_LOCKED','BACKUP_DURABILITY_FAILED','PG_IMAGE_MISMATCH','PREFLIGHT_UNAVAILABLE']);
 const sideCodes = {
  settlementError: new Set(['BACKEND_SETTLEMENT_FAILED']),
- cleanupError: new Set(['COMMAND_FAILED','DEADLINE_EXCEEDED','OWNERSHIP_MISMATCH','JOB_CLEANUP_UNRESOLVED']),
+ cleanupError: new Set(['COMMAND_FAILED','DEADLINE_EXCEEDED','OWNERSHIP_MISMATCH','JOB_CLEANUP_UNRESOLVED','BACKUP_CLEANUP_FAILED']),
  evidenceError: new Set(['EVIDENCE_WRITE_FAILED','EVIDENCE_CLOSE_FAILED']),
  evidenceCloseError: new Set(['EVIDENCE_CLOSE_FAILED']),
  lockError: new Set(['MAINTENANCE_LOCK_OWNERSHIP_MISMATCH','MAINTENANCE_LOCK_RELEASE_FAILED','MAINTENANCE_LOCK_MARKER_FAILED'])
@@ -125,6 +125,7 @@ export function sanitizedMaintenanceLines(rawOutput,secrets) {
   .replace(/\bBearer\s+[^\s]+/gi,'Bearer [redacted-token]')
   .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g,'[redacted-token]')
   .replace(/\bctm_[A-Za-z0-9_-]+/g,'[redacted-token]')
+  .replace(/\b(?:PGPASSWORD|POSTGRES_PASSWORD|DB_PASSWORD)\s*(?:=|:)\s*(?:'[^']*'|"[^"]*"|[^\s;,]+)/gi,'credential [redacted-secret]')
   .replace(/\b(?:password|passwd|token|secret|api[_-]?key)\s*(?:=|:|\s)\s*(?:'[^']*'|"[^"]*"|[^\s;,]+)/gi,(match,offset,input)=>{
    const prefix=input.slice(input.lastIndexOf('\n',offset)+1,offset);
    const standard=/(?:^|:\s*)FATAL:\s*(?:28P01[:\s]+)?$/i.test(prefix)
@@ -136,8 +137,9 @@ export function sanitizedMaintenanceLines(rawOutput,secrets) {
  const lines=[];
  for(const line of text.split(/\r?\n/)) {
   if(!/^(?:psql:|cat:|ERROR:|FATAL:|DETAIL:|HINT:|CONTEXT:|Error:|Error response from daemon:|\[redacted-path\]:|\s*"?(?:code|message|detail)"?\s*:)/i.test(line))continue;
-  // SQL contexts may embed credentials in nested dynamic statements.
-  const safe=/^(?:CONTEXT:|DETAIL:).*\b(?:PASSWORD|CREDENTIAL|SECRET|TOKEN)\b/i.test(line)?line.split(':')[0]+': [redacted-sensitive-context]':line;
+  // SQL detail and context can contain expanded parameters, dynamic SQL and
+  // server-side values that were never present in the configured secret set.
+  const safe=/^(?:CONTEXT:|DETAIL:)/i.test(line)?line.split(':')[0]+': [redacted-sensitive-context]':line;
   lines.push(safe.replace(/[\x00-\x1f\x7f-\x9f]/g,' ').slice(0,1000));if(lines.length===48)break;
  }
  return lines;

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync,readFileSync,writeFileSync,rmSync} from 'node:fs';
+import {mkdtempSync,readFileSync,writeFileSync,rmSync,existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {writeCommandOutput,readCommandInput} from './container-binary-transfer.mjs';
@@ -22,6 +22,12 @@ test('output transfer refuses existing evidence without overwriting',()=>{
 });
 test('failed binary subprocess does not report a completed transfer',()=>{
  const directory=mkdtempSync(join(tmpdir(),'continuum-transfer-'));
- try{assert.throws(()=>writeCommandOutput(process.execPath,['-e',"process.stderr.write('synthetic-sensitive-value');process.exit(2)"],join(directory,'dump')),error=>error.message==='Binary command transfer failed');}
+ try{
+  const file=join(directory,'dump');
+  assert.throws(()=>writeCommandOutput(process.execPath,['-e',"process.stdout.write('partial');process.stderr.write('synthetic-sensitive-value');process.exit(2)"],file),error=>error.message==='Binary command transfer failed');
+  assert.equal(existsSync(file),false);
+  writeCommandOutput(process.execPath,['-e',"process.stdout.write('retry-complete')"],file);
+  assert.equal(readFileSync(file,'utf8'),'retry-complete');
+ }
  finally{rmSync(directory,{recursive:true,force:true});}
 });
