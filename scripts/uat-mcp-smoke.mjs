@@ -26,11 +26,11 @@ function privateFile(path) {
   if (process.platform !== 'win32') assert((stat.mode & 0o077) === 0, 'Private file permissions required');
   return readFileSync(path, 'utf8').replace(/(?:\r\n|\n|\r)$/, '');
 }
-export async function connect(url, key) {
+export async function connect(url, key, options = {}) {
   currentStep = 'session';
   const client = new Client({ name: 'continuum-uat-smoke', version: '1.0.0' });
   const transport = new StreamableHTTPClientTransport(url, {
-    requestInit: { headers: { Authorization: `ApiKey ${key}` } },
+    requestInit: { headers: { Authorization: `ApiKey ${key}`, ...(options.freshConnections ? { Connection: 'close' } : {}) } },
     fetch: (input, init) => fetch(input, { ...init, redirect: 'error' }),
   });
   await client.connect(transport, { timeout: 20000 });
@@ -117,8 +117,9 @@ export async function runUatSmoke(env, phase = 'smoke', options = {}) {
     assert.throws(() => lstatSync(stateFile), { code: 'ENOENT' });
   }
   try {
-    const a = await connect(url, keyA); sessions.push(a);
-    const b = await connect(url, keyB); sessions.push(b);
+    const connectionOptions = { freshConnections: options.allowLoopback === true };
+    const a = await connect(url, keyA, connectionOptions); sessions.push(a);
+    const b = await connect(url, keyB, connectionOptions); sessions.push(b);
     currentStep = 'discovery';
     const tools = (await a.client.listTools()).tools.map(tool => tool.name);
     for (const name of ['capture','recall','get_memory','verify','agents_md','agents_md_fresh','lock_acquire','lock_renew','lock_release','lock_inspect']) assert(tools.includes(`continuum.${name}`));
