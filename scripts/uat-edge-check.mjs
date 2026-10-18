@@ -41,7 +41,7 @@ try {
     assert.deepEqual(Object.keys(m.services['uat-tunnel'].networks),['uat_ingress']);
     assert.deepEqual(Object.keys(m.services['uat-proxy'].networks).sort(),['uat_ingress','uat_origin']);
     assert.equal(m.networks.uat_origin.internal,true);
-    assert.equal(m.networks.edge.ipam,undefined);
+    assert.deepEqual(m.networks.edge.ipam ?? {}, {});
     for (const service of Object.values(m.services)) assert(!service.ports?.length);
     assert.equal(m.services.api.environment.CONTINUUM_MCP_TRUSTED_PROXY_CIDRS,'192.0.2.2/32');
     assert.equal(m.services.api.networks.uat_origin.ipv4_address,'192.0.2.4');

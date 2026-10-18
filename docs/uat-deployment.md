@@ -50,7 +50,7 @@ Put routing JSON in the private `embedding_config` secret. For example, with an 
 }
 ```
 
-Only approved synthetic non-sensitive scope text may use the hosted route. All other scopes remain disabled or explicitly local-only. Missing local support never falls through to hosted. The generator remains deterministic SQL selection and makes no Gemini call. Full-text capture/recall does not qualify semantic UAT. Check `embedded:true` and recall metadata `diagnostics.vector:used`, matching model-qualified provider/dimension, a paraphrase fixture and a provider-outage/local-only negative test. Existing stored vectors are never imported.
+Only approved synthetic non-sensitive scope text may use the hosted route. Recall query text is shared with every selected provider, so UAT callers must use synthetic queries and explicitly select only the approved synthetic project; routing cannot infer whether a query is sensitive. All other scopes remain disabled or explicitly local-only. Missing local support never falls through to hosted. The generator remains deterministic SQL selection and makes no Gemini call. Full-text capture/recall does not qualify semantic UAT. Check `embedded:true` and recall metadata `diagnostics.vector:used`, matching model-qualified provider/dimension, a paraphrase fixture and a provider-outage/local-only negative test. Existing stored vectors are never imported.
 
 ## Acceptance and private receipt
 
