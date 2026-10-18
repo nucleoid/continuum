@@ -27,6 +27,7 @@ function privateFile(path) {
   return readFileSync(path, 'utf8').replace(/(?:\r\n|\n|\r)$/, '');
 }
 export async function connect(url, key) {
+  currentStep = 'session';
   const client = new Client({ name: 'continuum-uat-smoke', version: '1.0.0' });
   const transport = new StreamableHTTPClientTransport(url, {
     requestInit: { headers: { Authorization: `ApiKey ${key}` } },
@@ -98,32 +99,38 @@ export async function leaseSmoke(a, b, scope, options = {}) {
   }
 }
 
-async function main() {
-  const env = process.env;
+export async function runUatSmoke(env, phase = 'smoke', options = {}) {
+  currentStep = 'configuration';
+  assert(process.platform !== 'win32', 'SDK fixture requires POSIX private file permissions');
   const url = new URL(env.CONTINUUM_UAT_URL);
-  assert(url.protocol === 'https:' && url.pathname === '/mcp' && !url.username && !url.password && !url.search && !url.hash, 'Canonical HTTPS MCP URL required');
+  assert((url.protocol === 'https:' || (options.allowLoopback === true && url.protocol === 'http:' && url.hostname === '127.0.0.1')) && url.pathname === '/mcp' && !url.username && !url.password && !url.search && !url.hash, 'Canonical HTTPS MCP URL required');
   const project = env.CONTINUUM_UAT_PROJECT;
   assert(project && project.length <= 500, 'Approved project required');
   const keyA = privateFile(env.CONTINUUM_UAT_KEY_A_FILE), keyB = privateFile(env.CONTINUUM_UAT_KEY_B_FILE);
   assert(keyA.startsWith('ctm_') && keyB.startsWith('ctm_') && keyA !== keyB, 'Distinct service credentials required');
   const sessions = [];
-  const phase = process.argv[2] ?? 'smoke';
   assert(['smoke', 'checkpoint', 'recover'].includes(phase), 'Unknown phase');
   assert(phase !== 'checkpoint' || process.platform !== 'win32', 'Checkpoint requires a POSIX private filesystem');
   try {
     const a = await connect(url, keyA); sessions.push(a);
     const b = await connect(url, keyB); sessions.push(b);
+    currentStep = 'discovery';
     const tools = (await a.client.listTools()).tools.map(tool => tool.name);
     for (const name of ['capture','recall','get_memory','verify','agents_md','agents_md_fresh','lock_acquire','lock_renew','lock_release','lock_inspect']) assert(tools.includes(`continuum.${name}`));
     const scope = `project:${project}`;
     if (phase === 'recover') {
       const state = JSON.parse(privateFile(env.CONTINUUM_UAT_STATE_FILE));
       assert(state.endpointHash === digest(url.href) && state.project === project, 'Wrong checkpoint target');
+      assert(/^uat:delivery-forge:[0-9a-f-]{36}$/.test(state.resource), 'Synthetic resource required');
+      assert(typeof state.bodyHash === 'string' && /^[a-f0-9]{64}$/.test(state.bodyHash));
+      assert(typeof state.expiresAt === 'string' && Number.isFinite(Date.parse(state.expiresAt)));
+      assert(state.memoryState === 'live' && typeof state.lastVerified === 'string');
       const memory = await a.call('get_memory', { memory_id: state.memoryId });
       assert.equal(memory.id, state.memoryId);
       assert.equal(digest(memory.body), state.bodyHash);
       assert.equal(memory.expires_at, state.expiresAt);
       assert.equal(memory.state, state.memoryState);
+      assert.equal(memory.last_verified, state.lastVerified);
       const current = await a.call('lock_inspect', { scope, resource: state.resource });
       assert.equal(current.lease_id, state.lease.lease_id);
       assert.equal(current.fencing_token, state.lease.fencing_token);
@@ -131,8 +138,7 @@ async function main() {
       assert.equal(renewed.fencing_token, current.fencing_token);
       assert.equal((await a.call('lock_release', { lease_id: current.lease_id, run_id: state.lease.run_id, request_id: randomUUID() })).released, true);
       await assert.rejects(a.call('lock_renew', { lease_id: current.lease_id, run_id: state.lease.run_id, request_id: randomUUID() }), { code: 'LEASE_LOST' });
-      console.log(JSON.stringify({ ok: true, restartPersistence: true, freshSessions: true }));
-      return;
+      return { ok: true, restartPersistence: true, freshSessions: true };
     }
     const marker = `Continuum UAT ${randomUUID()}`;
     const input = { scope_kind: 'project', scope_name: project, type: 'fact', title: marker, body: `${marker}. Synthetic reference: a bicycle is stored inside the garden shed.`, source: 'manual', tags: ['decision'], metadata: { uat_marker: marker } };
@@ -144,6 +150,7 @@ async function main() {
     assert(recalled.some(memory => memory.id === captured.id));
     await assert.rejects(a.call('capture', { ...input, tags: ['unknown-uat-tag'] }), { code: 'UNKNOWN_TAGS' });
     await a.call('verify', { memory_id: captured.id, still_true: true, note: 'Synthetic UAT confirmation' });
+    currentStep = 'bundle';
     const bundle = await a.client.callTool({ name: 'continuum.agents_md', arguments: { project } });
     assert(!bundle.isError);
     const text = bundle.content.filter(item => item.type === 'text').map(item => item.text).join('');
@@ -151,18 +158,22 @@ async function main() {
     assert.equal((await a.call('agents_md_fresh', { project, hash: digest(text) })).fresh, true);
     if (phase === 'checkpoint') {
       const persisted = await a.call('get_memory', { memory_id: captured.id });
+      assert(typeof persisted.expires_at === 'string' && Number.isFinite(Date.parse(persisted.expires_at)));
+      assert(Date.parse(persisted.expires_at) >= Date.parse(captured.expires_at));
+      assert.equal(persisted.state, 'live');
+      assert(typeof persisted.last_verified === 'string' && Number.isFinite(Date.parse(persisted.last_verified)));
       const resource = `uat:delivery-forge:${randomUUID()}`;
       const lease = await a.call('lock_acquire', { scope, resource, run_id: randomUUID(), request_id: randomUUID(), ttl_seconds: 300 });
       assert(lease.acquired);
       const stateFile = env.CONTINUUM_UAT_STATE_FILE;
       assert(stateFile && resolve(stateFile) === stateFile, 'Private absolute state path required');
-      writeFileSync(stateFile, JSON.stringify({ endpointHash: digest(url.href), project, memoryId: captured.id, bodyHash: digest(persisted.body), expiresAt: persisted.expires_at, memoryState: persisted.state, resource, lease }), { flag: 'wx', mode: 0o600 });
-      console.log(JSON.stringify({ ok: true, checkpoint: true, recoverWithinSeconds: 300 }));
-      return;
+      writeFileSync(stateFile, JSON.stringify({ endpointHash: digest(url.href), project, memoryId: captured.id, bodyHash: digest(persisted.body), expiresAt: persisted.expires_at, memoryState: persisted.state, lastVerified: persisted.last_verified, resource, lease }), { flag: 'wx', mode: 0o600 });
+      return { ok: true, checkpoint: true, recoverWithinSeconds: 300 };
     }
     let semantic = 'not-qualified';
     if (env.CONTINUUM_UAT_SEMANTIC_PROVIDER) {
       assert.equal(captured.embedded, true);
+      currentStep = 'semantic_recall';
       const result = await a.client.callTool({ name: 'continuum.recall', arguments: { query: 'Where do we keep the pedal-powered two-wheeled vehicle?', scopes: [scope], limit: 10 } });
       const memories = decodeResult(result);
       assert(memories.some(memory => memory.id === captured.id));
@@ -171,6 +182,7 @@ async function main() {
       assert(diagnostics.groups.some(group => group.provider === env.CONTINUUM_UAT_SEMANTIC_PROVIDER && group.dim === 768 && group.status === 'used'));
       semantic = 'used';
     }
+    currentStep = 'audit_rest';
     const audit = await fetch(new URL(`/api/v0/audit?memoryId=${captured.id}&limit=100`, url), { headers: { Authorization: `ApiKey ${keyA}` }, signal: AbortSignal.timeout(15000), redirect: 'error' });
     assert.equal(audit.status, 200);
     const entries = (await audit.json()).entries;
@@ -178,7 +190,7 @@ async function main() {
     await a.call('verify', { memory_id: captured.id, still_true: false });
     assert(!(await a.call('recall', { query: marker, scopes: [scope] })).some(memory => memory.id === captured.id));
     const leases = await leaseSmoke(a.call, b.call, scope);
-    console.log(JSON.stringify({ ok: true, memory: true, fixedExpiry: true, tags: true, verification: true, audit: true, bundleFreshness: true, semantic, leases }));
+    return { ok: true, memory: true, fixedExpiry: true, tags: true, verification: true, audit: true, bundleFreshness: true, semantic, leases };
   } finally {
     for (const session of sessions.reverse()) {
       await session.transport.terminateSession().catch(() => undefined);
@@ -187,8 +199,8 @@ async function main() {
   }
 }
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
-  const timer = setTimeout(() => { process.stderr.write('UAT smoke deadline exceeded; reconcile synthetic state before retry.\n'); process.exit(1); }, 180000);
-  try { await main(); } catch (error) {
+  const timer = setTimeout(() => { process.stderr.write(JSON.stringify({ ok: false, step: currentStep, code: 'DEADLINE_EXCEEDED', reconcileBeforeRetry: true }) + '\n'); process.exit(1); }, 180000);
+  try { console.log(JSON.stringify(await runUatSmoke(process.env, process.argv[2] ?? 'smoke'))); } catch (error) {
     const codes = new Set(['LEASE_LOST','SCOPE_NOT_FOUND','FORBIDDEN','UNKNOWN_TAGS','MEMORY_NOT_FOUND','INVALID_INPUT','QUOTA_EXCEEDED']);
     const code = codes.has(error?.code) ? error.code : error?.code === 'ERR_ASSERTION' ? 'ASSERTION_FAILED' : 'REQUEST_FAILED';
     process.stderr.write(JSON.stringify({ ok: false, step: currentStep, code, reconcileBeforeRetry: true }) + '\n');

@@ -25,6 +25,9 @@ describe('authenticated remote MCP boundary', () => {
 });
 import { afterAll, beforeAll, beforeEach } from 'vitest';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve, sep } from 'node:path';
 import type { Server } from 'node:http';
 import type pg from 'pg';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -127,6 +130,36 @@ describe('real SDK remote MCP with current database authority', () => {
       expect(checks).toEqual({ replay: true, contention: true, masking: true, renew: true, release: true, expiry: true, staleGeneration: true });
     } finally { await b.client.close(); await cleanup(); }
   });
+  it.skipIf(process.platform === 'win32')('runs checkpoint and recovery across an actual remote server restart', async () => {
+    const { runUatSmoke } = await import('../../scripts/uat-mcp-smoke.mjs');
+    const directory = mkdtempSync(join(tmpdir(), 'continuum-uat-restart-'));
+    const other = await createPrincipal(pool, { externalId: 'restart-other-client', kind: 'service', displayName: 'Synthetic restart B' });
+    await addMembership(pool, other.id, scopeId, 'writer');
+    const credential = `ctm_${randomBytes(32).toString('base64url')}`;
+    await pool.query('INSERT INTO service_api_keys (id,principal_id,key_hash,prefix,last_four) VALUES ($1,$2,$3,$4,$5)',
+      [randomUUID(), other.id, createHash('sha256').update(credential).digest(), 'ctm_test', credential.slice(-4)]);
+    const aFile = join(directory, 'a.key'), bFile = join(directory, 'b.key');
+    writeFileSync(aFile, key, { mode: 0o600 }); writeFileSync(bFile, credential, { mode: 0o600 });
+    const env = { CONTINUUM_UAT_URL: url.href, CONTINUUM_UAT_PROJECT: 'remote', CONTINUUM_UAT_KEY_A_FILE: aFile,
+      CONTINUUM_UAT_KEY_B_FILE: bFile, CONTINUUM_UAT_STATE_FILE: join(directory, 'checkpoint.json') };
+    try {
+      expect(await runUatSmoke(env, 'checkpoint', { allowLoopback: true })).toMatchObject({ ok: true, checkpoint: true });
+      await client.close(); await controller.stop('test-restart'); server.closeAllConnections();
+      const port = (server.address() as { port: number }).port;
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      const restarted = express();
+      server = await new Promise<Server>(resolve => { const listener = restarted.listen(port, '127.0.0.1', () => resolve(listener)); });
+      controller = createMcpHttpController(mcpHttpConfigFromEnv({ CONTINUUM_MCP_HTTP_ENABLED: 'true', CONTINUUM_MCP_PUBLIC_URL: url.href,
+        CONTINUUM_MCP_HTTP_LOOPBACK_DEV: 'true', CONTINUUM_MCP_HTTP_PEER_BURST: '100', CONTINUUM_MCP_HTTP_MESSAGE_BURST: '100' }, 'entra')!,
+        { pool, embeddingProvider: null, authenticator: createAuthenticator(pool, 'entra', entra) });
+      restarted.use('/mcp', controller.router);
+      expect(await runUatSmoke(env, 'recover', { allowLoopback: true })).toEqual({ ok: true, restartPersistence: true, freshSessions: true });
+    } finally {
+      await cleanup();
+      expect(resolve(directory).startsWith(resolve(tmpdir()) + sep)).toBe(true);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }, 60000);
   it('rejects alternate credentials and source-policy drift with uniform 404', async () => {
     try {
       const headers = { 'Mcp-Session-Id': transport.sessionId!, Accept: 'application/json, text/event-stream' };
