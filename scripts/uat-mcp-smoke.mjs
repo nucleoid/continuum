@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, lstatSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { resolve, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -110,7 +110,12 @@ export async function runUatSmoke(env, phase = 'smoke', options = {}) {
   assert(keyA.startsWith('ctm_') && keyB.startsWith('ctm_') && keyA !== keyB, 'Distinct service credentials required');
   const sessions = [];
   assert(['smoke', 'checkpoint', 'recover'].includes(phase), 'Unknown phase');
-  assert(phase !== 'checkpoint' || process.platform !== 'win32', 'Checkpoint requires a POSIX private filesystem');
+  if (phase === 'checkpoint') {
+    const stateFile = env.CONTINUUM_UAT_STATE_FILE;
+    assert(stateFile && resolve(stateFile) === stateFile, 'Private absolute state path required');
+    assert(lstatSync(dirname(stateFile)).isDirectory(), 'Checkpoint parent directory required');
+    assert.throws(() => lstatSync(stateFile), { code: 'ENOENT' });
+  }
   try {
     const a = await connect(url, keyA); sessions.push(a);
     const b = await connect(url, keyB); sessions.push(b);
@@ -146,10 +151,13 @@ export async function runUatSmoke(env, phase = 'smoke', options = {}) {
     assert(captured.id && captured.expires_at, 'Fact must have a fixed expiry');
     const fetched = await a.call('get_memory', { memory_id: captured.id });
     assert.equal(fetched.body, input.body);
+    assert.equal(fetched.expires_at, captured.expires_at, 'Reads must not slide expiry');
     const recalled = await a.call('recall', { query: marker, scopes: [scope], limit: 10 });
     assert(recalled.some(memory => memory.id === captured.id));
     await assert.rejects(a.call('capture', { ...input, tags: ['unknown-uat-tag'] }), { code: 'UNKNOWN_TAGS' });
     await a.call('verify', { memory_id: captured.id, still_true: true, note: 'Synthetic UAT confirmation' });
+    const verified = await a.call('get_memory', { memory_id: captured.id });
+    assert(Number.isFinite(Date.parse(verified.expires_at)) && Date.parse(verified.expires_at) >= Date.parse(captured.expires_at), 'Verification recomputes applicable expiry');
     currentStep = 'bundle';
     const bundle = await a.client.callTool({ name: 'continuum.agents_md', arguments: { project } });
     assert(!bundle.isError);

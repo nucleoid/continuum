@@ -55,7 +55,7 @@ try {
   const origin = docker(['network','create','--internal','--subnet','192.0.2.0/24','--ip-range','192.0.2.128/25',name+'-origin']); networks.push(origin);
   const ingress = docker(['network','create','--subnet','198.51.100.0/24','--ip-range','198.51.100.128/25',name+'-ingress']); networks.push(ingress);
   const upstream = run([...hardened,'--network',origin,'--ip','192.0.2.4','--network-alias','api','--user=10001:10001','-e','NODE_OPTIONS=--max-old-space-size=64',node,'--input-type=module','-e',
-    `import http from 'node:http';http.createServer((req,res)=>{res.setHeader('content-type','application/json');res.end(JSON.stringify({host:req.headers.host,proto:req.headers['x-forwarded-proto']}));}).listen(4000,'0.0.0.0');`]);
+    `import http from 'node:http';http.createServer((req,res)=>{res.setHeader('content-type','application/json');res.end(JSON.stringify({host:req.headers.host,proto:req.headers['x-forwarded-proto'],peer:req.socket.remoteAddress}));}).listen(4000,'0.0.0.0');`]);
   const proxyConfig = join(directory,'nginx.conf');
   writeFileSync(proxyConfig,readFileSync('deploy/uat-proxy.conf.example','utf8').replace('set_real_ip_from 192.0.2.3;', 'set_real_ip_from 198.51.100.3;'));
   const mounts = ['--mount',`type=bind,source=${proxyConfig},target=/etc/nginx/uat.conf,readonly`,'--tmpfs','/tmp:rw,noexec,nosuid,size=16m,uid=101,gid=101'];
@@ -65,7 +65,7 @@ try {
   const probe = `import assert from 'node:assert/strict';import http from 'node:http';
     const request=(path,extra={})=>new Promise((resolve,reject)=>{const req=http.get({hostname:'uat-proxy',port:8080,path,headers:{Host:'memory.example.com','X-Forwarded-Proto':'https','CF-Connecting-IP':'203.0.113.10',...extra},timeout:5000},res=>{const chunks=[];res.on('data',chunk=>chunks.push(chunk));res.on('end',()=>resolve(new Response(Buffer.concat(chunks),{status:res.statusCode})));});req.on('timeout',()=>req.destroy(new Error('Probe timeout')));req.on('error',reject);});
     let ready=false;for(let i=0;i<20;i++){try{const r=await request('/mcp');if(r.ok){ready=true;break;}}catch{}await new Promise(r=>setTimeout(r,100));}assert(ready);
-    for(const path of ['/mcp','/api/v0/audit','/api/v0/recall','/api/v0/memories/example']){const r=await request(path);assert.equal(r.status,200);assert.deepEqual(await r.json(),{host:'memory.example.com',proto:'https'});}
+    for(const path of ['/mcp','/api/v0/audit','/api/v0/recall','/api/v0/memories/example']){const r=await request(path);assert.equal(r.status,200);assert.deepEqual(await r.json(),{host:'memory.example.com',proto:'https',peer:'192.0.2.2'});}
     for(const path of ['/health/ready','/health/live','/api/v0/ingest','/unexpected']){const r=await request(path);assert.equal(r.status,404);await r.body?.cancel();}
     assert.equal((await request('/mcp',{Host:'wrong.example.com'})).status,404);
     assert.equal((await request('/mcp',{'X-Forwarded-Proto':'http'})).status,403);
@@ -73,6 +73,10 @@ try {
     const burst=await Promise.all(Array.from({length:40},async()=>{const r=await request('/mcp');await r.body?.cancel();return r.status;}));assert(burst.includes(429));assert.equal((await request('/mcp',{'CF-Connecting-IP':'203.0.113.11'})).status,200);
     console.log(JSON.stringify({proxyReadOnlyStart:true,canonicalHost:true,httpsRequired:true,routeAllowlist:true,preAuthRateLimit:true,trustedClientIpKeying:true,tunnelCannotReachApi:true}));`;
   const results = docker(['run','--rm',...hardened,'--network',ingress,'--ip','198.51.100.3','--user=10001:10001','-e','NODE_OPTIONS=--max-old-space-size=64',node,'--input-type=module','-e',probe]);
+  const untrustedProbe = `import assert from 'node:assert/strict';import http from 'node:http';
+    const request=(ip)=>new Promise((resolve,reject)=>{const req=http.get({hostname:'uat-proxy',port:8080,path:'/mcp',headers:{Host:'memory.example.com','X-Forwarded-Proto':'https','CF-Connecting-IP':ip},timeout:5000},res=>{res.resume();res.on('end',()=>resolve(res.statusCode));});req.on('timeout',()=>req.destroy(new Error('Probe timeout')));req.on('error',reject);});
+    const statuses=await Promise.all(Array.from({length:40},(_,i)=>request('203.0.113.'+(20+i))));assert(statuses.includes(429));console.log(JSON.stringify({untrustedCannotChooseClientBucket:true}));`;
+  console.log(docker(['run','--rm',...hardened,'--network',ingress,'--ip','198.51.100.4','--user=10001:10001','-e','NODE_OPTIONS=--max-old-space-size=64',node,'--input-type=module','-e',untrustedProbe]));
   console.log(results);
   console.log(JSON.stringify({composeModels:true,optionalGemini:true,maintenanceNetworksUnchanged:true,immutableImages:{nginx,tunnel}}));
 } finally {

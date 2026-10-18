@@ -22,7 +22,7 @@ The overlay leaves production `backend` and `edge` unchanged. It adds private `u
 
 Create the new tunnel/hostname only after inspecting existing account tunnels, routes, DNS and Access policies. Require an absent hostname, snapshot the account records privately, and make additive changes only. Configure the dedicated tunnel route to `http://uat-proxy:8080` with the public canonical Host. Its final catch-all returns 404. Keep machine authentication working; no browser-only Access gate. The tunnel joins only UAT ingress; PostgreSQL joins only backend. No inbound firewall opening is required. Do not flush or replace firewall rules.
 
-Apply ingress only after canonical maintenance succeeds. The base full-text lane uses the two verified packaged files below. Start the API first and wait for health, verify its actual image ID equals the selected verified loaded image, validate/start the proxy, then start the tunnel:
+Preload the selected digest-pinned proxy and tunnel images, verify their platform and recorded identities, and retain their private receipts. Apply ingress only after canonical maintenance succeeds. The base full-text lane uses the two verified packaged files below. Start the API first and wait for health, verify its actual image ID equals the selected verified loaded image, validate/start the proxy, then start the tunnel:
 
 ```sh
 # A private shell function avoids repeating the exact reviewed configuration.
@@ -32,11 +32,11 @@ uat_compose() {
     -f /private/assets/deploy/compose.uat.yml \
     --profile maintenance --profile serving --profile uat "$@"
 }
-uat_compose up -d --no-deps --wait --wait-timeout 60 api
+uat_compose up -d --pull never --no-deps --wait --wait-timeout 60 api
 # Privately inspect the API image ID, health and exact trusted peer setting here.
-uat_compose run --rm --no-deps uat-proxy -t -c /etc/nginx/uat.conf
-uat_compose up -d --no-deps uat-proxy
-uat_compose up -d --no-deps uat-tunnel
+uat_compose run --rm --pull never --no-deps uat-proxy -t -c /etc/nginx/uat.conf
+uat_compose up -d --pull never --no-deps uat-proxy
+uat_compose up -d --pull never --no-deps uat-tunnel
 ```
 
 For the explicitly approved semantic lane, add `-f /private/assets/deploy/compose.uat-gemini.yml` to that function after the ingress file, then run the same ordered steps. This requires the two private Gemini/routing secret files. Full-text-only ingress needs neither file and does not qualify semantic UAT. An API or image mismatch stops the sequence before the tunnel starts. Preserve the base/semantic distinction in the private receipt.

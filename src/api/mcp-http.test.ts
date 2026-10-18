@@ -130,7 +130,7 @@ describe('real SDK remote MCP with current database authority', () => {
       expect(checks).toEqual({ replay: true, contention: true, masking: true, renew: true, release: true, expiry: true, staleGeneration: true });
     } finally { await b.client.close(); await cleanup(); }
   });
-  it.skipIf(process.platform === 'win32')('runs checkpoint and recovery across an actual remote server restart', async () => {
+  it.skipIf(process.platform === 'win32')('runs checkpoint and recovery across remote listener and controller recreation', async () => {
     const { runUatSmoke } = await import('../../scripts/uat-mcp-smoke.mjs');
     const directory = mkdtempSync(join(tmpdir(), 'continuum-uat-restart-'));
     const other = await createPrincipal(pool, { externalId: 'restart-other-client', kind: 'service', displayName: 'Synthetic restart B' });
@@ -151,7 +151,7 @@ describe('real SDK remote MCP with current database authority', () => {
       server = await new Promise<Server>(resolve => { const listener = restarted.listen(port, '127.0.0.1', () => resolve(listener)); });
       controller = createMcpHttpController(mcpHttpConfigFromEnv({ CONTINUUM_MCP_HTTP_ENABLED: 'true', CONTINUUM_MCP_PUBLIC_URL: url.href,
         CONTINUUM_MCP_HTTP_LOOPBACK_DEV: 'true', CONTINUUM_MCP_HTTP_PEER_BURST: '100', CONTINUUM_MCP_HTTP_MESSAGE_BURST: '100' }, 'entra')!,
-        { pool, embeddingProvider: null, authenticator: createAuthenticator(pool, 'entra', entra) });
+        { pool, embeddingProvider: null, authenticator: createAuthenticator(pool, 'entra', entra), now: () => new Date('2026-10-13T11:00:00Z') });
       restarted.use('/mcp', controller.router);
       expect(await runUatSmoke(env, 'recover', { allowLoopback: true })).toEqual({ ok: true, restartPersistence: true, freshSessions: true });
     } finally {
