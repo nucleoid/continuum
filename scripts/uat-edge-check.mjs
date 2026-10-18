@@ -48,8 +48,8 @@ try {
   }
   assert.equal(base.services.api.environment.GEMINI_API_KEY_FILE,undefined);
   assert.equal(semantic.services.api.environment.GEMINI_API_KEY_FILE,'/run/secrets/gemini_api_key');
-  assert.equal(base.services['uat-proxy'].mem_limit,64*1024*1024);
-  assert.equal(base.services['uat-tunnel'].mem_limit,128*1024*1024);
+  assert.equal(Number(base.services['uat-proxy'].mem_limit),64*1024*1024);
+  assert.equal(Number(base.services['uat-tunnel'].mem_limit),128*1024*1024);
   for (const image of [nginx,tunnel,node]) docker(['pull',image]);
   assert(docker(['run','--rm',...hardened,'--network=none',tunnel,'tunnel','run','--help']).includes('--token-file'));
   const origin = docker(['network','create','--internal',name+'-origin']); networks.push(origin);
