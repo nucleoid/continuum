@@ -1,0 +1,10 @@
+# Explicit opt-in for approved synthetic hosted semantic UAT only.
+services:
+  api:
+    environment:
+      CONTINUUM_EMBEDDING_CONFIG_FILE: /run/secrets/embedding_config
+      GEMINI_API_KEY_FILE: /run/secrets/gemini_api_key
+    secrets: [app_database_url, embedding_config, gemini_api_key]
+secrets:
+  embedding_config: {file: '${CONTINUUM_UAT_EMBEDDING_CONFIG_FILE:?private routing JSON required}'}
+  gemini_api_key: {file: '${CONTINUUM_UAT_GEMINI_KEY_FILE:?private Gemini key file required}'}

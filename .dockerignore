@@ -77,3 +77,5 @@ src/plugins/tenants/**
 !docs/uat-deployment.md
 !docs/uat-client-onboarding.md
 !docs/delivery-forge-uat.md
+
+!deploy/compose.uat-gemini.yml

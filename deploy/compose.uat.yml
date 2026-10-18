@@ -12,9 +12,11 @@ services:
       CONTINUUM_MCP_HTTP_CALLS: "8"
       CONTINUUM_MCP_HTTP_PRINCIPAL_CALLS: "2"
       CONTINUUM_MCP_HTTP_AUTHENTICATIONS: "8"
-      CONTINUUM_EMBEDDING_CONFIG_FILE: /run/secrets/embedding_config
-      GEMINI_API_KEY_FILE: /run/secrets/gemini_api_key
-    secrets: [app_database_url, embedding_config, gemini_api_key]
+    networks:
+      backend: {}
+      edge: {}
+      uat_origin:
+        ipv4_address: ${CONTINUUM_UAT_API_IP:?reserved API IP required}
   uat-proxy:
     image: ${CONTINUUM_UAT_PROXY_IMAGE:?verified immutable nginx image digest required}
     profiles: [uat]
@@ -32,8 +34,10 @@ services:
     volumes:
       - ${CONTINUUM_UAT_PROXY_CONFIG_FILE:?private rendered proxy config required}:/etc/nginx/uat.conf:ro
     networks:
-      edge:
+      uat_origin:
         ipv4_address: ${CONTINUUM_UAT_PROXY_IP}
+      uat_ingress:
+        ipv4_address: ${CONTINUUM_UAT_PROXY_INGRESS_IP:?reserved proxy ingress IP required}
     depends_on:
       api: {condition: service_healthy}
     stop_grace_period: 10s
@@ -55,7 +59,7 @@ services:
     tmpfs: ['/tmp:rw,noexec,nosuid,size=8m,uid=65532,gid=65532']
     secrets: [tunnel_token]
     networks:
-      edge:
+      uat_ingress:
         ipv4_address: ${CONTINUUM_UAT_TUNNEL_IP:?reserved tunnel IP required}
     depends_on:
       uat-proxy: {condition: service_started}
@@ -64,11 +68,16 @@ services:
       driver: json-file
       options: {max-size: 1m, max-file: "2"}
 networks:
-  edge:
+  uat_origin:
+    internal: true
     ipam:
       config:
-        - subnet: ${CONTINUUM_UAT_EDGE_SUBNET:?fresh non-overlapping subnet required}
+        - subnet: ${CONTINUUM_UAT_ORIGIN_SUBNET:?fresh origin subnet required}
+          ip_range: ${CONTINUUM_UAT_ORIGIN_DYNAMIC_RANGE:?dynamic range excluding static IPs required}
+  uat_ingress:
+    ipam:
+      config:
+        - subnet: ${CONTINUUM_UAT_INGRESS_SUBNET:?fresh ingress subnet required}
+          ip_range: ${CONTINUUM_UAT_INGRESS_DYNAMIC_RANGE:?dynamic range excluding static IPs required}
 secrets:
-  embedding_config: {file: '${CONTINUUM_UAT_EMBEDDING_CONFIG_FILE:?private routing JSON required}'}
-  gemini_api_key: {file: '${CONTINUUM_UAT_GEMINI_KEY_FILE:?private Gemini key file required}'}
   tunnel_token: {file: '${CONTINUUM_UAT_TUNNEL_TOKEN_FILE:?dedicated tunnel token file required}'}

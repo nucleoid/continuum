@@ -7,6 +7,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
 const digest = text => createHash('sha256').update(text).digest('hex');
+let currentStep = 'configuration';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 export function decodeResult(result) {
   const text = result.content.filter(item => item.type === 'text').map(item => item.text).join('');
@@ -32,7 +33,10 @@ export async function connect(url, key) {
     fetch: (input, init) => fetch(input, { ...init, redirect: 'error' }),
   });
   await client.connect(transport, { timeout: 20000 });
-  const call = async (name, args) => decodeResult(await client.callTool({ name: `continuum.${name}`, arguments: args }, undefined, { timeout: 20000 }));
+  const call = async (name, args) => {
+    currentStep = name;
+    return decodeResult(await client.callTool({ name: `continuum.${name}`, arguments: args }, undefined, { timeout: 20000 }));
+  };
   return { client, transport, call };
 }
 
@@ -105,6 +109,7 @@ async function main() {
   const sessions = [];
   const phase = process.argv[2] ?? 'smoke';
   assert(['smoke', 'checkpoint', 'recover'].includes(phase), 'Unknown phase');
+  assert(phase !== 'checkpoint' || process.platform !== 'win32', 'Checkpoint requires a POSIX private filesystem');
   try {
     const a = await connect(url, keyA); sessions.push(a);
     const b = await connect(url, keyB); sessions.push(b);
@@ -114,13 +119,18 @@ async function main() {
     if (phase === 'recover') {
       const state = JSON.parse(privateFile(env.CONTINUUM_UAT_STATE_FILE));
       assert(state.endpointHash === digest(url.href) && state.project === project, 'Wrong checkpoint target');
-      assert.equal((await a.call('get_memory', { memory_id: state.memoryId })).id, state.memoryId);
+      const memory = await a.call('get_memory', { memory_id: state.memoryId });
+      assert.equal(memory.id, state.memoryId);
+      assert.equal(digest(memory.body), state.bodyHash);
+      assert.equal(memory.expires_at, state.expiresAt);
+      assert.equal(memory.state, state.memoryState);
       const current = await a.call('lock_inspect', { scope, resource: state.resource });
       assert.equal(current.lease_id, state.lease.lease_id);
       assert.equal(current.fencing_token, state.lease.fencing_token);
       const renewed = await a.call('lock_renew', { lease_id: current.lease_id, run_id: state.lease.run_id, request_id: randomUUID(), ttl_seconds: 30 });
       assert.equal(renewed.fencing_token, current.fencing_token);
-      await a.call('lock_release', { lease_id: current.lease_id, run_id: state.lease.run_id, request_id: randomUUID() });
+      assert.equal((await a.call('lock_release', { lease_id: current.lease_id, run_id: state.lease.run_id, request_id: randomUUID() })).released, true);
+      await assert.rejects(a.call('lock_renew', { lease_id: current.lease_id, run_id: state.lease.run_id, request_id: randomUUID() }), { code: 'LEASE_LOST' });
       console.log(JSON.stringify({ ok: true, restartPersistence: true, freshSessions: true }));
       return;
     }
@@ -140,12 +150,13 @@ async function main() {
     assert(text.includes('garden shed'));
     assert.equal((await a.call('agents_md_fresh', { project, hash: digest(text) })).fresh, true);
     if (phase === 'checkpoint') {
+      const persisted = await a.call('get_memory', { memory_id: captured.id });
       const resource = `uat:delivery-forge:${randomUUID()}`;
       const lease = await a.call('lock_acquire', { scope, resource, run_id: randomUUID(), request_id: randomUUID(), ttl_seconds: 300 });
       assert(lease.acquired);
       const stateFile = env.CONTINUUM_UAT_STATE_FILE;
       assert(stateFile && resolve(stateFile) === stateFile, 'Private absolute state path required');
-      writeFileSync(stateFile, JSON.stringify({ endpointHash: digest(url.href), project, memoryId: captured.id, resource, lease }), { flag: 'wx', mode: 0o600 });
+      writeFileSync(stateFile, JSON.stringify({ endpointHash: digest(url.href), project, memoryId: captured.id, bodyHash: digest(persisted.body), expiresAt: persisted.expires_at, memoryState: persisted.state, resource, lease }), { flag: 'wx', mode: 0o600 });
       console.log(JSON.stringify({ ok: true, checkpoint: true, recoverWithinSeconds: 300 }));
       return;
     }
@@ -177,6 +188,11 @@ async function main() {
 }
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
   const timer = setTimeout(() => { process.stderr.write('UAT smoke deadline exceeded; reconcile synthetic state before retry.\n'); process.exit(1); }, 180000);
-  try { await main(); } catch { process.stderr.write('UAT smoke failed; inspect private operator evidence, do not blindly retry writes.\n'); process.exitCode = 1; }
+  try { await main(); } catch (error) {
+    const codes = new Set(['LEASE_LOST','SCOPE_NOT_FOUND','FORBIDDEN','UNKNOWN_TAGS','MEMORY_NOT_FOUND','INVALID_INPUT','QUOTA_EXCEEDED']);
+    const code = codes.has(error?.code) ? error.code : error?.code === 'ERR_ASSERTION' ? 'ASSERTION_FAILED' : 'REQUEST_FAILED';
+    process.stderr.write(JSON.stringify({ ok: false, step: currentStep, code, reconcileBeforeRetry: true }) + '\n');
+    process.exitCode = 1;
+  }
   finally { clearTimeout(timer); }
 }

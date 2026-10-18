@@ -14,6 +14,21 @@ Prepare a narrowly scoped UAT routing instruction alongside the registration dif
 
 Apply the concrete config/instruction diff after owner review, then restart/reload that client as its installed documentation requires. A removed connection alone does not fix instructions that mandate unavailable tools. Require a fresh session with Continuum discovery and no original memory tools. Retain the original service for other clients and independent consumers.
 
+## Codex CLI registration example
+
+The [official MCP guide](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) documents HTTP registration, environment-backed bearer credentials and `enabled:false`. For a privately reviewed selected profile, use placeholders rather than inline secrets:
+
+```toml
+[mcp_servers.continuum-uat]
+url = "https://memory.example.com/mcp"
+bearer_token_env_var = "CONTINUUM_UAT_CLIENT_KEY"
+enabled = true
+startup_timeout_sec = 20
+tool_timeout_sec = 45
+```
+
+Load the key into the selected client's environment through its private launcher/store before starting a fresh process. Set `enabled = false` only on its existing memory registration after reviewing inherited configuration and the instruction diff; leave unrelated registrations intact. Plugin-provided servers have separate configuration, so inspect actual tool discovery. Do not assume these CLI settings enroll the desktop, gateway or another coding agent. Initial version inventory found Codex CLI 0.153.4, Claude Code 2.1.299 and Pi 0.80.7; their live Continuum connection/isolation results remain pending.
+
 ## Connection and identity
 
 Use HTTPS Streamable HTTP at the approved `/mcp`, with `Authorization: ApiKey <per-client-key>` on POST, GET and DELETE. SDK callers may omit Origin. Configure secrets through each client's supported private store/header mechanism; never embed real keys in command arguments, examples, repository files or chat. [Remote MCP](remote-mcp.md) is authoritative for protocol, headers, quotas and errors.

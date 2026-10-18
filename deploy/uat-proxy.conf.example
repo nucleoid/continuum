@@ -1,5 +1,5 @@
-# Replace the documentation-only tunnel address with its reserved edge IP.
-# Use this file as a template in private operator storage, never edit package assets.
+# Render into private storage. Replace memory.example.com with the approved
+# canonical hostname and 192.0.2.3 with the reserved tunnel ingress address.
 worker_processes 1;
 pid /tmp/nginx.pid;
 error_log /dev/stderr crit;
@@ -8,6 +8,9 @@ http {
   access_log off;
   client_body_temp_path /tmp/client;
   proxy_temp_path /tmp/proxy;
+  fastcgi_temp_path /tmp/fastcgi;
+  uwsgi_temp_path /tmp/uwsgi;
+  scgi_temp_path /tmp/scgi;
   client_max_body_size 1m;
   client_body_timeout 5s;
   client_header_timeout 5s;
@@ -17,26 +20,29 @@ http {
   real_ip_recursive off;
   limit_req_zone $binary_remote_addr zone=uat_clients:1m rate=10r/s;
   limit_conn_zone $binary_remote_addr zone=uat_connections:1m;
+  server { listen 8080 default_server; server_name _; return 404; }
   server {
     listen 8080;
-    server_name _;
+    server_name memory.example.com;
     # Cloudflare sets the visitor scheme; never authenticate public plain HTTP.
     if ($http_x_forwarded_proto != "https") { return 403; }
     limit_req zone=uat_clients burst=20 nodelay;
     limit_req_status 429;
     limit_conn uat_connections 16;
     limit_conn_status 429;
-    location / {
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-Host "";
+    proxy_set_header Connection "";
+    proxy_buffering off;
+    proxy_request_buffering off;
+    proxy_read_timeout 40s;
+    proxy_send_timeout 10s;
+    location = /mcp { proxy_pass http://api:4000; }
+    location ~ ^/api/v0/(capture|recall|audit|scopes|tag-vocabularies|memories|agents-md)(/|$) {
       proxy_pass http://api:4000;
-      proxy_http_version 1.1;
-      proxy_set_header Host $http_host;
-      proxy_set_header X-Forwarded-Proto https;
-      proxy_set_header X-Forwarded-Host "";
-      proxy_set_header Connection "";
-      proxy_buffering off;
-      proxy_request_buffering off;
-      proxy_read_timeout 40s;
-      proxy_send_timeout 10s;
     }
+    location / { return 404; }
   }
 }

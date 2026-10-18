@@ -33,10 +33,12 @@ node scripts/uat-mcp-smoke.mjs checkpoint
 node scripts/uat-mcp-smoke.mjs recover
 ```
 
-The checkpoint creates a synthetic fact and a 300-second lease and writes IDs, run/token and an endpoint hash to a new mode-0600 file. It never writes credentials. Recover within that TTL using fresh sessions and the same principal-A key; it verifies persisted full memory and exact lease/token, renews and releases. Do not count an expired checkpoint as restart persistence. It does not invoke Docker or restart a server itself. Preserve audit and migration/identity evidence separately. End old SDK sessions and require initialize after restart; process-local sessions cannot resume across instances.
+The checkpoint creates a synthetic fact and a 300-second lease and writes IDs, run/token, body digest, fixed expiry/state and an endpoint hash to a new mode-0600 file on a POSIX private filesystem; checkpoint refuses Windows. It never writes credentials. Recover within that TTL using fresh sessions and the same principal-A key; it verifies persisted full-body digest, fixed expiry/state and exact lease/token, renews, checks release and rejects a stale renewal. Do not count an expired checkpoint as restart persistence. It does not invoke Docker or restart a server itself. Preserve audit and migration/identity evidence separately. End old SDK sessions and require initialize after restart; process-local sessions cannot resume across instances.
 
 Rehearse bounded recovery for DB unavailability, revoked disposable credentials, current membership loss and missed renewal. Never force-release another holder, reset fencing, delete receipts or restart validator workloads. Release while still authorized, otherwise wait for TTL.
 
 ## Results and boundaries
 
 Record source/image identity, current migration/profile verification, client/version, timestamp, exact private UAT resource reference, per-step pass/fail, ownership-loss sink evidence, restart/persistence evidence, semantic lane result, native provider isolation and owner acceptance. Shared reports contain no tokens, memory bodies, private host/network inventory or client configuration snapshots. Leave failing/unexecuted criteria pending. Preserve both memory services and all data on rollback.
+
+The initial Delivery Forge production adapter remains externally gated in its own repository. A ready Continuum endpoint does not enable that adapter automatically; actual harness integration and dry-run loss evidence must be supplied before claiming production click-test readiness.
