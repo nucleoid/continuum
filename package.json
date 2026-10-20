@@ -48,7 +48,15 @@
     "deploy/bootstrap-database.sql",
     "deploy/bootstrap-production-admin.sql",
     "deploy/apply-role-profiles.sh",
-    "docs/deployment.md"
+    "docs/deployment.md",
+    "deploy/compose.uat.yml",
+    "deploy/uat.env.example",
+    "deploy/uat-proxy.conf.example",
+    "docs/uat-deployment.md",
+    "docs/uat-client-onboarding.md",
+    "docs/delivery-forge-uat.md",
+    "scripts/uat-mcp-smoke.mjs",
+    "deploy/compose.uat-gemini.yml"
   ],
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",

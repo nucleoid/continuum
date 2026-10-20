@@ -10,6 +10,7 @@ import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import { createMemory } from '../storage/memories.js';
 import { StubEmbeddingProvider } from '../embeddings/stub.js';
+import { GeminiEmbeddingProvider } from '../embeddings/gemini.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import { captureSources } from '../capture/source.js';
 import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
@@ -358,6 +359,24 @@ describe('MCP server', () => {
       metadata: { rank: 1, record_kind: 'result', transport: 'mcp' },
     });
     expect(rows[1].metadata.request_id).toBe(rows[0].metadata.request_id);
+  });
+
+  it('keeps Gemini out of generated reference data and freshness', async () => {
+    const fetchImpl = vi.fn(async () => { throw new Error('Generator must not call Gemini'); });
+    const { client, me, teamPayments } = await connectClient(new GeminiEmbeddingProvider({
+      apiKey: 'synthetic', model: 'gemini-embedding-2-preview', dim: 768, fetchImpl,
+    }));
+    try {
+      await createMemory(pool, { scopeId: teamPayments.id, scopeKind: 'team', type: 'decision', title: 'UAT reference', body: 'Safe reference.', authorId: me.id, source: 'manual' });
+      const result = await client.callTool({ name: 'continuum.agents_md', arguments: { team: 'payments' } });
+      const text = rawText(result as CallToolResult);
+      expect(text).toContain('UAT reference');
+      expect(text).not.toContain('gemini');
+      const hash = createHash('sha256').update(text).digest('hex');
+      const fresh = await client.callTool({ name: 'continuum.agents_md_fresh', arguments: { team: 'payments', hash } });
+      expect(parseJsonResult(fresh as CallToolResult)).toEqual({ fresh: true });
+      expect(fetchImpl).not.toHaveBeenCalled();
+    } finally { await client.close(); }
   });
 
   it('checks AGENTS.md freshness with the same bounded rendered-content hash', async () => {

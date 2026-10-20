@@ -245,3 +245,7 @@ Production container packaging uses hosted-built immutable Linux amd64 OCI artif
 The API process can serve authenticated Streamable HTTP at `/mcp`, disabled by default. It uses the same tool registrations, current memberships, source restrictions and required domain audits as stdio. See [remote MCP](./docs/remote-mcp.md) for the explicit HTTPS proxy policy, limits, session lifecycle and rollout. Stdio remains available through `npm run mcp`.
 
 Remote MCP passes optional aggregate read budgets into shared memory, recall, history and generator paths. Metadata-only admission and a repeated same-snapshot gate prevent oversized hydration; mutation source probes lock admitted rows before reading their contents. Generator limits include all selected scopes and escaped rendering. Budget failures precede success delivery audits and writes without truncating content or changing default transport selection.
+
+## Isolated UAT
+
+See [UAT deployment](./docs/uat-deployment.md), [client onboarding](./docs/uat-client-onboarding.md) and [Delivery Forge smoke](./docs/delivery-forge-uat.md). The optional Gemini adapter uses an explicit model-qualified 768-dimensional profile; only approved non-sensitive scopes may route to it. Local-only scopes never fall through to hosted providers. Guides and SDK fixtures do not establish live deployment, native-client isolation or owner acceptance. Keep private configuration and receipts outside tracked artifacts.

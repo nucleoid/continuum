@@ -10,7 +10,7 @@ import {
   withEmbeddingTimeout,
 } from './timeout.js';
 
-interface HostedOptions {
+export interface HostedOptions {
   apiKey: string;
   model: string;
   dim: number;
@@ -28,7 +28,7 @@ const MAX_SUCCESS_BODY_BYTES = 64 * 1024 * 1024;
 
 interface EmbeddingItem { index?: number; embedding?: unknown }
 
-function invalidResponse(message: string, cause?: unknown): EmbeddingProviderError {
+export function invalidResponse(message: string, cause?: unknown): EmbeddingProviderError {
   return new EmbeddingProviderError(
     'EMBEDDING_INVALID_RESPONSE', message, { cause, diagnostic: true },
   );
@@ -87,7 +87,7 @@ function validateHostedEndpoint(endpoint: string): string {
   return endpoint;
 }
 
-function validateVectors(items: unknown, count: number, dim: number): number[][] {
+export function validateVectors(items: unknown, count: number, dim: number): number[][] {
   if (!Array.isArray(items) || items.length !== count) throw invalidResponse('Provider returned invalid embedding count');
   if (items.some((item) => item === null || typeof item !== 'object' || Array.isArray(item))) {
     throw invalidResponse('Provider returned an invalid embedding item');
@@ -106,9 +106,9 @@ function validateVectors(items: unknown, count: number, dim: number): number[][]
   });
 }
 
-abstract class HostedEmbeddingProvider implements EmbeddingProvider {
+export abstract class HostedEmbeddingProvider implements EmbeddingProvider {
   abstract readonly id: string;
-  abstract readonly httpProvider: 'openai' | 'voyage';
+  abstract readonly httpProvider: 'openai' | 'voyage' | 'gemini';
   abstract embed(texts: string[], options?: { signal?: AbortSignal }): Promise<number[][]>;
   readonly local = false;
   readonly dim: number;
@@ -144,7 +144,7 @@ abstract class HostedEmbeddingProvider implements EmbeddingProvider {
         try {
           response = await this.fetchImpl(this.endpoint, {
             method: 'POST', headers: { 'content-type': 'application/json', ...headers },
-            body: JSON.stringify(body), signal: requestSignal,
+            body: JSON.stringify(body), signal: requestSignal, redirect: 'error',
           });
         } catch (error) {
           if (requestSignal.aborted) throw requestSignal.reason ?? error;
@@ -162,9 +162,7 @@ abstract class HostedEmbeddingProvider implements EmbeddingProvider {
         if (json === null || typeof json !== 'object' || Array.isArray(json)) {
           throw invalidResponse('Embedding provider returned an invalid response');
         }
-        return validateVectors(
-          (json as { data?: unknown }).data ?? [], texts.length, this.dim,
-        );
+        return this.responseVectors(json as Record<string, unknown>, texts.length);
       });
     } catch (error) {
       if (signal?.aborted) throw signal.reason ?? error;
@@ -178,6 +176,10 @@ abstract class HostedEmbeddingProvider implements EmbeddingProvider {
         'EMBEDDING_NETWORK', 'Embedding provider network request failed', { cause: error },
       );
     }
+  }
+
+  protected responseVectors(json: Record<string, unknown>, count: number): number[][] {
+    return validateVectors(json.data ?? [], count, this.dim);
   }
 }
 

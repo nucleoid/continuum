@@ -71,6 +71,7 @@ describe('AGENTS.md data rendering', () => {
       lastVerified: null,
     };
 
+    memory.metadata = { provider: 'gemini:gemini-embedding-2-preview', embedding: [1, 2] };
     expect(renderMemoryEntry(memory, 'project:booking-engine')).toEqual([
       '#### Memory',
       '',

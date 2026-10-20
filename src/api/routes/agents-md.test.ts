@@ -4,6 +4,7 @@ import type pg from 'pg';
 import request from 'supertest';
 import { makeTestPool, resetData } from '../../storage/test-helpers.js';
 import { createApp } from '../server.js';
+import { GeminiEmbeddingProvider } from '../../embeddings/gemini.js';
 import { RetrievalEnricherRegistry } from '../../extensions/retrieval.js';
 import { createPrincipal } from '../../storage/principals.js';
 import { createScope, getScopeByRef } from '../../storage/scopes.js';
@@ -133,6 +134,24 @@ describe('GET /api/v0/agents-md', () => {
     });
     expect(normalized(following.rows)).toEqual(normalized(initial.rows));
     expect(following.rows[0].metadata).toMatchObject({ view: 'agents-md', vector_status: 'not_applicable', record_kind: 'summary', transport: 'rest', hits: 4 });
+  });
+
+  it('preserves generator bytes, ACL and freshness without calling Gemini', async () => {
+    await seed();
+    const fetchImpl = vi.fn(async () => { throw new Error('Generator must not call provider'); });
+    const enabled = createApp(pool, { embeddingProvider: new GeminiEmbeddingProvider({
+      apiKey: 'synthetic', model: 'gemini-embedding-2-preview', dim: 768, fetchImpl,
+    }) });
+    const url = '/api/v0/agents-md?project=booking-engine&team=payments';
+    const baseline = await request(app).get(url).set('Authorization', 'Bearer entra:user:bundle');
+    const result = await request(enabled).get(url).set('Authorization', 'Bearer entra:user:bundle');
+    expect(result.status).toBe(200);
+    expect(result.text).toBe(baseline.text);
+    expect(result.headers.etag).toBe(baseline.headers.etag);
+    expect(result.text).not.toContain('Secret pricing');
+    const conditional = await request(enabled).get(url).set('Authorization', 'Bearer entra:user:bundle').set('If-None-Match', result.headers.etag);
+    expect(conditional.status).toBe(304);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it('always includes org and the principal role scopes, with no project/team', async () => {

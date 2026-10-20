@@ -308,3 +308,7 @@ credential, binding, or provenance data.
 ## Optional remote MCP
 
 The API process can serve authenticated Streamable HTTP at `/mcp`, disabled by default. It uses the same tool registrations, current memberships, source restrictions and required domain audits as stdio. See [remote MCP](./remote-mcp.md) for the explicit HTTPS proxy policy, limits, session lifecycle and rollout. Stdio remains available through `npm run mcp`.
+
+## Isolated UAT
+
+See [UAT deployment](uat-deployment.md), [client onboarding](uat-client-onboarding.md) and [Delivery Forge smoke](delivery-forge-uat.md). The optional Gemini adapter uses an explicit model-qualified 768-dimensional profile; only approved non-sensitive scopes may route to it. Local-only scopes never fall through to hosted providers. Guides and SDK fixtures do not establish live deployment, native-client isolation or owner acceptance. Keep private configuration and receipts outside tracked artifacts.

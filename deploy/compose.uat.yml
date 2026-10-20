@@ -1,0 +1,83 @@
+# Apply only after canonical production maintenance has passed.
+# Supply the verified packaged compose.production.yml first, this file second.
+services:
+  api:
+    environment:
+      CONTINUUM_MCP_HTTP_ENABLED: "true"
+      CONTINUUM_MCP_PUBLIC_URL: ${CONTINUUM_MCP_PUBLIC_URL:?approved HTTPS MCP URL required}
+      CONTINUUM_MCP_TRUSTED_PROXY_CIDRS: ${CONTINUUM_UAT_PROXY_IP:?reserved proxy IP required}/32
+      CONTINUUM_MCP_HTTP_SESSIONS: "20"
+      CONTINUUM_MCP_HTTP_PRINCIPAL_SESSIONS: "3"
+      CONTINUUM_MCP_HTTP_STREAMS: "20"
+      CONTINUUM_MCP_HTTP_CALLS: "8"
+      CONTINUUM_MCP_HTTP_PRINCIPAL_CALLS: "2"
+      CONTINUUM_MCP_HTTP_AUTHENTICATIONS: "8"
+    networks:
+      backend: {}
+      edge: {}
+      uat_origin:
+        ipv4_address: ${CONTINUUM_UAT_API_IP:?reserved API IP required}
+  uat-proxy:
+    image: ${CONTINUUM_UAT_PROXY_IMAGE:?verified immutable nginx image digest required}
+    profiles: [uat]
+    user: "101:101"
+    entrypoint: [nginx]
+    command: [-c, /etc/nginx/uat.conf, -g, "daemon off;"]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 64m
+    cpus: 0.25
+    tmpfs: ['/tmp:rw,noexec,nosuid,size=16m,uid=101,gid=101']
+    volumes:
+      - ${CONTINUUM_UAT_PROXY_CONFIG_FILE:?private rendered proxy config required}:/etc/nginx/uat.conf:ro
+    networks:
+      uat_origin:
+        ipv4_address: ${CONTINUUM_UAT_PROXY_IP}
+      uat_ingress:
+        ipv4_address: ${CONTINUUM_UAT_PROXY_INGRESS_IP:?reserved proxy ingress IP required}
+    depends_on:
+      api: {condition: service_healthy}
+    stop_grace_period: 10s
+    logging:
+      driver: json-file
+      options: {max-size: 1m, max-file: "2"}
+  uat-tunnel:
+    image: ${CONTINUUM_UAT_TUNNEL_IMAGE:?verified immutable cloudflared digest required}
+    profiles: [uat]
+    user: "65532:65532"
+    command: [tunnel, --no-autoupdate, --protocol, http2, run, --token-file, /run/secrets/tunnel_token]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.25
+    tmpfs: ['/tmp:rw,noexec,nosuid,size=8m,uid=65532,gid=65532']
+    secrets: [tunnel_token]
+    networks:
+      uat_ingress:
+        ipv4_address: ${CONTINUUM_UAT_TUNNEL_IP:?reserved tunnel IP required}
+    depends_on:
+      uat-proxy: {condition: service_started}
+    stop_grace_period: 10s
+    logging:
+      driver: json-file
+      options: {max-size: 1m, max-file: "2"}
+networks:
+  uat_origin:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${CONTINUUM_UAT_ORIGIN_SUBNET:?fresh origin subnet required}
+          ip_range: ${CONTINUUM_UAT_ORIGIN_DYNAMIC_RANGE:?dynamic range excluding static IPs required}
+  uat_ingress:
+    ipam:
+      config:
+        - subnet: ${CONTINUUM_UAT_INGRESS_SUBNET:?fresh ingress subnet required}
+          ip_range: ${CONTINUUM_UAT_INGRESS_DYNAMIC_RANGE:?dynamic range excluding static IPs required}
+secrets:
+  tunnel_token: {file: '${CONTINUUM_UAT_TUNNEL_TOKEN_FILE:?dedicated tunnel token file required}'}

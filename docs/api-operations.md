@@ -190,3 +190,7 @@ diagnosis.
 ## Containers
 
 The production Compose readiness check calls /health/ready; /health/live remains process liveness. Container health does not restart an unhealthy service or certify optional provider health. The application has a ten-second shutdown budget and at least 15-second container stop grace. Use explicit successful maintenance before starting the selected immutable image. See [deployment](deployment.md).
+
+## Isolated UAT
+
+See [UAT deployment](uat-deployment.md), [client onboarding](uat-client-onboarding.md) and [Delivery Forge smoke](delivery-forge-uat.md). The optional Gemini adapter uses an explicit model-qualified 768-dimensional profile; only approved non-sensitive scopes may route to it. Local-only scopes never fall through to hosted providers. Guides and SDK fixtures do not establish live deployment, native-client isolation or owner acceptance. Keep private configuration and receipts outside tracked artifacts.

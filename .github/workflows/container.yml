@@ -17,7 +17,7 @@ env:
 
 jobs:
   build:
-    needs: windows
+    needs: [windows, uat-edge]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     services:
@@ -120,6 +120,7 @@ jobs:
       - run: npm run build
       - run: npx vitest run src/api/entrypoint.test.ts src/api/entrypoint-callers.test.ts
       - run: npx vitest run src/cli/config.test.ts src/cli/http.test.ts src/cli/index.test.ts
+      - run: npx vitest run src/embeddings/gemini.test.ts src/embeddings/factory.test.ts src/embeddings/hosted.test.ts src/agents-md/render.test.ts
       - run: node scripts/windows-entrypoint-smoke.mjs
       - run: node --test deploy/container-entrypoint.test.mjs deploy/apply-role-profiles.test.mjs scripts/container-maintenance.test.mjs scripts/container-artifact.test.mjs scripts/container-assets-extract.test.mjs scripts/container-diagnostics.test.mjs scripts/container-compose-model.test.mjs scripts/container-binary-transfer.test.mjs scripts/container-maintenance-evidence.test.mjs
       - run: npm pack --dry-run
@@ -160,3 +161,16 @@ jobs:
             container-artifact/loaded-identity.json
             container-artifact/skopeo-version.txt
           if-no-files-found: error
+
+  uat-edge:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.23.3
+      - name: Qualify UAT topology and hardened proxy using immutable upstream images
+        run: node scripts/uat-edge-check.mjs
