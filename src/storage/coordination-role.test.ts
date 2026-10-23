@@ -1,6 +1,8 @@
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import pg, { type PoolConfig } from 'pg';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { acquireLease, releaseLease, renewLease } from '../services/coordination.js';
@@ -946,4 +948,317 @@ describe('coordination database role profiles', () => {
       await app.connection.end();
     }
   });
+  it.each([false, true])('quarantines an expired renewal without inventing its historical response (receipt=%s)', async (retainedReceipt) => {
+    const actor = await createPrincipal(pool, {
+      externalId: randomUUID(), kind: 'user', displayName: 'Reconciliation operator',
+    });
+    const target = await createPrincipal(pool, {
+      externalId: randomUUID(), kind: 'service', displayName: 'Original lease holder',
+    });
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await addMembership(pool, actor.id, org.id, 'admin');
+    const scope = await createScope(pool, { kind: 'project', name: 'quarantine-' + randomUUID() });
+    await addMembership(pool, target.id, scope.id, 'writer');
+    const app = await createApplicationRole();
+    const operator = await createApplicationRole();
+    await applyGrantScript(pool, 'grant-operator-role.sql', {
+      continuum_operator_role: operator.role, continuum_principal_id: actor.id,
+    });
+    try {
+      const runId = randomUUID();
+      const requestId = randomUUID();
+      const acquired = await acquireLease(app.connection, target, {
+        scope: 'project:' + scope.name, resource: 'original', runId, requestId: randomUUID(),
+      });
+      if (!acquired.acquired) throw new Error('expected original acquisition');
+      // The no-receipt row is deliberately UNKNOWN fixture input, not a claim
+      // that a real missing receipt proves its request was never committed.
+      if (retainedReceipt) await renewLease(app.connection, target, {
+        leaseId: acquired.leaseId, runId, requestId, ttlSeconds: 300,
+      });
+      const call = 'SELECT continuum_operator_quarantine_expired_renewal($1::uuid,$2::uuid,$3::uuid,$4::text,$5::uuid,$6::uuid,$7::bigint,$8::uuid,$9::integer,$10::text) AS result';
+      const args = [actor.id, target.id, scope.id, 'original', acquired.leaseId,
+        runId, acquired.fencingToken, requestId, 300, 'a'.repeat(64)];
+      await expect(app.connection.query(call, args)).rejects.toMatchObject({ code: '42501' });
+      await expect(operator.connection.query(call, args)).rejects.toThrow('live or indeterminate');
+      await pool.query(`UPDATE coordination_leases SET
+        acquired_at=clock_timestamp()-interval '20 minutes',
+        expires_at=clock_timestamp()-interval '10 minutes' WHERE lease_id=$1`, [acquired.leaseId]);
+      const previousExpiry = (await pool.query('SELECT expires_at FROM coordination_leases WHERE lease_id=$1', [acquired.leaseId])).rows[0].expires_at;
+      const floorBefore = (await pool.query('SELECT fencing_floor FROM coordination_scope_fencing_floors WHERE scope_id=$1', [scope.id])).rows;
+      const receiptBefore = (await pool.query(`SELECT to_jsonb(receipt) AS value
+        FROM coordination_operation_receipts receipt
+        WHERE principal_id=$1 AND operation='renew' AND request_id=$2`, [target.id, requestId])).rows;
+      if (retainedReceipt) {
+        const wrongTtl = [...args]; wrongTtl[8] = 301;
+        await expect(operator.connection.query(call, wrongTtl)).rejects.toThrow('retained renewal receipt');
+      }
+      const script = (await readFile(join(process.cwd(),'scripts/preflight-renewal-quarantine.sql'),'utf8')).replaceAll('\r\n','\n');
+      const query = script.split('-- continuum:renewal-quarantine-preflight-query-begin\n')[1]
+        ?.split('-- continuum:renewal-quarantine-preflight-query-end')[0];
+      if (!query) throw new Error('missing checked owner preflight query');
+      const sha = (value: string) => createHash('sha256').update(value,'utf8').digest('hex');
+      const tuple = ['renew-quarantine-v1',target.id,scope.id,'original',acquired.leaseId,runId,
+        acquired.fencingToken,requestId,'300','a'.repeat(64)];
+      const schema = String((await pool.query('SELECT current_schema() AS schema')).rows[0].schema);
+      const owner = String((await pool.query('SELECT current_user AS owner')).rows[0].owner);
+      const variables: Record<string,string> = {
+        continuum_schema:schema,expected_owner:owner,target_principal_id:target.id,target_scope_id:scope.id,
+        target_scope_name:scope.name,target_resource:'original',target_lease_id:acquired.leaseId,target_run_id:runId,
+        expected_fencing_token:acquired.fencingToken,target_request_id:requestId,requested_ttl_seconds:'300',
+        acknowledged_evidence_hash:'a'.repeat(64),previous_expiry:String((await pool.query(
+          'SELECT expires_at::text AS expiry FROM coordination_leases WHERE lease_id=$1',[acquired.leaseId])).rows[0].expiry),
+        expected_request_key_hash:sha(`renew-v1:${target.id}:${requestId}`),
+        expected_lease_hash:sha(`lease-v1:${acquired.leaseId}`),
+        expected_binding_hash:sha('['+tuple.map(value=>JSON.stringify(value)).join(', ')+']'),
+      };
+      const preflight = async (overrides: Record<string,string> = {}) => {
+        const selected = {...variables,...overrides};
+        const bound = query.replace(/:'([a-z_]+)'|:"([a-z_]+)"/g, (_match,literal,identifier) => {
+          const value=selected[literal ?? identifier];
+          if (value === undefined) throw new Error('missing preflight variable');
+          return literal ? "'"+value.replaceAll("'","''")+"'" : quoteRole(value);
+        });
+        const client=await pool.connect();
+        try {
+          await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+          await client.query("SET LOCAL lock_timeout='1s'; SET LOCAL statement_timeout='5s'; SET LOCAL search_path=pg_catalog");
+          return (await client.query(bound)).rows[0];
+        } finally { try { await client.query('ROLLBACK'); } finally { client.release(); } }
+      };
+      const acceptedPreflight = (await preflight()).report;
+      expect(acceptedPreflight).toMatchObject({ eligible:true,readOnly:'on',operationExecuted:false,
+        physicalQuiescenceProven:false,receiptCount:retainedReceipt ? 1 : 0 });
+      if (!retainedReceipt) {
+        // makeTestPool selects this explicit fixture URL. Do not put the URL,
+        // username or password in psql argv, output or assertion messages.
+        const fixtureUrl = new URL(String((pool as unknown as { options: PoolConfig }).options.connectionString));
+        if (!['postgres:','postgresql:'].includes(fixtureUrl.protocol) || !fixtureUrl.hostname || !fixtureUrl.username
+          || !fixtureUrl.pathname.slice(1) || fixtureUrl.hash) throw new Error('Explicit PostgreSQL fixture URL required');
+        const childEnv: NodeJS.ProcessEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('PG')));
+        Object.assign(childEnv, {
+          PGHOST:decodeURIComponent(fixtureUrl.hostname.replace(/^\[|\]$/g,'')),PGPORT:fixtureUrl.port || '5432',
+          PGDATABASE:decodeURIComponent(fixtureUrl.pathname.slice(1)),PGUSER:decodeURIComponent(fixtureUrl.username),
+          PGPASSWORD:decodeURIComponent(fixtureUrl.password),PGCONNECT_TIMEOUT:'2',
+        });
+        // Preserve the fixture URL's relevant libpq TLS/session selections.
+        // Unknown URL options refuse rather than silently selecting a different connection.
+        const connectionOptions: Record<string,string> = {
+          sslmode:'PGSSLMODE',sslcert:'PGSSLCERT',sslkey:'PGSSLKEY',sslrootcert:'PGSSLROOTCERT',
+          sslcrl:'PGSSLCRL',options:'PGOPTIONS',application_name:'PGAPPNAME',
+        };
+        for (const [key,value] of fixtureUrl.searchParams) {
+          if (!connectionOptions[key]) throw new Error('Unsupported psql fixture connection option');
+          childEnv[connectionOptions[key]]=value;
+        }
+        const retainedDirectory=await mkdtemp(join(tmpdir(),'continuum-owner-preflight-psql-'));
+        const psql = async (label: string, overrides: Record<string,string> = {}) => {
+          const input=Object.entries({...variables,...overrides}).map(([key,value]) =>
+            `\\set ${key} '${value.replaceAll('\\','\\\\').replaceAll("'","\\'")}'`).join('\n')+'\n';
+          const result=spawnSync('psql',['-X','--no-password','--set=ON_ERROR_STOP=1','--file=-',
+            '--file',join(process.cwd(),'scripts/preflight-renewal-quarantine.sql')], {
+            env:childEnv,input,encoding:'utf8',timeout:5_000,maxBuffer:64*1024,killSignal:'SIGKILL',windowsHide:true,
+          });
+          await writeFile(join(retainedDirectory,label+'.stdout'),result.stdout ?? '',{flag:'wx',mode:0o600});
+          await writeFile(join(retainedDirectory,label+'.stderr'),result.stderr ?? '',{flag:'wx',mode:0o600});
+          await writeFile(join(retainedDirectory,label+'.result.json'),JSON.stringify({
+            status:result.status,signal:result.signal,errorCode:(result.error as NodeJS.ErrnoException | undefined)?.code ?? null,
+          })+'\n',{flag:'wx',mode:0o600});
+          expect(result.error,`psql process failure; retained reports: ${retainedDirectory}`).toBeUndefined();
+          expect(result.signal).toBeNull();
+          const lines=result.stdout.trim().split(/\r?\n/);
+          expect(lines).toHaveLength(1);
+          const report=JSON.parse(lines[0]);
+          // Synthetic fixture JSON only, no connection settings. Preserve the
+          // actual positive/refusal report in the normal CI log as well as files.
+          console.info(`owner-preflight-psql ${label}: ${result.stdout.trim()}`);
+          return {status:result.status,report};
+        };
+        const actualPositive=await psql('eligible');
+        expect(actualPositive.status).toBe(0);
+        expect(actualPositive.report).toMatchObject({eligible:true,readOnly:'on',operationExecuted:false,
+          requestKeyHash:acceptedPreflight.requestKeyHash,leaseHash:acceptedPreflight.leaseHash,bindingHash:acceptedPreflight.bindingHash});
+        const actualRefusal=await psql('independent-hash-refused',{expected_binding_hash:'0'.repeat(64)});
+        expect(actualRefusal.status).toBe(3);
+        expect(actualRefusal.report).toMatchObject({eligible:false,independentHashesMatch:false,
+          readOnly:'on',operationExecuted:false});
+      }
+      // A mistyped request still names a genuine lease, but cannot borrow the
+      // independently frozen expected hashes from the original prepared tuple.
+      expect((await preflight({target_request_id:randomUUID()})).eligible).toBe(false);
+      expect((await preflight({expected_binding_hash:'0'.repeat(64)})).eligible).toBe(false);
+      expect((await preflight({target_lease_id:randomUUID()})).report).toMatchObject({eligible:false,generationPresent:false});
+      const wrongFence = [...args]; wrongFence[6] = '2';
+      await expect(operator.connection.query(call, wrongFence)).rejects.toThrow('reviewed identity');
+      if (!retainedReceipt) {
+        const purgedRun = randomUUID();
+        const purged = await acquireLease(app.connection, target, {
+          scope: 'project:' + scope.name, resource: 'purged', runId: purgedRun, requestId: randomUUID(),
+        });
+        if (!purged.acquired) throw new Error('expected purge fixture acquisition');
+        // Owner fixture models the eligible post-horizon row absence. It is not
+        // proof of any historical renewal outcome, and no row is reconstructed.
+        await pool.query(`UPDATE coordination_leases SET acquired_at=clock_timestamp()-interval '3 days',
+          expires_at=clock_timestamp()-interval '2 days' WHERE lease_id=$1`, [purged.leaseId]);
+        await pool.query('UPDATE coordination_resources SET current_lease_id=NULL WHERE scope_id=$1 AND resource=$2', [scope.id,'purged']);
+        await pool.query('DELETE FROM coordination_operation_receipts WHERE lease_id=$1', [purged.leaseId]);
+        await pool.query('DELETE FROM coordination_leases WHERE lease_id=$1', [purged.leaseId]);
+        const purgedArgs = [actor.id,target.id,scope.id,'purged',purged.leaseId,
+          purgedRun,purged.fencingToken,randomUUID(),300,'a'.repeat(64)];
+        await expect(operator.connection.query(call,purgedArgs)).rejects.toMatchObject({
+          code: '23514', constraint: 'coordination_renewal_generation_unavailable',
+        });
+        expect((await pool.query('SELECT fencing_token::text,current_lease_id FROM coordination_resources WHERE scope_id=$1 AND resource=$2',
+          [scope.id,'purged'])).rows[0]).toEqual({ fencing_token: purged.fencingToken,current_lease_id: null });
+        expect((await pool.query('SELECT 1 FROM coordination_leases WHERE lease_id=$1',[purged.leaseId])).rows).toEqual([]);
+      }
+      const absentGeneration = [...args]; absentGeneration[4] = randomUUID();
+      await expect(operator.connection.query(call, absentGeneration)).rejects.toMatchObject({
+        code: '23514', constraint: 'coordination_renewal_generation_unavailable',
+      });
+      expect((await pool.query(`SELECT count(*)::int AS count FROM coordination_operator_events
+        WHERE operation='coordination_renewal_quarantined'`)).rows[0].count).toBe(0);
+      const disposition = (await operator.connection.query(call, args)).rows[0].result;
+      expect(disposition).toMatchObject({ historicalOutcome: 'UNKNOWN', disposition: 'QUARANTINED_NO_REPLAY',
+        oldGenerationAuthority: false, replayPermitted: false, receiptRetainedAtDisposition: retainedReceipt });
+      expect((await operator.connection.query(call, args)).rows[0].result).toEqual(disposition);
+      expect((await preflight()).report).toMatchObject({eligible:false,priorQuarantineCount:1});
+      const otherRequest = [...args]; otherRequest[7] = randomUUID();
+      await expect(operator.connection.query(call, otherRequest)).rejects.toMatchObject({
+        code: '23514', constraint: 'coordination_renewal_generation_already_quarantined',
+      });
+      expect((await pool.query(`SELECT count(*)::int AS count FROM coordination_operator_events
+        WHERE operation='coordination_renewal_quarantined'`)).rows[0].count).toBe(1);
+      const changedEvidence = [...args]; changedEvidence[9] = 'b'.repeat(64);
+      await expect(operator.connection.query(call, changedEvidence)).rejects.toThrow('conflicts with retained evidence');
+      expect((await pool.query(`SELECT to_jsonb(receipt) AS value FROM coordination_operation_receipts receipt
+        WHERE principal_id=$1 AND operation='renew' AND request_id=$2`, [target.id, requestId])).rows).toEqual(receiptBefore);
+      const old = (await pool.query('SELECT expires_at,released_at FROM coordination_leases WHERE lease_id=$1', [acquired.leaseId])).rows[0];
+      expect(old.expires_at).toEqual(previousExpiry);
+      expect(old.released_at).not.toBeNull();
+      expect((await pool.query('SELECT fencing_floor FROM coordination_scope_fencing_floors WHERE scope_id=$1', [scope.id])).rows).toEqual(floorBefore);
+      expect((await pool.query('SELECT fencing_token::text,current_lease_id FROM coordination_resources WHERE scope_id=$1 AND resource=$2', [scope.id, 'original'])).rows[0])
+        .toEqual({ fencing_token: acquired.fencingToken, current_lease_id: null });
+      const successorRun = randomUUID();
+      const successor = await acquireLease(app.connection, target, {
+        scope: 'project:' + scope.name, resource: 'original', runId: successorRun, requestId: randomUUID(),
+      });
+      expect(successor).toMatchObject({ acquired: true, fencingToken: '2' });
+      if (!successor.acquired) throw new Error('expected successor acquisition');
+      await expect(renewLease(app.connection, target, {
+        leaseId: acquired.leaseId, runId, requestId,
+      })).rejects.toMatchObject({ code: 'LEASE_LOST' });
+      // Owner fixture setup models ordinary receipt cleanup after its horizon.
+      // Quarantine itself did not delete, shorten or replace this receipt.
+      await pool.query(`DELETE FROM coordination_operation_receipts
+        WHERE principal_id=$1 AND operation='renew' AND request_id=$2`, [target.id, requestId]);
+      await expect(renewLease(app.connection, target, {
+        leaseId: successor.leaseId, runId: successorRun, requestId,
+      })).rejects.toMatchObject({ code: 'LEASE_LOST' });
+      expect((await pool.query('SELECT expires_at FROM coordination_leases WHERE lease_id=$1', [successor.leaseId])).rows[0].expires_at.toISOString())
+        .toBe(new Date(successor.expiresAt).toISOString());
+      await expect(app.connection.query(`UPDATE coordination_leases SET expires_at=clock_timestamp()+interval '5 minutes'
+        WHERE lease_id=$1`, [acquired.leaseId])).rejects.toMatchObject({ code: '23514', constraint: 'coordination_renewal_quarantined' });
+      await expect(app.connection.query('UPDATE coordination_leases SET released_at=NULL WHERE lease_id=$1', [acquired.leaseId]))
+        .rejects.toMatchObject({ code: '23514', constraint: 'coordination_renewal_quarantined' });
+      await pool.query('DELETE FROM coordination_operation_receipts WHERE lease_id=$1', [acquired.leaseId]);
+      await pool.query('DELETE FROM coordination_leases WHERE lease_id=$1', [acquired.leaseId]);
+      await expect(app.connection.query(`INSERT INTO coordination_leases
+        (lease_id,scope_id,resource,principal_id,run_id,fencing_token,acquired_at,expires_at)
+        VALUES ($1,$2,$3,$4,$5,$6::bigint,clock_timestamp(),clock_timestamp()+interval '5 minutes')`,
+      [acquired.leaseId, scope.id, 'original', target.id, runId, acquired.fencingToken]))
+        .rejects.toMatchObject({ code: '23514', constraint: 'coordination_renewal_quarantined' });
+      const events = (await pool.query(`SELECT metadata FROM coordination_operator_events
+        WHERE operation='coordination_renewal_quarantined'`)).rows;
+      expect(events).toHaveLength(1);
+      expect(events[0].metadata).toMatchObject({
+        request_key_hash:acceptedPreflight.requestKeyHash,
+        lease_hash:acceptedPreflight.leaseHash,
+        binding_hash:acceptedPreflight.bindingHash,
+      });
+      for (const value of [requestId, runId, target.id, acquired.leaseId]) {
+        expect(JSON.stringify(events[0].metadata)).not.toContain(value);
+      }
+      await expect(operator.connection.query('SELECT * FROM coordination_operator_events')).rejects.toMatchObject({ code: '42501' });
+      await expect(pool.query(`DELETE FROM coordination_operator_events WHERE id=$1::bigint`, [disposition.operatorEventId]))
+        .rejects.toThrow('immutable');
+    } finally {
+      await operator.connection.end();
+      await app.connection.end();
+    }
+  }, 30_000);
+
+  it('does not grant the quarantining operator surface to the normal SYNC profile', async () => {
+    const service = await createPrincipal(pool, { externalId: randomUUID(), kind: 'service', displayName: 'Sync fixture' });
+    const role = `coord_sync_quarantine_${Date.now()}_${roles.length}`;
+    roles.push(role);
+    await pool.query('CREATE ROLE ' + quoteRole(role) + " LOGIN PASSWORD '" + randomUUID() + "'");
+    const connection = await rolePool(role);
+    try {
+      await applyGrantScript(pool, 'grant-sync-role.sql', {
+        continuum_sync_role: role, continuum_principal_id: service.id,
+      });
+      const signature = 'continuum_operator_quarantine_expired_renewal(uuid,uuid,uuid,text,uuid,uuid,bigint,uuid,integer,text)';
+      expect((await pool.query('SELECT has_function_privilege($1,$2,\'EXECUTE\') AS allowed', [role, signature])).rows[0].allowed).toBe(false);
+      await expect(connection.query('SELECT continuum_operator_quarantine_expired_renewal($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
+        [randomUUID(), randomUUID(), randomUUID(), 'original', randomUUID(), randomUUID(), '1', randomUUID(), 300, 'a'.repeat(64)]))
+        .rejects.toMatchObject({ code: '42501' });
+    } finally {
+      await connection.end();
+    }
+  }, 30_000);
+
+  it('rolls back a contended renewal disposition and requires the bound actor', async () => {
+    const actor = await createPrincipal(pool, { externalId: randomUUID(), kind: 'user', displayName: 'Operator' });
+    const other = await createPrincipal(pool, { externalId: randomUUID(), kind: 'user', displayName: 'Other actor' });
+    const target = await createPrincipal(pool, { externalId: randomUUID(), kind: 'service', displayName: 'Holder' });
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await addMembership(pool, actor.id, org.id, 'admin');
+    await addMembership(pool, other.id, org.id, 'admin');
+    const scope = await createScope(pool, { kind: 'project', name: 'quarantine-lock-' + randomUUID() });
+    await addMembership(pool, target.id, scope.id, 'writer');
+    const operator = await createApplicationRole();
+    await applyGrantScript(pool, 'grant-operator-role.sql', {
+      continuum_operator_role: operator.role, continuum_principal_id: actor.id,
+    });
+    const runId = randomUUID(); const requestId = randomUUID();
+    const held = await acquireLease(pool, target, {
+      scope: 'project:' + scope.name, resource: 'original', runId, requestId: randomUUID(),
+    });
+    if (!held.acquired) throw new Error('expected lease');
+    await pool.query(`UPDATE coordination_leases SET acquired_at=clock_timestamp()-interval '20 minutes',
+      expires_at=clock_timestamp()-interval '10 minutes' WHERE lease_id=$1`, [held.leaseId]);
+    const args = [actor.id, target.id, scope.id, 'original', held.leaseId, runId, held.fencingToken,
+      requestId, 300, 'a'.repeat(64)];
+    const call = 'SELECT continuum_operator_quarantine_expired_renewal($1::uuid,$2::uuid,$3::uuid,$4::text,$5::uuid,$6::uuid,$7::bigint,$8::uuid,$9::integer,$10::text)';
+    const blocker = await pool.connect();
+    let auditTrigger = false;
+    try {
+      const spoofed = [...args]; spoofed[0] = other.id;
+      await expect(operator.connection.query(call, spoofed)).rejects.toThrow('trusted');
+      await blocker.query('BEGIN');
+      await blocker.query(`SELECT pg_advisory_xact_lock(hashtextextended($1::text||':renew:'||$2::text,604692071::bigint))`, [target.id, requestId]);
+      await expect(operator.connection.query(call, args)).rejects.toMatchObject({ code: '55P03' });
+      expect((await pool.query(`SELECT count(*)::int AS count FROM coordination_operator_events
+        WHERE operation='coordination_renewal_quarantined'`)).rows[0].count).toBe(0);
+      expect((await pool.query('SELECT released_at FROM coordination_leases WHERE lease_id=$1', [held.leaseId])).rows[0].released_at).toBeNull();
+      await blocker.query('ROLLBACK');
+      // The existing mandatory audit is part of the transaction, not optional
+      // cleanup. A real database trigger fault must undo the fence and retirement.
+      await pool.query(`CREATE FUNCTION quarantine_fixture_reject_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'fixture mandatory audit failure'; END $$;
+        CREATE TRIGGER quarantine_fixture_reject_audit BEFORE INSERT ON audit_log
+          FOR EACH ROW WHEN (NEW.metadata->>'operation'='coordination_renewal_quarantined')
+          EXECUTE FUNCTION quarantine_fixture_reject_audit()`);
+      auditTrigger = true;
+      await expect(operator.connection.query(call, args)).rejects.toThrow('fixture mandatory audit failure');
+      expect((await pool.query(`SELECT count(*)::int AS count FROM coordination_operator_events
+        WHERE operation='coordination_renewal_quarantined'`)).rows[0].count).toBe(0);
+      expect((await pool.query('SELECT released_at FROM coordination_leases WHERE lease_id=$1', [held.leaseId])).rows[0].released_at).toBeNull();
+    } finally {
+      await blocker.query('ROLLBACK'); blocker.release();
+      if (auditTrigger) await pool.query('DROP TRIGGER quarantine_fixture_reject_audit ON audit_log; DROP FUNCTION quarantine_fixture_reject_audit()');
+      await operator.connection.end();
+    }
+  }, 30_000);
 });

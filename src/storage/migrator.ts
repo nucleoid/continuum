@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import type pg from 'pg';
 import {
   ensureExecutionLedger, executionClientIsUnsafe, MigrationExecution, recordUnknownHistory,
-  rollbackExecutionTransaction, sqlHash, verifyContractFunctionBodies,
+  rollbackExecutionTransaction, sqlHash, verifyContractFunctionBodies, verifyRenewalQuarantineBoundary,
 } from './migration-execution.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -102,6 +102,7 @@ const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
     'e0f21f1cfa4a81fbc7c8fbe65e06ae31157e499dbf562b482b87099185e079e2'],
   ['0089_promotion_outbox.sql', '034fff0c1f04c67d5b9e6e5bab5500e7c0b93b4b9baef5351c8e095fef7dc6ff'],
   ['0090_standup_activity.sql', 'ddf1f0bb884df857f7b17eb9d9b91da2fa527561990fc96604b43af7af8f657e'],
+  ['0091_coordination_renewal_quarantine.sql', '7f1ec5fb8ee0ba939f78b0d98df9a74c63f5efe8c9b72e00d22b30eb241b2d0e'],
 ]);
 const FORWARD_MIGRATION_REQUIREMENTS = new Map([
   ['0084_provider_embeddings_backfill.sql', '0083_tag_vocabularies.sql'],
@@ -111,6 +112,7 @@ const FORWARD_MIGRATION_REQUIREMENTS = new Map([
   ['0088_embedding_provider_scan_index_rebuild.sql', '0087_embedding_provider_scan_index.sql'],
   ['0089_promotion_outbox.sql', '0088_embedding_provider_scan_index_rebuild.sql'],
   ['0090_standup_activity.sql', '0089_promotion_outbox.sql'],
+  ['0091_coordination_renewal_quarantine.sql', '0090_standup_activity.sql'],
   ['0053_offboarding_restore_contract.sql', '0052_offboarding_review_repair.sql'],
   ['0056_coordination_final_remediation.sql', '0055_coordination_review_remediation.sql'],
   ['0057_coordination_privacy_race_remediation.sql',
@@ -1063,6 +1065,7 @@ export async function runMigrations(
       if (rowCount && rowCount > 0) {
         await recordUnknownHistory(client, file);
         const source = verifiedSources.get(file)!;
+        if (file === '0091_coordination_renewal_quarantine.sql') await verifyRenewalQuarantineBoundary(client, source);
         if (source.split('\n').some((line) => line.trim() === BACKFILL_COORDINATION_CONTRACT)) {
           await finishContractBackfill(client, file, source);
         }
@@ -1187,6 +1190,7 @@ export async function runMigrations(
           transactionOpen = true;
           await client.query('BEGIN');
           await execution.query(client, sql);
+          if (file === '0091_coordination_renewal_quarantine.sql') await verifyRenewalQuarantineBoundary(client, canonicalSql);
           await execution.complete(client);
           await client.query(
             'INSERT INTO _continuum_migrations (name) VALUES ($1)',

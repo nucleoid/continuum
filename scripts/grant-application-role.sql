@@ -278,6 +278,7 @@ BEGIN
     'continuum_operator_coordination_scope_privacy_state(uuid,uuid)',
     'continuum_operator_scrub_promotion_scope(uuid,uuid,uuid,integer)',
     'continuum_operator_scrub_standup_scope(uuid,uuid,uuid,integer)',
+    'continuum_operator_quarantine_expired_renewal(uuid,uuid,uuid,text,uuid,uuid,bigint,uuid,integer,text)',
     'continuum_operator_set_promotion_webhook_ids(uuid,text[])',
     'continuum_operator_bind_standup_producer(uuid,name,uuid,text,text)',
     'continuum_operator_map_standup_actor(uuid,text,text,uuid,text)',
