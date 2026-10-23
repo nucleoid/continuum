@@ -83,6 +83,7 @@ try {
     'migrations/0087_embedding_provider_scan_index.sql',
     'migrations/0088_embedding_provider_scan_index_rebuild.sql',
     'migrations/0090_standup_activity.sql',
+    'migrations/0091_coordination_renewal_quarantine.sql',
     'docs/standup.md',
     'docs/deployment.md',
     'deploy/container-entrypoint.mjs',
@@ -179,6 +180,26 @@ try {
     if (!definition) throw new Error(`Packaged contract function definition is missing: ${name}`);
     contractBodies.set(name, definition[1]);
   }
+  const quarantineSource = readFileSync(join(installedRoot,
+    'migrations/0091_coordination_renewal_quarantine.sql'), 'utf8').replaceAll('\r\n', '\n');
+  const quarantineBodies = new Map();
+  for (const [name, args] of [
+    ['continuum_guard_quarantined_renewal_receipt', ''],
+    ['continuum_guard_quarantined_lease_generation', ''],
+    ['continuum_operator_quarantine_expired_renewal', 'uuid,uuid,uuid,text,uuid,uuid,bigint,uuid,integer,text'],
+  ]) {
+    const definition = quarantineSource.match(new RegExp(
+      `CREATE FUNCTION ${name}\\([\\s\\S]*?AS \\$\\$([\\s\\S]*?)\\$\\$;`,
+    ));
+    if (!definition) throw new Error(`Packaged quarantine function definition is missing: ${name}`);
+    quarantineBodies.set(name, { args, body: definition[1] });
+  }
+  const quarantineTriggers = new Map([
+    ['quarantine_renewal_receipt', ['coordination_operation_receipts', 'continuum_guard_quarantined_renewal_receipt', 7, []]],
+    ['quarantine_lease_generation', ['coordination_leases', 'continuum_guard_quarantined_lease_generation', 23, ['expires_at', 'released_at']]],
+  ]);
+  const verifiedQuarantineBodies = new Set();
+  const verifiedQuarantineTriggers = new Set();
   let verifiedContractBodies = 0;
   let contractBackfillCalls = 0;
   let completedContractAttempts = 0;
@@ -238,11 +259,28 @@ try {
       // catalog bodies from the installed SQL, not invented verifier output.
       if (statement.includes('SELECT function.prosrc')
           && statement.includes('to_regprocedure')) {
-        const body = contractBodies.get(values[0]);
+        const quarantine = quarantineBodies.get(values[0]);
+        const body = quarantine?.body ?? contractBodies.get(values[0]);
         if (body === undefined) throw new Error('Unexpected packaged function verification');
-        verifiedContractBodies += 1;
+        if (quarantine) {
+          if (values.length !== 2 || values[1] !== quarantine.args
+              || verifiedQuarantineBodies.has(values[0])) {
+            throw new Error('Unexpected packaged quarantine function signature or duplicate verification');
+          }
+          verifiedQuarantineBodies.add(values[0]);
+        } else verifiedContractBodies += 1;
         return { rowCount: 1, rows: [{ prosrc: body, owner: true, language: 'plpgsql',
           prosecdef: true, hardened: true, publicExecute: false }] };
+      }
+      if (statement.includes('FROM pg_trigger trigger')
+          && statement.includes('trigger.tgname=$1::text')) {
+        const expected = quarantineTriggers.get(values[0]);
+        if (!expected || JSON.stringify(values) !== JSON.stringify([values[0], ...expected])
+            || verifiedQuarantineTriggers.has(values[0])) {
+          throw new Error('Unexpected packaged quarantine trigger verification');
+        }
+        verifiedQuarantineTriggers.add(values[0]);
+        return { rowCount: 1, rows: [{ valid: true }] };
       }
       if (statement.startsWith('SELECT continuum_backfill_coordination_contract($1)')) {
         if (!Number.isInteger(values[0]) || values[0] < 1 || values[0] > 1000) {
@@ -272,6 +310,10 @@ try {
   }
   if (verifiedContractBodies !== 4 || contractBackfillCalls !== 1 || completedContractAttempts !== 1) {
     throw new Error('Packed migrator did not verify and finish the ledgered contract backfill');
+  }
+  if (verifiedQuarantineBodies.size !== quarantineBodies.size
+      || verifiedQuarantineTriggers.size !== quarantineTriggers.size) {
+    throw new Error('Packed migrator did not verify all quarantine function bodies and triggers');
   }
   process.stdout.write('Packed continuum CLI entrypoint passed\n');
 } finally {
