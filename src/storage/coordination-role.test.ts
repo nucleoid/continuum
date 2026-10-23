@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import pg, { type PoolConfig } from 'pg';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { acquireLease, releaseLease, renewLease } from '../services/coordination.js';
@@ -991,6 +991,46 @@ describe('coordination database role profiles', () => {
         const wrongTtl = [...args]; wrongTtl[8] = 301;
         await expect(operator.connection.query(call, wrongTtl)).rejects.toThrow('retained renewal receipt');
       }
+      const script = (await readFile(join(process.cwd(),'scripts/preflight-renewal-quarantine.sql'),'utf8')).replaceAll('\r\n','\n');
+      const query = script.split('-- continuum:renewal-quarantine-preflight-query-begin\n')[1]
+        ?.split('-- continuum:renewal-quarantine-preflight-query-end')[0];
+      if (!query) throw new Error('missing checked owner preflight query');
+      const sha = (value: string) => createHash('sha256').update(value,'utf8').digest('hex');
+      const tuple = ['renew-quarantine-v1',target.id,scope.id,'original',acquired.leaseId,runId,
+        acquired.fencingToken,requestId,'300','a'.repeat(64)];
+      const schema = String((await pool.query('SELECT current_schema() AS schema')).rows[0].schema);
+      const owner = String((await pool.query('SELECT current_user AS owner')).rows[0].owner);
+      const variables: Record<string,string> = {
+        continuum_schema:schema,expected_owner:owner,target_principal_id:target.id,target_scope_id:scope.id,
+        target_scope_name:scope.name,target_resource:'original',target_lease_id:acquired.leaseId,target_run_id:runId,
+        expected_fencing_token:acquired.fencingToken,target_request_id:requestId,requested_ttl_seconds:'300',
+        acknowledged_evidence_hash:'a'.repeat(64),previous_expiry:String((await pool.query(
+          'SELECT expires_at::text AS expiry FROM coordination_leases WHERE lease_id=$1',[acquired.leaseId])).rows[0].expiry),
+        expected_request_key_hash:sha(`renew-v1:${target.id}:${requestId}`),
+        expected_lease_hash:sha(`lease-v1:${acquired.leaseId}`),
+        expected_binding_hash:sha('['+tuple.map(value=>JSON.stringify(value)).join(', ')+']'),
+      };
+      const preflight = async (overrides: Record<string,string> = {}) => {
+        const selected = {...variables,...overrides};
+        const bound = query.replace(/:'([a-z_]+)'|:"([a-z_]+)"/g, (_match,literal,identifier) => {
+          const value=selected[literal ?? identifier];
+          if (value === undefined) throw new Error('missing preflight variable');
+          return literal ? "'"+value.replaceAll("'","''")+"'" : quoteRole(value);
+        });
+        const client=await pool.connect();
+        try {
+          await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+          await client.query("SET LOCAL lock_timeout='1s'; SET LOCAL statement_timeout='5s'; SET LOCAL search_path=pg_catalog");
+          return (await client.query(bound)).rows[0];
+        } finally { try { await client.query('ROLLBACK'); } finally { client.release(); } }
+      };
+      expect((await preflight()).report).toMatchObject({ eligible:true,readOnly:'on',operationExecuted:false,
+        physicalQuiescenceProven:false,receiptCount:retainedReceipt ? 1 : 0 });
+      // A mistyped request still names a genuine lease, but cannot borrow the
+      // independently frozen expected hashes from the original prepared tuple.
+      expect((await preflight({target_request_id:randomUUID()})).eligible).toBe(false);
+      expect((await preflight({expected_binding_hash:'0'.repeat(64)})).eligible).toBe(false);
+      expect((await preflight({target_lease_id:randomUUID()})).report).toMatchObject({eligible:false,generationPresent:false});
       const wrongFence = [...args]; wrongFence[6] = '2';
       await expect(operator.connection.query(call, wrongFence)).rejects.toThrow('reviewed identity');
       if (!retainedReceipt) {
@@ -1025,6 +1065,7 @@ describe('coordination database role profiles', () => {
       expect(disposition).toMatchObject({ historicalOutcome: 'UNKNOWN', disposition: 'QUARANTINED_NO_REPLAY',
         oldGenerationAuthority: false, replayPermitted: false, receiptRetainedAtDisposition: retainedReceipt });
       expect((await operator.connection.query(call, args)).rows[0].result).toEqual(disposition);
+      expect((await preflight()).report).toMatchObject({eligible:false,priorQuarantineCount:1});
       const otherRequest = [...args]; otherRequest[7] = randomUUID();
       await expect(operator.connection.query(call, otherRequest)).rejects.toMatchObject({
         code: '23514', constraint: 'coordination_renewal_generation_already_quarantined',

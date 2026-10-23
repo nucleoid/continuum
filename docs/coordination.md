@@ -267,6 +267,12 @@ usage, resource and generation locks. After waits, it requires the reviewed
 identity and a fresh database observation that the generation has expired.
 A matching retained receipt is kept byte-for-byte; a mismatching one refuses.
 It does not run receipt cleanup or infer a not-committed result from absence.
+`receiptRetainedAtDisposition=true` means that the function matched a retained
+`renewed` receipt, including its canonical payload hash and complete generation
+tuple; that receipt proves the renewal committed. The disposition still uses
+the conservative `historicalOutcome=UNKNOWN` label and grants no old-generation
+authority. Retain the receipt as separate commit evidence; do not rewrite the
+original client's immutable UNKNOWN checkpoint or synthesize its lost response.
 Only a retained original lease row is supported. A missing row refuses with
 SQLSTATE `23514`, constraint `coordination_renewal_generation_unavailable`.
 This includes a generation purged by ordinary cleanup: preserve UNKNOWN and
@@ -285,8 +291,26 @@ the same event and original observation time; a changed tuple or evidence hash
 refuses. A different request for that same lease refuses with constraint
 `coordination_renewal_generation_already_quarantined`; a unique lease-hash index
 also prevents a second event. A correction is not an idempotent replay.
-Before the first call, independently join the complete prepared tuple and raw
-evidence hash against the retained owner readback. A dry run must find exactly
+Before the first call, run the checked owner-only
+[`scripts/preflight-renewal-quarantine.sql`](../scripts/preflight-renewal-quarantine.sql)
+under the existing finite maintenance owner. Independently derive its complete
+tuple, acknowledged raw evidence SHA-256 and expected request-key, lease and
+binding hashes from the preserved client record and reviewed scope-ID mapping.
+Do not copy the script's returned hashes back into its expected inputs.
+The script opens a read-only transaction and never calls the operator function.
+It checks the owner, retained generation/resource, fresh expiry, receipt match,
+the three independently supplied hashes and absence of an existing request or
+lease quarantine. Record its private JSON stdout and stderr beside the exact
+input bytes and script hash, using new non-overwriting output files. Nonzero
+exit or `eligible=false` stops the procedure. Any prior quarantine stops this
+first-disposition preflight, even if exact; retain and inspect the committed
+event instead of attempting a correction. The operator function's exact-repeat
+idempotence contract is unchanged.
+When there is no retained receipt, the generation expiry must also match the
+prepared previous expiry. A matching retained receipt can instead explain a
+changed expiry, but the actual generation must still be expired.
+Independently join the complete prepared tuple and raw
+evidence hash against that retained owner readback. A dry run must find exactly
 one matching scope, resource and generation, an expired finite timestamp, a
 counter at least the generation fence, and no differently bound quarantine.
 The request UUID and TTL cannot be reconstructed from an absent receipt;

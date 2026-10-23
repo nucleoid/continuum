@@ -104,9 +104,25 @@ post-upgrade recovery. Use the ordinary verified immutable artifact and full
 maintenance sequence, retaining backups, old source/image and original failed
 client evidence. Keep old clients/producers stopped; prove owned server-session
 and job settlement as required by the maintenance wrapper before retry or start.
-Before maintenance, read the exact retained lease and resource through the
-existing owner readback and join principal, scope, resource, lease, run, fence
-and previous expiry to the immutable prepared evidence. Stop the affected
+Before maintenance, use `scripts/preflight-renewal-quarantine.sql` through the
+existing owner connection, not the OP connection. Use `psql -X` with
+`ON_ERROR_STOP=1`, no credential-bearing command arguments, the approved finite
+outer owner and fresh private non-overwriting stdout/stderr files. Supply
+`continuum_schema`, `expected_owner`, `target_principal_id`, `target_scope_id`,
+`target_scope_name`, `target_resource`, `target_lease_id`, `target_run_id`,
+`expected_fencing_token`, `target_request_id`, `requested_ttl_seconds`,
+`acknowledged_evidence_hash`, `previous_expiry`, `expected_request_key_hash`,
+`expected_lease_hash` and `expected_binding_hash` as psql variables from a
+reviewed private input file. The expected tuple and raw evidence hash come from
+the preserved client bytes, with the selected existing project scope's UUID
+independently joined to its name. Compute the three expected hashes independently
+using the exact UTF-8 domains and JSONB text array contract in migration 0091;
+compare them to the returned hashes, never derive expectations from that result.
+Retain the input record/raw SHA, mapping proof, derived variable file, exact
+script hash and private JSON result as one reviewable preflight packet.
+The script only reads and rolls back. It refuses mismatches, absence, any prior
+quarantine or a non-owner session. It does not prove client/job quiescence and
+does not authorize or execute the irreversible OP call. Stop the affected
 principal's writers before this preflight and keep them stopped through the
 operator effect, since normal acquire/renew/sweep can purge an expired row.
 Require exactly one matching finite expired generation and reject a conflicting
