@@ -104,11 +104,27 @@ post-upgrade recovery. Use the ordinary verified immutable artifact and full
 maintenance sequence, retaining backups, old source/image and original failed
 client evidence. Keep old clients/producers stopped; prove owned server-session
 and job settlement as required by the maintenance wrapper before retry or start.
+Before maintenance, read the exact retained lease and resource through the
+existing owner readback and join principal, scope, resource, lease, run, fence
+and previous expiry to the immutable prepared evidence. Stop the affected
+principal's writers before this preflight and keep them stopped through the
+operator effect, since normal acquire/renew/sweep can purge an expired row.
+Require exactly one matching finite expired generation and reject a conflicting
+lease quarantine. If the generation is already absent, do not deploy on the
+assumption this action can resolve it: retained-row disposition is unavailable,
+UNKNOWN remains, and any purged-generation recovery needs separate review.
 After migration and exact identity/grant verification, use the dedicated bound
 OP connection with transaction-level one-second lock/five-second statement
 limits and the original outer owner. Read back the actual immutable event and
 all three new hardened function/trigger definitions before accepting a new-run
-disposition. Retain source, migration execution, function/trigger/owner/ACL,
+disposition. The normal migrator checks exact verified bodies, current migration
+owner, PL/pgSQL, SECURITY DEFINER, exact hardened search path, no PUBLIC EXECUTE
+and both exact enabled trigger attachments before committing 0091. It repeats
+those checks on a ledgered-0091 rerun; drift refuses instead of reinstalling
+over evidence. Before the irreversible operator call, repeat the complete tuple
+readback under the same maintenance quiescence, join the acknowledgement to the
+preserved raw client evidence, and refuse if another request already quarantined
+this lease. No dry-run or preflight result is an execution receipt. Retain source, migration execution, function/trigger/owner/ACL,
 operator role/OID/current membership, selected tuple and acknowledgement joins.
 Do not expose private credentials or claim that an absent historical receipt
 proved no commit. No old client checkpoint is rewritten or adopted. Preserve

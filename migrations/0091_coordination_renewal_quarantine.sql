@@ -7,7 +7,7 @@ SET LOCAL statement_timeout = '60s';
 CREATE UNIQUE INDEX coordination_renewal_quarantine_request_idx
   ON coordination_operator_events ((metadata->>'request_key_hash'))
   WHERE operation = 'coordination_renewal_quarantined';
-CREATE INDEX coordination_renewal_quarantine_lease_idx
+CREATE UNIQUE INDEX coordination_renewal_quarantine_lease_idx
   ON coordination_operator_events ((metadata->>'lease_hash'))
   WHERE operation = 'coordination_renewal_quarantined';
 
@@ -150,11 +150,23 @@ BEGIN
    WHERE scope_id = target_scope_id AND resource = target_resource FOR UPDATE;
   IF NOT FOUND THEN RAISE check_violation USING MESSAGE = 'renewal resource is unavailable'; END IF;
   SELECT * INTO lease_state FROM coordination_leases WHERE lease_id = target_lease_id FOR UPDATE;
-  IF NOT FOUND OR lease_state.principal_id <> target_principal_id
+  IF NOT FOUND THEN
+    RAISE check_violation USING CONSTRAINT = 'coordination_renewal_generation_unavailable',
+      MESSAGE = 'renewal generation is absent; retained-row disposition is unavailable';
+  END IF;
+  IF lease_state.principal_id <> target_principal_id
      OR lease_state.scope_id <> target_scope_id OR lease_state.resource <> target_resource
      OR lease_state.run_id <> target_run_id OR lease_state.fencing_token <> expected_fencing_token
      OR resource_state.fencing_token < expected_fencing_token THEN
     RAISE check_violation USING MESSAGE = 'renewal generation does not match reviewed identity';
+  END IF;
+  -- The resource and exact generation locks serialize different request keys.
+  -- A second event cannot correct an irreversible, differently bound event.
+  IF EXISTS (SELECT 1 FROM coordination_operator_events event
+      WHERE event.operation = 'coordination_renewal_quarantined'
+        AND event.metadata->>'lease_hash' = lease_hash) THEN
+    RAISE check_violation USING CONSTRAINT = 'coordination_renewal_generation_already_quarantined',
+      MESSAGE = 'renewal generation is already quarantined under another request';
   END IF;
   observed_at := pg_catalog.clock_timestamp();
   IF NOT isfinite(lease_state.expires_at) OR lease_state.expires_at > observed_at THEN

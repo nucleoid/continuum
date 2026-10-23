@@ -267,6 +267,12 @@ usage, resource and generation locks. After waits, it requires the reviewed
 identity and a fresh database observation that the generation has expired.
 A matching retained receipt is kept byte-for-byte; a mismatching one refuses.
 It does not run receipt cleanup or infer a not-committed result from absence.
+Only a retained original lease row is supported. A missing row refuses with
+SQLSTATE `23514`, constraint `coordination_renewal_generation_unavailable`.
+This includes a generation purged by ordinary cleanup: preserve UNKNOWN and
+stop. Reconstructing a row or authorizing a disposition from client evidence
+alone is outside this contract and needs a separately reviewed recovery design.
+The absence of a row, receipt or event grants no replay or lease authority.
 
 The append-only operator event records `UNKNOWN` and
 `QUARANTINED_NO_REPLAY`, with no old-generation or replay authority. Its bounded
@@ -276,7 +282,18 @@ target request/run/principal/lease identifiers, resource text or a resource-only
 digest. The existing event's operator, scope and time accounting remains under
 its existing immutable retention contract. Exact repeated operator calls return
 the same event and original observation time; a changed tuple or evidence hash
-refuses. Normal receipt sweeping and authorized privacy do not erase this fence.
+refuses. A different request for that same lease refuses with constraint
+`coordination_renewal_generation_already_quarantined`; a unique lease-hash index
+also prevents a second event. A correction is not an idempotent replay.
+Before the first call, independently join the complete prepared tuple and raw
+evidence hash against the retained owner readback. A dry run must find exactly
+one matching scope, resource and generation, an expired finite timestamp, a
+counter at least the generation fence, and no differently bound quarantine.
+The request UUID and TTL cannot be reconstructed from an absent receipt;
+their acknowledgement must match the preserved client evidence exactly.
+Keep affected principal writers stopped and repeat the identity readback
+immediately before the effect. Normal receipt sweeping and authorized privacy
+do not erase this fence.
 
 This is a new, explicit operator retirement: only the already-expired old
 lease's `released_at` is set, if absent, to this operator observation. Its expiry

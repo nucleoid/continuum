@@ -242,3 +242,55 @@ export async function verifyContractFunctionBodies(client: pg.PoolClient, source
     }
   }
 }
+
+/** Verify the retained no-replay boundary, only after migration 0091 exists. */
+export async function verifyRenewalQuarantineBoundary(client: pg.PoolClient, source: string): Promise<void> {
+  for (const [name, args] of [
+    ['continuum_guard_quarantined_renewal_receipt', ''],
+    ['continuum_guard_quarantined_lease_generation', ''],
+    ['continuum_operator_quarantine_expired_renewal', 'uuid,uuid,uuid,text,uuid,uuid,bigint,uuid,integer,text'],
+  ]) {
+    const start = source.indexOf(`CREATE FUNCTION ${name}(`);
+    const bodyStart = source.indexOf('AS $$', start);
+    const bodyEnd = source.indexOf('$$;', bodyStart + 5);
+    if (start < 0 || bodyStart < 0 || bodyEnd < 0) throw new Error(`Missing verified renewal quarantine body for ${name}`);
+    const expected = source.slice(bodyStart + 5, bodyEnd);
+    const result = await client.query<{
+      prosrc: string; owner: boolean; language: string; prosecdef: boolean;
+      hardened: boolean; publicExecute: boolean;
+    }>(`SELECT function.prosrc,
+        function.proowner=(SELECT oid FROM pg_catalog.pg_roles WHERE rolname=current_user) AS owner,
+        language.lanname AS language,function.prosecdef,
+        ARRAY(SELECT setting FROM unnest(COALESCE(function.proconfig,ARRAY[]::text[])) setting
+          WHERE setting LIKE 'search_path=%') =
+          ARRAY[format('search_path=pg_catalog, %I, pg_temp',current_schema())] AS hardened,
+        EXISTS(SELECT 1 FROM pg_catalog.aclexplode(COALESCE(function.proacl,
+          pg_catalog.acldefault('f',function.proowner))) privilege
+          WHERE privilege.grantee=0 AND privilege.privilege_type='EXECUTE') AS "publicExecute"
+      FROM pg_catalog.pg_proc function JOIN pg_catalog.pg_language language ON language.oid=function.prolang
+      WHERE function.oid=pg_catalog.to_regprocedure(format('%I.%s(%s)',current_schema(),$1::text,$2::text))`, [name,args]);
+    const row = result.rows[0];
+    if (!row || sqlHash(row.prosrc) !== sqlHash(expected) || !row.owner || row.language !== 'plpgsql'
+      || !row.prosecdef || !row.hardened || row.publicExecute) {
+      throw new Error(`Current renewal quarantine function body or trust drift: ${name}(${args})`);
+    }
+  }
+  for (const [name, table, helper, type, columns] of [
+    ['quarantine_renewal_receipt', 'coordination_operation_receipts', 'continuum_guard_quarantined_renewal_receipt', 7, []],
+    ['quarantine_lease_generation', 'coordination_leases', 'continuum_guard_quarantined_lease_generation', 23, ['expires_at','released_at']],
+  ] as const) {
+    const result = await client.query<{ valid: boolean }>(`SELECT
+        trigger.tgenabled='O' AND NOT trigger.tgisinternal AND trigger.tgtype=$4::smallint
+        AND trigger.tgnargs=0 AND trigger.tgqual IS NULL AND trigger.tgconstraint=0
+        AND trigger.tgfoid=pg_catalog.to_regprocedure(format('%I.%I()',current_schema(),$3::text))
+        AND ARRAY(SELECT attribute.attname::text FROM unnest(trigger.tgattr) WITH ORDINALITY item(attnum,position)
+          JOIN pg_catalog.pg_attribute attribute ON attribute.attrelid=trigger.tgrelid AND attribute.attnum=item.attnum
+          ORDER BY item.position)=$5::text[] AS valid
+      FROM pg_catalog.pg_trigger trigger
+      WHERE trigger.tgname=$1::text AND trigger.tgrelid=pg_catalog.to_regclass(format('%I.%I',current_schema(),$2::text))`,
+    [name,table,helper,type,columns]);
+    if (result.rows.length !== 1 || result.rows[0].valid !== true) {
+      throw new Error(`Current renewal quarantine trigger drift: ${name}`);
+    }
+  }
+}

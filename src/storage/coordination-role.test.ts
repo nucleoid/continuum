@@ -993,10 +993,44 @@ describe('coordination database role profiles', () => {
       }
       const wrongFence = [...args]; wrongFence[6] = '2';
       await expect(operator.connection.query(call, wrongFence)).rejects.toThrow('reviewed identity');
+      if (!retainedReceipt) {
+        const purgedRun = randomUUID();
+        const purged = await acquireLease(app.connection, target, {
+          scope: 'project:' + scope.name, resource: 'purged', runId: purgedRun, requestId: randomUUID(),
+        });
+        if (!purged.acquired) throw new Error('expected purge fixture acquisition');
+        // Owner fixture models the eligible post-horizon row absence. It is not
+        // proof of any historical renewal outcome, and no row is reconstructed.
+        await pool.query(`UPDATE coordination_leases SET acquired_at=clock_timestamp()-interval '3 days',
+          expires_at=clock_timestamp()-interval '2 days' WHERE lease_id=$1`, [purged.leaseId]);
+        await pool.query('UPDATE coordination_resources SET current_lease_id=NULL WHERE scope_id=$1 AND resource=$2', [scope.id,'purged']);
+        await pool.query('DELETE FROM coordination_operation_receipts WHERE lease_id=$1', [purged.leaseId]);
+        await pool.query('DELETE FROM coordination_leases WHERE lease_id=$1', [purged.leaseId]);
+        const purgedArgs = [actor.id,target.id,scope.id,'purged',purged.leaseId,
+          purgedRun,purged.fencingToken,randomUUID(),300,'a'.repeat(64)];
+        await expect(operator.connection.query(call,purgedArgs)).rejects.toMatchObject({
+          code: '23514', constraint: 'coordination_renewal_generation_unavailable',
+        });
+        expect((await pool.query('SELECT fencing_token::text,current_lease_id FROM coordination_resources WHERE scope_id=$1 AND resource=$2',
+          [scope.id,'purged'])).rows[0]).toEqual({ fencing_token: purged.fencingToken,current_lease_id: null });
+        expect((await pool.query('SELECT 1 FROM coordination_leases WHERE lease_id=$1',[purged.leaseId])).rows).toEqual([]);
+      }
+      const absentGeneration = [...args]; absentGeneration[4] = randomUUID();
+      await expect(operator.connection.query(call, absentGeneration)).rejects.toMatchObject({
+        code: '23514', constraint: 'coordination_renewal_generation_unavailable',
+      });
+      expect((await pool.query(`SELECT count(*)::int AS count FROM coordination_operator_events
+        WHERE operation='coordination_renewal_quarantined'`)).rows[0].count).toBe(0);
       const disposition = (await operator.connection.query(call, args)).rows[0].result;
       expect(disposition).toMatchObject({ historicalOutcome: 'UNKNOWN', disposition: 'QUARANTINED_NO_REPLAY',
         oldGenerationAuthority: false, replayPermitted: false, receiptRetainedAtDisposition: retainedReceipt });
       expect((await operator.connection.query(call, args)).rows[0].result).toEqual(disposition);
+      const otherRequest = [...args]; otherRequest[7] = randomUUID();
+      await expect(operator.connection.query(call, otherRequest)).rejects.toMatchObject({
+        code: '23514', constraint: 'coordination_renewal_generation_already_quarantined',
+      });
+      expect((await pool.query(`SELECT count(*)::int AS count FROM coordination_operator_events
+        WHERE operation='coordination_renewal_quarantined'`)).rows[0].count).toBe(1);
       const changedEvidence = [...args]; changedEvidence[9] = 'b'.repeat(64);
       await expect(operator.connection.query(call, changedEvidence)).rejects.toThrow('conflicts with retained evidence');
       expect((await pool.query(`SELECT to_jsonb(receipt) AS value FROM coordination_operation_receipts receipt
