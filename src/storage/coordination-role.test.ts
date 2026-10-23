@@ -1,4 +1,6 @@
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import pg, { type PoolConfig } from 'pg';
@@ -1024,8 +1026,63 @@ describe('coordination database role profiles', () => {
           return (await client.query(bound)).rows[0];
         } finally { try { await client.query('ROLLBACK'); } finally { client.release(); } }
       };
-      expect((await preflight()).report).toMatchObject({ eligible:true,readOnly:'on',operationExecuted:false,
+      const acceptedPreflight = (await preflight()).report;
+      expect(acceptedPreflight).toMatchObject({ eligible:true,readOnly:'on',operationExecuted:false,
         physicalQuiescenceProven:false,receiptCount:retainedReceipt ? 1 : 0 });
+      if (!retainedReceipt) {
+        // makeTestPool selects this explicit fixture URL. Do not put the URL,
+        // username or password in psql argv, output or assertion messages.
+        const fixtureUrl = new URL(String((pool as unknown as { options: PoolConfig }).options.connectionString));
+        if (!['postgres:','postgresql:'].includes(fixtureUrl.protocol) || !fixtureUrl.hostname || !fixtureUrl.username
+          || !fixtureUrl.pathname.slice(1) || fixtureUrl.hash) throw new Error('Explicit PostgreSQL fixture URL required');
+        const childEnv: NodeJS.ProcessEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('PG')));
+        Object.assign(childEnv, {
+          PGHOST:decodeURIComponent(fixtureUrl.hostname.replace(/^\[|\]$/g,'')),PGPORT:fixtureUrl.port || '5432',
+          PGDATABASE:decodeURIComponent(fixtureUrl.pathname.slice(1)),PGUSER:decodeURIComponent(fixtureUrl.username),
+          PGPASSWORD:decodeURIComponent(fixtureUrl.password),PGCONNECT_TIMEOUT:'2',
+        });
+        // Preserve the fixture URL's relevant libpq TLS/session selections.
+        // Unknown URL options refuse rather than silently selecting a different connection.
+        const connectionOptions: Record<string,string> = {
+          sslmode:'PGSSLMODE',sslcert:'PGSSLCERT',sslkey:'PGSSLKEY',sslrootcert:'PGSSLROOTCERT',
+          sslcrl:'PGSSLCRL',options:'PGOPTIONS',application_name:'PGAPPNAME',
+        };
+        for (const [key,value] of fixtureUrl.searchParams) {
+          if (!connectionOptions[key]) throw new Error('Unsupported psql fixture connection option');
+          childEnv[connectionOptions[key]]=value;
+        }
+        const retainedDirectory=await mkdtemp(join(tmpdir(),'continuum-owner-preflight-psql-'));
+        const psql = async (label: string, overrides: Record<string,string> = {}) => {
+          const input=Object.entries({...variables,...overrides}).map(([key,value]) =>
+            `\\set ${key} '${value.replaceAll('\\','\\\\').replaceAll("'","\\'")}'`).join('\n')+'\n';
+          const result=spawnSync('psql',['-X','--no-password','--set=ON_ERROR_STOP=1','--file=-',
+            '--file',join(process.cwd(),'scripts/preflight-renewal-quarantine.sql')], {
+            env:childEnv,input,encoding:'utf8',timeout:5_000,maxBuffer:64*1024,killSignal:'SIGKILL',windowsHide:true,
+          });
+          await writeFile(join(retainedDirectory,label+'.stdout'),result.stdout ?? '',{flag:'wx',mode:0o600});
+          await writeFile(join(retainedDirectory,label+'.stderr'),result.stderr ?? '',{flag:'wx',mode:0o600});
+          await writeFile(join(retainedDirectory,label+'.result.json'),JSON.stringify({
+            status:result.status,signal:result.signal,errorCode:(result.error as NodeJS.ErrnoException | undefined)?.code ?? null,
+          })+'\n',{flag:'wx',mode:0o600});
+          expect(result.error,`psql process failure; retained reports: ${retainedDirectory}`).toBeUndefined();
+          expect(result.signal).toBeNull();
+          const lines=result.stdout.trim().split(/\r?\n/);
+          expect(lines).toHaveLength(1);
+          const report=JSON.parse(lines[0]);
+          // Synthetic fixture JSON only, no connection settings. Preserve the
+          // actual positive/refusal report in the normal CI log as well as files.
+          console.info(`owner-preflight-psql ${label}: ${result.stdout.trim()}`);
+          return {status:result.status,report};
+        };
+        const actualPositive=await psql('eligible');
+        expect(actualPositive.status).toBe(0);
+        expect(actualPositive.report).toMatchObject({eligible:true,readOnly:'on',operationExecuted:false,
+          requestKeyHash:acceptedPreflight.requestKeyHash,leaseHash:acceptedPreflight.leaseHash,bindingHash:acceptedPreflight.bindingHash});
+        const actualRefusal=await psql('independent-hash-refused',{expected_binding_hash:'0'.repeat(64)});
+        expect(actualRefusal.status).toBe(3);
+        expect(actualRefusal.report).toMatchObject({eligible:false,independentHashesMatch:false,
+          readOnly:'on',operationExecuted:false});
+      }
       // A mistyped request still names a genuine lease, but cannot borrow the
       // independently frozen expected hashes from the original prepared tuple.
       expect((await preflight({target_request_id:randomUUID()})).eligible).toBe(false);
@@ -1114,6 +1171,11 @@ describe('coordination database role profiles', () => {
       const events = (await pool.query(`SELECT metadata FROM coordination_operator_events
         WHERE operation='coordination_renewal_quarantined'`)).rows;
       expect(events).toHaveLength(1);
+      expect(events[0].metadata).toMatchObject({
+        request_key_hash:acceptedPreflight.requestKeyHash,
+        lease_hash:acceptedPreflight.leaseHash,
+        binding_hash:acceptedPreflight.bindingHash,
+      });
       for (const value of [requestId, runId, target.id, acquired.leaseId]) {
         expect(JSON.stringify(events[0].metadata)).not.toContain(value);
       }
