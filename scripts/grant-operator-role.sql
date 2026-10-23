@@ -71,6 +71,7 @@ GRANT EXECUTE ON FUNCTION
   :"continuum_schema".continuum_operator_list_coordination_privacy_repairs(UUID, UUID, INTEGER),
   :"continuum_schema".continuum_operator_list_coordination_privacy_repairs(UUID, UUID, UUID, INTEGER),
   :"continuum_schema".continuum_operator_offboarding_actual_state_is_erased(UUID, UUID),
+  :"continuum_schema".continuum_operator_quarantine_expired_renewal(UUID, UUID, UUID, TEXT, UUID, UUID, BIGINT, UUID, INTEGER, TEXT),
   :"continuum_schema".continuum_operator_set_coordination_principal_quota(UUID, UUID, INTEGER, INTEGER),
   :"continuum_schema".continuum_change_manual_org_admin(UUID, UUID, TEXT, BOOLEAN),
   :"continuum_schema".continuum_takeover_manual_org_admin(UUID, UUID, UUID),

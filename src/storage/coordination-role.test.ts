@@ -946,4 +946,182 @@ describe('coordination database role profiles', () => {
       await app.connection.end();
     }
   });
+  it.each([false, true])('quarantines an expired renewal without inventing its historical response (receipt=%s)', async (retainedReceipt) => {
+    const actor = await createPrincipal(pool, {
+      externalId: randomUUID(), kind: 'user', displayName: 'Reconciliation operator',
+    });
+    const target = await createPrincipal(pool, {
+      externalId: randomUUID(), kind: 'service', displayName: 'Original lease holder',
+    });
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await addMembership(pool, actor.id, org.id, 'admin');
+    const scope = await createScope(pool, { kind: 'project', name: 'quarantine-' + randomUUID() });
+    await addMembership(pool, target.id, scope.id, 'writer');
+    const app = await createApplicationRole();
+    const operator = await createApplicationRole();
+    await applyGrantScript(pool, 'grant-operator-role.sql', {
+      continuum_operator_role: operator.role, continuum_principal_id: actor.id,
+    });
+    try {
+      const runId = randomUUID();
+      const requestId = randomUUID();
+      const acquired = await acquireLease(app.connection, target, {
+        scope: 'project:' + scope.name, resource: 'original', runId, requestId: randomUUID(),
+      });
+      if (!acquired.acquired) throw new Error('expected original acquisition');
+      // The no-receipt row is deliberately UNKNOWN fixture input, not a claim
+      // that a real missing receipt proves its request was never committed.
+      if (retainedReceipt) await renewLease(app.connection, target, {
+        leaseId: acquired.leaseId, runId, requestId, ttlSeconds: 300,
+      });
+      const call = 'SELECT continuum_operator_quarantine_expired_renewal($1::uuid,$2::uuid,$3::uuid,$4::text,$5::uuid,$6::uuid,$7::bigint,$8::uuid,$9::integer,$10::text) AS result';
+      const args = [actor.id, target.id, scope.id, 'original', acquired.leaseId,
+        runId, acquired.fencingToken, requestId, 300, 'a'.repeat(64)];
+      await expect(app.connection.query(call, args)).rejects.toMatchObject({ code: '42501' });
+      await expect(operator.connection.query(call, args)).rejects.toThrow('live or indeterminate');
+      await pool.query(`UPDATE coordination_leases SET
+        acquired_at=clock_timestamp()-interval '20 minutes',
+        expires_at=clock_timestamp()-interval '10 minutes' WHERE lease_id=$1`, [acquired.leaseId]);
+      const previousExpiry = (await pool.query('SELECT expires_at FROM coordination_leases WHERE lease_id=$1', [acquired.leaseId])).rows[0].expires_at;
+      const floorBefore = (await pool.query('SELECT fencing_floor FROM coordination_scope_fencing_floors WHERE scope_id=$1', [scope.id])).rows;
+      const receiptBefore = (await pool.query(`SELECT to_jsonb(receipt) AS value
+        FROM coordination_operation_receipts receipt
+        WHERE principal_id=$1 AND operation='renew' AND request_id=$2`, [target.id, requestId])).rows;
+      if (retainedReceipt) {
+        const wrongTtl = [...args]; wrongTtl[8] = 301;
+        await expect(operator.connection.query(call, wrongTtl)).rejects.toThrow('retained renewal receipt');
+      }
+      const wrongFence = [...args]; wrongFence[6] = '2';
+      await expect(operator.connection.query(call, wrongFence)).rejects.toThrow('reviewed identity');
+      const disposition = (await operator.connection.query(call, args)).rows[0].result;
+      expect(disposition).toMatchObject({ historicalOutcome: 'UNKNOWN', disposition: 'QUARANTINED_NO_REPLAY',
+        oldGenerationAuthority: false, replayPermitted: false, receiptRetainedAtDisposition: retainedReceipt });
+      expect((await operator.connection.query(call, args)).rows[0].result).toEqual(disposition);
+      const changedEvidence = [...args]; changedEvidence[9] = 'b'.repeat(64);
+      await expect(operator.connection.query(call, changedEvidence)).rejects.toThrow('conflicts with retained evidence');
+      expect((await pool.query(`SELECT to_jsonb(receipt) AS value FROM coordination_operation_receipts receipt
+        WHERE principal_id=$1 AND operation='renew' AND request_id=$2`, [target.id, requestId])).rows).toEqual(receiptBefore);
+      const old = (await pool.query('SELECT expires_at,released_at FROM coordination_leases WHERE lease_id=$1', [acquired.leaseId])).rows[0];
+      expect(old.expires_at).toEqual(previousExpiry);
+      expect(old.released_at).not.toBeNull();
+      expect((await pool.query('SELECT fencing_floor FROM coordination_scope_fencing_floors WHERE scope_id=$1', [scope.id])).rows).toEqual(floorBefore);
+      expect((await pool.query('SELECT fencing_token::text,current_lease_id FROM coordination_resources WHERE scope_id=$1 AND resource=$2', [scope.id, 'original'])).rows[0])
+        .toEqual({ fencing_token: acquired.fencingToken, current_lease_id: null });
+      const successorRun = randomUUID();
+      const successor = await acquireLease(app.connection, target, {
+        scope: 'project:' + scope.name, resource: 'original', runId: successorRun, requestId: randomUUID(),
+      });
+      expect(successor).toMatchObject({ acquired: true, fencingToken: '2' });
+      if (!successor.acquired) throw new Error('expected successor acquisition');
+      await expect(renewLease(app.connection, target, {
+        leaseId: acquired.leaseId, runId, requestId,
+      })).rejects.toMatchObject({ code: 'LEASE_LOST' });
+      // Owner fixture setup models ordinary receipt cleanup after its horizon.
+      // Quarantine itself did not delete, shorten or replace this receipt.
+      await pool.query(`DELETE FROM coordination_operation_receipts
+        WHERE principal_id=$1 AND operation='renew' AND request_id=$2`, [target.id, requestId]);
+      await expect(renewLease(app.connection, target, {
+        leaseId: successor.leaseId, runId: successorRun, requestId,
+      })).rejects.toMatchObject({ code: 'LEASE_LOST' });
+      expect((await pool.query('SELECT expires_at FROM coordination_leases WHERE lease_id=$1', [successor.leaseId])).rows[0].expires_at.toISOString())
+        .toBe(new Date(successor.expiresAt).toISOString());
+      await expect(app.connection.query(`UPDATE coordination_leases SET expires_at=clock_timestamp()+interval '5 minutes'
+        WHERE lease_id=$1`, [acquired.leaseId])).rejects.toMatchObject({ code: '23514', constraint: 'coordination_renewal_quarantined' });
+      await expect(app.connection.query('UPDATE coordination_leases SET released_at=NULL WHERE lease_id=$1', [acquired.leaseId]))
+        .rejects.toMatchObject({ code: '23514', constraint: 'coordination_renewal_quarantined' });
+      await pool.query('DELETE FROM coordination_operation_receipts WHERE lease_id=$1', [acquired.leaseId]);
+      await pool.query('DELETE FROM coordination_leases WHERE lease_id=$1', [acquired.leaseId]);
+      await expect(app.connection.query(`INSERT INTO coordination_leases
+        (lease_id,scope_id,resource,principal_id,run_id,fencing_token,acquired_at,expires_at)
+        VALUES ($1,$2,$3,$4,$5,$6::bigint,clock_timestamp(),clock_timestamp()+interval '5 minutes')`,
+      [acquired.leaseId, scope.id, 'original', target.id, runId, acquired.fencingToken]))
+        .rejects.toMatchObject({ code: '23514', constraint: 'coordination_renewal_quarantined' });
+      const events = (await pool.query(`SELECT metadata FROM coordination_operator_events
+        WHERE operation='coordination_renewal_quarantined'`)).rows;
+      expect(events).toHaveLength(1);
+      for (const value of [requestId, runId, target.id, acquired.leaseId]) {
+        expect(JSON.stringify(events[0].metadata)).not.toContain(value);
+      }
+      await expect(operator.connection.query('SELECT * FROM coordination_operator_events')).rejects.toMatchObject({ code: '42501' });
+      await expect(pool.query(`DELETE FROM coordination_operator_events WHERE id=$1::bigint`, [disposition.operatorEventId]))
+        .rejects.toThrow('immutable');
+    } finally {
+      await operator.connection.end();
+      await app.connection.end();
+    }
+  }, 30_000);
+
+  it('does not grant the quarantining operator surface to the normal SYNC profile', async () => {
+    const service = await createPrincipal(pool, { externalId: randomUUID(), kind: 'service', displayName: 'Sync fixture' });
+    const role = `coord_sync_quarantine_${Date.now()}_${roles.length}`;
+    roles.push(role);
+    await pool.query('CREATE ROLE ' + quoteRole(role) + ' NOLOGIN');
+    const connection = await rolePool(role);
+    try {
+      await applyGrantScript(pool, 'grant-sync-role.sql', {
+        continuum_sync_role: role, continuum_principal_id: service.id,
+      });
+      const signature = 'continuum_operator_quarantine_expired_renewal(uuid,uuid,uuid,text,uuid,uuid,bigint,uuid,integer,text)';
+      expect((await pool.query('SELECT has_function_privilege($1,$2,\'EXECUTE\') AS allowed', [role, signature])).rows[0].allowed).toBe(false);
+      await expect(connection.query('SELECT continuum_operator_quarantine_expired_renewal($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
+        [randomUUID(), randomUUID(), randomUUID(), 'original', randomUUID(), randomUUID(), '1', randomUUID(), 300, 'a'.repeat(64)]))
+        .rejects.toMatchObject({ code: '42501' });
+    } finally {
+      await connection.end();
+    }
+  }, 30_000);
+
+  it('rolls back a contended renewal disposition and requires the bound actor', async () => {
+    const actor = await createPrincipal(pool, { externalId: randomUUID(), kind: 'user', displayName: 'Operator' });
+    const other = await createPrincipal(pool, { externalId: randomUUID(), kind: 'user', displayName: 'Other actor' });
+    const target = await createPrincipal(pool, { externalId: randomUUID(), kind: 'service', displayName: 'Holder' });
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await addMembership(pool, actor.id, org.id, 'admin');
+    await addMembership(pool, other.id, org.id, 'admin');
+    const scope = await createScope(pool, { kind: 'project', name: 'quarantine-lock-' + randomUUID() });
+    await addMembership(pool, target.id, scope.id, 'writer');
+    const operator = await createApplicationRole();
+    await applyGrantScript(pool, 'grant-operator-role.sql', {
+      continuum_operator_role: operator.role, continuum_principal_id: actor.id,
+    });
+    const runId = randomUUID(); const requestId = randomUUID();
+    const held = await acquireLease(pool, target, {
+      scope: 'project:' + scope.name, resource: 'original', runId, requestId: randomUUID(),
+    });
+    if (!held.acquired) throw new Error('expected lease');
+    await pool.query(`UPDATE coordination_leases SET acquired_at=clock_timestamp()-interval '20 minutes',
+      expires_at=clock_timestamp()-interval '10 minutes' WHERE lease_id=$1`, [held.leaseId]);
+    const args = [actor.id, target.id, scope.id, 'original', held.leaseId, runId, held.fencingToken,
+      requestId, 300, 'a'.repeat(64)];
+    const call = 'SELECT continuum_operator_quarantine_expired_renewal($1::uuid,$2::uuid,$3::uuid,$4::text,$5::uuid,$6::uuid,$7::bigint,$8::uuid,$9::integer,$10::text)';
+    const blocker = await pool.connect();
+    let auditTrigger = false;
+    try {
+      const spoofed = [...args]; spoofed[0] = other.id;
+      await expect(operator.connection.query(call, spoofed)).rejects.toThrow('trusted');
+      await blocker.query('BEGIN');
+      await blocker.query(`SELECT pg_advisory_xact_lock(hashtextextended($1::text||':renew:'||$2::text,604692071::bigint))`, [target.id, requestId]);
+      await expect(operator.connection.query(call, args)).rejects.toMatchObject({ code: '55P03' });
+      expect((await pool.query(`SELECT count(*)::int AS count FROM coordination_operator_events
+        WHERE operation='coordination_renewal_quarantined'`)).rows[0].count).toBe(0);
+      expect((await pool.query('SELECT released_at FROM coordination_leases WHERE lease_id=$1', [held.leaseId])).rows[0].released_at).toBeNull();
+      await blocker.query('ROLLBACK');
+      // The existing mandatory audit is part of the transaction, not optional
+      // cleanup. A real database trigger fault must undo the fence and retirement.
+      await pool.query(`CREATE FUNCTION quarantine_fixture_reject_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'fixture mandatory audit failure'; END $$;
+        CREATE TRIGGER quarantine_fixture_reject_audit BEFORE INSERT ON audit_log
+          FOR EACH ROW WHEN (NEW.metadata->>'operation'='coordination_renewal_quarantined')
+          EXECUTE FUNCTION quarantine_fixture_reject_audit()`);
+      auditTrigger = true;
+      await expect(operator.connection.query(call, args)).rejects.toThrow('fixture mandatory audit failure');
+      expect((await pool.query(`SELECT count(*)::int AS count FROM coordination_operator_events
+        WHERE operation='coordination_renewal_quarantined'`)).rows[0].count).toBe(0);
+      expect((await pool.query('SELECT released_at FROM coordination_leases WHERE lease_id=$1', [held.leaseId])).rows[0].released_at).toBeNull();
+    } finally {
+      await blocker.query('ROLLBACK'); blocker.release();
+      if (auditTrigger) await pool.query('DROP TRIGGER quarantine_fixture_reject_audit ON audit_log; DROP FUNCTION quarantine_fixture_reject_audit()');
+      await operator.connection.end();
+    }
+  }, 30_000);
 });

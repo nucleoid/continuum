@@ -96,6 +96,34 @@ Application containers use fixed UID 10001, read-only root, all capabilities dro
 
 Readiness uses `/health/ready` and a one-second database deadline. Liveness uses `/health/live`. Neither proves embedding provider health or repeats migration/profile verification. Compose health does not restart an unhealthy process. REST shutdown has a ten-second budget and a 15-second stop grace; bounded termination does not prove detached callbacks or downstream copies were erased. Commands that write output need a separately approved narrow writable mount, including Linux audit-retention export.
 
+### Expired ambiguous coordination renewal
+
+Migration 0091 and its operator grant add the narrowly scoped expired-renewal
+quarantine described in [coordination](coordination.md). It is not automatic
+post-upgrade recovery. Use the ordinary verified immutable artifact and full
+maintenance sequence, retaining backups, old source/image and original failed
+client evidence. Keep old clients/producers stopped; prove owned server-session
+and job settlement as required by the maintenance wrapper before retry or start.
+After migration and exact identity/grant verification, use the dedicated bound
+OP connection with transaction-level one-second lock/five-second statement
+limits and the original outer owner. Read back the actual immutable event and
+all three new hardened function/trigger definitions before accepting a new-run
+disposition. Retain source, migration execution, function/trigger/owner/ACL,
+operator role/OID/current membership, selected tuple and acknowledgement joins.
+Do not expose private credentials or claim that an absent historical receipt
+proved no commit. No old client checkpoint is rewritten or adopted. Preserve
+UNKNOWN and require separate actual native quiescence before a fresh run.
+
+The two new indexes are ordinary transactional DDL over operator event history.
+Rehearse under existing limits; large histories or lock contention can exceed a
+bounded maintenance window. A failed 0091 transaction rolls back its changes,
+but earlier forward phases may already have committed. Preserve the wrapper's
+failure/settlement evidence and project lock; recover through the existing
+forward procedure, not manual ledger edits or a larger unreviewed deadline.
+Keep the permanent quarantine fence on rollback. Deploying a binary or passing
+readiness does not by itself perform this operator action or close its client's
+original ownership uncertainty.
+
 ## Upgrade, backup, restore and rollback
 
 Set `CONTINUUM_MAINTENANCE_DEADLINE_SECONDS` and `CONTINUUM_BACKUP_DEADLINE_SECONDS` explicitly for the approved window when needed. Each defaults to 900 seconds and is capped at 14400 seconds. Backup has its own budget; dumping the database does not consume the fresh or upgrade migration/grant budget. Maintenance output records the selected budgets in milliseconds as `deadlineMs` and `backupDeadlineMs`. A larger deadline does not change the migration's statement and lock limits.

@@ -241,6 +241,71 @@ Continuum does not use a local query timeout that could reject while a mutating
 statement continues unseen. If the network makes commit versus response
 uncertain, retry the exact request within the receipt horizon.
 
+## Operator quarantine of an expired ambiguous renewal
+
+Migration 0091 adds a database-operator surface, not a REST/MCP replay or a
+negative operation receipt. It supports existing project scopes only. Use
+`continuum_operator_quarantine_expired_renewal(actor, principal, scope, resource,
+lease, run, expected_fence, request, ttl, acknowledged_evidence_hash)` through the
+existing role-name/OID-bound OP connection and a current canonical manual
+organization administrator. APP and SYNC cannot execute it. Neither a passed
+actor UUID nor an expired lease establishes operator authority.
+
+Quiesce the original harness and all affected external producers first, retain
+its exact PreparedRenew bytes, request/principal/run/lease/fence/TTL tuple and
+actual original process/owned-task disposition. An absent receipt, a timeout or
+an expired lease does not prove that the old renewal never committed. A hash of
+client evidence is an operator acknowledgement, not server proof of client
+quiescence. If old native or server work remains unsettled, preserve that gap
+and do not start a new owner.
+
+The operator calls inside a transaction with `SET LOCAL lock_timeout='1s'` and
+`SET LOCAL statement_timeout='5s'`, under a finite outer owner. Function-local
+settings do not bound the already-running calling statement. The function takes
+principal/authorization, the exact existing request advisory lock, receipt,
+usage, resource and generation locks. After waits, it requires the reviewed
+identity and a fresh database observation that the generation has expired.
+A matching retained receipt is kept byte-for-byte; a mismatching one refuses.
+It does not run receipt cleanup or infer a not-committed result from absence.
+
+The append-only operator event records `UNKNOWN` and
+`QUARANTINED_NO_REPLAY`, with no old-generation or replay authority. Its bounded
+metadata stores domain-separated hashes of high-entropy request/generation
+identities, a complete tuple binding and acknowledged evidence digest, not raw
+target request/run/principal/lease identifiers, resource text or a resource-only
+digest. The existing event's operator, scope and time accounting remains under
+its existing immutable retention contract. Exact repeated operator calls return
+the same event and original observation time; a changed tuple or evidence hash
+refuses. Normal receipt sweeping and authorized privacy do not erase this fence.
+
+This is a new, explicit operator retirement: only the already-expired old
+lease's `released_at` is set, if absent, to this operator observation. Its expiry
+and all original receipts remain unchanged. The resource pointer is cleared only
+if it still names that lease; a successor and the persistent counter/floor stay
+untouched. No old lock_release response is manufactured. Guard triggers reject
+new receipts under that quarantined renewal key and extension, reactivation or
+recreation of its lease identity, including by an old binary. Privacy may still
+shorten timestamps. Direct older writers receive a constraint refusal; current
+service callers receive the existing non-authoritative `LEASE_LOST` envelope.
+
+Keep the old harness checkpoint permanently quarantined, with the old intent
+still UNKNOWN, not Cleared, Held or ReleaseSucceeded. A reviewed fresh start
+requires actual readback of the committed operator event and guards, current OP
+and deployed image/source/grant provenance, and physical original-work
+quiescence. Use a new run, store/writer epoch and request UUIDs. Acquire normally
+and require the new generation's actual higher fencing token; an operator event
+cannot itself grant a lease, permit dispatch or certify downstream effects.
+Do not call a client reconcile method that resends the old renewal. If original
+physical closure cannot be established, the operator fence alone does not close
+that separate blocker.
+
+Reapply the exact OP profile after the full forward migration. No new APP/SYNC
+capability is granted. This operation is irreversible; keep the fence on binary
+rollback, or recover forward. Schema reversal needs the existing verified
+separate-volume restore procedure plus explicit reconciliation of all later
+quarantines and writes. Do not remove events, weaken trigger/profile guards,
+shorten receipt retention or reset fencing counters to make recovery pass.
+
 ## Limits and cleanup
 
 V1 hard limits are:

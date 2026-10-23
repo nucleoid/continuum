@@ -218,6 +218,15 @@ Each scope has a hard 10,000-key ceiling. Each principal has one combined 10,000
 
 Lease ownership is not an end-to-end side-effect fence. Downstream resources must reject stale tokens; ordinary filesystems and GitHub do not do this automatically. Publication still requires orchestrator control and repository protection. REST uses camelCase and MCP snake_case naming over the shared service. See [coordination](./docs/coordination.md).
 
+Migration 0091 adds an approval-bound, project-scope operator quarantine for an
+exact expired ambiguous renewal. It preserves the historical outcome as UNKNOWN
+and original receipt/expiry evidence, commits a permanent no-replay fence and a
+new operator retirement, and grants no lease or worker authority. Old clients
+remain quarantined; a new run additionally requires current operator/deployment
+readback and independent physical quiescence. See the coordination and deployment
+runbooks. This does not claim linearizable downstream fencing or retrospectively
+prove whether the original renewal committed.
+
 ## Migration and rollout
 
 The current schema includes provider-profile and coordination repairs through 0082, tag vocabularies in 0083, embedding storage/backfill/index migrations 0084 through 0088, the promotion outbox in 0089, and trusted Standup activity in 0090. A migration filename in the ledger does not prove bounded coordination backfill completion. Owner-only schema work, backfill, effective-body verification, and execution evidence have separate roles. Execution provenance stores hashes, counts, and named variants without storing raw SQL or credential bindings; older execution history can remain unknown.
