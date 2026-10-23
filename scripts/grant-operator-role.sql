@@ -71,7 +71,6 @@ GRANT EXECUTE ON FUNCTION
   :"continuum_schema".continuum_operator_list_coordination_privacy_repairs(UUID, UUID, INTEGER),
   :"continuum_schema".continuum_operator_list_coordination_privacy_repairs(UUID, UUID, UUID, INTEGER),
   :"continuum_schema".continuum_operator_offboarding_actual_state_is_erased(UUID, UUID),
-  :"continuum_schema".continuum_operator_quarantine_expired_renewal(UUID, UUID, UUID, TEXT, UUID, UUID, BIGINT, UUID, INTEGER, TEXT),
   :"continuum_schema".continuum_operator_set_coordination_principal_quota(UUID, UUID, INTEGER, INTEGER),
   :"continuum_schema".continuum_change_manual_org_admin(UUID, UUID, TEXT, BOOLEAN),
   :"continuum_schema".continuum_takeover_manual_org_admin(UUID, UUID, UUID),
@@ -137,6 +136,11 @@ BEGIN
   END IF;
   IF to_regprocedure(format('%I.continuum_operator_set_promotion_webhook_ids(uuid,text[])',schema_name)) IS NOT NULL THEN
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_operator_set_promotion_webhook_ids(UUID,TEXT[]) TO %I',schema_name,target_role);
+  END IF;
+  -- Historical upgrade rehearsals also use the current grant assets. The
+  -- capability is granted only after its exact forward function is present.
+  IF to_regprocedure(format('%I.continuum_operator_quarantine_expired_renewal(uuid,uuid,uuid,text,uuid,uuid,bigint,uuid,integer,text)',schema_name)) IS NOT NULL THEN
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_operator_quarantine_expired_renewal(UUID,UUID,UUID,TEXT,UUID,UUID,BIGINT,UUID,INTEGER,TEXT) TO %I',schema_name,target_role);
   END IF;
   IF to_regclass(format('%I.continuum_pgvector_role_profiles', schema_name)) IS NOT NULL THEN
     EXECUTE format(

@@ -197,14 +197,14 @@ describe('pgvector rollout remediation', () => {
       await addMembership(owner, actor.id, org.id, 'admin');
       const appRole = identifier('renewal_app'), opRole = identifier('renewal_op'), syncRole = identifier('renewal_sync');
       roles.push(appRole, opRole, syncRole);
-      for (const role of [appRole,opRole,syncRole]) await root.query(`CREATE ROLE ${quoteIdentifier(role)} NOLOGIN`);
+      for (const role of [appRole,opRole]) await root.query(`CREATE ROLE ${quoteIdentifier(role)} NOLOGIN`);
+      await root.query(`CREATE ROLE ${quoteIdentifier(syncRole)} LOGIN PASSWORD ${quoteLiteral(randomUUID())}`);
       await grantApplicationRole(owner, schema, appRole);
       await grantApplicationRole(owner, schema, opRole);
       await grantSyncRole(owner, schema, syncRole, sync.id);
       const opSource = await readFile(join(process.cwd(), 'scripts/grant-operator-role.sql'), 'utf8');
-      const newGrant = '  :"continuum_schema".continuum_operator_quarantine_expired_renewal(UUID, UUID, UUID, TEXT, UUID, UUID, BIGINT, UUID, INTEGER, TEXT),';
-      expect(opSource.split(newGrant)).toHaveLength(2);
-      // Reproduce the existing 0090 profile by omitting only its not-yet-created capability.
+      // Run the same current script on 0090 and 0091. Only the exact function's
+      // presence changes whether its new capability can be granted.
       const grantOperator = async (source: string) => {
         const sql = source.split(/\r?\n/).filter((line) => !line.trimStart().startsWith('\\')).join('\n')
           .replaceAll(':"continuum_schema"',quoteIdentifier(schema)).replaceAll(":'continuum_schema'",quoteLiteral(schema))
@@ -212,7 +212,7 @@ describe('pgvector rollout remediation', () => {
           .replaceAll(":'continuum_principal_id'",quoteLiteral(actor.id));
         await owner.query(sql);
       };
-      await grantOperator(opSource.replace(newGrant, ''));
+      await grantOperator(opSource);
       const profiles = async () => (await owner.query(`SELECT database_role_oid,profile_kind,provider_schema_oid FROM continuum_pgvector_role_profiles ORDER BY database_role_oid`)).rows;
       const identities = async () => (await owner.query(`SELECT database_role,database_role_oid,principal_id,can_approve,can_sync FROM continuum_trusted_database_identities ORDER BY database_role_oid`)).rows;
       const beforeProfiles = await profiles(), beforeIdentities = await identities();

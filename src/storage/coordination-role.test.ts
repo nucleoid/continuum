@@ -1192,7 +1192,7 @@ describe('coordination database role profiles', () => {
     const service = await createPrincipal(pool, { externalId: randomUUID(), kind: 'service', displayName: 'Sync fixture' });
     const role = `coord_sync_quarantine_${Date.now()}_${roles.length}`;
     roles.push(role);
-    await pool.query('CREATE ROLE ' + quoteRole(role) + ' NOLOGIN');
+    await pool.query('CREATE ROLE ' + quoteRole(role) + " LOGIN PASSWORD '" + randomUUID() + "'");
     const connection = await rolePool(role);
     try {
       await applyGrantScript(pool, 'grant-sync-role.sql', {
