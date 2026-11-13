@@ -10,6 +10,7 @@ import { addMembership, removeMembership } from '../storage/memberships.js';
 import { loadCorpus } from '../evaluation/test-helpers.js';
 import type { EvidenceTarget } from '../evidence/policy.js';
 import { decideEvidenceForPrincipal } from './access.js';
+import { provisionEntraGroupBinding, syncEntraMemberships } from './membership-sync.js';
 
 const target = (scopeId: string): EvidenceTarget => ({ kind: 'extracted-assertion',
   policy: { version: '1', currentVersion: '1', scopeIds: [scopeId], state: 'active', expiresAt: null,
@@ -44,11 +45,13 @@ describe('trusted current evidence authority', () => {
   });
 
   it('uses database Entra freshness while retaining manual break-glass semantics', async () => {
-    await removeMembership(owner, reader.id, scope.id);
-    await owner.query(`INSERT INTO scope_memberships(principal_id,scope_id,role,source_kind,source_id,active)
-      VALUES($1,$2,'reader','entra','fixture',TRUE)`, [reader.id, scope.id]);
-    await owner.query(`INSERT INTO entra_sync_state(singleton,last_success_at,max_staleness_hours)
-      VALUES(TRUE,clock_timestamp(),48) ON CONFLICT(singleton) DO UPDATE SET last_success_at=EXCLUDED.last_success_at`);
+    const admin = await createPrincipal(owner, { externalId: 'evidence-admin', kind: 'user', displayName: 'Admin' });
+    const org = (await getScopeByRef(owner, { kind: 'org', name: '' }))!;
+    await addMembership(owner, admin.id, org.id, 'admin');
+    reader = await createPrincipal(owner, { externalId: randomUUID(), kind: 'user', displayName: 'Entra reader' });
+    const groupId = randomUUID();
+    await provisionEntraGroupBinding(owner, admin, { externalId: groupId, scopeId: scope.id, role: 'reader' });
+    await syncEntraMemberships(owner, admin, [{ id: groupId, status: 'present', displayName: 'Evidence', memberObjectIds: [reader.externalId] }]);
     const request = { action: 'read' as const, artifact: target(scope.id), providerInput: 'artifact' as const };
     expect((await decideEvidenceForPrincipal(owner, reader.id, request)).artifactRead.decision).toBe('allow');
     await owner.query("UPDATE entra_sync_state SET last_success_at=clock_timestamp()-interval '49 hours'");

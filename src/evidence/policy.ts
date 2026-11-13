@@ -73,7 +73,7 @@ function checkAuthority(authority: CurrentEvidenceAuthority | 'not-required', no
 function checkTarget(context: EvidenceAuthorityContext, target?: EvidenceTarget): EvidenceDecision {
   if (!target || !EVIDENCE_ARTIFACT_KINDS.includes(target.kind)
       || !Array.isArray(target.authorityDependencies)) return deny('authority-unknown');
-  const policies = [target.policy, ...target.authorityDependencies];
+  const policies: EvidencePolicy[] = [target.policy, ...target.authorityDependencies];
   for (const policy of policies) {
     if (!policy || !policy.version || policy.version !== policy.currentVersion) return deny('policy-stale');
     if (policy.state !== 'active' || (policy.expiresAt !== null
