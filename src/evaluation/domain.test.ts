@@ -3,7 +3,8 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { loadCorpus, scoreRetrieval, scoreClaims, compareRuns, relationshipGate,
-  evaluateMechanism, seededOrder, boundReport, runBaseline, evaluateTaskPair, validateCases, compareExperiments, checkedGrantSql, experimentFromReport } from './test-helpers.js';
+  evaluateMechanism, seededOrder, boundReport, runBaseline, evaluateTaskPair, validateCases, compareExperiments, checkedGrantSql, experimentFromReport,
+  retrievalInput, evaluateRetrieval, PhaseBudget, planRows } from './test-helpers.js';
 
 describe('frozen domain evaluator', () => {
   it('loads content-addressed synthetic fixtures with reproducible seeded order', async () => {
@@ -16,9 +17,48 @@ describe('frozen domain evaluator', () => {
     expect(holdout.length).toBeGreaterThanOrEqual(20);
     expect(new Set(holdout.map(item => item.query)).size).toBe(holdout.length);
     expect(corpus.cases.some(item => item.split === 'development')).toBe(true);
-    expect(holdout.every(item => item.documents.length >= 3 && item.relevant.some(ref => ref.grade < 3))).toBe(true);
-    expect(holdout.every(item => item.documents.some(doc => !item.relevant.some(ref => ref.id === doc.id))
-      && item.relations.length > 0 && item.documents.some(doc => doc.type === 'relationship'))).toBe(true);
+    expect(new Set(holdout.map(item => item.relevant.map(ref => ref.grade).sort().join(','))).size).toBeGreaterThanOrEqual(6);
+    expect(new Set(holdout.map(item => item.documents.length)).size).toBeGreaterThanOrEqual(4);
+    expect(holdout.some(item => item.relations.length === 0)).toBe(true);
+    expect(holdout.some(item => item.relations.some(edge => edge.type === 'contradicts'))).toBe(true);
+    expect(holdout.some(item => item.relations.some(edge => item.prohibited.includes(`${edge.target.id}@${edge.target.version}`)))).toBe(true);
+    expect(holdout.some(item => item.relations.length > 0 && item.relations.every(edge => !item.relevant.some(ref => ref.id === edge.target.id)))).toBe(true);
+    const development = corpus.cases.filter(item => item.collection === 'ranking' && item.split === 'development');
+    const bodies = new Set(development.flatMap(item => item.documents.map(doc => doc.body)));
+    expect(holdout.every(item => item.documents.every(doc => !bodies.has(doc.body)))).toBe(true);
+  });
+
+  it('gives copied assertions no additional gain or independent-source credit', () => {
+    const refs = [{ id: 'a', version: '1', grade: 3, family: 'source', assertion: 'same' },
+      { id: 'b', version: '1', grade: 3, family: 'source', assertion: 'same' }];
+    expect(scoreRetrieval(refs, refs)).toMatchObject({ recall: 1, precision: 0.5, independentFamilies: 1, ndcg: 1, duplicateResults: 1 });
+    const forged = refs.map((ref, index) => ({ ...ref, family: `source-${index}` }));
+    expect(() => scoreRetrieval(forged, forged)).toThrow(/family/i);
+  });
+
+  it('keeps judgments and denied payloads outside future retrieval adapters', async () => {
+    const corpus = await loadCorpus();
+    const item = corpus.cases.find(item => item.collection === 'ranking' && item.prohibited.length > 0)!;
+    const input = retrievalInput(item);
+    expect(Object.keys(input).sort()).toEqual(['documents', 'query', 'relations']);
+    expect(input.documents.every(doc => !item.prohibited.includes(`${doc.id}@${doc.version}`))).toBe(true);
+    expect(input.documents.every(doc => Object.keys(doc).sort().join(',') === 'body,id,title,version')).toBe(true);
+    expect(input.relations.every(edge => input.documents.some(doc => doc.id === edge.target.id))).toBe(true);
+    expect(await evaluateRetrieval(item, undefined)).toEqual({ status: 'not_supported' });
+    const denied = item.documents.find(doc => item.prohibited.includes(`${doc.id}@${doc.version}`))!;
+    expect(await evaluateRetrieval(item, async () => [denied])).toMatchObject({ status: 'failed', reason: 'PROHIBITED_EVIDENCE' });
+  });
+
+  it('separates setup time from measured work and preflights candidate report capacity', () => {
+    let now = 0;
+    const budget = new PhaseBudget(100, 20, () => now);
+    now = 99; budget.check(); budget.beginMeasured();
+    now = 118; budget.check();
+    now = 120; expect(() => budget.check()).toThrow(/measured/i);
+    const setup = new PhaseBudget(100, 20, () => now);
+    now = 221; expect(() => setup.check()).toThrow(/setup/i);
+    expect(planRows(47, 14, 4, 512)).toBe(202);
+    expect(() => planRows(47, 14, 12, 512)).toThrow(/row/i);
   });
 
   it('scores ranks once per exact version, penalizes copies, and distinguishes undefined denominators', () => {
@@ -62,7 +102,7 @@ describe('frozen domain evaluator', () => {
   });
 
   it('bounds artifacts without silently truncating security evidence', () => {
-    expect(() => boundReport({ rows: Array(201).fill({}) })).toThrow(/bound/i);
+    expect(() => boundReport({ rows: Array(513).fill({}) })).toThrow(/bound/i);
     expect(() => boundReport({ text: 'x'.repeat(1_048_577) })).toThrow(/bound/i);
   });
 
@@ -117,14 +157,23 @@ describe('frozen domain evaluator', () => {
     const corpus = await loadCorpus();
     const ids = corpus.cases.filter(item => item.split === 'holdout' && item.operation === 'recall').map(item => item.id);
     const report = (ablation: string, value: number, p95: number) => ({ head: (value === 0.5 ? 'a' : 'b').repeat(40),
+      sourceHead: (value === 0.5 ? 'a' : 'b').repeat(40), predecessorEligible: true,
       fixtureManifest: corpus.manifestHash, seed: 25, runner: 'memory-evaluation-v1', budgets: corpus.manifest.budgets,
-      gates: { failures: [] }, usage: { persistedBytes: 100, candidateCount: 240, actualSpend: 0, reservedSpend: 0, calls: 24, retries: 0 },
+      gates: { failures: [] }, usage: { persistedBytes: 1100, emptySchemaBytes: 1000, evidenceBytes: 100, candidateCount: 240, actualSpend: 0, reservedSpend: 0, calls: 24, retries: 0 },
       rows: ids.map(id => ({ id, ablation, status: 'measured', metrics: { ndcg: value, evidenceCoverage: 1 }, latencyMs: p95, failures: [] })) });
     const features = { hybrid: true, reranking: true, 'relationship-expansion': false };
     const before = experimentFromReport(corpus, report('hybrid-reranking', 0.5, 10), 'hybrid-reranking', features, { hybrid: '1', reranking: '1' });
     const after = experimentFromReport(corpus, report('relationship-expansion', 0.6, 11), 'relationship-expansion',
       { ...features, 'relationship-expansion': true }, { hybrid: '1', reranking: '1' }, before.head);
     expect(compareExperiments(before, after, corpus)).toMatchObject({ status: 'pass' });
+    const noSource = { ...report('hybrid-reranking', 0.5, 10), sourceHead: undefined };
+    expect(() => experimentFromReport(corpus, noSource, 'hybrid-reranking', features, {})).toThrow();
+    expect(() => experimentFromReport(corpus, { ...noSource, sourceHead: 'c'.repeat(40) }, 'hybrid-reranking', features, {})).toThrow(/provenance/i);
+    const amplified = report('relationship-expansion', 0.6, 11);
+    amplified.usage.persistedBytes = 1300; amplified.usage.evidenceBytes = 300;
+    const amplification = experimentFromReport(corpus, amplified, 'relationship-expansion', after.features, after.adapters, before.head);
+    expect(compareExperiments(before, amplification, corpus)).toMatchObject({ status: 'fail' });
+    expect(() => experimentFromReport(corpus, { ...amplified, usage: { ...amplified.usage, evidenceBytes: 1 } }, 'relationship-expansion', after.features, after.adapters)).toThrow(/storage/i);
     expect(() => compareExperiments(before, after)).toThrow(/corpus/i);
     expect(() => compareExperiments(before, { ...after, samples: after.samples.slice(1) }, corpus)).toThrow(/report|holdout/i);
     expect(() => compareExperiments(before, { ...after, fixtureHash: 'a'.repeat(64) }, corpus)).toThrow(/drift/i);
