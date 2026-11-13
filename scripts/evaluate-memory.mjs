@@ -1,7 +1,8 @@
 import { execFileSync } from 'node:child_process';
-import { readFile, mkdir, writeFile, stat } from 'node:fs/promises';
-import { dirname, resolve, relative, isAbsolute } from 'node:path';
+import { readFile, stat } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { preflightOutput, writeOutputPair } from './evaluation-output.mjs';
 import { loadCorpus, runBaseline, boundReport, RUNNER_VERSION, assertPublishableReport } from '../dist/evaluation/test-helpers.js';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -19,8 +20,10 @@ const controller = new AbortController();
 try {
   const manifestPath = resolve(args[1]);
   const output = resolve(args[3]);
-  const withinFixtures = relative(resolve('evals/fixtures'), output);
-  if (!output.endsWith('.json') || output === manifestPath || (!withinFixtures.startsWith('..') && !isAbsolute(withinFixtures))) throw new Error('Invalid output');
+  failureCode = 'OUTPUT_PREFLIGHT';
+  await preflightOutput(root, output);
+  if (output === manifestPath) throw new Error('Invalid output');
+  failureCode = 'PROFILE';
   if ((await stat(manifestPath)).size > 16_384) throw new Error('Run manifest bound');
   const text = await readFile(manifestPath, 'utf8');
   if (Buffer.byteLength(text) > 16_384) throw new Error('Run manifest bound');
@@ -50,10 +53,8 @@ try {
     `Latency p50/p95: ${report.latencyMs.p50}/${report.latencyMs.p95} ms\n` +
     `Mechanism gate: ${report.gates.mechanism}\nQuality acceptance: ${report.gates.qualityAcceptance}\nRelationship expansion: ${report.gates.relationshipExpansion}\n` +
     `\nCandidate counts and model token usage are unavailable, reported as null. Future adapters are not_supported.\n`;
-  await mkdir(dirname(output), { recursive: true });
   failureCode = 'OUTPUT_WRITE';
-  await writeFile(output, bytes, { flag: 'wx' });
-  await writeFile(output.slice(0, -5) + '.md', human, { flag: 'wx' });
+  await writeOutputPair(root, output, bytes, human);
   console.log(JSON.stringify({ output, head, gates: report.gates, sampleCounts: report.sampleCounts }));
   if (report.gates.mechanism !== 'pass') { console.error(JSON.stringify({ status: 'failed', code: 'MECHANISM_FAIL' })); process.exitCode = 1; }
 } catch {

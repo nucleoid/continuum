@@ -37,8 +37,11 @@ npm run eval:memory -- --manifest evals/offline-v1.json --output .fire-off/basel
 ```
 
 The CLI requires clean stable input, an explicit source identity and a new output
-path. It writes bounded JSON and adjacent Markdown with no overwrite. Select a
-fresh output name for each run. `CONTINUUM_EVAL_REPORT` requests the same checked
+path under ignored `.fire-off/`. Before database work it checks both JSON and
+adjacent Markdown destinations. It reserves both exclusively before writing and
+removes its own files on an ordinary write failure. Two files are not crash-atomic;
+after forced termination inspect both and select a fresh output name.
+`CONTINUUM_EVAL_REPORT` requests the same checked
 publication inside the database test; a dirty requested publication fails instead
 of silently writing eligible evidence. Without that variable, dirty-tree mechanism
 tests run normally. CI captures its report once inside the full suite and uploads
@@ -71,11 +74,14 @@ The `relevance-v1` rubric applies to each question:
   verify the answer, rather than merely repeating it.
 - Grade 1: useful diagnostic or historical context that does not establish the
   answer or authority. A last-successful-sync timestamp is context for membership
-  freshness; an operator's name on a disable receipt is not freshness evidence.
+  freshness; Fjord's UTC log display setting is diagnostic context, not evidence
+  establishing the incident time. An operator's name on a disable receipt is not
+  freshness evidence.
 - Grade 0: unapproved, rejected, superseded or disproven claims; unrelated topics,
   UI examples and disclaimers that merely state another procedure is independent.
   Moraine database recovery, Larch housekeeping reminders, Dune/Juniper dashboard
-  descriptions and the disproven older Quill package account receive zero.
+  descriptions, Reed's cached display-name setting and the disproven older Quill
+  package account receive zero. Zero judgments are omitted from `relevant`.
 
 Twenty-four independently authored operational holdouts vary counts, grades,
 lexical coverage, contradictions and decoy placement. Five separately authored
@@ -88,13 +94,18 @@ they are withheld from adapters along with all relevance judgments.
 
 The loader checks adapter-visible edges after policy filtering and rejects graph features whose per-split relevance precision exceeds
 .75 or lack both positive and negative examples: outgoing/incoming incidence and
-each typed source/target incidence. A second negative control ranks the full
-inventory without the query using those features and stable ID tie-breaks; its
-maximum mean holdout nDCG must stay below .25. These are corpus shortcut checks,
-not feature-acceptance thresholds or evidence that all possible shortcuts are
-impossible. Reports retain the diagnostics. No model was tuned on holdout scores.
+each typed source/target incidence. Self relations are rejected. A descriptive
+query-blind ranking also uses those features and stable ID tie-breaks. Its mean
+nDCG has no acceptance threshold: disjoint topics in a broad inventory can dilute
+that score even when a query-conditioned shortcut exists. The incidence checks
+do not establish absence of such shortcuts. Reports retain the diagnostics.
+No model was tuned on holdout scores.
 
 ## Shared inventory and policy boundary
+
+Adapter documents and relations are sorted by their IDs and exact reference
+content independently of authored case, document and relation order. Reversing
+those fixture arrays preserves the complete adapter input and universe hash.
 
 Ranking cases share one complete store per split. The service baseline seeds
 that inventory; `retrievalInput(corpus, case)` supplies the same authorized live
@@ -168,11 +179,14 @@ are recorded separately as evaluator overhead. Erasure preparation is setup; its
 residual-proof row does not claim timed serving delivery.
 
 A future latency acceptance comparison must execute baseline/candidate in a
-declared paired interleaved session on the same environment, with this same
-sampling policy, inventory and caps. Missing/mismatched paired session or
-environment identity yields `insufficient_evidence`. Current single-head baseline
-reports have no paired session and do not satisfy that future gate. Repeating two
-uncontrolled serial runs on different hosts is not latency acceptance evidence.
+verified paired interleaved session on the same environment, with this same
+sampling policy, inventory and caps. V1 ships no paired cross-head producer or
+verifier. `compareExperiments` therefore returns `insufficient_evidence` for
+otherwise valid supported comparisons, even when report labels claim matching
+sessions, environments and candidate counts. Known security, coverage and hard
+budget failures still fail. Current runtime/environment hashes are diagnostics;
+they do not prove host identity or an actual paired execution. Sampling observation
+counts and order digests are retained in derived source reports.
 
 `experimentFromReport` derives scores, critical failures, medians, storage and
 policy identity from bounded source evidence. `compareExperiments` rederives
@@ -181,6 +195,8 @@ fixture/policy/budget hashes and exactly one changed mechanism. Missing adapters
 stay unsupported. Scores, sample medians or inventory identities edited away from
 their source evidence cannot establish acceptance. Reports are research artifacts,
 not cryptographically authenticated; preserve exact-input execution receipts.
+`compareRuns` is only a statistical arithmetic primitive for synthetic inputs;
+its passing result does not establish feature acceptance or verified resources.
 
 Source head and checkout head are distinct. Explicit source identity, clean stable
 head/tree and matching source head are required for acceptance eligibility. CI
@@ -222,9 +238,12 @@ growth is the greater of relevant-relation growth and whole-database growth,
 floored at zero. This catches catalog/other-schema growth without allowing a
 different relation to hide known application growth. Accounted persisted bytes
 are empty application allocation plus that growth. The unchanged 16MiB ceiling
-applies to this conservative total; the 2x gate compares growth only. Fixed empty
-database/catalog allocation cannot dilute amplification. All components and the
-accounting equality are validated. No hard ceiling is silently raised.
+applies to this conservative total. `runGrowthBytes` is a whole-run diagnostic
+including seed updates, grants/catalog effects and repeated read audits. It is not
+normalized evidence storage and cannot establish the 2x acceptance gate. That
+gate needs a future reviewed collector with equivalent evidence volume and phase
+accounting. All raw components and the accounting equality are validated. No hard
+ceiling is silently raised.
 
 Reports include actual runtime/version identity, fixture hashes, provider locality,
 prompt/schema identity, flags, sample/unsupported/failed counts, service latency,

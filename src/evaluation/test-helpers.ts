@@ -1,5 +1,6 @@
 /** Source-checkout evaluation tooling. Deliberately excluded from the public package. */
 import { createHash, randomUUID } from 'node:crypto';
+import { hostname } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { readFile, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -24,7 +25,7 @@ import { mapOwnedUserScope, offboardPrincipal } from '../services/offboarding.js
 import type { Principal, Memory, Scope } from '../types.js';
 
 export const RUNNER_VERSION = 'memory-evaluation-v1';
-const MANIFEST_SHA256 = '9bffa0896696ab4f6e3f5dae27dd66ea2dfc1263617f2020de02a5042c0717d0';
+const MANIFEST_SHA256 = '31577ca467b8e4c5f559e1f83f0950c773d6342b929920df5c6d8d570de58670';
 export const sha256 = (text: string | Buffer): string => createHash('sha256').update(text).digest('hex');
 const id = z.string().regex(/^[a-z0-9][a-z0-9-]{0,79}$/);
 const version = z.string().regex(/^[1-9][0-9]{0,5}$/);
@@ -116,7 +117,10 @@ export function validateCases(input: unknown): FixtureCase[] {
       if (!known.has(ref)) throw new Error('Judgment references an absent source version');
     }
     const edgeKnown = item.collection === 'ranking' ? new Set(cases.filter(row => row.collection === 'ranking' && row.split === item.split).flatMap(row => row.documents.map(key))) : known;
-    for (const edge of item.relations) if (!edgeKnown.has(key(edge.source)) || !edgeKnown.has(key(edge.target))) throw new Error('Relation references an absent split source');
+    for (const edge of item.relations) {
+      if (key(edge.source) === key(edge.target)) throw new Error('Self relation is not permitted');
+      if (!edgeKnown.has(key(edge.source)) || !edgeKnown.has(key(edge.target))) throw new Error('Relation references an absent split source');
+    }
     if (item.relevant.some(ref => item.prohibited.includes(key(ref)))) throw new Error('Contradictory judgments');
     const forbidden = new Set(item.documents.filter(doc => !doc.allowed || !doc.sourceAllowed
       || (item.executionResidency === 'hosted' && doc.residency === 'local-only')).map(key));
@@ -180,7 +184,7 @@ function forbidden(corpus: Pick<Corpus, 'cases' | 'manifest'>, item: FixtureCase
       || (item.executionResidency === 'hosted' && doc.residency === 'local-only')).map(key),
     ...row.timeline.filter(event => event.at <= corpus.manifest.clock).map(event => event.evidence)]));
 }
-export function checkDelivered(corpus: Corpus, item: FixtureCase, actual: Reference[], deniedScope = false): string[] {
+export function checkDelivered(corpus: Corpus, item: FixtureCase, actual: (Reference | undefined)[], deniedScope = false): string[] {
   const denied = forbidden(corpus, item);
   const known = new Set(universe(corpus, item).flatMap(row => row.documents.map(key)));
   if (item.operation === 'supersede') known.add('successor@2');
@@ -189,12 +193,12 @@ export function checkDelivered(corpus: Corpus, item: FixtureCase, actual: Refere
 export function retrievalInput(corpus: Corpus, item: FixtureCase) {
   const cases = universe(corpus, item); const denied = forbidden(corpus, item);
   const documents = cases.flatMap(row => row.documents).filter(doc => !denied.has(key(doc)))
-    .map(({ id, version, title, body }) => ({ id, version, title, body }));
+    .map(({ id, version, title, body }) => ({ id, version, title, body })).sort((a, b) => key(a).localeCompare(key(b)));
   unique(documents.map(key), 'shared source versions');
   const available = new Set(documents.map(key));
   return freezeData({ query: item.query, documents,
     relations: cases.flatMap(row => row.relations).filter(edge => available.has(key(edge.source)) && available.has(key(edge.target)))
-      .map(({ type, source, target }) => ({ type, source, target })) });
+      .map(({ type, source, target }) => ({ type, source, target })).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))) });
 }
 export function candidateUniverseHash(corpus: Corpus, item: FixtureCase): string {
   const input = retrievalInput(corpus, item);
@@ -223,7 +227,7 @@ export async function evaluateRetrieval(corpus: Corpus, item: FixtureCase,
   finally { clearTimeout(timer); }
 }
 
-/** Negative control: graph shape must not encode query relevance. Not a feature adapter. */
+/** Limited graph incidence checks and descriptive query-blind scores. Not feature acceptance. */
 export function graphShortcutDiagnostics(cases: FixtureCase[]) {
   const corpus = { cases, manifest: { clock: '2026-02-01T00:00:00Z' } } as Corpus;
   const features = ['outgoing', 'incoming', ...['supports', 'depends-on', 'contradicts'].flatMap(type => [`${type}:source`, `${type}:target`])];
@@ -251,7 +255,6 @@ export function graphShortcutDiagnostics(cases: FixtureCase[]) {
     return scores.reduce((sum, value) => sum + value, 0) / scores.length;
   });
   const maximumQueryBlindNdcg = Math.max(...blindScores);
-  if (maximumQueryBlindNdcg >= 0.25) throw new Error('Graph shortcut query-blind ranking');
   return { localFeatures, maximumQueryBlindNdcg };
 }
 
@@ -436,10 +439,11 @@ const reportEvidenceSchema = z.object({ head: z.string().regex(/^[a-f0-9]{40}$/)
   sourceHead: z.string().regex(/^[a-f0-9]{40}$/), predecessorEligible: z.boolean(),
   provenance: provenanceSchema,
   latencyEvidence: z.object({ policy: manifestSchema.shape.latencyPolicy, pairedSession: id.nullable(), environment: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+  sampling: z.object({ observations: z.number().int().nonnegative().max(3072), orderDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   fixtureManifest: z.string().regex(/^[a-f0-9]{64}$/), seed: z.number().int(), runner: z.literal(RUNNER_VERSION),
   budgets: budgetsSchema, gates: z.object({ failures: z.array(z.string().max(80)).max(100) }).passthrough(),
   usage: z.object({ persistedBytes: z.number().int().positive(), emptySchemaBytes: z.number().int().positive(),
-    evidenceBytes: z.number().int().nonnegative(), rawApplicationBytes: z.number().int().positive(), rawDatabaseBytes: z.number().int().positive(),
+    runGrowthBytes: z.number().int().nonnegative(), rawApplicationBytes: z.number().int().positive(), rawDatabaseBytes: z.number().int().positive(),
     emptyDatabaseBytes: z.number().int().positive(), candidateCount: z.number().int().nonnegative().nullable(),
     actualSpend: z.number().finite().nonnegative().nullable(), reservedSpend: z.number().finite().nonnegative().nullable(),
     calls: z.number().int().nonnegative().nullable(), setupCalls: z.number().int().nonnegative().optional(),
@@ -450,8 +454,8 @@ const reportEvidenceSchema = z.object({ head: z.string().regex(/^[a-f0-9]{40}$/)
     universeHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), failures: z.array(z.string().max(80)).max(20).optional() }).passthrough()).max(512) }).passthrough()
   .refine(report => report.predecessorEligible === acceptanceEligible(report.head, report.sourceHead, report.provenance), 'Source provenance mismatch')
   .refine(report => report.usage.persistedBytes >= report.usage.emptySchemaBytes
-    && report.usage.evidenceBytes === report.usage.persistedBytes - report.usage.emptySchemaBytes
-    && report.usage.evidenceBytes === Math.max(0, report.usage.rawApplicationBytes - report.usage.emptySchemaBytes,
+    && report.usage.runGrowthBytes === report.usage.persistedBytes - report.usage.emptySchemaBytes
+    && report.usage.runGrowthBytes === Math.max(0, report.usage.rawApplicationBytes - report.usage.emptySchemaBytes,
       report.usage.rawDatabaseBytes - report.usage.emptyDatabaseBytes), 'Storage delta mismatch');
 const experimentSchema = z.object({ head: z.string().regex(/^[a-f0-9]{40}$/),
   predecessorHead: z.string().regex(/^[a-f0-9]{40}$/), fixtureHash: z.string().regex(/^[a-f0-9]{64}$/),
@@ -461,7 +465,7 @@ const experimentSchema = z.object({ head: z.string().regex(/^[a-f0-9]{40}$/),
   features: z.record(z.boolean()).refine(value => Object.keys(value).length <= 12), adapters: z.record(z.string().max(100)).refine(value => Object.keys(value).length <= 12),
   samples: z.array(z.object({ id, value: z.number().finite().min(0).max(1) }).strict()).max(1000),
   criticalFailures: z.array(id).max(100), criticalCoverageRegressions: z.number().int().nonnegative(),
-  p95: z.number().finite().nonnegative().nullable(), persistedBytes: z.number().int().nonnegative(),
+  p95: z.number().finite().nonnegative().nullable(), runGrowthBytes: z.number().int().nonnegative(),
   hardStorageBudget: z.number().int().positive(), supported: z.boolean(),
   status: z.enum(['measured', 'not_supported', 'failed']), ablation: z.string().max(40), predecessorEligible: z.boolean(), sourceReport: reportEvidenceSchema }).strict();
 
@@ -472,10 +476,10 @@ export function experimentFromReport(corpus: Corpus, input: unknown, ablation: s
   const report = reportEvidenceSchema.parse(input);
   if (report.seed !== corpus.manifest.seed || report.fixtureManifest !== corpus.manifestHash || JSON.stringify(report.budgets) !== JSON.stringify(corpus.manifest.budgets)) throw new Error('Report fixture/budget drift');
   const sourceReport = { head: report.head, sourceHead: report.sourceHead, predecessorEligible: report.predecessorEligible, provenance: report.provenance,
-    latencyEvidence: report.latencyEvidence,
+    latencyEvidence: report.latencyEvidence, sampling: report.sampling,
     fixtureManifest: report.fixtureManifest, seed: report.seed, runner: report.runner,
     budgets: report.budgets, gates: { failures: report.gates.failures }, usage: {
-      persistedBytes: report.usage.persistedBytes, emptySchemaBytes: report.usage.emptySchemaBytes, evidenceBytes: report.usage.evidenceBytes,
+      persistedBytes: report.usage.persistedBytes, emptySchemaBytes: report.usage.emptySchemaBytes, runGrowthBytes: report.usage.runGrowthBytes,
       rawApplicationBytes: report.usage.rawApplicationBytes, rawDatabaseBytes: report.usage.rawDatabaseBytes, emptyDatabaseBytes: report.usage.emptyDatabaseBytes,
       candidateCount: report.usage.candidateCount, actualSpend: report.usage.actualSpend,
       reservedSpend: report.usage.reservedSpend, calls: report.usage.calls, setupCalls: report.usage.setupCalls, retries: report.usage.retries },
@@ -500,7 +504,7 @@ export function experimentFromReport(corpus: Corpus, input: unknown, ablation: s
     features, adapters, samples: status === 'measured' ? selected.map(row => ({ id: row.id, value: row.metrics!.ndcg! })) : [],
     criticalFailures, criticalCoverageRegressions: 0,
     p95: latencies.length ? latencies[Math.max(0, Math.ceil(latencies.length * 0.95) - 1)] : null,
-    persistedBytes: report.usage.evidenceBytes, hardStorageBudget: corpus.manifest.budgets.storageBytes,
+    runGrowthBytes: report.usage.runGrowthBytes, hardStorageBudget: corpus.manifest.budgets.storageBytes,
     supported: status === 'measured', status, ablation, predecessorEligible: report.predecessorEligible, sourceReport };
 }
 
@@ -514,7 +518,7 @@ export function compareExperiments(baselineInput: unknown, candidateInput: unkno
     if (record.fixtureHash !== corpus.manifestHash || corpus.manifestHash !== MANIFEST_SHA256) throw new Error('Fixture drift');
     const derived = experimentFromReport(corpus, record.sourceReport, record.ablation, record.features, record.adapters, record.predecessorHead);
     for (const field of ['head', 'fixtureHash', 'policyHash', 'budgetHash', 'seed', 'runner', 'samples', 'criticalFailures',
-      'p95', 'persistedBytes', 'hardStorageBudget', 'supported', 'status', 'gate', 'predecessorEligible'] as const) {
+      'p95', 'runGrowthBytes', 'hardStorageBudget', 'supported', 'status', 'gate', 'predecessorEligible'] as const) {
       if (JSON.stringify(record[field]) !== JSON.stringify(derived[field])) throw new Error('Experiment differs from source report');
     }
   }
@@ -532,28 +536,27 @@ export function compareExperiments(baselineInput: unknown, candidateInput: unkno
     if (name !== changes[0] && before.adapters[name] !== after.adapters[name]) throw new Error('Unchanged adapter drift');
   }
   if (before.criticalFailures.length || after.criticalFailures.length) return { status: 'fail' };
-  if (!before.supported || !after.supported) return { status: 'not_supported' };
-  const timingBefore = before.sourceReport.latencyEvidence; const timingAfter = after.sourceReport.latencyEvidence;
-  if (!timingBefore.pairedSession || timingBefore.pairedSession !== timingAfter.pairedSession
-    || timingBefore.environment !== timingAfter.environment || JSON.stringify(timingBefore.policy) !== JSON.stringify(latencyPolicy)
-    || JSON.stringify(timingAfter.policy) !== JSON.stringify(latencyPolicy)) return { status: 'insufficient_evidence' };
+  // Self-reported pairing, environment and work counts are diagnostics, not verified execution.
+  // Check known hard failures before fencing acceptance pending a real paired producer.
   for (const record of [before, after]) {
     const usage = record.sourceReport.usage;
-    if (usage.persistedBytes > record.hardStorageBudget) return { status: 'fail' };
-    if ([usage.candidateCount, usage.actualSpend, usage.reservedSpend, usage.calls, usage.retries].some(value => value === null)) return { status: 'insufficient_evidence' };
-    if (usage.actualSpend! > corpus.manifest.budgets.actualSpend || usage.reservedSpend! > corpus.manifest.budgets.reservedSpend
-      || usage.calls! + (usage.setupCalls ?? 0) > corpus.manifest.budgets.calls || usage.retries! > corpus.manifest.budgets.retries) return { status: 'fail' };
+    if (usage.persistedBytes > record.hardStorageBudget
+      || (usage.actualSpend ?? 0) > corpus.manifest.budgets.actualSpend
+      || (usage.reservedSpend ?? 0) > corpus.manifest.budgets.reservedSpend
+      || (usage.calls ?? 0) + (usage.setupCalls ?? 0) > corpus.manifest.budgets.calls
+      || (usage.retries ?? 0) > corpus.manifest.budgets.retries) return { status: 'fail' };
   }
+  if (!before.supported || !after.supported) return { status: 'not_supported' };
   if (changes[0] === 'relationship-expansion' && (!before.features['hybrid'] || !before.features['reranking']
     || before.features['relationship-expansion'] !== false || after.features['relationship-expansion'] !== true
     || JSON.stringify(before.gate) !== JSON.stringify(relationshipGate))) throw new Error('Relationship gate requires hybrid plus reranking and frozen policy');
   const beforeCoverage = new Map(before.sourceReport.rows.filter(row => row.ablation === before.ablation).map(row => [row.id, row.metrics?.evidenceCoverage]));
   const coverageRegressions = after.sourceReport.rows.filter(row => row.ablation === after.ablation)
     .filter(row => beforeCoverage.get(row.id) != null && row.metrics?.evidenceCoverage != null && row.metrics.evidenceCoverage < beforeCoverage.get(row.id)!).length;
-  return compareRuns(before.samples, after.samples, before.gate, [...before.criticalFailures, ...after.criticalFailures], {
-    baselineP95: before.p95!, candidateP95: after.p95!, baselineBytes: before.persistedBytes,
-    candidateBytes: after.persistedBytes, hardStorageBudget: before.hardStorageBudget, identicalCaps: true,
-    criticalCoverageRegressions: before.criticalCoverageRegressions + after.criticalCoverageRegressions + coverageRegressions });
+  if (coverageRegressions) return { status: 'fail' };
+  // No paired cross-head runner or normalized evidence-storage producer ships in v1.
+  // Arbitrary report labels must never turn diagnostic measurements into acceptance.
+  return { status: 'insufficient_evidence' };
 }
 
 export function boundReport(report: unknown): string {
@@ -649,8 +652,8 @@ export async function measureStorage(pool: pg.Pool): Promise<StorageSnapshot> {
   return { applicationBytes: Number(row.application_bytes), databaseBytes: Number(row.database_bytes) };
 }
 export function accountStorage(empty: StorageSnapshot, final: StorageSnapshot) {
-  const evidenceBytes = Math.max(0, final.applicationBytes - empty.applicationBytes, final.databaseBytes - empty.databaseBytes);
-  return { persistedBytes: empty.applicationBytes + evidenceBytes, evidenceBytes, emptySchemaBytes: empty.applicationBytes,
+  const runGrowthBytes = Math.max(0, final.applicationBytes - empty.applicationBytes, final.databaseBytes - empty.databaseBytes);
+  return { persistedBytes: empty.applicationBytes + runGrowthBytes, runGrowthBytes, emptySchemaBytes: empty.applicationBytes,
     rawApplicationBytes: final.applicationBytes, rawDatabaseBytes: final.databaseBytes, emptyDatabaseBytes: empty.databaseBytes };
 }
 
@@ -679,7 +682,7 @@ export async function runBaseline(corpus: Corpus, databaseUrl: string, head: str
   const rows: EvaluationRow[] = [];
   const limits = corpus.manifest.budgets;
   const budget = new PhaseBudget(limits.maxSetupMs, limits.maxDurationMs);
-  let storage = { persistedBytes: 0, evidenceBytes: 0, emptySchemaBytes: 0, rawApplicationBytes: 0, rawDatabaseBytes: 0, emptyDatabaseBytes: 0 };
+  let storage = { persistedBytes: 0, runGrowthBytes: 0, emptySchemaBytes: 0, rawApplicationBytes: 0, rawDatabaseBytes: 0, emptyDatabaseBytes: 0 };
   let workEnded = started;
   let timings = { setupMs: 0, measuredMs: 0 };
   let setupCalls = 0;
@@ -690,7 +693,7 @@ export async function runBaseline(corpus: Corpus, databaseUrl: string, head: str
   let environment = '';
   await withEvaluationFixture(databaseUrl, async ({ owner, app, operator, sync, actor, emptyStorage }) => {
     const platform = (await owner.query("SELECT current_setting('server_version_num') AS version, current_setting('jit') AS jit, current_setting('fsync') AS fsync")).rows[0];
-    environment = sha256(JSON.stringify({ node: process.version, platform: process.platform, arch: process.arch, postgres: platform }));
+    environment = sha256(JSON.stringify({ host: hostname(), node: process.version, platform: process.platform, arch: process.arch, postgres: platform }));
     budget.check(); signal?.throwIfAborted();
     // Exact grant scripts run before runtime work; SYNC must have no memory payload access.
     const syncAllowed = (await sync.query("SELECT has_table_privilege(session_user,'memories','SELECT') AS allowed")).rows[0].allowed;
@@ -824,6 +827,9 @@ export async function runBaseline(corpus: Corpus, databaseUrl: string, head: str
             if (item.collection === 'ranking' && ((ablation === 'hybrid' && diagnostics !== 'used')
               || (ablation === 'fallback' && diagnostics !== 'failed') || (ablation === 'lexical' && diagnostics !== 'disabled'))) failures.push('ablation-not-exercised');
           }
+          failures.push(...checkDelivered(corpus, item, actual, deniedScope));
+          // Preserve security classification before audit lookup or scoring can reject an unknown reference.
+          if (actual.some(ref => !ref)) throw new Error('Unmapped delivered reference');
           const serializedBytes = Buffer.byteLength(JSON.stringify(context));
           if (serializedBytes > limits.contextBytes || serializedBytes > limits.outputBytes) failures.push('hard-byte-budget');
           deliveredAudits ??= await readAudits();
@@ -832,14 +838,13 @@ export async function runBaseline(corpus: Corpus, databaseUrl: string, head: str
             const memoryId = [...references].find(([, value]) => key(value) === key(ref))?.[0];
             if (!memoryId || !deliveredAudits.includes(memoryId)) failures.push('missing-delivered-memory-audit');
           }
-          failures.push(...checkDelivered(corpus, item, actual, deniedScope));
           observations.push({ id: item.id, ablation, status: 'measured', metrics: scoreRetrieval(actual, item.relevant),
             latencyMs: serviceMs, evaluatorMs: performance.now() - start - serviceMs, universeHash, warmup: repetition === 0, failures, diagnostics,
             contextBytes: serializedBytes, outputBytes: serializedBytes, hydrated: actual.length, calls });
         } catch (error) {
           const code = (error as { code?: string }).code;
           observations.push({ id: item.id, ablation, status: 'failed', latencyMs: serviceMs, evaluatorMs: performance.now() - start - serviceMs, universeHash, warmup: repetition === 0, calls,
-            failures: ['SERVICE_FAILED'], diagnostics: code && ['FORBIDDEN', 'UNAUTHORIZED', 'PRINCIPAL_DISABLED', 'INVALID_SCOPE', 'INTERNAL'].includes(code) ? code : 'SERVICE_ERROR' });
+            failures: [...new Set([...failures, 'SERVICE_FAILED'])], diagnostics: code && ['FORBIDDEN', 'UNAUTHORIZED', 'PRINCIPAL_DISABLED', 'INVALID_SCOPE', 'INTERNAL'].includes(code) ? code : 'SERVICE_ERROR' });
         }
         if (observations.length > limits.maxRows * (latencyPolicy.repetitions + latencyPolicy.warmups)) throw new Error('Observation bound exceeded');
         budget.check(); signal?.throwIfAborted();
@@ -915,5 +920,5 @@ export async function runBaseline(corpus: Corpus, databaseUrl: string, head: str
   const experiments = ['lexical', 'hybrid', 'fallback'].map(ablation => experimentFromReport(corpus, report, ablation,
     { lexical: true, hybrid: ablation === 'hybrid', reranking: false, 'relationship-expansion': false, 'vector-fallback': ablation === 'fallback' },
     { lexical: 'shared-service-v1', hybrid: 'stub:sha256-v1', reranking: 'not_supported', 'relationship-expansion': 'not_supported', 'vector-fallback': 'synthetic-unavailable-v1' }));
-  return { ...report, measuredFields: ['**.latencyMs', '**.p95', '**.persistedBytes', '**.emptySchemaBytes', '**.evidenceBytes', '**.latencySamplesMs', '**.evaluatorMs', '**.rawApplicationBytes', '**.rawDatabaseBytes', '**.emptyDatabaseBytes', 'timing'], experiments };
+  return { ...report, measuredFields: ['**.latencyMs', '**.p95', '**.persistedBytes', '**.emptySchemaBytes', '**.runGrowthBytes', '**.latencySamplesMs', '**.evaluatorMs', '**.rawApplicationBytes', '**.rawDatabaseBytes', '**.emptyDatabaseBytes', 'timing'], experiments };
 }

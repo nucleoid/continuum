@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdir, writeFile, readFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { preflightOutput, writeOutputPair } from '../../scripts/evaluation-output.mjs';
 import { loadCorpus, scoreRetrieval, scoreClaims, compareRuns, relationshipGate,
   evaluateMechanism, seededOrder, boundReport, runBaseline, evaluateTaskPair, validateCases, compareExperiments, checkedGrantSql, experimentFromReport,
   retrievalInput, evaluateRetrieval, PhaseBudget, planRows, checkDelivered, graphShortcutDiagnostics,
@@ -17,6 +17,7 @@ describe('frozen domain evaluator', () => {
     expect(input.documents.some(doc => other.relevant.some(ref => ref.id === doc.id))).toBe(true);
     expect(input.documents.some(doc => doc.id === denied.id)).toBe(false);
     expect(checkDelivered(corpus, item, [denied])).toContain('prohibited-evidence');
+    expect(checkDelivered(corpus, item, [undefined])).toContain('prohibited-evidence');
     const permitted = other.documents.find(doc => doc.allowed && doc.sourceAllowed)!;
     expect(checkDelivered(corpus, item, [permitted])).toEqual([]);
     for (const policy of [{ state: 'quarantined' as const }, { state: 'stale' as const }, { sourceAllowed: false }, { scope: 'project:denied' as const }]) {
@@ -92,10 +93,10 @@ describe('frozen domain evaluator', () => {
       expect(table.applicationBytes).toBeGreaterThan(empty.applicationBytes);
       expect(view.applicationBytes).toBeGreaterThan(table.applicationBytes);
       expect(lob.applicationBytes).toBeGreaterThan(view.applicationBytes);
-      expect(accountStorage(empty, lob).evidenceBytes).toBeGreaterThan(0);
+      expect(accountStorage(empty, lob).runGrowthBytes).toBeGreaterThan(0);
     });
     expect(accountStorage({ applicationBytes: 100, databaseBytes: 10000 }, { applicationBytes: 200, databaseBytes: 10500 }))
-      .toMatchObject({ evidenceBytes: 500, persistedBytes: 600 });
+      .toMatchObject({ runGrowthBytes: 500, persistedBytes: 600 });
   }, 180_000);
 
   it('returns insufficient evidence for a zero storage growth denominator', () => {
@@ -273,17 +274,19 @@ describe('frozen domain evaluator', () => {
       provenance: { headStart: (value === 0.5 ? 'a' : 'b').repeat(40), headEnd: (value === 0.5 ? 'a' : 'b').repeat(40),
         treeStart: 'd'.repeat(40), treeEnd: 'd'.repeat(40), parents: [], cleanStart: true, cleanEnd: true, sourceIdentity: 'explicit', context: 'local' },
       latencyEvidence: { policy: latencyPolicy, pairedSession: 'synthetic-pair', environment: 'e'.repeat(64) },
+      sampling: { observations: 144, orderDigest: 'd'.repeat(64) },
       fixtureManifest: corpus.manifestHash, seed: 25, runner: 'memory-evaluation-v1', budgets: corpus.manifest.budgets,
-      gates: { failures: [] }, usage: { persistedBytes: 1100, emptySchemaBytes: 1000, evidenceBytes: 100, rawApplicationBytes: 1100, rawDatabaseBytes: 10100, emptyDatabaseBytes: 10000, candidateCount: 240, actualSpend: 0, reservedSpend: 0, calls: 24, retries: 0 },
+      gates: { failures: [] }, usage: { persistedBytes: 1100, emptySchemaBytes: 1000, runGrowthBytes: 100, rawApplicationBytes: 1100, rawDatabaseBytes: 10100, emptyDatabaseBytes: 10000, candidateCount: 240, actualSpend: 0, reservedSpend: 0, calls: 24, retries: 0 },
       rows: ids.map(id => ({ id, ablation, status: 'measured', metrics: { ndcg: value, evidenceCoverage: 1 }, latencyMs: p95, latencySamplesMs: Array(5).fill(p95), universeHash: candidateUniverseHash(corpus, corpus.cases.find(item => item.id === id)!), failures: [] })) });
     const features = { hybrid: true, reranking: true, 'relationship-expansion': false };
     const before = experimentFromReport(corpus, report('hybrid-reranking', 0.5, 10), 'hybrid-reranking', features, { hybrid: '1', reranking: '1' });
+    expect(before.sourceReport.sampling).toEqual({ observations: 144, orderDigest: 'd'.repeat(64) });
     const after = experimentFromReport(corpus, report('relationship-expansion', 0.6, 11), 'relationship-expansion',
       { ...features, 'relationship-expansion': true }, { hybrid: '1', reranking: '1' }, before.head);
     // Self-labelled pairing and work counters cannot establish a verified paired execution.
     expect(compareExperiments(before, after, corpus)).toMatchObject({ status: 'insufficient_evidence' });
     const emptyGrowth = report('hybrid-reranking', 0.5, 10);
-    Object.assign(emptyGrowth.usage, { evidenceBytes: 0, persistedBytes: 1000, rawApplicationBytes: 1000, rawDatabaseBytes: 10000 });
+    Object.assign(emptyGrowth.usage, { runGrowthBytes: 0, persistedBytes: 1000, rawApplicationBytes: 1000, rawDatabaseBytes: 10000 });
     expect(compareExperiments(experimentFromReport(corpus, emptyGrowth, 'hybrid-reranking', features, before.adapters), after, corpus))
       .toEqual(expect.objectContaining({ status: 'insufficient_evidence' }));
     const wrongMedian = report('relationship-expansion', 0.6, 11);
@@ -297,10 +300,15 @@ describe('frozen domain evaluator', () => {
     expect(() => experimentFromReport(corpus, { ...report('hybrid-reranking', 0.5, 10), seed: 26 }, 'hybrid-reranking', features, {})).toThrow(/drift/i);
     expect(() => experimentFromReport(corpus, { ...noSource, sourceHead: 'c'.repeat(40) }, 'hybrid-reranking', features, {})).toThrow(/provenance/i);
     const amplified = report('relationship-expansion', 0.6, 11);
-    amplified.usage.persistedBytes = 1300; amplified.usage.evidenceBytes = 300; amplified.usage.rawApplicationBytes = 1300; amplified.usage.rawDatabaseBytes = 10300;
+    amplified.usage.persistedBytes = 1300; amplified.usage.runGrowthBytes = 300; amplified.usage.rawApplicationBytes = 1300; amplified.usage.rawDatabaseBytes = 10300;
     const amplification = experimentFromReport(corpus, amplified, 'relationship-expansion', after.features, after.adapters, before.head);
     expect(compareExperiments(before, amplification, corpus)).toMatchObject({ status: 'insufficient_evidence' });
-    expect(() => experimentFromReport(corpus, { ...amplified, usage: { ...amplified.usage, evidenceBytes: 1 } }, 'relationship-expansion', after.features, after.adapters)).toThrow(/storage/i);
+    const overBudget = structuredClone(amplified);
+    const growth = corpus.manifest.budgets.storageBytes;
+    Object.assign(overBudget.usage, { calls: null, runGrowthBytes: growth, persistedBytes: growth + 1000,
+      rawApplicationBytes: growth + 1000, rawDatabaseBytes: growth + 10000 });
+    expect(compareExperiments(before, experimentFromReport(corpus, overBudget, 'relationship-expansion', after.features, after.adapters, before.head), corpus)).toMatchObject({ status: 'fail' });
+    expect(() => experimentFromReport(corpus, { ...amplified, usage: { ...amplified.usage, runGrowthBytes: 1 } }, 'relationship-expansion', after.features, after.adapters)).toThrow(/storage/i);
     const noPair = experimentFromReport(corpus, { ...report('relationship-expansion', 0.6, 11), latencyEvidence: { ...report('relationship-expansion', 0.6, 11).latencyEvidence, pairedSession: null } }, 'relationship-expansion', after.features, after.adapters, before.head);
     expect(compareExperiments(before, noPair, corpus)).toEqual({ status: 'insufficient_evidence' });
     const dirty = report('hybrid-reranking', 0.5, 10); dirty.provenance.cleanStart = false; dirty.predecessorEligible = false;
@@ -321,15 +329,14 @@ describe('frozen domain evaluator', () => {
   });
 
   it('exercises current audited services on exact APP and bound OP/SYNC LOGIN profiles', async () => {
+    if (process.env.CONTINUUM_EVAL_REPORT) await preflightOutput(process.cwd(), process.env.CONTINUUM_EVAL_REPORT);
     const head = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 5000 }).trim();
     const report = await runBaseline(await loadCorpus(), process.env.CONTINUUM_TEST_DATABASE_URL
       ?? 'postgres://continuum:continuum@localhost:5433/continuum', head);
     if (process.env.CONTINUUM_EVAL_REPORT) {
       assertPublishableReport(report);
       const output = process.env.CONTINUUM_EVAL_REPORT;
-      await mkdir(dirname(output), { recursive: true });
-      await writeFile(output, boundReport(report), { flag: 'wx' });
-      await writeFile(output.replace(/\.json$/, '.md'), `# Offline synthetic memory baseline\n\nHead: ${head}\nFixture: ${report.fixtureManifest}\nMechanism: ${report.gates.mechanism}\nNo live-model quality claim.\n`, { flag: 'wx' });
+      await writeOutputPair(process.cwd(), output, boundReport(report), `# Offline synthetic memory baseline\n\nHead: ${head}\nFixture: ${report.fixtureManifest}\nMechanism: ${report.gates.mechanism}\nNo live-model quality claim.\n`);
     }
     expect(report.rows.filter(row => row.status === 'failed')).toEqual([]);
     expect(report.gates).toMatchObject({ mechanism: 'pass', relationshipExpansion: 'not_supported' });
