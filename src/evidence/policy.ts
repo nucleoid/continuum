@@ -44,7 +44,7 @@ export interface EvidenceAuthorityContext {
     readableScopeIds: readonly string[];
   };
   artifact: EvidenceTarget;
-  sourceDocument?: EvidenceTarget;
+  sourceDocument?: EvidenceTarget & { kind: 'source-document-version' };
   providerInput: 'artifact' | 'source-document';
   provider?: { locality: 'local' | 'hosted' | 'unknown'; authority: CurrentEvidenceAuthority };
 }
@@ -73,6 +73,8 @@ function checkAuthority(authority: CurrentEvidenceAuthority | 'not-required', no
 function checkTarget(context: EvidenceAuthorityContext, target?: EvidenceTarget): EvidenceDecision {
   if (!target || !EVIDENCE_ARTIFACT_KINDS.includes(target.kind)
       || !Array.isArray(target.authorityDependencies)) return deny('authority-unknown');
+  if (!['source-document-version', 'connector-evidence', 'connector-receipt'].includes(target.kind)
+      && target.authorityDependencies.length === 0) return deny('authority-unknown');
   const policies: EvidencePolicy[] = [target.policy, ...target.authorityDependencies];
   for (const policy of policies) {
     if (!policy || !policy.version || policy.version !== policy.currentVersion) return deny('policy-stale');
@@ -97,7 +99,8 @@ export function decideEvidencePolicy(context: EvidenceAuthorityContext): Evidenc
   else if (!context.continuum?.principalId || context.continuum.enabled !== true) common = deny('principal-denied');
   else if (!Number.isFinite(context.now) || context.continuum.checkedAt !== context.now) common = deny('authority-stale');
   const artifactRead = common ?? checkTarget(context, context.artifact);
-  const sourceDocumentRead = common ?? checkTarget(context, context.sourceDocument);
+  const sourceDocumentRead = common ?? (context.sourceDocument?.kind === 'source-document-version'
+    ? checkTarget(context, context.sourceDocument) : deny('authority-unknown'));
   const selected = context.providerInput === 'artifact' ? context.artifact : context.sourceDocument;
   let providerDisclosure = context.providerInput === 'artifact' ? artifactRead
     : context.providerInput === 'source-document' ? sourceDocumentRead : deny('authority-unknown');

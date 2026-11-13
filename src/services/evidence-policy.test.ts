@@ -14,7 +14,9 @@ import { provisionEntraGroupBinding, syncEntraMemberships } from './membership-s
 
 const target = (scopeId: string): EvidenceTarget => ({ kind: 'extracted-assertion',
   policy: { version: '1', currentVersion: '1', scopeIds: [scopeId], state: 'active', expiresAt: null,
-    residency: 'any', connector: 'not-required', repository: 'not-required' }, authorityDependencies: [],
+    residency: 'any', connector: 'not-required', repository: 'not-required' },
+  authorityDependencies: [{ version: '1', currentVersion: '1', scopeIds: [scopeId], state: 'active', expiresAt: null,
+    residency: 'any', connector: 'not-required', repository: 'not-required' }],
 });
 describe('trusted current evidence authority', () => {
   let owner: pg.Pool;
@@ -27,6 +29,17 @@ describe('trusted current evidence authority', () => {
     await addMembership(owner, reader.id, scope.id, 'reader');
   }, 30_000);
   afterAll(async () => { await owner?.end(); });
+
+  it('snapshots trusted policy before awaiting and samples current time after resolving memberships', async () => {
+    const request = { action: 'read' as const, artifact: target(scope.id), providerInput: 'artifact' as const };
+    let called = false;
+    const observed = { query: async (...args: Parameters<pg.Pool['query']>) => {
+      if (!called) { called = true; request.artifact.policy.scopeIds = [randomUUID()]; }
+      return owner.query(...args);
+    } } as unknown as pg.Pool;
+    expect((await decideEvidenceForPrincipal(observed, reader.id, request)).artifactRead.decision).toBe('allow');
+    expect((await decideEvidenceForPrincipal(owner, reader.id, request)).artifactRead.decision).toBe('deny');
+  });
 
   it('ignores caller snapshots and rechecks removal, disablement and explicit restoration', async () => {
     const request = { action: 'read' as const, artifact: target(scope.id), providerInput: 'artifact' as const,
@@ -79,9 +92,11 @@ describe('trusted current evidence authority', () => {
 
   it('resolves an actual non-owner APP read without granting operator mutation from an admin UUID', async () => {
     const role = `evidence26_${randomUUID().replaceAll('-', '')}`;
+    const operatorRole = `evidence26_op_${randomUUID().replaceAll('-', '')}`;
     const password = randomUUID();
     const url = new URL(process.env.CONTINUUM_TEST_DATABASE_URL ?? 'postgres://continuum:continuum@localhost:5433/continuum');
     let app: pg.Pool | undefined;
+    let operator: pg.Pool | undefined;
     await owner.query(`CREATE ROLE "${role}" LOGIN PASSWORD '${password}'`);
     try {
       execFileSync('psql', [url.toString(), '-X', '-v', 'ON_ERROR_STOP=1', '-v', 'continuum_schema=public',
@@ -99,11 +114,31 @@ describe('trusted current evidence authority', () => {
       });
       expect(result.artifactRead.reason).toBe('unsupported-action');
       await expect(app.query('SELECT continuum_operator_set_promotion_webhook_ids($1,$2)', [reader.id, []]))
+        .rejects.toThrow(/permission denied/);
+      const admin = await createPrincipal(owner, { externalId: 'bound-evidence-admin', kind: 'user', displayName: 'Admin' });
+      await addMembership(owner, admin.id, org.id, 'admin');
+      await owner.query(`CREATE ROLE "${operatorRole}" LOGIN PASSWORD '${password}'`);
+      const ownerUrl = process.env.CONTINUUM_TEST_DATABASE_URL ?? 'postgres://continuum:continuum@localhost:5433/continuum';
+      for (const script of ['grant-application-role.sql', 'grant-operator-role.sql']) {
+        execFileSync('psql', [ownerUrl, '-X', '-v', 'ON_ERROR_STOP=1', '-v', 'continuum_schema=public',
+          '-v', `continuum_app_role=${operatorRole}`, '-v', `continuum_operator_role=${operatorRole}`,
+          '-v', `continuum_principal_id=${admin.id}`, '-f', resolve('scripts', script)], { stdio: 'pipe', timeout: 30_000 });
+      }
+      url.username = operatorRole;
+      operator = new pg.Pool({ connectionString: url.toString(), max: 1 });
+      await operator.query('SELECT continuum_operator_set_promotion_webhook_ids($1,$2)', [admin.id, ['evidence26']]);
+      expect((await owner.query('SELECT webhook_ids FROM promotion_webhook_registry')).rows[0].webhook_ids).toEqual(['evidence26']);
+      await expect(operator.query('SELECT continuum_operator_set_promotion_webhook_ids($1,$2)', [reader.id, []]))
         .rejects.toThrow();
     } finally {
       await app?.end();
-      await owner.query('DELETE FROM continuum_pgvector_role_profiles WHERE database_role_oid=(SELECT oid FROM pg_roles WHERE rolname=$1)', [role]);
-      await owner.query(`DROP OWNED BY "${role}"; DROP ROLE "${role}"`);
+      await operator?.end();
+      for (const cleanupRole of [role, operatorRole]) {
+        if (!(await owner.query('SELECT 1 FROM pg_roles WHERE rolname=$1', [cleanupRole])).rowCount) continue;
+        await owner.query('DELETE FROM continuum_pgvector_role_profiles WHERE database_role_oid=(SELECT oid FROM pg_roles WHERE rolname=$1)', [cleanupRole]);
+        await owner.query('DELETE FROM continuum_trusted_database_identities WHERE database_role=$1::name', [cleanupRole]);
+        await owner.query(`DROP OWNED BY "${cleanupRole}"; DROP ROLE "${cleanupRole}"`);
+      }
     }
   }, 30_000);
 });

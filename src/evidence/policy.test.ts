@@ -37,7 +37,7 @@ describe('evidence authority intersection', () => {
       sourceDocumentRead: { decision: 'deny' }, providerDisclosure: { decision: 'allow' } });
     input.providerInput = 'source-document';
     expect(decideEvidencePolicy(input).providerDisclosure.decision).toBe('deny');
-    input.artifact = target('hidden'); input.sourceDocument = target();
+    input.artifact = target('hidden'); input.sourceDocument = { ...target(), kind: 'source-document-version' };
     expect(decideEvidencePolicy(input)).toMatchObject({ artifactRead: { decision: 'deny' }, sourceDocumentRead: { decision: 'allow' } });
   });
 
@@ -47,6 +47,8 @@ describe('evidence authority intersection', () => {
       ...{ declassified: true, tags: ['public'], confidence: 1, sourceCount: 300 } };
     expect(decideEvidencePolicy(input).artifactRead).toEqual({ decision: 'deny', reason: 'scope-denied' });
     input.artifact.authorityDependencies = null;
+    expect(decideEvidencePolicy(input).artifactRead.reason).toBe('authority-unknown');
+    input.artifact.authorityDependencies = [];
     expect(decideEvidencePolicy(input).artifactRead.reason).toBe('authority-unknown');
   });
 

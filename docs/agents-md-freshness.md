@@ -70,3 +70,18 @@ exact UTF-8 text returned by `continuum.agents_md`.
 
 This contract does not provide changed-scope counts, historical manifests, or
 repository automation. Those concerns remain outside this API.
+
+## Evidence boundaries
+
+The [evidence authorization foundation](evidence-authorization.md) does not add
+new generator inputs. Selection remains deterministic SQL over authorized live,
+unexpired source memories; arbitrary metadata cannot grant access or change
+selection. Derived assertions, briefs, connector payloads, personal activity,
+coordination, retrieval enrichment and advisory relations are excluded as new
+surfaces. Their presence in source metadata does not enter rendered bytes or
+freshness hashes. Contributed body/title/source text retains escaping and explicit
+provenance boundaries, including instruction-like content. This is formatting,
+not a semantic prompt-injection detector. Conditional and boolean freshness reads
+still require current selection and summary-only auditing; old hashes are never
+authorization. Independently authorized source references do not confer an
+external repository or document permission.

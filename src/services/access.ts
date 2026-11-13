@@ -30,9 +30,9 @@ export async function decideEvidenceForPrincipal(
 ): Promise<EvidencePolicyDecision> {
   // Snapshot before awaiting so a caller cannot swap policy inputs during resolution.
   const { action, artifact, sourceDocument, provider, providerInput } = structuredClone(request);
-  const now = await evidenceDatabaseTime(queryable);
   const principal = await getPrincipal(queryable, principalId);
   const scopes = await accessibleScopes(queryable, principalId);
+  const now = await evidenceDatabaseTime(queryable);
   return decideEvidencePolicy({ action, artifact, sourceDocument, provider, providerInput, now,
     continuum: { principalId, enabled: principal !== null, checkedAt: now, readableScopeIds: [...scopes.keys()] } });
 }
