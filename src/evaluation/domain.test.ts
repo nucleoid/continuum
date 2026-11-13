@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { loadCorpus, scoreRetrieval, scoreClaims, compareRuns, relationshipGate,
-  evaluateMechanism, seededOrder, boundReport, runBaseline, evaluateTaskPair, validateCases, compareExperiments, checkedGrantSql } from './test-helpers.js';
+  evaluateMechanism, seededOrder, boundReport, runBaseline, evaluateTaskPair, validateCases, compareExperiments, checkedGrantSql, experimentFromReport } from './test-helpers.js';
 
 describe('frozen domain evaluator', () => {
   it('loads content-addressed synthetic fixtures with reproducible seeded order', async () => {
@@ -17,6 +17,8 @@ describe('frozen domain evaluator', () => {
     expect(new Set(holdout.map(item => item.query)).size).toBe(holdout.length);
     expect(corpus.cases.some(item => item.split === 'development')).toBe(true);
     expect(holdout.every(item => item.documents.length >= 3 && item.relevant.some(ref => ref.grade < 3))).toBe(true);
+    expect(holdout.every(item => item.documents.some(doc => !item.relevant.some(ref => ref.id === doc.id))
+      && item.relations.length > 0 && item.documents.some(doc => doc.type === 'relationship'))).toBe(true);
   });
 
   it('scores ranks once per exact version, penalizes copies, and distinguishes undefined denominators', () => {
@@ -111,22 +113,28 @@ describe('frozen domain evaluator', () => {
     expect(() => checkedGrantSql('grant-application-role.sql', sql + '\n\\gexec\n')).toThrow(/drift/);
   });
 
-  it('rejects unpaired experiment inputs, cap drift, missing adapters, and critical regressions', () => {
-    const before = { head: 'a'.repeat(40), predecessorHead: 'b'.repeat(40), fixtureHash: 'c'.repeat(64),
-      policyHash: 'd'.repeat(64), budgetHash: 'e'.repeat(64), seed: 25, runner: 'memory-evaluation-v1', gate: relationshipGate,
-      split: 'holdout', repetitionRule: 'one-paired-mean-per-query',
-      features: { hybrid: true, reranking: true, 'relationship-expansion': false }, adapters: { hybrid: '1', reranking: '1' },
-      samples: Array.from({ length: 20 }, (_, i) => ({ id: `query-${i}`, value: 0.5 })),
-      criticalFailures: [], criticalCoverageRegressions: 0, p95: 10, persistedBytes: 100, hardStorageBudget: 1000, supported: true };
-    const after = { ...before, head: 'f'.repeat(40), predecessorHead: before.head,
-      features: { ...before.features, 'relationship-expansion': true }, samples: before.samples.map(row => ({ ...row, value: 0.6 })) };
-    expect(compareExperiments(before, after)).toMatchObject({ status: 'pass' });
-    expect(compareExperiments(before, { ...after, supported: false })).toEqual({ status: 'not_supported' });
-    expect(() => compareExperiments(before, { ...after, budgetHash: 'a'.repeat(64) })).toThrow(/drift/);
-    expect(compareExperiments(before, { ...after, p95: 11.01 })).toMatchObject({ status: 'fail' });
-    expect(compareExperiments(before, { ...after, persistedBytes: 201 })).toMatchObject({ status: 'fail' });
-    expect(compareExperiments(before, { ...after, criticalFailures: ['unauthorized-disclosure'] })).toMatchObject({ status: 'fail' });
-    expect(compareExperiments(before, { ...after, criticalCoverageRegressions: 1 })).toMatchObject({ status: 'fail' });
+  it('binds comparisons to all frozen holdout queries and reported security/resource evidence', async () => {
+    const corpus = await loadCorpus();
+    const ids = corpus.cases.filter(item => item.split === 'holdout' && item.operation === 'recall').map(item => item.id);
+    const report = (ablation: string, value: number, p95: number) => ({ head: (value === 0.5 ? 'a' : 'b').repeat(40),
+      fixtureManifest: corpus.manifestHash, seed: 25, runner: 'memory-evaluation-v1', budgets: corpus.manifest.budgets,
+      gates: { failures: [] }, usage: { persistedBytes: 100 },
+      rows: ids.map(id => ({ id, ablation, status: 'measured', metrics: { ndcg: value, evidenceCoverage: 1 }, latencyMs: p95, failures: [] })) });
+    const features = { hybrid: true, reranking: true, 'relationship-expansion': false };
+    const before = experimentFromReport(corpus, report('hybrid-reranking', 0.5, 10), 'hybrid-reranking', features, { hybrid: '1', reranking: '1' });
+    const after = experimentFromReport(corpus, report('relationship-expansion', 0.6, 11), 'relationship-expansion',
+      { ...features, 'relationship-expansion': true }, { hybrid: '1', reranking: '1' }, before.head);
+    expect(compareExperiments(before, after, corpus)).toMatchObject({ status: 'pass' });
+    expect(() => compareExperiments(before, after)).toThrow(/corpus/i);
+    expect(() => compareExperiments(before, { ...after, samples: after.samples.slice(1) }, corpus)).toThrow(/report|holdout/i);
+    expect(() => compareExperiments(before, { ...after, fixtureHash: 'a'.repeat(64) }, corpus)).toThrow(/drift/i);
+    const securityReport = report('relationship-expansion', 0.6, 11);
+    (securityReport.gates.failures as string[]).push('unauthorized-disclosure');
+    const unsafe = experimentFromReport(corpus, securityReport, 'relationship-expansion', after.features, after.adapters, before.head);
+    expect(compareExperiments(before, unsafe, corpus)).toMatchObject({ status: 'fail' });
+    expect(() => compareExperiments(before, { ...unsafe, criticalFailures: [] }, corpus)).toThrow(/report/i);
+    const absent = experimentFromReport(corpus, { ...securityReport, rows: [] }, 'relationship-expansion', after.features, after.adapters, before.head);
+    expect(compareExperiments(before, absent, corpus)).toEqual({ status: 'not_supported' });
   });
 
   it('exercises current audited services on exact APP and bound OP/SYNC LOGIN profiles', async () => {
