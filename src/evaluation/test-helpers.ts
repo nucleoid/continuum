@@ -25,7 +25,7 @@ import { mapOwnedUserScope, offboardPrincipal } from '../services/offboarding.js
 import type { Principal, Memory, Scope } from '../types.js';
 
 export const RUNNER_VERSION = 'memory-evaluation-v1';
-const MANIFEST_SHA256 = '31577ca467b8e4c5f559e1f83f0950c773d6342b929920df5c6d8d570de58670';
+const MANIFEST_SHA256 = '23640a26ea397e2365033884a56904e4a6c6a170dbc74d44efa57a799c4591f6';
 export const sha256 = (text: string | Buffer): string => createHash('sha256').update(text).digest('hex');
 const id = z.string().regex(/^[a-z0-9][a-z0-9-]{0,79}$/);
 const version = z.string().regex(/^[1-9][0-9]{0,5}$/);

@@ -111,6 +111,18 @@
               "version": "1"
             }
           ],
+          "unknown": false,
+          "contradiction": null
+        },
+        {
+          "id": "queue-implementation",
+          "label": "inference",
+          "evidence": [
+            {
+              "id": "primary",
+              "version": "1"
+            }
+          ],
           "unknown": true,
           "contradiction": null
         }
@@ -138,7 +150,7 @@
           "sourceKind": "non-code",
           "scope": "project:synthetic",
           "title": "Quartz deployment",
-          "body": "The roadmap proposes the blue queue. Implementation is unknown.",
+          "body": "The roadmap proposes the blue queue.",
           "type": "decision",
           "tags": [
             "decision"

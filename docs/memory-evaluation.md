@@ -71,7 +71,8 @@ The `relevance-v1` rubric applies to each question:
   Equally direct accounts of an unresolved conflict receive the same grade; no
   winner is inferred. Both Fjord timezone accounts are grade 3.
 - Grade 2: complementary causal or implementation evidence needed to explain or
-  verify the answer, rather than merely repeating it.
+  verify the answer, rather than merely repeating it. Dune's stored deadline and
+  Sable's shared admission transaction are grade 2 implementation evidence.
 - Grade 1: useful diagnostic or historical context that does not establish the
   answer or authority. A last-successful-sync timestamp is context for membership
   freshness; Fjord's UTC log display setting is diagnostic context, not evidence
@@ -152,6 +153,18 @@ inference labels, unknowns, contradictions, unsupported assertions and chunk
 coverage. Oracle and retrieved-evidence task runs diagnose reasoning failure
 versus retrieval miss. These are structured fixture judgments, not an unimplemented
 natural-language truth judge. Missing task adapters are `not_supported`.
+
+Claim `unknown` describes uncertainty about that specific claim, rather than
+uncertainty about whether a proposal was recorded. `unknown-preservation` has a
+known recorded-intent claim plus a separate unresolved implementation inference.
+`intent-vs-fact` has a known proposal and a separately sourced implementation fact;
+its proposal source makes no claim that implementation remains unknown.
+
+Chunk coverage currently measures adapter-reported completed chunk IDs against
+the fixture's declared IDs. Those IDs have no document spans or byte ranges, so
+this does not verify that the adapter read or processed the source. The
+`partial-chunks` fixture exercises accounting of partial reported results only.
+Verified source-chunk completion requires a future reviewed chunk/span protocol.
 
 The baseline measures lexical recall, hybrid RRF with local stubs and failed-vector
 full-text fallback. It also exercises point reads, supersession, database-time
