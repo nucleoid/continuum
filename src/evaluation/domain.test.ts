@@ -118,7 +118,7 @@ describe('frozen domain evaluator', () => {
     const ids = corpus.cases.filter(item => item.split === 'holdout' && item.operation === 'recall').map(item => item.id);
     const report = (ablation: string, value: number, p95: number) => ({ head: (value === 0.5 ? 'a' : 'b').repeat(40),
       fixtureManifest: corpus.manifestHash, seed: 25, runner: 'memory-evaluation-v1', budgets: corpus.manifest.budgets,
-      gates: { failures: [] }, usage: { persistedBytes: 100 },
+      gates: { failures: [] }, usage: { persistedBytes: 100, candidateCount: 240, actualSpend: 0, reservedSpend: 0, calls: 24, retries: 0 },
       rows: ids.map(id => ({ id, ablation, status: 'measured', metrics: { ndcg: value, evidenceCoverage: 1 }, latencyMs: p95, failures: [] })) });
     const features = { hybrid: true, reranking: true, 'relationship-expansion': false };
     const before = experimentFromReport(corpus, report('hybrid-reranking', 0.5, 10), 'hybrid-reranking', features, { hybrid: '1', reranking: '1' });
@@ -133,8 +133,10 @@ describe('frozen domain evaluator', () => {
     const unsafe = experimentFromReport(corpus, securityReport, 'relationship-expansion', after.features, after.adapters, before.head);
     expect(compareExperiments(before, unsafe, corpus)).toMatchObject({ status: 'fail' });
     expect(() => compareExperiments(before, { ...unsafe, criticalFailures: [] }, corpus)).toThrow(/report/i);
-    const absent = experimentFromReport(corpus, { ...securityReport, rows: [] }, 'relationship-expansion', after.features, after.adapters, before.head);
+    const absent = experimentFromReport(corpus, { ...securityReport, gates: { failures: [] }, rows: [] }, 'relationship-expansion', after.features, after.adapters, before.head);
     expect(compareExperiments(before, absent, corpus)).toEqual({ status: 'not_supported' });
+    expect(() => compareExperiments(before, after, structuredClone(corpus))).toThrow(/loaded frozen corpus/);
+    expect(() => compareExperiments(before, { ...after, samples: after.samples.map(row => ({ ...row, value: 1 })) }, corpus)).toThrow(/source report/);
   });
 
   it('exercises current audited services on exact APP and bound OP/SYNC LOGIN profiles', async () => {
@@ -153,7 +155,8 @@ describe('frozen domain evaluator', () => {
     expect(report.rows.find(row => row.id === 'expired-evidence' && row.ablation === 'hybrid')?.metrics?.recall).toBeNull();
     expect(report.rows.find(row => row.id === 'explicit-supersession' && row.ablation === 'hybrid')?.metrics?.recall).toBe(1);
     expect(report.rows.find(row => row.id === 'deterministic-agents-md')?.metrics?.recall).toBe(1);
-    expect(report.rows.find(row => row.id === 'local-only-no-egress')?.calls).toBe(0);
+    expect(report.rows.find(row => row.id === 'local-only-no-egress' && row.ablation === 'hybrid')?.calls).toBe(0);
+    expect(report.experiments).toHaveLength(3);
     expect(report.sampleCounts.unsupported).toBeGreaterThan(0);
   }, 180_000);
 });

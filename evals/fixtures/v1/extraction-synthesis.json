@@ -16,7 +16,7 @@
           "sourceKind": "non-code",
           "scope": "project:synthetic",
           "title": "Quartz deployment",
-          "body": "Quartz deployment uses the blue queue.",
+          "body": "Chunk one records a blue queue. Chunk two records the retry limit separately.",
           "type": "decision",
           "tags": [
             "decision"
@@ -59,7 +59,8 @@
         "chunk-2"
       ],
       "contradictionSets": [],
-      "timeline": []
+      "timeline": [],
+      "relations": []
     },
     {
       "id": "unknown-preservation",
@@ -76,7 +77,7 @@
           "sourceKind": "non-code",
           "scope": "project:synthetic",
           "title": "Quartz deployment",
-          "body": "Quartz deployment uses the blue queue.",
+          "body": "The synthetic roadmap proposes a blue queue; implementation is explicitly unknown.",
           "type": "decision",
           "tags": [
             "decision"
@@ -119,7 +120,8 @@
         "chunk-2"
       ],
       "contradictionSets": [],
-      "timeline": []
+      "timeline": [],
+      "relations": []
     },
     {
       "id": "intent-vs-fact",
@@ -218,7 +220,8 @@
         "chunk-2"
       ],
       "contradictionSets": [],
-      "timeline": []
+      "timeline": [],
+      "relations": []
     },
     {
       "id": "oracle-vs-retrieved",
@@ -278,7 +281,8 @@
         "chunk-2"
       ],
       "contradictionSets": [],
-      "timeline": []
+      "timeline": [],
+      "relations": []
     },
     {
       "id": "contradiction-preservation",
@@ -383,7 +387,8 @@
           ]
         }
       ],
-      "timeline": []
+      "timeline": [],
+      "relations": []
     },
     {
       "id": "source-document-denied",
@@ -422,7 +427,8 @@
       "claims": [],
       "chunks": [],
       "contradictionSets": [],
-      "timeline": []
+      "timeline": [],
+      "relations": []
     }
   ]
 }

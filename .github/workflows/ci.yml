@@ -10,6 +10,7 @@ permissions:
 
 env:
   NODE_OPTIONS: --max-old-space-size=384
+  CONTINUUM_EVAL_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}

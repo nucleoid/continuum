@@ -38,7 +38,8 @@
       "claims": [],
       "chunks": [],
       "contradictionSets": [],
-      "timeline": []
+      "timeline": [],
+      "relations": []
     },
     {
       "id": "all-evidence-denied",
@@ -77,7 +78,8 @@
       "claims": [],
       "chunks": [],
       "contradictionSets": [],
-      "timeline": []
+      "timeline": [],
+      "relations": []
     },
     {
       "id": "expired-evidence",
@@ -122,7 +124,8 @@
           "action": "expiry",
           "evidence": "primary@1"
         }
-      ]
+      ],
+      "relations": []
     },
     {
       "id": "revoked-evidence",
@@ -167,7 +170,8 @@
           "action": "revoke",
           "evidence": "primary@1"
         }
-      ]
+      ],
+      "relations": []
     },
     {
       "id": "erased-evidence",
@@ -212,7 +216,8 @@
           "action": "erase",
           "evidence": "primary@1"
         }
-      ]
+      ],
+      "relations": []
     },
     {
       "id": "explicit-supersession",
@@ -264,7 +269,8 @@
           "action": "supersede",
           "evidence": "primary@1"
         }
-      ]
+      ],
+      "relations": []
     },
     {
       "id": "malicious-reference",
@@ -308,7 +314,8 @@
       "claims": [],
       "chunks": [],
       "contradictionSets": [],
-      "timeline": []
+      "timeline": [],
+      "relations": []
     },
     {
       "id": "audited-memory-read",
@@ -352,7 +359,8 @@
       "claims": [],
       "chunks": [],
       "contradictionSets": [],
-      "timeline": []
+      "timeline": [],
+      "relations": []
     },
     {
       "id": "deterministic-agents-md",
@@ -396,7 +404,8 @@
       "claims": [],
       "chunks": [],
       "contradictionSets": [],
-      "timeline": []
+      "timeline": [],
+      "relations": []
     }
   ]
 }

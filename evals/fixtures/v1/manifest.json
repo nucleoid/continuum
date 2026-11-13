@@ -5,10 +5,10 @@
   "clock": "2026-02-01T00:00:00Z",
   "seed": 25,
   "files": {
-    "retrieval.json": "68e35a2362d4b75547c83aefd3bb89f50d5897b5345ee73ce5464a916b5fbad3",
-    "lifecycle-security.json": "c2332483c03daae7b908cb1f1e102a6165fd05df387ec178f42a3e3e086b3a47",
-    "extraction-synthesis.json": "af41d74c398e028ef87752af222d0e44f372ca1c9a61434c005d4b6c21d32ebd",
-    "temporal-connectors.json": "fb5bbd56b9ab87274ec12c6b76be9bd008445016e42896184574f1d2f5b99f74"
+    "retrieval.json": "4b90b752a60cb1b3fe372b9db3a642f73b19e9bbbd0e3cafaf1a50a5c56a8603",
+    "lifecycle-security.json": "a6f856a0330b800df4ab486790b691b7869add56b6ddd90bacce76c766c12b11",
+    "extraction-synthesis.json": "3c0e3acff7962fe7249476539075a931a0916bb79cc5cb51152ad4ef417f2cad",
+    "temporal-connectors.json": "4afd0eba7c47096f0a88b5d4150507fb61cd5aa738b75829c3634202a1bbffc0"
   },
   "splitPolicy": "Frozen IDs; no training or tuning on holdout",
   "relationshipGate": {
@@ -36,7 +36,7 @@
     "hydrationLimit": 10,
     "contextBytes": 65536,
     "outputBytes": 65536,
-    "calls": 256,
+    "calls": 1024,
     "retries": 0,
     "reservedSpend": 0,
     "actualSpend": 0,

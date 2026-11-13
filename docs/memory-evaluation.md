@@ -44,11 +44,14 @@ file hashes, split policy, hard caps, and the relationship gate. Its SHA-256 is
 anchored in `src/evaluation/test-helpers.ts`. JSON bytes are preserved by
 `.gitattributes`. Editing a file and refreshing only its checksum fails the
 manifest anchor. Future fixture or gate changes require a new version and
-retained predecessor reports; do not update v1 after publication.
+retained predecessor reports; do not update v1 after publication. Loaded corpora
+are deeply frozen and comparison accepts only instances verified by this loader.
 
 Every case declares a stable query/task ID, frozen development/holdout split,
 operation, expected exact source versions and relevance grades, prohibited
-versions, abstention, claims, chunks, contradiction sets, and lifecycle events.
+versions, abstention, claims, chunks, contradiction sets, typed fixture relations,
+and lifecycle events. Relation metadata stays in the evaluator and is never
+persisted as production relation candidates or rendered into AGENTS.md.
 Each synthetic document declares its source and assertion version, copy-family
 ID, code/non-code kind, supported controlled tags, scope and source-document
 authorization, residency, event interval and ingestion time. A copy family
@@ -66,7 +69,12 @@ local-only routing, and future relationship expansion. The fixture reference
 clock and seeded insertion order are fixed. PostgreSQL retains its real clock
 for lifecycle authority: fixture expiry is set at the database-time boundary,
 not by replacing production clocks. No current event-time reasoning feature is
-implied by recording temporal fixture metadata.
+implied by recording temporal fixture metadata. Ranking cases share one project
+corpus per split, so unrelated sources compete across queries. Each query has
+approved direct evidence, contextual evidence, a linked supporting relationship
+without the query terms, and judged non-relevant proposals/retired-project
+distractors. Varied titles and exact term counts avoid differently graded
+lexical ties. Logical memory UUIDs and insertion order derive from the seed.
 
 ## Evaluator contracts and scores
 
@@ -94,8 +102,9 @@ judges cannot override source policy, authorization, deletion, or exact-version
 checks.
 
 `evaluateTaskPair` runs the same bounded adapter with retrieved evidence and
-policy-permitted oracle evidence. Better oracle claim recall identifies a
-retrieval miss; incomplete oracle recall identifies a reasoning failure. A
+policy-permitted oracle evidence. A correct oracle run with an incorrect
+retrieved-evidence run identifies a retrieval miss; incorrect oracle citations,
+labels, unknowns, coverage or abstention identify a reasoning failure. A
 missing adapter is `not_supported`, never an empty successful answer. Adapter
 exceptions, malformed output, byte overflow or a one-second per-stage deadline
 are `failed`. The caller must contain arbitrary adapter processes externally;
@@ -124,21 +133,33 @@ expansion are also `not_supported` until real feature adapters exist.
 ## Comparisons and acceptance
 
 Capture the predecessor feature head before every later feature experiment.
-`compareExperiments` requires versioned holdout inputs, predecessor identity,
+`runBaseline` emits `experiments` for each measured recall ablation using
+`experimentFromReport`. These records carry bounded source-report evidence and
+derive every holdout sample, security outcome, p95 and storage measurement.
+`compareExperiments(before, after, corpus)` requires the loaded corpus, exact
+equality with its complete holdout query set, versioned inputs, predecessor identity,
 identical fixture/policy/budget hashes, seed, runner, repetition rule and storage
 budget. Exactly one feature flag changes; unchanged adapter versions must
-match. It rejects input/gate drift and mismatched query pairs. A missing
+match. It rederives values from the source reports and rejects hand-edited
+scores, omitted queries, security outcomes and resource measurements. It rejects
+input/gate drift and mismatched query pairs. A missing
 adapter remains `not_supported`. `compareRuns` is the lower-level paired metric
 primitive; missing resource measurements yield `insufficient_evidence`.
+Reports record both the tested checkout `head` and the PR branch `sourceHead`.
+Synthetic merge checkouts are marked `predecessorEligible: false` and cannot
+establish an acceptance baseline. Preserve exact-head local or push baselines.
+Research artifacts are not cryptographically authenticated; preserve their
+provenance and reviewer evidence rather than accepting edited reports as truth.
 
 Freeze the feature gate before observing results. The comparison contract uses
 one paired mean per query, at least 20 independent query pairs, 2,000 seeded
 paired bootstrap resamples, and a percentile 95% confidence interval. Repeated
 model runs belong in each query mean, not as extra independent query samples.
 Stubs do not prove model repeatability. The corpus has 24 varied recall holdout
-queries with graded distractors, plus five development ranking queries and
-separate mechanism cases. Distractors include topical unapproved proposals so
-the current lexical and hash-vector baseline has room for ranking improvement.
+queries with grades 3/2/3 for direct/context/linked evidence, plus five development
+ranking queries and separate mechanism cases. Unapproved proposals and unrelated
+retired-project sources have zero relevance. The linked evidence can improve
+coverage as well as ranking. No graph adapter runs in the current baseline.
 This synthetic set still may be insufficient for broader product claims. No baseline quality score
 constitutes feature acceptance.
 
@@ -150,7 +171,10 @@ at most 10% higher p95 end-to-end latency, identical candidate/context/output/
 call/spend caps, and at most 2x persisted bytes inside the same hard storage
 budget. A zero baseline, missing measurements, insufficient samples, or missing
 adapters cannot pass. Critical failures take precedence over statistical gains.
-This profile authorizes neither graph runtime nor a paid experiment.
+This profile authorizes neither graph runtime nor a paid experiment. It cannot
+be reused as acceptance authorization for another mechanism; declare that
+feature's gate first. Current lexical/hybrid/fallback records are measurements,
+not an automatic feature acceptance comparison.
 
 For another feature, publish its primary metric, minimum meaningful gain,
 tolerated regression, independent critical gates, sample/repetition rules,
@@ -163,7 +187,7 @@ fixture hashes. Do not tune on holdout or change more than one mechanism.
 The frozen profile caps 100 cases, 12 stages, 200 report rows, 16 KiB per source,
 1 MiB per JSON artifact, 120 seconds of measured run work, 50 candidates per
 lexical/vector branch, 10 hydrated final results, 64 KiB complete serialized
-result context/output per row, 256 stub calls including setup, zero retries,
+result context/output per row, 1024 stub calls including setup, zero retries,
 zero reserved/actual provider spend, and 16 MiB application storage. The runner
 signals cancellation after 180 seconds and lets isolated cleanup run; external finite command deadlines are still
 required for database provisioning/cleanup. Forced external termination can
@@ -177,11 +201,15 @@ Reports contain head, schema/fixture hashes, runner, seed, provider identity,
 dimension/locality, prompt/schema identity, flags, sample/unsupported/failed
 counts, measured p50/p95 latency, hard failures, hydration counts, complete
 serialized context/output bytes, calls, retries, spend and persisted bytes.
+Latency and physical index/TOAST allocation are measured fields and can vary;
+seeded fixture ordering, scores, coverage, counts and policy identity reproduce.
 Raw content, raw provider errors and connection strings are excluded.
 Actual pre-fusion candidate counts and model token usage are unavailable in
 current services; they are null with declared ceilings and unsupported
 tokenization. They are not guessed from character counts. Storage includes
-application memory, vector, audit, promotion tables and their indexes/TOAST;
+all application tables in the isolated database and their indexes/TOAST, including
+memory, vectors, audits and all receipt/state tables, so future graph tables
+cannot silently escape the measurement;
 amplification needs a paired run and is null in a single baseline. Latency
 includes service audit delivery and evaluator checks but excludes setup,
 supersession/erasure preparation and database cleanup. It is a local synthetic

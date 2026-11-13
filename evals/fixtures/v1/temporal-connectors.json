@@ -36,7 +36,8 @@
       "claims": [],
       "chunks": [],
       "contradictionSets": [],
-      "timeline": []
+      "timeline": [],
+      "relations": []
     },
     {
       "id": "delayed-ingestion",
@@ -62,9 +63,9 @@
           "allowed": true,
           "sourceAllowed": true,
           "residency": "local-only",
-          "eventStart": "2026-01-01T00:00:00Z",
+          "eventStart": "2025-11-01T00:00:00Z",
           "eventEnd": null,
-          "ingestedAt": "2026-04-01T00:00:00Z"
+          "ingestedAt": "2026-01-31T00:00:00Z"
         }
       ],
       "relevant": [
@@ -80,7 +81,8 @@
       "claims": [],
       "chunks": [],
       "contradictionSets": [],
-      "timeline": []
+      "timeline": [],
+      "relations": []
     },
     {
       "id": "connector-denied",
@@ -119,7 +121,8 @@
       "claims": [],
       "chunks": [],
       "contradictionSets": [],
-      "timeline": []
+      "timeline": [],
+      "relations": []
     },
     {
       "id": "residency-denied",
@@ -158,7 +161,8 @@
       "claims": [],
       "chunks": [],
       "contradictionSets": [],
-      "timeline": []
+      "timeline": [],
+      "relations": []
     },
     {
       "id": "relationship-expansion",
@@ -202,7 +206,8 @@
       "claims": [],
       "chunks": [],
       "contradictionSets": [],
-      "timeline": []
+      "timeline": [],
+      "relations": []
     },
     {
       "id": "reranking",
@@ -246,7 +251,8 @@
       "claims": [],
       "chunks": [],
       "contradictionSets": [],
-      "timeline": []
+      "timeline": [],
+      "relations": []
     },
     {
       "id": "vector-only",
@@ -290,7 +296,8 @@
       "claims": [],
       "chunks": [],
       "contradictionSets": [],
-      "timeline": []
+      "timeline": [],
+      "relations": []
     },
     {
       "id": "stale-quarantined-delivery",
@@ -335,7 +342,8 @@
           "action": "quarantine",
           "evidence": "primary@1"
         }
-      ]
+      ],
+      "relations": []
     }
   ]
 }
