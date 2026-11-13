@@ -9,6 +9,11 @@ describe('frozen domain evaluator', () => {
     expect(corpus.cases.length).toBeGreaterThanOrEqual(20);
     expect(seededOrder(corpus.cases, 25)).toEqual(seededOrder([...corpus.cases].reverse(), 25));
     expect(corpus.cases.some(item => item.id === 'source-document-denied')).toBe(true);
+    const holdout = corpus.cases.filter(item => item.split === 'holdout' && item.operation === 'recall');
+    expect(holdout.length).toBeGreaterThanOrEqual(20);
+    expect(new Set(holdout.map(item => item.query)).size).toBe(holdout.length);
+    expect(corpus.cases.some(item => item.split === 'development')).toBe(true);
+    expect(holdout.every(item => item.documents.length >= 3 && item.relevant.some(ref => ref.grade < 3))).toBe(true);
   });
 
   it('scores ranks once per exact version, penalizes copies, and distinguishes undefined denominators', () => {
@@ -80,6 +85,21 @@ describe('frozen domain evaluator', () => {
     expect(() => validateCases({ schema: 1, cases: [other] })).toThrow(/Contradictory/);
     other.prohibited = []; other.documents[0].body = '界'.repeat(6000);
     expect(() => validateCases({ schema: 1, cases: [other] })).toThrow(/byte bound/);
+  });
+
+  it('accepts correct policy abstention and diagnoses wrong citations as reasoning failure', async () => {
+    const corpus = await loadCorpus();
+    const denied = corpus.cases.find(item => item.id === 'source-document-denied')!;
+    const empty = async () => ({ claims: [], delivered: [], completedChunks: [], abstained: true });
+    expect(await evaluateTaskPair(denied, [], empty)).toMatchObject({ gate: 'pass', diagnosis: 'no_miss' });
+    const task = corpus.cases.find(item => item.id === 'oracle-vs-retrieved')!;
+    expect(await evaluateTaskPair(task, [{ id: 'primary', version: '1' }], async () => ({
+      claims: task.claims.map(claim => ({ ...claim, label: 'inference', evidence: [{ id: 'primary', version: '999' }] })),
+      delivered: [], completedChunks: [], abstained: false,
+    }))).toMatchObject({ gate: 'fail', diagnosis: 'reasoning_failure' });
+    const contradictory = structuredClone(task);
+    contradictory.claims[0].contradiction = 'missing';
+    expect(() => validateCases({ schema: 1, cases: [contradictory] })).toThrow(/contradiction/i);
   });
 
   it('rejects unpaired experiment inputs, cap drift, missing adapters, and critical regressions', () => {
