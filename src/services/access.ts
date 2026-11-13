@@ -21,7 +21,8 @@ export type EvidencePolicyRequest = Pick<EvidenceAuthorityContext,
   'action' | 'artifact' | 'sourceDocument' | 'provider' | 'providerInput'>;
 
 /** Internal trusted composition only; policies/external facts must be resolved independently of request data.
- * No hydration, disclosure, mutation or audit occurs here. Invoke again for each operation boundary.
+ * Fresh autocommit READ COMMITTED only. No hydration, disclosure, mutation or audit
+ * occurs here. Invoke again for each operation boundary.
  */
 export async function decideEvidenceForPrincipal(
   queryable: Queryable,

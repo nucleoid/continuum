@@ -120,7 +120,11 @@ staleness denies sourced memberships while manual break-glass authority retains
 its documented semantics. Reactivation does not resurrect revoked keys or grants.
 
 The adapter uses existing queries, which can span statements. It does not create
-a new atomic revocation fence or acquire dispatch locks. Later dispatch/apply
+a new atomic revocation fence or acquire dispatch locks. Its supported connection
+mode is fresh autocommit READ COMMITTED. It denies borrowed transactions and
+other isolation modes with `authority-stale`, without committing or rolling back
+the caller's transaction. This prevents old snapshots/transaction timestamps from
+being relabeled as current membership or Entra freshness. Later dispatch/apply
 consumers must linearize admission against their authoritative revocation fence:
 no newly admitted authorization can succeed after that fence commits. An
 operation admitted before the fence may remain in flight or physically send
