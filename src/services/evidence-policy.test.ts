@@ -30,6 +30,19 @@ describe('trusted current evidence authority', () => {
   }, 30_000);
   afterAll(async () => { await owner?.end(); });
 
+  it('does not turn a borrowed old transaction snapshot into current authority', async () => {
+    const client = await owner.connect();
+    try {
+      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
+      await client.query('SELECT 1 FROM scope_memberships');
+      await removeMembership(owner, reader.id, scope.id);
+      const result = await decideEvidenceForPrincipal(client, reader.id, {
+        action: 'read', artifact: target(scope.id), providerInput: 'artifact',
+      });
+      expect(result.artifactRead.decision).toBe('deny');
+    } finally { await client.query('ROLLBACK'); client.release(); }
+  });
+
   it('snapshots trusted policy before awaiting and samples current time after resolving memberships', async () => {
     const request = { action: 'read' as const, artifact: target(scope.id), providerInput: 'artifact' as const };
     let called = false;
