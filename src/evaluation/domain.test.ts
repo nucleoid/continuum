@@ -4,9 +4,81 @@ import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { loadCorpus, scoreRetrieval, scoreClaims, compareRuns, relationshipGate,
   evaluateMechanism, seededOrder, boundReport, runBaseline, evaluateTaskPair, validateCases, compareExperiments, checkedGrantSql, experimentFromReport,
-  retrievalInput, evaluateRetrieval, PhaseBudget, planRows } from './test-helpers.js';
+  retrievalInput, evaluateRetrieval, PhaseBudget, planRows, checkDelivered, graphShortcutDiagnostics,
+  acceptanceEligible, accountStorage, measureStorage, withEvaluationFixture, assertPublishableReport } from './test-helpers.js';
 
 describe('frozen domain evaluator', () => {
+  it('uses the shared authorized universe and catches foreign-case policy leaks', async () => {
+    const corpus = await loadCorpus();
+    const item = corpus.cases.find(item => item.id === 'aster-refunds')!;
+    const other = corpus.cases.find(item => item.id === 'ember-handover')!;
+    const denied = other.documents.find(doc => !doc.allowed)!;
+    const input = retrievalInput(corpus, item);
+    expect(input.documents.some(doc => other.relevant.some(ref => ref.id === doc.id))).toBe(true);
+    expect(input.documents.some(doc => doc.id === denied.id)).toBe(false);
+    expect(checkDelivered(corpus, item, [denied])).toContain('prohibited-evidence');
+    const permitted = other.documents.find(doc => doc.allowed && doc.sourceAllowed)!;
+    expect(checkDelivered(corpus, item, [permitted])).toEqual([]);
+    for (const policy of [{ state: 'quarantined' as const }, { state: 'stale' as const }, { sourceAllowed: false }, { scope: 'project:denied' as const }]) {
+      const changed = structuredClone(corpus);
+      Object.assign(changed.cases.find(row => row.id === other.id)!.documents.find(doc => doc.id === permitted.id)!, policy);
+      expect(checkDelivered(changed, item, [permitted])).toContain('prohibited-evidence');
+      expect(retrievalInput(changed, item).documents.some(doc => doc.id === permitted.id)).toBe(false);
+    }
+    const hosted = { ...item, executionResidency: 'hosted' as const };
+    expect(checkDelivered(corpus, hosted, [permitted])).toContain('prohibited-evidence');
+    expect(await evaluateRetrieval(corpus, item, async () => [{ id: denied.id, version: denied.version }]))
+      .toMatchObject({ status: 'failed', reason: 'PROHIBITED_EVIDENCE' });
+  });
+
+  it('rejects graph topology answer shortcuts and bounds query-independent rankings', async () => {
+    const corpus = await loadCorpus();
+    const diagnostics = graphShortcutDiagnostics(corpus.cases);
+    expect(diagnostics.localFeatures.length).toBeGreaterThanOrEqual(8);
+    expect(diagnostics.localFeatures.every(row => row.positives > 0 && row.negatives > 0 && row.precision <= 0.75)).toBe(true);
+    expect(diagnostics.maximumQueryBlindNdcg).toBeLessThan(0.25);
+    const forged = structuredClone(corpus);
+    for (const item of forged.cases.filter(item => item.collection === 'ranking')) {
+      item.relations = item.relevant.map(ref => ({ type: 'supports', source: { id: ref.id, version: ref.version }, target: { id: ref.id, version: ref.version } }));
+    }
+    expect(() => graphShortcutDiagnostics(forged.cases)).toThrow(/shortcut/i);
+  });
+
+  it('keeps dirty and synthetic evidence ineligible while permitting committed merges', () => {
+    const head = 'a'.repeat(40);
+    const proof = { headStart: head, headEnd: head, treeStart: head, treeEnd: head,
+      parents: ['b'.repeat(40), 'c'.repeat(40)], cleanStart: true, cleanEnd: true, sourceIdentity: 'explicit' as const, context: 'local' as const };
+    expect(acceptanceEligible(head, head, proof)).toBe(true);
+    expect(acceptanceEligible(head, 'b'.repeat(40), proof)).toBe(false);
+    expect(acceptanceEligible(head, head, { ...proof, cleanStart: false })).toBe(false);
+    expect(acceptanceEligible(head, head, { ...proof, sourceIdentity: 'checkout' })).toBe(false);
+  });
+
+  it('counts non-public tables, materialized views and large-object growth', async () => {
+    await withEvaluationFixture(process.env.CONTINUUM_TEST_DATABASE_URL ?? 'postgres://continuum:continuum@localhost:5433/continuum', async ({ owner }) => {
+      const empty = await measureStorage(owner);
+      await owner.query('CREATE SCHEMA eval_storage_probe');
+      await owner.query("CREATE TABLE eval_storage_probe.receipts AS SELECT n, md5(n::text) AS body FROM generate_series(1,2000) n");
+      const table = await measureStorage(owner);
+      await owner.query('CREATE MATERIALIZED VIEW eval_storage_probe.edges AS SELECT * FROM eval_storage_probe.receipts');
+      const view = await measureStorage(owner);
+      await owner.query("SELECT lo_from_bytea(0, decode(string_agg(md5(n::text),''),'hex')) FROM generate_series(1,10000) n");
+      const lob = await measureStorage(owner);
+      expect(table.applicationBytes).toBeGreaterThan(empty.applicationBytes);
+      expect(view.applicationBytes).toBeGreaterThan(table.applicationBytes);
+      expect(lob.applicationBytes).toBeGreaterThan(view.applicationBytes);
+      expect(accountStorage(empty, lob).evidenceBytes).toBeGreaterThan(0);
+    });
+    expect(accountStorage({ applicationBytes: 100, databaseBytes: 10000 }, { applicationBytes: 200, databaseBytes: 10500 }))
+      .toMatchObject({ evidenceBytes: 500, persistedBytes: 600 });
+  }, 180_000);
+
+  it('returns insufficient evidence for a zero storage growth denominator', () => {
+    const rows = Array.from({ length: 20 }, (_, index) => ({ id: String(index), value: 0.5 }));
+    expect(compareRuns(rows, rows.map(row => ({ ...row, value: 0.6 })), relationshipGate, [], {
+      baselineP95: 10, candidateP95: 10, baselineBytes: 0, candidateBytes: 0, hardStorageBudget: 1000,
+      identicalCaps: true, criticalCoverageRegressions: 0 }).status).toBe('insufficient_evidence');
+  });
   it('loads content-addressed synthetic fixtures with reproducible seeded order', async () => {
     const corpus = await loadCorpus();
     expect(corpus.manifest.version).toBe('v1');
