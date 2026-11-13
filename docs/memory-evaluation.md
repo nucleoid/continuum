@@ -86,7 +86,7 @@ contradicts edges. Cross-topic links and bad imported keys are retained as noise
 Relation `basis` notes document the synthetic source-link observation for review;
 they are withheld from adapters along with all relevance judgments.
 
-The loader rejects graph features whose per-split relevance precision exceeds
+The loader checks adapter-visible edges after policy filtering and rejects graph features whose per-split relevance precision exceeds
 .75 or lack both positive and negative examples: outgoing/incoming incidence and
 each typed source/target incidence. A second negative control ranks the full
 inventory without the query using those features and stable ID tie-breaks; its

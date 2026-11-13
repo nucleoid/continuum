@@ -225,11 +225,14 @@ export async function evaluateRetrieval(corpus: Corpus, item: FixtureCase,
 
 /** Negative control: graph shape must not encode query relevance. Not a feature adapter. */
 export function graphShortcutDiagnostics(cases: FixtureCase[]) {
+  const corpus = { cases, manifest: { clock: '2026-02-01T00:00:00Z' } } as Corpus;
   const features = ['outgoing', 'incoming', ...['supports', 'depends-on', 'contradicts'].flatMap(type => [`${type}:source`, `${type}:target`])];
   const localFeatures = ['development', 'holdout'].flatMap(split => features.map(feature => {
     let positives = 0; let negatives = 0;
     for (const item of cases.filter(row => row.collection === 'ranking' && row.split === split)) {
-      const refs = new Set(item.relations.flatMap(edge => feature === 'outgoing' ? [key(edge.source)] : feature === 'incoming' ? [key(edge.target)]
+      const available = new Set(retrievalInput(corpus, item).documents.map(key));
+      const refs = new Set(item.relations.filter(edge => available.has(key(edge.source)) && available.has(key(edge.target)))
+        .flatMap(edge => feature === 'outgoing' ? [key(edge.source)] : feature === 'incoming' ? [key(edge.target)]
         : feature === `${edge.type}:source` ? [key(edge.source)] : feature === `${edge.type}:target` ? [key(edge.target)] : []));
       for (const ref of refs) { if (item.relevant.some(row => key(row) === ref)) positives++; else negatives++; }
     }
@@ -237,7 +240,6 @@ export function graphShortcutDiagnostics(cases: FixtureCase[]) {
   }));
   if (localFeatures.some(row => row.positives === 0 || row.negatives === 0 || row.precision > 0.75)) throw new Error(`Graph shortcut: ${JSON.stringify(localFeatures)}`);
   const holdout = cases.filter(item => item.collection === 'ranking' && item.split === 'holdout');
-  const corpus = { cases, manifest: { clock: '2026-02-01T00:00:00Z' } } as Corpus;
   const blindScores = features.map(feature => {
     const scores = holdout.map(item => {
       const input = retrievalInput(corpus, item);
