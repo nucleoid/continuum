@@ -38,7 +38,7 @@ try {
   }
   failureCode = 'FIXTURE_SCHEMA';
   const corpus = await loadCorpus();
-  timer = setTimeout(() => controller.abort(), 180_000);
+  timer = setTimeout(() => controller.abort(), corpus.manifest.budgets.maxSetupMs + corpus.manifest.budgets.maxDurationMs);
   failureCode = 'DB_OR_SERVICE';
   const report = await runBaseline(corpus, databaseUrl, head, manifest.seed, controller.signal);
   failureCode = 'REPORT_BOUND';

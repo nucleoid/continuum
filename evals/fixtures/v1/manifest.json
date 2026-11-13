@@ -5,12 +5,12 @@
   "clock": "2026-02-01T00:00:00Z",
   "seed": 25,
   "files": {
-    "retrieval.json": "4b90b752a60cb1b3fe372b9db3a642f73b19e9bbbd0e3cafaf1a50a5c56a8603",
+    "retrieval.json": "af5703180b44a5e3de2109b0c58838bb90e3870b3e5bcaed5df1c3efc08057a6",
     "lifecycle-security.json": "a6f856a0330b800df4ab486790b691b7869add56b6ddd90bacce76c766c12b11",
     "extraction-synthesis.json": "3c0e3acff7962fe7249476539075a931a0916bb79cc5cb51152ad4ef417f2cad",
     "temporal-connectors.json": "4afd0eba7c47096f0a88b5d4150507fb61cd5aa738b75829c3634202a1bbffc0"
   },
-  "splitPolicy": "Frozen IDs; no training or tuning on holdout",
+  "splitPolicy": "Frozen disjoint scenario IDs and independently authored source forms; no tuning on holdout",
   "relationshipGate": {
     "version": "relationship-v1",
     "primaryMetric": "ndcg@10",
@@ -28,7 +28,7 @@
   "budgets": {
     "maxCases": 100,
     "maxStages": 12,
-    "maxRows": 200,
+    "maxRows": 512,
     "maxSourceBytes": 16384,
     "maxArtifactBytes": 1048576,
     "maxDurationMs": 120000,
@@ -40,6 +40,7 @@
     "retries": 0,
     "reservedSpend": 0,
     "actualSpend": 0,
-    "storageBytes": 16777216
+    "storageBytes": 16777216,
+    "maxSetupMs": 120000
   }
 }

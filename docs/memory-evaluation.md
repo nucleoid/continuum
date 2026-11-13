@@ -70,23 +70,31 @@ clock and seeded insertion order are fixed. PostgreSQL retains its real clock
 for lifecycle authority: fixture expiry is set at the database-time boundary,
 not by replacing production clocks. No current event-time reasoning feature is
 implied by recording temporal fixture metadata. Ranking cases share one project
-corpus per split, so unrelated sources compete across queries. Each query has
-approved direct evidence, contextual evidence, a linked supporting relationship
-without the query terms, and judged non-relevant proposals/retired-project
-distractors. Varied titles and exact term counts avoid differently graded
-lexical ties. Logical memory UUIDs and insertion order derive from the seed.
+corpus per split, so unrelated sources compete across queries. Holdout scenarios vary document counts, relevance counts and grades, direct lexical
+coverage, and whether any useful neighbor exists. Typed edges include irrelevant
+neighbors, cross-topic sources, contradictions and denied endpoints; some cases
+have no edges. Supporting evidence contributes complementary facts rather than
+renaming a copy as an independent source. Development cases use separately authored
+troubleshooting transcripts, tables and test observations, with disjoint sources
+and questions. Neither split is produced by substituting topics into one ranking
+recipe. Reports expose score variance and flag degenerate scores for corpus review;
+a varied score distribution alone does not establish statistical independence. Logical memory UUIDs and insertion order derive from the seed.
 
 ## Evaluator contracts and scores
 
 `scoreRetrieval` accepts ranked exact `(id, version)` references and judgments
 with grades 1 through 3. Cutoff defaults to 10. Precision divides unique relevant
 hits by returned slots, so duplicate slots cost precision. Recall divides those
-hits by all relevant exact versions. Evidence coverage divides represented
+hits by all relevant assertion units. Exact versions remain citation identities;
+judgments can explicitly identify equivalent assertions. Such copies retain one
+source family, one grade, and one relevance unit, receiving gain at most once.
+The loader rejects identical source bodies with different families or relevance
+units, and the scorer rejects inconsistent family/grade labels for one unit. Evidence coverage divides represented
 families by relevant families and reports the independent-family count
 separately; copies cannot manufacture independent coverage. MRR uses the first
 relevant rank. nDCG uses gain `2^grade - 1` and logarithmic rank discount against
 the ideal judged ranking. Tied input ranks retain the adapter's delivered order;
-equal-grade ties have equal gain. Repeated exact versions receive gain once.
+equal-grade ties have equal gain. Repeated exact versions and equivalent assertions receive gain once.
 Undefined denominators are JSON null, not perfect scores. Empty output with
 relevant evidence and nonempty output without relevant evidence each register
 an abstention error. Unjudged evidence has zero relevance, not implicit approval.
@@ -112,6 +120,15 @@ JavaScript cannot stop an abort-ignoring callback. Prohibited or unauthorized
 input, delivery, or citations fail the independent gate even with high quality.
 Tests use deterministic fake extraction/synthesis adapters only as contract
 evidence. No production extraction or synthesis adapter is registered.
+
+`retrievalInput` gives a future retrieval adapter only the query, authorized live
+source id/version/title/body records, and edges whose endpoints are available.
+It excludes relevance grades, expected answers, abstention labels and denied
+payloads. `evaluateRetrieval` bounds time, output bytes and result count, checks
+exact authorized versions, and scores against judgments held outside the adapter.
+A missing adapter is `not_supported`. This fixture-only boundary does not
+implement a relationship graph, consume capture candidates, or claim to test a
+future feature end to end. A future feature still needs its real bounded adapter.
 
 The service baseline measures lexical recall, hybrid RRF with local stub vectors,
 and failed-vector full-text fallback over identical cases. Other operations
@@ -146,7 +163,8 @@ input/gate drift and mismatched query pairs. A missing
 adapter remains `not_supported`. `compareRuns` is the lower-level paired metric
 primitive; missing resource measurements yield `insufficient_evidence`.
 Reports record both the tested checkout `head` and the PR branch `sourceHead`.
-Synthetic merge checkouts are marked `predecessorEligible: false` and cannot
+Both provenance fields and the eligibility field are mandatory, and eligibility
+must agree with equality of the tested head and source head. Synthetic merge checkouts are marked `predecessorEligible: false` and cannot
 establish an acceptance baseline. Preserve exact-head local or push baselines.
 Research artifacts are not cryptographically authenticated; preserve their
 provenance and reviewer evidence rather than accepting edited reports as truth.
@@ -155,11 +173,12 @@ Freeze the feature gate before observing results. The comparison contract uses
 one paired mean per query, at least 20 independent query pairs, 2,000 seeded
 paired bootstrap resamples, and a percentile 95% confidence interval. Repeated
 model runs belong in each query mean, not as extra independent query samples.
-Stubs do not prove model repeatability. The corpus has 24 varied recall holdout
-queries with grades 3/2/3 for direct/context/linked evidence, plus five development
-ranking queries and separate mechanism cases. Unapproved proposals and unrelated
-retired-project sources have zero relevance. The linked evidence can improve
-coverage as well as ranking. No graph adapter runs in the current baseline.
+Stubs do not prove model repeatability. The corpus has 24 operational recall holdout
+questions with different graded relevance structures, plus five independent
+development ranking questions and separate mechanism cases. Proposals, unrelated
+sources and merely connected neighbors can have zero relevance. An edge does not
+confer relevance or independent-source credit. Direct lexical retrieval can already
+satisfy some questions; expansion can also waste budget or expose denied evidence. No graph adapter runs in the current baseline.
 This synthetic set still may be insufficient for broader product claims. No baseline quality score
 constitutes feature acceptance.
 
@@ -184,13 +203,20 @@ fixture hashes. Do not tune on holdout or change more than one mechanism.
 
 ## Bounds and interpretation
 
-The frozen profile caps 100 cases, 12 stages, 200 report rows, 16 KiB per source,
-1 MiB per JSON artifact, 120 seconds of measured run work, 50 candidates per
+The frozen profile caps 100 cases, 12 stages, 512 report rows, 16 KiB per source,
+1 MiB per JSON artifact, 120 seconds of setup and a separate 120 seconds of measured run work, 50 candidates per
 lexical/vector branch, 10 hydrated final results, 64 KiB complete serialized
 result context/output per row, 1024 stub calls including setup, zero retries,
 zero reserved/actual provider spend, and 16 MiB application storage. The runner
-signals cancellation after 180 seconds and lets isolated cleanup run; external finite command deadlines are still
-required for database provisioning/cleanup. Forced external termination can
+preflights the row count before creating a database; 47 supported cases and
+14 unsupported rows allow four ablations within the 512-row cap. The default
+service baseline still runs three. Candidate stages must fit the same declared
+row, byte and work caps; no future adapter is invented to fill those rows.
+All seeding and lifecycle preparation complete before the measured clock starts.
+The runner signals cancellation after the combined 240-second setup/work limit
+and lets isolated cleanup run; use a finite external deadline of 360 seconds
+for the standalone command, including cleanup. The full repository suite retains
+its separate finite 20-minute validation deadline. Forced external termination can
 leave disposable resources; cleanup disables leftover LOGIN roles when possible.
 The runner reports bounded allow-listed failure codes without raw errors.
 PostgreSQL runtime statements are
@@ -200,7 +226,8 @@ have 60-second/5-second limits. No trace is printed or silently truncated.
 Reports contain head, schema/fixture hashes, runner, seed, provider identity,
 dimension/locality, prompt/schema identity, flags, sample/unsupported/failed
 counts, measured p50/p95 latency, hard failures, hydration counts, complete
-serialized context/output bytes, calls, retries, spend and persisted bytes.
+serialized context/output bytes, calls, retries, spend, total persisted bytes, empty-schema allocation and evidence-growth bytes.
+Setup, measured work, cleanup and total wall time are separate fields.
 Latency and physical index/TOAST allocation are measured fields and can vary;
 seeded fixture ordering, scores, coverage, counts and policy identity reproduce.
 Raw content, raw provider errors and connection strings are excluded.
@@ -210,7 +237,12 @@ tokenization. They are not guessed from character counts. Storage includes
 all application tables in the isolated database and their indexes/TOAST, including
 memory, vectors, audits and all receipt/state tables, so future graph tables
 cannot silently escape the measurement;
-amplification needs a paired run and is null in a single baseline. Latency
+the empty migrated database is measured before fixture admission. Evidence growth
+is total application allocation minus that empty-schema allocation. The 2x
+amplification gate compares growth bytes between runs, while the hard storage
+ceiling always applies to total application bytes. Missing or inconsistent delta
+measurements cannot pass. A zero growth denominator is insufficient evidence.
+Amplification needs a paired run and is null in a single baseline. Latency
 includes service audit delivery and evaluator checks but excludes setup,
 supersession/erasure preparation and database cleanup. It is a local synthetic
 baseline, not production latency or full future-pipeline timing evidence.

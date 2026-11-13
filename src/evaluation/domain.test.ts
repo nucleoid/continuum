@@ -46,7 +46,7 @@ describe('frozen domain evaluator', () => {
     expect(input.relations.every(edge => input.documents.some(doc => doc.id === edge.target.id))).toBe(true);
     expect(await evaluateRetrieval(item, undefined)).toEqual({ status: 'not_supported' });
     const denied = item.documents.find(doc => item.prohibited.includes(`${doc.id}@${doc.version}`))!;
-    expect(await evaluateRetrieval(item, async () => [denied])).toMatchObject({ status: 'failed', reason: 'PROHIBITED_EVIDENCE' });
+    expect(await evaluateRetrieval(item, async () => [{ id: denied.id, version: denied.version }])).toMatchObject({ status: 'failed', reason: 'PROHIBITED_EVIDENCE' });
   });
 
   it('separates setup time from measured work and preflights candidate report capacity', () => {
@@ -207,5 +207,5 @@ describe('frozen domain evaluator', () => {
     expect(report.rows.find(row => row.id === 'local-only-no-egress' && row.ablation === 'hybrid')?.calls).toBe(0);
     expect(report.experiments).toHaveLength(3);
     expect(report.sampleCounts.unsupported).toBeGreaterThan(0);
-  }, 180_000);
+  }, 360_000);
 });
