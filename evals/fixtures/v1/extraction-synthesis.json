@@ -3,7 +3,8 @@
   "cases": [
     {
       "id": "partial-chunks",
-      "split": "holdout",
+      "split": "development",
+      "executionResidency": "local",
       "operation": "extraction",
       "query": "Quartz deployment",
       "documents": [
@@ -62,7 +63,8 @@
     },
     {
       "id": "unknown-preservation",
-      "split": "holdout",
+      "split": "development",
+      "executionResidency": "local",
       "operation": "extraction",
       "query": "Quartz deployment",
       "documents": [
@@ -121,7 +123,8 @@
     },
     {
       "id": "intent-vs-fact",
-      "split": "holdout",
+      "split": "development",
+      "executionResidency": "local",
       "operation": "synthesis",
       "query": "Quartz deployment",
       "documents": [
@@ -133,7 +136,28 @@
           "sourceKind": "non-code",
           "scope": "project:synthetic",
           "title": "Quartz deployment",
-          "body": "Quartz deployment uses the blue queue.",
+          "body": "The roadmap proposes the blue queue. Implementation is unknown.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "implemented",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "implemented",
+          "sourceKind": "code",
+          "scope": "project:synthetic",
+          "title": "Quartz deployment",
+          "body": "The synthetic implementation selects the green queue.",
           "type": "decision",
           "tags": [
             "decision"
@@ -153,6 +177,12 @@
           "version": "1",
           "grade": 3,
           "family": "primary"
+        },
+        {
+          "id": "implemented",
+          "version": "1",
+          "grade": 3,
+          "family": "implemented"
         }
       ],
       "prohibited": [],
@@ -169,6 +199,18 @@
           ],
           "unknown": false,
           "contradiction": null
+        },
+        {
+          "id": "queue-implemented",
+          "label": "implemented-fact",
+          "evidence": [
+            {
+              "id": "implemented",
+              "version": "1"
+            }
+          ],
+          "unknown": false,
+          "contradiction": null
         }
       ],
       "chunks": [
@@ -180,7 +222,8 @@
     },
     {
       "id": "oracle-vs-retrieved",
-      "split": "holdout",
+      "split": "development",
+      "executionResidency": "local",
       "operation": "synthesis",
       "query": "Quartz deployment",
       "documents": [
@@ -239,7 +282,8 @@
     },
     {
       "id": "contradiction-preservation",
-      "split": "holdout",
+      "split": "development",
+      "executionResidency": "local",
       "operation": "synthesis",
       "query": "Quartz deployment",
       "documents": [
@@ -263,6 +307,27 @@
           "eventStart": "2026-01-01T00:00:00Z",
           "eventEnd": null,
           "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "opposite",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "independent",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Quartz deployment",
+          "body": "Quartz deployment uses the red queue.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
         }
       ],
       "relevant": [
@@ -271,6 +336,12 @@
           "version": "1",
           "grade": 3,
           "family": "primary"
+        },
+        {
+          "id": "opposite",
+          "version": "1",
+          "grade": 3,
+          "family": "independent"
         }
       ],
       "prohibited": [],
@@ -283,6 +354,10 @@
             {
               "id": "primary",
               "version": "1"
+            },
+            {
+              "id": "opposite",
+              "version": "1"
             }
           ],
           "unknown": false,
@@ -293,12 +368,27 @@
         "chunk-1",
         "chunk-2"
       ],
-      "contradictionSets": [],
+      "contradictionSets": [
+        {
+          "id": "queue-conflict",
+          "evidence": [
+            {
+              "id": "primary",
+              "version": "1"
+            },
+            {
+              "id": "opposite",
+              "version": "1"
+            }
+          ]
+        }
+      ],
       "timeline": []
     },
     {
       "id": "source-document-denied",
-      "split": "holdout",
+      "split": "development",
+      "executionResidency": "local",
       "operation": "extraction",
       "query": "Quartz deployment",
       "documents": [
@@ -329,24 +419,8 @@
         "primary@1"
       ],
       "abstain": true,
-      "claims": [
-        {
-          "id": "queue",
-          "label": "recorded-intent",
-          "evidence": [
-            {
-              "id": "primary",
-              "version": "1"
-            }
-          ],
-          "unknown": false,
-          "contradiction": null
-        }
-      ],
-      "chunks": [
-        "chunk-1",
-        "chunk-2"
-      ],
+      "claims": [],
+      "chunks": [],
       "contradictionSets": [],
       "timeline": []
     }

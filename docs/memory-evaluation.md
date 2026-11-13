@@ -11,7 +11,7 @@ Build with Node 22 and restore the ordinary project dependencies. A PostgreSQL
 The LOGIN needs CREATE DATABASE, CREATE ROLE and migration-owner authority in
 the newly created database. Never supply a production maintenance connection.
 The harness creates one randomly named database, applies the existing migration
-chain, installs the exact APP and bound OP/SYNC grant scripts, connects as three
+chain, emulates the reviewed standalone SQL path of APP and bound OP/SYNC grant scripts, connects as three
 real non-superuser LOGINs, and drops only its own database and roles in finally
 cleanup. It never resets, migrates, or drops the database named in the URL.
 No `psql` executable is needed for this harness; the complete repository test
@@ -27,11 +27,15 @@ npm run eval:memory -- --manifest evals/offline-v1.json --output .fire-off/basel
 Commit the intended source before capturing a report. The runner requires a
 clean checkout, records the exact head, refuses an existing output path, and
 emits JSON and adjacent Markdown. Use an ignored local output directory, or
-exclude `.fire-off/` through local Git exclude. CI captures the baseline before
-test artifacts dirty the checkout and retains its report alongside complete
-test coverage. Fixtures, the runner, compiled test helpers, private reports and
+exclude `.fire-off/` through local Git exclude. CI captures its baseline once
+inside the PostgreSQL evaluator test, using the current Git head and a fixed
+offline profile, alongside complete test coverage. No separate baseline step
+can skip the full suite. Fixtures, the runner, compiled test helpers, private reports and
 live configuration are excluded from the npm tarball and container context.
-`npm run smoke:cli-package` checks that exclusion.
+`npm run smoke:cli-package` checks that exclusion. Grant emulation is checksum-pinned
+to the current scripts and fails on any change before removing psql directives.
+It is not a general psql interpreter. The container tests independently cover
+the packaged transaction-profile applier; this harness uses the standalone path.
 
 ## Frozen fixtures
 
@@ -106,6 +110,11 @@ measure full memory reads, explicit supersession, database-time expiry,
 membership revocation, physical personal tombstones/all-vector erasure, required
 read auditing, deterministic generator selection/ETags and escaped data blocks.
 Generator checks use its independent shared service, not recall ordering.
+The direct erasure residual query covers memory tombstones and all provider
+vectors only. Canonical OP completion verifies the wider lifecycle predicate;
+the harness does not manufacture private audit or outbox snapshots and does not
+claim independent residue coverage for those absent payloads. It makes no
+delivery claim from probing an administrator who already lacks user-scope access.
 The three recall configurations repeat non-retrieval service checks; those rows
 are mechanism repetitions, not independent statistical samples. Vector-only
 recall has no shared-service selector and is `not_supported`. Reranking,
@@ -126,8 +135,11 @@ Freeze the feature gate before observing results. The comparison contract uses
 one paired mean per query, at least 20 independent query pairs, 2,000 seeded
 paired bootstrap resamples, and a percentile 95% confidence interval. Repeated
 model runs belong in each query mean, not as extra independent query samples.
-Stubs do not prove model repeatability. The v1 corpus is intentionally small
-and may be insufficient for feature acceptance. No baseline quality score
+Stubs do not prove model repeatability. The corpus has 24 varied recall holdout
+queries with graded distractors, plus five development ranking queries and
+separate mechanism cases. Distractors include topical unapproved proposals so
+the current lexical and hash-vector baseline has room for ranking improvement.
+This synthetic set still may be insufficient for broader product claims. No baseline quality score
 constitutes feature acceptance.
 
 The user-approved relationship-v1 profile requires hybrid plus reranking as
@@ -151,10 +163,13 @@ fixture hashes. Do not tune on holdout or change more than one mechanism.
 The frozen profile caps 100 cases, 12 stages, 200 report rows, 16 KiB per source,
 1 MiB per JSON artifact, 120 seconds of measured run work, 50 candidates per
 lexical/vector branch, 10 hydrated final results, 64 KiB complete serialized
-result context/output per row, 100 stub calls including setup, zero retries,
+result context/output per row, 256 stub calls including setup, zero retries,
 zero reserved/actual provider spend, and 16 MiB application storage. The runner
-adds a 180-second process deadline; external finite command deadlines are still
-required for database provisioning/cleanup. PostgreSQL runtime statements are
+signals cancellation after 180 seconds and lets isolated cleanup run; external finite command deadlines are still
+required for database provisioning/cleanup. Forced external termination can
+leave disposable resources; cleanup disables leftover LOGIN roles when possible.
+The runner reports bounded allow-listed failure codes without raw errors.
+PostgreSQL runtime statements are
 limited to five seconds and lock waits to one second. Owner setup statements
 have 60-second/5-second limits. No trace is printed or silently truncated.
 

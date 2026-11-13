@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { mkdir, writeFile, readFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { loadCorpus, scoreRetrieval, scoreClaims, compareRuns, relationshipGate,
-  evaluateMechanism, seededOrder, boundReport, runBaseline, evaluateTaskPair, validateCases, compareExperiments } from './test-helpers.js';
+  evaluateMechanism, seededOrder, boundReport, runBaseline, evaluateTaskPair, validateCases, compareExperiments, checkedGrantSql } from './test-helpers.js';
 
 describe('frozen domain evaluator', () => {
   it('loads content-addressed synthetic fixtures with reproducible seeded order', async () => {
@@ -102,6 +105,12 @@ describe('frozen domain evaluator', () => {
     expect(() => validateCases({ schema: 1, cases: [contradictory] })).toThrow(/contradiction/i);
   });
 
+  it('fails closed when the reviewed grant emulation changes', async () => {
+    const sql = await readFile('scripts/grant-application-role.sql', 'utf8');
+    expect(checkedGrantSql('grant-application-role.sql', sql)).toContain('BEGIN;');
+    expect(() => checkedGrantSql('grant-application-role.sql', sql + '\n\\gexec\n')).toThrow(/drift/);
+  });
+
   it('rejects unpaired experiment inputs, cap drift, missing adapters, and critical regressions', () => {
     const before = { head: 'a'.repeat(40), predecessorHead: 'b'.repeat(40), fixtureHash: 'c'.repeat(64),
       policyHash: 'd'.repeat(64), budgetHash: 'e'.repeat(64), seed: 25, runner: 'memory-evaluation-v1', gate: relationshipGate,
@@ -121,8 +130,16 @@ describe('frozen domain evaluator', () => {
   });
 
   it('exercises current audited services on exact APP and bound OP/SYNC LOGIN profiles', async () => {
+    const head = process.env.CONTINUUM_EVAL_REPORT
+      ? execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 5000 }).trim() : 'a'.repeat(40);
     const report = await runBaseline(await loadCorpus(), process.env.CONTINUUM_TEST_DATABASE_URL
-      ?? 'postgres://continuum:continuum@localhost:5433/continuum', 'a'.repeat(40));
+      ?? 'postgres://continuum:continuum@localhost:5433/continuum', head);
+    if (process.env.CONTINUUM_EVAL_REPORT) {
+      const output = process.env.CONTINUUM_EVAL_REPORT;
+      await mkdir(dirname(output), { recursive: true });
+      await writeFile(output, boundReport(report), { flag: 'wx' });
+      await writeFile(output.replace(/\.json$/, '.md'), `# Offline synthetic memory baseline\n\nHead: ${head}\nFixture: ${report.fixtureManifest}\nMechanism: ${report.gates.mechanism}\nNo live-model quality claim.\n`, { flag: 'wx' });
+    }
     expect(report.rows.filter(row => row.status === 'failed')).toEqual([]);
     expect(report.gates).toMatchObject({ mechanism: 'pass', relationshipExpansion: 'not_supported' });
     expect(report.rows.find(row => row.id === 'expired-evidence' && row.ablation === 'hybrid')?.metrics?.recall).toBeNull();

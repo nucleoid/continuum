@@ -14,6 +14,8 @@ if (args.length !== 4 || args[0] !== '--manifest' || args[2] !== '--output') {
   process.exit(2);
 }
 let timer;
+let failureCode = 'PROFILE';
+const controller = new AbortController();
 try {
   const manifestPath = resolve(args[1]);
   const output = resolve(args[3]);
@@ -29,13 +31,17 @@ try {
       || manifest.runner !== RUNNER_VERSION || manifest.budgetProfile !== 'frozen-v1') throw new Error('Unsupported run profile');
   const databaseUrl = process.env.CONTINUUM_EVAL_DATABASE_URL;
   if (!databaseUrl) throw new Error('CONTINUUM_EVAL_DATABASE_URL must name a disposable-test maintenance connection');
+  failureCode = 'CHECKOUT_METADATA';
   const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8', timeout: 5000 }).trim();
   if (execFileSync('git', ['status', '--porcelain', '--untracked-files=normal'], { cwd: root, encoding: 'utf8', timeout: 5000 }).trim()) {
-    throw new Error('Commit intended source files before recording a baseline');
+    failureCode = 'DIRTY_CHECKOUT'; throw new Error('Commit intended source files before recording a baseline');
   }
+  failureCode = 'FIXTURE_SCHEMA';
   const corpus = await loadCorpus();
-  timer = setTimeout(() => { console.error('Evaluation process deadline exceeded'); process.exit(124); }, 180_000);
-  const report = await runBaseline(corpus, databaseUrl, head, manifest.seed);
+  timer = setTimeout(() => controller.abort(), 180_000);
+  failureCode = 'DB_OR_SERVICE';
+  const report = await runBaseline(corpus, databaseUrl, head, manifest.seed, controller.signal);
+  failureCode = 'REPORT_BOUND';
   const bytes = boundReport({ ...report, runManifest: manifest });
   const human = `# Memory evaluation\n\nHead: ${head}\nFixture: ${report.fixtureManifest}\n` +
     `Mode: offline synthetic stub, no live quality claim\n\nMeasured: ${report.sampleCounts.measured}; unsupported: ${report.sampleCounts.unsupported}; failed: ${report.sampleCounts.failed}\n` +
@@ -43,12 +49,13 @@ try {
     `Mechanism gate: ${report.gates.mechanism}\nQuality acceptance: ${report.gates.qualityAcceptance}\nRelationship expansion: ${report.gates.relationshipExpansion}\n` +
     `\nCandidate counts and model token usage are unavailable, reported as null. Future adapters are not_supported.\n`;
   await mkdir(dirname(output), { recursive: true });
+  failureCode = 'OUTPUT_WRITE';
   await writeFile(output, bytes, { flag: 'wx' });
   await writeFile(output.slice(0, -5) + '.md', human, { flag: 'wx' });
   console.log(JSON.stringify({ output, head, gates: report.gates, sampleCounts: report.sampleCounts }));
-  if (report.gates.mechanism !== 'pass') process.exitCode = 1;
+  if (report.gates.mechanism !== 'pass') { console.error(JSON.stringify({ status: 'failed', code: 'MECHANISM_FAIL' })); process.exitCode = 1; }
 } catch {
   // Connection strings and raw DB/provider errors must never enter an artifact or terminal.
-  console.error('Evaluation failed: check profile, clean committed checkout, bounds and isolated PostgreSQL prerequisites');
+  console.error(JSON.stringify({ status: 'failed', code: controller.signal.aborted ? 'EVALUATION_DEADLINE' : failureCode }));
   process.exitCode = 1;
 } finally { clearTimeout(timer); }

@@ -3,7 +3,8 @@
   "cases": [
     {
       "id": "cross-scope-denied",
-      "split": "holdout",
+      "split": "development",
+      "executionResidency": "local",
       "operation": "recall",
       "query": "Quartz deployment",
       "documents": [
@@ -41,7 +42,8 @@
     },
     {
       "id": "all-evidence-denied",
-      "split": "holdout",
+      "split": "development",
+      "executionResidency": "local",
       "operation": "fetch",
       "query": "Quartz deployment",
       "documents": [
@@ -79,7 +81,8 @@
     },
     {
       "id": "expired-evidence",
-      "split": "holdout",
+      "split": "development",
+      "executionResidency": "local",
       "operation": "expiry",
       "query": "Quartz deployment",
       "documents": [
@@ -123,7 +126,8 @@
     },
     {
       "id": "revoked-evidence",
-      "split": "holdout",
+      "split": "development",
+      "executionResidency": "local",
       "operation": "revoke",
       "query": "Quartz deployment",
       "documents": [
@@ -167,7 +171,8 @@
     },
     {
       "id": "erased-evidence",
-      "split": "holdout",
+      "split": "development",
+      "executionResidency": "local",
       "operation": "erase",
       "query": "Quartz deployment",
       "documents": [
@@ -211,7 +216,8 @@
     },
     {
       "id": "explicit-supersession",
-      "split": "holdout",
+      "split": "development",
+      "executionResidency": "local",
       "operation": "supersede",
       "query": "Quartz deployment",
       "documents": [
@@ -262,7 +268,8 @@
     },
     {
       "id": "malicious-reference",
-      "split": "holdout",
+      "split": "development",
+      "executionResidency": "local",
       "operation": "agents-md",
       "query": "Quartz deployment",
       "documents": [
@@ -305,7 +312,8 @@
     },
     {
       "id": "audited-memory-read",
-      "split": "holdout",
+      "split": "development",
+      "executionResidency": "local",
       "operation": "fetch",
       "query": "Quartz deployment",
       "documents": [
@@ -348,7 +356,8 @@
     },
     {
       "id": "deterministic-agents-md",
-      "split": "holdout",
+      "split": "development",
+      "executionResidency": "local",
       "operation": "agents-md",
       "query": "Quartz deployment",
       "documents": [

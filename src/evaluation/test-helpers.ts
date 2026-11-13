@@ -15,7 +15,7 @@ import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
 import { StubEmbeddingProvider } from '../embeddings/stub.js';
 import { recallForPrincipal } from '../services/recall.js';
 import { getMemoryForPrincipal } from '../services/memories.js';
-import { prepareAgentsMdForPrincipal, auditAgentsMdRead } from '../services/agents-md.js';
+import { prepareAgentsMdForPrincipal, renderAgentsMdForPrincipal } from '../services/agents-md.js';
 import { escapeAgentsMdData } from '../agents-md/render.js';
 import { EmbeddingRegistry, ScopeEmbeddingRouter } from '../embeddings/router.js';
 import { supersedeForPrincipal } from '../services/supersede.js';
@@ -23,7 +23,7 @@ import { mapOwnedUserScope, offboardPrincipal } from '../services/offboarding.js
 import type { Principal, Memory } from '../types.js';
 
 export const RUNNER_VERSION = 'memory-evaluation-v1';
-const MANIFEST_SHA256 = '4083c011ad04227ba0445ef0e8578c7624c49e4443a522580fc7112d58b04c1c';
+const MANIFEST_SHA256 = 'fa460a80ea99310c0f6169fad0a6f22469d008e52e206a39829ef2dca8023dde';
 export const sha256 = (text: string | Buffer): string => createHash('sha256').update(text).digest('hex');
 const id = z.string().regex(/^[a-z0-9][a-z0-9-]{0,79}$/);
 const version = z.string().regex(/^[1-9][0-9]{0,5}$/);
@@ -43,10 +43,11 @@ const documentSchema = z.object({ id, version, assertionVersion: version, family
 const operations = ['recall', 'fetch', 'agents-md', 'supersede', 'expiry', 'revoke', 'erase',
   'extraction', 'synthesis', 'temporal', 'connector', 'relationship-expansion', 'reranking', 'vector-only'] as const;
 const caseSchema = z.object({ id, split: z.enum(['development', 'holdout']), operation: z.enum(operations),
+  executionResidency: z.enum(['local', 'hosted']),
   query: z.string().min(1).max(500), documents: z.array(documentSchema).max(30),
   relevant: z.array(relevantSchema).max(30), prohibited: z.array(z.string().regex(/^[a-z0-9-]+@[1-9][0-9]*$/)).max(30),
   abstain: z.boolean(), claims: z.array(claimSchema).max(20), chunks: z.array(id).max(20),
-  contradictionSets: z.array(z.array(z.string().max(90)).min(2).max(10)).max(10),
+  contradictionSets: z.array(z.object({ id, evidence: z.array(reference).min(2).max(10) }).strict()).max(10),
   timeline: z.array(z.object({ at: date, action: z.enum(['supersede', 'expiry', 'revoke', 'erase']),
     evidence: z.string().max(90) }).strict()).max(10) }).strict();
 export type FixtureCase = z.infer<typeof caseSchema>;
@@ -68,7 +69,7 @@ const budgetsSchema = z.object({ maxCases: z.number().int().min(1).max(100),
   maxSourceBytes: z.number().int().min(1).max(16_384), maxArtifactBytes: z.number().int().min(1).max(1_048_576),
   maxDurationMs: z.number().int().min(1).max(120_000), candidateLimit: z.number().int().min(1).max(50),
   hydrationLimit: z.number().int().min(1).max(10), contextBytes: z.number().int().min(1).max(65_536),
-  outputBytes: z.number().int().min(1).max(65_536), calls: z.number().int().min(1).max(100),
+  outputBytes: z.number().int().min(1).max(65_536), calls: z.number().int().min(1).max(256),
   retries: z.literal(0), reservedSpend: z.literal(0), actualSpend: z.literal(0),
   storageBytes: z.number().int().min(1).max(16_777_216) }).strict();
 const fixtureFiles = ['retrieval.json', 'lifecycle-security.json', 'extraction-synthesis.json', 'temporal-connectors.json'] as const;
@@ -93,10 +94,17 @@ export function validateCases(input: unknown): FixtureCase[] {
     const known = new Set(item.documents.map(key));
     if (item.operation === 'supersede') known.add('successor@2');
     for (const ref of [...item.relevant.map(key), ...item.prohibited,
-      ...item.claims.flatMap(claim => claim.evidence.map(key)), ...item.contradictionSets.flat()]) {
+      ...item.claims.flatMap(claim => claim.evidence.map(key)), ...item.contradictionSets.flatMap(set => set.evidence.map(key))]) {
       if (!known.has(ref)) throw new Error('Judgment references an absent source version');
     }
     if (item.relevant.some(ref => item.prohibited.includes(key(ref)))) throw new Error('Contradictory judgments');
+    const forbidden = new Set(item.documents.filter(doc => !doc.allowed || !doc.sourceAllowed
+      || (item.executionResidency === 'hosted' && doc.residency === 'local-only')).map(key));
+    for (const claim of item.claims) {
+      if (claim.evidence.some(ref => item.prohibited.includes(key(ref)) || forbidden.has(key(ref)))) throw new Error('Claim cites prohibited evidence');
+      if (claim.contradiction && !item.contradictionSets.some(set => set.id === claim.contradiction)) throw new Error('Unknown contradiction set');
+    }
+    unique(item.contradictionSets.map(set => set.id), 'contradiction sets');
     if (item.abstain !== (item.relevant.length === 0)) throw new Error('Contradictory abstention label');
     if (item.documents.some(doc => Buffer.byteLength(doc.body) > 16_384)) throw new Error('Source byte bound exceeded');
   }
@@ -192,6 +200,7 @@ export type TaskAdapter = (evidence: Reference[]) => Promise<TaskOutput>;
 export async function evaluateTaskPair(task: FixtureCase, retrieved: Reference[], adapter?: TaskAdapter) {
   if (!adapter) return { status: 'not_supported' as const };
   const permitted = task.documents.filter(doc => doc.allowed && doc.sourceAllowed && doc.state === 'live'
+    && (task.executionResidency === 'local' || doc.residency !== 'local-only')
     && !task.prohibited.includes(key(doc)) && (doc.eventEnd === null || doc.eventEnd >= doc.eventStart));
   const allowed = new Set(permitted.map(key));
   const oracleEvidence = task.relevant.filter(ref => allowed.has(key(ref))).map(({ id, version }) => ({ id, version }));
@@ -215,10 +224,11 @@ export async function evaluateTaskPair(task: FixtureCase, retrieved: Reference[]
     };
     const retrievedRun = await run(retrieved); const oracleRun = await run(oracleEvidence);
     const critical = retrievedRun.prohibited || oracleRun.prohibited;
+    const correct = (result: typeof oracleRun) => result.abstentionError === 0 && !result.prohibited
+      && Object.entries(result.claims).every(([metric, value]) => metric === 'unsupportedAssertionRate'
+        ? value === null || value === 0 : value === null || value === 1);
     return { status: 'measured' as const, gate: critical ? 'fail' : 'pass', retrieved: retrievedRun, oracle: oracleRun,
-      diagnosis: retrievedRun.claims.claimRecall !== null && oracleRun.claims.claimRecall !== null
-        && retrievedRun.claims.claimRecall < oracleRun.claims.claimRecall ? 'retrieval_miss'
-        : oracleRun.claims.claimRecall !== null && oracleRun.claims.claimRecall < 1 ? 'reasoning_failure' : 'no_miss' };
+      diagnosis: !correct(oracleRun) ? 'reasoning_failure' : !correct(retrievedRun) ? 'retrieval_miss' : 'no_miss' };
   } catch { return { status: 'failed' as const, gate: 'fail', reason: 'ADAPTER_FAILED' }; }
 }
 
@@ -298,9 +308,19 @@ export function boundReport(report: unknown): string {
 }
 
 const quote = (value: string): string => '"' + value.replaceAll('"', '""') + '"';
+const GRANT_HASHES: Record<string, string> = {
+  'grant-application-role.sql': 'df1518282b189bfb23482e173adeac935ed5bab935912dacd2b2d5f018cfb884',
+  'grant-operator-role.sql': '1520fb81154ce29ffe661c5ed6e81b39c7225a9292bceac4bd38720764305ff6',
+  'grant-sync-role.sql': '35c77a918abbc297d5c1e1fd89902bc99e29ac086147edd5cc973b1879c538c3',
+};
+/** Reviewed standalone SQL emulation, not a general-purpose psql interpreter. */
+export function checkedGrantSql(filename: string, source: string): string {
+  const normalized = source.replaceAll('\r\n', '\n');
+  if (!GRANT_HASHES[filename] || sha256(normalized) !== GRANT_HASHES[filename]) throw new Error('Grant script drift requires review');
+  return normalized.split('\n').filter(line => !line.trimStart().startsWith('\\')).join('\n');
+}
 async function grant(owner: pg.Pool, filename: string, variables: Record<string, string>) {
-  let sql = (await readFile(resolve('scripts', filename), 'utf8')).split(/\r?\n/)
-    .filter(line => !line.trimStart().startsWith('\\')).join('\n');
+  let sql = checkedGrantSql(filename, await readFile(resolve('scripts', filename), 'utf8'));
   for (const [name, value] of Object.entries({ continuum_schema: 'public', ...variables })) {
     sql = sql.replaceAll(`:"${name}"`, quote(value)).replaceAll(`:'${name}'`, "'" + value.replaceAll("'", "''") + "'");
   }
@@ -345,10 +365,15 @@ async function isolatedServices<T>(url: string, run: (fixture: {
     return await run({ owner, app: sessions[0], operator: sessions[1], sync: sessions[2], actor });
   } finally {
     await Promise.all(pools.map(pool => pool.end()));
+    const cleanupErrors: unknown[] = [];
     try {
-      if (created) await dropIsolatedTestDatabase(maintenance, database);
-      for (const role of roles.reverse()) await maintenance.query(`DROP ROLE ${quote(role)}`);
+      if (created) try { await dropIsolatedTestDatabase(maintenance, database); } catch (error) { cleanupErrors.push(error); }
+      for (const role of roles.reverse()) {
+        try { await maintenance.query(`ALTER ROLE ${quote(role)} NOLOGIN`); await maintenance.query(`DROP ROLE ${quote(role)}`); }
+        catch (error) { cleanupErrors.push(error); }
+      }
     } finally { await maintenance.end(); }
+    if (cleanupErrors.length) throw new Error('Isolated fixture cleanup incomplete');
   }
 }
 
@@ -357,7 +382,7 @@ export const ablations: Ablation[] = ['lexical', 'hybrid', 'fallback', 'vector-o
 export type EvaluationRow = { id: string; ablation: Ablation; status: 'measured' | 'not_supported' | 'failed';
   metrics?: ReturnType<typeof scoreRetrieval>; latencyMs?: number; failures?: string[];
   diagnostics?: string; contextBytes?: number; outputBytes?: number; hydrated?: number; calls?: number };
-export async function runBaseline(corpus: Corpus, databaseUrl: string, head: string, seed = corpus.manifest.seed) {
+export async function runBaseline(corpus: Corpus, databaseUrl: string, head: string, seed = corpus.manifest.seed, signal?: AbortSignal) {
   if (!/^[a-f0-9]{40}$/.test(head) || !Number.isSafeInteger(seed)) throw new Error('Invalid run identity');
   const started = performance.now();
   const rows: EvaluationRow[] = [];
@@ -370,6 +395,7 @@ export async function runBaseline(corpus: Corpus, databaseUrl: string, head: str
     const syncAllowed = (await sync.query("SELECT has_table_privilege(session_user,'memories','SELECT') AS allowed")).rows[0].allowed;
     if (syncAllowed) throw new Error('SYNC fixture may not read memory payloads');
     for (const item of seededOrder(corpus.cases, seed)) {
+      signal?.throwIfAborted();
       if (performance.now() - started > limits.maxDurationMs) throw new Error('Evaluation deadline exceeded');
       if (!supported.has(item.operation)) {
         rows.push({ id: item.id, ablation: item.operation as Ablation, status: 'not_supported' }); continue;
@@ -408,11 +434,14 @@ export async function runBaseline(corpus: Corpus, databaseUrl: string, head: str
           WHERE scope_id=$1 AND (body <> '[erased]' OR title <> '[erased]' OR EXISTS
           (SELECT 1 FROM memory_embeddings e WHERE e.memory_id=m.id))`, [scoped.id])).rows[0].count;
         if (residual) throw new Error('Erased payload survived');
+        const lateVectors = (await owner.query('SELECT 1 FROM memory_embeddings WHERE memory_id=ANY($1::uuid[])', [[...memories.values()].map(memory => memory.id)])).rowCount;
+        if (lateVectors) throw new Error('Erased vectors survived');
       }
       for (const ablation of ['lexical', 'hybrid', 'fallback'] as const) {
         const start = performance.now(); const failures: string[] = []; let actual: Reference[] = [];
         let context: unknown = []; let diagnostics = 'not_applicable'; let calls = 0;
         const beforeAudit = (await owner.query('SELECT count(*)::int AS count FROM audit_log')).rows[0].count;
+        const auditFence = (await owner.query('SELECT coalesce(max(id),0)::text AS id FROM audit_log')).rows[0].id;
         try {
           if (item.operation === 'fetch') {
             try { const result = await getMemoryForPrincipal(app, reader, memories.values().next().value!.id);
@@ -420,11 +449,10 @@ export async function runBaseline(corpus: Corpus, databaseUrl: string, head: str
             } catch (error) { if ((error as { code?: string }).code !== 'MEMORY_NOT_FOUND') throw error; }
           } else if (item.operation === 'agents-md') {
             const input = { project: scoped.name };
+            const markdown = await renderAgentsMdForPrincipal(app, reader, input);
             const bundle = await prepareAgentsMdForPrincipal(app, reader, input);
-            await auditAgentsMdRead(app, reader, input, bundle, true);
-            const repeated = await prepareAgentsMdForPrincipal(app, reader, input);
-            await auditAgentsMdRead(app, reader, input, repeated, true);
-            if (bundle.markdown !== repeated.markdown || bundle.hash !== repeated.hash) failures.push('nondeterministic-agents-md');
+            const repeated = await renderAgentsMdForPrincipal(app, reader, input);
+            if (markdown !== repeated || markdown !== bundle.markdown || sha256(markdown) !== bundle.hash) failures.push('nondeterministic-agents-md');
             for (const memory of bundle.memories) {
               const body = escapeAgentsMdData(memory.body, { preserveNewlines: true });
               const data = body.split('\n').map(line => line === '' ? '> DATA:' : `> DATA: ${line}`).join('\n');
@@ -433,10 +461,10 @@ export async function runBaseline(corpus: Corpus, databaseUrl: string, head: str
             actual = bundle.memories.map(memory => references.get(memory.id)!);
             context = bundle.markdown;
           } else if (item.operation === 'erase') {
-            // Physical proof above is separate from this active caller's access check.
-            const result = await recallForPrincipal(app, null, actor, { query: item.query, scopes: [`user:${scoped.name}`] });
-            actual = result.results.map(result => references.get(result.memory.id)!);
-            if (actual.length) failures.push('erased-evidence-delivery');
+            // This row measures direct memory/all-vector residual proof only.
+            // Canonical OP completion separately checks the wider lifecycle state.
+            context = { tombstones: memories.size, residualVectors: 0 };
+            diagnostics = 'physical_memory_vector_erasure';
           } else {
             const provider = ablation === 'lexical' ? null : { id: stub.id, dim: 768, local: true,
               embed: async (texts: string[]) => { calls++; if (ablation === 'fallback' || item.id === 'unavailable-vector-provider') throw new Error('synthetic unavailable'); return stub.embed(texts); } };
@@ -454,6 +482,12 @@ export async function runBaseline(corpus: Corpus, databaseUrl: string, head: str
           if (serializedBytes > limits.contextBytes || serializedBytes > limits.outputBytes) failures.push('hard-byte-budget');
           const afterAudit = (await owner.query('SELECT count(*)::int AS count FROM audit_log')).rows[0].count;
           if (actual.length && afterAudit <= beforeAudit) failures.push('unaudited-delivery');
+          const deliveredAudits = (await owner.query(`SELECT memory_id FROM audit_log WHERE id > $1::bigint
+            AND action='read' AND memory_id IS NOT NULL`, [auditFence])).rows.map(row => row.memory_id);
+          for (const ref of actual) {
+            const memoryId = [...references].find(([, value]) => key(value) === key(ref))?.[0];
+            if (!deliveredAudits.includes(memoryId)) failures.push('missing-delivered-memory-audit');
+          }
           if (actual.some(ref => item.prohibited.includes(key(ref)) || !references.size)) failures.push('prohibited-evidence');
           rows.push({ id: item.id, ablation, status: 'measured', metrics: scoreRetrieval(actual, item.relevant),
             latencyMs: performance.now() - start, failures, diagnostics,

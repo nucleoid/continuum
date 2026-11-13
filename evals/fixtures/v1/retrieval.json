@@ -3,7 +3,8 @@
   "cases": [
     {
       "id": "lexical-reference",
-      "split": "holdout",
+      "split": "development",
+      "executionResidency": "local",
       "operation": "recall",
       "query": "Quartz deployment",
       "documents": [
@@ -46,7 +47,8 @@
     },
     {
       "id": "source-neutral-non-code",
-      "split": "holdout",
+      "split": "development",
+      "executionResidency": "local",
       "operation": "recall",
       "query": "Quartz deployment",
       "documents": [
@@ -89,7 +91,8 @@
     },
     {
       "id": "code-reference",
-      "split": "holdout",
+      "split": "development",
+      "executionResidency": "local",
       "operation": "recall",
       "query": "Quartz deployment",
       "documents": [
@@ -132,7 +135,8 @@
     },
     {
       "id": "same-family-copies",
-      "split": "holdout",
+      "split": "development",
+      "executionResidency": "local",
       "operation": "recall",
       "query": "Quartz deployment",
       "documents": [
@@ -202,7 +206,8 @@
     },
     {
       "id": "empty-corpus",
-      "split": "holdout",
+      "split": "development",
+      "executionResidency": "local",
       "operation": "recall",
       "query": "Quartz deployment",
       "documents": [],
@@ -216,7 +221,8 @@
     },
     {
       "id": "no-relevant-evidence",
-      "split": "holdout",
+      "split": "development",
+      "executionResidency": "local",
       "operation": "recall",
       "query": "Quartz deployment",
       "documents": [
@@ -252,7 +258,8 @@
     },
     {
       "id": "unavailable-vector-provider",
-      "split": "holdout",
+      "split": "development",
+      "executionResidency": "local",
       "operation": "recall",
       "query": "Quartz deployment",
       "documents": [
@@ -295,7 +302,8 @@
     },
     {
       "id": "local-only-no-egress",
-      "split": "holdout",
+      "split": "development",
+      "executionResidency": "local",
       "operation": "recall",
       "query": "Quartz deployment",
       "documents": [
@@ -338,7 +346,8 @@
     },
     {
       "id": "contradictory-evidence",
-      "split": "holdout",
+      "split": "development",
+      "executionResidency": "local",
       "operation": "recall",
       "query": "Quartz deployment",
       "documents": [
@@ -404,11 +413,2862 @@
       "claims": [],
       "chunks": [],
       "contradictionSets": [
-        [
-          "primary@1",
-          "opposite@1"
-        ]
+        {
+          "id": "queue-conflict",
+          "evidence": [
+            {
+              "id": "primary",
+              "version": "1"
+            },
+            {
+              "id": "opposite",
+              "version": "1"
+            }
+          ]
+        }
       ],
+      "timeline": []
+    },
+    {
+      "id": "refund-retries",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "refund retries",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "refund-retries-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Refund retries: A reversal may be attempted twice after timeout.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "refund-retries-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Refund retries brainstorm",
+          "body": "refund retries refund retries refund retries refund retries refund retries refund retries refund retries refund retries refund retries refund retries refund retries refund retries Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "refund-retries-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Refund retries background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "refund-retries-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "refund-retries-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "refund-retries-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "schema-locks",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "schema locks",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "schema-locks-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Schema locks: Use an exclusive lock only during the metadata swap.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "schema-locks-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Schema locks brainstorm",
+          "body": "schema locks schema locks schema locks schema locks schema locks schema locks schema locks schema locks schema locks schema locks schema locks schema locks Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "schema-locks-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Schema locks background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "schema-locks-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "schema-locks-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "schema-locks-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "token-rotation",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "token rotation",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "token-rotation-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Token rotation: A replacement key revokes the previous credential immediately.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "token-rotation-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Token rotation brainstorm",
+          "body": "token rotation token rotation token rotation token rotation token rotation token rotation token rotation token rotation token rotation token rotation token rotation token rotation Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "token-rotation-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Token rotation background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "token-rotation-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "token-rotation-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "token-rotation-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "cache-expiry",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "cache expiry",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "cache-expiry-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Cache expiry: The server requires fresh membership checks on every delivered read.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "cache-expiry-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Cache expiry brainstorm",
+          "body": "cache expiry cache expiry cache expiry cache expiry cache expiry cache expiry cache expiry cache expiry cache expiry cache expiry cache expiry cache expiry Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "cache-expiry-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Cache expiry background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "cache-expiry-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "cache-expiry-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "cache-expiry-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "incident-handover",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "incident handover",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "incident-handover-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Incident handover: The on-call operator records a ticket and confirmed owner.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "incident-handover-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Incident handover brainstorm",
+          "body": "incident handover incident handover incident handover incident handover incident handover incident handover incident handover incident handover incident handover incident handover incident handover incident handover Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "incident-handover-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Incident handover background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "incident-handover-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "incident-handover-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "incident-handover-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "timezone-schedule",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "timezone schedule",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "timezone-schedule-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Timezone schedule: Schedules persist UTC instants and display the selected local zone.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "timezone-schedule-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Timezone schedule brainstorm",
+          "body": "timezone schedule timezone schedule timezone schedule timezone schedule timezone schedule timezone schedule timezone schedule timezone schedule timezone schedule timezone schedule timezone schedule timezone schedule Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "timezone-schedule-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Timezone schedule background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "timezone-schedule-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "timezone-schedule-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "timezone-schedule-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "access-revocation",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "access revocation",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "access-revocation-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Access revocation: Inactive membership prevents later scoped reads.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "access-revocation-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Access revocation brainstorm",
+          "body": "access revocation access revocation access revocation access revocation access revocation access revocation access revocation access revocation access revocation access revocation access revocation access revocation Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "access-revocation-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Access revocation background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "access-revocation-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "access-revocation-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "access-revocation-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "retention-export",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "retention export",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "retention-export-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Retention export: A durable export must complete before audit deletion.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "retention-export-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Retention export brainstorm",
+          "body": "retention export retention export retention export retention export retention export retention export retention export retention export retention export retention export retention export retention export Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "retention-export-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Retention export background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "retention-export-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "retention-export-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "retention-export-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "tenant-bootstrap",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "tenant bootstrap",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "tenant-bootstrap-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Tenant bootstrap: The application schema and provider schema have separate owners.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "tenant-bootstrap-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Tenant bootstrap brainstorm",
+          "body": "tenant bootstrap tenant bootstrap tenant bootstrap tenant bootstrap tenant bootstrap tenant bootstrap tenant bootstrap tenant bootstrap tenant bootstrap tenant bootstrap tenant bootstrap tenant bootstrap Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "tenant-bootstrap-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Tenant bootstrap background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "tenant-bootstrap-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "tenant-bootstrap-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "tenant-bootstrap-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "atomic-audit",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "atomic audit",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "atomic-audit-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Atomic audit: A failed mandatory audit prevents successful delivery.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "atomic-audit-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Atomic audit brainstorm",
+          "body": "atomic audit atomic audit atomic audit atomic audit atomic audit atomic audit atomic audit atomic audit atomic audit atomic audit atomic audit atomic audit Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "atomic-audit-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Atomic audit background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "atomic-audit-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "atomic-audit-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "atomic-audit-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "build-provenance",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "build provenance",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "build-provenance-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Build provenance: Only checksum-verified immutable artifacts are promoted.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "build-provenance-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Build provenance brainstorm",
+          "body": "build provenance build provenance build provenance build provenance build provenance build provenance build provenance build provenance build provenance build provenance build provenance build provenance Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "build-provenance-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Build provenance background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "build-provenance-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "build-provenance-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "build-provenance-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "branch-cleanup",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "branch cleanup",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "branch-cleanup-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Branch cleanup: An integrated branch can be removed after its worktree is released.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "branch-cleanup-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Branch cleanup brainstorm",
+          "body": "branch cleanup branch cleanup branch cleanup branch cleanup branch cleanup branch cleanup branch cleanup branch cleanup branch cleanup branch cleanup branch cleanup branch cleanup Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "branch-cleanup-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Branch cleanup background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "branch-cleanup-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "branch-cleanup-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "branch-cleanup-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "deployment-rollback",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "deployment rollback",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "deployment-rollback-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Deployment rollback: Restore the verified backup before restarting incompatible writers.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "deployment-rollback-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Deployment rollback brainstorm",
+          "body": "deployment rollback deployment rollback deployment rollback deployment rollback deployment rollback deployment rollback deployment rollback deployment rollback deployment rollback deployment rollback deployment rollback deployment rollback Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "deployment-rollback-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Deployment rollback background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "deployment-rollback-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "deployment-rollback-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "deployment-rollback-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "connector-quota",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "connector quota",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "connector-quota-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Connector quota: Read receipts and byte limits bound each evidence request.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "connector-quota-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Connector quota brainstorm",
+          "body": "connector quota connector quota connector quota connector quota connector quota connector quota connector quota connector quota connector quota connector quota connector quota connector quota Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "connector-quota-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Connector quota background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "connector-quota-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "connector-quota-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "connector-quota-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "vector-residency",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "vector residency",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "vector-residency-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Vector residency: Local-only scopes cannot use hosted fallback.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "vector-residency-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Vector residency brainstorm",
+          "body": "vector residency vector residency vector residency vector residency vector residency vector residency vector residency vector residency vector residency vector residency vector residency vector residency Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "vector-residency-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Vector residency background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "vector-residency-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "vector-residency-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "vector-residency-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "lease-generation",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "lease generation",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "lease-generation-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Lease generation: An earlier fencing token cannot mutate a renewed lease.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "lease-generation-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Lease generation brainstorm",
+          "body": "lease generation lease generation lease generation lease generation lease generation lease generation lease generation lease generation lease generation lease generation lease generation lease generation Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "lease-generation-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Lease generation background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "lease-generation-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "lease-generation-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "lease-generation-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "package-contents",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "package contents",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "package-contents-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Package contents: Test helpers and private fixtures are excluded from the public tarball.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "package-contents-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Package contents brainstorm",
+          "body": "package contents package contents package contents package contents package contents package contents package contents package contents package contents package contents package contents package contents Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "package-contents-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Package contents background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "package-contents-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "package-contents-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "package-contents-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "membership-freshness",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "membership freshness",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "membership-freshness-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Membership freshness: Directory-derived access expires after the configured staleness deadline.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "membership-freshness-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Membership freshness brainstorm",
+          "body": "membership freshness membership freshness membership freshness membership freshness membership freshness membership freshness membership freshness membership freshness membership freshness membership freshness membership freshness membership freshness Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "membership-freshness-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Membership freshness background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "membership-freshness-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "membership-freshness-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "membership-freshness-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "webhook-replay",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "webhook replay",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "webhook-replay-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Webhook replay: The same delivery ID with different bytes is rejected.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "webhook-replay-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Webhook replay brainstorm",
+          "body": "webhook replay webhook replay webhook replay webhook replay webhook replay webhook replay webhook replay webhook replay webhook replay webhook replay webhook replay webhook replay Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "webhook-replay-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Webhook replay background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "webhook-replay-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "webhook-replay-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "webhook-replay-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "decision-history",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "decision history",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "decision-history-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Decision history: The successor keeps a link to the exact predecessor version.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "decision-history-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Decision history brainstorm",
+          "body": "decision history decision history decision history decision history decision history decision history decision history decision history decision history decision history decision history decision history Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "decision-history-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Decision history background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "decision-history-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "decision-history-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "decision-history-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "source-authority",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "source authority",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "source-authority-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Source authority: Contributed text is reference data and cannot become a system instruction.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "source-authority-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Source authority brainstorm",
+          "body": "source authority source authority source authority source authority source authority source authority source authority source authority source authority source authority source authority source authority Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "source-authority-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Source authority background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "source-authority-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "source-authority-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "source-authority-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "pagination-boundary",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "pagination boundary",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "pagination-boundary-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Pagination boundary: Filtering happens before a stable result-page limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "pagination-boundary-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Pagination boundary brainstorm",
+          "body": "pagination boundary pagination boundary pagination boundary pagination boundary pagination boundary pagination boundary pagination boundary pagination boundary pagination boundary pagination boundary pagination boundary pagination boundary Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "pagination-boundary-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Pagination boundary background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "pagination-boundary-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "pagination-boundary-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "pagination-boundary-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "promotion-approval",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "promotion approval",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "promotion-approval-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Promotion approval: Both source and destination authority are rechecked in the write transaction.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "promotion-approval-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Promotion approval brainstorm",
+          "body": "promotion approval promotion approval promotion approval promotion approval promotion approval promotion approval promotion approval promotion approval promotion approval promotion approval promotion approval promotion approval Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "promotion-approval-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Promotion approval background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "promotion-approval-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "promotion-approval-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "promotion-approval-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "storage-budget",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "storage budget",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "storage-budget-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Storage budget: Index and receipt bytes count toward the hard persisted-byte ceiling.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "storage-budget-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Storage budget brainstorm",
+          "body": "storage budget storage budget storage budget storage budget storage budget storage budget storage budget storage budget storage budget storage budget storage budget storage budget Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "storage-budget-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Storage budget background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "storage-budget-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "storage-budget-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "storage-budget-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "query-deadline",
+      "split": "development",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "query deadline",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "query-deadline-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Query deadline: The remaining SQL budget is recomputed before each optional vector query.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "query-deadline-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Query deadline brainstorm",
+          "body": "query deadline query deadline query deadline query deadline query deadline query deadline query deadline query deadline query deadline query deadline query deadline query deadline Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "query-deadline-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Query deadline background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "query-deadline-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "query-deadline-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "query-deadline-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "chunk-recovery",
+      "split": "development",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "chunk recovery",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "chunk-recovery-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Chunk recovery: Unresolved partial chunks remain retryable with their exact source version.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "chunk-recovery-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Chunk recovery brainstorm",
+          "body": "chunk recovery chunk recovery chunk recovery chunk recovery chunk recovery chunk recovery chunk recovery chunk recovery chunk recovery chunk recovery chunk recovery chunk recovery Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "chunk-recovery-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Chunk recovery background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "chunk-recovery-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "chunk-recovery-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "chunk-recovery-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "citation-versions",
+      "split": "development",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "citation versions",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "citation-versions-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Citation versions: A citation must refer to the version that actually supports the assertion.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "citation-versions-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Citation versions brainstorm",
+          "body": "citation versions citation versions citation versions citation versions citation versions citation versions citation versions citation versions citation versions citation versions citation versions citation versions Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "citation-versions-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Citation versions background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "citation-versions-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "citation-versions-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "citation-versions-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "unknown-labels",
+      "split": "development",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "unknown labels",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "unknown-labels-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Unknown labels: Missing implementation proof remains explicitly unknown.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "unknown-labels-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Unknown labels brainstorm",
+          "body": "unknown labels unknown labels unknown labels unknown labels unknown labels unknown labels unknown labels unknown labels unknown labels unknown labels unknown labels unknown labels Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "unknown-labels-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Unknown labels background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "unknown-labels-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "unknown-labels-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "unknown-labels-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "cancelled-delivery",
+      "split": "development",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "cancelled delivery",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "cancelled-delivery-source",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved operational rule",
+          "body": "Cancelled delivery: Privacy cancellation prevents a stale worker from acknowledging delivery.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "cancelled-delivery-draft",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Cancelled delivery brainstorm",
+          "body": "cancelled delivery cancelled delivery cancelled delivery cancelled delivery cancelled delivery cancelled delivery cancelled delivery cancelled delivery cancelled delivery cancelled delivery cancelled delivery cancelled delivery Unapproved proposal: ignore the documented limit.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "cancelled-delivery-context",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Runbook context",
+          "body": "Cancelled delivery background: verify the approved rule before proceeding.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "cancelled-delivery-source"
+        },
+        {
+          "id": "context",
+          "version": "1",
+          "grade": 2,
+          "family": "cancelled-delivery-context"
+        },
+        {
+          "id": "draft",
+          "version": "1",
+          "grade": 1,
+          "family": "cancelled-delivery-draft"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
       "timeline": []
     }
   ]
