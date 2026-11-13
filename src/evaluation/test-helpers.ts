@@ -1,5 +1,6 @@
 /** Source-checkout evaluation tooling. Deliberately excluded from the public package. */
 import { createHash, randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { readFile, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -174,6 +175,7 @@ export async function evaluateRetrieval(item: FixtureCase,
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const input = retrievalInput(item);
+    if (Buffer.byteLength(JSON.stringify(input)) > 65_536) return { status: 'failed' as const, reason: 'CONTEXT_BOUND' };
     const raw = await Promise.race([adapter(input), new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error('Adapter deadline')), 1000);
     })]);
@@ -382,7 +384,7 @@ export function experimentFromReport(corpus: Corpus, input: unknown, ablation: s
   features: Record<string, boolean>, adapters: Record<string, string>, predecessorHead?: string) {
   if (!loadedCorpora.has(corpus)) throw new Error('A loaded frozen corpus is required');
   const report = reportEvidenceSchema.parse(input);
-  if (report.fixtureManifest !== corpus.manifestHash || JSON.stringify(report.budgets) !== JSON.stringify(corpus.manifest.budgets)) throw new Error('Report fixture/budget drift');
+  if (report.seed !== corpus.manifest.seed || report.fixtureManifest !== corpus.manifestHash || JSON.stringify(report.budgets) !== JSON.stringify(corpus.manifest.budgets)) throw new Error('Report fixture/budget drift');
   const sourceReport = { head: report.head, sourceHead: report.sourceHead, predecessorEligible: report.predecessorEligible,
     fixtureManifest: report.fixtureManifest, seed: report.seed, runner: report.runner,
     budgets: report.budgets, gates: { failures: report.gates.failures }, usage: {
@@ -554,8 +556,16 @@ export const ablations: Ablation[] = ['lexical', 'hybrid', 'fallback', 'vector-o
 export type EvaluationRow = { id: string; ablation: Ablation; status: 'measured' | 'not_supported' | 'failed';
   metrics?: ReturnType<typeof scoreRetrieval>; latencyMs?: number; failures?: string[];
   diagnostics?: string; contextBytes?: number; outputBytes?: number; hydrated?: number; calls?: number };
+function assertCheckout(head: string) {
+  const actual = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 5000 }).trim();
+  const dirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=normal'], { encoding: 'utf8', timeout: 5000 }).trim();
+  if (actual !== head || dirty) throw new Error('Checkout identity must be clean and match the tested head');
+}
+
 export async function runBaseline(corpus: Corpus, databaseUrl: string, head: string, seed = corpus.manifest.seed, signal?: AbortSignal) {
-  if (!/^[a-f0-9]{40}$/.test(head) || !Number.isSafeInteger(seed)) throw new Error('Invalid run identity');
+  if (!loadedCorpora.has(corpus)) throw new Error('A loaded frozen corpus is required');
+  if (!/^[a-f0-9]{40}$/.test(head) || seed !== corpus.manifest.seed) throw new Error('Invalid run identity');
+  assertCheckout(head);
   const started = performance.now();
   const rows: EvaluationRow[] = [];
   const limits = corpus.manifest.budgets;
@@ -711,6 +721,7 @@ export async function runBaseline(corpus: Corpus, databaseUrl: string, head: str
     storedBytes = await applicationBytes(owner);
     budget.check(); timings = budget.timings(); workEnded = performance.now();
   });
+  assertCheckout(head);
   const measured = rows.filter(row => row.status === 'measured');
   const latencies = measured.map(row => row.latencyMs!).sort((a, b) => a - b);
   const percentile = (p: number) => latencies.length ? latencies[Math.max(0, Math.ceil(p * latencies.length) - 1)] : null;

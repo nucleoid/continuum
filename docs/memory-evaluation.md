@@ -26,7 +26,10 @@ npm run eval:memory -- --manifest evals/offline-v1.json --output .fire-off/basel
 
 Commit the intended source before capturing a report. The runner requires a
 clean checkout, records the exact head, refuses an existing output path, and
-emits JSON and adjacent Markdown. Use an ignored local output directory, or
+emits JSON and adjacent Markdown. The shared baseline collector independently
+checks the actual clean Git head before provisioning and after cleanup, rejects
+unverified corpus objects and frozen-seed drift, and cannot certify a caller-supplied
+fictitious head. Use an ignored local output directory, or
 exclude `.fire-off/` through local Git exclude. CI captures its baseline once
 inside the PostgreSQL evaluator test, using the current Git head and a fixed
 offline profile, alongside complete test coverage. No separate baseline step
@@ -124,7 +127,8 @@ evidence. No production extraction or synthesis adapter is registered.
 `retrievalInput` gives a future retrieval adapter only the query, authorized live
 source id/version/title/body records, and edges whose endpoints are available.
 It excludes relevance grades, expected answers, abstention labels and denied
-payloads. `evaluateRetrieval` bounds time, output bytes and result count, checks
+payloads. The complete serialized adapter input must fit the 64KiB context cap
+before invoking the adapter. `evaluateRetrieval` bounds time, output bytes and result count, checks
 exact authorized versions, and scores against judgments held outside the adapter.
 A missing adapter is `not_supported`. This fixture-only boundary does not
 implement a relationship graph, consume capture candidates, or claim to test a

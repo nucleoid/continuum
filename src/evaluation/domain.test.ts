@@ -205,8 +205,7 @@ describe('frozen domain evaluator', () => {
   });
 
   it('exercises current audited services on exact APP and bound OP/SYNC LOGIN profiles', async () => {
-    const head = process.env.CONTINUUM_EVAL_REPORT
-      ? execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 5000 }).trim() : 'a'.repeat(40);
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 5000 }).trim();
     const report = await runBaseline(await loadCorpus(), process.env.CONTINUUM_TEST_DATABASE_URL
       ?? 'postgres://continuum:continuum@localhost:5433/continuum', head);
     if (process.env.CONTINUUM_EVAL_REPORT) {
