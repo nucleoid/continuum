@@ -1,0 +1,498 @@
+/** Source-checkout evaluation tooling. Deliberately excluded from the public package. */
+import { createHash, randomUUID } from 'node:crypto';
+import { readFile, stat } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { performance } from 'node:perf_hooks';
+import pg from 'pg';
+import { z } from 'zod';
+import { runMigrations } from '../storage/migrator.js';
+import { dropIsolatedTestDatabase } from '../storage/test-helpers.js';
+import { createPrincipal } from '../storage/principals.js';
+import { createScope, getScopeByRef } from '../storage/scopes.js';
+import { addMembership } from '../storage/memberships.js';
+import { createMemory } from '../storage/memories.js';
+import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
+import { StubEmbeddingProvider } from '../embeddings/stub.js';
+import { recallForPrincipal } from '../services/recall.js';
+import { getMemoryForPrincipal } from '../services/memories.js';
+import { prepareAgentsMdForPrincipal, auditAgentsMdRead } from '../services/agents-md.js';
+import { escapeAgentsMdData } from '../agents-md/render.js';
+import { EmbeddingRegistry, ScopeEmbeddingRouter } from '../embeddings/router.js';
+import { supersedeForPrincipal } from '../services/supersede.js';
+import { mapOwnedUserScope, offboardPrincipal } from '../services/offboarding.js';
+import type { Principal, Memory } from '../types.js';
+
+export const RUNNER_VERSION = 'memory-evaluation-v1';
+const MANIFEST_SHA256 = '4083c011ad04227ba0445ef0e8578c7624c49e4443a522580fc7112d58b04c1c';
+export const sha256 = (text: string | Buffer): string => createHash('sha256').update(text).digest('hex');
+const id = z.string().regex(/^[a-z0-9][a-z0-9-]{0,79}$/);
+const version = z.string().regex(/^[1-9][0-9]{0,5}$/);
+const date = z.string().datetime();
+const reference = z.object({ id, version }).strict();
+const relevantSchema = reference.extend({ grade: z.number().int().min(1).max(3), family: id }).strict();
+const claimSchema = z.object({ id, label: z.enum(['implemented-fact', 'recorded-intent', 'inference']),
+  evidence: z.array(reference).max(20), unknown: z.boolean(), contradiction: id.nullable() }).strict();
+const documentSchema = z.object({ id, version, assertionVersion: version, family: id,
+  sourceKind: z.enum(['code', 'non-code']), scope: z.enum(['project:synthetic', 'project:denied']),
+  title: z.string().min(1).max(500), body: z.string().min(1).max(16_384),
+  type: z.enum(['decision', 'fact', 'context', 'playbook', 'relationship']),
+  tags: z.array(z.enum(['decision', 'github', 'deploy', 'terminal'])).max(4),
+  state: z.enum(['live', 'stale', 'archived']), allowed: z.boolean(), sourceAllowed: z.boolean(),
+  residency: z.enum(['local-only', 'approved-hosted']), eventStart: date,
+  eventEnd: date.nullable(), ingestedAt: date }).strict();
+const operations = ['recall', 'fetch', 'agents-md', 'supersede', 'expiry', 'revoke', 'erase',
+  'extraction', 'synthesis', 'temporal', 'connector', 'relationship-expansion', 'reranking', 'vector-only'] as const;
+const caseSchema = z.object({ id, split: z.enum(['development', 'holdout']), operation: z.enum(operations),
+  query: z.string().min(1).max(500), documents: z.array(documentSchema).max(30),
+  relevant: z.array(relevantSchema).max(30), prohibited: z.array(z.string().regex(/^[a-z0-9-]+@[1-9][0-9]*$/)).max(30),
+  abstain: z.boolean(), claims: z.array(claimSchema).max(20), chunks: z.array(id).max(20),
+  contradictionSets: z.array(z.array(z.string().max(90)).min(2).max(10)).max(10),
+  timeline: z.array(z.object({ at: date, action: z.enum(['supersede', 'expiry', 'revoke', 'erase']),
+    evidence: z.string().max(90) }).strict()).max(10) }).strict();
+export type FixtureCase = z.infer<typeof caseSchema>;
+export type Reference = z.infer<typeof reference>;
+export type Relevant = z.infer<typeof relevantSchema>;
+export type Claim = z.infer<typeof claimSchema>;
+export const relationshipGate = Object.freeze({ version: 'relationship-v1', primaryMetric: 'ndcg@10',
+  minimumRelativeGain: 0.05, confidence: 0.95, minPairs: 20, bootstrapSamples: 2000, seed: 25,
+  maximumP95Ratio: 1.1, maximumStorageRatio: 2, criticalCoverageRegression: 0,
+  securityRegressions: 0, budgetPolicy: 'identical' });
+const gateSchema = z.object({ version: id, primaryMetric: z.literal('ndcg@10'),
+  minimumRelativeGain: z.number().positive().max(1), confidence: z.literal(0.95),
+  minPairs: z.number().int().min(20).max(1000), bootstrapSamples: z.number().int().min(1000).max(10_000),
+  seed: z.number().int().nonnegative(), maximumP95Ratio: z.number().min(1).max(2),
+  maximumStorageRatio: z.number().min(1).max(2), criticalCoverageRegression: z.literal(0),
+  securityRegressions: z.literal(0), budgetPolicy: z.literal('identical') }).strict();
+const budgetsSchema = z.object({ maxCases: z.number().int().min(1).max(100),
+  maxStages: z.number().int().min(1).max(12), maxRows: z.number().int().min(1).max(200),
+  maxSourceBytes: z.number().int().min(1).max(16_384), maxArtifactBytes: z.number().int().min(1).max(1_048_576),
+  maxDurationMs: z.number().int().min(1).max(120_000), candidateLimit: z.number().int().min(1).max(50),
+  hydrationLimit: z.number().int().min(1).max(10), contextBytes: z.number().int().min(1).max(65_536),
+  outputBytes: z.number().int().min(1).max(65_536), calls: z.number().int().min(1).max(100),
+  retries: z.literal(0), reservedSpend: z.literal(0), actualSpend: z.literal(0),
+  storageBytes: z.number().int().min(1).max(16_777_216) }).strict();
+const fixtureFiles = ['retrieval.json', 'lifecycle-security.json', 'extraction-synthesis.json', 'temporal-connectors.json'] as const;
+const manifestSchema = z.object({ schema: z.literal(1), version: z.literal('v1'), synthetic: z.literal(true),
+  clock: date, seed: z.number().int(), files: z.object(Object.fromEntries(fixtureFiles.map(name =>
+    [name, z.string().regex(/^[a-f0-9]{64}$/)])) as Record<typeof fixtureFiles[number], z.ZodString>).strict(),
+  splitPolicy: z.string().max(200), relationshipGate: gateSchema, budgets: budgetsSchema }).strict();
+export type Corpus = { manifest: z.infer<typeof manifestSchema>; manifestHash: string; cases: FixtureCase[] };
+
+function unique(values: string[], name: string): void {
+  if (new Set(values).size !== values.length) throw new Error(`Duplicate ${name}`);
+}
+const key = (value: Reference): string => `${value.id}@${value.version}`;
+export function validateCases(input: unknown): FixtureCase[] {
+  const cases = z.object({ schema: z.literal(1), cases: z.array(caseSchema).max(100) }).strict().parse(input).cases;
+  unique(cases.map(item => item.id), 'case IDs');
+  for (const item of cases) {
+    unique(item.documents.map(key), 'source versions');
+    unique(item.relevant.map(key), 'relevance judgments');
+    unique(item.claims.map(claim => claim.id), 'claim labels');
+    unique(item.chunks, 'chunks');
+    const known = new Set(item.documents.map(key));
+    if (item.operation === 'supersede') known.add('successor@2');
+    for (const ref of [...item.relevant.map(key), ...item.prohibited,
+      ...item.claims.flatMap(claim => claim.evidence.map(key)), ...item.contradictionSets.flat()]) {
+      if (!known.has(ref)) throw new Error('Judgment references an absent source version');
+    }
+    if (item.relevant.some(ref => item.prohibited.includes(key(ref)))) throw new Error('Contradictory judgments');
+    if (item.abstain !== (item.relevant.length === 0)) throw new Error('Contradictory abstention label');
+    if (item.documents.some(doc => Buffer.byteLength(doc.body) > 16_384)) throw new Error('Source byte bound exceeded');
+  }
+  return cases;
+}
+
+export async function loadCorpus(directory = resolve('evals/fixtures/v1')): Promise<Corpus> {
+  if ((await stat(resolve(directory, 'manifest.json'))).size > 16_384) throw new Error('Manifest bound exceeded');
+  const bytes = await readFile(resolve(directory, 'manifest.json'));
+  if (bytes.length > 16_384 || sha256(bytes) !== MANIFEST_SHA256) throw new Error('Frozen v1 manifest drift');
+  const manifest = manifestSchema.parse(JSON.parse(bytes.toString('utf8')));
+  const cases: FixtureCase[] = [];
+  for (const name of fixtureFiles) {
+    if ((await stat(resolve(directory, name))).size > 262_144) throw new Error('Fixture bound exceeded');
+    const content = await readFile(resolve(directory, name));
+    if (content.length > 262_144 || sha256(content) !== manifest.files[name]) throw new Error('Frozen fixture drift');
+    cases.push(...validateCases(JSON.parse(content.toString('utf8'))));
+  }
+  unique(cases.map(item => item.id), 'case IDs');
+  if (cases.length > manifest.budgets.maxCases) throw new Error('Case bound exceeded');
+  if (JSON.stringify(manifest.relationshipGate) !== JSON.stringify(relationshipGate)) throw new Error('Gate drift');
+  return { manifest, manifestHash: sha256(bytes), cases };
+}
+
+export function seededOrder<T extends { id: string }>(items: T[], seed: number): T[] {
+  return [...items].sort((a, b) => sha256(`${seed}:${a.id}`).localeCompare(sha256(`${seed}:${b.id}`)) || a.id.localeCompare(b.id));
+}
+function random(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => { state = (Math.imul(state, 1664525) + 1013904223) >>> 0; return state / 0x1_0000_0000; };
+}
+const ratio = (numerator: number, denominator: number): number | null => denominator === 0 ? null : numerator / denominator;
+export function scoreRetrieval(actual: Reference[], expected: Relevant[], cutoff = 10) {
+  if (!Number.isInteger(cutoff) || cutoff < 1 || cutoff > 100) throw new Error('Invalid cutoff');
+  unique(expected.map(key), 'relevance judgments');
+  const top = actual.slice(0, cutoff);
+  const seen = new Set<string>();
+  const judgments = new Map(expected.map(item => [key(item), item]));
+  let hits = 0; let first = 0; let dcg = 0;
+  const families = new Set<string>();
+  top.forEach((item, index) => {
+    const judgment = judgments.get(key(item));
+    if (judgment && !seen.has(key(item))) {
+      hits++; if (!first) first = 1 / (index + 1);
+      dcg += (2 ** judgment.grade - 1) / Math.log2(index + 2);
+      families.add(judgment.family);
+    }
+    seen.add(key(item));
+  });
+  const ideal = [...expected].sort((a, b) => b.grade - a.grade).slice(0, cutoff)
+    .reduce((sum, item, index) => sum + (2 ** item.grade - 1) / Math.log2(index + 2), 0);
+  return { precision: ratio(hits, top.length), recall: ratio(hits, expected.length),
+    evidenceCoverage: ratio(families.size, new Set(expected.map(item => item.family)).size),
+    mrr: expected.length === 0 ? null : first, ndcg: ratio(dcg, ideal),
+    abstentionError: expected.length === 0 ? Number(actual.length !== 0) : Number(actual.length === 0),
+    duplicateResults: top.length - seen.size, independentFamilies: families.size };
+}
+
+export function scoreClaims(actual: Claim[], expected: Claim[], chunks: string[] = [], completedChunks: string[] = []) {
+  unique(expected.map(item => item.id), 'claim labels');
+  unique(actual.map(item => item.id), 'output claims');
+  const judgments = new Map(expected.map(item => [item.id, item]));
+  let aligned = 0; let labels = 0; let unsupported = 0; let unknowns = 0; let conflicts = 0;
+  for (const claim of actual) {
+    const expectedClaim = judgments.get(claim.id);
+    const correct = expectedClaim && claim.evidence.length > 0
+      && new Set(claim.evidence.map(key)).size === claim.evidence.length
+      && claim.evidence.length === expectedClaim.evidence.length
+      && claim.evidence.every(ref => expectedClaim.evidence.some(expectedRef => key(ref) === key(expectedRef)));
+    if (correct) aligned++; else unsupported++;
+    if (expectedClaim?.label === claim.label) labels++;
+    if (expectedClaim?.unknown && claim.unknown) unknowns++;
+    if (expectedClaim?.contradiction && expectedClaim.contradiction === claim.contradiction) conflicts++;
+  }
+  return { alignment: ratio(aligned, actual.length), labelAccuracy: ratio(labels, expected.length),
+    unsupportedAssertionRate: ratio(unsupported, actual.length), claimRecall: ratio(actual.filter(item => judgments.has(item.id)).length, expected.length),
+    unknownPreservation: ratio(unknowns, expected.filter(item => item.unknown).length),
+    contradictionPreservation: ratio(conflicts, expected.filter(item => item.contradiction !== null).length),
+    chunkCoverage: ratio(new Set(completedChunks.filter(chunk => chunks.includes(chunk))).size, new Set(chunks).size) };
+}
+
+export async function evaluateMechanism(_name: string, adapter?: () => Promise<unknown>) {
+  if (!adapter) return { status: 'not_supported' as const };
+  try { return { status: 'measured' as const, output: await adapter() }; }
+  catch { return { status: 'failed' as const, reason: 'ADAPTER_FAILED' }; }
+}
+
+const taskOutputSchema = z.object({ claims: z.array(claimSchema).max(20), delivered: z.array(reference).max(30),
+  completedChunks: z.array(id).max(20), abstained: z.boolean() }).strict();
+export type TaskOutput = z.infer<typeof taskOutputSchema>;
+export type TaskAdapter = (evidence: Reference[]) => Promise<TaskOutput>;
+/** Mechanism-only contract for future adapters. Oracle evidence does not bypass fixture policy. */
+export async function evaluateTaskPair(task: FixtureCase, retrieved: Reference[], adapter?: TaskAdapter) {
+  if (!adapter) return { status: 'not_supported' as const };
+  const permitted = task.documents.filter(doc => doc.allowed && doc.sourceAllowed && doc.state === 'live'
+    && !task.prohibited.includes(key(doc)) && (doc.eventEnd === null || doc.eventEnd >= doc.eventStart));
+  const allowed = new Set(permitted.map(key));
+  const oracleEvidence = task.relevant.filter(ref => allowed.has(key(ref))).map(({ id, version }) => ({ id, version }));
+  try {
+    const run = async (evidence: Reference[]) => {
+      if (evidence.length > 30 || Buffer.byteLength(JSON.stringify(evidence)) > 65_536) throw new Error('Input bound');
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let raw: TaskOutput;
+      try {
+        raw = await Promise.race([adapter(structuredClone(evidence)), new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('Adapter deadline')), 1000);
+        })]);
+      } finally { clearTimeout(timer); }
+      const output = taskOutputSchema.parse(raw);
+      if (Buffer.byteLength(JSON.stringify(output)) > 65_536) throw new Error('Output bound');
+      const prohibited = [...evidence, ...output.delivered, ...output.claims.flatMap(claim => claim.evidence)]
+        .some(ref => !allowed.has(key(ref)));
+      return { claims: scoreClaims(output.claims, task.claims, task.chunks, output.completedChunks),
+        retrieval: scoreRetrieval(output.delivered, task.relevant),
+        abstentionError: Number(output.abstained !== task.abstain), prohibited };
+    };
+    const retrievedRun = await run(retrieved); const oracleRun = await run(oracleEvidence);
+    const critical = retrievedRun.prohibited || oracleRun.prohibited;
+    return { status: 'measured' as const, gate: critical ? 'fail' : 'pass', retrieved: retrievedRun, oracle: oracleRun,
+      diagnosis: retrievedRun.claims.claimRecall !== null && oracleRun.claims.claimRecall !== null
+        && retrievedRun.claims.claimRecall < oracleRun.claims.claimRecall ? 'retrieval_miss'
+        : oracleRun.claims.claimRecall !== null && oracleRun.claims.claimRecall < 1 ? 'reasoning_failure' : 'no_miss' };
+  } catch { return { status: 'failed' as const, gate: 'fail', reason: 'ADAPTER_FAILED' }; }
+}
+
+export type Pair = { id: string; value: number };
+export type ComparisonResources = { baselineP95: number; candidateP95: number; baselineBytes: number;
+  candidateBytes: number; hardStorageBudget: number; identicalCaps: boolean; criticalCoverageRegressions: number };
+export function compareRuns(baseline: Pair[], candidate: Pair[], gate: unknown, criticalFailures: string[] = [], resources?: ComparisonResources) {
+  if (!gate) throw new Error('A declared gate is required');
+  const policy = gateSchema.parse(gate);
+  unique(baseline.map(item => item.id), 'paired IDs'); unique(candidate.map(item => item.id), 'paired IDs');
+  const before = [...baseline].sort((a, b) => a.id.localeCompare(b.id));
+  const after = [...candidate].sort((a, b) => a.id.localeCompare(b.id));
+  if (before.length !== after.length || before.some((item, index) => item.id !== after[index].id)) throw new Error('Runs must be paired');
+  if ([...before, ...after].some(item => !Number.isFinite(item.value) || item.value < 0 || item.value > 1)) throw new Error('Invalid metric');
+  const mean = (values: number[]) => values.reduce((sum, value) => sum + value, 0) / values.length;
+  const differences = before.map((item, index) => after[index].value - item.value);
+  const baselineMean = mean(before.map(item => item.value));
+  const delta = mean(differences);
+  const gain = baselineMean > 0 ? delta / baselineMean : null;
+  const rng = random(policy.seed);
+  const samples = Array.from({ length: policy.bootstrapSamples }, () => mean(differences.map(() => differences[Math.floor(rng() * differences.length)]))).sort((a, b) => a - b);
+  const ci = differences.length ? [samples[Math.floor(samples.length * 0.025)], samples[Math.min(samples.length - 1, Math.floor(samples.length * 0.975))]] : null;
+  const invalidResources = resources && (Object.entries(resources).some(([name, value]) =>
+    name !== 'identicalCaps' && (typeof value !== 'number' || !Number.isFinite(value) || value < 0))
+    || resources.baselineP95 <= 0 || resources.baselineBytes <= 0 || resources.hardStorageBudget <= 0);
+  if (invalidResources) throw new Error('Invalid resource measurements');
+  const failedResources = resources && (!resources.identicalCaps || resources.criticalCoverageRegressions > 0
+    || resources.candidateP95 > resources.baselineP95 * policy.maximumP95Ratio
+    || resources.candidateBytes > resources.baselineBytes * policy.maximumStorageRatio
+    || resources.candidateBytes > resources.hardStorageBudget);
+  const status = criticalFailures.length || failedResources ? 'fail'
+    : before.length < policy.minPairs || gain === null || !resources ? 'insufficient_evidence'
+      : gain >= policy.minimumRelativeGain && ci && ci[0] > 0 ? 'pass' : 'fail';
+  return { status, pairs: before.length, relativeGain: gain, confidenceInterval: ci,
+    criticalFailures: criticalFailures.length, resourceGate: !resources ? 'not_measured' : failedResources ? 'fail' : 'pass' };
+}
+
+const experimentSchema = z.object({ head: z.string().regex(/^[a-f0-9]{40}$/),
+  predecessorHead: z.string().regex(/^[a-f0-9]{40}$/), fixtureHash: z.string().regex(/^[a-f0-9]{64}$/),
+  policyHash: z.string().regex(/^[a-f0-9]{64}$/), budgetHash: z.string().regex(/^[a-f0-9]{64}$/),
+  seed: z.number().int(), runner: z.literal(RUNNER_VERSION), gate: gateSchema,
+  split: z.literal('holdout'), repetitionRule: z.literal('one-paired-mean-per-query'),
+  features: z.record(z.boolean()), adapters: z.record(z.string().max(100)),
+  samples: z.array(z.object({ id, value: z.number().finite().min(0).max(1) }).strict()).max(1000),
+  criticalFailures: z.array(id).max(100), criticalCoverageRegressions: z.number().int().nonnegative(),
+  p95: z.number().finite().positive(), persistedBytes: z.number().int().positive(),
+  hardStorageBudget: z.number().int().positive(), supported: z.boolean() }).strict();
+export function compareExperiments(baselineInput: unknown, candidateInput: unknown) {
+  const before = experimentSchema.parse(baselineInput); const after = experimentSchema.parse(candidateInput);
+  if (after.predecessorHead !== before.head) throw new Error('Capture the predecessor feature head first');
+  for (const field of ['fixtureHash', 'policyHash', 'budgetHash', 'seed', 'runner', 'split', 'repetitionRule', 'hardStorageBudget'] as const) {
+    if (before[field] !== after[field]) throw new Error('Comparison input drift');
+  }
+  if (JSON.stringify(before.gate) !== JSON.stringify(after.gate)) throw new Error('Gate drift');
+  const featureNames = [...new Set([...Object.keys(before.features), ...Object.keys(after.features)])].sort();
+  const changes = featureNames.filter(name => before.features[name] !== after.features[name]);
+  if (changes.length !== 1) throw new Error('Change exactly one mechanism per ablation');
+  for (const name of new Set([...Object.keys(before.adapters), ...Object.keys(after.adapters)])) {
+    if (name !== changes[0] && before.adapters[name] !== after.adapters[name]) throw new Error('Unchanged adapter drift');
+  }
+  if (!before.supported || !after.supported) return { status: 'not_supported' };
+  if (changes[0] === 'relationship-expansion' && (!before.features['hybrid'] || !before.features['reranking']
+    || before.features['relationship-expansion'] !== false || after.features['relationship-expansion'] !== true
+    || JSON.stringify(before.gate) !== JSON.stringify(relationshipGate))) throw new Error('Relationship gate requires hybrid plus reranking and frozen policy');
+  return compareRuns(before.samples, after.samples, before.gate, [...before.criticalFailures, ...after.criticalFailures], {
+    baselineP95: before.p95, candidateP95: after.p95, baselineBytes: before.persistedBytes,
+    candidateBytes: after.persistedBytes, hardStorageBudget: before.hardStorageBudget, identicalCaps: true,
+    criticalCoverageRegressions: before.criticalCoverageRegressions + after.criticalCoverageRegressions });
+}
+
+export function boundReport(report: unknown): string {
+  if (report && typeof report === 'object' && 'rows' in report
+    && Array.isArray(report.rows) && report.rows.length > 200) throw new Error('Report row bound exceeded');
+  const bytes = JSON.stringify(report, null, 2) + '\n';
+  if (Buffer.byteLength(bytes) > 1_048_576) throw new Error('Report artifact bound exceeded');
+  return bytes;
+}
+
+const quote = (value: string): string => '"' + value.replaceAll('"', '""') + '"';
+async function grant(owner: pg.Pool, filename: string, variables: Record<string, string>) {
+  let sql = (await readFile(resolve('scripts', filename), 'utf8')).split(/\r?\n/)
+    .filter(line => !line.trimStart().startsWith('\\')).join('\n');
+  for (const [name, value] of Object.entries({ continuum_schema: 'public', ...variables })) {
+    sql = sql.replaceAll(`:"${name}"`, quote(value)).replaceAll(`:'${name}'`, "'" + value.replaceAll("'", "''") + "'");
+  }
+  await owner.query(sql);
+}
+
+/** Creates a fresh DB, never migrates or resets the caller's database. LOGINs are real sessions. */
+async function isolatedServices<T>(url: string, run: (fixture: {
+  owner: pg.Pool; app: pg.Pool; operator: pg.Pool; sync: pg.Pool; actor: Principal;
+}) => Promise<T>): Promise<T> {
+  const suffix = randomUUID().replaceAll('-', '');
+  const database = `eval_${suffix}`;
+  const maintenance = new pg.Pool({ connectionString: url, max: 1, connectionTimeoutMillis: 5000,
+    options: '-c statement_timeout=60000 -c lock_timeout=5000' });
+  const pools: pg.Pool[] = [];
+  const roles: string[] = [];
+  let created = false;
+  try {
+    await maintenance.query(`CREATE DATABASE ${quote(database)}`); created = true;
+    const ownerUrl = new URL(url); ownerUrl.pathname = '/' + database;
+    const owner = new pg.Pool({ connectionString: ownerUrl.toString(), max: 1, connectionTimeoutMillis: 5000,
+      options: '-c statement_timeout=60000 -c lock_timeout=5000' }); pools.push(owner);
+    await runMigrations(owner);
+    const actor = await createPrincipal(owner, { externalId: 'eval-admin', kind: 'user', displayName: 'Synthetic administrator' });
+    const org = (await getScopeByRef(owner, { kind: 'org', name: '' }))!;
+    await addMembership(owner, actor.id, org.id, 'admin');
+    const syncActor = await createPrincipal(owner, { externalId: 'eval-sync', kind: 'service', displayName: 'Synthetic sync' });
+    const sessions: pg.Pool[] = [];
+    for (const kind of ['app', 'operator', 'sync']) {
+      const role = `eval_${kind}_${suffix}`; const password = randomUUID();
+      await owner.query(`CREATE ROLE ${quote(role)} LOGIN PASSWORD '${password}'`); roles.push(role);
+      if (kind !== 'sync') await grant(owner, 'grant-application-role.sql', { continuum_app_role: role });
+      if (kind === 'operator') await grant(owner, 'grant-operator-role.sql', { continuum_operator_role: role, continuum_principal_id: actor.id });
+      if (kind === 'sync') await grant(owner, 'grant-sync-role.sql', { continuum_sync_role: role, continuum_principal_id: syncActor.id });
+      const roleUrl = new URL(ownerUrl); roleUrl.username = role; roleUrl.password = password;
+      const pool = new pg.Pool({ connectionString: roleUrl.toString(), max: 1, connectionTimeoutMillis: 5000,
+        options: '-c search_path=public -c statement_timeout=5000 -c lock_timeout=1000' });
+      pools.push(pool); sessions.push(pool);
+      const session = (await pool.query('SELECT session_user AS name, rolsuper FROM pg_catalog.pg_roles WHERE rolname=session_user')).rows[0];
+      if (session.name !== role || session.rolsuper) throw new Error('Runtime authority fixture invalid');
+    }
+    return await run({ owner, app: sessions[0], operator: sessions[1], sync: sessions[2], actor });
+  } finally {
+    await Promise.all(pools.map(pool => pool.end()));
+    try {
+      if (created) await dropIsolatedTestDatabase(maintenance, database);
+      for (const role of roles.reverse()) await maintenance.query(`DROP ROLE ${quote(role)}`);
+    } finally { await maintenance.end(); }
+  }
+}
+
+export type Ablation = 'lexical' | 'hybrid' | 'fallback' | 'vector-only' | 'reranking' | 'extraction' | 'synthesis' | 'temporal' | 'connector' | 'relationship-expansion';
+export const ablations: Ablation[] = ['lexical', 'hybrid', 'fallback', 'vector-only', 'reranking', 'extraction', 'synthesis', 'temporal', 'connector', 'relationship-expansion'];
+export type EvaluationRow = { id: string; ablation: Ablation; status: 'measured' | 'not_supported' | 'failed';
+  metrics?: ReturnType<typeof scoreRetrieval>; latencyMs?: number; failures?: string[];
+  diagnostics?: string; contextBytes?: number; outputBytes?: number; hydrated?: number; calls?: number };
+export async function runBaseline(corpus: Corpus, databaseUrl: string, head: string, seed = corpus.manifest.seed) {
+  if (!/^[a-f0-9]{40}$/.test(head) || !Number.isSafeInteger(seed)) throw new Error('Invalid run identity');
+  const started = performance.now();
+  const rows: EvaluationRow[] = [];
+  const limits = corpus.manifest.budgets;
+  let storedBytes = 0;
+  let setupCalls = 0;
+  const supported = new Set(['recall', 'fetch', 'agents-md', 'supersede', 'expiry', 'revoke', 'erase']);
+  await isolatedServices(databaseUrl, async ({ owner, app, operator, sync, actor }) => {
+    // Exact grant scripts run before runtime work; SYNC must have no memory payload access.
+    const syncAllowed = (await sync.query("SELECT has_table_privilege(session_user,'memories','SELECT') AS allowed")).rows[0].allowed;
+    if (syncAllowed) throw new Error('SYNC fixture may not read memory payloads');
+    for (const item of seededOrder(corpus.cases, seed)) {
+      if (performance.now() - started > limits.maxDurationMs) throw new Error('Evaluation deadline exceeded');
+      if (!supported.has(item.operation)) {
+        rows.push({ id: item.id, ablation: item.operation as Ablation, status: 'not_supported' }); continue;
+      }
+      const reader = await createPrincipal(owner, { externalId: `eval-${item.id}`, kind: 'user', displayName: 'Synthetic reader' });
+      const scoped = await createScope(owner, { kind: item.operation === 'erase' ? 'user' : 'project', name: `eval-${item.id}` });
+      const denied = await createScope(owner, { kind: 'project', name: `denied-${item.id}` });
+      await addMembership(owner, reader.id, scoped.id, 'writer');
+      const memories = new Map<string, Memory>();
+      const references = new Map<string, Reference>();
+      const stub = new StubEmbeddingProvider();
+      for (const doc of seededOrder(item.documents, seed)) {
+        const memory = await createMemory(owner, { scopeId: doc.allowed ? scoped.id : denied.id,
+          scopeKind: doc.allowed && item.operation === 'erase' ? 'user' : 'project', type: doc.type,
+          title: doc.title, body: doc.body, tags: doc.tags, authorId: reader.id, source: 'manual',
+          sourceRef: `${doc.id}@${doc.version}`, metadata: {} });
+        memories.set(doc.id, memory); references.set(memory.id, { id: doc.id, version: doc.version });
+        await owner.query("UPDATE memories SET state=$1, created_at=$2, updated_at=$2 WHERE id=$3", [doc.state, corpus.manifest.clock, memory.id]);
+        setupCalls++;
+        await storeMemoryEmbeddingVector(owner, memory.id, (await stub.embed([`${doc.title}\n\n${doc.body}`]))[0], stub);
+      }
+      if (item.operation === 'expiry') await owner.query('UPDATE memories SET expires_at=clock_timestamp() WHERE scope_id=$1', [scoped.id]);
+      if (item.operation === 'revoke') await owner.query('UPDATE scope_memberships SET active=FALSE WHERE principal_id=$1 AND scope_id=$2', [reader.id, scoped.id]);
+      if (item.operation === 'supersede') {
+        setupCalls++;
+        const result = await supersedeForPrincipal(app, stub, reader, { supersededId: memories.get('primary')!.id,
+          title: 'Quartz deployment successor', body: 'Quartz deployment now uses the green queue.', tags: ['decision'] });
+        references.set(result.successor.id, { id: 'successor', version: '2' });
+      }
+      if (item.operation === 'erase') {
+        await mapOwnedUserScope(operator, actor, reader.id, scoped.id);
+        let result = await offboardPrincipal(operator, actor, reader.id, { confirmationScopeId: scoped.id });
+        for (let attempt = 0; !result.complete && attempt < 10; attempt++) result = await offboardPrincipal(operator, actor, reader.id, { confirmationScopeId: scoped.id });
+        if (!result.complete) throw new Error('Erasure fixture incomplete');
+        const residual = (await owner.query(`SELECT count(*)::int AS count FROM memories m
+          WHERE scope_id=$1 AND (body <> '[erased]' OR title <> '[erased]' OR EXISTS
+          (SELECT 1 FROM memory_embeddings e WHERE e.memory_id=m.id))`, [scoped.id])).rows[0].count;
+        if (residual) throw new Error('Erased payload survived');
+      }
+      for (const ablation of ['lexical', 'hybrid', 'fallback'] as const) {
+        const start = performance.now(); const failures: string[] = []; let actual: Reference[] = [];
+        let context: unknown = []; let diagnostics = 'not_applicable'; let calls = 0;
+        const beforeAudit = (await owner.query('SELECT count(*)::int AS count FROM audit_log')).rows[0].count;
+        try {
+          if (item.operation === 'fetch') {
+            try { const result = await getMemoryForPrincipal(app, reader, memories.values().next().value!.id);
+              actual = [references.get(result.memory.id)!]; context = result.memory;
+            } catch (error) { if ((error as { code?: string }).code !== 'MEMORY_NOT_FOUND') throw error; }
+          } else if (item.operation === 'agents-md') {
+            const input = { project: scoped.name };
+            const bundle = await prepareAgentsMdForPrincipal(app, reader, input);
+            await auditAgentsMdRead(app, reader, input, bundle, true);
+            const repeated = await prepareAgentsMdForPrincipal(app, reader, input);
+            await auditAgentsMdRead(app, reader, input, repeated, true);
+            if (bundle.markdown !== repeated.markdown || bundle.hash !== repeated.hash) failures.push('nondeterministic-agents-md');
+            for (const memory of bundle.memories) {
+              const body = escapeAgentsMdData(memory.body, { preserveNewlines: true });
+              const data = body.split('\n').map(line => line === '' ? '> DATA:' : `> DATA: ${line}`).join('\n');
+              if (!bundle.markdown.includes(`> [BEGIN CONTINUUM MEMORY DATA]\n${data}\n> [END CONTINUUM MEMORY DATA]`)) failures.push('instruction-authority');
+            }
+            actual = bundle.memories.map(memory => references.get(memory.id)!);
+            context = bundle.markdown;
+          } else if (item.operation === 'erase') {
+            // Physical proof above is separate from this active caller's access check.
+            const result = await recallForPrincipal(app, null, actor, { query: item.query, scopes: [`user:${scoped.name}`] });
+            actual = result.results.map(result => references.get(result.memory.id)!);
+            if (actual.length) failures.push('erased-evidence-delivery');
+          } else {
+            const provider = ablation === 'lexical' ? null : { id: stub.id, dim: 768, local: true,
+              embed: async (texts: string[]) => { calls++; if (ablation === 'fallback' || item.id === 'unavailable-vector-provider') throw new Error('synthetic unavailable'); return stub.embed(texts); } };
+            const hostedSpy = { id: 'stub:hosted-spy', dim: 768, local: false,
+              embed: async () => { calls++; failures.push('local-only-egress'); throw new Error('Hosted calls forbidden'); } };
+            const routing = item.id === 'local-only-no-egress' ? new ScopeEmbeddingRouter(new EmbeddingRegistry([['hosted', hostedSpy]]),
+              { default: 'hosted', rules: [{ match: { kind: 'project' }, provider: 'local-only' }] }) : provider;
+            const result = await recallForPrincipal(app, routing, reader,
+              { query: item.query, scopes: [`project:${scoped.name}`, `project:${denied.name}`], limit: limits.hydrationLimit });
+            actual = result.results.map(result => references.get(result.memory.id)!);
+            context = result.results;
+            diagnostics = result.diagnostics.vector;
+          }
+          const serializedBytes = Buffer.byteLength(JSON.stringify(context));
+          if (serializedBytes > limits.contextBytes || serializedBytes > limits.outputBytes) failures.push('hard-byte-budget');
+          const afterAudit = (await owner.query('SELECT count(*)::int AS count FROM audit_log')).rows[0].count;
+          if (actual.length && afterAudit <= beforeAudit) failures.push('unaudited-delivery');
+          if (actual.some(ref => item.prohibited.includes(key(ref)) || !references.size)) failures.push('prohibited-evidence');
+          rows.push({ id: item.id, ablation, status: 'measured', metrics: scoreRetrieval(actual, item.relevant),
+            latencyMs: performance.now() - start, failures, diagnostics,
+            contextBytes: serializedBytes, outputBytes: serializedBytes, hydrated: actual.length, calls });
+        } catch (error) {
+          const code = (error as { code?: string }).code;
+          rows.push({ id: item.id, ablation, status: 'failed', latencyMs: performance.now() - start,
+            failures: ['SERVICE_FAILED'], diagnostics: code && ['FORBIDDEN', 'UNAUTHORIZED', 'PRINCIPAL_DISABLED', 'INVALID_SCOPE', 'INTERNAL'].includes(code) ? code : 'SERVICE_ERROR' });
+        }
+        if (rows.length > limits.maxRows) throw new Error('Report row bound exceeded');
+      }
+    }
+    storedBytes = Number((await owner.query(`SELECT coalesce(sum(pg_total_relation_size(c.oid)),0)::text AS bytes
+      FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+      WHERE n.nspname='public' AND c.relkind='r' AND c.relname IN
+      ('memories','memory_embeddings','audit_log','promotion_events','promotion_event_deliveries')`)).rows[0].bytes);
+  });
+  const measured = rows.filter(row => row.status === 'measured');
+  const latencies = measured.map(row => row.latencyMs!).sort((a, b) => a - b);
+  const percentile = (p: number) => latencies.length ? latencies[Math.max(0, Math.ceil(p * latencies.length) - 1)] : null;
+  const failures = rows.flatMap(row => row.failures ?? []);
+  if (storedBytes > limits.storageBytes) failures.push('hard-storage-budget');
+  if (setupCalls + measured.reduce((sum, row) => sum + (row.calls ?? 0), 0) > limits.calls) failures.push('hard-call-budget');
+  if (performance.now() - started > limits.maxDurationMs) failures.push('hard-deadline');
+  return { schema: 1, runner: RUNNER_VERSION, head, fixtureManifest: corpus.manifestHash,
+    fixtureFiles: corpus.manifest.files, fixtureVersion: corpus.manifest.version, seed,
+    clock: corpus.manifest.clock, provider: { id: 'stub:sha256', dim: 768, local: true, liveQuality: false },
+    promptSchemaHash: sha256(JSON.stringify({ caseSchema: 'v1', prompt: null })),
+    featureFlags: { productionChanges: false, hosted: false }, budgets: limits,
+    sampleCounts: { total: rows.length, measured: measured.length, unsupported: rows.filter(row => row.status === 'not_supported').length,
+      failed: rows.filter(row => row.status === 'failed').length },
+    latencyMs: { p50: percentile(0.5), p95: percentile(0.95) },
+    usage: { candidateCount: null, candidateCeilingPerRecall: limits.candidateLimit,
+      hydrationCount: measured.reduce((sum, row) => sum + (row.hydrated ?? 0), 0),
+      completeSerializedContextBytes: measured.reduce((sum, row) => sum + (row.contextBytes ?? 0), 0),
+      outputBytes: measured.reduce((sum, row) => sum + (row.outputBytes ?? 0), 0),
+      contextTokens: null, outputTokens: null, tokenizer: 'not_supported',
+      calls: measured.reduce((sum, row) => sum + (row.calls ?? 0), 0), setupCalls, retries: 0, reservedSpend: 0, actualSpend: 0,
+      persistedBytes: storedBytes, storageAmplification: null },
+    gates: { mechanism: failures.length ? 'fail' : 'pass', qualityAcceptance: 'not_evaluated',
+      relationshipExpansion: 'not_supported', failures }, rows };
+}

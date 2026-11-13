@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "version": "v1",
+  "synthetic": true,
+  "clock": "2026-02-01T00:00:00Z",
+  "seed": 25,
+  "files": {
+    "retrieval.json": "4314775a34b213221963fba9b91e12c8ca07754dc3c3fdacf1fc460c3624f6cf",
+    "lifecycle-security.json": "31361811eb7de0421b76b4eb62ff1301b85a3248031616da52741ab09c437968",
+    "extraction-synthesis.json": "828df725428911163f3224c74a2deeab6f1a781f983397abe6abf62695e7a8b9",
+    "temporal-connectors.json": "2aca1e3675f29cef0697629ebe801bb65f5c91b443cbf12466d9f46c1634ecdc"
+  },
+  "splitPolicy": "Frozen IDs; no training or tuning on holdout",
+  "relationshipGate": {
+    "version": "relationship-v1",
+    "primaryMetric": "ndcg@10",
+    "minimumRelativeGain": 0.05,
+    "confidence": 0.95,
+    "minPairs": 20,
+    "bootstrapSamples": 2000,
+    "seed": 25,
+    "maximumP95Ratio": 1.1,
+    "maximumStorageRatio": 2,
+    "criticalCoverageRegression": 0,
+    "securityRegressions": 0,
+    "budgetPolicy": "identical"
+  },
+  "budgets": {
+    "maxCases": 100,
+    "maxStages": 12,
+    "maxRows": 200,
+    "maxSourceBytes": 16384,
+    "maxArtifactBytes": 1048576,
+    "maxDurationMs": 120000,
+    "candidateLimit": 50,
+    "hydrationLimit": 10,
+    "contextBytes": 65536,
+    "outputBytes": 65536,
+    "calls": 100,
+    "retries": 0,
+    "reservedSpend": 0,
+    "actualSpend": 0,
+    "storageBytes": 16777216
+  }
+}

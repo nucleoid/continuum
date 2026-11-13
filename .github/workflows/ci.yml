@@ -44,6 +44,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - name: Frozen offline memory baseline
+        env:
+          CONTINUUM_EVAL_DATABASE_URL: ${{ env.CONTINUUM_TEST_DATABASE_URL }}
+        run: node scripts/evaluate-memory.mjs --manifest evals/offline-v1.json --output .fire-off/baseline.json
       - run: npm test -- --maxWorkers=1 --reporter=default --reporter=json --outputFile=test-results.json
       - name: Verify complete source test coverage
         if: always()
@@ -59,6 +63,9 @@ jobs:
             test-results.json
             test-coverage.json
             test-artifact/*.tgz
+            .fire-off/baseline.json
+            .fire-off/baseline.md
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
 

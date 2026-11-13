@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "mode": "offline",
+  "fixtureVersion": "v1",
+  "seed": 25,
+  "runner": "memory-evaluation-v1",
+  "budgetProfile": "frozen-v1"
+}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { loadCorpus, scoreRetrieval, scoreClaims, compareRuns, relationshipGate,
-  evaluateMechanism, seededOrder, boundReport, runBaseline, evaluateTaskPair, validateCases } from './test-helpers.js';
+  evaluateMechanism, seededOrder, boundReport, runBaseline, evaluateTaskPair, validateCases, compareExperiments } from './test-helpers.js';
 
 describe('frozen domain evaluator', () => {
   it('loads content-addressed synthetic fixtures with reproducible seeded order', async () => {
@@ -82,13 +82,33 @@ describe('frozen domain evaluator', () => {
     expect(() => validateCases({ schema: 1, cases: [other] })).toThrow(/byte bound/);
   });
 
+  it('rejects unpaired experiment inputs, cap drift, missing adapters, and critical regressions', () => {
+    const before = { head: 'a'.repeat(40), predecessorHead: 'b'.repeat(40), fixtureHash: 'c'.repeat(64),
+      policyHash: 'd'.repeat(64), budgetHash: 'e'.repeat(64), seed: 25, runner: 'memory-evaluation-v1', gate: relationshipGate,
+      split: 'holdout', repetitionRule: 'one-paired-mean-per-query',
+      features: { hybrid: true, reranking: true, 'relationship-expansion': false }, adapters: { hybrid: '1', reranking: '1' },
+      samples: Array.from({ length: 20 }, (_, i) => ({ id: `query-${i}`, value: 0.5 })),
+      criticalFailures: [], criticalCoverageRegressions: 0, p95: 10, persistedBytes: 100, hardStorageBudget: 1000, supported: true };
+    const after = { ...before, head: 'f'.repeat(40), predecessorHead: before.head,
+      features: { ...before.features, 'relationship-expansion': true }, samples: before.samples.map(row => ({ ...row, value: 0.6 })) };
+    expect(compareExperiments(before, after)).toMatchObject({ status: 'pass' });
+    expect(compareExperiments(before, { ...after, supported: false })).toEqual({ status: 'not_supported' });
+    expect(() => compareExperiments(before, { ...after, budgetHash: 'a'.repeat(64) })).toThrow(/drift/);
+    expect(compareExperiments(before, { ...after, p95: 11.01 })).toMatchObject({ status: 'fail' });
+    expect(compareExperiments(before, { ...after, persistedBytes: 201 })).toMatchObject({ status: 'fail' });
+    expect(compareExperiments(before, { ...after, criticalFailures: ['unauthorized-disclosure'] })).toMatchObject({ status: 'fail' });
+    expect(compareExperiments(before, { ...after, criticalCoverageRegressions: 1 })).toMatchObject({ status: 'fail' });
+  });
+
   it('exercises current audited services on exact APP and bound OP/SYNC LOGIN profiles', async () => {
     const report = await runBaseline(await loadCorpus(), process.env.CONTINUUM_TEST_DATABASE_URL
       ?? 'postgres://continuum:continuum@localhost:5433/continuum', 'a'.repeat(40));
-    expect(report.sampleCounts.failed).toBe(0);
+    expect(report.rows.filter(row => row.status === 'failed')).toEqual([]);
     expect(report.gates).toMatchObject({ mechanism: 'pass', relationshipExpansion: 'not_supported' });
     expect(report.rows.find(row => row.id === 'expired-evidence' && row.ablation === 'hybrid')?.metrics?.recall).toBeNull();
     expect(report.rows.find(row => row.id === 'explicit-supersession' && row.ablation === 'hybrid')?.metrics?.recall).toBe(1);
+    expect(report.rows.find(row => row.id === 'deterministic-agents-md')?.metrics?.recall).toBe(1);
+    expect(report.rows.find(row => row.id === 'local-only-no-egress')?.calls).toBe(0);
     expect(report.sampleCounts.unsupported).toBeGreaterThan(0);
   }, 180_000);
 });

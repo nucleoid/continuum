@@ -1,0 +1,415 @@
+{
+  "schema": 1,
+  "cases": [
+    {
+      "id": "lexical-reference",
+      "split": "holdout",
+      "operation": "recall",
+      "query": "Quartz deployment",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "primary",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Quartz deployment",
+          "body": "Quartz deployment uses the blue queue.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "primary"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "source-neutral-non-code",
+      "split": "holdout",
+      "operation": "recall",
+      "query": "Quartz deployment",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "primary",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Quartz deployment",
+          "body": "Quartz deployment uses the blue queue.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "primary"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "code-reference",
+      "split": "holdout",
+      "operation": "recall",
+      "query": "Quartz deployment",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "primary",
+          "sourceKind": "code",
+          "scope": "project:synthetic",
+          "title": "Quartz deployment",
+          "body": "Quartz deployment uses queue_blue in synthetic.ts.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "primary"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "same-family-copies",
+      "split": "holdout",
+      "operation": "recall",
+      "query": "Quartz deployment",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "primary",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Quartz deployment",
+          "body": "Quartz deployment uses the blue queue.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "copy",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "primary",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Quartz deployment",
+          "body": "Quartz deployment uses the blue queue.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "primary"
+        },
+        {
+          "id": "copy",
+          "version": "1",
+          "grade": 3,
+          "family": "primary"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "empty-corpus",
+      "split": "holdout",
+      "operation": "recall",
+      "query": "Quartz deployment",
+      "documents": [],
+      "relevant": [],
+      "prohibited": [],
+      "abstain": true,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "no-relevant-evidence",
+      "split": "holdout",
+      "operation": "recall",
+      "query": "Quartz deployment",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "primary",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Cafeteria",
+          "body": "The synthetic cafeteria serves pears.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [],
+      "prohibited": [],
+      "abstain": true,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "unavailable-vector-provider",
+      "split": "holdout",
+      "operation": "recall",
+      "query": "Quartz deployment",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "primary",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Quartz deployment",
+          "body": "Quartz deployment uses the blue queue.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "primary"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "local-only-no-egress",
+      "split": "holdout",
+      "operation": "recall",
+      "query": "Quartz deployment",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "primary",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Quartz deployment",
+          "body": "Quartz deployment uses the blue queue.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "primary"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "contradictory-evidence",
+      "split": "holdout",
+      "operation": "recall",
+      "query": "Quartz deployment",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "primary",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Quartz deployment",
+          "body": "Quartz deployment uses the blue queue.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "opposite",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "independent",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Quartz deployment",
+          "body": "Quartz deployment uses the red queue.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "primary"
+        },
+        {
+          "id": "opposite",
+          "version": "1",
+          "grade": 3,
+          "family": "independent"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [
+        [
+          "primary@1",
+          "opposite@1"
+        ]
+      ],
+      "timeline": []
+    }
+  ]
+}

@@ -1,0 +1,354 @@
+{
+  "schema": 1,
+  "cases": [
+    {
+      "id": "partial-chunks",
+      "split": "holdout",
+      "operation": "extraction",
+      "query": "Quartz deployment",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "primary",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Quartz deployment",
+          "body": "Quartz deployment uses the blue queue.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "primary"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [
+        {
+          "id": "queue",
+          "label": "recorded-intent",
+          "evidence": [
+            {
+              "id": "primary",
+              "version": "1"
+            }
+          ],
+          "unknown": false,
+          "contradiction": null
+        }
+      ],
+      "chunks": [
+        "chunk-1",
+        "chunk-2"
+      ],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "unknown-preservation",
+      "split": "holdout",
+      "operation": "extraction",
+      "query": "Quartz deployment",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "primary",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Quartz deployment",
+          "body": "Quartz deployment uses the blue queue.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "primary"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [
+        {
+          "id": "queue",
+          "label": "recorded-intent",
+          "evidence": [
+            {
+              "id": "primary",
+              "version": "1"
+            }
+          ],
+          "unknown": true,
+          "contradiction": null
+        }
+      ],
+      "chunks": [
+        "chunk-1",
+        "chunk-2"
+      ],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "intent-vs-fact",
+      "split": "holdout",
+      "operation": "synthesis",
+      "query": "Quartz deployment",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "primary",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Quartz deployment",
+          "body": "Quartz deployment uses the blue queue.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "primary"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [
+        {
+          "id": "queue",
+          "label": "recorded-intent",
+          "evidence": [
+            {
+              "id": "primary",
+              "version": "1"
+            }
+          ],
+          "unknown": false,
+          "contradiction": null
+        }
+      ],
+      "chunks": [
+        "chunk-1",
+        "chunk-2"
+      ],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "oracle-vs-retrieved",
+      "split": "holdout",
+      "operation": "synthesis",
+      "query": "Quartz deployment",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "primary",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Quartz deployment",
+          "body": "Quartz deployment uses the blue queue.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "primary"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [
+        {
+          "id": "queue",
+          "label": "recorded-intent",
+          "evidence": [
+            {
+              "id": "primary",
+              "version": "1"
+            }
+          ],
+          "unknown": false,
+          "contradiction": null
+        }
+      ],
+      "chunks": [
+        "chunk-1",
+        "chunk-2"
+      ],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "contradiction-preservation",
+      "split": "holdout",
+      "operation": "synthesis",
+      "query": "Quartz deployment",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "primary",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Quartz deployment",
+          "body": "Quartz deployment uses the blue queue.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "primary"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [
+        {
+          "id": "queue",
+          "label": "recorded-intent",
+          "evidence": [
+            {
+              "id": "primary",
+              "version": "1"
+            }
+          ],
+          "unknown": false,
+          "contradiction": "queue-conflict"
+        }
+      ],
+      "chunks": [
+        "chunk-1",
+        "chunk-2"
+      ],
+      "contradictionSets": [],
+      "timeline": []
+    },
+    {
+      "id": "source-document-denied",
+      "split": "holdout",
+      "operation": "extraction",
+      "query": "Quartz deployment",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "primary",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Quartz deployment",
+          "body": "Quartz deployment uses the blue queue.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": false,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [],
+      "prohibited": [
+        "primary@1"
+      ],
+      "abstain": true,
+      "claims": [
+        {
+          "id": "queue",
+          "label": "recorded-intent",
+          "evidence": [
+            {
+              "id": "primary",
+              "version": "1"
+            }
+          ],
+          "unknown": false,
+          "contradiction": null
+        }
+      ],
+      "chunks": [
+        "chunk-1",
+        "chunk-2"
+      ],
+      "contradictionSets": [],
+      "timeline": []
+    }
+  ]
+}

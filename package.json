@@ -65,6 +65,7 @@
     "pretest": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
+    "eval:memory": "npm run build && node scripts/evaluate-memory.mjs",
     "migrate": "node dist/storage/migrate-cli.js",
     "migrate:dev": "tsx src/storage/migrate-cli.ts",
     "api": "node dist/api/server.js",
