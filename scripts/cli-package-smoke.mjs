@@ -28,7 +28,9 @@ try {
     );
   }
   const forbidden = packed[0].files.filter(
-    ({ path }) => path === 'docs/internal-security-brief.md' || /(?:^|\/)tenants?(?:\/|$)/i.test(path),
+    ({ path }) => path === 'docs/internal-security-brief.md' || /(?:^|\/)tenants?(?:\/|$)/i.test(path)
+      || /^(?:evals|\.fire-off)\//.test(path) || path.startsWith('dist/evaluation/')
+      || path === 'scripts/evaluate-memory.mjs' || path === 'scripts/evaluation-output.mjs' || /(?:^|\/)(?:live-config|private-report)/i.test(path),
   );
   if (forbidden.length > 0) {
     throw new Error(

@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "version": "v1",
+  "synthetic": true,
+  "clock": "2026-02-01T00:00:00Z",
+  "seed": 25,
+  "files": {
+    "retrieval.json": "86de925700e1017d34fc056459fdec78ee4f5ccd149e3ad6b651e45a838aa916",
+    "lifecycle-security.json": "a6f856a0330b800df4ab486790b691b7869add56b6ddd90bacce76c766c12b11",
+    "extraction-synthesis.json": "e97e7155e83801405342961204b41b030aa5b30d966e541159ca38c18ba2ef94",
+    "temporal-connectors.json": "4afd0eba7c47096f0a88b5d4150507fb61cd5aa738b75829c3634202a1bbffc0"
+  },
+  "splitPolicy": "Frozen disjoint scenario IDs and independently authored source forms; no tuning on holdout",
+  "relationshipGate": {
+    "version": "relationship-v1",
+    "primaryMetric": "ndcg@10",
+    "minimumRelativeGain": 0.05,
+    "confidence": 0.95,
+    "minPairs": 20,
+    "bootstrapSamples": 2000,
+    "seed": 25,
+    "maximumP95Ratio": 1.1,
+    "maximumStorageRatio": 2,
+    "criticalCoverageRegression": 0,
+    "securityRegressions": 0,
+    "budgetPolicy": "identical"
+  },
+  "budgets": {
+    "maxCases": 100,
+    "maxStages": 12,
+    "maxRows": 512,
+    "maxSourceBytes": 16384,
+    "maxArtifactBytes": 1048576,
+    "maxDurationMs": 120000,
+    "candidateLimit": 50,
+    "hydrationLimit": 10,
+    "contextBytes": 65536,
+    "outputBytes": 65536,
+    "calls": 1024,
+    "retries": 0,
+    "reservedSpend": 0,
+    "actualSpend": 0,
+    "storageBytes": 16777216,
+    "maxSetupMs": 120000
+  },
+  "rubricVersion": "relevance-v1",
+  "latencyPolicy": {
+    "version": "service-latency-v1",
+    "repetitions": 5,
+    "warmups": 1,
+    "order": "seeded-rotating-interleaved",
+    "summary": "p95-of-per-query-medians",
+    "comparison": "paired-interleaved-session"
+  }
+}

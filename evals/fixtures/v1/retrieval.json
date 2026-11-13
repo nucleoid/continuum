@@ -1,0 +1,5006 @@
+{
+  "schema": 1,
+  "cases": [
+    {
+      "id": "lexical-reference",
+      "split": "development",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Quartz deployment",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "primary",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Quartz deployment",
+          "body": "Quartz deployment uses the blue queue.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "primary"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": []
+    },
+    {
+      "id": "source-neutral-non-code",
+      "split": "development",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Quartz deployment",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "primary",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Quartz deployment",
+          "body": "Quartz deployment uses the blue queue.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "primary"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": []
+    },
+    {
+      "id": "code-reference",
+      "split": "development",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Quartz deployment",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "primary",
+          "sourceKind": "code",
+          "scope": "project:synthetic",
+          "title": "Quartz deployment",
+          "body": "Quartz deployment uses queue_blue in synthetic.ts.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "primary"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": []
+    },
+    {
+      "id": "same-family-copies",
+      "split": "development",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Quartz deployment",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "primary",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Quartz deployment",
+          "body": "Quartz deployment uses the blue queue.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "copy",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "primary",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Quartz deployment",
+          "body": "Quartz deployment uses the blue queue.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "primary",
+          "assertion": "copy-d101f73fa1d98ed7"
+        },
+        {
+          "id": "copy",
+          "version": "1",
+          "grade": 3,
+          "family": "primary",
+          "assertion": "copy-d101f73fa1d98ed7"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": []
+    },
+    {
+      "id": "empty-corpus",
+      "split": "development",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Quartz deployment",
+      "documents": [],
+      "relevant": [],
+      "prohibited": [],
+      "abstain": true,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": []
+    },
+    {
+      "id": "no-relevant-evidence",
+      "split": "development",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Quartz deployment",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "primary",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Cafeteria",
+          "body": "The synthetic cafeteria serves pears.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [],
+      "prohibited": [],
+      "abstain": true,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": []
+    },
+    {
+      "id": "unavailable-vector-provider",
+      "split": "development",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Quartz deployment",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "primary",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Quartz deployment",
+          "body": "Quartz deployment uses the blue queue.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "primary"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": []
+    },
+    {
+      "id": "local-only-no-egress",
+      "split": "development",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Quartz deployment",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "primary",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Quartz deployment",
+          "body": "Quartz deployment uses the blue queue.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "primary"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": []
+    },
+    {
+      "id": "contradictory-evidence",
+      "split": "development",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Quartz deployment",
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "primary",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Quartz deployment",
+          "body": "Quartz deployment uses the blue queue.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "opposite",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "independent",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Quartz deployment",
+          "body": "Quartz deployment uses the red queue.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "primary",
+          "version": "1",
+          "grade": 3,
+          "family": "primary"
+        },
+        {
+          "id": "opposite",
+          "version": "1",
+          "grade": 3,
+          "family": "independent"
+        }
+      ],
+      "prohibited": [],
+      "abstain": false,
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [
+        {
+          "id": "queue-conflict",
+          "evidence": [
+            {
+              "id": "primary",
+              "version": "1"
+            },
+            {
+              "id": "opposite",
+              "version": "1"
+            }
+          ]
+        }
+      ],
+      "timeline": [],
+      "relations": []
+    },
+    {
+      "id": "aster-refunds",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Aster refund retries",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-ae48ec5fb0ab0551",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-6bec5cbebcae8d3b",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Aster refund retries",
+          "body": "Aster refunds use the original payment id as the idempotency key; a retry cannot create a second refund.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-3841ad6d05d36c0c",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-9b094ea11445a9de",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Payment reconciliation",
+          "body": "Aster reconciliation records a successful refund receipt before acknowledging the job.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-f483e4892c1f6d32",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-f486a54883d67a1c",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Aster refund research",
+          "body": "A proposal to retry refunds with random keys was rejected in the recorded review.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-ae48ec5fb0ab0551",
+          "version": "1",
+          "grade": 3,
+          "family": "f-6bec5cbebcae8d3b"
+        },
+        {
+          "id": "r-3841ad6d05d36c0c",
+          "version": "1",
+          "grade": 2,
+          "family": "f-9b094ea11445a9de"
+        }
+      ],
+      "prohibited": [],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": []
+    },
+    {
+      "id": "birch-locks",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Birch migration locks",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-033748f0080ee618",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-e1e737a3f3975da5",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Birch migration locks proposal",
+          "body": "The unapproved Birch proposal acquires a session lock for every application request.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-1cd207792ff95e1f",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-9234f22ed25ce16f",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Migration worker ownership",
+          "body": "The Birch migrator obtains one transaction advisory lock before applying a pending version.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-07d3cd32091b6ab9",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-b42a0610a437bf77",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Birch lock recovery",
+          "body": "A failed migration transaction releases its advisory lock during rollback.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-e46b58ae7fd5da19",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-a4828010f6946312",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Migration status endpoint",
+          "body": "Birch migration status reports the last committed version without acquiring the writer lock.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-1cd207792ff95e1f",
+          "version": "1",
+          "grade": 3,
+          "family": "f-9234f22ed25ce16f"
+        },
+        {
+          "id": "r-07d3cd32091b6ab9",
+          "version": "1",
+          "grade": 2,
+          "family": "f-b42a0610a437bf77"
+        },
+        {
+          "id": "r-e46b58ae7fd5da19",
+          "version": "1",
+          "grade": 1,
+          "family": "f-a4828010f6946312"
+        }
+      ],
+      "prohibited": [],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": [
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-1cd207792ff95e1f",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-07d3cd32091b6ab9",
+            "version": "1"
+          }
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-033748f0080ee618",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-e46b58ae7fd5da19",
+            "version": "1"
+          },
+          "basis": "The unapproved lock proposal cites the status endpoint as its proposed verification surface."
+        }
+      ]
+    },
+    {
+      "id": "cedar-tokens",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Cedar token rotation",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-435d02519cfb6ee2",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-e569df3c051ec800",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Cedar token rotation",
+          "body": "Cedar rotates signing keys by publishing the next verifier before changing the active signer.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-9ba37c0b39e4b3cb",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-72d17fbd67d99413",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Cedar rotation schedule",
+          "body": "The retired staging schedule rotated keys every minute and was removed.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-435d02519cfb6ee2",
+          "version": "1",
+          "grade": 3,
+          "family": "f-e569df3c051ec800"
+        }
+      ],
+      "prohibited": [],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": [
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-435d02519cfb6ee2",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-9ba37c0b39e4b3cb",
+            "version": "1"
+          }
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-9ba37c0b39e4b3cb",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-435d02519cfb6ee2",
+            "version": "1"
+          },
+          "basis": "The retired schedule refers to the rotation specification despite using a removed interval."
+        }
+      ]
+    },
+    {
+      "id": "dune-cache",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Dune cache expiry",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-b18ece81d86bcfb4",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-68bebefcbd332890",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Dune cache expiry",
+          "body": "Dune cache entries expire after sixty seconds; refreshing a value does not extend the original expiry.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-bcde9e6a698ee33e",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-20b45215c3716440",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Dune expiry implementation",
+          "body": "The cache admission path stores the original deadline alongside the value.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-9bd1c5065d3c80fd",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-f56d7221d0568e4e",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Clock source",
+          "body": "Dune expiry compares against the monotonic process clock.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-68deccaaad9975ae",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-cf1ec4d5d67c2ac2",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Dune cache expiry dashboard",
+          "body": "The dashboard records hit rates but does not enforce entry expiration.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-884a1275f649b076",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-b44d7e16862a9198",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Earlier cache specification",
+          "body": "The superseded Dune specification allowed refreshes to extend cache lifetime.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-b18ece81d86bcfb4",
+          "version": "1",
+          "grade": 3,
+          "family": "f-68bebefcbd332890"
+        },
+        {
+          "id": "r-bcde9e6a698ee33e",
+          "version": "1",
+          "grade": 2,
+          "family": "f-20b45215c3716440"
+        },
+        {
+          "id": "r-9bd1c5065d3c80fd",
+          "version": "1",
+          "grade": 2,
+          "family": "f-f56d7221d0568e4e"
+        }
+      ],
+      "prohibited": [],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": [
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-b18ece81d86bcfb4",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-bcde9e6a698ee33e",
+            "version": "1"
+          }
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-b18ece81d86bcfb4",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-884a1275f649b076",
+            "version": "1"
+          }
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-884a1275f649b076",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-b18ece81d86bcfb4",
+            "version": "1"
+          },
+          "basis": "The same two recorded accounts disagree; this reverse assertion has no authority preference."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-68deccaaad9975ae",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-8caee4311ec2901a",
+            "version": "1"
+          },
+          "basis": "A reporting-widget reference was copied across the Dune and Juniper dashboard notes."
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-884a1275f649b076",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-68deccaaad9975ae",
+            "version": "1"
+          },
+          "basis": "The obsolete specification cites the cache dashboard as its observation point."
+        }
+      ]
+    },
+    {
+      "id": "ember-handover",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Ember incident handover",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-47ef398e48496879",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-8ce38493030c341f",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Ember incident handover checklist",
+          "body": "At handover, the outgoing responder records current mitigations and names the incoming responder.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-9d210c6f20a4aaf8",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-7d560f6e0351bb32",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Ember incident notes",
+          "body": "Ember incident notes identify the active incident channel.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-5109cb53012936c8",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-4a844e6249181c30",
+          "sourceKind": "non-code",
+          "scope": "project:denied",
+          "title": "Private handover appendix",
+          "body": "Restricted synthetic appendix: Ember responder telephone list.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": false,
+          "sourceAllowed": false,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-c538b9f562724877",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-0e8d9f67d62882d3",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Expense worksheet",
+          "body": "Ember expense approval is unrelated to incident response.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-47ef398e48496879",
+          "version": "1",
+          "grade": 3,
+          "family": "f-8ce38493030c341f"
+        },
+        {
+          "id": "r-9d210c6f20a4aaf8",
+          "version": "1",
+          "grade": 1,
+          "family": "f-7d560f6e0351bb32"
+        }
+      ],
+      "prohibited": [
+        "r-5109cb53012936c8@1"
+      ],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": [
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-47ef398e48496879",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-5109cb53012936c8",
+            "version": "1"
+          }
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-c538b9f562724877",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-9d210c6f20a4aaf8",
+            "version": "1"
+          },
+          "basis": "The expense worksheet links the incident channel note as the cost-centre explanation."
+        }
+      ]
+    },
+    {
+      "id": "fjord-timezones",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Fjord schedule timezone",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-2cbe9f5114d51367",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-b7da853d068ed04d",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Fjord schedule timezone dispute",
+          "body": "One Fjord scheduler operating note says the daily window is evaluated in Pacific/Auckland; no resolution of the competing timezone accounts is recorded.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-7bdcb5b30556e9de",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-351f123717b659ef",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Fjord schedule timezone report",
+          "body": "A second Fjord scheduler operating note says the daily window is evaluated in UTC; no resolution of the competing timezone accounts is recorded.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-cb7630fdaf76779c",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-da02db3f3cf923c2",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Schedule history",
+          "body": "Fjord migrated its schedule format from integer hours to named zones.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-e1f79e242baf498e",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-e08c18853e1be7cf",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Fjord meeting room",
+          "body": "The Fjord meeting-room calendar has no bearing on the scheduler.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-2338543f2a9182e4",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-c134fd31556b0523",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Timestamp rendering",
+          "body": "Fjord logs retain UTC timestamps regardless of the execution window.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-a94b1037ccc765c4",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-1ceaea0db9cc4b1a",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Desktop preferences",
+          "body": "Fjord desktop users can choose a display timezone independently.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-2cbe9f5114d51367",
+          "version": "1",
+          "grade": 3,
+          "family": "f-b7da853d068ed04d"
+        },
+        {
+          "id": "r-cb7630fdaf76779c",
+          "version": "1",
+          "grade": 1,
+          "family": "f-da02db3f3cf923c2"
+        },
+        {
+          "id": "r-2338543f2a9182e4",
+          "version": "1",
+          "grade": 1,
+          "family": "f-c134fd31556b0523"
+        },
+        {
+          "id": "r-7bdcb5b30556e9de",
+          "version": "1",
+          "grade": 3,
+          "family": "f-351f123717b659ef"
+        }
+      ],
+      "prohibited": [],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [
+        {
+          "id": "timezone-accounts",
+          "evidence": [
+            {
+              "id": "r-2cbe9f5114d51367",
+              "version": "1"
+            },
+            {
+              "id": "r-7bdcb5b30556e9de",
+              "version": "1"
+            }
+          ]
+        }
+      ],
+      "timeline": [],
+      "relations": [
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-2cbe9f5114d51367",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-7bdcb5b30556e9de",
+            "version": "1"
+          }
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-2338543f2a9182e4",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-cb7630fdaf76779c",
+            "version": "1"
+          }
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-7bdcb5b30556e9de",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-2cbe9f5114d51367",
+            "version": "1"
+          },
+          "basis": "The same two recorded accounts disagree; this reverse assertion has no authority preference."
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-e1f79e242baf498e",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-a94b1037ccc765c4",
+            "version": "1"
+          },
+          "basis": "The meeting-room calendar configuration links the desktop timezone preferences."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-a94b1037ccc765c4",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-e1f79e242baf498e",
+            "version": "1"
+          },
+          "basis": "The desktop preference help page illustrates the setting with the room calendar."
+        }
+      ]
+    },
+    {
+      "id": "grove-access",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Grove access revocation",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-ae20be735c68800e",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-4f0418a55916eb84",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Grove access revocation",
+          "body": "Grove checks current membership before each protected payload read.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-7bc5883ca360059c",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-e28c84b552c27898",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Grove revocation cache",
+          "body": "A discarded design cached positive memberships for a day.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-ebfa0cb318078850",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-4f0c9ff1cb2d70e4",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Bridge connector limits",
+          "body": "The Bridge connector accepts at most ten requests per minute, independently of Grove membership.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-0845d1c05db8b5aa",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-16c34840aaeb5e2d",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "grove-access restricted historical source",
+          "body": "Synthetic retained source for grove-access with policy state quarantined. This record is excluded from delivery.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "quarantined",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-ae20be735c68800e",
+          "version": "1",
+          "grade": 3,
+          "family": "f-4f0418a55916eb84"
+        }
+      ],
+      "prohibited": [
+        "r-0845d1c05db8b5aa@1"
+      ],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": [
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-ae20be735c68800e",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-ebfa0cb318078850",
+            "version": "1"
+          }
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-ebfa0cb318078850",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-0e903920a25c8ea7",
+            "version": "1"
+          },
+          "basis": "An imported connector link retained the wrong project key and points at the cancelled Nacre experiment."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-0845d1c05db8b5aa",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-ebfa0cb318078850",
+            "version": "1"
+          },
+          "basis": "The quarantined historical record links the unrelated connector-limits note."
+        }
+      ]
+    },
+    {
+      "id": "harbor-export",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Harbor retention export",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-5f32460e4a64b9bd",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-b35ceda87c603fd6",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Export receipt format",
+          "body": "Harbor export receipts contain object count and a digest of the exported bytes.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-08d4e160d95d2794",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-6d479fcb7f75f989",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Harbor retention export",
+          "body": "Harbor exports exclude records already past their fixed retention deadline.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-0cb220f8e1ba6a17",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-44070691c85733a2",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Harbor retention policy",
+          "body": "A legal hold suspends scheduled retention expiry for an explicitly reviewed collection.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-a4621f1074d7d5de",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-24c87544a727b209",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Harbor export proposal",
+          "body": "An unsigned proposal would export expired records to simplify reconciliation.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-b245b8beb3af9eb5",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-9a25a241dd0f5a3a",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Harbor billing",
+          "body": "Harbor billing exports cover invoice totals rather than retained records.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-5f32460e4a64b9bd",
+          "version": "1",
+          "grade": 2,
+          "family": "f-b35ceda87c603fd6"
+        },
+        {
+          "id": "r-08d4e160d95d2794",
+          "version": "1",
+          "grade": 3,
+          "family": "f-6d479fcb7f75f989"
+        },
+        {
+          "id": "r-0cb220f8e1ba6a17",
+          "version": "1",
+          "grade": 3,
+          "family": "f-44070691c85733a2"
+        }
+      ],
+      "prohibited": [],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": [
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-08d4e160d95d2794",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-5f32460e4a64b9bd",
+            "version": "1"
+          }
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-08d4e160d95d2794",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-0cb220f8e1ba6a17",
+            "version": "1"
+          }
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-a4621f1074d7d5de",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-5f32460e4a64b9bd",
+            "version": "1"
+          },
+          "basis": "The unsigned export proposal reuses the existing receipt format."
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-b245b8beb3af9eb5",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-a4621f1074d7d5de",
+            "version": "1"
+          },
+          "basis": "The billing worksheet links an unsigned export proposal during a budgeting discussion."
+        }
+      ]
+    },
+    {
+      "id": "islet-bootstrap",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Islet tenant bootstrap",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-1fdfaf290db29d6d",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-ca19e63a3626c8ad",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Islet tenant bootstrap",
+          "body": "Islet bootstrap creates the tenant scope before admitting its first membership.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-b4deb2e91952f4af",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-f7ed4989de1341bb",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Islet bootstrap receipt",
+          "body": "A bootstrap receipt records the new scope id and approving operator.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-1fdfaf290db29d6d",
+          "version": "1",
+          "grade": 3,
+          "family": "f-ca19e63a3626c8ad"
+        },
+        {
+          "id": "r-b4deb2e91952f4af",
+          "version": "1",
+          "grade": 2,
+          "family": "f-f7ed4989de1341bb"
+        }
+      ],
+      "prohibited": [],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": []
+    },
+    {
+      "id": "juniper-audit",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Juniper atomic audit",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-88d2471ee12639a9",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-6456a6d7fb192658",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Juniper atomic audit",
+          "body": "Juniper commits a promotion and its required audit event in one transaction.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-a694e1d33c85eb59",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-fa78ae9809143943",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Juniper audit delivery",
+          "body": "When audit insertion fails, the promotion transaction rolls back.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-8caee4311ec2901a",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-58014e376364445f",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Juniper audit dashboard",
+          "body": "The dashboard groups delivery outcomes by day; it does not commit promotions.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-88d2471ee12639a9",
+          "version": "1",
+          "grade": 3,
+          "family": "f-6456a6d7fb192658"
+        },
+        {
+          "id": "r-a694e1d33c85eb59",
+          "version": "1",
+          "grade": 3,
+          "family": "f-fa78ae9809143943"
+        }
+      ],
+      "prohibited": [],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": [
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-88d2471ee12639a9",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-a694e1d33c85eb59",
+            "version": "1"
+          }
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-88d2471ee12639a9",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-8caee4311ec2901a",
+            "version": "1"
+          }
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-8caee4311ec2901a",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-88d2471ee12639a9",
+            "version": "1"
+          },
+          "basis": "The dashboard cites the atomic audit contract as the source of its displayed delivery counters."
+        }
+      ]
+    },
+    {
+      "id": "kelp-builds",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Kelp build provenance",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-bdf78a2763176e37",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-a7cc699569fe5f1f",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Kelp build provenance draft",
+          "body": "An abandoned Kelp build draft accepted a mutable latest tag as evidence.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-a3d61e55bb634628",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-4ac81774cc3ab457",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Release evidence",
+          "body": "Kelp release admission verifies the artifact digest against the signed provenance record.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-ca06bb734c33e258",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-94c23b10b79260fc",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Kelp build inputs",
+          "body": "The provenance record lists the source commit and lockfile digest.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-dd6108b425bf4fa3",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-339af01dbf8d479b",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Image receipt",
+          "body": "Kelp importer receipts name the digest actually loaded into the target runtime.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-0c3f84f29ef7cdcc",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-c0e44148c9a95201",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "kelp-builds restricted historical source",
+          "body": "Synthetic retained source for kelp-builds with policy state archived. This record is excluded from delivery.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "archived",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-a3d61e55bb634628",
+          "version": "1",
+          "grade": 3,
+          "family": "f-4ac81774cc3ab457"
+        },
+        {
+          "id": "r-ca06bb734c33e258",
+          "version": "1",
+          "grade": 2,
+          "family": "f-94c23b10b79260fc"
+        },
+        {
+          "id": "r-dd6108b425bf4fa3",
+          "version": "1",
+          "grade": 2,
+          "family": "f-339af01dbf8d479b"
+        }
+      ],
+      "prohibited": [
+        "r-0c3f84f29ef7cdcc@1"
+      ],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": [
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-a3d61e55bb634628",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-ca06bb734c33e258",
+            "version": "1"
+          }
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-a3d61e55bb634628",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-dd6108b425bf4fa3",
+            "version": "1"
+          }
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-bdf78a2763176e37",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-ca06bb734c33e258",
+            "version": "1"
+          },
+          "basis": "The abandoned build draft used the same source-input inventory format."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-0c3f84f29ef7cdcc",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-bdf78a2763176e37",
+            "version": "1"
+          },
+          "basis": "The retained record carries a historical source link; current policy still forbids its delivery."
+        }
+      ]
+    },
+    {
+      "id": "larch-branches",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Larch branch cleanup",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-b5e0454b77aaea2b",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-feb0b917bc7366f7",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Larch branch cleanup",
+          "body": "Larch deletes a temporary branch only after its associated change is merged.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-b0338fd4321705c6",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-09d44639622013e9",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Larch branch cleanup reminder",
+          "body": "Larch sends a reminder for old open changes but does not delete their branches.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-eb34f2b85c065c0c",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-1ce150dadcc49ced",
+          "sourceKind": "non-code",
+          "scope": "project:denied",
+          "title": "Larch private branch register",
+          "body": "Synthetic restricted register lists branches reserved by maintainers.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": false,
+          "sourceAllowed": false,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-68a312f4156e359b",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-3d03250611a0e56b",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Cleanup proposal",
+          "body": "A rejected Larch proposal deleted every branch older than one week.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-c9dfe8dc2df75a73",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-87dbf4fa6e69fead",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Build caching",
+          "body": "Larch build caches expire separately from Git branches.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-b5e0454b77aaea2b",
+          "version": "1",
+          "grade": 3,
+          "family": "f-feb0b917bc7366f7"
+        }
+      ],
+      "prohibited": [
+        "r-eb34f2b85c065c0c@1"
+      ],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": [
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-b5e0454b77aaea2b",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-eb34f2b85c065c0c",
+            "version": "1"
+          }
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-b5e0454b77aaea2b",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-68a312f4156e359b",
+            "version": "1"
+          }
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-68a312f4156e359b",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-b5e0454b77aaea2b",
+            "version": "1"
+          },
+          "basis": "The same two recorded accounts disagree; this reverse assertion has no authority preference."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-b0338fd4321705c6",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-c9dfe8dc2df75a73",
+            "version": "1"
+          },
+          "basis": "The reminder references build-cache expiry to explain unrelated housekeeping notifications."
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-c9dfe8dc2df75a73",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-bdf78a2763176e37",
+            "version": "1"
+          },
+          "basis": "An old cache note links the abandoned Kelp build draft as a historical integration sketch."
+        }
+      ]
+    },
+    {
+      "id": "moraine-rollback",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Moraine deployment rollback",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-a026e8a95f93f523",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-4823a6c7de40d068",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Moraine deployment rollback",
+          "body": "Moraine rollback selects the previously admitted immutable image digest.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-ba22bbcdebee8d2c",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-849746eb1f1116e6",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Moraine deployment record",
+          "body": "The rollout record preserves the old digest before updating the service.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-1f86aa3dd72bb063",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-7b3642769e222f7d",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Moraine rollback validation",
+          "body": "After rollback, the health probe must observe the restored digest.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-e85c11844160bfbe",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-052c456ed8885ede",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Moraine deployment analytics",
+          "body": "Deployment analytics count attempts including failed rollouts.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-0a3f495121c0ae30",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-8e79d0498a2ba160",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Moraine theme",
+          "body": "Moraine dashboard colors are changed without a deployment rollback.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-1334dcfa29f9d012",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-1401e266bb28e053",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Legacy rollback draft",
+          "body": "The obsolete draft resolved a floating image tag at rollback time.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-840424ecf2009a30",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-f4718abdea4024bb",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Database restore",
+          "body": "Moraine database recovery is an independent operator procedure.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-a026e8a95f93f523",
+          "version": "1",
+          "grade": 3,
+          "family": "f-4823a6c7de40d068"
+        },
+        {
+          "id": "r-ba22bbcdebee8d2c",
+          "version": "1",
+          "grade": 3,
+          "family": "f-849746eb1f1116e6"
+        },
+        {
+          "id": "r-1f86aa3dd72bb063",
+          "version": "1",
+          "grade": 2,
+          "family": "f-7b3642769e222f7d"
+        }
+      ],
+      "prohibited": [],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": [
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-a026e8a95f93f523",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-ba22bbcdebee8d2c",
+            "version": "1"
+          }
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-a026e8a95f93f523",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-1f86aa3dd72bb063",
+            "version": "1"
+          }
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-a026e8a95f93f523",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-1334dcfa29f9d012",
+            "version": "1"
+          }
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-1334dcfa29f9d012",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-a026e8a95f93f523",
+            "version": "1"
+          },
+          "basis": "The same two recorded accounts disagree; this reverse assertion has no authority preference."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-e85c11844160bfbe",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-0a3f495121c0ae30",
+            "version": "1"
+          },
+          "basis": "The analytics screenshot cites the dashboard theme configuration."
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-0a3f495121c0ae30",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-e85c11844160bfbe",
+            "version": "1"
+          },
+          "basis": "The theme example imports a deployment analytics panel."
+        }
+      ]
+    },
+    {
+      "id": "nacre-quotas",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Nacre connector quota",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-c42c76cd336c0854",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-a982065bb15d04e1",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Nacre connector quota",
+          "body": "Nacre permits four concurrent connector requests per tenant.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-5379a92f772c8f61",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-3d87946aaea9a79f",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Nacre connector queue",
+          "body": "Requests above the concurrency limit wait in a bounded tenant queue.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-0e903920a25c8ea7",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-550f0b35975e9ddd",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Nacre connector quota experiment",
+          "body": "A cancelled experiment tried a single global concurrency allowance.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-c42c76cd336c0854",
+          "version": "1",
+          "grade": 3,
+          "family": "f-a982065bb15d04e1"
+        },
+        {
+          "id": "r-5379a92f772c8f61",
+          "version": "1",
+          "grade": 2,
+          "family": "f-3d87946aaea9a79f"
+        }
+      ],
+      "prohibited": [],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": []
+    },
+    {
+      "id": "ochre-residency",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Ochre vector residency",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-91208517ffd8b77b",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-f0aa887a9714e3e6",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Ochre vector residency",
+          "body": "Ochre routes local-only scopes exclusively to the configured local embedding provider.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-547a29718ac2bb0b",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-3250be16cc694b4c",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Ochre provider failure",
+          "body": "If the local embedding provider is unavailable, Ochre uses lexical retrieval rather than hosted fallback.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-24108c0fb4c4b943",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-b0676c77b8bfb2c2",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Ochre vector residency draft",
+          "body": "The rejected draft allowed hosted fallback when local inference was busy.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-fab9857534623bc7",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-b8783af3fa17b68b",
+          "sourceKind": "non-code",
+          "scope": "project:denied",
+          "title": "Ochre private scope inventory",
+          "body": "Synthetic restricted inventory lists the local-only tenant scopes.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": false,
+          "sourceAllowed": false,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-91208517ffd8b77b",
+          "version": "1",
+          "grade": 3,
+          "family": "f-f0aa887a9714e3e6"
+        },
+        {
+          "id": "r-547a29718ac2bb0b",
+          "version": "1",
+          "grade": 3,
+          "family": "f-3250be16cc694b4c"
+        }
+      ],
+      "prohibited": [
+        "r-fab9857534623bc7@1"
+      ],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": [
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-91208517ffd8b77b",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-24108c0fb4c4b943",
+            "version": "1"
+          }
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-91208517ffd8b77b",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-fab9857534623bc7",
+            "version": "1"
+          }
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-24108c0fb4c4b943",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-91208517ffd8b77b",
+            "version": "1"
+          },
+          "basis": "The same two recorded accounts disagree; this reverse assertion has no authority preference."
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-24108c0fb4c4b943",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-547a29718ac2bb0b",
+            "version": "1"
+          },
+          "basis": "The rejected hosted-fallback draft cites the actual local-provider failure behavior it proposed to change."
+        }
+      ]
+    },
+    {
+      "id": "pollen-leases",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Pollen lease generation",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-2291774c644eef66",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-808be817fd50feff",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Pollen lease generation",
+          "body": "Each successful Pollen lease reacquisition increments the durable generation.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-afa05a1e1e676917",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-679b26e2973c26c1",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Pollen generation fence",
+          "body": "A completion carrying an older generation cannot commit the leased work.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-c0fff0fa8bdefa2d",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-20ece9296362846a",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Pollen clock measurements",
+          "body": "Lease duration uses database time; generation comparison does not use wall-clock ordering.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-5ab75e92ef5d623d",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-04fa87c2d3efc7a4",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Pollen UI colors",
+          "body": "The Pollen interface uses amber for an expiring lease.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-9f19159e7e15a085",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-a7d7855371c8464a",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Pollen lease generation design",
+          "body": "An abandoned design reset the generation when a lease was released.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-04f2753b2945ecda",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-9dccebed24125ca5",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "pollen-leases restricted historical source",
+          "body": "Synthetic retained source for pollen-leases with policy state stale. This record is excluded from delivery.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "stale",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-2291774c644eef66",
+          "version": "1",
+          "grade": 3,
+          "family": "f-808be817fd50feff"
+        },
+        {
+          "id": "r-afa05a1e1e676917",
+          "version": "1",
+          "grade": 2,
+          "family": "f-679b26e2973c26c1"
+        },
+        {
+          "id": "r-c0fff0fa8bdefa2d",
+          "version": "1",
+          "grade": 1,
+          "family": "f-20ece9296362846a"
+        }
+      ],
+      "prohibited": [
+        "r-04f2753b2945ecda@1"
+      ],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": [
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-2291774c644eef66",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-afa05a1e1e676917",
+            "version": "1"
+          }
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-2291774c644eef66",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-9f19159e7e15a085",
+            "version": "1"
+          }
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-9f19159e7e15a085",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-2291774c644eef66",
+            "version": "1"
+          },
+          "basis": "The same two recorded accounts disagree; this reverse assertion has no authority preference."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-5ab75e92ef5d623d",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-9f19159e7e15a085",
+            "version": "1"
+          },
+          "basis": "The UI color note links an abandoned generation design as a historical screenshot source."
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-9f19159e7e15a085",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-c0fff0fa8bdefa2d",
+            "version": "1"
+          },
+          "basis": "The abandoned generation design cites the database-clock measurements."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-04f2753b2945ecda",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-2291774c644eef66",
+            "version": "1"
+          },
+          "basis": "The retained record carries a historical source link; current policy still forbids its delivery."
+        }
+      ]
+    },
+    {
+      "id": "quill-package",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Quill package contents",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-d7d197206d30f5cf",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-75a6248be2dea87d",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Quill package contents",
+          "body": "The Quill package publishes runtime modules and omits source test fixtures.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-e84af9941858f521",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-adc57468704ff1bf",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Quill package contents report",
+          "body": "An older report claimed source fixtures were included; current package inspection contradicts it.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-d7d197206d30f5cf",
+          "version": "1",
+          "grade": 3,
+          "family": "f-75a6248be2dea87d"
+        }
+      ],
+      "prohibited": [],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": [
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-d7d197206d30f5cf",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-e84af9941858f521",
+            "version": "1"
+          }
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-e84af9941858f521",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-d7d197206d30f5cf",
+            "version": "1"
+          },
+          "basis": "The same two recorded accounts disagree; this reverse assertion has no authority preference."
+        }
+      ]
+    },
+    {
+      "id": "reed-membership",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Reed membership freshness",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-542f0e576d915d37",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-05f9ec2f339d815b",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Reed membership freshness proposal",
+          "body": "A rejected Reed proposal trusted memberships from an authentication token indefinitely.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-988ed9fb05ff6872",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-fd6410acad05017b",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Authorization transaction",
+          "body": "Reed resolves effective membership from current database rows at each service operation.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-371578a7c9b02a2e",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-c227425477556336",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Membership disable receipt",
+          "body": "Reed records the operator who disabled a membership.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-10f3814915a5d27b",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-d500c809e49eabe0",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Reed identity display",
+          "body": "A cached display name does not establish authorization.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-ae02aef8b522073e",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-452a8d761923aae2",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Import notes",
+          "body": "Reed imports identity profile changes independently of membership admission.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-6f6cfbeb037ef736",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-54e29a86862a78fd",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Reed membership freshness panel",
+          "body": "The panel labels the time of the last successful identity synchronization.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-988ed9fb05ff6872",
+          "version": "1",
+          "grade": 3,
+          "family": "f-fd6410acad05017b"
+        },
+        {
+          "id": "r-6f6cfbeb037ef736",
+          "version": "1",
+          "grade": 1,
+          "family": "f-54e29a86862a78fd"
+        }
+      ],
+      "prohibited": [],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": [
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-988ed9fb05ff6872",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-ae02aef8b522073e",
+            "version": "1"
+          }
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-542f0e576d915d37",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-6f6cfbeb037ef736",
+            "version": "1"
+          },
+          "basis": "The rejected token-cache proposal cites the synchronization panel as its freshness indicator."
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-ae02aef8b522073e",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-371578a7c9b02a2e",
+            "version": "1"
+          },
+          "basis": "The profile-import note links an operator disable receipt as an example of unrelated administrative metadata."
+        }
+      ]
+    },
+    {
+      "id": "sable-replay",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Sable webhook replay",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-0d270741bb8ba272",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-eb1d303c02c203fd",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Sable webhook replay",
+          "body": "Sable rejects a repeated delivery id after its first authenticated admission.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-6c8617085f9c6b6a",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-939b73393445d2fe",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Sable delivery ledger",
+          "body": "Delivery id insertion and payload admission share a transaction.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-175a24324d4e0bda",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-460cf681989d856d",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Webhook authentication",
+          "body": "Sable verifies the request signature before consulting delivery deduplication.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-0d270741bb8ba272",
+          "version": "1",
+          "grade": 3,
+          "family": "f-eb1d303c02c203fd"
+        },
+        {
+          "id": "r-6c8617085f9c6b6a",
+          "version": "1",
+          "grade": 2,
+          "family": "f-939b73393445d2fe"
+        },
+        {
+          "id": "r-175a24324d4e0bda",
+          "version": "1",
+          "grade": 2,
+          "family": "f-460cf681989d856d"
+        }
+      ],
+      "prohibited": [],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": [
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-0d270741bb8ba272",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-6c8617085f9c6b6a",
+            "version": "1"
+          }
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-6c8617085f9c6b6a",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-175a24324d4e0bda",
+            "version": "1"
+          }
+        }
+      ]
+    },
+    {
+      "id": "tarn-history",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Tarn decision history",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-6c71d2626bee6e5d",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-1149628b17bb91f8",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Tarn decision history",
+          "body": "Tarn preserves the superseded decision as an archived predecessor of the current record.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-cf37275165fc3a77",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-180cf5bf90f02169",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Tarn predecessor rendering",
+          "body": "Default retrieval excludes the archived predecessor.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-07cc6106e4a1a792",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-493beaf91edfb593",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Tarn decision history sketch",
+          "body": "An obsolete sketch overwrote the original decision body.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-a891ccf50f55d4b2",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-e36ac8e82d6f5e21",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Tarn release roster",
+          "body": "Release staffing is independent of decision supersession.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-6c71d2626bee6e5d",
+          "version": "1",
+          "grade": 3,
+          "family": "f-1149628b17bb91f8"
+        },
+        {
+          "id": "r-cf37275165fc3a77",
+          "version": "1",
+          "grade": 2,
+          "family": "f-180cf5bf90f02169"
+        }
+      ],
+      "prohibited": [],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": [
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-6c71d2626bee6e5d",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-07cc6106e4a1a792",
+            "version": "1"
+          }
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-6c71d2626bee6e5d",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-a891ccf50f55d4b2",
+            "version": "1"
+          }
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-07cc6106e4a1a792",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-6c71d2626bee6e5d",
+            "version": "1"
+          },
+          "basis": "The same two recorded accounts disagree; this reverse assertion has no authority preference."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-a891ccf50f55d4b2",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-07cc6106e4a1a792",
+            "version": "1"
+          },
+          "basis": "The release roster cites the obsolete decision sketch as the staffing discussion attachment."
+        }
+      ]
+    },
+    {
+      "id": "umber-sources",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Umber source authority",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-8d926ca99d9ddd45",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-022bc3331dc17a7b",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Umber source authority",
+          "body": "Umber admits a source document only after checking its current source-specific permission.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-c96a87eb28c6e819",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-39c5fdd64817f86d",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Assertion visibility",
+          "body": "A visible Umber assertion cannot grant access to its restricted source document.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-dd559d48075449a3",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-71a515cd5bb1dae6",
+          "sourceKind": "non-code",
+          "scope": "project:denied",
+          "title": "Umber source authority appendix",
+          "body": "Synthetic restricted appendix contains source-owner addresses.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": false,
+          "sourceAllowed": false,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-5d31aa5afafff2a3",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-3590c9554f27fd01",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Umber authoring tips",
+          "body": "The authoring guide recommends short titles but establishes no source access rights.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-75e1df716dc1a6fb",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-9e2af195510f9c3b",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Umber source authority memo",
+          "body": "A cancelled memo proposed inheriting access from assertion visibility.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-700acbda816b65af",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-c7d74c45f4625658",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "umber-sources restricted historical source",
+          "body": "Synthetic retained source for umber-sources with policy state live. This record is excluded from delivery.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": false,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-8d926ca99d9ddd45",
+          "version": "1",
+          "grade": 3,
+          "family": "f-022bc3331dc17a7b"
+        },
+        {
+          "id": "r-c96a87eb28c6e819",
+          "version": "1",
+          "grade": 3,
+          "family": "f-39c5fdd64817f86d"
+        }
+      ],
+      "prohibited": [
+        "r-dd559d48075449a3@1",
+        "r-700acbda816b65af@1"
+      ],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": [
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-8d926ca99d9ddd45",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-dd559d48075449a3",
+            "version": "1"
+          }
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-8d926ca99d9ddd45",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-75e1df716dc1a6fb",
+            "version": "1"
+          }
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-75e1df716dc1a6fb",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-8d926ca99d9ddd45",
+            "version": "1"
+          },
+          "basis": "The same two recorded accounts disagree; this reverse assertion has no authority preference."
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-5d31aa5afafff2a3",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-5879b2e04cb93f3d",
+            "version": "1"
+          },
+          "basis": "The authoring tips link a Willow menu screenshot as a navigation example."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-75e1df716dc1a6fb",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-c96a87eb28c6e819",
+            "version": "1"
+          },
+          "basis": "The cancelled source-access memo cites the assertion visibility rule it proposed to replace."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-700acbda816b65af",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-8d926ca99d9ddd45",
+            "version": "1"
+          },
+          "basis": "The retained record carries a historical source link; current policy still forbids its delivery."
+        }
+      ]
+    },
+    {
+      "id": "vale-pages",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Vale pagination boundary",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-ca95ded837224332",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-dd738b7fc0cdfabc",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Vale pagination boundary",
+          "body": "Vale cursors identify the last emitted row using the complete stable sort key.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-35b127ef1ba7e936",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-9879baa3b59fe7ca",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Vale pagination boundary draft",
+          "body": "The rejected draft advanced only by timestamp and could omit tied rows.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-ca95ded837224332",
+          "version": "1",
+          "grade": 3,
+          "family": "f-dd738b7fc0cdfabc"
+        }
+      ],
+      "prohibited": [],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": []
+    },
+    {
+      "id": "willow-approval",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Willow promotion approval",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-f7333b41d29bb346",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-87e7ca7739e9e1a8",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Willow promotion approval",
+          "body": "Willow requires a current destination-scope approver before promoting a record.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-e1124c465826eb37",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-27c9bf3bd1f84658",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Willow promotion receipt",
+          "body": "The receipt binds approval to the destination and the promoted source version.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-b3bc793051ac5303",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-4c61a41e8b4fc05d",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Willow promotion cancellation",
+          "body": "A revoked approval prevents the pending promotion from committing.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-e4f495f083f5b78e",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-2b8789e819822a3b",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Willow promotion approval illustration",
+          "body": "An illustrative diagram shows a caller-set approved flag; it is not an implemented authorization path.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-5879b2e04cb93f3d",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-1ea40563b7fdcaff",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Willow menu",
+          "body": "The application menu groups promotion screens with other operator tools.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-b43323e6a05b03cb",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-ecc12af8fa802a57",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Approved source version",
+          "body": "Willow rejects approval receipts for an older source version.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-6fceab1fc14b053d",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-5e3f40c78a3f6a5e",
+          "sourceKind": "non-code",
+          "scope": "project:denied",
+          "title": "Willow private approver list",
+          "body": "Synthetic restricted list contains destination approvers.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": false,
+          "sourceAllowed": false,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-7d1c5d0615a7c39e",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-d9994f0a2472f764",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Willow onboarding",
+          "body": "New users can read the onboarding guide before requesting a role.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-f7333b41d29bb346",
+          "version": "1",
+          "grade": 3,
+          "family": "f-87e7ca7739e9e1a8"
+        },
+        {
+          "id": "r-e1124c465826eb37",
+          "version": "1",
+          "grade": 2,
+          "family": "f-27c9bf3bd1f84658"
+        },
+        {
+          "id": "r-b3bc793051ac5303",
+          "version": "1",
+          "grade": 3,
+          "family": "f-4c61a41e8b4fc05d"
+        },
+        {
+          "id": "r-b43323e6a05b03cb",
+          "version": "1",
+          "grade": 2,
+          "family": "f-ecc12af8fa802a57"
+        }
+      ],
+      "prohibited": [
+        "r-6fceab1fc14b053d@1"
+      ],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": [
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-f7333b41d29bb346",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-e1124c465826eb37",
+            "version": "1"
+          }
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-f7333b41d29bb346",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-b3bc793051ac5303",
+            "version": "1"
+          }
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-f7333b41d29bb346",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-6fceab1fc14b053d",
+            "version": "1"
+          }
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-e4f495f083f5b78e",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-7d1c5d0615a7c39e",
+            "version": "1"
+          },
+          "basis": "The illustrative approval diagram links the public onboarding guide."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-5879b2e04cb93f3d",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-e4f495f083f5b78e",
+            "version": "1"
+          },
+          "basis": "The menu mockup cites the illustrative approval diagram as its screenshot source."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-7d1c5d0615a7c39e",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-b0338fd4321705c6",
+            "version": "1"
+          },
+          "basis": "A copied onboarding link points at the Larch housekeeping reminder, an unrelated operational topic."
+        }
+      ]
+    },
+    {
+      "id": "yarrow-storage",
+      "split": "holdout",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Yarrow storage budget",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-e49f7c1b712bfddd",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-af2f9dcf82d3b0b7",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Yarrow storage budget",
+          "body": "Yarrow includes indexes and receipts when enforcing the application storage ceiling.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-4175791826e2cba0",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-25cdbe6afe5b9799",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Yarrow allocation baseline",
+          "body": "The evaluation records empty migrated-schema bytes separately from evidence growth.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-05273d1165e82625",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-fd18043052380972",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Yarrow storage budget sketch",
+          "body": "An abandoned sketch counted memory bodies alone and omitted index allocation.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-e49f7c1b712bfddd",
+          "version": "1",
+          "grade": 3,
+          "family": "f-af2f9dcf82d3b0b7"
+        },
+        {
+          "id": "r-4175791826e2cba0",
+          "version": "1",
+          "grade": 2,
+          "family": "f-25cdbe6afe5b9799"
+        }
+      ],
+      "prohibited": [],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": [
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-e49f7c1b712bfddd",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-05273d1165e82625",
+            "version": "1"
+          }
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-05273d1165e82625",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-e49f7c1b712bfddd",
+            "version": "1"
+          },
+          "basis": "The same two recorded accounts disagree; this reverse assertion has no authority preference."
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-05273d1165e82625",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-4175791826e2cba0",
+            "version": "1"
+          },
+          "basis": "The abandoned body-only accounting sketch cites the allocation baseline it failed to include."
+        }
+      ]
+    },
+    {
+      "id": "dev-otter",
+      "split": "development",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Otter query cancellation",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-f89dfff90219e5a7",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-7f767d015fba2687",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Session 17 transcript",
+          "body": "operator> cancel Otter query 17\nserver> cancellation acknowledged; transaction rolled back",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-d719b538939060fa",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-e5d325b449362f71",
+          "sourceKind": "code",
+          "scope": "project:synthetic",
+          "title": "Otter test table",
+          "body": "case | Otter query cancellation | rollback observed\n17 | yes | yes",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-47de006220d332ce",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-ddb310901e92748e",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Otter issue draft",
+          "body": "TODO: make cancellation interrupt outstanding requests; no implementation recorded here.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-f89dfff90219e5a7",
+          "version": "1",
+          "grade": 3,
+          "family": "f-7f767d015fba2687"
+        },
+        {
+          "id": "r-d719b538939060fa",
+          "version": "1",
+          "grade": 2,
+          "family": "f-e5d325b449362f71"
+        }
+      ],
+      "prohibited": [],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": [
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-47de006220d332ce",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-d719b538939060fa",
+            "version": "1"
+          },
+          "basis": "The unimplemented cancellation issue cites the existing observation table."
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-47de006220d332ce",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-630e8e5735c87996",
+            "version": "1"
+          },
+          "basis": "The cancellation issue proposes adopting the unenabled display experiment."
+        }
+      ]
+    },
+    {
+      "id": "dev-pika",
+      "split": "development",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Pika chunk recovery",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-63b12aff93aab0fa",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-e29eade9e0596203",
+          "sourceKind": "code",
+          "scope": "project:synthetic",
+          "title": "Recovery test log",
+          "body": "Pika chunk recovery: checkpoint=2; chunks replayed=3,4; duplicate chunk=2 ignored.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-e806164cf206b368",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-610a410e6cb54152",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Pika reproduction",
+          "body": "Steps: write checkpoint; restart importer; observe that acknowledged chunks are not emitted again.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-63b12aff93aab0fa",
+          "version": "1",
+          "grade": 3,
+          "family": "f-e29eade9e0596203"
+        },
+        {
+          "id": "r-e806164cf206b368",
+          "version": "1",
+          "grade": 2,
+          "family": "f-610a410e6cb54152"
+        }
+      ],
+      "prohibited": [],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": [
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-63b12aff93aab0fa",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-e806164cf206b368",
+            "version": "1"
+          }
+        }
+      ]
+    },
+    {
+      "id": "dev-rook",
+      "split": "development",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Rook citation versions",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-e2ef3f49e4b848f7",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-865c180590106feb",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Rook assertion trace",
+          "body": "Rook citation versions\nactual: record=R7 version=4\nexpected: record=R7 version=4\nresult: valid",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-f074066679f6f53a",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-9ab5c89cd1c4cbc1",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Rook stale trace",
+          "body": "record=R7 version=2\nvalidator: rejected stale citation",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-630e8e5735c87996",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-a6cdf80f5ef7ee3f",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Rook display experiment",
+          "body": "Experiment only: render citations without versions. Never enabled.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-0f3f2487421a3687",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-2e50df5b44f04806",
+          "sourceKind": "non-code",
+          "scope": "project:denied",
+          "title": "Rook private trace",
+          "body": "Restricted synthetic trace R9.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": false,
+          "sourceAllowed": false,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-e2ef3f49e4b848f7",
+          "version": "1",
+          "grade": 3,
+          "family": "f-865c180590106feb"
+        },
+        {
+          "id": "r-f074066679f6f53a",
+          "version": "1",
+          "grade": 2,
+          "family": "f-9ab5c89cd1c4cbc1"
+        }
+      ],
+      "prohibited": [
+        "r-0f3f2487421a3687@1"
+      ],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": [
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-e2ef3f49e4b848f7",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-0f3f2487421a3687",
+            "version": "1"
+          }
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-630e8e5735c87996",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-a4534c51aff837e2",
+            "version": "1"
+          },
+          "basis": "An experiment discussion links an unrelated cancelled-delivery draft as an example rendering task."
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-630e8e5735c87996",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-e2ef3f49e4b848f7",
+            "version": "1"
+          },
+          "basis": "The versionless display experiment conflicts with the validator trace."
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-630e8e5735c87996",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-e806164cf206b368",
+            "version": "1"
+          },
+          "basis": "A reproduction checklist in another project was linked as a testing template."
+        }
+      ]
+    },
+    {
+      "id": "dev-shrike",
+      "split": "development",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Shrike unknown labels",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-8e08f8f8caf8a232",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-b7e3cda7d4b1f8f4",
+          "sourceKind": "code",
+          "scope": "project:synthetic",
+          "title": "Shrike test observation",
+          "body": "Shrike unknown labels: absent ship date remains unknown after formatting. Test passed.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-24b06a16b38f6529",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-b504c6de4d2e8103",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Shrike proposed formatter",
+          "body": "Proposed, not merged: replace unknown ship dates with next Friday.",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-215693e1a2e3a8a8",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-ac8a997535c82e80",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Shrike snapshot",
+          "body": "output.fields.shipDate = null; output.labels.shipDate = unknown",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-8e08f8f8caf8a232",
+          "version": "1",
+          "grade": 3,
+          "family": "f-b7e3cda7d4b1f8f4"
+        },
+        {
+          "id": "r-215693e1a2e3a8a8",
+          "version": "1",
+          "grade": 3,
+          "family": "f-ac8a997535c82e80"
+        }
+      ],
+      "prohibited": [],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": [
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-8e08f8f8caf8a232",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-24b06a16b38f6529",
+            "version": "1"
+          }
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-24b06a16b38f6529",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-8e08f8f8caf8a232",
+            "version": "1"
+          },
+          "basis": "The same two recorded accounts disagree; this reverse assertion has no authority preference."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-24b06a16b38f6529",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-630e8e5735c87996",
+            "version": "1"
+          },
+          "basis": "The proposed formatter links the unenabled citation display experiment."
+        }
+      ]
+    },
+    {
+      "id": "dev-tern",
+      "split": "development",
+      "executionResidency": "local",
+      "operation": "recall",
+      "query": "Tern cancelled delivery",
+      "abstain": false,
+      "collection": "ranking",
+      "documents": [
+        {
+          "id": "r-0f4548a3cdcde18c",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-68969223b82e6e2c",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Tern reproduction transcript",
+          "body": "send Tern message; cancel generation; resume old worker; delivery rejected by cancellation fence.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-b8d221d7a027b427",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-b8a1e0330e010a13",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Tern generation log",
+          "body": "generation=8 cancelled=true\nworker generation=7 outcome=fenced",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-a4534c51aff837e2",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-0f0fe916ca44538c",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Tern draft",
+          "body": "Discussion: allow old generations to finish delivery. No approval.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-e4e5d374e4ce4323",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-0c677ff9f9656bbf",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Tern status table",
+          "body": "queue | pending | sent\nTern | 0 | 0",
+          "type": "context",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-dbbf5cb7b7dea559",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-ac4d1a804e3afd1d",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Tern colors",
+          "body": "The status table uses green cells for completed jobs.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
+      "relevant": [
+        {
+          "id": "r-0f4548a3cdcde18c",
+          "version": "1",
+          "grade": 3,
+          "family": "f-68969223b82e6e2c"
+        },
+        {
+          "id": "r-b8d221d7a027b427",
+          "version": "1",
+          "grade": 2,
+          "family": "f-b8a1e0330e010a13"
+        },
+        {
+          "id": "r-e4e5d374e4ce4323",
+          "version": "1",
+          "grade": 1,
+          "family": "f-0c677ff9f9656bbf"
+        }
+      ],
+      "prohibited": [],
+      "claims": [],
+      "chunks": [],
+      "contradictionSets": [],
+      "timeline": [],
+      "relations": [
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-0f4548a3cdcde18c",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-b8d221d7a027b427",
+            "version": "1"
+          }
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-0f4548a3cdcde18c",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-dbbf5cb7b7dea559",
+            "version": "1"
+          }
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-dbbf5cb7b7dea559",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-47de006220d332ce",
+            "version": "1"
+          },
+          "basis": "The colors note contains a mistaken issue link into the Otter backlog."
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-a4534c51aff837e2",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-0f4548a3cdcde18c",
+            "version": "1"
+          },
+          "basis": "The old delivery proposal conflicts with the cancellation-fence reproduction."
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-a4534c51aff837e2",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-dbbf5cb7b7dea559",
+            "version": "1"
+          },
+          "basis": "The cancelled-delivery draft links its UI color discussion."
+        }
+      ]
+    }
+  ]
+}
