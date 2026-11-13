@@ -61,6 +61,21 @@ describe('frozen domain evaluator', () => {
     expect(() => planRows(47, 14, 12, 512)).toThrow(/row/i);
   });
 
+  it('rejects oversized complete adapter context before invoking the adapter', async () => {
+    const corpus = await loadCorpus();
+    const task = structuredClone(corpus.cases.find(item => item.id === 'aster-refunds')!);
+    task.documents = Array.from({ length: 5 }, (_, index) => ({ ...task.documents[0], id: `large-${index}`, body: 'x'.repeat(16_384) }));
+    let called = false;
+    expect(await evaluateRetrieval(task, async () => { called = true; return []; })).toEqual({ status: 'failed', reason: 'CONTEXT_BOUND' });
+    expect(called).toBe(false);
+  });
+
+  it('refuses an unverified corpus or fictitious checkout before provisioning', async () => {
+    const corpus = await loadCorpus();
+    await expect(runBaseline(corpus, 'postgres://127.0.0.1:1/invalid', 'a'.repeat(40))).rejects.toThrow(/checkout/i);
+    await expect(runBaseline(structuredClone(corpus), 'postgres://127.0.0.1:1/invalid', 'a'.repeat(40))).rejects.toThrow(/loaded frozen corpus/i);
+  });
+
   it('scores ranks once per exact version, penalizes copies, and distinguishes undefined denominators', () => {
     const expected = [{ id: 'a', version: '1', grade: 3, family: 'original' },
       { id: 'b', version: '2', grade: 1, family: 'independent' }];
@@ -168,6 +183,7 @@ describe('frozen domain evaluator', () => {
     expect(compareExperiments(before, after, corpus)).toMatchObject({ status: 'pass' });
     const noSource = { ...report('hybrid-reranking', 0.5, 10), sourceHead: undefined };
     expect(() => experimentFromReport(corpus, noSource, 'hybrid-reranking', features, {})).toThrow();
+    expect(() => experimentFromReport(corpus, { ...report('hybrid-reranking', 0.5, 10), seed: 26 }, 'hybrid-reranking', features, {})).toThrow(/drift/i);
     expect(() => experimentFromReport(corpus, { ...noSource, sourceHead: 'c'.repeat(40) }, 'hybrid-reranking', features, {})).toThrow(/provenance/i);
     const amplified = report('relationship-expansion', 0.6, 11);
     amplified.usage.persistedBytes = 1300; amplified.usage.evidenceBytes = 300;
