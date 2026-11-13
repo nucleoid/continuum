@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { readFile, mkdir, writeFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { readFile, mkdir, writeFile, stat } from 'node:fs/promises';
+import { dirname, resolve, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCorpus, runBaseline, boundReport, RUNNER_VERSION } from '../dist/evaluation/test-helpers.js';
 
@@ -17,7 +17,9 @@ let timer;
 try {
   const manifestPath = resolve(args[1]);
   const output = resolve(args[3]);
-  if (!output.endsWith('.json') || output === manifestPath || output.includes(`${resolve('evals/fixtures')}/`)) throw new Error('Invalid output');
+  const withinFixtures = relative(resolve('evals/fixtures'), output);
+  if (!output.endsWith('.json') || output === manifestPath || (!withinFixtures.startsWith('..') && !isAbsolute(withinFixtures))) throw new Error('Invalid output');
+  if ((await stat(manifestPath)).size > 16_384) throw new Error('Run manifest bound');
   const text = await readFile(manifestPath, 'utf8');
   if (Buffer.byteLength(text) > 16_384) throw new Error('Run manifest bound');
   const manifest = JSON.parse(text);
