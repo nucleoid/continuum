@@ -5,7 +5,7 @@ import { dirname } from 'node:path';
 import { loadCorpus, scoreRetrieval, scoreClaims, compareRuns, relationshipGate,
   evaluateMechanism, seededOrder, boundReport, runBaseline, evaluateTaskPair, validateCases, compareExperiments, checkedGrantSql, experimentFromReport,
   retrievalInput, evaluateRetrieval, PhaseBudget, planRows, checkDelivered, graphShortcutDiagnostics,
-  acceptanceEligible, accountStorage, measureStorage, withEvaluationFixture, assertPublishableReport } from './test-helpers.js';
+  acceptanceEligible, accountStorage, measureStorage, withEvaluationFixture, assertPublishableReport, candidateUniverseHash, latencyPolicy } from './test-helpers.js';
 
 describe('frozen domain evaluator', () => {
   it('uses the shared authorized universe and catches foreign-case policy leaks', async () => {
@@ -27,6 +27,12 @@ describe('frozen domain evaluator', () => {
     }
     const hosted = { ...item, executionResidency: 'hosted' as const };
     expect(checkDelivered(corpus, hosted, [permitted])).toContain('prohibited-evidence');
+    const erased = structuredClone(corpus);
+    erased.cases.find(row => row.id === other.id)!.timeline.push({ at: '2026-01-01T00:00:00Z', action: 'erase', evidence: `${permitted.id}@${permitted.version}` });
+    expect(checkDelivered(erased, item, [permitted])).toContain('prohibited-evidence');
+    expect(retrievalInput(erased, item).documents.some(doc => doc.id === permitted.id)).toBe(false);
+    const development = corpus.cases.find(row => row.collection === 'ranking' && row.split === 'development')!;
+    expect(retrievalInput(corpus, development).documents.some(doc => doc.id === permitted.id)).toBe(false);
     expect(await evaluateRetrieval(corpus, item, async () => [{ id: denied.id, version: denied.version }]))
       .toMatchObject({ status: 'failed', reason: 'PROHIBITED_EVIDENCE' });
   });
@@ -111,14 +117,14 @@ describe('frozen domain evaluator', () => {
   it('keeps judgments and denied payloads outside future retrieval adapters', async () => {
     const corpus = await loadCorpus();
     const item = corpus.cases.find(item => item.collection === 'ranking' && item.prohibited.length > 0)!;
-    const input = retrievalInput(item);
+    const input = retrievalInput(corpus, item);
     expect(Object.keys(input).sort()).toEqual(['documents', 'query', 'relations']);
     expect(input.documents.every(doc => !item.prohibited.includes(`${doc.id}@${doc.version}`))).toBe(true);
     expect(input.documents.every(doc => Object.keys(doc).sort().join(',') === 'body,id,title,version')).toBe(true);
     expect(input.relations.every(edge => input.documents.some(doc => doc.id === edge.target.id))).toBe(true);
-    expect(await evaluateRetrieval(item, undefined)).toEqual({ status: 'not_supported' });
+    expect(await evaluateRetrieval(corpus, item, undefined)).toEqual({ status: 'not_supported' });
     const denied = item.documents.find(doc => item.prohibited.includes(`${doc.id}@${doc.version}`))!;
-    expect(await evaluateRetrieval(item, async () => [{ id: denied.id, version: denied.version }])).toMatchObject({ status: 'failed', reason: 'PROHIBITED_EVIDENCE' });
+    expect(await evaluateRetrieval(corpus, item, async () => [{ id: denied.id, version: denied.version }])).toMatchObject({ status: 'failed', reason: 'PROHIBITED_EVIDENCE' });
   });
 
   it('separates setup time from measured work and preflights candidate report capacity', () => {
@@ -138,7 +144,7 @@ describe('frozen domain evaluator', () => {
     const task = structuredClone(corpus.cases.find(item => item.id === 'aster-refunds')!);
     task.documents = Array.from({ length: 5 }, (_, index) => ({ ...task.documents[0], id: `large-${index}`, body: 'x'.repeat(16_384) }));
     let called = false;
-    expect(await evaluateRetrieval(task, async () => { called = true; return []; })).toEqual({ status: 'failed', reason: 'CONTEXT_BOUND' });
+    expect(await evaluateRetrieval({ ...corpus, cases: corpus.cases.map(item => item.id === task.id ? task : item) }, task, async () => { called = true; return []; })).toEqual({ status: 'failed', reason: 'CONTEXT_BOUND' });
     expect(called).toBe(false);
   });
 
@@ -245,23 +251,41 @@ describe('frozen domain evaluator', () => {
     const ids = corpus.cases.filter(item => item.split === 'holdout' && item.operation === 'recall').map(item => item.id);
     const report = (ablation: string, value: number, p95: number) => ({ head: (value === 0.5 ? 'a' : 'b').repeat(40),
       sourceHead: (value === 0.5 ? 'a' : 'b').repeat(40), predecessorEligible: true,
+      provenance: { headStart: (value === 0.5 ? 'a' : 'b').repeat(40), headEnd: (value === 0.5 ? 'a' : 'b').repeat(40),
+        treeStart: 'd'.repeat(40), treeEnd: 'd'.repeat(40), parents: [], cleanStart: true, cleanEnd: true, sourceIdentity: 'explicit', context: 'local' },
+      latencyEvidence: { policy: latencyPolicy, pairedSession: 'synthetic-pair', environment: 'e'.repeat(64) },
       fixtureManifest: corpus.manifestHash, seed: 25, runner: 'memory-evaluation-v1', budgets: corpus.manifest.budgets,
-      gates: { failures: [] }, usage: { persistedBytes: 1100, emptySchemaBytes: 1000, evidenceBytes: 100, candidateCount: 240, actualSpend: 0, reservedSpend: 0, calls: 24, retries: 0 },
-      rows: ids.map(id => ({ id, ablation, status: 'measured', metrics: { ndcg: value, evidenceCoverage: 1 }, latencyMs: p95, failures: [] })) });
+      gates: { failures: [] }, usage: { persistedBytes: 1100, emptySchemaBytes: 1000, evidenceBytes: 100, rawApplicationBytes: 1100, rawDatabaseBytes: 10100, emptyDatabaseBytes: 10000, candidateCount: 240, actualSpend: 0, reservedSpend: 0, calls: 24, retries: 0 },
+      rows: ids.map(id => ({ id, ablation, status: 'measured', metrics: { ndcg: value, evidenceCoverage: 1 }, latencyMs: p95, latencySamplesMs: Array(5).fill(p95), universeHash: candidateUniverseHash(corpus, corpus.cases.find(item => item.id === id)!), failures: [] })) });
     const features = { hybrid: true, reranking: true, 'relationship-expansion': false };
     const before = experimentFromReport(corpus, report('hybrid-reranking', 0.5, 10), 'hybrid-reranking', features, { hybrid: '1', reranking: '1' });
     const after = experimentFromReport(corpus, report('relationship-expansion', 0.6, 11), 'relationship-expansion',
       { ...features, 'relationship-expansion': true }, { hybrid: '1', reranking: '1' }, before.head);
     expect(compareExperiments(before, after, corpus)).toMatchObject({ status: 'pass' });
+    const emptyGrowth = report('hybrid-reranking', 0.5, 10);
+    Object.assign(emptyGrowth.usage, { evidenceBytes: 0, persistedBytes: 1000, rawApplicationBytes: 1000, rawDatabaseBytes: 10000 });
+    expect(compareExperiments(experimentFromReport(corpus, emptyGrowth, 'hybrid-reranking', features, before.adapters), after, corpus))
+      .toEqual(expect.objectContaining({ status: 'insufficient_evidence' }));
+    const wrongMedian = report('relationship-expansion', 0.6, 11);
+    wrongMedian.rows[0].latencyMs = 100;
+    expect(experimentFromReport(corpus, wrongMedian, 'relationship-expansion', after.features, after.adapters, before.head).status).toBe('failed');
+    const differentUniverse = report('relationship-expansion', 0.6, 11);
+    differentUniverse.rows[0].universeHash = 'f'.repeat(64);
+    expect(experimentFromReport(corpus, differentUniverse, 'relationship-expansion', after.features, after.adapters, before.head).status).toBe('failed');
     const noSource = { ...report('hybrid-reranking', 0.5, 10), sourceHead: undefined };
     expect(() => experimentFromReport(corpus, noSource, 'hybrid-reranking', features, {})).toThrow();
     expect(() => experimentFromReport(corpus, { ...report('hybrid-reranking', 0.5, 10), seed: 26 }, 'hybrid-reranking', features, {})).toThrow(/drift/i);
     expect(() => experimentFromReport(corpus, { ...noSource, sourceHead: 'c'.repeat(40) }, 'hybrid-reranking', features, {})).toThrow(/provenance/i);
     const amplified = report('relationship-expansion', 0.6, 11);
-    amplified.usage.persistedBytes = 1300; amplified.usage.evidenceBytes = 300;
+    amplified.usage.persistedBytes = 1300; amplified.usage.evidenceBytes = 300; amplified.usage.rawApplicationBytes = 1300; amplified.usage.rawDatabaseBytes = 10300;
     const amplification = experimentFromReport(corpus, amplified, 'relationship-expansion', after.features, after.adapters, before.head);
     expect(compareExperiments(before, amplification, corpus)).toMatchObject({ status: 'fail' });
     expect(() => experimentFromReport(corpus, { ...amplified, usage: { ...amplified.usage, evidenceBytes: 1 } }, 'relationship-expansion', after.features, after.adapters)).toThrow(/storage/i);
+    const noPair = experimentFromReport(corpus, { ...report('relationship-expansion', 0.6, 11), latencyEvidence: { ...report('relationship-expansion', 0.6, 11).latencyEvidence, pairedSession: null } }, 'relationship-expansion', after.features, after.adapters, before.head);
+    expect(compareExperiments(before, noPair, corpus)).toEqual({ status: 'insufficient_evidence' });
+    const dirty = report('hybrid-reranking', 0.5, 10); dirty.provenance.cleanStart = false; dirty.predecessorEligible = false;
+    expect(() => assertPublishableReport(dirty)).toThrow(/clean/i);
+    expect(experimentFromReport(corpus, dirty, 'hybrid-reranking', features, {}).predecessorEligible).toBe(false);
     expect(() => compareExperiments(before, after)).toThrow(/corpus/i);
     expect(() => compareExperiments(before, { ...after, samples: after.samples.slice(1) }, corpus)).toThrow(/report|holdout/i);
     expect(() => compareExperiments(before, { ...after, fixtureHash: 'a'.repeat(64) }, corpus)).toThrow(/drift/i);
@@ -281,6 +305,7 @@ describe('frozen domain evaluator', () => {
     const report = await runBaseline(await loadCorpus(), process.env.CONTINUUM_TEST_DATABASE_URL
       ?? 'postgres://continuum:continuum@localhost:5433/continuum', head);
     if (process.env.CONTINUUM_EVAL_REPORT) {
+      assertPublishableReport(report);
       const output = process.env.CONTINUUM_EVAL_REPORT;
       await mkdir(dirname(output), { recursive: true });
       await writeFile(output, boundReport(report), { flag: 'wx' });
@@ -292,6 +317,10 @@ describe('frozen domain evaluator', () => {
     expect(report.rows.find(row => row.id === 'explicit-supersession' && row.ablation === 'hybrid')?.metrics?.recall).toBe(1);
     expect(report.rows.find(row => row.id === 'deterministic-agents-md')?.metrics?.recall).toBe(1);
     expect(report.rows.find(row => row.id === 'local-only-no-egress' && row.ablation === 'hybrid')?.calls).toBe(0);
+    expect(report.rows.filter(row => row.status === 'measured').every(row => row.latencySamplesMs?.length === 5 && row.evaluatorMs! >= 0)).toBe(true);
+    const dirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=normal'], { encoding: 'utf8', timeout: 5000 }).trim() !== '';
+    expect(report.provenance.cleanStart).toBe(!dirty);
+    if (dirty || !process.env.CONTINUUM_EVAL_SOURCE_SHA) expect(report.predecessorEligible).toBe(false);
     expect(report.experiments).toHaveLength(3);
     expect(report.sampleCounts.unsupported).toBeGreaterThan(0);
   }, 360_000);

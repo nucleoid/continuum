@@ -11,3 +11,7 @@ coverage/
 .idea/
 tmp/
 .continuum-local/
+.fire-off/
+test-results.json
+test-coverage.json
+test-artifact/

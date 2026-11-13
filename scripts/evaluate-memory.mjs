@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { readFile, mkdir, writeFile, stat } from 'node:fs/promises';
 import { dirname, resolve, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadCorpus, runBaseline, boundReport, RUNNER_VERSION } from '../dist/evaluation/test-helpers.js';
+import { loadCorpus, runBaseline, boundReport, RUNNER_VERSION, assertPublishableReport } from '../dist/evaluation/test-helpers.js';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 process.chdir(root);
@@ -41,6 +41,8 @@ try {
   timer = setTimeout(() => controller.abort(), corpus.manifest.budgets.maxSetupMs + corpus.manifest.budgets.maxDurationMs);
   failureCode = 'DB_OR_SERVICE';
   const report = await runBaseline(corpus, databaseUrl, head, manifest.seed, controller.signal);
+  failureCode = 'REPORT_PROVENANCE';
+  assertPublishableReport(report);
   failureCode = 'REPORT_BOUND';
   const bytes = boundReport({ ...report, runManifest: manifest });
   const human = `# Memory evaluation\n\nHead: ${head}\nFixture: ${report.fixtureManifest}\n` +

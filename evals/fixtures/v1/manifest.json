@@ -5,7 +5,7 @@
   "clock": "2026-02-01T00:00:00Z",
   "seed": 25,
   "files": {
-    "retrieval.json": "af5703180b44a5e3de2109b0c58838bb90e3870b3e5bcaed5df1c3efc08057a6",
+    "retrieval.json": "c72f027443285decd6851758f0a9e96738d4a3285a1c2d5fcfc4f2a86fbf5f0d",
     "lifecycle-security.json": "a6f856a0330b800df4ab486790b691b7869add56b6ddd90bacce76c766c12b11",
     "extraction-synthesis.json": "3c0e3acff7962fe7249476539075a931a0916bb79cc5cb51152ad4ef417f2cad",
     "temporal-connectors.json": "4afd0eba7c47096f0a88b5d4150507fb61cd5aa738b75829c3634202a1bbffc0"
@@ -42,5 +42,14 @@
     "actualSpend": 0,
     "storageBytes": 16777216,
     "maxSetupMs": 120000
+  },
+  "rubricVersion": "relevance-v1",
+  "latencyPolicy": {
+    "version": "service-latency-v1",
+    "repetitions": 5,
+    "warmups": 1,
+    "order": "seeded-rotating-interleaved",
+    "summary": "p95-of-per-query-medians",
+    "comparison": "paired-interleaved-session"
   }
 }

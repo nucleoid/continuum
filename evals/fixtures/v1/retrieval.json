@@ -664,6 +664,18 @@
             "id": "r-07d3cd32091b6ab9",
             "version": "1"
           }
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-033748f0080ee618",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-e46b58ae7fd5da19",
+            "version": "1"
+          },
+          "basis": "The unapproved lock proposal cites the status endpoint as its proposed verification surface."
         }
       ]
     },
@@ -743,6 +755,18 @@
             "id": "r-9ba37c0b39e4b3cb",
             "version": "1"
           }
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-9ba37c0b39e4b3cb",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-435d02519cfb6ee2",
+            "version": "1"
+          },
+          "basis": "The retired schedule refers to the rotation specification despite using a removed interval."
         }
       ]
     },
@@ -908,6 +932,42 @@
             "id": "r-884a1275f649b076",
             "version": "1"
           }
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-884a1275f649b076",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-b18ece81d86bcfb4",
+            "version": "1"
+          },
+          "basis": "The same two recorded accounts disagree; this reverse assertion has no authority preference."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-68deccaaad9975ae",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-8caee4311ec2901a",
+            "version": "1"
+          },
+          "basis": "A reporting-widget reference was copied across the Dune and Juniper dashboard notes."
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-884a1275f649b076",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-68deccaaad9975ae",
+            "version": "1"
+          },
+          "basis": "The obsolete specification cites the cache dashboard as its observation point."
         }
       ]
     },
@@ -1037,6 +1097,18 @@
             "id": "r-5109cb53012936c8",
             "version": "1"
           }
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-c538b9f562724877",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-9d210c6f20a4aaf8",
+            "version": "1"
+          },
+          "basis": "The expense worksheet links the incident channel note as the cost-centre explanation."
         }
       ]
     },
@@ -1057,7 +1129,7 @@
           "sourceKind": "non-code",
           "scope": "project:synthetic",
           "title": "Fjord schedule timezone dispute",
-          "body": "The current Fjord scheduler evaluates the daily window in Pacific/Auckland.",
+          "body": "One Fjord scheduler operating note says the daily window is evaluated in Pacific/Auckland; no resolution of the competing timezone accounts is recorded.",
           "type": "fact",
           "tags": [
             "decision"
@@ -1078,7 +1150,7 @@
           "sourceKind": "non-code",
           "scope": "project:synthetic",
           "title": "Fjord schedule timezone report",
-          "body": "A still-published operator note says the same daily window is evaluated in UTC; the discrepancy has no recorded resolution.",
+          "body": "A second Fjord scheduler operating note says the daily window is evaluated in UTC; no resolution of the competing timezone accounts is recorded.",
           "type": "context",
           "tags": [
             "decision"
@@ -1184,12 +1256,6 @@
           "family": "f-b7da853d068ed04d"
         },
         {
-          "id": "r-7bdcb5b30556e9de",
-          "version": "1",
-          "grade": 2,
-          "family": "f-351f123717b659ef"
-        },
-        {
           "id": "r-cb7630fdaf76779c",
           "version": "1",
           "grade": 1,
@@ -1200,12 +1266,32 @@
           "version": "1",
           "grade": 2,
           "family": "f-c134fd31556b0523"
+        },
+        {
+          "id": "r-7bdcb5b30556e9de",
+          "version": "1",
+          "grade": 3,
+          "family": "f-351f123717b659ef"
         }
       ],
       "prohibited": [],
       "claims": [],
       "chunks": [],
-      "contradictionSets": [],
+      "contradictionSets": [
+        {
+          "id": "timezone-accounts",
+          "evidence": [
+            {
+              "id": "r-2cbe9f5114d51367",
+              "version": "1"
+            },
+            {
+              "id": "r-7bdcb5b30556e9de",
+              "version": "1"
+            }
+          ]
+        }
+      ],
       "timeline": [],
       "relations": [
         {
@@ -1229,6 +1315,42 @@
             "id": "r-cb7630fdaf76779c",
             "version": "1"
           }
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-7bdcb5b30556e9de",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-2cbe9f5114d51367",
+            "version": "1"
+          },
+          "basis": "The same two recorded accounts disagree; this reverse assertion has no authority preference."
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-e1f79e242baf498e",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-a94b1037ccc765c4",
+            "version": "1"
+          },
+          "basis": "The meeting-room calendar configuration links the desktop timezone preferences."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-a94b1037ccc765c4",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-e1f79e242baf498e",
+            "version": "1"
+          },
+          "basis": "The desktop preference help page illustrates the setting with the room calendar."
         }
       ]
     },
@@ -1303,6 +1425,27 @@
           "eventStart": "2026-01-01T00:00:00Z",
           "eventEnd": null,
           "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-0845d1c05db8b5aa",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-16c34840aaeb5e2d",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "grove-access restricted historical source",
+          "body": "Synthetic retained source for grove-access with policy state quarantined. This record is excluded from delivery.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "quarantined",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
         }
       ],
       "relevant": [
@@ -1313,7 +1456,9 @@
           "family": "f-4f0418a55916eb84"
         }
       ],
-      "prohibited": [],
+      "prohibited": [
+        "r-0845d1c05db8b5aa@1"
+      ],
       "claims": [],
       "chunks": [],
       "contradictionSets": [],
@@ -1329,6 +1474,30 @@
             "id": "r-ebfa0cb318078850",
             "version": "1"
           }
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-ebfa0cb318078850",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-0e903920a25c8ea7",
+            "version": "1"
+          },
+          "basis": "An imported connector link retained the wrong project key and points at the cancelled Nacre experiment."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-0845d1c05db8b5aa",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-ebfa0cb318078850",
+            "version": "1"
+          },
+          "basis": "The quarantined historical record links the unrelated connector-limits note."
         }
       ]
     },
@@ -1494,6 +1663,30 @@
             "id": "r-0cb220f8e1ba6a17",
             "version": "1"
           }
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-a4621f1074d7d5de",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-5f32460e4a64b9bd",
+            "version": "1"
+          },
+          "basis": "The unsigned export proposal reuses the existing receipt format."
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-b245b8beb3af9eb5",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-a4621f1074d7d5de",
+            "version": "1"
+          },
+          "basis": "The billing worksheet links an unsigned export proposal during a budgeting discussion."
         }
       ]
     },
@@ -1684,6 +1877,18 @@
             "id": "r-8caee4311ec2901a",
             "version": "1"
           }
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-8caee4311ec2901a",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-88d2471ee12639a9",
+            "version": "1"
+          },
+          "basis": "The dashboard cites the atomic audit contract as the source of its displayed delivery counters."
         }
       ]
     },
@@ -1779,6 +1984,27 @@
           "eventStart": "2026-01-01T00:00:00Z",
           "eventEnd": null,
           "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-0c3f84f29ef7cdcc",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-c0e44148c9a95201",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "kelp-builds restricted historical source",
+          "body": "Synthetic retained source for kelp-builds with policy state archived. This record is excluded from delivery.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "archived",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
         }
       ],
       "relevant": [
@@ -1801,7 +2027,9 @@
           "family": "f-339af01dbf8d479b"
         }
       ],
-      "prohibited": [],
+      "prohibited": [
+        "r-0c3f84f29ef7cdcc@1"
+      ],
       "claims": [],
       "chunks": [],
       "contradictionSets": [],
@@ -1828,6 +2056,30 @@
             "id": "r-dd6108b425bf4fa3",
             "version": "1"
           }
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-bdf78a2763176e37",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-ca06bb734c33e258",
+            "version": "1"
+          },
+          "basis": "The abandoned build draft used the same source-input inventory format."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-0c3f84f29ef7cdcc",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-bdf78a2763176e37",
+            "version": "1"
+          },
+          "basis": "The retained record carries a historical source link; current policy still forbids its delivery."
         }
       ]
     },
@@ -1952,12 +2204,6 @@
           "version": "1",
           "grade": 3,
           "family": "f-feb0b917bc7366f7"
-        },
-        {
-          "id": "r-b0338fd4321705c6",
-          "version": "1",
-          "grade": 1,
-          "family": "f-09d44639622013e9"
         }
       ],
       "prohibited": [
@@ -1989,6 +2235,42 @@
             "id": "r-68a312f4156e359b",
             "version": "1"
           }
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-68a312f4156e359b",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-b5e0454b77aaea2b",
+            "version": "1"
+          },
+          "basis": "The same two recorded accounts disagree; this reverse assertion has no authority preference."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-b0338fd4321705c6",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-c9dfe8dc2df75a73",
+            "version": "1"
+          },
+          "basis": "The reminder references build-cache expiry to explain unrelated housekeeping notifications."
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-c9dfe8dc2df75a73",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-bdf78a2763176e37",
+            "version": "1"
+          },
+          "basis": "An old cache note links the abandoned Kelp build draft as a historical integration sketch."
         }
       ]
     },
@@ -2167,12 +2449,6 @@
           "version": "1",
           "grade": 2,
           "family": "f-7b3642769e222f7d"
-        },
-        {
-          "id": "r-840424ecf2009a30",
-          "version": "1",
-          "grade": 1,
-          "family": "f-f4718abdea4024bb"
         }
       ],
       "prohibited": [],
@@ -2213,6 +2489,42 @@
             "id": "r-1334dcfa29f9d012",
             "version": "1"
           }
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-1334dcfa29f9d012",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-a026e8a95f93f523",
+            "version": "1"
+          },
+          "basis": "The same two recorded accounts disagree; this reverse assertion has no authority preference."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-e85c11844160bfbe",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-0a3f495121c0ae30",
+            "version": "1"
+          },
+          "basis": "The analytics screenshot cites the dashboard theme configuration."
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-0a3f495121c0ae30",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-e85c11844160bfbe",
+            "version": "1"
+          },
+          "basis": "The theme example imports a deployment analytics panel."
         }
       ]
     },
@@ -2447,6 +2759,30 @@
             "id": "r-fab9857534623bc7",
             "version": "1"
           }
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-24108c0fb4c4b943",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-91208517ffd8b77b",
+            "version": "1"
+          },
+          "basis": "The same two recorded accounts disagree; this reverse assertion has no authority preference."
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-24108c0fb4c4b943",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-547a29718ac2bb0b",
+            "version": "1"
+          },
+          "basis": "The rejected hosted-fallback draft cites the actual local-provider failure behavior it proposed to change."
         }
       ]
     },
@@ -2563,6 +2899,27 @@
           "eventStart": "2026-01-01T00:00:00Z",
           "eventEnd": null,
           "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-04f2753b2945ecda",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-9dccebed24125ca5",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "pollen-leases restricted historical source",
+          "body": "Synthetic retained source for pollen-leases with policy state stale. This record is excluded from delivery.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "stale",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
         }
       ],
       "relevant": [
@@ -2585,7 +2942,9 @@
           "family": "f-20ece9296362846a"
         }
       ],
-      "prohibited": [],
+      "prohibited": [
+        "r-04f2753b2945ecda@1"
+      ],
       "claims": [],
       "chunks": [],
       "contradictionSets": [],
@@ -2612,6 +2971,54 @@
             "id": "r-9f19159e7e15a085",
             "version": "1"
           }
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-9f19159e7e15a085",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-2291774c644eef66",
+            "version": "1"
+          },
+          "basis": "The same two recorded accounts disagree; this reverse assertion has no authority preference."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-5ab75e92ef5d623d",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-9f19159e7e15a085",
+            "version": "1"
+          },
+          "basis": "The UI color note links an abandoned generation design as a historical screenshot source."
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-9f19159e7e15a085",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-c0fff0fa8bdefa2d",
+            "version": "1"
+          },
+          "basis": "The abandoned generation design cites the database-clock measurements."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-04f2753b2945ecda",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-2291774c644eef66",
+            "version": "1"
+          },
+          "basis": "The retained record carries a historical source link; current policy still forbids its delivery."
         }
       ]
     },
@@ -2673,12 +3080,6 @@
           "version": "1",
           "grade": 3,
           "family": "f-75a6248be2dea87d"
-        },
-        {
-          "id": "r-e84af9941858f521",
-          "version": "1",
-          "grade": 2,
-          "family": "f-adc57468704ff1bf"
         }
       ],
       "prohibited": [],
@@ -2697,6 +3098,18 @@
             "id": "r-e84af9941858f521",
             "version": "1"
           }
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-e84af9941858f521",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-d7d197206d30f5cf",
+            "version": "1"
+          },
+          "basis": "The same two recorded accounts disagree; this reverse assertion has no authority preference."
         }
       ]
     },
@@ -2844,15 +3257,15 @@
           "family": "f-fd6410acad05017b"
         },
         {
-          "id": "r-371578a7c9b02a2e",
+          "id": "r-6f6cfbeb037ef736",
           "version": "1",
           "grade": 1,
-          "family": "f-c227425477556336"
+          "family": "f-54e29a86862a78fd"
         },
         {
           "id": "r-10f3814915a5d27b",
           "version": "1",
-          "grade": 2,
+          "grade": 1,
           "family": "f-d500c809e49eabe0"
         }
       ],
@@ -2872,6 +3285,30 @@
             "id": "r-ae02aef8b522073e",
             "version": "1"
           }
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-542f0e576d915d37",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-6f6cfbeb037ef736",
+            "version": "1"
+          },
+          "basis": "The rejected token-cache proposal cites the synchronization panel as its freshness indicator."
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-ae02aef8b522073e",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-371578a7c9b02a2e",
+            "version": "1"
+          },
+          "basis": "The profile-import note links an operator disable receipt as an example of unrelated administrative metadata."
         }
       ]
     },
@@ -3133,6 +3570,30 @@
             "id": "r-a891ccf50f55d4b2",
             "version": "1"
           }
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-07cc6106e4a1a792",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-6c71d2626bee6e5d",
+            "version": "1"
+          },
+          "basis": "The same two recorded accounts disagree; this reverse assertion has no authority preference."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-a891ccf50f55d4b2",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-07cc6106e4a1a792",
+            "version": "1"
+          },
+          "basis": "The release roster cites the obsolete decision sketch as the staffing discussion attachment."
         }
       ]
     },
@@ -3249,6 +3710,27 @@
           "eventStart": "2026-01-01T00:00:00Z",
           "eventEnd": null,
           "ingestedAt": "2026-01-02T00:00:00Z"
+        },
+        {
+          "id": "r-700acbda816b65af",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "f-c7d74c45f4625658",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "umber-sources restricted historical source",
+          "body": "Synthetic retained source for umber-sources with policy state live. This record is excluded from delivery.",
+          "type": "fact",
+          "tags": [
+            "decision"
+          ],
+          "state": "live",
+          "allowed": true,
+          "sourceAllowed": false,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
         }
       ],
       "relevant": [
@@ -3266,7 +3748,8 @@
         }
       ],
       "prohibited": [
-        "r-dd559d48075449a3@1"
+        "r-dd559d48075449a3@1",
+        "r-700acbda816b65af@1"
       ],
       "claims": [],
       "chunks": [],
@@ -3294,6 +3777,54 @@
             "id": "r-75e1df716dc1a6fb",
             "version": "1"
           }
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-75e1df716dc1a6fb",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-8d926ca99d9ddd45",
+            "version": "1"
+          },
+          "basis": "The same two recorded accounts disagree; this reverse assertion has no authority preference."
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-5d31aa5afafff2a3",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-5879b2e04cb93f3d",
+            "version": "1"
+          },
+          "basis": "The authoring tips link a Willow menu screenshot as a navigation example."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-75e1df716dc1a6fb",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-c96a87eb28c6e819",
+            "version": "1"
+          },
+          "basis": "The cancelled source-access memo cites the assertion visibility rule it proposed to replace."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-700acbda816b65af",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-8d926ca99d9ddd45",
+            "version": "1"
+          },
+          "basis": "The retained record carries a historical source link; current policy still forbids its delivery."
         }
       ]
     },
@@ -3608,6 +4139,42 @@
             "id": "r-6fceab1fc14b053d",
             "version": "1"
           }
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-e4f495f083f5b78e",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-7d1c5d0615a7c39e",
+            "version": "1"
+          },
+          "basis": "The illustrative approval diagram links the public onboarding guide."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-5879b2e04cb93f3d",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-e4f495f083f5b78e",
+            "version": "1"
+          },
+          "basis": "The menu mockup cites the illustrative approval diagram as its screenshot source."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-7d1c5d0615a7c39e",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-b0338fd4321705c6",
+            "version": "1"
+          },
+          "basis": "A copied onboarding link points at the Larch housekeeping reminder, an unrelated operational topic."
         }
       ]
     },
@@ -3714,6 +4281,30 @@
             "id": "r-05273d1165e82625",
             "version": "1"
           }
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-05273d1165e82625",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-e49f7c1b712bfddd",
+            "version": "1"
+          },
+          "basis": "The same two recorded accounts disagree; this reverse assertion has no authority preference."
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-05273d1165e82625",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-4175791826e2cba0",
+            "version": "1"
+          },
+          "basis": "The abandoned body-only accounting sketch cites the allocation baseline it failed to include."
         }
       ]
     },
@@ -3809,7 +4400,32 @@
       "chunks": [],
       "contradictionSets": [],
       "timeline": [],
-      "relations": []
+      "relations": [
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-47de006220d332ce",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-d719b538939060fa",
+            "version": "1"
+          },
+          "basis": "The unimplemented cancellation issue cites the existing observation table."
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-47de006220d332ce",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-630e8e5735c87996",
+            "version": "1"
+          },
+          "basis": "The cancellation issue proposes adopting the unenabled display experiment."
+        }
+      ]
     },
     {
       "id": "dev-pika",
@@ -4022,6 +4638,42 @@
             "id": "r-0f3f2487421a3687",
             "version": "1"
           }
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-630e8e5735c87996",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-a4534c51aff837e2",
+            "version": "1"
+          },
+          "basis": "An experiment discussion links an unrelated cancelled-delivery draft as an example rendering task."
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-630e8e5735c87996",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-e2ef3f49e4b848f7",
+            "version": "1"
+          },
+          "basis": "The versionless display experiment conflicts with the validator trace."
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-630e8e5735c87996",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-e806164cf206b368",
+            "version": "1"
+          },
+          "basis": "A reproduction checklist in another project was linked as a testing template."
         }
       ]
     },
@@ -4128,6 +4780,30 @@
             "id": "r-24b06a16b38f6529",
             "version": "1"
           }
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-24b06a16b38f6529",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-8e08f8f8caf8a232",
+            "version": "1"
+          },
+          "basis": "The same two recorded accounts disagree; this reverse assertion has no authority preference."
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-24b06a16b38f6529",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-630e8e5735c87996",
+            "version": "1"
+          },
+          "basis": "The proposed formatter links the unenabled citation display experiment."
         }
       ]
     },
@@ -4293,6 +4969,42 @@
             "id": "r-dbbf5cb7b7dea559",
             "version": "1"
           }
+        },
+        {
+          "type": "supports",
+          "source": {
+            "id": "r-dbbf5cb7b7dea559",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-47de006220d332ce",
+            "version": "1"
+          },
+          "basis": "The colors note contains a mistaken issue link into the Otter backlog."
+        },
+        {
+          "type": "contradicts",
+          "source": {
+            "id": "r-a4534c51aff837e2",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-0f4548a3cdcde18c",
+            "version": "1"
+          },
+          "basis": "The old delivery proposal conflicts with the cancellation-fence reproduction."
+        },
+        {
+          "type": "depends-on",
+          "source": {
+            "id": "r-a4534c51aff837e2",
+            "version": "1"
+          },
+          "target": {
+            "id": "r-dbbf5cb7b7dea559",
+            "version": "1"
+          },
+          "basis": "The cancelled-delivery draft links its UI color discussion."
         }
       ]
     }

@@ -24,7 +24,7 @@ import { mapOwnedUserScope, offboardPrincipal } from '../services/offboarding.js
 import type { Principal, Memory, Scope } from '../types.js';
 
 export const RUNNER_VERSION = 'memory-evaluation-v1';
-const MANIFEST_SHA256 = 'f73f4a4409473427af5f6184a841143a381a8cc3a5e00eaeb4c27cf9d5a075ed';
+const MANIFEST_SHA256 = '9bffa0896696ab4f6e3f5dae27dd66ea2dfc1263617f2020de02a5042c0717d0';
 export const sha256 = (text: string | Buffer): string => createHash('sha256').update(text).digest('hex');
 const id = z.string().regex(/^[a-z0-9][a-z0-9-]{0,79}$/);
 const version = z.string().regex(/^[1-9][0-9]{0,5}$/);
@@ -52,11 +52,14 @@ const caseSchema = z.object({ id, split: z.enum(['development', 'holdout']), ope
   contradictionSets: z.array(z.object({ id, evidence: z.array(reference).min(2).max(10) }).strict()).max(10),
   timeline: z.array(z.object({ at: date, action: z.enum(['supersede', 'expiry', 'revoke', 'erase', 'quarantine']),
     evidence: z.string().max(90) }).strict()).max(10),
-  relations: z.array(z.object({ type: z.enum(['supports', 'depends-on', 'contradicts']), source: reference, target: reference }).strict()).max(30) }).strict();
+  relations: z.array(z.object({ type: z.enum(['supports', 'depends-on', 'contradicts']), source: reference, target: reference,
+    basis: z.string().max(200).optional() }).strict()).max(30) }).strict();
 export type FixtureCase = z.infer<typeof caseSchema>;
 export type Reference = z.infer<typeof reference>;
 export type Relevant = z.infer<typeof relevantSchema>;
 export type Claim = z.infer<typeof claimSchema>;
+export const latencyPolicy = Object.freeze({ version: 'service-latency-v1', repetitions: 5, warmups: 1,
+  order: 'seeded-rotating-interleaved', summary: 'p95-of-per-query-medians', comparison: 'paired-interleaved-session' });
 export const relationshipGate = Object.freeze({ version: 'relationship-v1', primaryMetric: 'ndcg@10',
   minimumRelativeGain: 0.05, confidence: 0.95, minPairs: 20, bootstrapSamples: 2000, seed: 25,
   maximumP95Ratio: 1.1, maximumStorageRatio: 2, criticalCoverageRegression: 0,
@@ -79,7 +82,10 @@ const fixtureFiles = ['retrieval.json', 'lifecycle-security.json', 'extraction-s
 const manifestSchema = z.object({ schema: z.literal(1), version: z.literal('v1'), synthetic: z.literal(true),
   clock: date, seed: z.number().int(), files: z.object(Object.fromEntries(fixtureFiles.map(name =>
     [name, z.string().regex(/^[a-f0-9]{64}$/)])) as Record<typeof fixtureFiles[number], z.ZodString>).strict(),
-  splitPolicy: z.string().max(200), relationshipGate: gateSchema, budgets: budgetsSchema }).strict();
+  splitPolicy: z.string().max(200), rubricVersion: z.literal('relevance-v1'), latencyPolicy: z.object({
+    version: z.literal('service-latency-v1'), repetitions: z.literal(5), warmups: z.literal(1),
+    order: z.literal('seeded-rotating-interleaved'), summary: z.literal('p95-of-per-query-medians'), comparison: z.literal('paired-interleaved-session') }).strict(),
+  relationshipGate: gateSchema, budgets: budgetsSchema }).strict();
 export type Corpus = { manifest: z.infer<typeof manifestSchema>; manifestHash: string; cases: FixtureCase[] };
 const loadedCorpora = new WeakSet<object>();
 function freezeData<T>(value: T): T {
@@ -106,9 +112,11 @@ export function validateCases(input: unknown): FixtureCase[] {
     if (item.operation === 'supersede') known.add('successor@2');
     for (const ref of [...item.relevant.map(key), ...item.prohibited,
       ...item.claims.flatMap(claim => claim.evidence.map(key)), ...item.contradictionSets.flatMap(set => set.evidence.map(key)),
-      ...item.relations.flatMap(relation => [key(relation.source), key(relation.target)])]) {
+      ]) {
       if (!known.has(ref)) throw new Error('Judgment references an absent source version');
     }
+    const edgeKnown = item.collection === 'ranking' ? new Set(cases.filter(row => row.collection === 'ranking' && row.split === item.split).flatMap(row => row.documents.map(key))) : known;
+    for (const edge of item.relations) if (!edgeKnown.has(key(edge.source)) || !edgeKnown.has(key(edge.target))) throw new Error('Relation references an absent split source');
     if (item.relevant.some(ref => item.prohibited.includes(key(ref)))) throw new Error('Contradictory judgments');
     const forbidden = new Set(item.documents.filter(doc => !doc.allowed || !doc.sourceAllowed
       || (item.executionResidency === 'hosted' && doc.residency === 'local-only')).map(key));
@@ -151,6 +159,7 @@ export async function loadCorpus(directory = resolve('evals/fixtures/v1')): Prom
   unique(cases.map(item => item.id), 'case IDs');
   if (cases.length > manifest.budgets.maxCases) throw new Error('Case bound exceeded');
   if (JSON.stringify(manifest.relationshipGate) !== JSON.stringify(relationshipGate)) throw new Error('Gate drift');
+  graphShortcutDiagnostics(cases);
   const corpus = freezeData({ manifest, manifestHash: sha256(bytes), cases });
   loadedCorpora.add(corpus);
   return corpus;
@@ -161,20 +170,44 @@ export function seededOrder<T extends { id: string }>(items: T[], seed: number):
 }
 
 /** Fixture-only adapter boundary. No relevance grades, answers, or denied bodies. */
-export function retrievalInput(item: FixtureCase) {
-  const documents = item.documents.filter(doc => doc.allowed && doc.sourceAllowed && doc.state === 'live'
-    && !(item.executionResidency === 'hosted' && doc.residency === 'local-only'))
+function universe(corpus: Pick<Corpus, 'cases'>, item: FixtureCase) {
+  return item.collection === 'ranking' ? corpus.cases.filter(row => row.collection === 'ranking' && row.split === item.split) : [item];
+}
+function forbidden(corpus: Pick<Corpus, 'cases' | 'manifest'>, item: FixtureCase) {
+  const cases = universe(corpus, item);
+  return new Set(cases.flatMap(row => [...row.prohibited,
+    ...row.documents.filter(doc => !doc.allowed || !doc.sourceAllowed || doc.scope === 'project:denied' || doc.state !== 'live'
+      || (item.executionResidency === 'hosted' && doc.residency === 'local-only')).map(key),
+    ...row.timeline.filter(event => event.at <= corpus.manifest.clock).map(event => event.evidence)]));
+}
+export function checkDelivered(corpus: Corpus, item: FixtureCase, actual: Reference[], deniedScope = false): string[] {
+  const denied = forbidden(corpus, item);
+  const known = new Set(universe(corpus, item).flatMap(row => row.documents.map(key)));
+  if (item.operation === 'supersede') known.add('successor@2');
+  return deniedScope || actual.some(ref => !ref || denied.has(key(ref)) || !known.has(key(ref))) ? ['prohibited-evidence'] : [];
+}
+export function retrievalInput(corpus: Corpus, item: FixtureCase) {
+  const cases = universe(corpus, item); const denied = forbidden(corpus, item);
+  const documents = cases.flatMap(row => row.documents).filter(doc => !denied.has(key(doc)))
     .map(({ id, version, title, body }) => ({ id, version, title, body }));
+  unique(documents.map(key), 'shared source versions');
   const available = new Set(documents.map(key));
   return freezeData({ query: item.query, documents,
-    relations: item.relations.filter(edge => available.has(key(edge.source)) && available.has(key(edge.target))) });
+    relations: cases.flatMap(row => row.relations).filter(edge => available.has(key(edge.source)) && available.has(key(edge.target)))
+      .map(({ type, source, target }) => ({ type, source, target })) });
 }
-export async function evaluateRetrieval(item: FixtureCase,
+export function candidateUniverseHash(corpus: Corpus, item: FixtureCase): string {
+  const input = retrievalInput(corpus, item);
+  return sha256(JSON.stringify({ documents: [...input.documents].sort((a, b) => key(a).localeCompare(key(b))),
+    relations: [...input.relations].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))) }));
+}
+const median = (values: number[]): number => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
+export async function evaluateRetrieval(corpus: Corpus, item: FixtureCase,
   adapter?: (input: ReturnType<typeof retrievalInput>) => Promise<Reference[]>) {
   if (!adapter) return { status: 'not_supported' as const };
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const input = retrievalInput(item);
+    const input = retrievalInput(corpus, item);
     if (Buffer.byteLength(JSON.stringify(input)) > 65_536) return { status: 'failed' as const, reason: 'CONTEXT_BOUND' };
     const raw = await Promise.race([adapter(input), new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error('Adapter deadline')), 1000);
@@ -182,12 +215,42 @@ export async function evaluateRetrieval(item: FixtureCase,
     if (Buffer.byteLength(JSON.stringify(raw)) > 65_536) throw new Error('Adapter byte bound');
     const actual = z.array(reference).max(10).parse(raw);
     const permitted = new Set(input.documents.map(key));
-    if (actual.some(ref => !permitted.has(key(ref)) || item.prohibited.includes(key(ref)))) {
+    if (actual.some(ref => !permitted.has(key(ref))) || checkDelivered(corpus, item, actual).length) {
       return { status: 'failed' as const, reason: 'PROHIBITED_EVIDENCE' };
     }
     return { status: 'measured' as const, metrics: scoreRetrieval(actual, item.relevant) };
   } catch { return { status: 'failed' as const, reason: 'ADAPTER_FAILED' }; }
   finally { clearTimeout(timer); }
+}
+
+/** Negative control: graph shape must not encode query relevance. Not a feature adapter. */
+export function graphShortcutDiagnostics(cases: FixtureCase[]) {
+  const features = ['outgoing', 'incoming', ...['supports', 'depends-on', 'contradicts'].flatMap(type => [`${type}:source`, `${type}:target`])];
+  const localFeatures = ['development', 'holdout'].flatMap(split => features.map(feature => {
+    let positives = 0; let negatives = 0;
+    for (const item of cases.filter(row => row.collection === 'ranking' && row.split === split)) {
+      const refs = new Set(item.relations.flatMap(edge => feature === 'outgoing' ? [key(edge.source)] : feature === 'incoming' ? [key(edge.target)]
+        : feature === `${edge.type}:source` ? [key(edge.source)] : feature === `${edge.type}:target` ? [key(edge.target)] : []));
+      for (const ref of refs) { if (item.relevant.some(row => key(row) === ref)) positives++; else negatives++; }
+    }
+    return { split, feature, positives, negatives, precision: ratio(positives, positives + negatives) ?? 0 };
+  }));
+  if (localFeatures.some(row => row.positives === 0 || row.negatives === 0 || row.precision > 0.75)) throw new Error(`Graph shortcut: ${JSON.stringify(localFeatures)}`);
+  const holdout = cases.filter(item => item.collection === 'ranking' && item.split === 'holdout');
+  const corpus = { cases, manifest: { clock: '2026-02-01T00:00:00Z' } } as Corpus;
+  const blindScores = features.map(feature => {
+    const scores = holdout.map(item => {
+      const input = retrievalInput(corpus, item);
+      const selected = new Set(input.relations.flatMap(edge => feature === 'outgoing' ? [key(edge.source)] : feature === 'incoming' ? [key(edge.target)]
+        : feature === `${edge.type}:source` ? [key(edge.source)] : feature === `${edge.type}:target` ? [key(edge.target)] : []));
+      const ranked = [...input.documents].sort((a, b) => Number(selected.has(key(b))) - Number(selected.has(key(a))) || key(a).localeCompare(key(b)));
+      return scoreRetrieval(ranked, item.relevant).ndcg ?? 0;
+    });
+    return scores.reduce((sum, value) => sum + value, 0) / scores.length;
+  });
+  const maximumQueryBlindNdcg = Math.max(...blindScores);
+  if (maximumQueryBlindNdcg >= 0.25) throw new Error('Graph shortcut query-blind ranking');
+  return { localFeatures, maximumQueryBlindNdcg };
 }
 
 /** Provisioning and measured work have independent finite clocks. */
@@ -339,34 +402,55 @@ export function compareRuns(baseline: Pair[], candidate: Pair[], gate: unknown, 
   const ci = differences.length ? [samples[Math.floor(samples.length * 0.025)], samples[Math.min(samples.length - 1, Math.floor(samples.length * 0.975))]] : null;
   const invalidResources = resources && (Object.entries(resources).some(([name, value]) =>
     name !== 'identicalCaps' && (typeof value !== 'number' || !Number.isFinite(value) || value < 0))
-    || resources.baselineP95 <= 0 || resources.baselineBytes <= 0 || resources.hardStorageBudget <= 0);
+    || resources.baselineP95 <= 0 || resources.hardStorageBudget <= 0);
   if (invalidResources) throw new Error('Invalid resource measurements');
   const failedResources = resources && (!resources.identicalCaps || resources.criticalCoverageRegressions > 0
     || resources.candidateP95 > resources.baselineP95 * policy.maximumP95Ratio
-    || resources.candidateBytes > resources.baselineBytes * policy.maximumStorageRatio
+    || (resources.baselineBytes > 0 && resources.candidateBytes > resources.baselineBytes * policy.maximumStorageRatio)
     || resources.candidateBytes > resources.hardStorageBudget);
   const status = criticalFailures.length || failedResources ? 'fail'
-    : before.length < policy.minPairs || gain === null || !resources ? 'insufficient_evidence'
+    : before.length < policy.minPairs || gain === null || !resources || resources.baselineBytes === 0 ? 'insufficient_evidence'
       : gain >= policy.minimumRelativeGain && ci && ci[0] > 0 ? 'pass' : 'fail';
   return { status, pairs: before.length, relativeGain: gain, confidenceInterval: ci,
-    criticalFailures: criticalFailures.length, resourceGate: !resources ? 'not_measured' : failedResources ? 'fail' : 'pass' };
+    criticalFailures: criticalFailures.length, resourceGate: !resources || resources.baselineBytes === 0 ? 'not_measured' : failedResources ? 'fail' : 'pass' };
+}
+
+const sha = z.string().regex(/^[a-f0-9]{40}$/);
+const provenanceSchema = z.object({ headStart: sha, headEnd: sha, treeStart: sha, treeEnd: sha,
+  parents: z.array(sha).max(20), cleanStart: z.boolean(), cleanEnd: z.boolean(),
+  sourceIdentity: z.enum(['explicit', 'checkout']), context: z.enum(['local', 'pull_request', 'push', 'workflow_dispatch', 'other']) }).strict();
+type Provenance = z.infer<typeof provenanceSchema>;
+export function acceptanceEligible(head: string, sourceHead: string, proof: Provenance): boolean {
+  return proof.sourceIdentity === 'explicit' && proof.cleanStart && proof.cleanEnd
+    && proof.headStart === head && proof.headEnd === head && head === sourceHead && proof.treeStart === proof.treeEnd;
+}
+export function assertPublishableReport(report: { head: string; provenance: Provenance }) {
+  const p = report.provenance;
+  if (!p.cleanStart || !p.cleanEnd || p.headStart !== report.head || p.headEnd !== report.head || p.treeStart !== p.treeEnd
+    || p.sourceIdentity !== 'explicit') throw new Error('Publication requires proven clean stable checkout and explicit source identity');
 }
 
 const reportEvidenceSchema = z.object({ head: z.string().regex(/^[a-f0-9]{40}$/),
   sourceHead: z.string().regex(/^[a-f0-9]{40}$/), predecessorEligible: z.boolean(),
+  provenance: provenanceSchema,
+  latencyEvidence: z.object({ policy: manifestSchema.shape.latencyPolicy, pairedSession: id.nullable(), environment: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   fixtureManifest: z.string().regex(/^[a-f0-9]{64}$/), seed: z.number().int(), runner: z.literal(RUNNER_VERSION),
   budgets: budgetsSchema, gates: z.object({ failures: z.array(z.string().max(80)).max(100) }).passthrough(),
   usage: z.object({ persistedBytes: z.number().int().positive(), emptySchemaBytes: z.number().int().positive(),
-    evidenceBytes: z.number().int().nonnegative(), candidateCount: z.number().int().nonnegative().nullable(),
+    evidenceBytes: z.number().int().nonnegative(), rawApplicationBytes: z.number().int().positive(), rawDatabaseBytes: z.number().int().positive(),
+    emptyDatabaseBytes: z.number().int().positive(), candidateCount: z.number().int().nonnegative().nullable(),
     actualSpend: z.number().finite().nonnegative().nullable(), reservedSpend: z.number().finite().nonnegative().nullable(),
     calls: z.number().int().nonnegative().nullable(), setupCalls: z.number().int().nonnegative().optional(),
     retries: z.number().int().nonnegative().nullable() }).passthrough(),
   rows: z.array(z.object({ id, ablation: z.string().max(40), status: z.enum(['measured', 'not_supported', 'failed']),
     metrics: z.object({ ndcg: z.number().finite().min(0).max(1).nullable(), evidenceCoverage: z.number().finite().min(0).max(1).nullable().optional() }).passthrough().optional(),
-    latencyMs: z.number().finite().nonnegative().optional(), failures: z.array(z.string().max(80)).max(20).optional() }).passthrough()).max(512) }).passthrough()
-  .refine(report => report.predecessorEligible === (report.head === report.sourceHead), 'Source provenance mismatch')
+    latencyMs: z.number().finite().nonnegative().optional(), latencySamplesMs: z.array(z.number().finite().nonnegative()).length(5).optional(),
+    universeHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), failures: z.array(z.string().max(80)).max(20).optional() }).passthrough()).max(512) }).passthrough()
+  .refine(report => report.predecessorEligible === acceptanceEligible(report.head, report.sourceHead, report.provenance), 'Source provenance mismatch')
   .refine(report => report.usage.persistedBytes >= report.usage.emptySchemaBytes
-    && report.usage.evidenceBytes === report.usage.persistedBytes - report.usage.emptySchemaBytes, 'Storage delta mismatch');
+    && report.usage.evidenceBytes === report.usage.persistedBytes - report.usage.emptySchemaBytes
+    && report.usage.evidenceBytes === Math.max(0, report.usage.rawApplicationBytes - report.usage.emptySchemaBytes,
+      report.usage.rawDatabaseBytes - report.usage.emptyDatabaseBytes), 'Storage delta mismatch');
 const experimentSchema = z.object({ head: z.string().regex(/^[a-f0-9]{40}$/),
   predecessorHead: z.string().regex(/^[a-f0-9]{40}$/), fixtureHash: z.string().regex(/^[a-f0-9]{64}$/),
   policyHash: z.string().regex(/^[a-f0-9]{64}$/), budgetHash: z.string().regex(/^[a-f0-9]{64}$/),
@@ -385,21 +469,25 @@ export function experimentFromReport(corpus: Corpus, input: unknown, ablation: s
   if (!loadedCorpora.has(corpus)) throw new Error('A loaded frozen corpus is required');
   const report = reportEvidenceSchema.parse(input);
   if (report.seed !== corpus.manifest.seed || report.fixtureManifest !== corpus.manifestHash || JSON.stringify(report.budgets) !== JSON.stringify(corpus.manifest.budgets)) throw new Error('Report fixture/budget drift');
-  const sourceReport = { head: report.head, sourceHead: report.sourceHead, predecessorEligible: report.predecessorEligible,
+  const sourceReport = { head: report.head, sourceHead: report.sourceHead, predecessorEligible: report.predecessorEligible, provenance: report.provenance,
+    latencyEvidence: report.latencyEvidence,
     fixtureManifest: report.fixtureManifest, seed: report.seed, runner: report.runner,
     budgets: report.budgets, gates: { failures: report.gates.failures }, usage: {
       persistedBytes: report.usage.persistedBytes, emptySchemaBytes: report.usage.emptySchemaBytes, evidenceBytes: report.usage.evidenceBytes,
+      rawApplicationBytes: report.usage.rawApplicationBytes, rawDatabaseBytes: report.usage.rawDatabaseBytes, emptyDatabaseBytes: report.usage.emptyDatabaseBytes,
       candidateCount: report.usage.candidateCount, actualSpend: report.usage.actualSpend,
       reservedSpend: report.usage.reservedSpend, calls: report.usage.calls, setupCalls: report.usage.setupCalls, retries: report.usage.retries },
     rows: report.rows.map(row => ({ id: row.id, ablation: row.ablation, status: row.status,
       metrics: row.metrics ? { ndcg: row.metrics.ndcg, evidenceCoverage: row.metrics.evidenceCoverage } : undefined,
-      latencyMs: row.latencyMs, failures: row.failures })) };
+      latencyMs: row.latencyMs, latencySamplesMs: row.latencySamplesMs, universeHash: row.universeHash, failures: row.failures })) };
   const holdout = corpus.cases.filter(item => item.split === 'holdout' && item.operation === 'recall').map(item => item.id).sort();
   const selected = sourceReport.rows.filter(row => row.ablation === ablation && holdout.includes(row.id));
   unique(selected.map(row => row.id), 'report holdout IDs');
   if (selected.length && JSON.stringify(selected.map(row => row.id).sort()) !== JSON.stringify(holdout)) throw new Error('Report holdout drift');
   const status = selected.length === 0 || selected.every(row => row.status === 'not_supported') ? 'not_supported'
-    : selected.some(row => row.status !== 'measured' || row.metrics?.ndcg == null || row.metrics.evidenceCoverage == null || row.latencyMs === undefined) ? 'failed' : 'measured';
+    : selected.some(row => row.status !== 'measured' || row.metrics?.ndcg == null || row.metrics.evidenceCoverage == null || row.latencyMs === undefined
+      || !row.latencySamplesMs || !row.universeHash || row.latencyMs !== median(row.latencySamplesMs)
+      || row.universeHash !== candidateUniverseHash(corpus, corpus.cases.find(item => item.id === row.id)!)) ? 'failed' : 'measured';
   const criticalFailures = [...new Set([...report.gates.failures, ...report.rows.flatMap(row => row.failures ?? []),
     ...(status === 'failed' ? ['incomplete-samples'] : [])].map(value => value.toLowerCase().replaceAll('_', '-')))].sort();
   const latencies = selected.map(row => row.latencyMs ?? 0).sort((a, b) => a - b);
@@ -411,7 +499,7 @@ export function experimentFromReport(corpus: Corpus, input: unknown, ablation: s
     criticalFailures, criticalCoverageRegressions: 0,
     p95: latencies.length ? latencies[Math.max(0, Math.ceil(latencies.length * 0.95) - 1)] : null,
     persistedBytes: report.usage.evidenceBytes, hardStorageBudget: corpus.manifest.budgets.storageBytes,
-    supported: status === 'measured', status, ablation, predecessorEligible: report.head === report.sourceHead, sourceReport };
+    supported: status === 'measured', status, ablation, predecessorEligible: report.predecessorEligible, sourceReport };
 }
 
 export function compareExperiments(baselineInput: unknown, candidateInput: unknown, corpus?: Corpus) {
@@ -428,7 +516,7 @@ export function compareExperiments(baselineInput: unknown, candidateInput: unkno
       if (JSON.stringify(record[field]) !== JSON.stringify(derived[field])) throw new Error('Experiment differs from source report');
     }
   }
-  if (!before.predecessorEligible || !after.predecessorEligible) throw new Error('Merge checkout is ineligible as an acceptance baseline');
+  if (!before.predecessorEligible || !after.predecessorEligible) throw new Error('Unproven, dirty or source-mismatched checkout is ineligible as an acceptance baseline');
   if (after.predecessorHead !== before.head) throw new Error('Capture the predecessor feature head first');
   for (const field of ['fixtureHash', 'policyHash', 'budgetHash', 'seed', 'runner', 'split', 'repetitionRule', 'hardStorageBudget'] as const) {
     if (before[field] !== after[field]) throw new Error('Comparison input drift');
@@ -443,6 +531,10 @@ export function compareExperiments(baselineInput: unknown, candidateInput: unkno
   }
   if (before.criticalFailures.length || after.criticalFailures.length) return { status: 'fail' };
   if (!before.supported || !after.supported) return { status: 'not_supported' };
+  const timingBefore = before.sourceReport.latencyEvidence; const timingAfter = after.sourceReport.latencyEvidence;
+  if (!timingBefore.pairedSession || timingBefore.pairedSession !== timingAfter.pairedSession
+    || timingBefore.environment !== timingAfter.environment || JSON.stringify(timingBefore.policy) !== JSON.stringify(latencyPolicy)
+    || JSON.stringify(timingAfter.policy) !== JSON.stringify(latencyPolicy)) return { status: 'insufficient_evidence' };
   for (const record of [before, after]) {
     const usage = record.sourceReport.usage;
     if (usage.persistedBytes > record.hardStorageBudget) return { status: 'fail' };
@@ -495,8 +587,8 @@ async function grant(owner: pg.Pool, filename: string, variables: Record<string,
 }
 
 /** Creates a fresh DB, never migrates or resets the caller's database. LOGINs are real sessions. */
-async function isolatedServices<T>(url: string, run: (fixture: {
-  owner: pg.Pool; app: pg.Pool; operator: pg.Pool; sync: pg.Pool; actor: Principal; emptySchemaBytes: number;
+export async function withEvaluationFixture<T>(url: string, run: (fixture: {
+  owner: pg.Pool; app: pg.Pool; operator: pg.Pool; sync: pg.Pool; actor: Principal; emptyStorage: StorageSnapshot;
 }) => Promise<T>): Promise<T> {
   const suffix = randomUUID().replaceAll('-', '');
   const database = `eval_${suffix}`;
@@ -511,7 +603,7 @@ async function isolatedServices<T>(url: string, run: (fixture: {
     const owner = new pg.Pool({ connectionString: ownerUrl.toString(), max: 1, connectionTimeoutMillis: 5000,
       options: '-c statement_timeout=60000 -c lock_timeout=5000' }); pools.push(owner);
     await runMigrations(owner);
-    const emptySchemaBytes = await applicationBytes(owner);
+    const emptyStorage = await measureStorage(owner);
     const actor = await createPrincipal(owner, { externalId: 'eval-admin', kind: 'user', displayName: 'Synthetic administrator' });
     const org = (await getScopeByRef(owner, { kind: 'org', name: '' }))!;
     await addMembership(owner, actor.id, org.id, 'admin');
@@ -530,7 +622,7 @@ async function isolatedServices<T>(url: string, run: (fixture: {
       const session = (await pool.query('SELECT session_user AS name, rolsuper FROM pg_catalog.pg_roles WHERE rolname=session_user')).rows[0];
       if (session.name !== role || session.rolsuper) throw new Error('Runtime authority fixture invalid');
     }
-    return await run({ owner, app: sessions[0], operator: sessions[1], sync: sessions[2], actor, emptySchemaBytes });
+    return await run({ owner, app: sessions[0], operator: sessions[1], sync: sessions[2], actor, emptyStorage });
   } finally {
     await Promise.all(pools.map(pool => pool.end()));
     const cleanupErrors: unknown[] = [];
@@ -545,41 +637,58 @@ async function isolatedServices<T>(url: string, run: (fixture: {
   }
 }
 
-async function applicationBytes(pool: pg.Pool): Promise<number> {
-  return Number((await pool.query(`SELECT coalesce(sum(pg_total_relation_size(c.oid)),0)::text AS bytes
-    FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-    WHERE n.nspname='public' AND c.relkind='r'`)).rows[0].bytes);
+export type StorageSnapshot = { applicationBytes: number; databaseBytes: number };
+export async function measureStorage(pool: pg.Pool): Promise<StorageSnapshot> {
+  const row = (await pool.query(`SELECT pg_database_size(current_database())::text AS database_bytes,
+    (SELECT coalesce(sum(pg_total_relation_size(c.oid)),0) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+      WHERE (n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname !~ '^pg_(toast|temp)'
+        AND c.relkind IN ('r','m','p','S'))
+        OR c.oid IN ('pg_catalog.pg_largeobject'::regclass,'pg_catalog.pg_largeobject_metadata'::regclass))::text AS application_bytes`)).rows[0];
+  return { applicationBytes: Number(row.application_bytes), databaseBytes: Number(row.database_bytes) };
+}
+export function accountStorage(empty: StorageSnapshot, final: StorageSnapshot) {
+  const evidenceBytes = Math.max(0, final.applicationBytes - empty.applicationBytes, final.databaseBytes - empty.databaseBytes);
+  return { persistedBytes: empty.applicationBytes + evidenceBytes, evidenceBytes, emptySchemaBytes: empty.applicationBytes,
+    rawApplicationBytes: final.applicationBytes, rawDatabaseBytes: final.databaseBytes, emptyDatabaseBytes: empty.databaseBytes };
 }
 
 export type Ablation = 'lexical' | 'hybrid' | 'fallback' | 'vector-only' | 'reranking' | 'extraction' | 'synthesis' | 'temporal' | 'connector' | 'relationship-expansion';
 export const ablations: Ablation[] = ['lexical', 'hybrid', 'fallback', 'vector-only', 'reranking', 'extraction', 'synthesis', 'temporal', 'connector', 'relationship-expansion'];
 export type EvaluationRow = { id: string; ablation: Ablation; status: 'measured' | 'not_supported' | 'failed';
   metrics?: ReturnType<typeof scoreRetrieval>; latencyMs?: number; failures?: string[];
-  diagnostics?: string; contextBytes?: number; outputBytes?: number; hydrated?: number; calls?: number };
-function assertCheckout(head: string) {
+  latencySamplesMs?: number[]; evaluatorMs?: number; universeHash?: string; warmup?: boolean;
+  diagnostics?: string; contextBytes?: number; outputBytes?: number; contextBytesTotal?: number; outputBytesTotal?: number; hydrated?: number; calls?: number };
+function checkoutState(head: string) {
   const actual = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 5000 }).trim();
   const dirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=normal'], { encoding: 'utf8', timeout: 5000 }).trim();
-  if (actual !== head || dirty) throw new Error('Checkout identity must be clean and match the tested head');
+  if (actual !== head) throw new Error('Checkout identity must match the tested head');
+  const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { encoding: 'utf8', timeout: 5000 }).trim();
+  // Read the commit headers, including parents hidden by a shallow CI boundary.
+  const headers = execFileSync('git', ['cat-file', 'commit', 'HEAD'], { encoding: 'utf8', timeout: 5000, maxBuffer: 1_048_576 }).split('\n\n', 1)[0];
+  const parents = [...headers.matchAll(/^parent ([a-f0-9]{40})$/gm)].map(match => match[1]);
+  return { head: actual, tree, parents, clean: dirty === '' };
 }
 
 export async function runBaseline(corpus: Corpus, databaseUrl: string, head: string, seed = corpus.manifest.seed, signal?: AbortSignal) {
   if (!loadedCorpora.has(corpus)) throw new Error('A loaded frozen corpus is required');
   if (!/^[a-f0-9]{40}$/.test(head) || seed !== corpus.manifest.seed) throw new Error('Invalid run identity');
-  assertCheckout(head);
+  const checkoutStart = checkoutState(head);
   const started = performance.now();
   const rows: EvaluationRow[] = [];
   const limits = corpus.manifest.budgets;
   const budget = new PhaseBudget(limits.maxSetupMs, limits.maxDurationMs);
-  let storedBytes = 0;
-  let emptySchemaBytes = 0;
+  let storage = { persistedBytes: 0, evidenceBytes: 0, emptySchemaBytes: 0, rawApplicationBytes: 0, rawDatabaseBytes: 0, emptyDatabaseBytes: 0 };
   let workEnded = started;
   let timings = { setupMs: 0, measuredMs: 0 };
   let setupCalls = 0;
   const supported = new Set(['recall', 'fetch', 'agents-md', 'supersede', 'expiry', 'revoke', 'erase']);
   planRows(corpus.cases.filter(item => supported.has(item.operation)).length,
     corpus.cases.filter(item => !supported.has(item.operation)).length, 3, limits.maxRows);
-  await isolatedServices(databaseUrl, async ({ owner, app, operator, sync, actor, emptySchemaBytes: emptyBytes }) => {
-    emptySchemaBytes = emptyBytes;
+  const observations: EvaluationRow[] = [];
+  let environment = '';
+  await withEvaluationFixture(databaseUrl, async ({ owner, app, operator, sync, actor, emptyStorage }) => {
+    const platform = (await owner.query("SELECT current_setting('server_version_num') AS version, current_setting('jit') AS jit, current_setting('fsync') AS fsync")).rows[0];
+    environment = sha256(JSON.stringify({ node: process.version, platform: process.platform, arch: process.arch, postgres: platform }));
     budget.check(); signal?.throwIfAborted();
     // Exact grant scripts run before runtime work; SYNC must have no memory payload access.
     const syncAllowed = (await sync.query("SELECT has_table_privilege(session_user,'memories','SELECT') AS allowed")).rows[0].allowed;
@@ -590,15 +699,20 @@ export async function runBaseline(corpus: Corpus, databaseUrl: string, head: str
     const prepared = new Map<string, Seeded>();
     const seedDocument = async (item: FixtureCase, doc: FixtureCase['documents'][number], fixture: Seeded, denied: Scope) => {
       budget.check(); signal?.throwIfAborted();
+      // No production quarantine state exists. Its negative adapter fixture is
+      // withheld from admission, never represented as a measured serving feature.
+      if (doc.state === 'quarantined') return;
       const memory = await createMemory(owner, { id: fixtureUuid(`${seed}:${item.id}:${key(doc)}`),
-        scopeId: doc.allowed && doc.sourceAllowed ? fixture.scoped.id : denied.id,
+        scopeId: doc.allowed && doc.sourceAllowed && doc.scope !== 'project:denied' ? fixture.scoped.id : denied.id,
         scopeKind: doc.allowed && item.operation === 'erase' ? 'user' : 'project', type: doc.type,
         title: doc.title, body: doc.body, tags: doc.tags, authorId: fixture.reader.id, source: 'manual',
         sourceRef: key(doc), metadata: {} });
       fixture.memories.set(doc.id, memory); fixture.references.set(memory.id, { id: doc.id, version: doc.version });
       await owner.query('UPDATE memories SET state=$1, created_at=$2, updated_at=$2 WHERE id=$3', [doc.state, corpus.manifest.clock, memory.id]);
-      setupCalls++;
-      await storeMemoryEmbeddingVector(owner, memory.id, (await stub.embed([`${doc.title}\n\n${doc.body}`]))[0], stub);
+      if (doc.state === 'live') {
+        setupCalls++;
+        await storeMemoryEmbeddingVector(owner, memory.id, (await stub.embed([`${doc.title}\n\n${doc.body}`]))[0], stub);
+      }
     };
     for (const split of ['development', 'holdout']) {
       const reader = await createPrincipal(owner, { externalId: `eval-shared-${split}`, kind: 'user', displayName: 'Synthetic ranking reader' });
@@ -651,20 +765,31 @@ export async function runBaseline(corpus: Corpus, databaseUrl: string, head: str
     budget.beginMeasured();
     for (const item of seededOrder(corpus.cases.filter(item => supported.has(item.operation)), seed)) {
       const { reader, scoped, denied, memories, references } = prepared.get(item.id)!;
-      for (const ablation of ['lexical', 'hybrid', 'fallback'] as const) {
+      const universeHash = candidateUniverseHash(corpus, item);
+      const modes = ['lexical', 'hybrid', 'fallback'] as const;
+      for (let repetition = 0; repetition <= latencyPolicy.repetitions; repetition++) {
+      const offset = (repetition + parseInt(sha256(item.id).slice(0, 4), 16)) % modes.length;
+      for (const ablation of [...modes.slice(offset), ...modes.slice(0, offset)]) {
         budget.check(); signal?.throwIfAborted();
         const start = performance.now(); const failures: string[] = []; let actual: Reference[] = [];
+        let serviceMs = 0; let deniedScope = false;
+        const service = async <T>(run: () => Promise<T>): Promise<T> => {
+          const began = performance.now(); try { return await run(); } finally { serviceMs += performance.now() - began; }
+        };
         let context: unknown = []; let diagnostics = 'not_applicable'; let calls = 0;
-        const beforeAudit = (await owner.query('SELECT count(*)::int AS count FROM audit_log')).rows[0].count;
         const auditFence = (await owner.query('SELECT coalesce(max(id),0)::text AS id FROM audit_log')).rows[0].id;
+        const readAudits = async () => (await owner.query(`SELECT memory_id FROM audit_log WHERE id > $1::bigint
+          AND action='read' AND principal_id=$2 AND memory_id IS NOT NULL`, [auditFence, reader.id])).rows.map(row => row.memory_id as string);
+        let deliveredAudits: string[] | undefined;
         try {
           if (item.operation === 'fetch') {
-            try { const result = await getMemoryForPrincipal(app, reader, memories.values().next().value!.id);
-              actual = [references.get(result.memory.id)!]; context = result.memory;
+            try { const result = await service(() => getMemoryForPrincipal(app, reader, memories.values().next().value!.id));
+              actual = [references.get(result.memory.id)!]; context = result.memory; deniedScope = result.memory.scopeId === denied.id;
             } catch (error) { if ((error as { code?: string }).code !== 'MEMORY_NOT_FOUND') throw error; }
           } else if (item.operation === 'agents-md') {
             const input = { project: scoped.name };
-            const markdown = await renderAgentsMdForPrincipal(app, reader, input);
+            const markdown = await service(() => renderAgentsMdForPrincipal(app, reader, input));
+            deliveredAudits = await readAudits();
             const bundle = await prepareAgentsMdForPrincipal(app, reader, input);
             const repeated = await renderAgentsMdForPrincipal(app, reader, input);
             if (markdown !== repeated || markdown !== bundle.markdown || sha256(markdown) !== bundle.hash) failures.push('nondeterministic-agents-md');
@@ -674,6 +799,7 @@ export async function runBaseline(corpus: Corpus, databaseUrl: string, head: str
               if (!bundle.markdown.includes(`> [BEGIN CONTINUUM MEMORY DATA]\n${data}\n> [END CONTINUUM MEMORY DATA]`)) failures.push('instruction-authority');
             }
             actual = bundle.memories.map(memory => references.get(memory.id)!);
+            deniedScope = bundle.memories.some(memory => memory.scopeId === denied.id);
             context = bundle.markdown;
           } else if (item.operation === 'erase') {
             // This row measures direct memory/all-vector residual proof only.
@@ -687,8 +813,9 @@ export async function runBaseline(corpus: Corpus, databaseUrl: string, head: str
               embed: async () => { calls++; failures.push('local-only-egress'); throw new Error('Hosted calls forbidden'); } };
             const routing = item.id === 'local-only-no-egress' && ablation === 'hybrid' ? new ScopeEmbeddingRouter(new EmbeddingRegistry([['hosted', hostedSpy]]),
               { default: 'hosted', rules: [{ match: { kind: 'project' }, provider: 'local-only' }] }) : provider;
-            const result = await recallForPrincipal(app, routing, reader,
-              { query: item.query, scopes: [`project:${scoped.name}`, `project:${denied.name}`], limit: limits.hydrationLimit });
+            const result = await service(() => recallForPrincipal(app, routing, reader,
+              { query: item.query, scopes: [`project:${scoped.name}`, `project:${denied.name}`], limit: limits.hydrationLimit }));
+            deniedScope = result.results.some(row => row.memory.scopeId === denied.id);
             actual = result.results.map(result => references.get(result.memory.id)!);
             context = result.results;
             diagnostics = result.diagnostics.vector;
@@ -697,38 +824,59 @@ export async function runBaseline(corpus: Corpus, databaseUrl: string, head: str
           }
           const serializedBytes = Buffer.byteLength(JSON.stringify(context));
           if (serializedBytes > limits.contextBytes || serializedBytes > limits.outputBytes) failures.push('hard-byte-budget');
-          const afterAudit = (await owner.query('SELECT count(*)::int AS count FROM audit_log')).rows[0].count;
-          if (actual.length && afterAudit <= beforeAudit) failures.push('unaudited-delivery');
-          const deliveredAudits = (await owner.query(`SELECT memory_id FROM audit_log WHERE id > $1::bigint
-            AND action='read' AND memory_id IS NOT NULL`, [auditFence])).rows.map(row => row.memory_id);
+          deliveredAudits ??= await readAudits();
+          if (actual.length && deliveredAudits.length === 0) failures.push('unaudited-delivery');
           for (const ref of actual) {
             const memoryId = [...references].find(([, value]) => key(value) === key(ref))?.[0];
-            if (!deliveredAudits.includes(memoryId)) failures.push('missing-delivered-memory-audit');
+            if (!memoryId || !deliveredAudits.includes(memoryId)) failures.push('missing-delivered-memory-audit');
           }
-          if (actual.some(ref => item.prohibited.includes(key(ref)) || !references.size)) failures.push('prohibited-evidence');
-          rows.push({ id: item.id, ablation, status: 'measured', metrics: scoreRetrieval(actual, item.relevant),
-            latencyMs: performance.now() - start, failures, diagnostics,
+          failures.push(...checkDelivered(corpus, item, actual, deniedScope));
+          observations.push({ id: item.id, ablation, status: 'measured', metrics: scoreRetrieval(actual, item.relevant),
+            latencyMs: serviceMs, evaluatorMs: performance.now() - start - serviceMs, universeHash, warmup: repetition === 0, failures, diagnostics,
             contextBytes: serializedBytes, outputBytes: serializedBytes, hydrated: actual.length, calls });
         } catch (error) {
           const code = (error as { code?: string }).code;
-          rows.push({ id: item.id, ablation, status: 'failed', latencyMs: performance.now() - start,
+          observations.push({ id: item.id, ablation, status: 'failed', latencyMs: serviceMs, evaluatorMs: performance.now() - start - serviceMs, universeHash, warmup: repetition === 0, calls,
             failures: ['SERVICE_FAILED'], diagnostics: code && ['FORBIDDEN', 'UNAUTHORIZED', 'PRINCIPAL_DISABLED', 'INVALID_SCOPE', 'INTERNAL'].includes(code) ? code : 'SERVICE_ERROR' });
         }
-        if (rows.length > limits.maxRows) throw new Error('Report row bound exceeded');
+        if (observations.length > limits.maxRows * (latencyPolicy.repetitions + latencyPolicy.warmups)) throw new Error('Observation bound exceeded');
         budget.check(); signal?.throwIfAborted();
       }
     }
-    storedBytes = await applicationBytes(owner);
+    }
+    storage = accountStorage(emptyStorage, await measureStorage(owner));
     budget.check(); timings = budget.timings(); workEnded = performance.now();
   });
-  assertCheckout(head);
+  const checkoutEnd = checkoutState(head);
+  const sourceHead = process.env.CONTINUUM_EVAL_SOURCE_SHA ?? head;
+  const event = process.env.GITHUB_EVENT_NAME;
+  const provenance: Provenance = { headStart: checkoutStart.head, headEnd: checkoutEnd.head, treeStart: checkoutStart.tree, treeEnd: checkoutEnd.tree,
+    parents: checkoutStart.parents, cleanStart: checkoutStart.clean, cleanEnd: checkoutEnd.clean,
+    sourceIdentity: process.env.CONTINUUM_EVAL_SOURCE_SHA ? 'explicit' : 'checkout',
+    context: event === 'pull_request' || event === 'push' || event === 'workflow_dispatch' ? event : event ? 'other' : 'local' };
+  const grouped = new Map<string, EvaluationRow[]>();
+  for (const row of observations) { const name = row.id + ':' + row.ablation; const group = grouped.get(name) ?? []; group.push(row); grouped.set(name, group); }
+  for (const group of grouped.values()) {
+    const measuredGroup = group.filter(row => !row.warmup); const first = measuredGroup[0];
+    const latencySamplesMs = measuredGroup.map(row => row.latencyMs!);
+    const metrics = first.metrics && Object.fromEntries(Object.keys(first.metrics).map(name => {
+      const values = measuredGroup.map(row => row.metrics?.[name as keyof NonNullable<typeof row.metrics>]);
+      return [name, values.every(value => value === null) ? null : values.reduce<number>((sum, value) => sum + (value ?? 0), 0) / values.length];
+    })) as EvaluationRow['metrics'];
+    rows.push({ ...first, warmup: undefined, status: group.some(row => row.status !== 'measured') ? 'failed' : 'measured',
+      metrics, latencyMs: median(latencySamplesMs), latencySamplesMs, evaluatorMs: group.reduce((sum, row) => sum + (row.evaluatorMs ?? 0), 0),
+      failures: [...new Set(group.flatMap(row => row.failures ?? []))], calls: group.reduce((sum, row) => sum + (row.calls ?? 0), 0),
+      hydrated: group.reduce((sum, row) => sum + (row.hydrated ?? 0), 0), contextBytes: Math.max(...group.map(row => row.contextBytes ?? 0)),
+      outputBytes: Math.max(...group.map(row => row.outputBytes ?? 0)), contextBytesTotal: group.reduce((sum, row) => sum + (row.contextBytes ?? 0), 0),
+      outputBytesTotal: group.reduce((sum, row) => sum + (row.outputBytes ?? 0), 0) });
+  }
   const measured = rows.filter(row => row.status === 'measured');
   const latencies = measured.map(row => row.latencyMs!).sort((a, b) => a - b);
   const percentile = (p: number) => latencies.length ? latencies[Math.max(0, Math.ceil(p * latencies.length) - 1)] : null;
   const failures = [...new Set(rows.flatMap(row => row.failures ?? []))];
-  if (storedBytes > limits.storageBytes) failures.push('hard-storage-budget');
-  if (setupCalls + measured.reduce((sum, row) => sum + (row.calls ?? 0), 0) > limits.calls) failures.push('hard-call-budget');
-  const sourceHead = process.env.CONTINUUM_EVAL_SOURCE_SHA ?? head;
+  if (storage.persistedBytes > limits.storageBytes) failures.push('hard-storage-budget');
+  const allCalls = observations.reduce((sum, row) => sum + (row.calls ?? 0), 0);
+  if (setupCalls + allCalls > limits.calls) failures.push('hard-call-budget');
   if (!/^[a-f0-9]{40}$/.test(sourceHead)) throw new Error('Invalid source provenance');
   const holdoutIds = new Set(corpus.cases.filter(item => item.collection === 'ranking' && item.split === 'holdout').map(item => item.id));
   const rankingDiagnostics = ['lexical', 'hybrid', 'fallback'].map(ablation => {
@@ -739,27 +887,31 @@ export async function runBaseline(corpus: Corpus, databaseUrl: string, head: str
     return { ablation, pairs: scores.length, distinctScores: new Set(scores).size, mean: scores.length ? mean : null,
       variance, diagnostic: variance === null ? 'no_evidence' : variance < 1e-12 ? 'degenerate_scores_review_corpus' : 'varied_scores' };
   });
-  const report = { schema: 1, runner: RUNNER_VERSION, head, sourceHead, predecessorEligible: sourceHead === head,
+  const report = { schema: 1, runner: RUNNER_VERSION, head, sourceHead, provenance, predecessorEligible: acceptanceEligible(head, sourceHead, provenance),
+    latencyEvidence: { policy: latencyPolicy, pairedSession: null, environment },
+    sampling: { observations: observations.length, orderDigest: sha256(JSON.stringify(observations.map(row => [row.id, row.ablation, row.warmup]))) },
+    corpusDiagnostics: graphShortcutDiagnostics(corpus.cases),
     fixtureManifest: corpus.manifestHash,
     fixtureFiles: corpus.manifest.files, fixtureVersion: corpus.manifest.version, seed,
     clock: corpus.manifest.clock, rankingDiagnostics, provider: { id: 'stub:sha256', dim: 768, local: true, liveQuality: false },
     promptSchemaHash: sha256(JSON.stringify({ caseSchema: 'v1', prompt: null })),
     featureFlags: { productionChanges: false, hosted: false }, budgets: limits,
+    fixtureStateAdapters: { quarantined: 'not_supported' },
     sampleCounts: { total: rows.length, measured: measured.length, unsupported: rows.filter(row => row.status === 'not_supported').length,
       failed: rows.filter(row => row.status === 'failed').length },
     latencyMs: { p50: percentile(0.5), p95: percentile(0.95) },
     timing: { ...timings, cleanupMs: performance.now() - workEnded, totalMs: performance.now() - started },
     usage: { candidateCount: null, candidateCeilingPerBranch: limits.candidateLimit, candidateUnionCeiling: limits.candidateLimit * 2,
       hydrationCount: measured.reduce((sum, row) => sum + (row.hydrated ?? 0), 0),
-      completeSerializedContextBytes: measured.reduce((sum, row) => sum + (row.contextBytes ?? 0), 0),
-      outputBytes: measured.reduce((sum, row) => sum + (row.outputBytes ?? 0), 0),
+      completeSerializedContextBytes: rows.reduce((sum, row) => sum + (row.contextBytesTotal ?? 0), 0),
+      outputBytes: rows.reduce((sum, row) => sum + (row.outputBytesTotal ?? 0), 0),
       contextTokens: null, outputTokens: null, tokenizer: 'not_supported',
-      calls: measured.reduce((sum, row) => sum + (row.calls ?? 0), 0), setupCalls, retries: 0, reservedSpend: 0, actualSpend: 0,
-      persistedBytes: storedBytes, emptySchemaBytes, evidenceBytes: storedBytes - emptySchemaBytes, storageAmplification: null },
+      calls: allCalls, setupCalls, retries: 0, reservedSpend: 0, actualSpend: 0,
+      ...storage, storageAmplification: null },
     gates: { mechanism: failures.length ? 'fail' : 'pass', qualityAcceptance: 'not_evaluated',
       relationshipExpansion: 'not_supported', failures }, rows };
   const experiments = ['lexical', 'hybrid', 'fallback'].map(ablation => experimentFromReport(corpus, report, ablation,
     { lexical: true, hybrid: ablation === 'hybrid', reranking: false, 'relationship-expansion': false, 'vector-fallback': ablation === 'fallback' },
     { lexical: 'shared-service-v1', hybrid: 'stub:sha256-v1', reranking: 'not_supported', 'relationship-expansion': 'not_supported', 'vector-fallback': 'synthetic-unavailable-v1' }));
-  return { ...report, measuredFields: ['**.latencyMs', '**.p95', '**.persistedBytes', '**.emptySchemaBytes', '**.evidenceBytes', 'timing'], experiments };
+  return { ...report, measuredFields: ['**.latencyMs', '**.p95', '**.persistedBytes', '**.emptySchemaBytes', '**.evidenceBytes', '**.latencySamplesMs', '**.evaluatorMs', '**.rawApplicationBytes', '**.rawDatabaseBytes', '**.emptyDatabaseBytes', 'timing'], experiments };
 }
