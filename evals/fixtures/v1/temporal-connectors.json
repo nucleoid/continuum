@@ -298,14 +298,44 @@
       "executionResidency": "local",
       "operation": "connector",
       "query": "Quartz deployment",
-      "documents": [],
+      "documents": [
+        {
+          "id": "primary",
+          "version": "1",
+          "assertionVersion": "1",
+          "family": "primary",
+          "sourceKind": "non-code",
+          "scope": "project:synthetic",
+          "title": "Quartz deployment",
+          "body": "Quartz deployment uses the blue queue.",
+          "type": "decision",
+          "tags": [
+            "decision"
+          ],
+          "state": "quarantined",
+          "allowed": true,
+          "sourceAllowed": true,
+          "residency": "local-only",
+          "eventStart": "2026-01-01T00:00:00Z",
+          "eventEnd": null,
+          "ingestedAt": "2026-01-02T00:00:00Z"
+        }
+      ],
       "relevant": [],
-      "prohibited": [],
+      "prohibited": [
+        "primary@1"
+      ],
       "abstain": true,
       "claims": [],
       "chunks": [],
       "contradictionSets": [],
-      "timeline": []
+      "timeline": [
+        {
+          "at": "2026-02-01T00:00:00Z",
+          "action": "quarantine",
+          "evidence": "primary@1"
+        }
+      ]
     }
   ]
 }

@@ -23,7 +23,7 @@ import { mapOwnedUserScope, offboardPrincipal } from '../services/offboarding.js
 import type { Principal, Memory } from '../types.js';
 
 export const RUNNER_VERSION = 'memory-evaluation-v1';
-const MANIFEST_SHA256 = 'fa460a80ea99310c0f6169fad0a6f22469d008e52e206a39829ef2dca8023dde';
+const MANIFEST_SHA256 = '6880e7fa8d8e1601b0cd67780402c5effe3f4af91f2d712fdc6c097204de9c73';
 export const sha256 = (text: string | Buffer): string => createHash('sha256').update(text).digest('hex');
 const id = z.string().regex(/^[a-z0-9][a-z0-9-]{0,79}$/);
 const version = z.string().regex(/^[1-9][0-9]{0,5}$/);
@@ -37,7 +37,7 @@ const documentSchema = z.object({ id, version, assertionVersion: version, family
   title: z.string().min(1).max(500), body: z.string().min(1).max(16_384),
   type: z.enum(['decision', 'fact', 'context', 'playbook', 'relationship']),
   tags: z.array(z.enum(['decision', 'github', 'deploy', 'terminal'])).max(4),
-  state: z.enum(['live', 'stale', 'archived']), allowed: z.boolean(), sourceAllowed: z.boolean(),
+  state: z.enum(['live', 'stale', 'archived', 'quarantined']), allowed: z.boolean(), sourceAllowed: z.boolean(),
   residency: z.enum(['local-only', 'approved-hosted']), eventStart: date,
   eventEnd: date.nullable(), ingestedAt: date }).strict();
 const operations = ['recall', 'fetch', 'agents-md', 'supersede', 'expiry', 'revoke', 'erase',
@@ -48,7 +48,7 @@ const caseSchema = z.object({ id, split: z.enum(['development', 'holdout']), ope
   relevant: z.array(relevantSchema).max(30), prohibited: z.array(z.string().regex(/^[a-z0-9-]+@[1-9][0-9]*$/)).max(30),
   abstain: z.boolean(), claims: z.array(claimSchema).max(20), chunks: z.array(id).max(20),
   contradictionSets: z.array(z.object({ id, evidence: z.array(reference).min(2).max(10) }).strict()).max(10),
-  timeline: z.array(z.object({ at: date, action: z.enum(['supersede', 'expiry', 'revoke', 'erase']),
+  timeline: z.array(z.object({ at: date, action: z.enum(['supersede', 'expiry', 'revoke', 'erase', 'quarantine']),
     evidence: z.string().max(90) }).strict()).max(10) }).strict();
 export type FixtureCase = z.infer<typeof caseSchema>;
 export type Reference = z.infer<typeof reference>;
