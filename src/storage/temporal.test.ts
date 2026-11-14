@@ -13,7 +13,7 @@ import { promoteMemoryWithAudit } from './promote.js';
 import { readEventAnnotations, writeEventAnnotation } from './temporal.js';
 import { parseEventAnnotation, parseEventWindow } from '../temporal/model.js';
 import { storeMemoryEmbeddingVector } from './embeddings.js';
-import { hydrateRecallCandidates } from './recall.js';
+import { hydrateRecallCandidates, recall } from './recall.js';
 
 const annotation = (instant = '2026-02-01T00:00:00Z') => parseEventAnnotation({ status:'known', assertion:'asserted', precision:'instant', instant });
 const filter = parseEventWindow({ from:'2026-02-01T00:00:00Z', to:'2026-03-01T00:00:00Z' });
@@ -91,5 +91,10 @@ describe('event annotations and candidate admission', () => {
     const f=await world(), good=await f.capture(annotation('2099-01-01T00:00:00Z'));
     await pool.query("UPDATE memories SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",[good.memory.id]);
     expect((await recallForPrincipal(pool,null,f.actor,{query:'signal',eventFilter:parseEventWindow({at:'2099-01-01T00:00:00Z'})})).results).toEqual([]);
+  });
+  it('retains the final limit for direct low-level hint callers', async () => {
+    const f=await world();await f.capture();await f.capture(annotation('2025-01-01T00:00:00Z'));
+    const result=await recall(pool,{actor:f.actor.id,query:'signal',scopeIds:[f.scope.id],limit:1,eventWindow:filter});
+    expect(result.results).toHaveLength(1);
   });
 });

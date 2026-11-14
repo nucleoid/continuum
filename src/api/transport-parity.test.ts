@@ -70,6 +70,17 @@ describe('REST/MCP semantic parity matrix', () => {
     const fetched=await request(app).get(`/api/v0/memories/${rest.body.id}`).set('Authorization',auth);
     expect(fetched.body.event).toEqual(rest.body.event);
   });
+  it('rolls capture back when the complete temporal MCP frame exceeds its budget', async () => {
+    const server=buildMcpServer({pool,principal,embeddingProvider:null,readBudgetBytes:1024});
+    const [serverTransport,clientTransport]=InMemoryTransport.createLinkedPair();
+    const bounded=new Client({name:'temporal-wire-bound',version:'1'});
+    try {
+      await Promise.all([server.connect(serverTransport),bounded.connect(clientTransport)]);
+      const response=await bounded.callTool({name:'continuum.capture',arguments:{scope_kind:'team',scope_name:'payments',type:'decision',title:'Budgeted event',body:'Signal',event_annotation:{status:'unknown',original:'x'.repeat(1024)}}}) as ToolResult;
+      expect(response.isError).toBe(true);
+      expect((await pool.query("SELECT count(*)::int AS n FROM memories WHERE title='Budgeted event'")).rows[0].n).toBe(0);
+    } finally { await bounded.close();await server.close(); }
+  });
 
   it.each(['rest', 'mcp'] as const)('budgets %s excerpts rather than full stored bodies with reranking enabled', async transport => {
     const team = (await getScopeByRef(pool, { kind: 'team', name: 'payments' }))!;
