@@ -111,6 +111,29 @@ describe('optional pipeline service envelope parity', () => {
     expect((await pool.query("SELECT count(*)::int AS n FROM audit_log WHERE action='read'")).rows[0].n).toBe(audits);
   });
 
+  it('runs a budgeted enricher that projects read-only source dates into its wire envelope', async () => {
+    await seed();
+    let sent: { evidence: Array<{ body: string; createdAt: string }> } | undefined;
+    const registry = new RetrievalEnricherRegistry();
+    registry.register({ id: 'bounded', enrich: async () => { throw new Error('Unbudgeted path invoked'); },
+      pipelineAdapter: {
+        id: 'bounded', model: 'synthetic-v1', profile: 'synthetic-v1', local: true,
+        timeoutMs: 1000, responseBodyBytes: 128, outputTokens: 0, reasoningTokens: 0, completionTokens: 0,
+        enforceableCaps: true, cancellation: 'cooperative',
+        tokens: { kind: 'conservative', model: 'synthetic-v1', profile: 'synthetic-v1', validationId: 'bytes-v1', overheadTokens: 0, count: (value) => Buffer.byteLength(value) },
+        price: { id: 'local-zero-v1', currency: 'USD', unitTokens: 1, inputMicros: 0, outputMicros: 0, reasoningMicros: 0 },
+        serialize: ({ results }) => ({ evidence: results.map(({ memory }) => {
+          expect(() => memory.createdAt.setFullYear(2000)).toThrow('read-only');
+          return { body: memory.body, createdAt: memory.createdAt.toISOString() };
+        }) }),
+        invoke: async (wire) => { sent = JSON.parse(wire); return { value: [{ checked: true }], response: [{ checked: true }] }; },
+      } });
+    const result = await recallForPrincipal(pool, null, principal, { query: 'Budget' }, {}, undefined,
+      { registry, options: { timeoutMs: 2000, maxBytes: 1024 } }, new Budget(starterProfile));
+    expect(result.results[0].enrichments).toEqual({ bounded: { checked: true } });
+    expect(sent?.evidence[0]).toEqual({ body: 'Budget reference evidence', createdAt: result.results[0].memory.createdAt.toISOString() });
+  });
+
   it('reports exhausted valid profiles as resource overflow, preserving the failure allowance', async () => {
     await seed();
     const budget = new Budget(checkedProfile({ ...starterProfile, limits: { ...starterProfile.limits, outputBytes: 512 } }));
