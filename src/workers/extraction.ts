@@ -20,6 +20,8 @@ export interface ExtractionWorkOptions {
 export async function processExtraction(pool: pg.Pool, worker: string, profile: Readonly<ExtractionProfile>,
   options: ExtractionWorkOptions = {}): Promise<'idle' | 'unavailable' | 'processed'> {
   let claim: ExtractionClaim | undefined;
+  let abort: (() => void) | undefined;
+  let cancellation: Promise<void> | undefined;
   const stop = async (reason: string) => {
     if (claim) await extractionOperation(pool, 'SELECT continuum_extraction_stop($1,$2,$3,$4) AS result', [claim.id, worker, claim.generation, reason]);
   };
@@ -33,6 +35,13 @@ export async function processExtraction(pool: pg.Pool, worker: string, profile: 
     if (!selected) return 'idle';
     if (selected.outcome !== 'claimed') return 'unavailable';
     claim = selected;
+    abort = () => {
+      budget.cancel();
+      cancellation ??= stop('cancelled').catch(() => undefined);
+    };
+    options.signal?.addEventListener('abort', abort, { once: true });
+    if (options.signal?.aborted) abort();
+    options.signal?.throwIfAborted();
     budget.assertLive();
     const payload = await extractionOperation<string>(pool, 'SELECT continuum_extraction_hydrate($1,$2,$3) AS result', [claim.id, worker, claim.generation]);
     budget.consume({ candidates: 1, hydratedBytes: Buffer.byteLength(payload) });
@@ -81,6 +90,7 @@ export async function processExtraction(pool: pg.Pool, worker: string, profile: 
           await stop(reason === 'stale_attempt' ? 'ambiguous' : reason); return 'unavailable';
         }
       }
+      options.signal?.throwIfAborted(); budget.assertLive();
       try {
         await extractionOperation(pool, 'SELECT continuum_extraction_apply($1,$2,$3,$4,$5,$6,$7) AS result',
           [claim.id, worker, claim.generation, chunk.index, attempt, output, failure]);
@@ -95,6 +105,9 @@ export async function processExtraction(pool: pg.Pool, worker: string, profile: 
   } catch {
     try { await stop(options.signal?.aborted ? 'cancelled' : 'ambiguous'); } catch { /* Stale ownership remains fenced in SQL. */ }
     return 'unavailable';
+  } finally {
+    if (abort) options.signal?.removeEventListener('abort', abort);
+    await cancellation;
   }
 }
 

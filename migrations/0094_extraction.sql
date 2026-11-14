@@ -575,6 +575,23 @@ BEGIN
   RETURN jsonb_build_object('status','queued','runId',job.id);
 END $$;
 
+-- Trusted capture-transaction metadata only. Its required write audit remains
+-- the success boundary; disabled capture must not manufacture a read audit.
+CREATE FUNCTION continuum_extraction_capture_status(actor UUID,capture_id UUID) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
+#variable_conflict use_column
+DECLARE target_scope UUID; job extraction_runs%ROWTYPE;
+BEGIN
+  SELECT scope_id INTO target_scope FROM memories WHERE id=capture_id AND state='live' AND (expires_at IS NULL OR expires_at>clock_timestamp()) FOR SHARE;
+  IF target_scope IS NULL OR NOT continuum_evidence_can_access(actor,target_scope,TRUE) THEN RAISE insufficient_privilege USING MESSAGE='extraction capture unavailable'; END IF;
+  SELECT * INTO job FROM extraction_runs WHERE memory_id=capture_id ORDER BY created_at DESC,id DESC LIMIT 1;
+  IF job.id IS NULL THEN RETURN jsonb_build_object('status','not-configured'); END IF;
+  IF job.source_version IS NOT NULL THEN
+    PERFORM continuum_evidence_lock(actor,ARRAY[job.source_version]);
+    IF NOT continuum_evidence_eligible(actor,job.source_version,NULL) THEN RAISE insufficient_privilege USING MESSAGE='extraction capture unavailable'; END IF;
+  END IF;
+  RETURN jsonb_build_object('status',job.state,'runId',job.id);
+END $$;
+
 CREATE FUNCTION continuum_operator_recover_extraction(actor UUID,run_id UUID,attempt UUID,confirmation TEXT) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
 #variable_conflict use_column
 DECLARE job extraction_runs%ROWTYPE; original extraction_attempts%ROWTYPE; accounting pipeline_budget_attempts%ROWTYPE;
@@ -709,7 +726,8 @@ CREATE TRIGGER guard_extraction_privacy_audit BEFORE INSERT OR UPDATE OR DELETE 
 DO $$
 DECLARE schema_name TEXT:=current_schema(); f RECORD; signature TEXT; definition TEXT; revised TEXT; candidate RECORD;
   app_signatures TEXT[]:=ARRAY['continuum_extraction_configure(uuid,uuid,text,text[],boolean)',
-    'continuum_extraction_status(uuid,uuid,boolean)','continuum_extraction_retry(uuid,uuid)','continuum_extraction_is_ready()'];
+    'continuum_extraction_status(uuid,uuid,boolean)','continuum_extraction_retry(uuid,uuid)','continuum_extraction_is_ready()',
+    'continuum_extraction_capture_status(uuid,uuid)'];
   op_signatures TEXT[]:=ARRAY['continuum_operator_install_extractor(uuid,jsonb,boolean)',
     'continuum_operator_bind_extraction_worker(uuid,name,uuid,uuid,text,boolean)','continuum_operator_scrub_extraction_scope(uuid,uuid,uuid,integer)',
     'continuum_operator_recover_extraction(uuid,uuid,uuid,text)'];

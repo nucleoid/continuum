@@ -6,6 +6,8 @@ import { createReadinessState, type ReadinessState } from './readiness.js';
 
 export interface RuntimeWorker {
   start?(): void | Promise<void>;
+  /** Bounded shutdown rejects when actual work remains unsettled. Typed
+   * extraction workers use this same lifecycle with a dedicated LOGIN pool. */
   stop(reason: string): void | Promise<void>;
 }
 

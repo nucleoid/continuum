@@ -17,7 +17,7 @@ function safe(error: unknown): never {
 /** Used inside capture's caller-owned transaction. Required audit commits with
  * capture and enqueue, including webhook attribution and replay reservation. */
 export async function captureExtractionStatus(client: Queryable, actor: string, memory: string): Promise<ExtractionStatus> {
-  const value = (await client.query<{ result: ExtractionStatus }>('SELECT continuum_extraction_status($1,$2,FALSE) AS result', [actor, memory])).rows[0].result;
+  const value = (await client.query<{ result: ExtractionStatus }>('SELECT continuum_extraction_capture_status($1,$2) AS result', [actor, memory])).rows[0].result;
   return { status: value.status, ...(value.runId ? { runId: value.runId } : {}) };
 }
 export async function extractionForPrincipal(pool: pg.Pool, principal: Principal, memory: string, includeAssertions = false): Promise<ExtractionStatus & Record<string, unknown>> {

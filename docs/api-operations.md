@@ -39,7 +39,7 @@ may add `ExtractionWorker` to their existing bounded worker lifecycle using its
 dedicated pool. Shutdown reports unsettled provider work rather than claiming
 that a timeout released retained resources.
 
-Apply every packaged migration through `0092`, finish the owner-only `0081`
+Apply every packaged migration through `0094`, finish the owner-only `0081`
 coordination backfill, and converge current application/operator/sync profiles
 before starting matching binaries. Use the migration-owner connection for this
 work, then restore the runtime application connection. `0083` needs database

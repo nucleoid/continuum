@@ -106,6 +106,9 @@ describe('real SDK remote MCP with current database authority', () => {
       expect(JSON.parse((fresh.content as Array<{ text: string }>)[0].text)).toEqual({ fresh: true });
       expect(await client.callTool({ name: 'continuum.standup', arguments: {} })).toEqual(
         await local.callTool({ name: 'continuum.standup', arguments: {} }));
+      const source = (await pool.query('SELECT id FROM memories WHERE scope_id=$1 LIMIT 1', [scopeId])).rows[0].id;
+      const extraction = { name: 'continuum.extraction_status', arguments: { memory_id: source } };
+      expect(await client.callTool(extraction)).toEqual(await local.callTool(extraction));
       const strict = await client.callTool({ name: 'continuum.lock_acquire', arguments: {
         scope: 'project:remote', resource: 'one', run_id: 'run', request_id: 'request', unknown: true } });
       expect(strict.isError).toBe(true); expect(JSON.stringify(strict)).toContain('INVALID_INPUT');
