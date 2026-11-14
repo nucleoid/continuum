@@ -37,7 +37,7 @@ it.each([
   { version: 'test-v1', scores: [{ id: 'c0', score: NaN }, { id: 'c1', score: 2 }] },
   { version: 'test-v1', scores: [{ id: 'c0', score: Infinity }, { id: 'c1', score: 2 }] },
   { get version() { throw new Error('private text'); } },
-])('rejects malformed scores without a partial prefix: %j', async value => {
+])('rejects malformed scores without a partial prefix', async value => {
   const result = await runReranking(configured(adapter(value)), new Budget(starterProfile), { query: 'q', candidates }, async () => true, 20_000);
   expect(result).toEqual({ status: 'fallback', reason: 'invalid_response' });
 });
