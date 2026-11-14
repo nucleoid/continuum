@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Budget, checkedProfile, starterProfile, boundedJson, runBudgetedStage, type BudgetAdapter } from './budget.js';
+import { Budget, checkedProfile, starterProfile, boundedJson, runBudgetedStage, priceMicros, type BudgetAdapter } from './budget.js';
 
 const profile = (limits = {}) => checkedProfile({ ...starterProfile, limits: { ...starterProfile.limits, ...limits } });
 function adapter(overrides: Partial<BudgetAdapter<string, string>> = {}): BudgetAdapter<string, string> {
@@ -88,5 +88,34 @@ describe('one shared pipeline envelope', () => {
     budget.cancel();
     expect(await runBudgetedStage(budget, adapter(), 'x')).toMatchObject({ status: 'skipped', reason: 'cancelled' });
     expect(JSON.stringify(budget.receipts.snapshot())).not.toContain('raw-secret');
+  });
+
+  it('retains process fences across replacement budgets until real settlement', async () => {
+    let resolve!: (r: { value: string; response: unknown }) => void;
+    const configured = adapter({ id: 'replacement-fence', invoke: () => new Promise((r) => { resolve = r; }) });
+    const tiny = checkedProfile({ ...starterProfile, stageMs: 5 });
+    expect(await runBudgetedStage(new Budget(tiny), configured, 'first')).toMatchObject({ reason: 'deadline' });
+    expect(await runBudgetedStage(new Budget(tiny), adapter({ id: configured.id }), 'replacement')).toMatchObject({ status: 'skipped', reason: 'budget_exhausted' });
+    resolve({ value: 'late', response: 'late' });
+    await new Promise((r) => setTimeout(r, 1));
+    expect(await runBudgetedStage(new Budget(starterProfile), adapter({ id: configured.id }), 'after settlement')).toMatchObject({ status: 'complete' });
+  });
+
+  it('rounds each price component upward with safe integer arithmetic', () => {
+    const price = { id: 'rate-v1', currency: 'USD', unitTokens: 3, inputMicros: 1, outputMicros: 2, reasoningMicros: 4 };
+    expect(priceMicros(price, 1, 1, 1)).toBe(4);
+    expect(priceMicros({ ...price, unitTokens: 1, inputMicros: Number.MAX_SAFE_INTEGER }, 1, 0, 0)).toBe(Number.MAX_SAFE_INTEGER);
+    expect(() => priceMicros({ ...price, unitTokens: 1, inputMicros: Number.MAX_SAFE_INTEGER }, 2, 0, 0)).toThrow();
+  });
+
+  it('reserves bounded safe receipts and identifies effective caps and cost provenance', async () => {
+    const budget = new Budget(starterProfile);
+    for (let i = 0; i < 100; i++) budget.receipts.add({ event: 'skipped', reason: 'budget_exhausted', elapsedMs: i });
+    const report = budget.report();
+    expect(report).toMatchObject({ profile: { id: 'foreground-v1', rateSchedule: 'local-zero-v1' }, usage: { active: 0 } });
+    expect(Buffer.byteLength(JSON.stringify(report.receipts))).toBeLessThanOrEqual(4096);
+    expect(report.receipts.length).toBeLessThanOrEqual(32);
+    expect(await runBudgetedStage(new Budget(starterProfile), adapter({ credentials: 'missing' }), 'x')).toMatchObject({ reason: 'credentials_unavailable' });
+    expect(await runBudgetedStage(new Budget(starterProfile), adapter(), 'x', { authorize: async () => false })).toMatchObject({ reason: 'policy_denied' });
   });
 });

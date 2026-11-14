@@ -65,7 +65,7 @@ describe('optional pipeline service envelope parity', () => {
     const hidden = await createScope(pool, { kind: 'project', name: 'hidden' });
     await createMemory(pool, { scopeId: hidden.id, scopeKind: 'project', type: 'decision', title: 'Hidden', body: 'Budget', authorId: principal.id, source: 'manual' });
     const before = new Budget(starterProfile);
-    await expect(recallForPrincipal(pool, provider, principal, { query: 'Budget', scopes: ['project:hidden'] }, {}, undefined, undefined, before)).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(await recallForPrincipal(pool, provider, principal, { query: 'Budget', scopes: ['project:hidden'] }, {}, undefined, undefined, before)).toMatchObject({ results: [], diagnostics: { vector: 'disabled' } });
     expect(calls).toBe(0);
     expect(before.snapshot().used.calls).toBe(0);
   });
