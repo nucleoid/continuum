@@ -63,6 +63,8 @@ CREATE TABLE extraction_attempts(
 CREATE INDEX extraction_attempt_run_idx ON extraction_attempts(run_id,chunk_index,created_at);
 CREATE TABLE extraction_dispatch_receipts(attempt_id UUID PRIMARY KEY REFERENCES extraction_attempts(attempt_id));
 CREATE TABLE extraction_abandoned_attempts(attempt_id UUID PRIMARY KEY REFERENCES extraction_attempts(attempt_id));
+CREATE TABLE extraction_recoveries(attempt_id UUID PRIMARY KEY REFERENCES extraction_attempts(attempt_id), accounting TEXT NOT NULL CHECK(accounting IN ('settled','no-reservation')));
+CREATE TRIGGER extraction_recovery_immutable BEFORE UPDATE OR DELETE ON extraction_recoveries FOR EACH ROW EXECUTE FUNCTION continuum_evidence_immutable();
 CREATE TRIGGER extraction_abandoned_immutable BEFORE UPDATE OR DELETE ON extraction_abandoned_attempts FOR EACH ROW EXECUTE FUNCTION continuum_evidence_immutable();
 CREATE TRIGGER extraction_dispatch_immutable BEFORE UPDATE OR DELETE ON extraction_dispatch_receipts FOR EACH ROW EXECUTE FUNCTION continuum_evidence_immutable();
 CREATE TABLE extraction_receipts(
@@ -84,7 +86,7 @@ BEGIN
   RETURN NEW;
 END $$;
 CREATE TRIGGER extraction_run_identity BEFORE UPDATE ON extraction_runs FOR EACH ROW EXECUTE FUNCTION continuum_extraction_run_identity();
-REVOKE ALL ON extraction_profiles,extraction_scope_config,extraction_worker_bindings,extraction_runs,extraction_chunks,extraction_attempts,extraction_receipts,extraction_dispatch_receipts,extraction_abandoned_attempts FROM PUBLIC;
+REVOKE ALL ON extraction_profiles,extraction_scope_config,extraction_worker_bindings,extraction_runs,extraction_chunks,extraction_attempts,extraction_receipts,extraction_dispatch_receipts,extraction_abandoned_attempts,extraction_recoveries FROM PUBLIC;
 REVOKE ALL ON SEQUENCE extraction_receipts_id_seq FROM PUBLIC;
 
 CREATE FUNCTION continuum_extraction_valid_descriptor(d JSONB) RETURNS BOOLEAN LANGUAGE plpgsql IMMUTABLE AS $$
@@ -183,6 +185,7 @@ BEGIN
   skipped:=bytes>least(1048576,(profile.descriptor->'budget'->>'maxItemHydratedBytes')::int,
     (profile.descriptor->>'chunkBytes')::int*(profile.descriptor->>'maxChunks')::int)
     OR bytes+continuum_extraction_control_bytes(profile.descriptor)>(profile.descriptor->'budget'->'limits'->>'storageBytes')::bigint;
+  skipped:=skipped OR (profile.descriptor->'budget'->'limits'->>'calls')::bigint<1;
   IF skipped THEN skip_reason:='budget'; END IF;
   IF NOT skipped THEN
     -- Evidence admission can abstain independently of a valid legacy capture.
@@ -267,7 +270,10 @@ BEGIN
     AND NOT(edge.roleid=role_id AND edge.member=owner_id AND edge.admin_option AND NOT edge.set_option AND NOT edge.inherit_option))
     OR EXISTS(SELECT 1 FROM pg_db_role_setting WHERE setrole=role_id)
     OR EXISTS(SELECT 1 FROM pg_parameter_acl p,aclexplode(p.paracl) a WHERE a.grantee=role_id)
-    OR has_schema_privilege(role_id,schema_id,'CREATE')
+    OR NOT has_schema_privilege(role_id,schema_id,'USAGE') OR has_schema_privilege(role_id,schema_id,'CREATE')
+    OR EXISTS(SELECT 1 FROM unnest(continuum_extraction_worker_signatures()) signature WHERE NOT has_function_privilege(role_id,to_regprocedure(signature),'EXECUTE'))
+    OR EXISTS(SELECT 1 FROM pg_class c WHERE c.relnamespace=schema_id AND CASE WHEN c.relkind='S' THEN has_sequence_privilege(role_id,c.oid,'USAGE,SELECT,UPDATE')
+      WHEN c.relkind IN ('r','v','m','p','f') THEN has_table_privilege(role_id,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') ELSE FALSE END)
     OR EXISTS(SELECT 1 FROM pg_class c WHERE c.relnamespace=schema_id AND (c.relowner=role_id OR EXISTS(
       SELECT 1 FROM aclexplode(COALESCE(c.relacl,acldefault(CASE WHEN c.relkind='S' THEN 'S'::"char" ELSE 'r'::"char" END,c.relowner))) a WHERE a.grantee=role_id)))
     OR EXISTS(SELECT 1 FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid WHERE c.relnamespace=schema_id AND a.attacl IS NOT NULL
@@ -389,6 +395,7 @@ BEGIN
   job:=continuum_extraction_gate(run_id,worker,epoch,TRUE);
   IF phase='attach' THEN
     IF attempt IS NULL OR (value->>'index')::int NOT BETWEEN 0 AND job.chunk_count-1
+      OR (SELECT count(*) FROM extraction_attempts WHERE run_id=job.id)>=(job.descriptor->'budget'->'limits'->>'calls')::bigint
       OR NOT EXISTS(SELECT 1 FROM extraction_chunks WHERE run_id=job.id AND chunk_index=(value->>'index')::int AND state='pending')
       OR EXISTS(SELECT 1 FROM extraction_attempts a LEFT JOIN pipeline_budget_attempts p ON p.workflow_id=job.workflow_id AND p.attempt_id=a.attempt_id
         WHERE a.run_id=job.id AND (p.state IS DISTINCT FROM 'settled') AND NOT EXISTS(SELECT 1 FROM extraction_abandoned_attempts WHERE attempt_id=a.attempt_id)) THEN RETURN 'false'::jsonb; END IF;
@@ -523,9 +530,9 @@ BEGIN
         'charged',w.used,'active',w.active,'retainedBytes',w.retained_bytes,'cancelled',w.cancelled,
         'settledAttempts',(SELECT count(*) FROM pipeline_budget_attempts WHERE workflow_id=w.id AND state='settled'),
         'unsettledAttempts',(SELECT count(*) FROM pipeline_budget_attempts WHERE workflow_id=w.id AND state<>'settled')) FROM pipeline_budget_workflows w WHERE w.id=job.workflow_id),
-      'receipts',(SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY r.id),'[]'::jsonb) FROM (
+      'receipts',(SELECT COALESCE(jsonb_agg(to_jsonb(r)-'id' ORDER BY r.id),'[]'::jsonb) FROM (
         SELECT id,generation,outcome,reason,created_at FROM extraction_receipts WHERE run_id=job.id ORDER BY id DESC LIMIT 32) r),
-      'receiptsTruncated',(SELECT count(*)>32 FROM extraction_receipts WHERE run_id=job.id),
+      'receiptsTruncated',(SELECT count(*)>32 FROM (SELECT id FROM extraction_receipts WHERE run_id=job.id LIMIT 33) bounded),
       'coverage',(SELECT COALESCE(jsonb_agg(jsonb_build_object('index',chunk_index,'status',state,'reason',reason) ORDER BY chunk_index),'[]'::jsonb) FROM extraction_chunks WHERE run_id=job.id));
     SELECT array_agg(v) INTO versions FROM extraction_chunks c,LATERAL unnest(c.assertions) v WHERE c.run_id=job.id;
     IF cardinality(versions)>1024 THEN RAISE check_violation USING MESSAGE='extraction read bounds exceeded'; END IF;
@@ -558,8 +565,12 @@ BEGIN
     OR NOT EXISTS(SELECT 1 FROM pipeline_budget_workflows WHERE id=job.workflow_id AND active=0 AND NOT cancelled AND deadline_at>clock_timestamp()
       AND (used->>'calls')::bigint<(profile->'limits'->>'calls')::bigint AND (used->>'retries')::bigint<(profile->'limits'->>'retries')::bigint) THEN
     RAISE check_violation USING MESSAGE='extraction original allowance unavailable'; END IF;
-  UPDATE extraction_runs SET state='queued',retry_at=clock_timestamp(),generation=generation+1,owner=NULL,lease_until=NULL WHERE id=job.id;
-  INSERT INTO extraction_receipts(run_id,generation,outcome) VALUES(job.id,job.generation+1,'retry');
+  IF job.state='queued' THEN
+    UPDATE extraction_runs SET retry_at=clock_timestamp() WHERE id=job.id;
+  ELSE
+    UPDATE extraction_runs SET state='queued',retry_at=clock_timestamp(),generation=generation+1,owner=NULL,lease_until=NULL WHERE id=job.id;
+    INSERT INTO extraction_receipts(run_id,generation,outcome) VALUES(job.id,job.generation+1,'retry');
+  END IF;
   INSERT INTO audit_log(principal_id,action,memory_id,scope_id,metadata) VALUES(actor,'write',memory,job.scope_id,jsonb_build_object('operation','extraction_retry'));
   RETURN jsonb_build_object('status','queued','runId',job.id);
 END $$;
@@ -574,11 +585,15 @@ BEGIN
   IF job.state='running' AND job.lease_until>clock_timestamp() THEN RAISE check_violation USING MESSAGE='extraction worker lease is active'; END IF;
   SELECT * INTO STRICT original FROM extraction_attempts WHERE run_id=job.id AND attempt_id=attempt;
   SELECT * INTO accounting FROM pipeline_budget_attempts WHERE workflow_id=job.workflow_id AND attempt_id=attempt;
+  IF EXISTS(SELECT 1 FROM extraction_recoveries WHERE attempt_id=attempt) THEN
+    RETURN (SELECT jsonb_build_object('accounting',r.accounting,'renewed',FALSE) FROM extraction_recoveries r WHERE r.attempt_id=attempt);
+  END IF;
   IF accounting.attempt_id IS NOT NULL AND accounting.state<>'settled' THEN
     PERFORM continuum_pipeline_settle(job.workflow_id,attempt,original.attempt_owner,original.attempt_generation,'{"provenance":"unknown"}'::jsonb);
   ELSIF accounting.attempt_id IS NULL THEN
     INSERT INTO extraction_abandoned_attempts VALUES(attempt) ON CONFLICT DO NOTHING;
   END IF;
+  INSERT INTO extraction_recoveries VALUES(attempt,CASE WHEN accounting.attempt_id IS NULL THEN 'no-reservation' ELSE 'settled' END);
   -- Recovery never creates a workflow or renews a deadline, and never restores
   -- a cancelled job. A live remaining allowance can be retried by its scope admin.
   IF job.state<>'cancelled' THEN
@@ -645,7 +660,8 @@ CREATE FUNCTION continuum_extraction_is_ready() RETURNS BOOLEAN LANGUAGE sql STA
   SELECT continuum_evidence_is_ready() AND continuum_pipeline_budgets_is_ready()
     AND NOT EXISTS(SELECT 1 FROM (VALUES
       ('extraction_attempts'::regclass,'extraction_attempt_immutable'),('extraction_receipts'::regclass,'extraction_receipt_immutable'),
-      ('extraction_dispatch_receipts'::regclass,'extraction_dispatch_immutable'),('extraction_abandoned_attempts'::regclass,'extraction_abandoned_immutable')) expected(relation,name)
+      ('extraction_dispatch_receipts'::regclass,'extraction_dispatch_immutable'),('extraction_abandoned_attempts'::regclass,'extraction_abandoned_immutable'),
+      ('extraction_recoveries'::regclass,'extraction_recovery_immutable')) expected(relation,name)
       LEFT JOIN pg_trigger t ON t.tgrelid=expected.relation AND t.tgname=expected.name
       WHERE t.oid IS NULL OR t.tgenabled<>'O' OR t.tgtype<>27 OR t.tgfoid<>'continuum_evidence_immutable()'::regprocedure)
     AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='extraction_runs'::regclass AND tgname='extraction_run_identity' AND tgenabled='O'

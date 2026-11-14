@@ -675,6 +675,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0090_standup_activity.sql' }),
         expect.objectContaining({ name: '0092_pipeline_budgets.sql' }),
         expect.objectContaining({ name: '0093_evidence_lifecycle.sql' }),
+        expect.objectContaining({ name: '0094_extraction.sql' }),
       ]);
       await grantApplicationRole(pool, applicationSchema, appRole);
       await expect(pool.query(
@@ -721,6 +722,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0090_standup_activity.sql' }),
         expect.objectContaining({ name: '0092_pipeline_budgets.sql' }),
         expect.objectContaining({ name: '0093_evidence_lifecycle.sql' }),
+        expect.objectContaining({ name: '0094_extraction.sql' }),
       ]);
       await grantApplicationRole(pool, applicationSchema, appRole);
       await expect(pool.query(
@@ -903,6 +905,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0090_standup_activity.sql' }),
         expect.objectContaining({ name: '0092_pipeline_budgets.sql' }),
         expect.objectContaining({ name: '0093_evidence_lifecycle.sql' }),
+        expect.objectContaining({ name: '0094_extraction.sql' }),
       ]);
       await grantApplicationRole(pool, applicationSchema, appRole);
       await expect(pool.query(
@@ -965,6 +968,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0090_standup_activity.sql' }),
         expect.objectContaining({ name: '0092_pipeline_budgets.sql' }),
         expect.objectContaining({ name: '0093_evidence_lifecycle.sql' }),
+        expect.objectContaining({ name: '0094_extraction.sql' }),
       ]);
       await grantApplicationRole(owner, applicationSchema, appRole);
       await expect(owner.query(
@@ -1260,6 +1264,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0090_standup_activity.sql' }),
         expect.objectContaining({ name: '0092_pipeline_budgets.sql' }),
         expect.objectContaining({ name: '0093_evidence_lifecycle.sql' }),
+        expect.objectContaining({ name: '0094_extraction.sql' }),
       ]);
       await grantApplicationRole(owner, applicationSchema, appRole);
       await expect(owner.query(

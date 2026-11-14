@@ -69,7 +69,7 @@ it('preserves healthy chunk outcomes, explicit unknowns and source bytes when on
   }, profile);
 }, 120_000);
 
-it.each(['version','policy','expiry','worker-revoked'] as const)('discards %s races before assertion commit with no captured-truth replacement', async race => {
+it.each(['version','policy','expiry','archive','delete','worker-revoked'] as const)('discards %s races before assertion commit with no captured-truth replacement', async race => {
   let mutate: () => Promise<void> = async () => {}; const good = syntheticExtractor();
   const profile = syntheticExtractor(async (...args) => { const result = await good.adapter.invoke(...args); await mutate(); return result; });
   await extractionFixture(async f => {
@@ -77,6 +77,8 @@ it.each(['version','policy','expiry','worker-revoked'] as const)('discards %s ra
     mutate = async () => {
       if (race === 'version') await f.app.query("UPDATE memories SET body='New authoritative version' WHERE id=$1", [memory.id]);
       if (race === 'expiry') await f.app.query("UPDATE memories SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [memory.id]);
+      if (race === 'archive') await f.app.query("UPDATE memories SET state='archived' WHERE id=$1", [memory.id]);
+      if (race === 'delete') await f.owner.query('DELETE FROM memories WHERE id=$1', [memory.id]);
       if (race === 'policy') await f.operator.query("SELECT continuum_operator_evidence_policy($1,$2,'any','deny',NULL,NULL)", [f.adminId, memory.id]);
       if (race === 'worker-revoked') await f.operator.query('SELECT continuum_operator_bind_extraction_worker($1,$2,$3,$4,$5,FALSE)', [f.adminId, f.workerRole, f.producerId, f.scopeId, f.profile.id]);
     };

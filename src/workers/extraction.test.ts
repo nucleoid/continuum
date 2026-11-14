@@ -75,3 +75,24 @@ it('retries a settled classified transient within the same original workflow, re
     expect((await f.owner.query('SELECT count(*)::int AS n FROM extraction_attempts WHERE run_id=(SELECT id FROM extraction_runs WHERE memory_id=$1)', [memory.id])).rows[0].n).toBe(2);
   }, profile);
 }, 120_000);
+
+it('projects durable settlement rejection as unavailable and retains maxima until actual original-identity settlement', async () => {
+  await extractionFixture(async f => {
+    await createMemory(f.app, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId, type: 'decision', title: 'Settlement', body: 'Original source', source: 'manual' });
+    await f.owner.query(`CREATE FUNCTION reject_extraction_settlement() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.state='settled' THEN RAISE EXCEPTION 'synthetic settlement rejection'; END IF; RETURN NEW; END $$;
+      CREATE TRIGGER reject_extraction_settlement BEFORE UPDATE ON pipeline_budget_attempts FOR EACH ROW EXECUTE FUNCTION reject_extraction_settlement()`);
+    expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('unavailable');
+    const row = (await f.owner.query(`SELECT r.id,r.generation,r.owner,r.workflow_id,a.attempt_id,w.active,w.used,w.retained_bytes
+      FROM extraction_runs r JOIN extraction_attempts a ON a.run_id=r.id JOIN pipeline_budget_workflows w ON w.id=r.workflow_id`)).rows[0];
+    expect(row.active).toBe(1); expect(row.used.calls).toBe(1); expect(Number(row.retained_bytes)).toBeGreaterThan(0);
+    expect((await f.owner.query("SELECT count(*)::int AS n FROM evidence_versions WHERE kind='extracted-assertion'")).rows[0].n).toBe(0);
+    await f.owner.query('DROP TRIGGER reject_extraction_settlement ON pipeline_budget_attempts');
+    // The local call has actually settled. Use its persisted original identity,
+    // retaining unknown maximum charges despite the cancelled generation.
+    expect((await f.worker.query('SELECT continuum_extraction_budget($1,$2,$3,$4,\'settle\',$5,0) AS result',
+      [row.id, randomUUID(), row.generation, row.attempt_id, { provenance: 'unknown' }])).rows[0].result).toBe(false);
+    expect((await f.owner.query('SELECT active,used FROM pipeline_budget_workflows WHERE id=$1', [row.workflow_id])).rows[0]).toMatchObject({ active: 0, used: { calls: 1 } });
+    expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('idle');
+  });
+}, 120_000);
