@@ -44,7 +44,8 @@ describe('durable pipeline accounting', () => {
     expect(await pending.dispatch()).toBe(false);
     const replica = new pg.Pool((pool as unknown as { options: pg.PoolConfig }).options);
     try {
-      expect(await pipelineAttempt(replica, { ...w, owner: newOwner, generation: next.generation, attemptId: randomUUID() }).reserve(amounts({ calls: 1, spendMicros: 1 }), 1)).toBe(false);
+      // Even a zero-spend attempt is refused while crashed attempts occupy both slots.
+      expect(await pipelineAttempt(replica, { ...w, owner: newOwner, generation: next.generation, attemptId: randomUUID() }).reserve(amounts({ calls: 1 }), 0)).toBe(false);
       expect((await readBudgetWorkflow(replica, w.id))).toMatchObject({ active: 2, retainedBytes: 500, used: { spendMicros: 10, calls: 2 } });
       expect(await dispatched.settle({})).toBe(false); // Old owner may settle, never publish.
       expect((await readBudgetWorkflow(replica, w.id))).toMatchObject({ active: 1, retainedBytes: 300, used: { spendMicros: 10 } });

@@ -386,12 +386,15 @@ export async function recall(
     ?? (opts.embeddingProvider
       ? [{ scopeIds: opts.scopeIds, provider: opts.embeddingProvider }]
       : []);
-  const deadlineMs = Math.max(1, Math.min(opts.embeddingDeadlineMs ?? routedEmbeddingDeadlineMs(groups),
-    opts.budget?.remainingMs() ?? MAX_RECALL_EMBEDDING_DEADLINE_MS));
-  if (!Number.isSafeInteger(deadlineMs) || deadlineMs < 1
-    || deadlineMs > MAX_RECALL_EMBEDDING_DEADLINE_MS) {
+  const requestedDeadlineMs = opts.embeddingDeadlineMs ?? routedEmbeddingDeadlineMs(groups);
+  if (!Number.isSafeInteger(requestedDeadlineMs) || requestedDeadlineMs < 1
+    || requestedDeadlineMs > MAX_RECALL_EMBEDDING_DEADLINE_MS) {
     throw new Error(`embeddingDeadlineMs must be an integer from 1 to ${MAX_RECALL_EMBEDDING_DEADLINE_MS}`);
   }
+  opts.budget?.assertLive();
+  const deadlineMs = opts.budget
+    ? Math.max(1, Math.min(requestedDeadlineMs, opts.budget.remainingMs()))
+    : requestedDeadlineMs;
   type GroupResult = {
     list: Array<{ id: string; rank: number; distance: number }>;
     diagnostic: RecallDiagnostics['groups'][number];

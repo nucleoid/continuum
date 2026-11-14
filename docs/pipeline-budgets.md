@@ -75,7 +75,9 @@ for real providers. Model or overhead changes require compatible accounting.
 `boundedJson` counts the exact UTF-8 bytes it returns incrementally, with at most
 256 UTF-16 units in each temporary quoted string. It rejects cycles, accessors,
 functions, symbols, non-finite numbers, unsupported prototypes, more than 10,000
-nodes and depth greater than 32. Dates use the intrinsic ISO projection rather
+nodes and depth greater than 32. These fixed resource limits produce a budget
+overflow, including for valid stored metadata; unsupported shapes produce a
+type error. Dates use the intrinsic ISO projection rather
 than contributed `toJSON` code. Escaping, keys and wrappers count. The adapter
 must send those exact bytes and enforce response limits during body reading.
 Buffering an unbounded body then returning a small projection violates the
@@ -139,6 +141,22 @@ Old owners cannot dispatch or publish, but may settle their actually completed
 attempts. Repeated settlement is idempotent and grants no second publication
 permit; conflicts fail visibly. Unresolved pre-dispatch crash reservations also
 remain retained until deliberately reconciled. Requeue is not proof a call ended.
+Workflow expiry also does not release retained slots or refund charges.
+
+Composition must persist the original attempt UUID, worker UUID and generation
+alongside its job state. After proving actual settlement or process exit, it can
+use that original identity to settle conservatively with unknown usage, releasing
+slots and retained bytes while keeping maximum spend. This foundation has no
+attempt-listing or privileged orphan-reconciliation API. If those identities are
+lost, library callers must cancel and abandon the blocked workflow, retaining its
+ledger. Further work requires a separately approved new workflow; it is not an
+automatic retry or permission to reset the previous budget.
+
+There is no automatic accounting retention. Plan bounded workflow creation and
+owner-controlled maintenance for expired, fully settled records under the
+installation's accounting retention policy. Cleanup must verify actual attempt
+settlement and remove selected attempt rows before their workflow rows. Never
+delete unsettled or ambiguous attempts to clear a budget.
 
 Pass the `DurableAttempt` to `runBudgetedStage` for queued calls. Keep the stable
 workflow identity on restart; a fresh local budget cannot bypass durable totals.
@@ -147,7 +165,10 @@ calling local `cancel()`. The database commit is the durable cutoff. A settlemen
 permit is not a fenced content-write transaction. Future apply consumers must
 recheck generation, current policy and source versions in their authorized
 write/audit transaction. These raw library APIs are trusted composition exports,
-not authenticated operator endpoints.
+not authenticated operator endpoints. Worker UUID/generation fences protect
+against stale cooperative workers, not other trusted APP/OP code: those roles
+can read the workflow identity and transfer ownership. Do not expose these
+capabilities directly to untrusted callers.
 
 The storage wrapper accepts an owned Pool and uses local five-second statement
 and one-second lock limits, preserving stricter session settings. Commit/rollback
