@@ -336,7 +336,11 @@ export function scoreClaims(actual: Claim[], expected: Claim[], chunks: string[]
   return { alignment: ratio(aligned, actual.length), labelAccuracy: ratio(labels, expected.length),
     unsupportedAssertionRate: ratio(unsupported, actual.length), claimRecall: ratio(actual.filter(item => judgments.has(item.id)).length, expected.length),
     unknownPreservation: ratio(unknowns, expected.filter(item => item.unknown).length),
+    unknownPrecision: ratio(unknowns, actual.filter(item => item.unknown).length),
+    falseUnknowns: actual.filter(item => item.unknown).length - unknowns,
     contradictionPreservation: ratio(conflicts, expected.filter(item => item.contradiction !== null).length),
+    contradictionPrecision: ratio(conflicts, actual.filter(item => item.contradiction !== null).length),
+    falseContradictions: actual.filter(item => item.contradiction !== null).length - conflicts,
     chunkCoverage: ratio(new Set(completedChunks.filter(chunk => chunks.includes(chunk))).size, new Set(chunks).size) };
 }
 
