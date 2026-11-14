@@ -278,6 +278,11 @@ BEGIN
     'continuum_operator_coordination_scope_privacy_state(uuid,uuid)',
     'continuum_operator_scrub_promotion_scope(uuid,uuid,uuid,integer)',
     'continuum_operator_scrub_standup_scope(uuid,uuid,uuid,integer)',
+    'continuum_operator_evidence_policy(uuid,uuid,text,text,timestamp with time zone,timestamp with time zone)',
+    'continuum_operator_scrub_evidence_scope(uuid,uuid,uuid,integer)',
+    'continuum_operator_evidence_repair_claim(uuid,uuid,integer)',
+    'continuum_operator_evidence_repair_attach(uuid,uuid,uuid,bigint,uuid,uuid,uuid,bigint)',
+    'continuum_operator_evidence_repair_finish(uuid,uuid,uuid,bigint,jsonb)',
     'continuum_operator_set_promotion_webhook_ids(uuid,text[])',
     'continuum_operator_bind_standup_producer(uuid,name,uuid,text,text)',
     'continuum_operator_map_standup_actor(uuid,text,text,uuid,text)',
@@ -340,6 +345,11 @@ BEGIN
   IF to_regclass(format('%I.pipeline_budget_workflows',schema_name)) IS NOT NULL THEN
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_pipeline_create(UUID,UUID,JSONB),%I.continuum_pipeline_read(UUID),%I.continuum_pipeline_reserve(UUID,UUID,UUID,BIGINT,JSONB,BIGINT),%I.continuum_pipeline_dispatch(UUID,UUID,UUID,BIGINT),%I.continuum_pipeline_settle(UUID,UUID,UUID,BIGINT,JSONB),%I.continuum_pipeline_fence(UUID,UUID,BIGINT,UUID,BOOLEAN),%I.continuum_pipeline_budgets_is_ready() TO %I',
       schema_name,schema_name,schema_name,schema_name,schema_name,schema_name,schema_name,target_role);
+  END IF;
+  IF to_regclass(format('%I.evidence_roots',schema_name)) IS NOT NULL THEN
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_evidence_source(UUID,UUID),%I.continuum_evidence_register(UUID,UUID,UUID,UUID,TEXT,JSONB,JSONB,TEXT),%I.continuum_evidence_envelope(UUID,UUID),%I.continuum_evidence_payload(UUID,UUID,TEXT),%I.continuum_evidence_eligible(UUID,UUID,TEXT),%I.continuum_evidence_is_ready() TO %I',
+      schema_name,schema_name,schema_name,schema_name,schema_name,schema_name,target_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_evidence_claim_dirty(UUID,INTEGER),%I.continuum_evidence_invalidate_page(UUID,BIGINT,UUID,BIGINT,INTEGER) TO %I',schema_name,schema_name,target_role);
   END IF;
   IF to_regclass(format('%I.memory_activity_attributions',schema_name)) IS NOT NULL THEN
     EXECUTE format('GRANT SELECT ON %I.actor_principal_mappings,%I.memory_activity_attributions,%I.standup_thread_closures TO %I',schema_name,schema_name,schema_name,target_role);

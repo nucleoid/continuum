@@ -32,6 +32,8 @@ export async function prepareAgentsMdForPrincipal(
     // bytes, selection, the digest, or the required generator read audit.
     // Personal standup attribution and closure tables are a separate reader;
     // they do not enter this bundle or expand its scoped selection.
+    // Evidence versions, derivative prose and managed copies stay outside
+    // source-memory selection, freshness bytes and delivery audit identities.
     const { markdown, memories } = await renderAgentsMdResult(pool, {
       principalId: principal.id,
       project: input.project,

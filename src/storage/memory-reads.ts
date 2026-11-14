@@ -13,6 +13,7 @@ function rowToMemoryReadRecord(row: MemoryReadRow): MemoryReadRecord {
 const READ_SELECT = `${MEMORY_COLUMNS.split(',').map((column) => `m.${column.trim()}`).join(', ')},
   CASE WHEN s.kind = 'org' THEN 'org' ELSE s.kind || ':' || s.name END AS scope_label,
   p.display_name AS author_display_name`;
+// Legacy source reader. Evidence payloads require their own current root gate.
 const JOINS = 'FROM memories m JOIN scopes s ON s.id = m.scope_id JOIN principals p ON p.id = m.author_id';
 function eligibility(principalParameter: string): string {
   return `(m.expires_at IS NULL OR m.expires_at > now())

@@ -9,7 +9,14 @@ export interface StartupSchemaOptions { expectedSchema?: string }
 
 /** Current serving binaries require the owner-controlled accounting capability. */
 export async function requirePipelineBudgetsReady(pool: pg.Pool, options: StartupSchemaOptions = {}): Promise<void> {
-  const unavailable = () => new ServiceError('DEPENDENCY_UNAVAILABLE', 'Pipeline accounting schema is unavailable; finish migrations before starting runtimes');
+  return requireOwnedReadiness(pool, options, 'continuum_pipeline_budgets_is_ready');
+}
+export async function requireEvidenceReady(pool: pg.Pool, options: StartupSchemaOptions = {}): Promise<void> {
+  return requireOwnedReadiness(pool, options, 'continuum_evidence_is_ready');
+}
+async function requireOwnedReadiness(pool: pg.Pool, options: StartupSchemaOptions,
+  capability: 'continuum_pipeline_budgets_is_ready' | 'continuum_evidence_is_ready'): Promise<void> {
+  const unavailable = () => new ServiceError('DEPENDENCY_UNAVAILABLE', 'Required pipeline schema is unavailable; finish migrations before starting runtimes');
   const client = await pool.connect().catch(() => { throw unavailable(); });
   let discard = false;
   try {
@@ -24,10 +31,10 @@ export async function requirePipelineBudgetsReady(pool: pg.Pool, options: Startu
         AND NOT EXISTS(SELECT 1 FROM pg_catalog.aclexplode(COALESCE(f.proacl,pg_catalog.acldefault('f',f.proowner))) acl
           WHERE acl.grantee=0 AND acl.privilege_type='EXECUTE'),FALSE) AS trusted
       FROM pg_catalog.pg_class m JOIN pg_catalog.pg_namespace n ON n.oid=m.relnamespace
-      LEFT JOIN pg_catalog.pg_proc f ON f.oid=pg_catalog.to_regprocedure(pg_catalog.format('%I.continuum_pipeline_budgets_is_ready()',n.nspname))
+      LEFT JOIN pg_catalog.pg_proc f ON f.oid=pg_catalog.to_regprocedure(pg_catalog.format('%I.${capability}()',n.nspname))
       WHERE m.oid=pg_catalog.to_regclass('memories')`)).rows[0];
     if (!state?.trusted) throw unavailable();
-    if (!(await client.query<{ ready: boolean }>(`SELECT ${quoteIdentifier(state.schema)}.continuum_pipeline_budgets_is_ready() AS ready`)).rows[0]?.ready) throw unavailable();
+    if (!(await client.query<{ ready: boolean }>(`SELECT ${quoteIdentifier(state.schema)}.${capability}() AS ready`)).rows[0]?.ready) throw unavailable();
     await client.query('COMMIT');
   } catch (error) {
     try { await client.query('ROLLBACK'); } catch { discard = true; }

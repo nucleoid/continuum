@@ -1,0 +1,5 @@
+[
+  { "id": "deleted-source", "mutation": "delete", "payload": "Conclusion from deleted source data" },
+  { "id": "revoked-source", "mutation": "revoke", "payload": "Conclusion from revoked source data" },
+  { "id": "unsupported-wording", "mutation": "unsupported-kind", "payload": "Unsupported wording has no reviewed artifact admission" }
+]

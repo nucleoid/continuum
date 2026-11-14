@@ -2,6 +2,13 @@
 
 ## Implemented foundation
 
+The separate [evidence lifecycle](evidence-lifecycle.md) now implements the
+version/quarantine/erasure consumer foundation in migration 0093. It evaluates
+this pure policy over locked current authority in owned transactions. The
+autocommit adapter below retains its narrower connection contract. Existing
+legacy retrieval/generator services remain source-only, and no artifact-specific
+extraction/synthesis/connector feature is activated.
+
 `src/evidence/policy.ts` defines `evidence-authorization-v1`: pure, typed
 intersection decisions and bounded reason codes. The internal
 `decideEvidenceForPrincipal` adapter in `src/services/access.ts` resolves an

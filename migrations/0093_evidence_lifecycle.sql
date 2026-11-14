@@ -1,0 +1,724 @@
+-- Empty, lazy evidence foundation. No historical source rewrite or enabled generator.
+SET LOCAL lock_timeout='5s';
+SET LOCAL statement_timeout='60s';
+CREATE TEMP TABLE continuum_evidence_upgrade_roles(role_oid OID PRIMARY KEY,role_name NAME,operator BOOLEAN) ON COMMIT DROP;
+DO $$
+DECLARE candidate RECORD;
+BEGIN
+  FOR candidate IN SELECT profile.*,role.rolname FROM continuum_pgvector_role_profiles profile
+    JOIN pg_catalog.pg_roles role ON role.oid=profile.database_role_oid WHERE profile_kind IN ('application','operator') LOOP
+    BEGIN
+      PERFORM continuum_assert_application_role_allowlist(candidate.rolname,candidate.profile_kind='operator');
+      INSERT INTO continuum_evidence_upgrade_roles VALUES(candidate.database_role_oid,candidate.rolname,candidate.profile_kind='operator');
+    EXCEPTION WHEN OTHERS THEN
+      RAISE NOTICE 'Continuum skipped evidence grants for role OID % (SQLSTATE %); explicit regrant required',candidate.database_role_oid,SQLSTATE;
+    END;
+  END LOOP;
+END;
+$$;
+
+CREATE TABLE evidence_roots(
+  id UUID PRIMARY KEY,
+  source_memory_id UUID UNIQUE,
+  promotion_destination UUID,
+  scope_id UUID NOT NULL REFERENCES scopes(id),
+  generation BIGINT NOT NULL DEFAULT 1 CHECK(generation>0),
+  current_version UUID,
+  revoked BOOLEAN NOT NULL DEFAULT FALSE,
+  expiry_ceiling TIMESTAMPTZ CHECK(expiry_ceiling IS NULL OR isfinite(expiry_ceiling)),
+  residency TEXT NOT NULL DEFAULT 'any' CHECK(residency IN ('any','local-only')),
+  -- Local memory reference data needs no external document grant. Connector
+  -- artifacts cannot use this default; unsupported connector kinds deny below.
+  external_state TEXT NOT NULL DEFAULT 'not-required' CHECK(external_state IN ('not-required','allow','deny','unknown')),
+  checked_at TIMESTAMPTZ CHECK(checked_at IS NULL OR isfinite(checked_at)),
+  valid_until TIMESTAMPTZ CHECK(valid_until IS NULL OR isfinite(valid_until)),
+  CHECK(external_state<>'allow' OR (checked_at IS NOT NULL AND valid_until IS NOT NULL AND valid_until>checked_at))
+);
+CREATE TABLE evidence_versions(
+  id UUID PRIMARY KEY DEFAULT pg_catalog.gen_random_uuid(),
+  root_id UUID NOT NULL REFERENCES evidence_roots(id),
+  scope_id UUID NOT NULL REFERENCES scopes(id),
+  kind TEXT NOT NULL CHECK(kind IN ('source-document-version','extracted-assertion','derived-observation','brief-section-version','history','cache','trace','managed-export','queued-payload')),
+  previous_version UUID REFERENCES evidence_versions(id),
+  provenance JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+  expires_at TIMESTAMPTZ CHECK(expires_at IS NULL OR isfinite(expires_at)),
+  depth INTEGER NOT NULL CHECK(depth BETWEEN 0 AND 16),
+  root_count INTEGER NOT NULL CHECK(root_count BETWEEN 1 AND 256),
+  parent_count INTEGER NOT NULL CHECK(parent_count BETWEEN 0 AND 64)
+);
+CREATE INDEX evidence_versions_scope_idx ON evidence_versions(scope_id,root_id,id);
+CREATE INDEX evidence_versions_root_idx ON evidence_versions(root_id,id);
+ALTER TABLE evidence_roots ADD CONSTRAINT evidence_current_version_fk FOREIGN KEY(current_version) REFERENCES evidence_versions(id);
+ALTER TABLE evidence_roots ADD COLUMN lineage_parent UUID REFERENCES evidence_versions(id);
+CREATE TABLE evidence_source_dependencies(
+  root_id UUID NOT NULL REFERENCES evidence_roots(id),
+  upstream_root_id UUID NOT NULL REFERENCES evidence_roots(id),
+  generation BIGINT NOT NULL CHECK(generation>0),
+  PRIMARY KEY(root_id,upstream_root_id), CHECK(root_id<>upstream_root_id)
+);
+REVOKE ALL ON evidence_source_dependencies FROM PUBLIC;
+CREATE TABLE evidence_payloads(
+  version_id UUID PRIMARY KEY REFERENCES evidence_versions(id),
+  payload TEXT NOT NULL CHECK(octet_length(payload)<=1048576),
+  content_hash TEXT NOT NULL CHECK(content_hash~'^[0-9a-f]{64}$')
+);
+CREATE TABLE evidence_edges(
+  version_id UUID NOT NULL REFERENCES evidence_versions(id),
+  parent_id UUID NOT NULL REFERENCES evidence_versions(id),
+  kind TEXT NOT NULL CHECK(kind IN ('source','assertion','derivation','copy')),
+  PRIMARY KEY(version_id,parent_id), CHECK(version_id<>parent_id)
+);
+CREATE INDEX evidence_edges_parent_idx ON evidence_edges(parent_id,version_id);
+CREATE TABLE evidence_closure(
+  version_id UUID NOT NULL REFERENCES evidence_versions(id),
+  root_id UUID NOT NULL REFERENCES evidence_roots(id),
+  generation BIGINT NOT NULL CHECK(generation>0),
+  PRIMARY KEY(version_id,root_id)
+);
+CREATE INDEX evidence_closure_root_idx ON evidence_closure(root_id,generation,version_id);
+CREATE TABLE evidence_state(
+  version_id UUID PRIMARY KEY REFERENCES evidence_versions(id),
+  state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','quarantined','erased'))
+);
+-- Each committed generation remains independently discoverable. An allocated
+-- sequence/high-water mark is never used as evidence of commit order.
+CREATE TABLE evidence_dirty_roots(
+  root_id UUID NOT NULL REFERENCES evidence_roots(id),
+  generation BIGINT NOT NULL,
+  erase BOOLEAN NOT NULL DEFAULT FALSE,
+  cursor UUID,
+  owner UUID,
+  claim_generation BIGINT NOT NULL DEFAULT 0,
+  lease_until TIMESTAMPTZ,
+  complete BOOLEAN NOT NULL DEFAULT FALSE,
+  PRIMARY KEY(root_id,generation)
+);
+CREATE INDEX evidence_dirty_pending_idx ON evidence_dirty_roots(root_id,generation) WHERE NOT complete;
+CREATE TABLE evidence_repair_jobs(
+  version_id UUID PRIMARY KEY REFERENCES evidence_versions(id),
+  state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','claimed','completed','unavailable','cancelled')),
+  owner UUID,
+  generation BIGINT NOT NULL DEFAULT 0,
+  lease_until TIMESTAMPTZ,
+  -- Original accounting identities survive requeue. No expiry-based refunds.
+  retry_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+  workflow_id UUID,
+  attempt_id UUID,
+  attempt_owner UUID,
+  attempt_generation BIGINT,
+  result_version UUID REFERENCES evidence_versions(id),
+  CHECK((workflow_id IS NULL AND attempt_id IS NULL AND attempt_owner IS NULL AND attempt_generation IS NULL)
+    OR (workflow_id IS NOT NULL AND attempt_id IS NOT NULL AND attempt_owner IS NOT NULL AND attempt_generation>0))
+);
+CREATE INDEX evidence_repair_pending_idx ON evidence_repair_jobs(version_id) WHERE state IN ('pending','claimed');
+CREATE TABLE evidence_scope_erasure_progress(
+  scope_id UUID PRIMARY KEY REFERENCES scopes(id),
+  generation BIGINT NOT NULL DEFAULT 1,
+  cursor UUID,
+  complete BOOLEAN NOT NULL DEFAULT FALSE
+);
+REVOKE ALL ON evidence_scope_erasure_progress FROM PUBLIC;
+REVOKE ALL ON evidence_roots,evidence_versions,evidence_payloads,evidence_edges,evidence_closure,evidence_state,evidence_dirty_roots,evidence_repair_jobs FROM PUBLIC;
+
+CREATE FUNCTION continuum_evidence_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE check_violation USING MESSAGE='evidence provenance is immutable'; END;
+$$;
+CREATE TRIGGER evidence_version_immutable BEFORE UPDATE OR DELETE ON evidence_versions FOR EACH ROW EXECUTE FUNCTION continuum_evidence_immutable();
+CREATE TRIGGER evidence_edge_immutable BEFORE UPDATE OR DELETE ON evidence_edges FOR EACH ROW EXECUTE FUNCTION continuum_evidence_immutable();
+CREATE TRIGGER evidence_closure_immutable BEFORE UPDATE OR DELETE ON evidence_closure FOR EACH ROW EXECUTE FUNCTION continuum_evidence_immutable();
+CREATE TRIGGER evidence_source_dependencies_immutable BEFORE UPDATE OR DELETE ON evidence_source_dependencies FOR EACH ROW EXECUTE FUNCTION continuum_evidence_immutable();
+-- Payload deletion is the canonical erasure operation. It also deletes hashes.
+CREATE TRIGGER evidence_payload_immutable BEFORE UPDATE ON evidence_payloads FOR EACH ROW EXECUTE FUNCTION continuum_evidence_immutable();
+
+CREATE FUNCTION continuum_evidence_canonical(memory memories) RETURNS TEXT LANGUAGE sql IMMUTABLE AS $$
+  SELECT jsonb_build_object('scopeId',memory.scope_id,'title',memory.title,'body',memory.body,'type',memory.type,
+    'tags',memory.tags,'source',memory.source,'sourceRef',memory.source_ref,'metadata',memory.metadata-'related')::text;
+$$;
+CREATE FUNCTION continuum_evidence_can_access(actor UUID,scope UUID,writing BOOLEAN) RETURNS BOOLEAN LANGUAGE sql VOLATILE SECURITY DEFINER AS $$
+  SELECT EXISTS(SELECT 1 FROM principals WHERE id=actor AND disabled_at IS NULL)
+    AND NOT EXISTS(SELECT 1 FROM principal_user_scopes mapping JOIN principals owner ON owner.id=mapping.principal_id
+      WHERE mapping.scope_id=scope AND owner.disabled_at IS NOT NULL)
+    AND ((NOT writing AND EXISTS(SELECT 1 FROM scopes WHERE id=scope AND kind='org'))
+      OR EXISTS(SELECT 1 FROM scope_memberships m WHERE m.principal_id=actor AND m.scope_id=scope AND m.active
+        AND (NOT writing OR m.role IN ('writer','admin'))
+        AND (m.source_kind<>'entra' OR EXISTS(SELECT 1 FROM entra_sync_state WHERE singleton
+          AND clock_timestamp()<last_success_at+max_staleness))));
+$$;
+CREATE FUNCTION continuum_evidence_promotion_parent(memory memories) RETURNS UUID LANGUAGE sql STABLE SECURITY DEFINER AS $$
+  SELECT p.id FROM memories p WHERE p.id::text=memory.metadata->>'promoted_from' AND p.promoted_to_id=memory.id AND p.state='promoted'
+    AND (p.title,p.body,p.type,p.tags,p.source_ref) IS NOT DISTINCT FROM (memory.title,memory.body,memory.type,memory.tags,memory.source_ref)
+    AND memory.source='promote:'||p.source;
+$$;
+CREATE FUNCTION continuum_evidence_snapshot(memory memories) RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE root evidence_roots%ROWTYPE; version UUID:=gen_random_uuid(); canonical TEXT; total INTEGER; depth_value INTEGER:=0;
+BEGIN
+  SELECT * INTO STRICT root FROM evidence_roots WHERE id=memory.id FOR UPDATE;
+  IF root.revoked OR memory.state NOT IN ('live','promoted') OR (root.expiry_ceiling IS NOT NULL AND root.expiry_ceiling<=clock_timestamp()) THEN
+    RETURN NULL;
+  END IF;
+  IF EXISTS(SELECT 1 FROM principal_user_scopes mapping JOIN principals owner ON owner.id=mapping.principal_id
+      WHERE mapping.scope_id=root.scope_id AND owner.disabled_at IS NOT NULL)
+    OR root.external_state IN ('deny','unknown') OR (root.external_state='allow'
+    AND (root.checked_at IS NULL OR root.valid_until IS NULL OR root.checked_at>clock_timestamp() OR root.valid_until<=clock_timestamp()))
+    OR EXISTS(SELECT 1 FROM evidence_source_dependencies dependency JOIN evidence_roots upstream ON upstream.id=dependency.upstream_root_id
+      LEFT JOIN memories source ON source.id=upstream.source_memory_id
+      WHERE dependency.root_id=root.id AND (upstream.generation<>dependency.generation OR upstream.revoked
+        OR (upstream.expiry_ceiling IS NOT NULL AND upstream.expiry_ceiling<=clock_timestamp())
+        OR upstream.external_state IN ('deny','unknown') OR (upstream.external_state='allow'
+          AND (upstream.checked_at IS NULL OR upstream.valid_until IS NULL OR upstream.checked_at>clock_timestamp() OR upstream.valid_until<=clock_timestamp()))
+        OR (upstream.source_memory_id IS NOT NULL AND (source.id IS NULL OR source.state NOT IN ('live','promoted')
+          OR (source.state='promoted' AND (upstream.promotion_destination IS NULL OR upstream.promotion_destination IS DISTINCT FROM source.promoted_to_id))))
+        OR EXISTS(SELECT 1 FROM principal_user_scopes mapping JOIN principals owner ON owner.id=mapping.principal_id
+          WHERE mapping.scope_id=upstream.scope_id AND owner.disabled_at IS NOT NULL))) THEN RETURN NULL; END IF;
+  canonical:=continuum_evidence_canonical(memory);
+  IF octet_length(canonical)>1048576 THEN RETURN NULL; END IF;
+  SELECT count(*)+1 INTO total FROM evidence_source_dependencies WHERE root_id=root.id;
+  IF root.lineage_parent IS NOT NULL THEN SELECT depth+1 INTO depth_value FROM evidence_versions WHERE id=root.lineage_parent; END IF;
+  IF total>256 OR depth_value>16 THEN RAISE check_violation USING MESSAGE='evidence lineage bounds exceeded'; END IF;
+  INSERT INTO evidence_versions(id,root_id,scope_id,kind,previous_version,provenance,expires_at,depth,root_count,parent_count)
+    VALUES(version,root.id,memory.scope_id,'source-document-version',root.current_version,jsonb_build_object('policy',to_jsonb(root)),root.expiry_ceiling,depth_value,total,CASE WHEN root.lineage_parent IS NULL THEN 0 ELSE 1 END);
+  INSERT INTO evidence_payloads VALUES(version,canonical,encode(sha256(convert_to(canonical,'UTF8')),'hex'));
+  INSERT INTO evidence_state(version_id) VALUES(version);
+  INSERT INTO evidence_closure VALUES(version,root.id,root.generation);
+  INSERT INTO evidence_closure SELECT version,upstream_root_id,generation FROM evidence_source_dependencies WHERE root_id=root.id;
+  IF root.lineage_parent IS NOT NULL THEN INSERT INTO evidence_edges VALUES(version,root.lineage_parent,'copy'); END IF;
+  UPDATE evidence_roots SET current_version=version WHERE id=root.id;
+  RETURN version;
+END;
+$$;
+CREATE FUNCTION continuum_evidence_adopt_source(actor UUID,memory_id UUID,remaining INTEGER) RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE memory memories%ROWTYPE; root evidence_roots%ROWTYPE; version UUID; parent UUID; parent_version UUID; upstream evidence_roots%ROWTYPE; destination memories%ROWTYPE;
+BEGIN
+  IF remaining<0 THEN RAISE check_violation USING MESSAGE='evidence lineage bounds exceeded'; END IF;
+  SELECT * INTO memory FROM memories WHERE id=memory_id FOR UPDATE;
+  IF memory.id IS NULL OR memory.state NOT IN ('live','promoted') OR (actor IS NOT NULL AND NOT continuum_evidence_can_access(actor,memory.scope_id,FALSE))
+    OR (memory.expires_at IS NOT NULL AND memory.expires_at<=clock_timestamp()) THEN
+    RAISE check_violation USING MESSAGE='evidence unavailable';
+  END IF;
+  SELECT * INTO root FROM evidence_roots WHERE id=memory.id FOR UPDATE;
+  IF root.id IS NOT NULL THEN
+    IF root.revoked OR root.source_memory_id IS DISTINCT FROM memory.id THEN RAISE check_violation USING MESSAGE='evidence unavailable'; END IF;
+    IF root.current_version IS NOT NULL THEN RETURN root.current_version; END IF;
+  END IF;
+  IF memory.metadata ? 'promoted_from' OR memory.source LIKE 'promote:%' THEN
+    parent:=continuum_evidence_promotion_parent(memory);
+    IF parent IS NULL THEN RAISE check_violation USING MESSAGE='evidence promotion lineage unavailable'; END IF;
+    parent_version:=continuum_evidence_adopt_source(actor,parent,remaining-1);
+    SELECT * INTO STRICT upstream FROM evidence_roots WHERE id=parent;
+  END IF;
+  IF memory.state='promoted' THEN
+    SELECT * INTO destination FROM memories WHERE id=memory.promoted_to_id FOR SHARE;
+    IF continuum_evidence_promotion_parent(destination) IS DISTINCT FROM memory.id THEN RAISE check_violation USING MESSAGE='evidence promotion lineage unavailable'; END IF;
+  END IF;
+  INSERT INTO evidence_roots(id,source_memory_id,scope_id,expiry_ceiling,promotion_destination)
+    VALUES(memory.id,memory.id,memory.scope_id,memory.expires_at,CASE WHEN memory.state='promoted' THEN memory.promoted_to_id END) ON CONFLICT DO NOTHING;
+  SELECT * INTO STRICT root FROM evidence_roots WHERE id=memory.id FOR UPDATE;
+  IF root.source_memory_id IS DISTINCT FROM memory.id OR root.revoked THEN RAISE check_violation USING MESSAGE='evidence unavailable'; END IF;
+  IF parent IS NOT NULL THEN
+    UPDATE evidence_roots SET expiry_ceiling=least(expiry_ceiling,upstream.expiry_ceiling),lineage_parent=parent_version WHERE id=root.id;
+    INSERT INTO evidence_source_dependencies SELECT root.id,c.root_id,c.generation
+      FROM evidence_closure c WHERE c.version_id=parent_version;
+  END IF;
+  version:=root.current_version;
+  IF version IS NULL THEN version:=continuum_evidence_snapshot(memory); END IF;
+  IF version IS NULL THEN RAISE check_violation USING MESSAGE='evidence unavailable'; END IF;
+  RETURN version;
+END;
+$$;
+CREATE FUNCTION continuum_evidence_source(actor UUID,memory_id UUID) RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE version UUID; memory memories%ROWTYPE;
+BEGIN
+  SELECT * INTO memory FROM memories WHERE id=memory_id FOR UPDATE;
+  IF actor IS NULL OR memory.id IS NULL OR memory.state<>'live' THEN RAISE check_violation USING MESSAGE='evidence unavailable'; END IF;
+  version:=continuum_evidence_adopt_source(actor,memory_id,16);
+  PERFORM continuum_evidence_lock(actor,ARRAY[version]);
+  IF NOT continuum_evidence_eligible(actor,version,NULL) THEN RAISE check_violation USING MESSAGE='evidence unavailable'; END IF;
+  INSERT INTO audit_log(principal_id,action,scope_id,metadata) VALUES(actor,'write',memory.scope_id,jsonb_build_object('operation','evidence_source_registered'));
+  RETURN version;
+END;
+$$;
+CREATE FUNCTION continuum_evidence_source_fence() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE root evidence_roots%ROWTYPE; erased BOOLEAN; promoted memories%ROWTYPE;
+BEGIN
+  IF TG_OP='UPDATE' AND NEW.state='promoted' AND NEW.promoted_to_id IS NOT NULL THEN
+    SELECT * INTO promoted FROM memories WHERE id=NEW.promoted_to_id FOR UPDATE;
+    IF continuum_evidence_promotion_parent(promoted) IS DISTINCT FROM NEW.id THEN promoted.id:=NULL; END IF;
+  END IF;
+  SELECT * INTO root FROM evidence_roots WHERE source_memory_id=OLD.id FOR UPDATE;
+  IF root.id IS NULL THEN IF TG_OP='DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF; END IF;
+  IF TG_OP='UPDATE' AND continuum_evidence_canonical(OLD)=continuum_evidence_canonical(NEW)
+    AND (OLD.state,OLD.expires_at,OLD.promoted_to_id,OLD.supersedes_id) IS NOT DISTINCT FROM
+        (NEW.state,NEW.expires_at,NEW.promoted_to_id,NEW.supersedes_id) THEN RETURN NEW; END IF;
+  erased:=TG_OP='DELETE';
+  IF TG_OP='UPDATE' THEN erased:=NEW.state='archived' AND NEW.title='[erased]' AND NEW.body='[erased]'; END IF;
+  UPDATE evidence_roots SET generation=generation+1,revoked=revoked OR erased,
+    expiry_ceiling=CASE WHEN TG_OP='DELETE' THEN expiry_ceiling ELSE least(expiry_ceiling,NEW.expires_at) END,
+    scope_id=CASE WHEN TG_OP='DELETE' THEN scope_id ELSE NEW.scope_id END,
+    promotion_destination=promoted.id
+    WHERE id=root.id RETURNING * INTO root;
+  INSERT INTO evidence_dirty_roots(root_id,generation,erase) VALUES(root.id,root.generation,erased);
+  IF TG_OP='UPDATE' AND NOT root.revoked AND (NEW.state='live' OR promoted.id IS NOT NULL) THEN
+    PERFORM continuum_evidence_snapshot(NEW);
+  END IF;
+  IF promoted.id IS NOT NULL THEN
+    BEGIN
+      PERFORM continuum_evidence_adopt_source(NULL,promoted.id,16);
+    EXCEPTION WHEN check_violation THEN
+      -- Evidence-only ineligibility must not reject a valid legacy promotion.
+      -- The source fence above remains committed; lazy destination enrollment
+      -- will recheck its original ancestry and ceiling before admitting data.
+      NULL;
+    END;
+  END IF;
+  -- Trusted older/direct writers cannot omit the committed fence and guard audit.
+  INSERT INTO audit_log(principal_id,action,metadata)
+    VALUES('00000000-0000-4000-8000-000000000011','archive',jsonb_build_object('operation','evidence_source_fenced'));
+  IF TG_OP='DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF;
+END;
+$$;
+CREATE TRIGGER evidence_source_fence AFTER UPDATE OR DELETE ON memories FOR EACH ROW EXECUTE FUNCTION continuum_evidence_source_fence();
+
+CREATE FUNCTION continuum_evidence_eligible(actor UUID,version UUID,locality TEXT) RETURNS BOOLEAN LANGUAGE plpgsql VOLATILE SECURITY DEFINER AS $$
+DECLARE v evidence_versions%ROWTYPE; at TIMESTAMPTZ:=clock_timestamp();
+BEGIN
+  SELECT * INTO v FROM evidence_versions WHERE id=version;
+  IF v.id IS NULL OR (v.expires_at IS NOT NULL AND v.expires_at<=at)
+    OR NOT continuum_evidence_can_access(actor,v.scope_id,FALSE)
+    OR NOT EXISTS(SELECT 1 FROM evidence_state WHERE version_id=version AND state='active')
+    OR NOT EXISTS(SELECT 1 FROM evidence_payloads WHERE version_id=version)
+    OR (SELECT count(*) FROM evidence_closure WHERE version_id=version)<>v.root_count
+    OR (SELECT count(*) FROM evidence_edges WHERE version_id=version)<>v.parent_count
+    OR NOT EXISTS(SELECT 1 FROM evidence_closure WHERE version_id=version AND root_id=v.root_id)
+    OR (locality IS NOT NULL AND locality NOT IN ('local','hosted')) THEN RETURN FALSE; END IF;
+  IF EXISTS(SELECT 1 FROM evidence_closure c JOIN evidence_roots r ON r.id=c.root_id
+    LEFT JOIN memories m ON m.id=r.source_memory_id
+    WHERE c.version_id=version AND (r.generation<>c.generation OR r.revoked
+      OR (r.expiry_ceiling IS NOT NULL AND r.expiry_ceiling<=at)
+      OR NOT continuum_evidence_can_access(actor,r.scope_id,FALSE)
+      OR (r.source_memory_id IS NOT NULL AND (m.id IS NULL OR (m.state<>'live' AND NOT(m.state='promoted' AND r.promotion_destination IS NOT NULL AND r.promotion_destination=m.promoted_to_id))
+        OR (m.expires_at IS NOT NULL AND m.expires_at<=at)))
+      OR (locality='hosted' AND r.residency='local-only')
+      OR r.external_state IN ('deny','unknown')
+      OR (r.external_state='allow' AND (r.checked_at IS NULL OR r.valid_until IS NULL OR NOT(r.checked_at<=at AND at<r.valid_until))))) THEN RETURN FALSE; END IF;
+  RETURN TRUE;
+END;
+$$;
+-- Stable locking order mirrors the source writer: source rows before roots.
+-- Authority rows are locked too, but time is always sampled after those locks.
+CREATE FUNCTION continuum_evidence_lock(actor UUID,versions UUID[],additional_scope UUID DEFAULT NULL) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN
+  IF cardinality(versions) NOT BETWEEN 1 AND 64 THEN RAISE check_violation USING MESSAGE='evidence admission bounds exceeded'; END IF;
+  PERFORM m.id FROM memories m WHERE m.id IN (SELECT r.source_memory_id FROM evidence_roots r JOIN evidence_closure c ON c.root_id=r.id
+    WHERE c.version_id=ANY(versions)) ORDER BY m.id FOR SHARE;
+  PERFORM r.id FROM evidence_roots r WHERE r.id IN (SELECT root_id FROM evidence_closure WHERE version_id=ANY(versions)) ORDER BY r.id FOR SHARE;
+  PERFORM id FROM principals WHERE id=actor FOR SHARE;
+  PERFORM principal_id FROM scope_memberships WHERE principal_id=actor AND (scope_id=additional_scope OR scope_id IN
+    (SELECT scope_id FROM evidence_roots WHERE id IN (SELECT root_id FROM evidence_closure WHERE version_id=ANY(versions)))
+    OR scope_id IN (SELECT scope_id FROM evidence_versions WHERE id=ANY(versions))) ORDER BY scope_id,source_kind,source_id FOR SHARE;
+  PERFORM singleton FROM entra_sync_state WHERE singleton FOR SHARE;
+END;
+$$;
+CREATE FUNCTION continuum_evidence_register(actor UUID,node UUID,expected UUID,target_scope UUID,artifact_kind TEXT,parents JSONB,identity JSONB,content TEXT)
+RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE root evidence_roots%ROWTYPE; version UUID:=gen_random_uuid(); parent_ids UUID[]; roots UUID[]; edge RECORD;
+  depth_value INTEGER; ceiling TIMESTAMPTZ; parent_total INTEGER; policy_snapshots JSONB;
+BEGIN
+  IF artifact_kind IS NULL OR artifact_kind NOT IN ('extracted-assertion','derived-observation','brief-section-version','history','cache','trace','managed-export','queued-payload')
+    OR jsonb_typeof(parents) IS DISTINCT FROM 'array' OR jsonb_array_length(parents) NOT BETWEEN 1 AND 64
+    OR content IS NULL OR octet_length(content)>1048576 OR node IS NULL OR EXISTS(SELECT 1 FROM memories WHERE id=node)
+    OR jsonb_typeof(identity) IS DISTINCT FROM 'object' OR NOT(identity ?& ARRAY['transform','model','prompt','schema'])
+    OR EXISTS(SELECT 1 FROM jsonb_each(identity) WHERE key NOT IN ('transform','model','prompt','schema') OR jsonb_typeof(value)<>'string'
+      OR (value#>>'{}')!~'^[a-zA-Z0-9_.:/-]{1,128}$') THEN
+    RAISE check_violation USING MESSAGE='evidence admission bounds or kind invalid'; END IF;
+  SELECT array_agg((p->>'versionId')::uuid ORDER BY p->>'versionId'),count(*) INTO parent_ids,parent_total FROM jsonb_array_elements(parents) p;
+  IF (SELECT count(DISTINCT p) FROM unnest(parent_ids) p)<>parent_total THEN RAISE check_violation USING MESSAGE='duplicate evidence parent'; END IF;
+  IF EXISTS(SELECT 1 FROM jsonb_array_elements(parents) p WHERE (p->>'kind') IS NULL OR (p->>'kind') NOT IN ('source','assertion','derivation','copy')
+    OR EXISTS(SELECT 1 FROM jsonb_object_keys(p) k WHERE k NOT IN ('versionId','kind'))) THEN RAISE check_violation USING MESSAGE='invalid evidence edge'; END IF;
+  -- A prospective current node in its parent closure is an explicit cycle.
+  IF EXISTS(SELECT 1 FROM evidence_closure WHERE version_id=ANY(parent_ids) AND root_id=node) THEN RAISE check_violation USING MESSAGE='evidence cycle'; END IF;
+  SELECT array_agg(DISTINCT root_id ORDER BY root_id) INTO roots FROM evidence_closure WHERE version_id=ANY(parent_ids);
+  IF roots IS NULL OR cardinality(roots)>=256 THEN RAISE check_violation USING MESSAGE='evidence admission bounds exceeded'; END IF;
+  PERFORM continuum_evidence_lock(actor,parent_ids,target_scope);
+  IF NOT continuum_evidence_can_access(actor,target_scope,TRUE) THEN RAISE insufficient_privilege USING MESSAGE='evidence unavailable'; END IF;
+  FOREACH version IN ARRAY parent_ids LOOP
+    IF NOT continuum_evidence_eligible(actor,version,NULL) THEN RAISE check_violation USING MESSAGE='evidence unavailable'; END IF;
+  END LOOP;
+  FOR edge IN SELECT (p->>'versionId')::uuid id,p->>'kind' kind FROM jsonb_array_elements(parents) p LOOP
+    IF edge.kind='source' AND NOT EXISTS(SELECT 1 FROM evidence_versions WHERE id=edge.id AND kind='source-document-version')
+      OR edge.kind='assertion' AND NOT EXISTS(SELECT 1 FROM evidence_versions WHERE id=edge.id AND kind='extracted-assertion') THEN
+      RAISE check_violation USING MESSAGE='invalid evidence edge'; END IF;
+  END LOOP;
+  SELECT max(depth)+1,min(expires_at) INTO depth_value,ceiling FROM evidence_versions WHERE id=ANY(parent_ids);
+  IF depth_value>16 THEN RAISE check_violation USING MESSAGE='evidence admission bounds exceeded'; END IF;
+  INSERT INTO evidence_roots(id,scope_id,expiry_ceiling) VALUES(node,target_scope,ceiling) ON CONFLICT DO NOTHING;
+  SELECT * INTO STRICT root FROM evidence_roots WHERE id=node FOR UPDATE;
+  IF root.current_version IS DISTINCT FROM expected OR root.source_memory_id IS NOT NULL OR root.revoked OR root.scope_id<>target_scope
+    OR (expected IS NOT NULL AND NOT EXISTS(SELECT 1 FROM evidence_versions WHERE id=expected AND kind=artifact_kind)) THEN
+    RAISE check_violation USING MESSAGE='evidence current pointer conflict'; END IF;
+  -- The node's original ceiling remains a bound across repair.
+  ceiling:=least(ceiling,root.expiry_ceiling);
+  UPDATE evidence_roots SET generation=generation+1,expiry_ceiling=ceiling WHERE id=node RETURNING * INTO root;
+  INSERT INTO evidence_dirty_roots(root_id,generation) VALUES(node,root.generation);
+  version:=gen_random_uuid();
+  SELECT jsonb_agg(jsonb_build_object('root',r.id,'generation',r.generation,'scopeId',r.scope_id,'expiryCeiling',r.expiry_ceiling,'revoked',r.revoked,'residency',r.residency,'external',r.external_state,
+    'checkedAt',r.checked_at,'validUntil',r.valid_until) ORDER BY r.id) INTO policy_snapshots FROM evidence_roots r WHERE id=ANY(roots);
+  INSERT INTO evidence_versions(id,root_id,scope_id,kind,previous_version,provenance,expires_at,depth,root_count,parent_count)
+    VALUES(version,node,target_scope,artifact_kind,expected,jsonb_build_object('identity',identity,'policies',policy_snapshots),ceiling,depth_value,cardinality(roots)+1,parent_total);
+  INSERT INTO evidence_edges SELECT version,(p->>'versionId')::uuid,p->>'kind' FROM jsonb_array_elements(parents) p;
+  INSERT INTO evidence_closure SELECT version,r.id,r.generation FROM evidence_roots r WHERE id=ANY(roots) OR id=node;
+  INSERT INTO evidence_state(version_id) VALUES(version);
+  INSERT INTO evidence_payloads VALUES(version,content,encode(sha256(convert_to(content,'UTF8')),'hex'));
+  UPDATE evidence_roots SET current_version=version WHERE id=node;
+  -- Recheck database time and all current authority immediately before commit.
+  IF NOT continuum_evidence_eligible(actor,version,NULL) THEN RAISE check_violation USING MESSAGE='evidence unavailable'; END IF;
+  INSERT INTO audit_log(principal_id,action,scope_id,metadata) VALUES(actor,'write',target_scope,jsonb_build_object('operation','evidence_registered','artifact_kind',artifact_kind));
+  RETURN version;
+END;
+$$;
+
+CREATE FUNCTION continuum_evidence_envelope(actor UUID,version UUID) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE v evidence_versions%ROWTYPE; policies JSONB; at TIMESTAMPTZ;
+BEGIN
+  PERFORM continuum_evidence_lock(actor,ARRAY[version]);
+  IF NOT continuum_evidence_eligible(actor,version,NULL) THEN RETURN NULL; END IF;
+  SELECT * INTO STRICT v FROM evidence_versions WHERE id=version;
+  at:=clock_timestamp();
+  SELECT jsonb_agg(jsonb_build_object('version',c.generation::text,'currentVersion',r.generation::text,'scopeIds',jsonb_build_array(r.scope_id),
+    'state','active','expiresAt',extract(epoch FROM r.expiry_ceiling)*1000,'residency',r.residency,
+    'connector',CASE WHEN r.external_state='not-required' THEN '"not-required"'::jsonb ELSE jsonb_build_object('decision',r.external_state,
+      'checkedAt',extract(epoch FROM r.checked_at)*1000,'validUntil',extract(epoch FROM r.valid_until)*1000) END,'repository','not-required') ORDER BY r.id)
+    INTO policies FROM evidence_closure c JOIN evidence_roots r ON r.id=c.root_id WHERE c.version_id=version;
+  RETURN jsonb_build_object('now',extract(epoch FROM at)*1000,'kind',v.kind,'scopeId',v.scope_id,
+    'expiresAt',extract(epoch FROM v.expires_at)*1000,'policies',policies,'bytes',(SELECT octet_length(payload) FROM evidence_payloads WHERE version_id=version));
+END;
+$$;
+CREATE FUNCTION continuum_evidence_payload(actor UUID,version UUID,locality TEXT) RETURNS TEXT LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE result TEXT; scope UUID;
+BEGIN
+  PERFORM continuum_evidence_lock(actor,ARRAY[version]);
+  IF NOT continuum_evidence_eligible(actor,version,locality) THEN RETURN NULL; END IF;
+  SELECT payload INTO result FROM evidence_payloads WHERE version_id=version;
+  SELECT scope_id INTO scope FROM evidence_versions WHERE id=version;
+  INSERT INTO audit_log(principal_id,action,scope_id,metadata) VALUES(actor,'read',scope,
+    jsonb_build_object('operation',CASE WHEN locality IS NULL THEN 'evidence_read' ELSE 'evidence_dispatch' END));
+  IF NOT continuum_evidence_eligible(actor,version,locality) THEN RETURN NULL; END IF;
+  RETURN result;
+END;
+$$;
+
+CREATE FUNCTION continuum_evidence_require_operator(actor UUID) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN
+  PERFORM id FROM principals WHERE id=actor FOR SHARE;
+  PERFORM principal_id FROM scope_memberships WHERE principal_id=actor AND scope_id=continuum_org_scope_id()
+    AND source_kind='manual' AND source_id='manual' FOR SHARE;
+  PERFORM continuum_require_standup_operator(actor);
+END;
+$$;
+CREATE FUNCTION continuum_operator_evidence_policy(actor UUID,root_id UUID,residency TEXT,external_state TEXT,checked_at TIMESTAMPTZ,valid_until TIMESTAMPTZ)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE root evidence_roots%ROWTYPE;
+BEGIN
+  PERFORM continuum_evidence_require_operator(actor);
+  PERFORM m.id FROM memories m JOIN evidence_roots r ON r.source_memory_id=m.id WHERE r.id=root_id FOR UPDATE OF m;
+  UPDATE evidence_roots r SET generation=r.generation+1,residency=$3,external_state=$4,checked_at=$5,valid_until=$6 WHERE r.id=$2 RETURNING * INTO STRICT root;
+  INSERT INTO evidence_dirty_roots(root_id,generation) VALUES(root.id,root.generation);
+  -- A policy change cannot renew an old immutable snapshot. A new source
+  -- version can be admitted under current authority, retaining the old ceiling.
+  IF root.source_memory_id IS NOT NULL AND NOT root.revoked THEN
+    PERFORM continuum_evidence_snapshot(m) FROM memories m WHERE id=root.source_memory_id;
+  END IF;
+  INSERT INTO audit_log(principal_id,action,scope_id,metadata) VALUES(actor,'archive',root.scope_id,jsonb_build_object('operation','evidence_policy_fenced'));
+END;
+$$;
+
+CREATE FUNCTION continuum_evidence_claim_dirty(worker UUID,lease_ms INTEGER) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE dirty evidence_dirty_roots%ROWTYPE;
+BEGIN
+  IF worker IS NULL OR lease_ms IS NULL OR lease_ms NOT BETWEEN 1 AND 30000 THEN RAISE check_violation USING MESSAGE='invalid evidence lease'; END IF;
+  SELECT * INTO dirty FROM evidence_dirty_roots WHERE NOT complete AND (lease_until IS NULL OR lease_until<=clock_timestamp())
+    ORDER BY root_id,generation FOR UPDATE SKIP LOCKED LIMIT 1;
+  IF dirty.root_id IS NULL THEN RETURN NULL; END IF;
+  UPDATE evidence_dirty_roots SET owner=worker,claim_generation=claim_generation+1,
+    lease_until=clock_timestamp()+lease_ms*interval '1 millisecond' WHERE root_id=dirty.root_id AND generation=dirty.generation RETURNING * INTO dirty;
+  RETURN to_jsonb(dirty);
+END;
+$$;
+CREATE FUNCTION continuum_evidence_erase_version(version UUID) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE root evidence_roots%ROWTYPE;
+BEGIN
+  PERFORM version_id FROM evidence_state WHERE version_id=version FOR UPDATE;
+  UPDATE evidence_roots r SET revoked=TRUE,generation=generation+1 FROM evidence_versions v
+    WHERE v.id=version AND r.id=v.root_id AND r.current_version=version AND NOT r.revoked RETURNING r.* INTO root;
+  IF root.id IS NOT NULL THEN INSERT INTO evidence_dirty_roots(root_id,generation,erase) VALUES(root.id,root.generation,TRUE); END IF;
+  DELETE FROM evidence_payloads WHERE version_id=version;
+  UPDATE evidence_state SET state='erased' WHERE version_id=version;
+  UPDATE pipeline_budget_workflows SET cancelled=TRUE,generation=generation+1
+    WHERE id IN (SELECT workflow_id FROM evidence_repair_jobs WHERE version_id=version) AND NOT cancelled;
+  UPDATE evidence_repair_jobs SET state='cancelled',generation=generation+1,owner=NULL,lease_until=NULL WHERE version_id=version AND state<>'cancelled';
+END;
+$$;
+CREATE FUNCTION continuum_evidence_invalidate_page(target_root UUID,epoch BIGINT,worker UUID,claim_epoch BIGINT,page_limit INTEGER)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE dirty evidence_dirty_roots%ROWTYPE; item RECORD; processed INTEGER:=0; last_id UUID; done BOOLEAN;
+BEGIN
+  IF page_limit IS NULL OR page_limit NOT BETWEEN 1 AND 1000 THEN RAISE check_violation USING MESSAGE='invalid evidence page bounds'; END IF;
+  SELECT * INTO STRICT dirty FROM evidence_dirty_roots WHERE root_id=target_root AND generation=epoch FOR UPDATE;
+  IF worker IS NULL OR claim_epoch IS NULL OR dirty.owner IS DISTINCT FROM worker OR dirty.claim_generation<>claim_epoch
+    OR dirty.lease_until<=clock_timestamp() OR dirty.complete THEN RAISE check_violation USING MESSAGE='stale evidence claim'; END IF;
+  -- Do not SKIP LOCKED beyond a durable cursor. A locked item aborts this page.
+  FOR item IN SELECT c.version_id,v.kind FROM evidence_closure c JOIN evidence_versions v ON v.id=c.version_id
+    WHERE c.root_id=target_root AND c.generation<epoch AND (dirty.cursor IS NULL OR c.version_id>dirty.cursor)
+    ORDER BY c.version_id LIMIT page_limit LOOP
+    PERFORM version_id FROM evidence_state WHERE version_id=item.version_id FOR UPDATE;
+    IF dirty.erase THEN
+      PERFORM continuum_evidence_erase_version(item.version_id);
+    ELSE
+      UPDATE evidence_state SET state='quarantined' WHERE version_id=item.version_id AND state='active';
+      IF item.kind<>'source-document-version' AND EXISTS(SELECT 1 FROM evidence_state WHERE version_id=item.version_id AND state='quarantined') THEN
+        INSERT INTO evidence_repair_jobs(version_id) VALUES(item.version_id)
+          ON CONFLICT(version_id) DO UPDATE SET state='pending',retry_at=clock_timestamp(),generation=evidence_repair_jobs.generation+1
+          WHERE evidence_repair_jobs.state='unavailable' AND evidence_repair_jobs.attempt_id IS NULL;
+      END IF;
+    END IF;
+    processed:=processed+1; last_id:=item.version_id;
+  END LOOP;
+  done:=NOT EXISTS(SELECT 1 FROM evidence_closure WHERE root_id=target_root AND generation<epoch
+    AND (COALESCE(last_id,dirty.cursor) IS NULL OR version_id>COALESCE(last_id,dirty.cursor)));
+  IF dirty.lease_until<=clock_timestamp() THEN RAISE check_violation USING MESSAGE='stale evidence claim'; END IF;
+  UPDATE evidence_dirty_roots SET cursor=COALESCE(last_id,cursor),complete=done WHERE root_id=target_root AND generation=epoch;
+  IF processed>0 THEN INSERT INTO audit_log(principal_id,action,metadata) VALUES('00000000-0000-4000-8000-000000000011','archive',
+    jsonb_build_object('operation','evidence_invalidation_page','processed',processed,'erasure',dirty.erase)); END IF;
+  RETURN jsonb_build_object('processed',processed,'complete',done);
+END;
+$$;
+
+CREATE FUNCTION continuum_operator_evidence_repair_claim(actor UUID,worker UUID,lease_ms INTEGER) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE job evidence_repair_jobs%ROWTYPE; v evidence_versions%ROWTYPE; replacements JSONB;
+BEGIN
+  PERFORM continuum_evidence_require_operator(actor);
+  IF worker IS NULL OR lease_ms IS NULL OR lease_ms NOT BETWEEN 1 AND 30000 THEN RAISE check_violation USING MESSAGE='invalid evidence lease'; END IF;
+  SELECT j.* INTO job FROM evidence_repair_jobs j JOIN evidence_versions candidate ON candidate.id=j.version_id
+    WHERE (j.state='pending' AND j.retry_at<=clock_timestamp()) OR (j.state='claimed' AND j.lease_until<=clock_timestamp())
+    ORDER BY candidate.depth,j.version_id FOR UPDATE OF j SKIP LOCKED LIMIT 1;
+  IF job.version_id IS NULL THEN RETURN NULL; END IF;
+  SELECT * INTO STRICT v FROM evidence_versions WHERE id=job.version_id;
+  -- A lost/expired execution identity does not authorize another attempt. Park
+  -- it with its original accounting reservation until deliberate reconciliation.
+  IF job.attempt_id IS NOT NULL
+    OR NOT EXISTS(SELECT 1 FROM evidence_roots WHERE id=v.root_id AND current_version=v.id AND NOT revoked)
+    OR NOT EXISTS(SELECT 1 FROM evidence_state WHERE version_id=v.id AND state='quarantined') THEN
+    UPDATE pipeline_budget_workflows SET cancelled=TRUE,generation=generation+1 WHERE id=job.workflow_id AND NOT cancelled;
+    UPDATE evidence_repair_jobs SET state='unavailable',generation=generation+1,owner=NULL,lease_until=NULL WHERE version_id=v.id;
+    RETURN jsonb_build_object('outcome','unavailable');
+  END IF;
+  IF NOT continuum_evidence_can_access(actor,v.scope_id,TRUE) THEN
+    UPDATE evidence_repair_jobs SET state='pending',retry_at=clock_timestamp()+interval '5 seconds',generation=generation+1,owner=NULL,lease_until=NULL WHERE version_id=v.id;
+    RETURN jsonb_build_object('outcome','unavailable');
+  END IF;
+  SELECT jsonb_agg(jsonb_build_object('versionId',replacement,'kind',kind) ORDER BY replacement) INTO replacements FROM (
+    SELECT DISTINCT r.current_version replacement,e.kind FROM evidence_edges e JOIN evidence_versions parent ON parent.id=e.parent_id
+      JOIN evidence_roots r ON r.id=parent.root_id WHERE e.version_id=v.id AND continuum_evidence_eligible(actor,r.current_version,NULL)
+  ) available;
+  IF replacements IS NULL THEN
+    UPDATE evidence_repair_jobs SET state='pending',retry_at=clock_timestamp()+interval '5 seconds',generation=generation+1,owner=NULL,lease_until=NULL WHERE version_id=v.id;
+    RETURN jsonb_build_object('outcome','unavailable');
+  END IF;
+  UPDATE evidence_repair_jobs SET state='claimed',owner=worker,generation=generation+1,lease_until=clock_timestamp()+lease_ms*interval '1 millisecond'
+    WHERE version_id=v.id RETURNING * INTO job;
+  RETURN jsonb_build_object('outcome','claimed','versionId',v.id,'nodeId',v.root_id,'scopeId',v.scope_id,'kind',v.kind,
+    'owner',worker,'generation',job.generation,'parents',replacements,'leaseUntil',job.lease_until);
+END;
+$$;
+CREATE FUNCTION continuum_operator_evidence_repair_attach(actor UUID,version UUID,worker UUID,epoch BIGINT,workflow UUID,attempt UUID,budget_owner UUID,budget_epoch BIGINT)
+RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE job evidence_repair_jobs%ROWTYPE;
+BEGIN
+  PERFORM continuum_evidence_require_operator(actor);
+  SELECT * INTO STRICT job FROM evidence_repair_jobs WHERE version_id=version FOR UPDATE;
+  IF job.state<>'claimed' OR job.owner IS DISTINCT FROM worker OR job.generation IS DISTINCT FROM epoch OR job.lease_until<=clock_timestamp()
+    OR job.attempt_id IS NOT NULL OR workflow IS NULL OR attempt IS NULL OR budget_owner IS NULL OR budget_epoch IS NULL
+    OR NOT EXISTS(SELECT 1 FROM pipeline_budget_workflows WHERE id=workflow AND owner=budget_owner AND generation=budget_epoch AND NOT cancelled AND deadline_at>clock_timestamp()) THEN RETURN FALSE; END IF;
+  UPDATE evidence_repair_jobs SET workflow_id=workflow,attempt_id=attempt,attempt_owner=budget_owner,attempt_generation=budget_epoch WHERE version_id=version;
+  RETURN TRUE;
+END;
+$$;
+CREATE FUNCTION continuum_operator_evidence_repair_finish(actor UUID,version UUID,worker UUID,epoch BIGINT,registration JSONB)
+RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE job evidence_repair_jobs%ROWTYPE; old evidence_versions%ROWTYPE; result UUID;
+BEGIN
+  PERFORM continuum_evidence_require_operator(actor);
+  SELECT * INTO STRICT job FROM evidence_repair_jobs WHERE version_id=version FOR UPDATE;
+  IF job.state<>'claimed' OR job.owner IS DISTINCT FROM worker OR job.generation IS DISTINCT FROM epoch OR job.lease_until<=clock_timestamp() THEN
+    RAISE check_violation USING MESSAGE='stale evidence repair'; END IF;
+  IF registration IS NULL THEN
+    UPDATE evidence_repair_jobs SET state=CASE WHEN attempt_id IS NULL THEN 'pending' ELSE 'unavailable' END,
+      retry_at=clock_timestamp()+interval '5 seconds',owner=NULL,lease_until=NULL WHERE version_id=version;
+    RETURN NULL;
+  END IF;
+  IF job.attempt_id IS NULL OR NOT EXISTS(SELECT 1 FROM pipeline_budget_workflows w JOIN pipeline_budget_attempts a ON a.workflow_id=w.id
+    WHERE w.id=job.workflow_id AND w.owner=job.attempt_owner AND w.generation=job.attempt_generation AND NOT w.cancelled AND w.deadline_at>clock_timestamp()
+      AND a.attempt_id=job.attempt_id AND a.owner=job.attempt_owner AND a.generation=job.attempt_generation AND a.state='settled') THEN
+    RAISE check_violation USING MESSAGE='unsettled evidence repair'; END IF;
+  SELECT * INTO STRICT old FROM evidence_versions WHERE id=version;
+  IF NOT EXISTS(SELECT 1 FROM evidence_state WHERE version_id=version AND state='quarantined') THEN RAISE check_violation USING MESSAGE='stale evidence repair'; END IF;
+  result:=continuum_evidence_register(actor,old.root_id,old.id,old.scope_id,old.kind,registration->'parents',registration->'identity',registration->>'payload');
+  IF job.lease_until<=clock_timestamp() OR NOT EXISTS(SELECT 1 FROM pipeline_budget_workflows WHERE id=job.workflow_id
+    AND owner=job.attempt_owner AND generation=job.attempt_generation AND NOT cancelled AND deadline_at>clock_timestamp()) THEN
+    RAISE check_violation USING MESSAGE='stale evidence repair'; END IF;
+  UPDATE evidence_repair_jobs SET state='completed',result_version=result,owner=NULL,lease_until=NULL WHERE version_id=version;
+  RETURN result;
+END;
+$$;
+
+-- UUID scope lineage selects all owned versions and every transitive managed
+-- copy, including source history after a source moved to another scope.
+CREATE FUNCTION continuum_evidence_scope_versions(target_scope UUID) RETURNS SETOF UUID LANGUAGE sql STABLE SECURITY DEFINER AS $$
+  SELECT id FROM evidence_versions WHERE scope_id=target_scope
+  UNION
+  SELECT c.version_id FROM evidence_closure c WHERE c.root_id IN
+    (SELECT root_id FROM evidence_versions WHERE scope_id=target_scope);
+$$;
+CREATE FUNCTION continuum_evidence_scope_is_erased(target_scope UUID) RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER AS $$
+  SELECT NOT EXISTS(SELECT 1 FROM evidence_payloads WHERE version_id IN (SELECT continuum_evidence_scope_versions(target_scope)))
+    AND NOT EXISTS(SELECT 1 FROM evidence_repair_jobs WHERE version_id IN (SELECT continuum_evidence_scope_versions(target_scope)) AND state<>'cancelled')
+    AND NOT EXISTS(SELECT 1 FROM evidence_state WHERE version_id IN (SELECT continuum_evidence_scope_versions(target_scope)) AND state<>'erased')
+    AND NOT EXISTS(SELECT 1 FROM evidence_roots r JOIN evidence_versions v ON v.root_id=r.id
+      WHERE v.id IN (SELECT continuum_evidence_scope_versions(target_scope)) AND r.current_version=v.id AND NOT r.revoked);
+$$;
+CREATE FUNCTION continuum_operator_scrub_evidence_scope(actor UUID,subject UUID,target_scope UUID,page_limit INTEGER)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE item RECORD; processed INTEGER:=0; scanned INTEGER:=0; run principal_offboarding_runs%ROWTYPE; clean BOOLEAN;
+  progress evidence_scope_erasure_progress%ROWTYPE; gap BOOLEAN:=FALSE; last_id UUID;
+BEGIN
+  IF page_limit IS NULL OR page_limit NOT BETWEEN 1 AND 1000 THEN RAISE check_violation USING MESSAGE='invalid evidence page bounds'; END IF;
+  PERFORM continuum_evidence_require_operator(actor);
+  PERFORM * FROM continuum_operator_coordination_scope_privacy_state(actor,target_scope);
+  IF NOT EXISTS(SELECT 1 FROM principal_user_scopes WHERE principal_id=subject AND scope_id=target_scope) THEN RAISE insufficient_privilege USING MESSAGE='evidence erasure requires approved mapping'; END IF;
+  SELECT * INTO run FROM principal_offboarding_runs WHERE principal_id=subject AND scope_id=target_scope FOR UPDATE;
+  IF run.run_id IS NULL THEN RAISE insufficient_privilege USING MESSAGE='evidence erasure requires authorized lifecycle run'; END IF;
+  INSERT INTO evidence_scope_erasure_progress(scope_id) VALUES(target_scope) ON CONFLICT DO NOTHING;
+  SELECT * INTO STRICT progress FROM evidence_scope_erasure_progress WHERE scope_id=target_scope FOR UPDATE;
+  clean:=continuum_evidence_scope_is_erased(target_scope);
+  IF clean THEN UPDATE evidence_scope_erasure_progress SET complete=TRUE WHERE scope_id=target_scope;
+    RETURN jsonb_build_object('complete',TRUE,'processed',0,'batch_full',FALSE); END IF;
+  IF progress.complete THEN
+    UPDATE evidence_scope_erasure_progress SET generation=generation+1,cursor=NULL,complete=FALSE WHERE scope_id=target_scope RETURNING * INTO progress;
+  END IF;
+  FOR item IN SELECT id AS version_id FROM continuum_evidence_scope_versions(target_scope) id
+    WHERE progress.cursor IS NULL OR id>progress.cursor ORDER BY id LIMIT page_limit LOOP
+    scanned:=scanned+1;
+    PERFORM version_id FROM evidence_state WHERE version_id=item.version_id FOR UPDATE SKIP LOCKED;
+    IF NOT FOUND THEN gap:=TRUE; CONTINUE; END IF;
+    PERFORM continuum_evidence_erase_version(item.version_id);
+    processed:=processed+1;
+    IF NOT gap THEN last_id:=item.version_id; END IF;
+  END LOOP;
+  clean:=continuum_evidence_scope_is_erased(target_scope);
+  UPDATE evidence_scope_erasure_progress SET cursor=CASE WHEN scanned=0 AND NOT clean THEN NULL ELSE COALESCE(last_id,cursor) END,
+    generation=generation+CASE WHEN scanned=0 AND NOT clean THEN 1 ELSE 0 END,complete=clean WHERE scope_id=target_scope;
+  IF processed>0 THEN INSERT INTO audit_log(principal_id,action,scope_id,metadata) VALUES(actor,'archive',target_scope,
+    jsonb_build_object('operation','principal_evidence_privacy_repaired','principal_id',subject,'run_id',run.run_id,
+      'approval_id',run.approval_id::text,'acknowledged_evidence_hash',run.approval_evidence_hash,'rows_processed',processed)); END IF;
+  RETURN jsonb_build_object('complete',clean,'processed',processed,'batch_full',NOT gap AND scanned=page_limit);
+END;
+$$;
+ALTER FUNCTION continuum_offboarding_lifecycle_state_is_erased(UUID) RENAME TO continuum_offboarding_lifecycle_state_is_erased_pre_evidence;
+CREATE FUNCTION continuum_offboarding_lifecycle_state_is_erased(target_run UUID) RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER AS $$
+  SELECT continuum_offboarding_lifecycle_state_is_erased_pre_evidence(target_run)
+    AND EXISTS(SELECT 1 FROM principal_offboarding_runs WHERE run_id=target_run AND continuum_evidence_scope_is_erased(scope_id));
+$$;
+REVOKE ALL ON FUNCTION continuum_offboarding_lifecycle_state_is_erased(UUID),continuum_offboarding_lifecycle_state_is_erased_pre_evidence(UUID) FROM PUBLIC;
+
+CREATE TABLE evidence_contract_functions(signature TEXT PRIMARY KEY,body_hash TEXT NOT NULL,definer BOOLEAN NOT NULL,volatility "char" NOT NULL);
+REVOKE ALL ON evidence_contract_functions FROM PUBLIC;
+CREATE FUNCTION continuum_evidence_is_ready() RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER AS $$
+  SELECT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='memories'::regclass AND tgname='evidence_source_fence' AND tgenabled='O'
+      AND tgfoid='continuum_evidence_source_fence()'::regprocedure AND tgtype=25)
+    AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='audit_log'::regclass AND tgname='guard_evidence_privacy_audit' AND tgenabled='O'
+      AND tgfoid=to_regprocedure('continuum_guard_evidence_privacy_audit()') AND tgtype=31)
+    AND NOT EXISTS(SELECT 1 FROM (VALUES
+        ('evidence_versions'::regclass,'evidence_version_immutable',27),('evidence_edges'::regclass,'evidence_edge_immutable',27),
+        ('evidence_closure'::regclass,'evidence_closure_immutable',27),('evidence_source_dependencies'::regclass,'evidence_source_dependencies_immutable',27),
+        ('evidence_payloads'::regclass,'evidence_payload_immutable',19)) expected(relation,name,type)
+      LEFT JOIN pg_trigger guard ON guard.tgrelid=expected.relation AND guard.tgname=expected.name
+      WHERE guard.oid IS NULL OR guard.tgenabled<>'O' OR guard.tgtype<>expected.type OR guard.tgfoid<>'continuum_evidence_immutable()'::regprocedure)
+    AND to_regprocedure('continuum_evidence_register(uuid,uuid,uuid,uuid,text,jsonb,jsonb,text)') IS NOT NULL
+    AND to_regprocedure('continuum_operator_scrub_evidence_scope(uuid,uuid,uuid,integer)') IS NOT NULL
+    AND to_regclass('evidence_dirty_roots') IS NOT NULL AND to_regclass('evidence_repair_jobs') IS NOT NULL
+    AND EXISTS(SELECT 1 FROM evidence_contract_functions)
+    AND NOT EXISTS(SELECT 1 FROM evidence_contract_functions contract LEFT JOIN pg_proc f ON f.oid=to_regprocedure(contract.signature)
+      WHERE f.oid IS NULL OR encode(sha256(convert_to(f.prosrc,'UTF8')),'hex')<>contract.body_hash OR f.prosecdef<>contract.definer
+        OR f.provolatile<>contract.volatility OR f.proowner<>(SELECT relowner FROM pg_class WHERE oid='memories'::regclass)
+        OR NOT(f.proconfig @> ARRAY[format('search_path=pg_catalog, %I, pg_temp',(SELECT n.nspname FROM pg_namespace n JOIN pg_class m ON m.relnamespace=n.oid WHERE m.oid='memories'::regclass))])
+        OR EXISTS(SELECT 1 FROM aclexplode(COALESCE(f.proacl,acldefault('f',f.proowner))) acl WHERE acl.grantee=0 AND acl.privilege_type='EXECUTE'));
+$$;
+
+DO $$
+DECLARE definition TEXT; revised TEXT; signature TEXT;
+BEGIN
+  definition:=pg_get_functiondef('continuum_guard_standup_privacy_audit()'::regprocedure);
+  revised:=replace(replace(definition,'continuum_guard_standup_privacy_audit','continuum_guard_evidence_privacy_audit'),
+    'principal_standup_privacy_repaired','principal_evidence_privacy_repaired');
+  EXECUTE revised;
+  definition:=pg_get_functiondef('continuum_offboarding_expected_audit_metadata(jsonb)'::regprocedure);
+  revised:=replace(definition,'  SELECT CASE',$branch$  SELECT CASE
+    WHEN audit_metadata->>'operation'='principal_evidence_privacy_repaired' THEN
+      (SELECT COALESCE(jsonb_object_agg(entry.key,entry.value),'{}'::jsonb) FROM jsonb_each(audit_metadata) entry
+        WHERE entry.key=ANY(ARRAY['operation','principal_id','run_id','approval_id','acknowledged_evidence_hash','rows_processed']::text[]))$branch$);
+  IF revised=definition THEN RAISE EXCEPTION 'unable to extend evidence audit classifier'; END IF;
+  EXECUTE revised;
+  definition:=pg_get_functiondef('continuum_reject_offboarded_principal_audit()'::regprocedure);
+  revised:=replace(definition,'''principal_promotion_privacy_repaired'',''principal_standup_privacy_repaired''',
+    '''principal_promotion_privacy_repaired'',''principal_standup_privacy_repaired'',''principal_evidence_privacy_repaired''');
+  IF revised=definition THEN RAISE EXCEPTION 'unable to extend evidence audit admission'; END IF;
+  EXECUTE revised;
+  FOREACH signature IN ARRAY ARRAY['continuum_redact_offboarding_audit(uuid,uuid,bigint[])','continuum_protect_offboarded_audit_tombstone()',
+    'continuum_apply_audit_retention_internal_v44(uuid,timestamp with time zone,integer,uuid,integer,jsonb,text,text)'] LOOP
+    definition:=pg_get_functiondef(signature::regprocedure);
+    revised:=replace(definition,'''principal_offboarding_access_revoked''','''principal_offboarding_access_revoked'', ''principal_evidence_privacy_repaired''');
+    IF revised=definition THEN RAISE EXCEPTION 'unable to preserve evidence erasure receipts'; END IF;
+    EXECUTE revised;
+  END LOOP;
+END;
+$$;
+INSERT INTO evidence_contract_functions
+  SELECT oid::regprocedure::text,encode(sha256(convert_to(prosrc,'UTF8')),'hex'),prosecdef,provolatile FROM pg_proc
+  WHERE pronamespace=quote_ident(current_schema())::regnamespace AND (proname LIKE 'continuum_evidence_%' OR proname LIKE 'continuum_operator_evidence_%'
+    OR proname IN ('continuum_operator_scrub_evidence_scope','continuum_guard_evidence_privacy_audit','continuum_offboarding_lifecycle_state_is_erased'));
+CREATE TRIGGER guard_evidence_privacy_audit BEFORE INSERT OR UPDATE OR DELETE ON audit_log FOR EACH ROW EXECUTE FUNCTION continuum_guard_evidence_privacy_audit();
+
+DO $$
+DECLARE schema_name TEXT:=current_schema(); f RECORD; signature TEXT; definition TEXT; revised TEXT; candidate RECORD;
+  app_signatures TEXT[]:=ARRAY['continuum_evidence_source(uuid,uuid)','continuum_evidence_register(uuid,uuid,uuid,uuid,text,jsonb,jsonb,text)',
+    'continuum_evidence_envelope(uuid,uuid)','continuum_evidence_payload(uuid,uuid,text)','continuum_evidence_eligible(uuid,uuid,text)','continuum_evidence_is_ready()',
+    'continuum_evidence_claim_dirty(uuid,integer)','continuum_evidence_invalidate_page(uuid,bigint,uuid,bigint,integer)'];
+  op_signatures TEXT[]:=ARRAY['continuum_operator_evidence_policy(uuid,uuid,text,text,timestamp with time zone,timestamp with time zone)',
+    'continuum_operator_scrub_evidence_scope(uuid,uuid,uuid,integer)','continuum_operator_evidence_repair_claim(uuid,uuid,integer)',
+    'continuum_operator_evidence_repair_attach(uuid,uuid,uuid,bigint,uuid,uuid,uuid,bigint)','continuum_operator_evidence_repair_finish(uuid,uuid,uuid,bigint,jsonb)'];
+BEGIN
+  FOR f IN SELECT oid::regprocedure signature FROM pg_proc WHERE pronamespace=quote_ident(schema_name)::regnamespace
+    AND (proname LIKE 'continuum_evidence_%' OR proname LIKE 'continuum_operator_evidence_%' OR proname IN ('continuum_operator_scrub_evidence_scope',
+      'continuum_offboarding_lifecycle_state_is_erased','continuum_offboarding_lifecycle_state_is_erased_pre_evidence','continuum_guard_evidence_privacy_audit')) LOOP
+    EXECUTE format('ALTER FUNCTION %s SET search_path=pg_catalog,%I,pg_temp',f.signature,schema_name);
+    EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC',f.signature);
+  END LOOP;
+  FOREACH signature IN ARRAY ARRAY['continuum_assert_application_role_allowlist(name,boolean)','continuum_assert_standup_application_role_allowlist(name,boolean)'] LOOP
+    definition:=pg_get_functiondef(signature::regprocedure);
+    revised:=replace(definition,'(''continuum_standup_is_ready()'')','(''continuum_standup_is_ready()''),('''||array_to_string(app_signatures,'''),(''')||''')');
+    revised:=replace(revised,'(''continuum_operator_scrub_standup_scope(uuid,uuid,uuid,integer)'')',
+      '(''continuum_operator_scrub_standup_scope(uuid,uuid,uuid,integer)''),('''||replace(array_to_string(op_signatures,'''),('''),' ','')||''')');
+    IF revised=definition THEN RAISE EXCEPTION 'unable to extend evidence allowlist'; END IF;
+    EXECUTE revised;
+  END LOOP;
+  FOR candidate IN SELECT * FROM continuum_evidence_upgrade_roles LOOP
+    IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE oid=candidate.role_oid AND rolname=candidate.role_name) THEN CONTINUE; END IF;
+    FOREACH signature IN ARRAY app_signatures LOOP EXECUTE format('GRANT EXECUTE ON FUNCTION %I.%s TO %I',schema_name,signature,candidate.role_name); END LOOP;
+    IF candidate.operator THEN
+      FOREACH signature IN ARRAY op_signatures LOOP EXECUTE format('GRANT EXECUTE ON FUNCTION %I.%s TO %I',schema_name,signature,candidate.role_name); END LOOP;
+    END IF;
+    PERFORM continuum_assert_application_role_allowlist(candidate.role_name,candidate.operator);
+  END LOOP;
+END;
+$$;
+

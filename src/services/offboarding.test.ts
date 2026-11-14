@@ -748,7 +748,7 @@ describe('offboarding and erasure', () => {
     expect(privacyIndex.rows[0].indexdef).toContain('(destination_scope_id, id)');
 
     const standupVerifier = (await pool.query(`SELECT prosrc FROM pg_proc
-      WHERE oid='continuum_offboarding_lifecycle_state_is_erased(uuid)'::regprocedure`)).rows[0].prosrc as string;
+      WHERE oid='continuum_offboarding_lifecycle_state_is_erased_pre_evidence(uuid)'::regprocedure`)).rows[0].prosrc as string;
     expect(standupVerifier).toContain('continuum_offboarding_lifecycle_state_is_erased_pre_standup(target_run_id)');
     // Current wrapper has one retained predicate call and three independently
     // fenced actor, owned-scope and mapping probes. Preserve all three bodies.
@@ -764,6 +764,14 @@ describe('offboarding and erasure', () => {
     const standupRelations = nodes.slice(priorNodeCount).map((node) => node['Relation Name']);
     expect(standupRelations).toContain('memory_activity_attributions');
     expect(standupRelations).toContain('actor_principal_mappings');
+
+    const evidenceVerifier = (await pool.query(`SELECT prosrc FROM pg_proc
+      WHERE oid='continuum_offboarding_lifecycle_state_is_erased(uuid)'::regprocedure`)).rows[0].prosrc as string;
+    expect(evidenceVerifier).toContain('continuum_offboarding_lifecycle_state_is_erased_pre_evidence(target_run)');
+    expect(evidenceVerifier).toContain('continuum_evidence_scope_is_erased(scope_id)');
+    const evidencePhysical = (await pool.query(`SELECT prosrc FROM pg_proc
+      WHERE oid='continuum_evidence_scope_is_erased(uuid)'::regprocedure`)).rows[0].prosrc as string;
+    for (const relation of ['evidence_payloads', 'evidence_state', 'evidence_repair_jobs', 'evidence_roots']) expect(evidencePhysical).toContain(relation);
 
 
     expect(nodes.filter((node) =>

@@ -40,6 +40,17 @@ worker recovery and shutdown limits.
 
 ## Current rollout and mixed versions
 
+Current evidence-capable binaries additionally require migration 0093, following
+0092, and exact profile regrants. Offboarding fences owned-source authority
+immediately and erases immutable source snapshots plus transitive managed
+history/cache/trace/export/queued payloads in durable bounded pages. Locked gaps
+remain unresolved; completed retries inspect actual residual bytes and reopen
+dirty progress. Source-scope UUID lineage selects copies even in shared scopes.
+New completion proof includes erased version state, revoked roots and cancelled
+jobs in addition to the existing memory and all-provider-vector predicates.
+Quiesce old offboarding and artifact runtimes before enabling these tables.
+See [evidence lifecycle](evidence-lifecycle.md) for limits, startup and rollback.
+
 Before upgrading through 0090, quiesce promotion and activity producers, offboarding processes and
 all consumer replicas. Back up the database and migration ledgers. Apply the complete packaged
 chain, including 0080 and 0081, through 0090 as migration owner with database
