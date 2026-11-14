@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { join } from 'node:path';
 import { expect, it } from 'vitest';
 import { extractionFixture, syntheticExtractor } from '../extraction/test-helpers.js';
 import { processExtraction, ExtractionTransientError, ExtractionWorker } from './extraction.js';
@@ -8,23 +10,59 @@ import { extractionDescriptor, ExtractionRegistry } from '../extraction/provider
 import { chunkSource } from '../extraction/chunking.js';
 import { createScope } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
-import type pg from 'pg';
+import { createPrincipal } from '../storage/principals.js';
+import { quoteStandupIdentifier } from '../standup/test-helpers.js';
+import pg from 'pg';
 
-it('leaves all queued sources untouched while credentials are missing and resumes after recovery', async () => {
+it.each(['credentials', 'capabilities', 'pricing'] as const)('leaves all queued sources untouched during %s unavailability and resumes after recovery', async mode => {
   let calls = 0; const good = syntheticExtractor();
   const profile = syntheticExtractor(async (...args) => { calls++; return good.adapter.invoke(...args); });
-  profile.adapter.credentials = 'missing';
   await extractionFixture(async f => {
     for (let i = 0; i < 2; i++) await createMemory(f.app, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId,
       type: 'decision', title: `Credential outage ${i}`, body: 'Keep queued truth', source: 'manual' });
+    const price = profile.adapter.price;
+    if (mode === 'credentials') profile.adapter.credentials = 'missing';
+    if (mode === 'capabilities') profile.adapter.enforceableCaps = false;
+    if (mode === 'pricing') profile.adapter.price = { ...price!, id: 'temporarily-unavailable-price' };
     for (let i = 0; i < 2; i++) expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('idle');
     expect((await f.owner.query("SELECT count(*)::int AS n FROM extraction_runs WHERE state='queued' AND started_at IS NULL")).rows[0].n).toBe(2);
     expect((await f.owner.query('SELECT count(*)::int AS n FROM pipeline_budget_workflows')).rows[0].n).toBe(0);
     expect(calls).toBe(0);
     profile.adapter.credentials = 'not-required';
+    profile.adapter.enforceableCaps = true; profile.adapter.price = price;
     for (let i = 0; i < 2; i++) expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('processed');
     expect(calls).toBe(2);
   }, profile);
+}, 120_000);
+
+it('lets a healthy bound LOGIN process work while another bound principal has lost access', async () => {
+  await extractionFixture(async f => {
+    const memory = await createMemory(f.app, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId,
+      type: 'decision', title: 'Shared worker binding', body: 'Still authorized for the peer', source: 'manual' });
+    const peer = await createPrincipal(f.owner, { externalId: `extract-peer-${randomUUID()}`, kind: 'service', displayName: 'Synthetic peer worker' });
+    await addMembership(f.owner, peer.id, f.scopeId, 'writer');
+    const role = `extract_peer_${randomUUID().replaceAll('-', '').slice(0, 16)}`, password = randomUUID();
+    const schema = (await f.owner.query('SELECT current_schema() AS name')).rows[0].name;
+    let pool: pg.Pool | undefined;
+    try {
+      await f.owner.query(`CREATE ROLE ${quoteStandupIdentifier(role)} LOGIN PASSWORD '${password}'`);
+      execFileSync('psql', [process.env.CONTINUUM_TEST_DATABASE_URL!, '-X', '-v', 'ON_ERROR_STOP=1', '-v', `continuum_schema=${schema}`,
+        '-v', `continuum_extraction_worker_role=${role}`, '-f', join(process.cwd(), 'scripts/grant-extraction-worker-role.sql')], { timeout: 30_000, stdio: 'pipe' });
+      await f.operator.query('SELECT continuum_operator_bind_extraction_worker($1,$2,$3,$4,$5,TRUE)', [f.adminId, role, peer.id, f.scopeId, f.profile.id]);
+      const connection = new URL(process.env.CONTINUUM_TEST_DATABASE_URL!); connection.username = role; connection.password = password;
+      pool = new pg.Pool({ connectionString: connection.toString(), max: 2, options: `-c search_path=${schema} -c statement_timeout=5000 -c lock_timeout=1000` });
+      await f.owner.query('UPDATE scope_memberships SET active=FALSE WHERE principal_id=$1 AND scope_id=$2', [f.producerId, f.scopeId]);
+      expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('idle');
+      expect((await f.owner.query('SELECT state,generation,started_at FROM extraction_runs WHERE memory_id=$1', [memory.id])).rows[0])
+        .toMatchObject({ state: 'queued', generation: '0', started_at: null });
+      expect(await processExtraction(pool, randomUUID(), f.profile)).toBe('processed');
+      expect((await f.owner.query('SELECT state FROM extraction_runs WHERE memory_id=$1', [memory.id])).rows[0].state).toBe('complete');
+    } finally {
+      await pool?.end();
+      await f.owner.query(`DROP OWNED BY ${quoteStandupIdentifier(role)}`);
+      await f.owner.query(`DROP ROLE IF EXISTS ${quoteStandupIdentifier(role)}`);
+    }
+  });
 }, 120_000);
 
 it('defers an availability race after claim under the original finite workflow and retry allowance', async () => {
