@@ -60,6 +60,17 @@ export type EventAnnotation = {
 export interface EventWindow { from?: string; to?: string; at?: string; includeUnknown: boolean }
 export interface EventInspection { annotation: EventAnnotation; version: string | null; sourceVersion: string | null }
 
+/** Discovery projects normalized status/precision, never candidate prose. Full
+ * original notation remains an independently authorized inspection surface. */
+export function recallEventInspection(event: EventInspection) {
+  const value=event.annotation;
+  if(value.status==='known') {
+    const {original:_original,...annotation}=value;
+    return {annotation,version:event.version,sourceVersion:event.sourceVersion};
+  }
+  return {annotation:{status:value.status},version:event.version,sourceVersion:event.sourceVersion};
+}
+
 function normalizeAnnotation(input: z.infer<typeof known>): EventAnnotation {
   const value = { ...input };
   if (value.value !== undefined) {

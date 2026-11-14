@@ -22,7 +22,7 @@ import { requirePipelineBudgetsReady, requireEvidenceReady, requireExtractionRea
 import { configureExtraction, extractionForPrincipal, retryExtraction } from '../services/extraction.js';
 import { accessibleScopes } from '../services/access.js';
 import { captureMemory, type CaptureResult } from '../services/capture.js';
-import { eventAnnotationSchema, eventWindowSchema, type EventInspection } from '../temporal/model.js';
+import { eventAnnotationSchema, eventWindowSchema, recallEventInspection, type EventInspection } from '../temporal/model.js';
 import { recallForPrincipal, type PrincipalRecallResult } from '../services/recall.js';
 import {
   asServiceError,
@@ -218,7 +218,8 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       state: memory.state, supersedes_id: memory.supersedesId, created_at: memory.createdAt })),
   });
   const recallProjection = ({ results, accessible }: PrincipalRecallResult) => results.map((r) => ({
-    ...(r.memory.event ? { event: mcpEvent(r.memory.event) } : {}),
+    ...(r.memory.event ? { event: {annotation:recallEventInspection(r.memory.event).annotation,
+      version:r.memory.event.version,source_version:r.memory.event.sourceVersion} } : {}),
     id: r.memory.id, score: r.score, scope: accessible.get(r.memory.scopeId)?.label ?? null, type: r.memory.type,
     ...(r.rerankScore === undefined ? {} : { rerank_score: r.rerankScore }),
     title: r.memory.title, excerpt: r.excerpt, body_truncated: r.bodyTruncated, source_ref: r.memory.sourceRef,

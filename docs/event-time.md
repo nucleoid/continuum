@@ -41,6 +41,11 @@ They are separate from caller metadata, source prose and generated AGENTS.md.
 Changing annotations alone cannot change generator bytes, ETag or freshness.
 Extraction candidates remain generated/unverified, outside normalized event time.
 
+Recall returns normalized status, precision/assertion and UTC bounds when known,
+plus authorized version provenance. Original notation and ambiguity candidate
+prose are excluded from discovery summaries. Full current inspection through
+memory fetch/browse retains those bounded fields under the same evidence gate.
+
 ## Installation and recovery
 
 Apply additive migration 0095 after 0094 as migration owner with database
