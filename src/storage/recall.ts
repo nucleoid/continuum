@@ -334,6 +334,7 @@ export async function hydrateRecallCandidates(
   types: MemoryType[] | undefined,
   readBudgetBytes?: number,
   budget?: Budget,
+  omitAdvisory = false,
 ): Promise<RecallResult[]> {
   if (ids.length === 0) return [];
   const params: unknown[] = [ids, scopeIds];
@@ -345,12 +346,15 @@ export async function hydrateRecallCandidates(
   const where = `id = ANY($1::uuid[]) AND scope_id = ANY($2::uuid[])
     AND state = 'live' AND (expires_at IS NULL OR expires_at > pg_catalog.clock_timestamp()) ${typeFilter}`;
   readBudgetBytes ??= budget?.available('hydratedBytes');
+  const columns = MEMORY_COLUMNS.split(',').map(column => omitAdvisory && column.trim() === 'metadata'
+    ? "(m.metadata - 'related') AS metadata" : `m.${column.trim()}`).join(', ');
   const rows = readBudgetBytes === undefined
-    ? (await pool.query(`SELECT ${MEMORY_COLUMNS} FROM memories WHERE ${where}`, params)).rows
+    ? (await pool.query(omitAdvisory ? `SELECT ${columns} FROM memories m WHERE ${where}`
+      : `SELECT ${MEMORY_COLUMNS} FROM memories WHERE ${where}`, params)).rows
     : await boundedMemoryReadRows(pool,
       `SELECT m.id, ${MEMORY_READ_BUDGET_BYTES_SQL} AS budget_bytes,
          array_position($1::uuid[], m.id) AS position FROM memories m WHERE ${where}`, params,
-      `SELECT ${MEMORY_COLUMNS.split(',').map((column) => `m.${column.trim()}`).join(', ')}
+      `SELECT ${columns}
          FROM memories m JOIN budget_candidates c ON c.id=m.id ORDER BY c.position`, readBudgetBytes, budget, true);
   const byId = new Map(rows.map((r) => [r.id as string, rowToMemory(r)]));
   return ids
@@ -379,7 +383,7 @@ export async function recallCandidates(
   candidateLimit = opts.limit,
   deferCandidateCharge = false,
 ): Promise<RecallCandidates> {
-  if (!Number.isSafeInteger(candidateLimit) || candidateLimit < 1 || candidateLimit > 100) throw new RangeError('Recall candidate limit must be from 1 to 100');
+  if (deferCandidateCharge && (!Number.isSafeInteger(candidateLimit) || candidateLimit < 1 || candidateLimit > 100)) throw new RangeError('Recall candidate limit must be from 1 to 100');
   opts.budget?.assertLive();
   if (opts.scopeIds.length === 0) {
     return { candidates: [], diagnostics: { vector: 'disabled', groups: [] } };

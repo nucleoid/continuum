@@ -2,6 +2,7 @@ import { boundedJsonText } from './mcp-http-output.js';
 import { remoteExecutionContext } from './mcp-http-execution.js';
 import type pg from 'pg';
 import type { Reranking } from '../reranking/provider.js';
+import { Budget } from '../pipeline/budget.js';
 import { z } from 'zod';
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { CallToolResult, ServerRequest, ServerNotification } from '@modelcontextprotocol/sdk/types.js';
@@ -476,6 +477,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     },
     async (args, extra) => {
       try {
+        const budget = deps.reranking ? new Budget(deps.reranking.profile) : undefined;
         const { results, accessible, diagnostics } = await recallForPrincipal(
           pool,
           embeddingProvider,
@@ -485,11 +487,14 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           logger,
           {
             registry: retrievalEnrichers,
-            options: { ...enrichment, signal: deps.executionGuard ? (enrichment.signal ? AbortSignal.any([extra.signal, enrichment.signal]) : extra.signal) : enrichment.signal, logger: deps.enrichmentLogger },
+            options: { ...enrichment, signal: deps.executionGuard || deps.reranking ? (enrichment.signal ? AbortSignal.any([extra.signal, enrichment.signal]) : extra.signal) : enrichment.signal, logger: deps.enrichmentLogger },
             readBudgetBytes: deps.readBudgetBytes,
-            validateResult: deps.readBudgetBytes === undefined ? undefined : (value) => { jsonResult(recallProjection(value), { diagnostics: value.diagnostics }); },
+            validateResult: deps.readBudgetBytes === undefined && !budget ? undefined : (value) => {
+              const wire = jsonResult(recallProjection(value), { diagnostics: value.diagnostics });
+              budget?.serializeOutput(wire);
+            },
           },
-          undefined,
+          budget,
           deps.reranking,
         );
         return jsonResult(recallProjection({ results, accessible, diagnostics }), { diagnostics });

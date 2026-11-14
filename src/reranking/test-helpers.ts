@@ -5,7 +5,7 @@ import { starterProfile } from '../pipeline/budget.js';
 /** Synthetic byte-token protocol, no model-quality or real-tokenizer claim. */
 export function testReranking(score: (candidate: RerankingInput['candidates'][number]) => number) {
   const adapter: RerankingAdapter = {
-    id: 'local-test', version: 'deterministic-v1', model: 'byte-protocol-v1', profile: 'local-test-v1', local: true,
+    id: 'local-test', version: 'deterministic-v1', model: 'byte-protocol-v1', profile: 'local-test-v1', local: true, purpose: 'deterministic',
     timeoutMs: 1000, responseBodyBytes: 8192, enforceableCaps: true, cancellation: 'cooperative',
     outputTokens: 8192, reasoningTokens: 0, completionTokens: 8192,
     tokens: { model: 'byte-protocol-v1', profile: 'local-test-v1', kind: 'exact', validationId: 'utf8-bytes-v1', overheadTokens: 0, count: s => Buffer.byteLength(s) },

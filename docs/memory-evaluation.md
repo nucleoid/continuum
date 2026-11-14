@@ -177,6 +177,12 @@ synthesis, temporal, connector and relationship adapters remain `not_supported`.
 
 ## Latency and comparisons
 
+The separate [reranking ablation](reranking.md) now exercises the optional
+pre-selection service with local deterministic adapters. Its separately versioned
+inputs and reports do not alter this frozen baseline's unsupported adapter rows,
+quality gates or acceptance limitations. Synthetic mechanism results cannot
+qualify a real adapter or tokenizer.
+
 The frozen `service-latency-v1` rule runs one warmup and five measured observations
 per query and mode. Modes rotate in a seeded, interleaved order for each repetition.
 Quality has one per-query mean, never five independent query samples. Latency is

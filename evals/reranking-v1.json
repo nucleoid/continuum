@@ -1,0 +1,17 @@
+{
+  "version": "reranking-ablation-v1",
+  "synthetic": true,
+  "seed": 25,
+  "sourceCorpus": "fixtures/v1",
+  "predecessorSource": "0a133d38cdb1533e416ea66e81795645c9a573ca",
+  "adapterVersion": "query-overlap-v1",
+  "modes": ["lexical", "hybrid", "reranking", "fallback"],
+  "candidateLimit": 20,
+  "finalLimit": 10,
+  "setupDeadlineMs": 120000,
+  "workDeadlineMs": 120000,
+  "maximumCalls": 2048,
+  "securityFailures": 0,
+  "hardBudgetFailures": 0,
+  "qualityAcceptance": "not_evaluated"
+}

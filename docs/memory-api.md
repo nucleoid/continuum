@@ -76,6 +76,13 @@ units. It is derived from the source body, not from excerpt punctuation.
 
 ## Recall vector diagnostics
 
+An explicitly injected [reranker](reranking.md), disabled by default, can reorder
+an authorized wider pool before the final limit. `score` remains hybrid fusion;
+optional REST `rerankScore` and MCP `rerank_score` carry the separate score.
+Safe `diagnostics.reranking` reports `used` or `fallback` with a bounded reason.
+MCP keeps the result array and `_meta.diagnostics` shape. Current source authority,
+final output limits and required delivered-order auditing still apply.
+
 Recall remains an excerpt discovery operation, separate from full-record fetch
 and browse. REST recall returns `{ "results": [...], "diagnostics": {...} }`.
 Diagnostics include `vector` (`used`, `disabled`, `failed`, or `partial`) and

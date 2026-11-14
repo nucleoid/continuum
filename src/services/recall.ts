@@ -7,7 +7,7 @@ import { evidenceTransaction } from '../storage/evidence.js';
 import type { Queryable } from '../storage/queryable.js';
 import type { Reranking } from '../reranking/provider.js';
 import type { RerankingDiagnostic } from '../reranking/runner.js';
-import { currentRecallIds, rerankRecallPool } from './recall-reranking.js';
+import { currentRecallEligibility, rerankRecallPool } from './recall-reranking.js';
 import { recordRead as recordReadAudit } from '../audit/log.js';
 import { resolveReadableScopeIds, type AccessibleScope } from './access.js';
 import { asServiceError } from './errors.js';
@@ -130,52 +130,52 @@ export async function recallForPrincipal(
       ? await applyRetrievalEnrichers(results, principal.id, enrichment.registry, { ...enrichment.options, budget })
       : undefined;
     const deliver = async (auditPool: Queryable, deliveredResults: RecallResult[]): Promise<PrincipalRecallResult> => {
-    enrichment?.validateResult?.({ results: deliveredResults, accessible, diagnostics });
-    budget?.serializeOutput({ results: deliveredResults, diagnostics });
+      enrichment?.validateResult?.({ results: deliveredResults, accessible, diagnostics });
+      budget?.serializeOutput({ results: deliveredResults, diagnostics });
 
-    // Recall auditing is required. Results are not returned if this write fails.
-    await recordReadAudit(auditPool, {
-      principalId: principal.id,
-      query: input.query,
-      metadata: {
-        scopes: scopeIds.length,
-        scope_ids: scopeIds,
-        hits: deliveredResults.length,
-        ...(ranked ? { reranking_status: ranked.diagnostic.status,
-          ...(ranked.diagnostic.status === 'fallback' ? { reranking_reason: ranked.diagnostic.reason } : {}) } : {}),
-        embedded: succeededEmbeddingGroups > 0,
-        embedding_status: failedEmbeddingGroups > 0 || localOnlyUnavailable > 0
-          ? 'degraded'
-          : succeededEmbeddingGroups > 0 ? 'succeeded' : 'not-requested',
-        embedding_groups: embeddingAuditGroups,
-        vector_status: diagnostics.vector,
-        ...(localOnlyUnavailable > 0
-          ? { local_only_unavailable_scopes: localOnlyUnavailable }
-          : {}),
-        ...auditMetadata,
-      },
-      memories: deliveredResults.map((result, index) => ({
-        memoryId: result.memory.id,
-        scopeId: result.memory.scopeId,
-        metadata: { rank: index + 1, score: result.score,
-          ...(result.rerankScore === undefined ? {} : { rerank_score: result.rerankScore }) },
-      })),
-    });
-    const enrichedResults = preparedResults || ranked ? deliveredResults : (enrichment
-      ? await applyRetrievalEnrichers(
-        results,
-        principal.id,
-        enrichment.registry,
-        enrichment.options,
-      )
-      : results);
-    budget?.assertLive();
-    return { results: enrichedResults, accessible, diagnostics };
+      // Recall auditing is required. Results are not returned if this write fails.
+      await recordReadAudit(auditPool, {
+        principalId: principal.id,
+        query: input.query,
+        metadata: {
+          scopes: scopeIds.length,
+          scope_ids: scopeIds,
+          hits: deliveredResults.length,
+          ...(ranked ? { reranking_status: ranked.diagnostic.status,
+            ...(ranked.diagnostic.status === 'fallback' ? { reranking_reason: ranked.diagnostic.reason } : {}) } : {}),
+          embedded: succeededEmbeddingGroups > 0,
+          embedding_status: failedEmbeddingGroups > 0 || localOnlyUnavailable > 0
+            ? 'degraded'
+            : succeededEmbeddingGroups > 0 ? 'succeeded' : 'not-requested',
+          embedding_groups: embeddingAuditGroups,
+          vector_status: diagnostics.vector,
+          ...(localOnlyUnavailable > 0
+            ? { local_only_unavailable_scopes: localOnlyUnavailable }
+            : {}),
+          ...auditMetadata,
+        },
+        memories: deliveredResults.map((result, index) => ({
+          memoryId: result.memory.id,
+          scopeId: result.memory.scopeId,
+          metadata: { rank: index + 1, score: result.score,
+            ...(result.rerankScore === undefined ? {} : { rerank_score: result.rerankScore }) },
+        })),
+      });
+      const enrichedResults = preparedResults || ranked ? deliveredResults : (enrichment
+        ? await applyRetrievalEnrichers(
+          results,
+          principal.id,
+          enrichment.registry,
+          enrichment.options,
+        )
+        : results);
+      budget?.assertLive();
+      return { results: enrichedResults, accessible, diagnostics };
     };
     if (ranked) return await evidenceTransaction(pool, async client => {
-      const eligible = await currentRecallIds(client, principal.id, ranked.versions);
+      const { readable: eligible, disclosable } = await currentRecallEligibility(client, principal.id, ranked.versions, reranking);
       if (ranked.diagnostic.status === 'used'
-        && (await currentRecallIds(client, principal.id, ranked.versions, reranking)).size !== ranked.results.length) {
+        && disclosable.size !== ranked.results.length) {
         diagnostics.reranking = ranked.diagnostic = { status: 'fallback', reason: 'policy_denied' };
         const fusionOrder = new Map(candidatePool!.candidates.map((c, i) => [c.id, i]));
         ranked.results = ranked.results.map(({ rerankScore: _score, ...r }) => r)

@@ -9,7 +9,7 @@ const candidates = Object.freeze([
 ]);
 function adapter(value: unknown = { version: 'test-v1', scores: [{ id: 'c0', score: 0 }, { id: 'c1', score: 1 }] }): RerankingAdapter {
   return {
-    id: 'test-reranker', version: 'test-v1', model: 'deterministic-v1', profile: 'test-v1', local: true,
+    id: 'test-reranker', version: 'test-v1', model: 'deterministic-v1', profile: 'test-v1', local: true, purpose: 'deterministic',
     timeoutMs: 100, responseBodyBytes: 4096, enforceableCaps: true, cancellation: 'cooperative',
     outputTokens: 100, reasoningTokens: 0, completionTokens: 100,
     tokens: { model: 'deterministic-v1', profile: 'test-v1', kind: 'exact', validationId: 'test-bytes-v1', overheadTokens: 0, count: s => Buffer.byteLength(s) },
@@ -20,6 +20,25 @@ function adapter(value: unknown = { version: 'test-v1', scores: [{ id: 'c0', sco
 }
 const configured = (a: RerankingAdapter) => configureReranking(a, starterProfile, {
   candidateLimit: 20, evidence: { kind: 'local-contract', adapterId: a.id, version: a.version, model: a.model, profile: a.profile },
+});
+it('requires exact version/profile qualification for model adapters and freezes capabilities', () => {
+  const a = adapter(); a.purpose = 'model';
+  expect(() => configured(a)).toThrow('qualification');
+  a.purpose = 'deterministic';
+  const c = configured(a); a.version = 'changed'; a.model = 'changed';
+  expect(c.adapter.version).toBe('test-v1'); expect(c.adapter.tokens?.model).toBe('deterministic-v1');
+});
+it('suppresses request cancellation and catches durable settlement rejection without resetting allowance', async () => {
+  const a = adapter(); const config = configured(a); const signal = AbortSignal.abort();
+  expect(await runReranking(config, new Budget(starterProfile), { query: 'q', candidates }, async () => true, 20_000, { signal }))
+    .toEqual({ status: 'fallback', reason: 'cancelled' });
+  expect(a.invoke).not.toHaveBeenCalled();
+  const budget = new Budget(starterProfile);
+  const durable = { reserve: vi.fn(async () => true), dispatch: vi.fn(async () => true), settle: vi.fn(async () => { throw new Error('private SQL'); }) };
+  expect(await runReranking(config, budget, { query: 'q', candidates }, async () => true, 20_000, { durable }))
+    .toEqual({ status: 'fallback', reason: 'provider_failed' });
+  expect(a.invoke).toHaveBeenCalledOnce(); expect(durable.settle).toHaveBeenCalledTimes(2);
+  expect(budget.snapshot().used.calls).toBe(1); expect(budget.snapshot().active).toBe(0);
 });
 it('scores the whole pool, counts the complete wire request, and preserves opaque IDs', async () => {
   const a = adapter(); const budget = new Budget(starterProfile);

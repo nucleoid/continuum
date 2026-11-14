@@ -11,6 +11,7 @@ export interface RerankingOutput {
   scores: Array<{ id: string; score: number }>;
 }
 export interface RerankingAdapter extends BudgetAdapter<RerankingInput, unknown> {
+  purpose: 'deterministic' | 'model';
   /** Immutable algorithm/model/prompt revision. Changed bytes require a new version. */
   version: string;
 }
@@ -44,7 +45,8 @@ export function configureReranking(adapter: RerankingAdapter, profile: BudgetPro
     || evidence.model !== adapter.model || evidence.profile !== adapter.profile
     || !['local-contract', 'operator-qualified'].includes(evidence.kind)
     || (evidence.kind === 'operator-qualified' && (!/^[a-f0-9]{64}$/.test(evidence.reportSha256 ?? '') || !options.providerAuthority))
-    || (evidence.kind === 'local-contract' && (adapter.local !== true || adapter.price?.inputMicros !== 0
+    || !['deterministic', 'model'].includes(adapter.purpose)
+    || (evidence.kind === 'local-contract' && (adapter.purpose !== 'deterministic' || adapter.local !== true || adapter.price?.inputMicros !== 0
       || adapter.price.outputMicros !== 0 || adapter.price.reasoningMicros !== 0))) {
     throw new TypeError('Reranking requires a bounded profile and matching qualification evidence');
   }

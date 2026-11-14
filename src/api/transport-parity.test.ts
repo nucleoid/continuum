@@ -13,6 +13,7 @@ import { createMemory } from '../storage/memories.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import { RetrievalEnricherRegistry } from '../extensions/retrieval.js';
 import { PromotionWebhookRegistry } from '../extensions/promotion.js';
+import { testReranking } from '../reranking/test-helpers.js';
 
 interface ToolResult {
   content: Array<{ type: string; text?: string }>;
@@ -46,6 +47,37 @@ describe('REST/MCP semantic parity matrix', () => {
 
   afterAll(async () => {
     await pool?.end();
+  });
+
+  it('projects pre-selection rerank scores additively and keeps source-only bundle bytes and freshness', async () => {
+    const team = (await getScopeByRef(pool, { kind: 'team', name: 'payments' }))!;
+    for (let i = 0; i < 3; i++) await createMemory(pool, { scopeId: team.id, scopeKind: 'team', authorId: principal.id,
+      type: 'decision', title: `Rankable checkout ${i}`, body: `Checkout ${'padding '.repeat(i * 10)}`, source: 'manual' });
+    const t = testReranking(c => c.title.endsWith('2') ? 9 : 0);
+    const app = createApp(pool, { reranking: t.config() });
+    const bundle = await request(app).get('/api/v0/agents-md?team=payments').set('Authorization', 'Bearer entra:user:parity');
+    const rest = await request(app).post('/api/v0/recall').set('Authorization', 'Bearer entra:user:parity')
+      .send({ query: 'checkout', limit: 1, reranker: { endpoint: 'https://untrusted.invalid', local: true } });
+    expect(rest.status).toBe(200); expect(rest.body.results[0]).toMatchObject({ title: 'Rankable checkout 2', rerankScore: 9 });
+    const server = buildMcpServer({ pool, embeddingProvider: null, principal, reranking: t.config(), readBudgetBytes: 128 * 1024 });
+    const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
+    const rerankedClient = new Client({ name: 'reranking-parity', version: '1' });
+    try {
+      await Promise.all([server.connect(serverTransport), rerankedClient.connect(clientTransport)]);
+      const mcp = await rerankedClient.callTool({ name: 'continuum.recall', arguments: { query: 'checkout', limit: 1 } }) as ToolResult & { _meta: { diagnostics: unknown } };
+      const rows = toolJson(mcp);
+      expect(Array.isArray(rows)).toBe(true); expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ id: rest.body.results[0].id, score: rest.body.results[0].score, rerank_score: 9 });
+      expect(rows[0]).not.toHaveProperty('rerankScore'); expect(rest.body.results[0]).not.toHaveProperty('rerank_score');
+      expect(mcp._meta.diagnostics).toEqual(rest.body.diagnostics);
+      expect(t.adapter.invoke).toHaveBeenCalledTimes(2);
+      const conditional = await request(app).get('/api/v0/agents-md?team=payments').set('Authorization', 'Bearer entra:user:parity').set('If-None-Match', bundle.headers.etag);
+      expect(conditional.status).toBe(304);
+      const fresh = await request(app).get(`/api/v0/agents-md/freshness?team=payments&hash=${bundle.headers.etag.replaceAll('"', '')}`).set('Authorization', 'Bearer entra:user:parity');
+      expect(fresh.body).toEqual({ fresh: true }); expect(t.adapter.invoke).toHaveBeenCalledTimes(2);
+      const again = await request(app).get('/api/v0/agents-md?team=payments').set('Authorization', 'Bearer entra:user:parity');
+      expect(again.text).toBe(bundle.text); expect(again.headers.etag).toBe(bundle.headers.etag);
+    } finally { await rerankedClient.close(); await server.close(); }
   });
 
   it.each([

@@ -3,9 +3,10 @@ import { BudgetError, boundedJson, type Budget } from '../pipeline/budget.js';
 import type { RecallInput, RecallResult } from '../types.js';
 import type { RecallCandidates, RecallOptions } from '../storage/recall.js';
 import { hydrateRecallCandidates } from '../storage/recall.js';
-import { evidenceEnvelope, evidenceTransaction } from '../storage/evidence.js';
-import { MEMORY_READ_BUDGET_BYTES_SQL } from '../storage/memory-reads.js';
-import { decideManagedEvidence } from './evidence.js';
+import { evidenceTransaction } from '../storage/evidence.js';
+import { recallAuthorityMetadata, enrollRecallSources, currentRecallEnvelopes } from '../storage/recall-authority.js';
+import type { EvidenceEnvelope } from '../evidence/model.js';
+import { decideEvidencePolicy, type EvidenceAuthorityContext, type EvidencePolicy } from '../evidence/policy.js';
 import type { Reranking } from '../reranking/provider.js';
 import { runReranking, type RerankingDiagnostic } from '../reranking/runner.js';
 
@@ -14,41 +15,57 @@ interface AdmittedRecall {
   versions: Map<string, string>;
   diagnostic: RerankingDiagnostic;
 }
+// Bounded identities only, scoped to the owned application Pool. No payload,
+// envelope or authorization decision survives a request. All hits recheck SQL.
+const sourceVersions = new WeakMap<pg.Pool, Map<string, string>>();
 const destination = (config: Reranking, now: number) => ({ locality: config.adapter.local ? 'local' as const : 'hosted' as const,
   authority: config.providerAuthority(now) });
+function decideSource(actor: string, envelope: EvidenceEnvelope, provider?: EvidenceAuthorityContext['provider']) {
+  const policy: EvidencePolicy = { version: 'recall-source-v1', currentVersion: 'recall-source-v1', scopeIds: [envelope.scopeId],
+    state: 'active', expiresAt: envelope.expiresAt, residency: 'any', connector: 'not-required', repository: 'not-required' };
+  const source = { kind: 'source-document-version' as const, policy, authorityDependencies: envelope.policies };
+  // Only current locked SQL may establish these Continuum facts. Both branches
+  // describe this same source; there is no assertion/document declassification.
+  return decideEvidencePolicy({ now: envelope.now, action: provider ? 'provider-disclosure' : 'text-hydration',
+    continuum: { principalId: actor, enabled: true, checkedAt: envelope.now,
+      readableScopeIds: [...new Set([envelope.scopeId, ...envelope.policies.flatMap(p => p.scopeIds)])] },
+    artifact: source, sourceDocument: source, providerInput: 'source-document', provider });
+}
+function canDisclose(actor: string, envelope: EvidenceEnvelope, config: Reranking): boolean {
+  try { return decideSource(actor, envelope, destination(config, envelope.now)).providerDisclosure.decision === 'allow'; }
+  catch { return false; }
+}
 
 /** Current source authority is established by SQL, then consumed by the pure
  * policy. Never call the exclusive autocommit authority adapter here. */
 export async function currentRecallIds(client: pg.PoolClient, actor: string,
   versions: ReadonlyMap<string, string>, config?: Reranking): Promise<Set<string>> {
-  const permitted = new Set<string>();
-  for (const [id, version] of [...versions].sort(([a], [b]) => a.localeCompare(b))) {
-    const envelope = await evidenceEnvelope(client, actor, version);
+  const decision = await currentRecallEligibility(client, actor, versions, config);
+  return config ? decision.disclosable : decision.readable;
+}
+export async function currentRecallEligibility(client: pg.PoolClient, actor: string,
+  versions: ReadonlyMap<string, string>, config?: Reranking) {
+  const readable = new Set<string>(); const disclosable = new Set<string>();
+  for (const { id, envelope } of await currentRecallEnvelopes(client, actor, versions)) {
     if (!envelope || envelope.kind !== 'source-document-version') continue;
-    const decision = decideManagedEvidence(actor, envelope, config && destination(config, envelope.now));
-    if ((config ? decision.providerDisclosure : decision.artifactRead).decision !== 'allow') continue;
-    const live = await client.query('SELECT id FROM memories WHERE id=$1 AND state=\'live\' AND (expires_at IS NULL OR expires_at>pg_catalog.clock_timestamp())', [id]);
-    if (live.rowCount) permitted.add(id);
+    if (decideSource(actor, envelope).sourceDocumentRead.decision !== 'allow') continue;
+    readable.add(id);
+    if (config && canDisclose(actor, envelope, config)) disclosable.add(id);
   }
-  return permitted;
+  return { readable, disclosable };
 }
 
 export async function rerankRecallPool(pool: pg.Pool, actor: string, input: RecallInput, opts: RecallOptions,
   selected: RecallCandidates, config: Reranking, budget: Budget, signal?: AbortSignal, localOnlyScopes: ReadonlySet<string> = new Set()): Promise<AdmittedRecall> {
   const limit = input.limit ?? 10;
+  const known = sourceVersions.get(pool) ?? new Map<string, string>();
+  sourceVersions.set(pool, known);
   let reason: RerankingDiagnostic | undefined;
   const admitted = await evidenceTransaction(pool, async client => {
     // Metadata before lazy source enrollment or body hydration. Current membership
     // applies even if a previously resolved readable-scope list is stale.
-    const metadata = await client.query<{ id: string; bytes: string }>(
-      `SELECT m.id, ${MEMORY_READ_BUDGET_BYTES_SQL} AS bytes FROM memories m JOIN scopes s ON s.id=m.scope_id
-       WHERE m.id=ANY($1::uuid[]) AND m.scope_id=ANY($2::uuid[]) AND m.state='live'
-       AND (m.expires_at IS NULL OR m.expires_at>pg_catalog.clock_timestamp())
-       AND EXISTS(SELECT 1 FROM principals p WHERE p.id=$3 AND p.disabled_at IS NULL)
-       AND (s.kind='org' OR EXISTS(SELECT 1 FROM scope_memberships sm WHERE sm.scope_id=m.scope_id AND sm.principal_id=$3
-         AND sm.active AND continuum_membership_is_effective(sm.active,sm.source_kind))) ORDER BY m.id FOR SHARE OF m`,
-      [selected.candidates.map(c => c.id), opts.scopeIds, actor]);
-    const sizes = new Map(metadata.rows.map(r => [r.id, Number(r.bytes)]));
+    const metadata = await recallAuthorityMetadata(client, actor, selected.candidates.map(c => c.id), opts.scopeIds);
+    const sizes = new Map(metadata.map(r => [r.id, Number(r.bytes)]));
     let candidates = selected.candidates.filter(c => sizes.has(c.id));
     const fits = (rows: typeof candidates) => rows.length <= budget.available('candidates')
       && rows.every(c => sizes.get(c.id)! <= budget.profile.maxItemHydratedBytes)
@@ -59,35 +76,24 @@ export async function rerankRecallPool(pool: pg.Pool, actor: string, input: Reca
     }
     if (!fits(candidates)) throw new BudgetError();
     const versions = new Map<string, string>();
-    for (const candidate of [...candidates].sort((a, b) => a.id.localeCompare(b.id))) {
-      // Oversized optional snapshots never hydrate. The required fallback still
-      // goes through the ordinary bounded read gate and fails if it cannot fit.
-      if (sizes.get(candidate.id)! > budget.profile.maxItemHydratedBytes) continue;
-      await client.query('SAVEPOINT reranking_source');
-      try {
-        const version = (await client.query<{ id: string }>('SELECT continuum_evidence_source($1,$2) AS id', [actor, candidate.id])).rows[0].id;
-        const envelope = await evidenceEnvelope(client, actor, version);
-        if (envelope && envelope.kind === 'source-document-version'
-          && decideManagedEvidence(actor, envelope).artifactRead.decision === 'allow') {
-          versions.set(candidate.id, version);
-          if ((!config.adapter.local && localOnlyScopes.has(envelope.scopeId))
-            || decideManagedEvidence(actor, envelope, destination(config, envelope.now)).providerDisclosure.decision !== 'allow') {
-            reason = { status: 'fallback', reason: 'policy_denied' };
-          }
+    const sources = await enrollRecallSources(client, actor, candidates.map(c => c.id).sort(), known);
+    if (sources.length !== candidates.length) reason = { status: 'fallback', reason: 'policy_denied' };
+    for (const { id, version, envelope } of sources) {
+      if (envelope && envelope.kind === 'source-document-version'
+        && decideSource(actor, envelope).sourceDocumentRead.decision === 'allow') {
+        versions.set(id, version);
+        known.delete(id); known.set(id, version);
+        if (known.size > 100) known.delete(known.keys().next().value!);
+        if ((!config.adapter.local && localOnlyScopes.has(envelope.scopeId))
+          || !canDisclose(actor, envelope, config)) {
+          reason = { status: 'fallback', reason: 'policy_denied' };
         }
-        await client.query('RELEASE SAVEPOINT reranking_source');
-      } catch (error) {
-        await client.query('ROLLBACK TO SAVEPOINT reranking_source');
-        await client.query('RELEASE SAVEPOINT reranking_source');
-        if (!['23514', '42501'].includes(String((error as { code?: string }).code))) throw error;
-        // A denied identity never enters inputs, diagnostics, counts or receipts.
-        reason = { status: 'fallback', reason: 'policy_denied' };
-      }
+      } else reason = { status: 'fallback', reason: 'policy_denied' };
     }
     candidates = candidates.filter(c => versions.has(c.id));
     budget.consume({ candidates: candidates.length });
     const results = await hydrateRecallCandidates(client, candidates.map(c => c.id), input.query,
-      new Map(candidates.map(c => [c.id, c.score])), opts.scopeIds, opts.types, opts.readBudgetBytes, budget);
+      new Map(candidates.map(c => [c.id, c.score])), opts.scopeIds, opts.types, opts.readBudgetBytes, budget, true);
     return { results, versions };
   });
   if (admitted.results.length < 2 || reason) return { ...admitted, diagnostic: reason ?? { status: 'fallback', reason: 'capability_unavailable' } };

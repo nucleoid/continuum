@@ -8,6 +8,10 @@ delivery identifiers.
 
 ## Retrieval enrichers
 
+Optional [reranking](reranking.md) is a separate server-owned stage before final
+recall selection. Enrichers still receive only the final selection and cannot
+change its order or scores. Neither extension participates in AGENTS.md selection.
+
 A `RetrievalEnricher` receives an immutable clone of memories that have already
 passed ACL filtering and ranking. It returns one plain JSON object or `null` for
 each result. Continuum places each object under

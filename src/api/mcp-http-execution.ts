@@ -71,6 +71,7 @@ export function remoteExecutionContext(pool: pg.Pool, routing: EmbeddingRouting)
     return wrapped;
   };
   const guardedRouting: EmbeddingRouter = {
+    requiresLocal(scope) { return router.requiresLocal?.(scope) ?? false; },
     resolve(scope) { const route = router.resolve(scope); return { ...route, provider: route.provider && wrapProvider(route.provider) }; },
     providers() { return router.providers().map(wrapProvider); },
   };
