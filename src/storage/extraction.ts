@@ -3,8 +3,12 @@ import { evidenceTransaction } from './evidence.js';
 import type { DurableAttempt, BudgetAmounts } from '../pipeline/budget.js';
 
 /** Owned transactions with the same bounded SQL limits as evidence operations. */
-export async function extractionOperation<T>(pool: pg.Pool, sql: string, values: unknown[]): Promise<T> {
-  return evidenceTransaction(pool, async client => (await client.query<{ result: T }>(sql, values)).rows[0].result);
+export async function extractionOperation<T>(pool: pg.Pool, sql: string, values: unknown[], beforeCommit?: () => void): Promise<T> {
+  return evidenceTransaction(pool, async client => {
+    const result = (await client.query<{ result: T }>(sql, values)).rows[0].result;
+    beforeCommit?.();
+    return result;
+  });
 }
 export interface ExtractionClaim {
   outcome: 'claimed'; id: string; generation: number; sourceVersion: string; sourceBytes: number; leaseUntil: string;

@@ -42,7 +42,7 @@ it('rolls back final assertion publication when the original local deadline expi
     } finally { release(); outcome = await work; }
     expect(outcome).toBe('unavailable');
     expect((await f.owner.query("SELECT count(*)::int AS n FROM evidence_versions WHERE kind='extracted-assertion'")).rows[0].n).toBe(0);
-    expect((await f.owner.query("SELECT count(*)::int AS n FROM audit_log WHERE metadata->>'operation'='extraction_applied'")).rows[0].n).toBe(0);
+    expect((await f.owner.query("SELECT count(*)::int AS n FROM audit_log WHERE metadata->>'operation'='extraction_chunk_finished'")).rows[0].n).toBe(0);
     expect((await f.owner.query('SELECT body FROM memories WHERE scope_id=$1', [f.scopeId])).rows[0].body).toBe('Keep original truth');
   }, profile);
 }, 120_000);

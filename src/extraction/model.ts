@@ -33,7 +33,7 @@ export function validateAssertions(value: unknown, chunk: ExtractionChunk): Extr
 export type ExtractionState = 'queued' | 'running' | 'complete' | 'partial' | 'skipped' | 'unavailable' | 'cancelled';
 export interface ExtractionStatus {
   status: ExtractionState | 'not-configured';
-  runId?: string; sourceVersion?: string; profile?: string; generation?: number;
+  runId?: string; sourceVersion?: string | null; profile?: string; generation?: number;
   chunks?: number; completed?: number; skipped?: number; assertions?: number;
-  reason?: string;
+  reason?: string | null;
 }

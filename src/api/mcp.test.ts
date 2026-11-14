@@ -234,6 +234,7 @@ describe('MCP server', () => {
       expires_at: expect.any(String),
       embedded: false,
       related: [],
+      extraction: { status: 'not-configured' },
     });
     expect(rawText(result)).not.toContain(privateMessage);
     const { rows } = await pool.query(

@@ -91,13 +91,14 @@ export async function processExtraction(pool: pg.Pool, worker: string, profile: 
         }
       }
       options.signal?.throwIfAborted(); budget.assertLive();
+      const beforeCommit = () => { options.signal?.throwIfAborted(); budget.assertLive(); };
       try {
         await extractionOperation(pool, 'SELECT continuum_extraction_apply($1,$2,$3,$4,$5,$6,$7) AS result',
-          [claim.id, worker, claim.generation, chunk.index, attempt, output, failure]);
+          [claim.id, worker, claim.generation, chunk.index, attempt, output, failure], beforeCommit);
       } catch (error) {
         if ((error as { code?: string }).code !== '54000') throw error;
         await extractionOperation(pool, 'SELECT continuum_extraction_apply($1,$2,$3,$4,$5,NULL,\'budget\') AS result',
-          [claim.id, worker, claim.generation, chunk.index, attempt]);
+          [claim.id, worker, claim.generation, chunk.index, attempt], beforeCommit);
       }
       if (failure === 'transient') return 'unavailable';
     }

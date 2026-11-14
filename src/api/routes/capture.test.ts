@@ -164,6 +164,7 @@ describe('POST /api/v0/capture', () => {
       expiresAt: expect.any(String),
       embedded: false,
       related: [],
+      extraction: { status: 'not-configured' },
     });
     expect(JSON.stringify(res.body)).not.toContain(privateMessage);
     const { rows } = await pool.query(
