@@ -26,7 +26,7 @@ export function assertRerankingEmbeddingBudget(routing: EmbeddingRouting, config
         || (provider.batchSize !== undefined && (!Number.isSafeInteger(provider.batchSize) || provider.batchSize < 1 || provider.batchSize > 1000))) throw new TypeError();
       const caps = { outputTokens: adapter.outputTokens, reasoningTokens: adapter.reasoningTokens, completionTokens: adapter.completionTokens };
       if (caps.outputTokens + caps.reasoningTokens > caps.completionTokens) throw new TypeError();
-      const wire = boundedJson(adapter.serialize([''], Object.freeze(caps)), probe.available('inputBytes'));
+      const wire = boundedJson(adapter.serialize(['a'], Object.freeze(caps)), probe.available('inputBytes'));
       const counted = adapter.tokens.count(wire);
       if (!Number.isSafeInteger(counted) || counted < 0 || !Number.isSafeInteger(adapter.tokens.overheadTokens) || adapter.tokens.overheadTokens < 0) throw new TypeError();
       const tokens = counted + adapter.tokens.overheadTokens;

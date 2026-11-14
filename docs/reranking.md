@@ -84,7 +84,7 @@ reject reranking compositions whose registered embedding providers lack matching
 `pipelineAdapter` accounting. Stock embedding adapters need an explicitly qualified
 budget adapter before they can be combined with reranking; no unbudgeted provider
 call substitutes for that prerequisite. Setup checks credentials, declared caps,
-token capability and matching pricing, and probes one complete empty-query wire
+token capability and matching pricing, and probes one complete minimal-query wire
 reservation for every distinct registered provider using the same accountant.
 The call ceiling must cover all those groups plus one reranker call. This is a
 minimum compatibility check; actual queries and all later stages still need
