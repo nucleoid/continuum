@@ -14,6 +14,32 @@ import { configureReranking } from '../reranking/provider.js';
 import { EmbeddingRegistry, ScopeEmbeddingRouter } from '../embeddings/router.js';
 import { supersedeDecision } from '../storage/supersede.js';
 import { provisionEntraGroupBinding, syncEntraMemberships } from './membership-sync.js';
+import { Budget } from '../pipeline/budget.js';
+
+it('suppresses cancellation after final audit commit without claiming atomic network delivery', async () => {
+  await standupProducerFixture(async f => {
+    const principal = (await getPrincipal(f.app, f.actorId))!;
+    for (let i = 0; i < 3; i++) await createMemory(f.app, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId,
+      type: 'decision', title: `Commitcancel source ${i}`, body: `Commitcancel ${'padding '.repeat(i * 10)}`, source: 'manual' });
+    const config = testReranking(() => 1).config(); const budget = new Budget(config.profile); let commits = 0;
+    const wrapped = { query: f.app.query.bind(f.app), connect: async () => {
+      const client = await f.app.connect();
+      return new Proxy(client, { get(object, key) {
+        if (key === 'query') return async (...args: unknown[]) => {
+          const result = await (client.query as Function).apply(client, args);
+          if (args[0] === 'COMMIT' && ++commits === 4) budget.cancel();
+          return result;
+        };
+        const value = Reflect.get(object, key); return typeof value === 'function' ? value.bind(object) : value;
+      } });
+    } } as unknown as pg.Pool;
+    await expect(recallForPrincipal(wrapped, null, principal, { query: 'commitcancel', limit: 1 }, {}, undefined,
+      undefined, budget, config)).rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE' });
+    expect(commits).toBe(4);
+    const summary = (await f.owner.query("SELECT metadata FROM audit_log WHERE query='commitcancel' ORDER BY id DESC LIMIT 1")).rows[0].metadata;
+    expect((await f.owner.query("SELECT count(*)::int AS n FROM audit_log WHERE metadata->>'request_id'=$1 AND memory_id IS NOT NULL", [summary.request_id])).rows[0].n).toBe(1);
+  });
+}, 120_000);
 
 it('admits concurrent cold source pools without a shared-lock upgrade deadlock', async () => {
   await standupProducerFixture(async f => {
@@ -30,7 +56,8 @@ it('admits concurrent cold source pools without a shared-lock upgrade deadlock',
         const outcomes = await Promise.allSettled([0, 1].map(() => recallForPrincipal(concurrent, null, principal,
           { query, limit: 1 }, {}, undefined, undefined, undefined, config)));
         for (const outcome of outcomes) {
-          expect(outcome.status, outcome.status === 'rejected' ? String(outcome.reason?.cause?.code ?? outcome.reason?.code) : undefined).toBe('fulfilled');
+          const code = outcome.status === 'rejected' ? String(outcome.reason?.cause?.code ?? outcome.reason?.code) : undefined;
+          expect(outcome.status, code).toBe('fulfilled');
           if (outcome.status === 'fulfilled') {
             expect(outcome.value.results).toHaveLength(1);
             expect(ids).toContain(outcome.value.results[0].memory.id);
@@ -39,9 +66,10 @@ it('admits concurrent cold source pools without a shared-lock upgrade deadlock',
       }
     } finally {
       await concurrent.end();
-      await Promise.race([Promise.all(closed), new Promise((_, reject) => {
-        const timer = setTimeout(() => reject(new Error('Concurrent APP sessions did not close')), 5000); timer.unref();
-      })]);
+      let timer: NodeJS.Timeout | undefined;
+      try { await Promise.race([Promise.all(closed), new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Concurrent APP sessions did not close')), 5000);
+      })]); } finally { if (timer) clearTimeout(timer); }
     }
   });
 }, 120_000);
