@@ -36,6 +36,8 @@ export interface ReadAuditMemory {
     rank: number;
     score?: number;
     rerank_score?: number;
+    source_version?: string;
+    evidence_policy_version?: string;
     delivery?: 'agents-md';
   };
 }

@@ -9,7 +9,7 @@ export async function recallAuthorityMetadata(client: pg.PoolClient, actor: stri
      AND (m.expires_at IS NULL OR m.expires_at>pg_catalog.clock_timestamp())
      AND EXISTS(SELECT 1 FROM principals p WHERE p.id=$3 AND p.disabled_at IS NULL)
      AND (s.kind='org' OR EXISTS(SELECT 1 FROM scope_memberships sm WHERE sm.scope_id=m.scope_id AND sm.principal_id=$3
-       AND sm.active AND continuum_membership_is_effective(sm.active,sm.source_kind))) ORDER BY m.id FOR SHARE OF m`,
+       AND sm.active AND continuum_membership_is_effective(sm.active,sm.source_kind))) ORDER BY m.id FOR UPDATE OF m`,
     [ids, scopeIds, actor])).rows;
 }
 interface SourceAdmission { id: string; version: string; envelope: EvidenceEnvelope | null }

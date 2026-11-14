@@ -44,8 +44,9 @@ in the final selection/audit transaction. Changed/expired/revoked versions are
 omitted; refill uses only the already admitted pool. Invalidated scores restore
 the complete eligible hybrid order. Required final-output checks precede the
 audit. That audit contains only delivered identities, in delivered order, with
-`score` and optional `rerank_score`. Source enrollment and disclosure admission
-have separate audit records. Auditing is not atomic proof of network receipt.
+`score` and optional `rerank_score`. Source enrollment has its own audit records. Final delivery receipts retain the
+configured adapter/model/profile revision, policy version and exact delivered
+source versions. Auditing is not atomic proof of network receipt.
 
 Require exactly one finite score per admitted alias, no duplicates, unknown
 aliases, missing scores or changed revision. Order is descending rerank score,

@@ -7,6 +7,7 @@ import { evidenceTransaction } from '../storage/evidence.js';
 import type { Queryable } from '../storage/queryable.js';
 import type { Reranking } from '../reranking/provider.js';
 import type { RerankingDiagnostic } from '../reranking/runner.js';
+import { EVIDENCE_POLICY_VERSION } from '../evidence/policy.js';
 import { currentRecallEligibility, rerankRecallPool } from './recall-reranking.js';
 import { recordRead as recordReadAudit } from '../audit/log.js';
 import { resolveReadableScopeIds, type AccessibleScope } from './access.js';
@@ -142,6 +143,9 @@ export async function recallForPrincipal(
           scope_ids: scopeIds,
           hits: deliveredResults.length,
           ...(ranked ? { reranking_status: ranked.diagnostic.status,
+            reranking_adapter: { id: reranking!.adapter.id, version: reranking!.adapter.version,
+              model: reranking!.adapter.model, profile: reranking!.adapter.profile },
+            evidence_policy_version: EVIDENCE_POLICY_VERSION,
             ...(ranked.diagnostic.status === 'fallback' ? { reranking_reason: ranked.diagnostic.reason } : {}) } : {}),
           embedded: succeededEmbeddingGroups > 0,
           embedding_status: failedEmbeddingGroups > 0 || localOnlyUnavailable > 0
@@ -158,6 +162,7 @@ export async function recallForPrincipal(
           memoryId: result.memory.id,
           scopeId: result.memory.scopeId,
           metadata: { rank: index + 1, score: result.score,
+            ...(ranked ? { source_version: ranked.versions.get(result.memory.id)!, evidence_policy_version: EVIDENCE_POLICY_VERSION } : {}),
             ...(result.rerankScore === undefined ? {} : { rerank_score: result.rerankScore }) },
         })),
       });
@@ -172,19 +177,25 @@ export async function recallForPrincipal(
       budget?.assertLive();
       return { results: enrichedResults, accessible, diagnostics };
     };
-    if (ranked) return await evidenceTransaction(pool, async client => {
-      const { readable: eligible, disclosable } = await currentRecallEligibility(client, principal.id, ranked.versions, reranking);
-      if (ranked.diagnostic.status === 'used'
-        && disclosable.size !== ranked.results.length) {
-        diagnostics.reranking = ranked.diagnostic = { status: 'fallback', reason: 'policy_denied' };
-        const fusionOrder = new Map(candidatePool!.candidates.map((c, i) => [c.id, i]));
-        ranked.results = ranked.results.map(({ rerankScore: _score, ...r }) => r)
-          .sort((a, b) => fusionOrder.get(a.memory.id)! - fusionOrder.get(b.memory.id)!);
-      }
-      const enriched = new Map((preparedResults ?? results).map(r => [r.memory.id, r]));
-      return deliver(client, ranked.results.filter(r => eligible.has(r.memory.id)).slice(0, input.limit ?? 10)
-        .map(r => ({ ...r, ...(enriched.get(r.memory.id)?.enrichments ? { enrichments: enriched.get(r.memory.id)!.enrichments } : {}) })));
-    });
+    if (ranked) {
+      const delivered = await evidenceTransaction(pool, async client => {
+        const { readable: eligible, disclosable } = await currentRecallEligibility(client, principal.id, ranked.versions, reranking);
+        if (ranked.diagnostic.status === 'used'
+          && disclosable.size !== ranked.results.length) {
+          diagnostics.reranking = ranked.diagnostic = { status: 'fallback', reason: 'policy_denied' };
+          const fusionOrder = new Map(candidatePool!.candidates.map((c, i) => [c.id, i]));
+          ranked.results = ranked.results.map(({ rerankScore: _score, ...r }) => r)
+            .sort((a, b) => fusionOrder.get(a.memory.id)! - fusionOrder.get(b.memory.id)!);
+        }
+        const enriched = new Map((preparedResults ?? results).map(r => [r.memory.id, r]));
+        return deliver(client, ranked.results.filter(r => eligible.has(r.memory.id)).slice(0, input.limit ?? 10)
+          .map(r => ({ ...r, ...(enriched.get(r.memory.id)?.enrichments ? { enrichments: enriched.get(r.memory.id)!.enrichments } : {}) })));
+      });
+      // A committed authorized-read audit is not a network receipt. Cancellation
+      // or expiry during COMMIT still suppresses the successful response.
+      budget?.assertLive();
+      return delivered;
+    }
     return await deliver(pool, preparedResults ?? results);
   } catch (error) {
     throw asServiceError(error);

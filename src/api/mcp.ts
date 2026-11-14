@@ -491,7 +491,11 @@ export function buildMcpServer(deps: McpDeps): McpServer {
             readBudgetBytes: deps.readBudgetBytes,
             validateResult: deps.readBudgetBytes === undefined && !budget ? undefined : (value) => {
               const wire = jsonResult(recallProjection(value), { diagnostics: value.diagnostics });
-              budget?.serializeOutput(wire);
+              if (budget) {
+                const frame = { jsonrpc: '2.0', id: extra.requestId, result: wire };
+                if (deps.readBudgetBytes !== undefined) boundedJsonText(frame, deps.readBudgetBytes, false);
+                budget.serializeOutput(frame);
+              }
             },
           },
           budget,

@@ -37,10 +37,11 @@ export interface Reranking {
 export function configureReranking(adapter: RerankingAdapter, profile: BudgetProfile,
   options: { candidateLimit: number; evidence: RerankingEvidence; providerAuthority?: (databaseNow: number) => CurrentEvidenceAuthority }): Reranking {
   const evidence = Object.freeze({ ...options.evidence });
+  const identity = /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/;
   if (!Number.isSafeInteger(options.candidateLimit) || options.candidateLimit < 1 || options.candidateLimit > 100
     || options.candidateLimit > profile.limits.candidates
     || !/^[a-z][a-z0-9.-]{0,63}$/.test(adapter.id)
-    || !/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(adapter.version)
+    || [adapter.version, adapter.model, adapter.profile].some(value => typeof value !== 'string' || !identity.test(value))
     || evidence.adapterId !== adapter.id || evidence.version !== adapter.version
     || evidence.model !== adapter.model || evidence.profile !== adapter.profile
     || !['local-contract', 'operator-qualified'].includes(evidence.kind)
