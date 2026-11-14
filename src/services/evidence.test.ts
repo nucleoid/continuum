@@ -85,10 +85,9 @@ it('erases shared copies of personal derivatives even when every source is share
         [f.adminId, randomUUID(), project.id, 'cache', JSON.stringify([{versionId:personal,kind:'copy'}]),
           {transform:'late-copy-v1',model:'none',prompt:'none',schema:'v1'}, 'Concurrent personal copy'])).rows[0].id;
       copies.push(late);
-      for (let i = 0; i < 3; i++) {
-        expect((await offboardPrincipal(f.operator, admin, f.actorId, { confirmationScopeId: f.scopeId, batchSize: 1 })).complete).toBe(false);
-        expect((await f.owner.query('SELECT continuum_evidence_scope_is_erased($1) AS clean', [f.scopeId])).rows[0].clean).toBe(false);
-      }
+      await expect(offboardPrincipal(f.operator, admin, f.actorId, { confirmationScopeId: f.scopeId, batchSize: 1 }))
+        .rejects.toMatchObject({code:'55P03'});
+      expect((await f.owner.query('SELECT continuum_evidence_scope_is_erased($1) AS clean', [f.scopeId])).rows[0].clean).toBe(false);
       await held.query('COMMIT');
     } finally { await held.query('ROLLBACK'); held.release(); }
     let result = await offboardPrincipal(f.operator, admin, f.actorId, { confirmationScopeId: f.scopeId, batchSize: 1 });

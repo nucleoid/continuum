@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
-import { createPrincipal } from '../storage/principals.js';
+import { createPrincipal, getPrincipal } from '../storage/principals.js';
 import { createScope } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import { createMemory } from '../storage/memories.js';
@@ -11,6 +11,7 @@ import { EvidencePayloadRegistry } from '../evidence/model.js';
 import { registerEvidence, readEvidence } from '../services/evidence.js';
 import { materializeEvidence, repairEvidence, type EvidenceRepairInput, type EvidenceRepairOutput } from './evidence.js';
 import { starterProfile, type BudgetAdapter } from '../pipeline/budget.js';
+import { offboardPrincipal } from '../services/offboarding.js';
 
 describe('gap-aware evidence invalidation', () => {
   let pool: pg.Pool;
@@ -130,6 +131,27 @@ it('repairs with new wording/version and original durable attempt identity, then
     expect(await repairEvidence(f.operator,f.adminId,randomUUID(),{owners,profile:starterProfile,adapter,providerAuthority})).toBe('unavailable');
     expect((await f.owner.query('SELECT attempt_id FROM evidence_repair_jobs WHERE version_id=$1',[job.result_version])).rows[0].attempt_id).toBe(failed.attempt_id);
     expect((await f.owner.query('SELECT used FROM pipeline_budget_workflows WHERE id=$1',[failed.workflow_id])).rows[0].used.calls).toBe(1);
+    await f.owner.query('DROP TRIGGER reject_evidence_settlement ON pipeline_budget_attempts; DROP FUNCTION reject_evidence_settlement()');
+    const currentSource=(await f.app.query('SELECT continuum_evidence_source($1,$2) AS id',[f.actorId,source.id])).rows[0].id;
+    const lateNode=randomUUID();
+    const lateVersion=await registerEvidence(f.app,f.actorId,{nodeId:lateNode,expectedCurrent:null,scopeId:f.scopeId,kind:'derived-observation',
+      parents:[{versionId:currentSource,kind:'derivation'}],identity:{transform:'v1',model:'none',prompt:'none',schema:'v1'},payload:'Pending late repair'},owners);
+    await f.app.query("UPDATE memories SET body='Source for concurrent erase' WHERE id=$1",[source.id]);
+    for(let i=0;i<8;i++) await materializeEvidence(f.app,{owner:randomUUID(),pageSize:100,deadlineMs:5000});
+    const entered=Promise.withResolvers<void>(),release=Promise.withResolvers<void>();
+    const late=repairEvidence(f.operator,f.adminId,randomUUID(),{owners,profile:starterProfile,providerAuthority,
+      adapter:{...adapter,invoke:async(wire,options)=>{entered.resolve();await release.promise;return adapter.invoke(wire,options);}}});
+    try {
+      await entered.promise;
+      const admin=(await getPrincipal(f.owner,f.adminId))!;
+      let erased=await offboardPrincipal(f.operator,admin,f.actorId,{confirmationScopeId:f.scopeId,batchSize:100});
+      for(let i=0;!erased.complete&&i<40;i++) erased=await offboardPrincipal(f.operator,admin,f.actorId,{confirmationScopeId:f.scopeId,batchSize:100});
+      expect(erased.complete).toBe(true);
+      expect((await f.owner.query('SELECT count(*)::int AS n FROM evidence_payloads WHERE version_id=$1',[lateVersion])).rows[0].n).toBe(0);
+    } finally {release.resolve();}
+    expect(await late).toBe('unavailable');
+    expect((await f.owner.query('SELECT count(*)::int AS n FROM evidence_versions WHERE root_id=$1',[lateNode])).rows[0].n).toBe(1);
+    expect((await f.owner.query('SELECT state FROM evidence_repair_jobs WHERE version_id=$1',[lateVersion])).rows[0].state).toBe('cancelled');
   });
 },120_000);
 
