@@ -99,6 +99,18 @@ describe('optional pipeline service envelope parity', () => {
     await expect(recallForPrincipal(pool, null, principal, { query: 'Budget' }, {}, undefined, undefined, budget)).rejects.toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
     expect((await pool.query("SELECT 1 FROM audit_log WHERE action='read'")).rowCount).toBe(0);
   });
+  it.each(['deep', 'wide'])('reports %s stored metadata as resource overflow without an internal error', async (shape) => {
+    let metadata: Record<string, unknown> = {};
+    if (shape === 'deep') for (let index = 0; index < 34; index++) metadata = { nested: metadata };
+    else metadata = Object.fromEntries(Array.from({ length: 6000 }, (_, index) => [`key${index}`, 0]));
+    await seed('Budget reference evidence', metadata);
+    expect((await recallForPrincipal(pool, null, principal, { query: 'Budget' })).results).toHaveLength(1);
+    const audits = (await pool.query("SELECT count(*)::int AS n FROM audit_log WHERE action='read'")).rows[0].n;
+    await expect(recallForPrincipal(pool, null, principal, { query: 'Budget' }, {}, undefined, undefined, new Budget(starterProfile)))
+      .rejects.toMatchObject({ code: 'PAYLOAD_TOO_LARGE', status: 413 });
+    expect((await pool.query("SELECT count(*)::int AS n FROM audit_log WHERE action='read'")).rows[0].n).toBe(audits);
+  });
+
   it('reports exhausted valid profiles as resource overflow, preserving the failure allowance', async () => {
     await seed();
     const budget = new Budget(checkedProfile({ ...starterProfile, limits: { ...starterProfile.limits, outputBytes: 512 } }));

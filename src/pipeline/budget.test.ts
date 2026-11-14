@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { Budget, checkedProfile, starterProfile, boundedJson, runBudgetedStage, priceMicros, type BudgetAdapter } from './budget.js';
+import { Budget, BudgetError, checkedProfile, starterProfile, boundedJson, runBudgetedStage, priceMicros, type BudgetAdapter } from './budget.js';
 
 const profile = (limits = {}) => checkedProfile({ ...starterProfile, limits: { ...starterProfile.limits, ...limits } });
 function adapter(overrides: Partial<BudgetAdapter<string, string>> = {}): BudgetAdapter<string, string> {
@@ -54,6 +54,16 @@ describe('one shared pipeline envelope', () => {
     expect(() => boundedJson({ large: 'x'.repeat(1_000_000) }, 100)).toThrow();
     let nested: unknown = null; for (let i = 0; i < 40; i++) nested = [nested];
     expect(() => boundedJson(nested, 1000)).toThrow();
+  });
+
+  it('classifies valid deep or wide JSON as resource overflow', () => {
+    let deep: unknown = null;
+    for (let index = 0; index < 34; index++) deep = { nested: deep };
+    const wide = Object.fromEntries(Array.from({ length: 6000 }, (_, index) => [`key${index}`, 0]));
+    for (const value of [deep, wide, Array(10_001).fill(null)]) {
+      expect(() => boundedJson(value, 1024 * 1024)).toThrow(BudgetError);
+    }
+    expect(() => boundedJson({ get unsupported() { return 1; } }, 1024)).toThrow(TypeError);
   });
 
   it('charges wrappers and tokens before calling an adapter', async () => {
