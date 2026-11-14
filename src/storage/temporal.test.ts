@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { makeTestPool, resetData } from './test-helpers.js';
 import { createPrincipal } from './principals.js';
 import { createScope } from './scopes.js';
@@ -14,6 +14,9 @@ import { readEventAnnotations, writeEventAnnotation } from './temporal.js';
 import { parseEventAnnotation, parseEventWindow } from '../temporal/model.js';
 import { storeMemoryEmbeddingVector } from './embeddings.js';
 import { hydrateRecallCandidates, recall } from './recall.js';
+import { recallAuthorityMetadata } from './recall-authority.js';
+import * as temporalStorage from './temporal.js';
+import { listMemoriesForPrincipal } from '../services/memories.js';
 
 const annotation = (instant = '2026-02-01T00:00:00Z') => parseEventAnnotation({ status:'known', assertion:'asserted', precision:'instant', instant });
 const filter = parseEventWindow({ from:'2026-02-01T00:00:00Z', to:'2026-03-01T00:00:00Z' });
@@ -96,5 +99,30 @@ describe('event annotations and candidate admission', () => {
     const f=await world();await f.capture();await f.capture(annotation('2025-01-01T00:00:00Z'));
     const result=await recall(pool,{actor:f.actor.id,query:'signal',scopeIds:[f.scope.id],limit:1,eventWindow:filter});
     expect(result.results).toHaveLength(1);
+  });
+  it('labels explicitly included historical unknowns for direct recall callers', async () => {
+    const f=await world();
+    const memory=await createMemory(pool,{scopeId:f.scope.id,scopeKind:'project',authorId:f.actor.id,type:'decision',title:'Signal',body:'Signal historical source',source:'manual'});
+    const result=await recall(pool,{actor:f.actor.id,query:'signal',scopeIds:[f.scope.id],limit:10,eventFilter:{...filter,includeUnknown:true}});
+    expect(result.results.find(r=>r.memory.id===memory.id)?.memory.event?.annotation.status).toBe('unknown');
+  });
+  it('rechecks hard filters during metadata admission before optional reranking', async () => {
+    const f=await world(), old=await f.capture(annotation('2025-01-01T00:00:00Z'));
+    const client=await pool.connect();
+    try {
+      await client.query('BEGIN');
+      expect(await recallAuthorityMetadata(client,f.actor.id,[old.memory.id],[f.scope.id],filter)).toEqual([]);
+    } finally {await client.query('ROLLBACK');client.release();}
+  });
+  it('removes a newly nonmatching annotation before browse delivery and audits', async () => {
+    const f=await world(), good=await f.capture();
+    const original=temporalStorage.readEventAnnotations;
+    const spy=vi.spyOn(temporalStorage,'readEventAnnotations').mockImplementationOnce(async(...args)=>{
+      await writeEventAnnotation(pool,f.actor.id,good.memory.id,annotation('2025-01-01T00:00:00Z'));
+      return original(...args);
+    });
+    try {
+      expect((await listMemoriesForPrincipal(pool,f.actor,{scope:`project:${f.scope.name}`,eventFilter:filter})).items).toEqual([]);
+    } finally {spy.mockRestore();}
   });
 });
