@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { Budget, checkedProfile, starterProfile, boundedJson, runBudgetedStage, priceMicros, type BudgetAdapter } from './budget.js';
 
 const profile = (limits = {}) => checkedProfile({ ...starterProfile, limits: { ...starterProfile.limits, ...limits } });
@@ -117,5 +117,23 @@ describe('one shared pipeline envelope', () => {
     expect(report.receipts.length).toBeLessThanOrEqual(32);
     expect(await runBudgetedStage(new Budget(starterProfile), adapter({ credentials: 'missing' }), 'x')).toMatchObject({ reason: 'credentials_unavailable' });
     expect(await runBudgetedStage(new Budget(starterProfile), adapter(), 'x', { authorize: async () => false })).toMatchObject({ reason: 'policy_denied' });
+  });
+
+  it('keeps the tighter stage deadline when a transport supplies a larger allowance', async () => {
+    vi.useFakeTimers();
+    let finish!: (r: { value: string; response: unknown }) => void;
+    try {
+      let completed = false;
+      const budget = new Budget(checkedProfile({ ...starterProfile, stageMs: 20 }), () => 0);
+      const pending = runBudgetedStage(budget, adapter({ id: 'stage-cap', timeoutMs: 100,
+        invoke: () => new Promise((r) => { finish = r; }) }), 'x', { transportMs: 100 });
+      void pending.then(() => { completed = true; });
+      await vi.advanceTimersByTimeAsync(21);
+      expect(completed).toBe(true);
+      expect(await pending).toMatchObject({ reason: 'deadline' });
+    } finally {
+      finish?.({ value: 'late', response: 'late' });
+      await Promise.resolve(); vi.useRealTimers();
+    }
   });
 });

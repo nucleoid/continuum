@@ -31,7 +31,8 @@ describe('qualified provider startup gate', () => {
     await fixture(async (pool, admin, schema, shadow) => {
       await expect(requirePipelineBudgetsReady(pool)).rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE' });
       await admin.query(`CREATE FUNCTION "${schema}".continuum_pipeline_budgets_is_ready() RETURNS BOOLEAN
-        LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,"${schema}",pg_temp AS 'SELECT TRUE'`);
+        LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,"${schema}",pg_temp AS 'SELECT TRUE';
+        GRANT EXECUTE ON FUNCTION "${schema}".continuum_pipeline_budgets_is_ready() TO PUBLIC`);
       await expect(requirePipelineBudgetsReady(pool)).rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE' });
       await admin.query(`REVOKE ALL ON FUNCTION "${schema}".continuum_pipeline_budgets_is_ready() FROM PUBLIC`);
       await expect(requirePipelineBudgetsReady(pool)).resolves.toBeUndefined();
