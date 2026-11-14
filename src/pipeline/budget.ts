@@ -174,6 +174,7 @@ export class Budget {
     const keys = Object.keys(actual) as Array<keyof typeof actual>;
     if (keys.some((key) => !['spendMicros', 'outputBytes', 'outputTokens', 'reasoningTokens', 'completionTokens'].includes(key))) throw new Error('Invalid pipeline settlement');
     if (!['measured', 'provider-reported', 'estimated', 'unknown'].includes(provenance)) throw new Error('Invalid usage provenance');
+    if ((provenance === 'estimated' || provenance === 'unknown') && keys.some((key) => key !== 'outputBytes')) throw new Error('Unknown usage cannot refund token or spend caps');
     const identity = boundedJson({ actual: Object.fromEntries(keys.sort().map((key) => [key, integer(actual[key]!)])), provenance }, 1024);
     if (reservation.settlement !== undefined) {
       if (reservation.settlement !== identity) throw new Error('Conflicting pipeline settlement');
@@ -347,7 +348,10 @@ export async function runBudgetedStage<I, O>(budget: Budget, adapter: BudgetAdap
       return { status: 'complete', value: result.value, provenance: usage?.provenance ?? 'unknown' };
     } catch (error) { return skip(error instanceof BudgetError ? error.reason : 'provider_failed'); }
     finally {
-      if (!invoked) actual = { spendMicros: 0, outputBytes: 0, outputTokens: 0, reasoningTokens: 0, completionTokens: 0 };
+      if (!invoked) {
+        actual = { spendMicros: 0, outputBytes: 0, outputTokens: 0, reasoningTokens: 0, completionTokens: 0 };
+        provenance = 'measured'; // This process knows no adapter invocation occurred.
+      }
       try { if (durableReserved) await options.durable!.settle(actual, provenance); }
       finally {
         budget.settle(id, actual, provenance);

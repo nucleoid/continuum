@@ -89,6 +89,7 @@ describe('durable pipeline accounting', () => {
     const attempt = pipelineAttempt(pool, { ...w, attemptId: randomUUID() });
     await attempt.reserve(amounts({ calls: 1, spendMicros: 1 }), 1);
     await expect(attempt.settle({ calls: 0 })).rejects.toThrow();
+    await expect(attempt.settle({ spendMicros: 0 }, 'estimated')).rejects.toThrow(/unknown usage/);
     const columns = (await pool.query("SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='pipeline_budget_attempts'")).rows.map((r) => r.column_name);
     expect(columns).not.toContain('payload');
     expect(columns).not.toContain('receipt');

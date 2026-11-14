@@ -153,6 +153,8 @@ BEGIN
         RAISE EXCEPTION 'invalid pipeline usage provenance'; END IF;
       CONTINUE;
     END IF;
+    IF entry.key<>'outputBytes' AND COALESCE(actual->>'provenance','unknown') NOT IN ('measured','provider-reported') THEN
+      RAISE EXCEPTION 'unknown usage cannot refund pipeline token or spend caps'; END IF;
     IF NOT entry.key=ANY(ARRAY['spendMicros','outputBytes','outputTokens','reasoningTokens','completionTokens'])
       OR jsonb_typeof(entry.value)<>'number' OR entry.value::text !~ '^(0|[1-9][0-9]*)$'
       OR entry.value::text::numeric>(a.reserved->>entry.key)::numeric THEN RAISE EXCEPTION 'invalid pipeline settlement'; END IF;

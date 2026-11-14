@@ -142,4 +142,12 @@ describe('one shared pipeline envelope', () => {
       usage: { outputTokens: 2, reasoningTokens: 0, completionTokens: 2, provenance: 'provider-reported' } }) }), 'x')).toMatchObject({ status: 'complete', provenance: 'provider-reported' });
     expect(budget.receipts.snapshot().find((r) => r.event === 'settled')?.provenance).toBe('provider-reported');
   });
+  it('refuses estimated or unknown token/spend refunds', () => {
+    const budget = new Budget(profile({ spendMicros: 10 }));
+    const id = budget.reserve({ calls: 1, spendMicros: 10 }, 0);
+    expect(() => budget.settle(id, { spendMicros: 0 }, 'estimated')).toThrow();
+    expect(() => budget.settle(id, { spendMicros: 0 }, 'unknown')).toThrow();
+    budget.settle(id, {}, 'unknown');
+    expect(budget.snapshot()).toMatchObject({ active: 0, used: { spendMicros: 10 } });
+  });
 });
