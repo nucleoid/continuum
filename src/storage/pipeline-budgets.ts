@@ -1,6 +1,6 @@
 import pg from 'pg';
 import { amounts, checkedProfile, type BudgetAmounts, type BudgetProfile, type DurableAttempt } from '../pipeline/budget.js';
-import { ServiceError } from '../services/errors.js';
+export { requirePipelineBudgetsReady } from './provider-lifecycle.js';
 
 export interface BudgetWorkflow {
   id: string; owner: string; generation: number; profile: BudgetProfile;
@@ -45,11 +45,4 @@ export function pipelineAttempt(pool: pg.Pool, identity: { id: string; attemptId
     dispatch: () => operation(pool, 'SELECT continuum_pipeline_dispatch($1,$2,$3,$4) AS result', [id, attemptId, owner, generation]),
     settle: (actual) => operation(pool, 'SELECT continuum_pipeline_settle($1,$2,$3,$4,$5) AS result', [id, attemptId, owner, generation, actual]),
   };
-}
-/** Startup gate for compositions enabling durable stages. Stock stages stay disabled. */
-export async function requirePipelineBudgetsReady(pool: pg.Pool): Promise<void> {
-  // The profile gate verifies the owner-controlled function allowlist and runtime path.
-  await operation(pool, 'SELECT continuum_assert_current_pgvector_profile() AS result', []);
-  const ready = await operation<boolean>(pool, 'SELECT continuum_pipeline_budgets_is_ready() AS result', []);
-  if (!ready) throw new ServiceError('DEPENDENCY_UNAVAILABLE', 'Pipeline accounting schema is incomplete');
 }
