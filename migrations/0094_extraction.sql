@@ -444,7 +444,7 @@ BEGIN
     FOR a IN SELECT value FROM jsonb_array_elements(output->'assertions') LOOP
       IF jsonb_typeof(a) IS DISTINCT FROM 'object' OR NOT(a ?& ARRAY['text','type','unknown','unsupported','temporal','citations'])
         OR (SELECT count(*) FROM jsonb_object_keys(a))<>6 OR jsonb_typeof(a->'text')<>'string' OR length(a->>'text') NOT BETWEEN 1 AND 4000
-        OR a->>'type' NOT IN ('fact','intent','decision','unknown') OR jsonb_typeof(a->'unknown')<>'boolean'
+        OR jsonb_typeof(a->'type') IS DISTINCT FROM 'string' OR a->>'type' NOT IN ('fact','intent','decision','unknown') OR jsonb_typeof(a->'unknown')<>'boolean'
         OR jsonb_typeof(a->'unsupported')<>'array' OR jsonb_array_length(a->'unsupported')>16
         OR EXISTS(SELECT 1 FROM jsonb_array_elements(a->'unsupported') v WHERE jsonb_typeof(v)<>'string' OR length(v#>>'{}') NOT BETWEEN 1 AND 100)
         OR jsonb_typeof(a->'temporal')<>'object' OR NOT(a->'temporal' ?& ARRAY['value','uncertain']) OR (SELECT count(*) FROM jsonb_object_keys(a->'temporal'))<>2
@@ -453,6 +453,7 @@ BEGIN
         OR jsonb_typeof(a->'citations')<>'array' OR jsonb_array_length(a->'citations') NOT BETWEEN 1 AND 8 THEN RAISE check_violation USING MESSAGE='invalid extraction assertion'; END IF;
       FOR citation IN SELECT value FROM jsonb_array_elements(a->'citations') LOOP
         IF jsonb_typeof(citation) IS DISTINCT FROM 'object' OR NOT(citation ?& ARRAY['start','end','quote']) OR (SELECT count(*) FROM jsonb_object_keys(citation))<>3
+          OR jsonb_typeof(citation->'start') IS DISTINCT FROM 'number' OR jsonb_typeof(citation->'end') IS DISTINCT FROM 'number'
           OR citation->>'start' !~ '^(0|[1-9][0-9]*)$' OR citation->>'end' !~ '^[1-9][0-9]*$'
           OR (citation->>'start')::numeric<chunk.start_byte OR (citation->>'end')::numeric>chunk.end_byte
           OR (citation->>'end')::numeric<=(citation->>'start')::numeric OR jsonb_typeof(citation->'quote')<>'string'
@@ -517,6 +518,14 @@ BEGIN
     result:=jsonb_build_object('status',job.state,'runId',job.id,'sourceVersion',job.source_version,'profile',job.profile,'generation',job.generation,
       'chunks',job.chunk_count,'completed',job.completed,'skipped',job.skipped,'assertions',job.assertion_count,'reason',job.reason,
       'createdAt',job.created_at,'startedAt',job.started_at,'finishedAt',job.finished_at,'identity',job.descriptor-'budget'-'accounting'-'price',
+      'cutoffAt',(SELECT deadline_at FROM pipeline_budget_workflows WHERE id=job.workflow_id),
+      'budget',(SELECT jsonb_build_object('profile',w.profile->>'id','currency',w.profile->>'currency','rateSchedule',w.profile->>'rateSchedule',
+        'charged',w.used,'active',w.active,'retainedBytes',w.retained_bytes,'cancelled',w.cancelled,
+        'settledAttempts',(SELECT count(*) FROM pipeline_budget_attempts WHERE workflow_id=w.id AND state='settled'),
+        'unsettledAttempts',(SELECT count(*) FROM pipeline_budget_attempts WHERE workflow_id=w.id AND state<>'settled')) FROM pipeline_budget_workflows w WHERE w.id=job.workflow_id),
+      'receipts',(SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY r.id),'[]'::jsonb) FROM (
+        SELECT id,generation,outcome,reason,created_at FROM extraction_receipts WHERE run_id=job.id ORDER BY id DESC LIMIT 32) r),
+      'receiptsTruncated',(SELECT count(*)>32 FROM extraction_receipts WHERE run_id=job.id),
       'coverage',(SELECT COALESCE(jsonb_agg(jsonb_build_object('index',chunk_index,'status',state,'reason',reason) ORDER BY chunk_index),'[]'::jsonb) FROM extraction_chunks WHERE run_id=job.id));
     SELECT array_agg(v) INTO versions FROM extraction_chunks c,LATERAL unnest(c.assertions) v WHERE c.run_id=job.id;
     IF cardinality(versions)>1024 THEN RAISE check_violation USING MESSAGE='extraction read bounds exceeded'; END IF;
@@ -608,7 +617,11 @@ BEGIN
   SELECT payload INTO STRICT source FROM evidence_payloads WHERE version_id=job.source_version;
   bytes:=convert_to(source,'UTF8');
   FOR c IN SELECT value FROM jsonb_array_elements(chunks) LOOP
-    IF (c->>'index')::int<>count OR (c->>'start')::int<>previous_end OR (c->>'end')::int<=previous_end
+    IF jsonb_typeof(c) IS DISTINCT FROM 'object' OR NOT(c ?& ARRAY['id','hash','index','start','end'])
+      OR (SELECT count(*) FROM jsonb_object_keys(c))<>5
+      OR jsonb_typeof(c->'index') IS DISTINCT FROM 'number' OR jsonb_typeof(c->'start') IS DISTINCT FROM 'number' OR jsonb_typeof(c->'end') IS DISTINCT FROM 'number'
+      OR c->>'index' !~ '^(0|[1-9][0-9]*)$' OR c->>'start' !~ '^(0|[1-9][0-9]*)$' OR c->>'end' !~ '^[1-9][0-9]*$'
+      OR (c->>'index')::int<>count OR (c->>'start')::int<>previous_end OR (c->>'end')::int<=previous_end
       OR (c->>'end')::int>octet_length(bytes) OR (c->>'end')::int-previous_end>(job.descriptor->>'chunkBytes')::int THEN RAISE check_violation USING MESSAGE='invalid extraction chunks'; END IF;
     -- convert_from rejects invalid UTF-8 chunk boundaries.
     PERFORM convert_from(substring(bytes FROM previous_end+1 FOR (c->>'end')::int-previous_end),'UTF8');

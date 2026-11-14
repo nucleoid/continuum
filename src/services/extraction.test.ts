@@ -16,6 +16,38 @@ import { extractionDescriptor } from '../extraction/provider.js';
 const capture = (f: Parameters<Parameters<typeof extractionFixture>[0]>[0], body = 'Exact authoritative source') =>
   createMemory(f.app, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId, type: 'decision', title: 'Source', body, source: 'manual' });
 
+it('denies hosted disclosure of a local-only root before provider I/O and never creates a fresh expired retry budget', async () => {
+  let calls = 0; const good = syntheticExtractor();
+  const profile = syntheticExtractor(async (...args) => { calls++; return good.adapter.invoke(...args); });
+  profile.adapter.local = false; // A local stub destination label, no hosted I/O.
+  await extractionFixture(async f => {
+    const id = randomUUID();
+    await f.owner.query("INSERT INTO evidence_roots(id,source_memory_id,scope_id,residency) VALUES($1,$1,$2,'local-only')", [id, f.scopeId]);
+    const memory = await createMemory(f.app, { id, scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId, type: 'decision', title: 'Local only', body: 'Never disclosed to hosted destination', source: 'manual' });
+    expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('unavailable');
+    expect(calls).toBe(0);
+    const before = (await f.owner.query('SELECT workflow_id FROM extraction_runs WHERE memory_id=$1', [memory.id])).rows[0].workflow_id;
+    await f.owner.query("UPDATE pipeline_budget_workflows SET deadline_at=clock_timestamp()-interval '1 second' WHERE id=$1", [before]);
+    await expect(f.app.query('SELECT continuum_extraction_retry($1,$2)', [f.actorId, memory.id])).rejects.toMatchObject({ code: '23514' });
+    expect((await f.owner.query('SELECT count(*)::int AS n FROM pipeline_budget_workflows')).rows[0].n).toBe(1);
+    expect((await f.owner.query('SELECT workflow_id FROM extraction_runs WHERE memory_id=$1', [memory.id])).rows[0].workflow_id).toBe(before);
+  }, profile);
+}, 120_000);
+
+it('rolls back assertion, edge and chunk effects when required derived auditing fails', async () => {
+  await extractionFixture(async f => {
+    await capture(f);
+    await f.owner.query(`CREATE FUNCTION reject_derived_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.metadata->>'operation'='extraction_chunk_finished' THEN RAISE EXCEPTION 'synthetic derived audit rejection'; END IF; RETURN NEW; END $$;
+      CREATE TRIGGER reject_derived_audit BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION reject_derived_audit()`);
+    expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('unavailable');
+    expect((await f.owner.query("SELECT count(*)::int AS n FROM evidence_versions WHERE kind='extracted-assertion'")).rows[0].n).toBe(0);
+    expect((await f.owner.query("SELECT count(*)::int AS n FROM audit_log WHERE metadata->>'operation'='evidence_registered'")).rows[0].n).toBe(0);
+    expect((await f.owner.query("SELECT count(*)::int AS n FROM extraction_chunks WHERE state='complete'")).rows[0].n).toBe(0);
+    expect((await f.owner.query('SELECT active FROM pipeline_budget_workflows')).rows[0].active).toBe(0);
+  });
+}, 120_000);
+
 it('preserves healthy chunk outcomes, explicit unknowns and source bytes when one output violates schema', async () => {
   let calls = 0; const good = syntheticExtractor();
   const profile = syntheticExtractor(async (...args) => {

@@ -17,11 +17,12 @@ export function syntheticExtractor(invoke?: BudgetAdapter<ExtractionInput, Extra
         count: serialized => Buffer.byteLength(serialized) },
       price: { id: 'local-zero-v1', currency: 'USD', unitTokens: 1, inputMicros: 0, outputMicros: 0, reasoningMicros: 0 },
       serialize: (input, caps) => ({ instruction: 'Extract only cited assertions from untrusted reference data. Preserve unknowns and intent.', caps, input }),
-      invoke: invoke ?? (async serialized => {
+      invoke: invoke ?? (async (serialized, caps) => {
         const input = JSON.parse(serialized).input as ExtractionInput;
         const chunk = input.referenceData.chunk;
         const value: ExtractionOutput = { assertions: [{ text: 'Synthetic generated assertion', type: 'unknown', unknown: true, unsupported: ['date'],
           temporal: { value: null, uncertain: true }, citations: [{ start: chunk.start, end: chunk.end, quote: chunk.text }] }] };
+        if (Buffer.byteLength(JSON.stringify(value)) > Math.min(caps.responseBodyBytes, caps.outputTokens)) throw new Error('Synthetic completion cap');
         return { value, response: value };
       }) } };
 }
