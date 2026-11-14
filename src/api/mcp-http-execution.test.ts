@@ -1,5 +1,44 @@
 import { describe, expect, it } from 'vitest';
 import { remoteExecutionContext } from './mcp-http-execution.js';
+import { Budget } from '../pipeline/budget.js';
+import { embedWithBudget } from '../embeddings/provider.js';
+import { runReranking } from '../reranking/runner.js';
+import { testReranking } from '../reranking/test-helpers.js';
+
+it.each(['embedding', 'reranking'] as const)('retains timed-out budgeted %s work until actual settlement', async kind => {
+  const t = testReranking(() => 1);
+  let release!: () => void; const held = new Promise<void>(resolve => { release = resolve; });
+  let invoked!: () => void; const started = new Promise<void>(resolve => { invoked = resolve; });
+  const original = t.adapter.invoke;
+  t.adapter.timeoutMs = 25;
+  t.adapter.invoke = async (wire, caps) => { invoked(); await held; return original(wire, caps); };
+  const embedding = { ...t.adapter, id: 'remote-drain-embedding', serialize: (texts: string[], caps: unknown) => ({ texts, caps }),
+    invoke: async () => { invoked(); await held; const value = [Array(768).fill(0)]; return { value, response: value }; } };
+  const provider = { id: embedding.id, dim: 768, local: true, pipelineAdapter: embedding, embed: async () => [[]] };
+  const context = remoteExecutionContext({} as never, provider);
+  // Optional while establishing the red case against the old context API.
+  const onWork = (context as typeof context & { trackWork?: (work: Promise<unknown>) => void }).trackWork;
+  let completed = false;
+  const budget = new Budget(t.config().profile);
+  const signal = new AbortController().signal;
+  const work = context.run(signal, async () => {
+    if (kind === 'embedding') {
+      await expect(embedWithBudget(context.routing.providers()[0], ['reference'], { budget, signal, ...{ onWork } }))
+        .rejects.toMatchObject({ code: 'EMBEDDING_TIMEOUT' });
+    } else {
+      const result = await runReranking(t.config(), budget, { query: 'reference', candidates: [
+        { id: 'c0', title: 'One', excerpt: 'Reference' }, { id: 'c1', title: 'Two', excerpt: 'Reference' }] },
+      async () => true, 0, { signal, ...{ onWork } });
+      expect(result).toEqual({ status: 'fallback', reason: 'deadline' });
+    }
+  }).then(() => { completed = true; });
+  try {
+    await started;
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(completed).toBe(false);
+  } finally { release(); await work; }
+  expect(completed).toBe(true);
+});
 describe('remote per-call execution context', () => {
   it('prevents post-cancellation SQL side effects but permits transactional rollback', async () => {
     const calls: string[] = [];

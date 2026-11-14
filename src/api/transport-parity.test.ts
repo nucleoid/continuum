@@ -49,6 +49,33 @@ describe('REST/MCP semantic parity matrix', () => {
     await pool?.end();
   });
 
+  it.each(['rest', 'mcp'] as const)('budgets %s excerpts rather than full stored bodies with reranking enabled', async transport => {
+    const team = (await getScopeByRef(pool, { kind: 'team', name: 'payments' }))!;
+    for (let i = 0; i < 3; i++) await createMemory(pool, { scopeId: team.id, scopeKind: 'team', authorId: principal.id,
+      type: 'decision', title: `Bigwire source ${i}`, body: `Bigwire reference ${i} ${'x'.repeat(400_000)}`, source: 'manual' });
+    const reranking = testReranking(() => 1).config();
+    if (transport === 'rest') {
+      const response = await request(createApp(pool, { reranking })).post('/api/v0/recall')
+        .set('Authorization', 'Bearer entra:user:parity').send({ query: 'bigwire', limit: 10 });
+      expect(response.status).toBe(200);
+      expect(response.body.results).toHaveLength(3);
+      expect(response.body.diagnostics.reranking).toEqual({ status: 'used' });
+      expect(Buffer.byteLength(JSON.stringify(response.body))).toBeLessThan(10_000);
+    } else {
+      const server = buildMcpServer({ pool, principal, embeddingProvider: null, reranking, readBudgetBytes: 2 * 1024 * 1024 });
+      const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
+      const reader = new Client({ name: 'large-body-recall', version: '1' });
+      try {
+        await Promise.all([server.connect(serverTransport), reader.connect(clientTransport)]);
+        const result = await reader.callTool({ name: 'continuum.recall', arguments: { query: 'bigwire', limit: 10 } }) as ToolResult & { _meta: { diagnostics: any } };
+        expect(result.isError).not.toBe(true);
+        expect(toolJson(result)).toHaveLength(3);
+        expect(result._meta.diagnostics.reranking).toEqual({ status: 'used' });
+        expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(10_000);
+      } finally { await reader.close(); await server.close(); }
+    }
+  });
+
   it('projects pre-selection rerank scores additively and keeps source-only bundle bytes and freshness', async () => {
     const team = (await getScopeByRef(pool, { kind: 'team', name: 'payments' }))!;
     for (let i = 0; i < 3; i++) await createMemory(pool, { scopeId: team.id, scopeKind: 'team', authorId: principal.id,

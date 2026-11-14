@@ -7,8 +7,9 @@ import type pg from 'pg';
 import type { Principal } from '../types.js';
 import { createApp } from './server.js';
 import { EmbeddingRegistry, ScopeEmbeddingRouter } from '../embeddings/router.js';
+import { configureReranking } from '../reranking/provider.js';
 
-it.each(['pricing', 'credentials', 'tokens', 'caps', 'spend', 'calls'] as const)('rejects known %s incompatibility with the reranking profile', mode => {
+it.each(['pricing', 'credentials', 'tokens', 'caps', 'spend', 'calls', 'concurrency', 'retained'] as const)('rejects known %s incompatibility with the reranking profile', mode => {
   const t = testReranking(() => 1);
   const makeProvider = (index: number) => {
     const adapter = { ...t.adapter, id: `profile-embed-${index}`, local: false, responseBodyBytes: 65_536, outputTokens: 0, completionTokens: 0,
@@ -21,12 +22,15 @@ it.each(['pricing', 'credentials', 'tokens', 'caps', 'spend', 'calls'] as const)
     if (mode === 'spend') adapter.price = { ...adapter.price!, inputMicros: 1 };
     return { id: adapter.id, dim: 768, local: false, pipelineAdapter: adapter, embed: vi.fn(async () => [Array(768).fill(0)]) };
   };
-  const entries = Array.from({ length: mode === 'calls' ? 4 : 1 }, (_, i) => [`p${i}`, makeProvider(i)] as const);
+  const entries = Array.from({ length: mode === 'calls' ? 4 : mode === 'concurrency' ? 3 : mode === 'retained' ? 2 : 1 }, (_, i) => [`p${i}`, makeProvider(i)] as const);
   const routing = new ScopeEmbeddingRouter(new EmbeddingRegistry(entries), { default: 'p0' });
   const principal: Principal = { id: '00000000-0000-4000-8000-000000000123', externalId: 'profile-test',
     kind: 'user', displayName: 'Reader', createdAt: new Date(0) };
-  expect(() => createApp({} as pg.Pool, { embeddingProvider: routing, reranking: t.config() })).toThrow('Reranking requires budget-compatible embedding providers');
-  expect(() => buildMcpServer({ pool: {} as pg.Pool, principal, embeddingProvider: routing, reranking: t.config() })).toThrow('Reranking requires budget-compatible embedding providers');
+  const original = t.config();
+  const config = mode === 'retained' ? configureReranking(t.adapter, { ...original.profile, maxRetainedBytes: 100_000 },
+    { candidateLimit: original.candidateLimit, evidence: original.evidence }) : original;
+  expect(() => createApp({} as pg.Pool, { embeddingProvider: routing, reranking: config })).toThrow('Reranking requires budget-compatible embedding providers');
+  expect(() => buildMcpServer({ pool: {} as pg.Pool, principal, embeddingProvider: routing, reranking: config })).toThrow('Reranking requires budget-compatible embedding providers');
   for (const [, provider] of entries) expect(provider.embed).not.toHaveBeenCalled();
 });
 
