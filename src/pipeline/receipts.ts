@@ -1,6 +1,6 @@
 /** Operational reference data only. No caller text, source IDs or raw errors. */
 export type BudgetReason = 'budget_exhausted' | 'capability_unavailable' | 'pricing_unavailable'
-  | 'deadline' | 'cancelled' | 'provider_failed' | 'invalid_response' | 'policy_denied' | 'stale_attempt';
+  | 'deadline' | 'cancelled' | 'provider_failed' | 'invalid_response' | 'policy_denied' | 'stale_attempt' | 'credentials_unavailable';
 export type UsageProvenance = 'measured' | 'provider-reported' | 'estimated' | 'unknown';
 export interface BudgetReceipt {
   event: 'reserved' | 'settled' | 'skipped';
@@ -9,7 +9,7 @@ export interface BudgetReceipt {
   provenance?: UsageProvenance;
 }
 const reasons = new Set<BudgetReason>(['budget_exhausted', 'capability_unavailable', 'pricing_unavailable',
-  'deadline', 'cancelled', 'provider_failed', 'invalid_response', 'policy_denied', 'stale_attempt']);
+  'deadline', 'cancelled', 'provider_failed', 'invalid_response', 'policy_denied', 'stale_attempt', 'credentials_unavailable']);
 const provenances = new Set<UsageProvenance>(['measured', 'provider-reported', 'estimated', 'unknown']);
 export const FAILURE_RECEIPT_BYTES = 512;
 export const MAX_RECEIPT_BYTES = 4096;

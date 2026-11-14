@@ -137,6 +137,11 @@ export class Budget {
   snapshot(): { used: BudgetAmounts; active: number; retainedBytes: number } {
     return { used: { ...this.used }, active: this.active, retainedBytes: this.retainedBytes };
   }
+  report() {
+    return { profile: this.profile, usage: this.snapshot(), elapsedMs: this.elapsedMs(),
+      remainingMs: this.remainingMs(this.profile.overallMs), cancelled: this.signal.aborted,
+      receipts: this.receipts.snapshot() };
+  }
   available(key: BudgetDimension): number { return this.profile.limits[key] - this.used[key]; }
   serializeOutput(value: unknown): string {
     this.assertLive();
@@ -189,6 +194,7 @@ export interface AdapterCaps { outputTokens: number; reasoningTokens: number; co
 export interface AdapterUsage extends AdapterCaps { provenance: UsageProvenance; }
 export interface BudgetAdapter<Input, Output> extends AdapterCaps {
   id: string; model: string; profile: string; local: boolean; timeoutMs: number;
+  credentials?: 'available' | 'not-required' | 'missing';
   responseBodyBytes: number; enforceableCaps: boolean; cancellation: 'cooperative' | 'unsupported';
   tokens?: TokenAccounting; price?: PriceSchedule;
   /** Must include all prompts, metadata, citations, tools and model/protocol wrappers. No credentials. */
@@ -211,6 +217,11 @@ export interface DurableAttempt {
   dispatch(): Promise<boolean>;
   settle(actual: Partial<BudgetAmounts>): Promise<boolean>;
 }
+// Replacement budgets/registries cannot clear unsettled provider fences. These
+// finite process limits tighten every caller profile and are not per-ID quotas.
+const processCalls = new Map<string, { active: number; detached: number }>();
+let processActive = 0;
+let processRetained = 0;
 export async function runBudgetedStage<I, O>(budget: Budget, adapter: BudgetAdapter<I, O>, input: I,
   options: { signal?: AbortSignal; retry?: boolean; authorize?: () => Promise<boolean>; durable?: DurableAttempt; transportMs?: number;
     onWork?: (settlement: Promise<unknown>) => void } = {},
@@ -225,13 +236,22 @@ export async function runBudgetedStage<I, O>(budget: Budget, adapter: BudgetAdap
   let caps: AdapterCaps;
   let reserve: BudgetAmounts;
   let timeoutMs: number;
+  let processKey: string;
+  let retained: number;
+  let processState: { active: number; detached: number };
+  const enteredAt = performance.now();
+  // Snapshot pricing before awaits. Mutating adapter configuration cannot refund
+  // a request priced under a different schedule.
+  let price: Readonly<PriceSchedule>;
   try {
     budget.assertLive();
     if (options.signal?.aborted) return skip('cancelled');
+    if (adapter.credentials === 'missing') return skip('credentials_unavailable');
     if (typeof adapter.local !== 'boolean' || !adapter.model || !adapter.profile || !adapter.enforceableCaps
       || !adapter.tokens || adapter.tokens.model !== adapter.model || adapter.tokens.profile !== adapter.profile
       || !adapter.tokens.validationId || !['exact', 'conservative'].includes(adapter.tokens.kind)) return skip('capability_unavailable');
     if (!adapter.price || adapter.price.id !== budget.profile.rateSchedule || adapter.price.currency !== budget.profile.currency) return skip('pricing_unavailable');
+    price = Object.freeze({ ...adapter.price });
     timeoutMs = Math.floor(budget.remainingMs(Math.min(integer(adapter.timeoutMs), options.transportMs ?? budget.profile.stageMs)));
     if (timeoutMs < 1) return skip('deadline');
     caps = { outputTokens: integer(adapter.outputTokens), reasoningTokens: integer(adapter.reasoningTokens), completionTokens: integer(adapter.completionTokens) };
@@ -243,10 +263,24 @@ export async function runBudgetedStage<I, O>(budget: Budget, adapter: BudgetAdap
     integer(inputTokens);
     reserve = amounts({ inputBytes: Buffer.byteLength(serialized), contextTokens: inputTokens,
       ...caps, outputBytes, calls: 1, retries: options.retry ? 1 : 0,
-      spendMicros: priceMicros(adapter.price, inputTokens, caps.outputTokens, caps.reasoningTokens) });
-    id = budget.reserve(reserve, reserve.inputBytes + outputBytes);
+      spendMicros: priceMicros(price, inputTokens, caps.outputTokens, caps.reasoningTokens) });
+    timeoutMs = Math.floor(Math.min(timeoutMs - (performance.now() - enteredAt), budget.remainingMs(timeoutMs)));
+    if (timeoutMs < 1) return skip('deadline');
+    if (typeof adapter.id !== 'string' || adapter.id.length > 200 || adapter.model.length > 200 || adapter.profile.length > 200) return skip('capability_unavailable');
+    processKey = `${adapter.id}\u0000${adapter.model}\u0000${adapter.profile}`;
+    processState = processCalls.get(processKey) ?? { active: 0, detached: 0 };
+    retained = reserve.inputBytes + outputBytes;
+    if (processState.detached || processState.active >= 4 || processActive >= 128 || retained > 64 * 1024 * 1024 - processRetained) return skip('budget_exhausted');
+    id = budget.reserve(reserve, retained);
+    processState.active++; processActive++; processRetained += retained;
+    processCalls.set(processKey, processState);
   } catch (error) { return skip(error instanceof BudgetError ? error.reason : 'capability_unavailable'); }
   const controller = new AbortController();
+  let detached = false;
+  let settled = false;
+  controller.signal.addEventListener('abort', () => {
+    if (!settled && !detached) { detached = true; processState.detached++; }
+  }, { once: true });
   const abort = () => controller.abort();
   budget.signal.addEventListener('abort', abort, { once: true });
   options.signal?.addEventListener('abort', abort, { once: true });
@@ -287,7 +321,7 @@ export async function runBudgetedStage<I, O>(budget: Budget, adapter: BudgetAdap
         // Estimates/unknown do not establish that a maximum charge can be refunded.
         if (usage.provenance === 'measured' || usage.provenance === 'provider-reported') {
           actual = { ...actual, outputTokens: usage.outputTokens, reasoningTokens: usage.reasoningTokens,
-            completionTokens: usage.completionTokens, spendMicros: priceMicros(adapter.price!, inputTokens, usage.outputTokens, usage.reasoningTokens) };
+            completionTokens: usage.completionTokens, spendMicros: priceMicros(price, inputTokens, usage.outputTokens, usage.reasoningTokens) };
         }
       }
       if (controller.signal.aborted) return skip('deadline');
@@ -302,7 +336,12 @@ export async function runBudgetedStage<I, O>(budget: Budget, adapter: BudgetAdap
     finally {
       if (!invoked) actual = { spendMicros: 0, outputBytes: 0, outputTokens: 0, reasoningTokens: 0, completionTokens: 0 };
       try { if (durableReserved) await options.durable!.settle(actual); }
-      finally { budget.settle(id, actual); }
+      finally {
+        budget.settle(id, actual);
+        settled = true; processState.active--; processActive--; processRetained -= retained;
+        if (detached) processState.detached--;
+        if (!processState.active) processCalls.delete(processKey);
+      }
     }
   })();
   options.onWork?.(work);
