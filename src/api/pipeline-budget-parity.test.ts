@@ -99,4 +99,13 @@ describe('optional pipeline service envelope parity', () => {
     await expect(recallForPrincipal(pool, null, principal, { query: 'Budget' }, {}, undefined, undefined, budget)).rejects.toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
     expect((await pool.query("SELECT 1 FROM audit_log WHERE action='read'")).rowCount).toBe(0);
   });
+  it('reports exhausted valid profiles as resource overflow, preserving the failure allowance', async () => {
+    await seed();
+    const budget = new Budget(checkedProfile({ ...starterProfile, limits: { ...starterProfile.limits, outputBytes: 512 } }));
+    await expect(renderAgentsMdForPrincipal(pool, principal, {}, {}, undefined, budget)).rejects.toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
+    const hydrated = new Budget(starterProfile);
+    hydrated.consume({ hydratedBytes: starterProfile.limits.hydratedBytes });
+    await expect(recallForPrincipal(pool, null, principal, { query: 'Budget' }, {}, undefined, undefined, hydrated)).rejects.toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
+    expect((await pool.query("SELECT 1 FROM audit_log WHERE action='read'")).rowCount).toBe(0);
+  });
 });

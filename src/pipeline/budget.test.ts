@@ -136,4 +136,10 @@ describe('one shared pipeline envelope', () => {
       await Promise.resolve(); vi.useRealTimers();
     }
   });
+  it('retains provider-reported cost provenance in settlement receipts', async () => {
+    const budget = new Budget(starterProfile);
+    expect(await runBudgetedStage(budget, adapter({ invoke: async () => ({ value: 'ok', response: 'ok',
+      usage: { outputTokens: 2, reasoningTokens: 0, completionTokens: 2, provenance: 'provider-reported' } }) }), 'x')).toMatchObject({ status: 'complete', provenance: 'provider-reported' });
+    expect(budget.receipts.snapshot().find((r) => r.event === 'settled')?.provenance).toBe('provider-reported');
+  });
 });
