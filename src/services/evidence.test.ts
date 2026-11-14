@@ -59,6 +59,32 @@ it('preserves current authority, source-only generator bytes and physical offboa
   });
 }, 120_000);
 
+it('erases shared copies of personal derivatives even when every source is shared', async () => {
+  await standupProducerFixture(async f => {
+    const owners = new EvidencePayloadRegistry();
+    for (const kind of ['source-document-version', 'derived-observation', 'cache', 'history', 'managed-export'] as const) owners.register(kind, () => true);
+    const project = await createScope(f.owner, { kind: 'project', name: randomUUID() });
+    await addMembership(f.owner, f.actorId, project.id, 'writer');
+    await addMembership(f.owner, f.adminId, project.id, 'writer');
+    const source = await createMemory(f.app, { scopeId: project.id, scopeKind: 'project', authorId: f.actorId,
+      type: 'decision', title: 'Shared source', body: 'Shared reference', source: 'manual' });
+    const sourceVersion = (await f.app.query('SELECT continuum_evidence_source($1,$2) AS id', [f.actorId, source.id])).rows[0].id;
+    const personal = await registerEvidence(f.app, f.actorId, { nodeId: randomUUID(), expectedCurrent: null, scopeId: f.scopeId,
+      kind: 'derived-observation', parents: [{ versionId: sourceVersion, kind: 'derivation' }],
+      identity: { transform: 'v1', model: 'none', prompt: 'none', schema: 'v1' }, payload: 'Personal conclusion' }, owners);
+    const copies = [];
+    for (const kind of ['cache', 'history', 'managed-export'] as const) copies.push(await registerEvidence(f.app, f.actorId, {
+      nodeId: randomUUID(), expectedCurrent: null, scopeId: project.id, kind, parents: [{ versionId: personal, kind: 'copy' }],
+      identity: { transform: 'copy-v1', model: 'none', prompt: 'none', schema: 'v1' }, payload: 'Copy of personal conclusion' }, owners));
+    const admin = (await getPrincipal(f.owner, f.adminId))!;
+    let result = await offboardPrincipal(f.operator, admin, f.actorId, { confirmationScopeId: f.scopeId, batchSize: 1 });
+    for (let i = 0; !result.complete && i < 40; i++) result = await offboardPrincipal(f.operator, admin, f.actorId, { confirmationScopeId: f.scopeId, batchSize: 1 });
+    expect(result.complete).toBe(true);
+    expect((await f.owner.query('SELECT count(*)::int AS n FROM evidence_payloads WHERE version_id=ANY($1::uuid[])', [[personal, ...copies]])).rows[0].n).toBe(0);
+    expect(await readEvidence(f.app, f.adminId, sourceVersion, owners)).toContain('Shared reference');
+  });
+}, 120_000);
+
 it('keeps locked residual evidence incomplete and repairs a dirty completed receipt from physical rows', async () => {
   await standupProducerFixture(async f => {
     const source = await createMemory(f.app, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId,

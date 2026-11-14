@@ -100,6 +100,35 @@ describe('immutable evidence and synchronous eligibility', () => {
       type: 'fact', title: f.memory.title, body: f.memory.body, source: 'promote:manual', metadata: { promoted_from: f.memory.id } });
     await expect(pool.query('SELECT continuum_evidence_source($1,$2)', [f.actor.id,fake.id])).rejects.toThrow(/lineage/);
   });
+  it.each(['expired-ceiling', 'deny', 'unknown'])('keeps legacy promotion independent of %s evidence eligibility', async reason => {
+    const f = await fixture();
+    await pool.query("UPDATE memories SET expires_at=clock_timestamp()+interval '30 days' WHERE id=$1", [f.memory.id]);
+    if (reason === 'expired-ceiling') await pool.query("UPDATE evidence_roots SET expiry_ceiling=clock_timestamp()-interval '1 second' WHERE id=$1", [f.memory.id]);
+    else await pool.query('UPDATE evidence_roots SET external_state=$2 WHERE id=$1', [f.memory.id, reason]);
+    const target = await createScope(pool, { kind: 'project', name: randomUUID() });
+    await addMembership(pool, f.actor.id, target.id, 'writer');
+    const destination = await createMemory(pool, { scopeId: target.id, scopeKind: 'project', authorId: f.actor.id,
+      type: 'fact', title: f.memory.title, body: f.memory.body, source: 'promote:manual', metadata: { promoted_from: f.memory.id } });
+    const expires = (await pool.query("UPDATE memories SET expires_at=clock_timestamp()+interval '60 days' WHERE id=$1 RETURNING expires_at", [destination.id])).rows[0].expires_at;
+    await expect(pool.query("UPDATE memories SET state='promoted',promoted_to_id=$2 WHERE id=$1", [f.memory.id, destination.id])).resolves.toBeDefined();
+    expect((await pool.query('SELECT expires_at FROM memories WHERE id=$1', [destination.id])).rows[0].expires_at).toEqual(expires);
+    await expect(pool.query('SELECT continuum_evidence_source($1,$2)', [f.actor.id, destination.id])).rejects.toThrow(/unavailable/);
+  });
+  it('fences oversized snapshots without rejecting a legacy source update', async () => {
+    const f = await fixture();
+    const body = 'x'.repeat(1_048_576);
+    await expect(pool.query('UPDATE memories SET body=$2 WHERE id=$1', [f.memory.id, body])).resolves.toBeDefined();
+    expect((await pool.query('SELECT octet_length(body)::int AS n FROM memories WHERE id=$1', [f.memory.id])).rows[0].n).toBe(body.length);
+    expect(await eligible(f.actor.id, f.source)).toBe(false);
+    await expect(pool.query('SELECT continuum_evidence_source($1,$2)', [f.actor.id, f.memory.id])).rejects.toThrow(/unavailable/);
+  });
+  it('cannot occupy an existing unregistered memory ID with a derivative root', async () => {
+    const f = await fixture();
+    const memory = await createMemory(pool, { scopeId: f.scope.id, scopeKind: 'project', authorId: f.actor.id,
+      type: 'fact', title: 'Not registered yet', body: 'Source', source: 'manual' });
+    await expect(derive(f, [f.source], memory.id)).rejects.toThrow();
+    expect((await pool.query('SELECT continuum_evidence_source($1,$2) AS id', [f.actor.id, memory.id])).rows[0].id).toEqual(expect.any(String));
+  });
   it('admits exactly 256 roots and rejects a larger closure before publishing', async () => {
     const f=await fixture();
     await pool.query(`INSERT INTO memories(id,scope_id,author_id,type,title,body,source)
