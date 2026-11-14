@@ -12,9 +12,69 @@ import { reviewQueueForPrincipal } from './review-queue.js';
 import { recallForPrincipal } from './recall.js';
 import { amounts } from '../pipeline/budget.js';
 import { extractionDescriptor } from '../extraction/provider.js';
+import { chunkSource } from '../extraction/chunking.js';
+import { validateAssertions, type ExtractionOutput } from '../extraction/model.js';
 
 const capture = (f: Parameters<Parameters<typeof extractionFixture>[0]>[0], body = 'Exact authoritative source') =>
   createMemory(f.app, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId, type: 'decision', title: 'Source', body, source: 'manual' });
+
+it('keeps queued work claimable after identical configuration, installation and source-list widening', async () => {
+  await extractionFixture(async f => {
+    await f.app.query('SELECT continuum_extraction_configure($1,$2,$3,$4,TRUE)', [f.actorId, f.scopeId, f.profile.id, ['manual']]);
+    const memory = await capture(f);
+    const before = (await f.owner.query('SELECT config_generation,profile_generation FROM extraction_runs WHERE memory_id=$1', [memory.id])).rows[0];
+    await f.app.query('SELECT continuum_extraction_configure($1,$2,$3,$4,TRUE)', [f.actorId, f.scopeId, f.profile.id, ['manual']]);
+    await f.operator.query('SELECT continuum_operator_install_extractor($1,$2,TRUE)', [f.adminId, extractionDescriptor(f.profile)]);
+    await f.app.query('SELECT continuum_extraction_configure($1,$2,$3,$4,TRUE)', [f.actorId, f.scopeId, f.profile.id, ['manual', 'terminal-summary']]);
+    await f.app.query('SELECT continuum_extraction_configure($1,$2,$3,$4,TRUE)', [f.actorId, f.scopeId, f.profile.id, ['terminal-summary', 'manual']]);
+    expect((await f.owner.query('SELECT generation FROM extraction_scope_config WHERE scope_id=$1', [f.scopeId])).rows[0].generation).toBe(before.config_generation);
+    expect((await f.owner.query('SELECT generation FROM extraction_profiles WHERE id=$1', [f.profile.id])).rows[0].generation).toBe(before.profile_generation);
+    expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('processed');
+  });
+}, 120_000);
+
+it.each(['scope', 'profile'] as const)('keeps old work fenced after %s disable and re-enable', async boundary => {
+  let calls = 0; const good = syntheticExtractor();
+  const profile = syntheticExtractor(async (...args) => { calls++; return good.adapter.invoke(...args); });
+  await extractionFixture(async f => {
+    await capture(f);
+    if (boundary === 'scope') {
+      for (const enabled of [false, true]) await f.app.query('SELECT continuum_extraction_configure($1,$2,$3,$4,$5)', [f.actorId, f.scopeId, f.profile.id, ['manual'], enabled]);
+    } else {
+      for (const enabled of [false, true]) await f.operator.query('SELECT continuum_operator_install_extractor($1,$2,$3)', [f.adminId, extractionDescriptor(f.profile), enabled]);
+    }
+    expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('unavailable');
+    expect(calls).toBe(0);
+    expect((await f.owner.query('SELECT state,reason FROM extraction_runs')).rows[0]).toMatchObject({ state: 'unavailable', reason: 'policy' });
+  }, profile);
+}, 120_000);
+
+it('skips one TS-valid near-cap output rejected by PostgreSQL jsonb formatting and preserves the next chunk', async () => {
+  let calls = 0; let large!: ExtractionOutput; const good = syntheticExtractor();
+  const profile = syntheticExtractor(async (...args) => ++calls === 1 ? { value: large, response: large } : good.adapter.invoke(...args));
+  profile.adapter.responseBodyBytes = profile.adapter.outputTokens = profile.adapter.completionTokens = 65_536;
+  profile.budget = { ...profile.budget, limits: { ...profile.budget.limits, outputTokens: 131_072, completionTokens: 131_072 } };
+  await extractionFixture(async f => {
+    const memory = await capture(f, 'a'.repeat(1400));
+    large = { assertions: Array.from({ length: 16 }, () => ({ text: 'X', type: 'fact', unknown: false, unsupported: [],
+      temporal: { value: null, uncertain: true }, citations: [{ start: 0, end: 1, quote: '{' }] })) };
+    let remaining = 65_520 - Buffer.byteLength(JSON.stringify(large));
+    for (const assertion of large.assertions) { const added = Math.min(3999, remaining); assertion.text += 'X'.repeat(added); remaining -= added; }
+    expect(remaining).toBe(0);
+    expect(Buffer.byteLength(JSON.stringify(large))).toBe(65_520);
+    expect((await f.owner.query('SELECT octet_length($1::jsonb::text) AS bytes', [large])).rows[0].bytes).toBeGreaterThan(65_536);
+    const source = (await f.owner.query('SELECT continuum_evidence_canonical(m) AS value FROM memories m WHERE id=$1', [memory.id])).rows[0].value;
+    const version = (await f.owner.query('SELECT source_version FROM extraction_runs WHERE memory_id=$1', [memory.id])).rows[0].source_version;
+    expect(validateAssertions(large, chunkSource(version, source, 1024, 4)[0])).toEqual(large);
+    expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('processed');
+    const result = (await f.app.query('SELECT continuum_extraction_status($1,$2,TRUE) AS result', [f.actorId, memory.id])).rows[0].result;
+    expect(result).toMatchObject({ status: 'partial', skipped: 1, completed: 1, assertions: 1 });
+    expect(result.coverage[0]).toMatchObject({ status: 'skipped', reason: 'invalid-output' });
+    expect(result.budget).toMatchObject({ active: 0, unsettledAttempts: 0 });
+    expect(result.budget.charged.calls).toBe(2);
+    expect((await f.owner.query('SELECT body FROM memories WHERE id=$1', [memory.id])).rows[0].body).toBe(memory.body);
+  }, profile);
+}, 120_000);
 
 it('denies hosted disclosure of a local-only root before provider I/O and never creates a fresh expired retry budget', async () => {
   let calls = 0; const good = syntheticExtractor();
