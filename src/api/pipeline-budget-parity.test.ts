@@ -93,4 +93,10 @@ describe('optional pipeline service envelope parity', () => {
     await expect(getReadableMemory(observed, principal.id, memory.id, undefined, new Budget(starterProfile))).rejects.toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
     expect(changed).toBe(true);
   });
+  it('rejects candidate overflow rather than silently narrowing ranked selection', async () => {
+    await seed(); await seed();
+    const budget = new Budget(checkedProfile({ ...starterProfile, limits: { ...starterProfile.limits, candidates: 1 } }));
+    await expect(recallForPrincipal(pool, null, principal, { query: 'Budget' }, {}, undefined, undefined, budget)).rejects.toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
+    expect((await pool.query("SELECT 1 FROM audit_log WHERE action='read'")).rowCount).toBe(0);
+  });
 });

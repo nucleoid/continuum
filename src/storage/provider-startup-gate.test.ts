@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { describe, expect, it } from 'vitest';
-import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoordinationContractReady } from './provider-lifecycle.js';
+import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoordinationContractReady, requirePipelineBudgetsReady } from './provider-lifecycle.js';
 
 const databaseUrl = process.env.CONTINUUM_TEST_DATABASE_URL
   ?? 'postgres://continuum:continuum@localhost:5433/continuum';
@@ -27,6 +27,20 @@ async function fixture(run: (pool: pg.Pool, admin: pg.Pool, schema: string, shad
 }
 
 describe('qualified provider startup gate', () => {
+  it('fails closed for missing, public-executable or incorrectly anchored pipeline helpers', async () => {
+    await fixture(async (pool, admin, schema, shadow) => {
+      await expect(requirePipelineBudgetsReady(pool)).rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE' });
+      await admin.query(`CREATE FUNCTION "${schema}".continuum_pipeline_budgets_is_ready() RETURNS BOOLEAN
+        LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,"${schema}",pg_temp AS 'SELECT TRUE'`);
+      await expect(requirePipelineBudgetsReady(pool)).rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE' });
+      await admin.query(`REVOKE ALL ON FUNCTION "${schema}".continuum_pipeline_budgets_is_ready() FROM PUBLIC`);
+      await expect(requirePipelineBudgetsReady(pool)).resolves.toBeUndefined();
+      await expect(requirePipelineBudgetsReady(pool, { expectedSchema: schema })).rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE' });
+      await admin.query(`CREATE FUNCTION "${shadow}".continuum_pipeline_budgets_is_ready() RETURNS BOOLEAN
+        LANGUAGE sql STABLE AS 'SELECT TRUE'`);
+      await expect(requirePipelineBudgetsReady(pool)).resolves.toBeUndefined();
+    });
+  });
   it('uses an explicit schema anchor and validates PostgreSQL identifier byte limits', () => {
     expect(applicationSchemaFromEnv({})).toBe('public');
     expect(applicationSchemaFromEnv({ CONTINUUM_APPLICATION_SCHEMA: 'Tenant-Schema' })).toBe('Tenant-Schema');

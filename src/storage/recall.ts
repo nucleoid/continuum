@@ -2,7 +2,7 @@ import { boundedMemoryReadRows, MEMORY_READ_BUDGET_BYTES_SQL } from './memory-re
 import pg from 'pg';
 import type { MemoryType, RecallResult } from '../types.js';
 import { embedWithBudget, type EmbeddingProvider } from '../embeddings/provider.js';
-import type { Budget } from '../pipeline/budget.js';
+import { BudgetError, type Budget } from '../pipeline/budget.js';
 import { vectorSearchMemoryIds } from './embeddings.js';
 import { assertEmbeddingVectorDimension } from './schema.js';
 import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
@@ -375,10 +375,12 @@ export async function recall(
     return { results: [], diagnostics: { vector: 'disabled', groups: [] } };
   }
 
-  const overFetch = Math.min(opts.limit * 5, 100, opts.budget?.available('candidates') ?? 100);
+  // One extra identity detects overflow rather than silently changing selection.
+  const overFetch = Math.min(opts.limit * 5, 100, (opts.budget?.available('candidates') ?? 100) + 1);
   const borrowed = !connectable(pool);
   const searchText = () => ftsHits(pool, opts.query, opts.scopeIds, opts.types, overFetch);
   const fts = await (borrowed ? queueBorrowedSql(pool, searchText) : searchText());
+  if (opts.budget && fts.length > opts.budget.available('candidates')) throw new BudgetError();
 
   const groups = opts.embeddingGroups
     ?? (opts.embeddingProvider
