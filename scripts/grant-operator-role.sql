@@ -121,6 +121,9 @@ DO $provider_profile$
 DECLARE schema_name TEXT := current_setting('continuum.operator_grant_schema');
         target_role NAME := current_setting('continuum.operator_grant_target')::name;
 BEGIN
+  IF to_regclass(format('%I.extraction_profiles',schema_name)) IS NOT NULL THEN
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_operator_install_extractor(UUID,JSONB,BOOLEAN),%I.continuum_operator_bind_extraction_worker(UUID,NAME,UUID,UUID,TEXT,BOOLEAN),%I.continuum_operator_scrub_extraction_scope(UUID,UUID,UUID,INTEGER) TO %I',schema_name,schema_name,schema_name,target_role);
+  END IF;
   IF to_regclass(format('%I.evidence_roots',schema_name)) IS NOT NULL THEN
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_operator_evidence_policy(UUID,UUID,TEXT,TEXT,TIMESTAMPTZ,TIMESTAMPTZ),%I.continuum_operator_scrub_evidence_scope(UUID,UUID,UUID,INTEGER),%I.continuum_operator_evidence_repair_claim(UUID,UUID,INTEGER),%I.continuum_operator_evidence_repair_attach(UUID,UUID,UUID,BIGINT,UUID,UUID,UUID,BIGINT),%I.continuum_operator_evidence_repair_finish(UUID,UUID,UUID,BIGINT,JSONB) TO %I',schema_name,schema_name,schema_name,schema_name,schema_name,target_role);
   END IF;

@@ -339,6 +339,10 @@ DO $tag_profile$
 DECLARE schema_name TEXT:=current_setting('continuum.application_grant_schema');
         target_role NAME:=current_setting('continuum.application_grant_target')::name;
 BEGIN
+  IF to_regclass(format('%I.extraction_profiles',schema_name)) IS NOT NULL THEN
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_extraction_configure(UUID,UUID,TEXT,TEXT[],BOOLEAN),%I.continuum_extraction_status(UUID,UUID,BOOLEAN),%I.continuum_extraction_retry(UUID,UUID),%I.continuum_extraction_is_ready() TO %I',schema_name,schema_name,schema_name,schema_name,target_role);
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.continuum_operator_install_extractor(UUID,JSONB,BOOLEAN),%I.continuum_operator_bind_extraction_worker(UUID,NAME,UUID,UUID,TEXT,BOOLEAN),%I.continuum_operator_scrub_extraction_scope(UUID,UUID,UUID,INTEGER) FROM %I',schema_name,schema_name,schema_name,target_role);
+  END IF;
   IF to_regclass(format('%I.tag_vocabularies',schema_name)) IS NOT NULL THEN
     EXECUTE format('GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE %I.tag_vocabularies TO %I',schema_name,target_role);
   END IF;
