@@ -28,7 +28,7 @@ it('abandons a never-reserved skipped chunk without hiding healthy later chunks'
 }, 120_000);
 
 it('reports UTF-8 chunk-count exhaustion as skipped budget without dispatch or source changes', async () => {
-  let calls = 0; const profile = syntheticExtractor(async () => { calls++; return { value: { assertions: [] } }; });
+  let calls = 0; const profile = syntheticExtractor(async () => { calls++; return { value: { assertions: [] }, response: {} }; });
   profile.chunkBytes = 17; profile.maxChunks = 64;
   await extractionFixture(async f => {
     const empty = (await f.owner.query(`SELECT jsonb_build_object('scopeId',$1::uuid,'title','UTF8 edge','body','',

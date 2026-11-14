@@ -349,7 +349,12 @@ BEGIN
       AND ((j.state='queued' AND j.retry_at<=clock_timestamp()) OR (j.state='running' AND j.lease_until<=clock_timestamp()))
     ORDER BY j.retry_at,j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1;
   IF job.id IS NULL THEN RETURN NULL; END IF;
-  binding:=continuum_extraction_binding(job.scope_id,job.profile);
+  BEGIN binding:=continuum_extraction_binding(job.scope_id,job.profile);
+  EXCEPTION WHEN insufficient_privilege THEN
+    UPDATE extraction_runs SET state='unavailable',reason='policy',generation=generation+1,owner=NULL,lease_until=NULL WHERE id=job.id;
+    INSERT INTO extraction_receipts(run_id,generation,outcome,reason) VALUES(job.id,job.generation+1,'unavailable','policy');
+    RETURN jsonb_build_object('outcome','unavailable');
+  END;
   IF job.state='running' THEN
     UPDATE extraction_runs SET state='unavailable',reason='ambiguous',generation=generation+1,owner=NULL,lease_until=NULL WHERE id=job.id;
     INSERT INTO extraction_receipts(run_id,generation,outcome,reason) VALUES(job.id,job.generation+1,'unavailable','ambiguous');
@@ -429,11 +434,20 @@ BEGIN
   binding:=continuum_extraction_binding(job.scope_id,job.profile);
   SELECT * INTO STRICT chunk FROM extraction_chunks WHERE run_id=job.id AND chunk_index=chunk_number FOR UPDATE;
   IF chunk.state<>'pending' THEN RETURN to_jsonb(chunk.assertions); END IF;
+  IF NOT EXISTS(SELECT 1 FROM extraction_attempts a WHERE a.run_id=job.id AND a.attempt_id=attempt
+    AND a.chunk_index=chunk_number AND a.claim_generation=epoch AND a.login_oid=job.login_oid) THEN
+    RAISE check_violation USING MESSAGE='extraction attempt unavailable'; END IF;
   IF NOT EXISTS(SELECT 1 FROM extraction_attempts a JOIN pipeline_budget_attempts p ON p.workflow_id=job.workflow_id AND p.attempt_id=a.attempt_id
       WHERE a.run_id=job.id AND a.attempt_id=attempt AND a.chunk_index=chunk_number AND a.claim_generation=epoch
         AND p.state='settled' AND EXISTS(SELECT 1 FROM extraction_dispatch_receipts WHERE attempt_id=attempt)) THEN
     -- Pre-dispatch skips have no generated result, but still produce explicit coverage.
     IF output IS NOT NULL THEN RAISE check_violation USING MESSAGE='unsettled extraction result'; END IF;
+    -- Absence of both reservation and dispatch proves that no provider work was
+    -- admitted. Preserve this original identity without process-exit attestation.
+    IF NOT EXISTS(SELECT 1 FROM pipeline_budget_attempts WHERE workflow_id=job.workflow_id AND attempt_id=attempt)
+      AND NOT EXISTS(SELECT 1 FROM extraction_dispatch_receipts WHERE attempt_id=attempt) THEN
+      INSERT INTO extraction_abandoned_attempts VALUES(attempt) ON CONFLICT DO NOTHING;
+    END IF;
   END IF;
   IF failure IS NOT NULL AND failure NOT IN ('budget','policy','invalid-output','transient','permanent','ambiguous','deadline','cancelled') THEN RAISE check_violation USING MESSAGE='invalid extraction outcome'; END IF;
   IF failure='transient' THEN
@@ -506,7 +520,7 @@ BEGIN
     OR job.state<>'running' OR failure IS NULL OR failure NOT IN ('budget','policy','invalid-output','permanent','ambiguous','deadline','cancelled') THEN RAISE insufficient_privilege USING MESSAGE='extraction cancellation unavailable'; END IF;
   UPDATE pipeline_budget_workflows SET cancelled=TRUE,generation=generation+1 WHERE id=job.workflow_id AND NOT cancelled;
   UPDATE extraction_chunks SET state='skipped',reason=failure WHERE run_id=job.id AND state='pending';
-  UPDATE extraction_runs SET state=CASE WHEN completed>0 THEN 'partial' ELSE 'unavailable' END,reason=failure,owner=NULL,lease_until=NULL,finished_at=clock_timestamp(),generation=generation+1,
+  UPDATE extraction_runs SET state=CASE WHEN completed>0 THEN 'partial' WHEN failure='budget' THEN 'skipped' ELSE 'unavailable' END,reason=failure,owner=NULL,lease_until=NULL,finished_at=clock_timestamp(),generation=generation+1,
     skipped=(SELECT count(*) FROM extraction_chunks WHERE run_id=job.id AND state='skipped') WHERE id=job.id;
   INSERT INTO extraction_receipts(run_id,generation,outcome,reason) SELECT id,generation,state,reason FROM extraction_runs WHERE id=job.id;
 END $$;
@@ -583,12 +597,17 @@ CREATE FUNCTION continuum_extraction_capture_status(actor UUID,capture_id UUID) 
 DECLARE target_scope UUID; job extraction_runs%ROWTYPE;
 BEGIN
   SELECT scope_id INTO target_scope FROM memories WHERE id=capture_id AND state='live' AND (expires_at IS NULL OR expires_at>clock_timestamp()) FOR SHARE;
-  IF target_scope IS NULL OR NOT continuum_evidence_can_access(actor,target_scope,TRUE) THEN RAISE insufficient_privilege USING MESSAGE='extraction capture unavailable'; END IF;
+  -- Match the existing capture writer boundary. Evidence policy may abstain from
+  -- extraction, but cannot revoke an acknowledged legacy capture permission.
+  IF target_scope IS NULL OR NOT EXISTS(SELECT 1 FROM scope_memberships m JOIN principals p ON p.id=m.principal_id
+    WHERE m.principal_id=actor AND m.scope_id=target_scope AND p.disabled_at IS NULL AND m.role IN ('writer','admin')
+      AND continuum_membership_is_effective(m.active,m.source_kind)) THEN RAISE insufficient_privilege USING MESSAGE='extraction capture unavailable'; END IF;
   SELECT * INTO job FROM extraction_runs WHERE memory_id=capture_id ORDER BY created_at DESC,id DESC LIMIT 1;
   IF job.id IS NULL THEN RETURN jsonb_build_object('status','not-configured'); END IF;
+  IF NOT continuum_evidence_can_access(actor,target_scope,TRUE) THEN RETURN jsonb_build_object('status','skipped'); END IF;
   IF job.source_version IS NOT NULL THEN
     PERFORM continuum_evidence_lock(actor,ARRAY[job.source_version]);
-    IF NOT continuum_evidence_eligible(actor,job.source_version,NULL) THEN RAISE insufficient_privilege USING MESSAGE='extraction capture unavailable'; END IF;
+    IF NOT continuum_evidence_eligible(actor,job.source_version,NULL) THEN RETURN jsonb_build_object('status','skipped'); END IF;
   END IF;
   RETURN jsonb_build_object('status',job.state,'runId',job.id);
 END $$;
@@ -614,7 +633,7 @@ BEGIN
   INSERT INTO extraction_recoveries VALUES(attempt,CASE WHEN accounting.attempt_id IS NULL THEN 'no-reservation' ELSE 'settled' END);
   -- Recovery never creates a workflow or renews a deadline, and never restores
   -- a cancelled job. A live remaining allowance can be retried by its scope admin.
-  IF job.state<>'cancelled' THEN
+  IF job.state IN ('running','unavailable') AND original.claim_generation=(SELECT max(claim_generation) FROM extraction_attempts WHERE run_id=job.id) THEN
     UPDATE extraction_runs SET state='unavailable',reason=CASE WHEN EXISTS(SELECT 1 FROM pipeline_budget_workflows
       WHERE id=job.workflow_id AND NOT cancelled AND deadline_at>clock_timestamp() AND active=0) THEN 'transient' ELSE 'deadline' END,
       owner=NULL,lease_until=NULL,generation=generation+1 WHERE id=job.id;

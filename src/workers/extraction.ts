@@ -52,7 +52,12 @@ export async function processExtraction(pool: pg.Pool, worker: string, profile: 
     assertLive();
     const payload = await extractionOperation<string>(pool, 'SELECT continuum_extraction_hydrate($1,$2,$3) AS result', [claim.id, worker, claim.generation]);
     budget.consume({ candidates: 1, hydratedBytes: Buffer.byteLength(payload) });
-    const chunks = chunkSource(claim.sourceVersion, payload, profile.chunkBytes, profile.maxChunks);
+    let chunks: ReturnType<typeof chunkSource>;
+    try { chunks = chunkSource(claim.sourceVersion, payload, profile.chunkBytes, profile.maxChunks); }
+    catch (error) {
+      if (!(error instanceof RangeError)) throw error;
+      await stop('budget'); return 'unavailable';
+    }
     const states = await extractionOperation<Array<{ index: number; state: string }>>(pool,
       'SELECT continuum_extraction_prepare($1,$2,$3,$4) AS result', [claim.id, worker, claim.generation,
         JSON.stringify(chunks.map(({ text: _text, sourceFamily: _family, ...metadata }) => metadata))]);

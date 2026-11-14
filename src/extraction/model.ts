@@ -4,14 +4,16 @@ import type { ExtractionChunk } from './chunking.js';
 
 export const EXTRACTION_SCHEMA = 'extraction-v1';
 export const EXTRACTION_PROMPT = 'source-reference-v1';
+const checkedText = (max: number) => z.string().min(1).max(max)
+  .refine(value => !value.includes('\u0000') && value === Buffer.from(value, 'utf8').toString('utf8'), 'Invalid extraction text');
 export const assertionSchema = z.object({
-  text: z.string().min(1).max(4000),
+  text: checkedText(4000),
   type: z.enum(['fact', 'intent', 'decision', 'unknown']),
   unknown: z.boolean(),
-  unsupported: z.array(z.string().min(1).max(100)).max(16),
-  temporal: z.object({ value: z.string().min(1).max(100).nullable(), uncertain: z.boolean() }).strict(),
+  unsupported: z.array(checkedText(100)).max(16),
+  temporal: z.object({ value: checkedText(100).nullable(), uncertain: z.boolean() }).strict(),
   citations: z.array(z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive(),
-    quote: z.string().min(1).max(8192) }).strict()).min(1).max(8),
+    quote: checkedText(8192) }).strict()).min(1).max(8),
 }).strict();
 export const assertionOutputSchema = z.object({ assertions: z.array(assertionSchema).max(16) }).strict();
 export type ExtractionOutput = z.infer<typeof assertionOutputSchema>;

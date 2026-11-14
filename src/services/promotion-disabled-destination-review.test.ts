@@ -60,7 +60,7 @@ describe('promotion disabled destination review', () => {
   });
   it('preserves acknowledged legacy capture with extraction disabled for a disabled mapped owner', async () => {
     const value = await seed();
-    const result = await captureMemory(pool, undefined, value.writer, {
+    const result = await captureMemory(pool, null, value.writer, {
       scope: { kind: 'user', name: value.personal.name }, type: 'decision', title: 'Authorized capture',
       body: 'The reviewed shared-scope acknowledgement remains effective.', source: 'manual',
     });
