@@ -8,6 +8,26 @@ import type { Principal } from '../types.js';
 import { createApp } from './server.js';
 import { EmbeddingRegistry, ScopeEmbeddingRouter } from '../embeddings/router.js';
 
+it.each(['pricing', 'credentials', 'tokens', 'caps', 'spend', 'calls'] as const)('rejects known %s incompatibility with the reranking profile', mode => {
+  const t = testReranking(() => 1);
+  const makeProvider = (index: number) => {
+    const adapter = { ...t.adapter, id: `profile-embed-${index}`, local: false, responseBodyBytes: 65_536, outputTokens: 0, completionTokens: 0 };
+    if (mode === 'pricing') adapter.price = { ...adapter.price!, id: 'another-schedule' };
+    if (mode === 'credentials') adapter.credentials = 'missing';
+    if (mode === 'tokens') adapter.tokens = undefined;
+    if (mode === 'caps') adapter.enforceableCaps = false;
+    if (mode === 'spend') adapter.price = { ...adapter.price!, inputMicros: 1 };
+    return { id: adapter.id, dim: 768, local: false, pipelineAdapter: adapter, embed: vi.fn(async () => [Array(768).fill(0)]) };
+  };
+  const entries = Array.from({ length: mode === 'calls' ? 4 : 1 }, (_, i) => [`p${i}`, makeProvider(i)] as const);
+  const routing = new ScopeEmbeddingRouter(new EmbeddingRegistry(entries), { default: 'p0' });
+  const principal: Principal = { id: '00000000-0000-4000-8000-000000000123', externalId: 'profile-test',
+    kind: 'user', displayName: 'Reader', createdAt: new Date(0) };
+  expect(() => createApp({} as pg.Pool, { embeddingProvider: routing, reranking: t.config() })).toThrow('Reranking requires budget-compatible embedding providers');
+  expect(() => buildMcpServer({ pool: {} as pg.Pool, principal, embeddingProvider: routing, reranking: t.config() })).toThrow('Reranking requires budget-compatible embedding providers');
+  for (const [, provider] of entries) expect(provider.embed).not.toHaveBeenCalled();
+});
+
 it.each(['direct', 'routed'] as const)('refuses incompatible %s embedding composition before REST or MCP can silently lose semantic recall', async mode => {
   const provider = { id: 'stock-local', dim: 768, local: true, embed: vi.fn(async () => [Array(768).fill(0)]) };
   const routing = mode === 'direct' ? provider

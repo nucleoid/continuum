@@ -17,6 +17,54 @@ import { provisionEntraGroupBinding, syncEntraMemberships } from './membership-s
 import { Budget } from '../pipeline/budget.js';
 import { getScopeByRef } from '../storage/scopes.js';
 import { promoteMemory, verifyMemory } from '../storage/promote.js';
+import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
+
+it('skips reranking of a capacity-degraded pool while four query embeddings remain unsettled', async () => {
+  await standupProducerFixture(async f => {
+    const principal = (await getPrincipal(f.app, f.actorId))!;
+    const t = testReranking(() => 1);
+    const vector = [1, ...Array(767).fill(0)];
+    let release!: () => void; const held = new Promise<void>(resolve => { release = resolve; });
+    let started = 0; let allStarted!: () => void; const ready = new Promise<void>(resolve => { allStarted = resolve; });
+    const embedding = { ...t.adapter, id: 'parallel-query-embedding', timeoutMs: 5000, responseBodyBytes: 65_536,
+      outputTokens: 0, completionTokens: 0, invoke: vi.fn(async () => {
+        if (++started === 4) allStarted();
+        await held;
+        const value = [vector];
+        return { value, response: value, usage: { provenance: 'measured' as const, outputTokens: 0, reasoningTokens: 0, completionTokens: 0 } };
+      }) };
+    const provider = { id: embedding.id, dim: 768, local: true, pipelineAdapter: embedding,
+      embed: vi.fn(async () => { throw new Error('Unbudgeted query embedding is forbidden'); }) };
+    for (let i = 0; i < 2; i++) {
+      const source = await createMemory(f.app, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId,
+        type: 'decision', title: `Capacityneedle source ${i}`, body: `Capacityneedle reference ${i}`, source: 'manual' });
+      await storeMemoryEmbeddingVector(f.app, source.id, vector, provider);
+    }
+    const config = t.config();
+    const recall = () => recallForPrincipal(f.app, provider, principal, { query: 'capacityneedle', limit: 2 }, {}, undefined, undefined, undefined, config);
+    const inFlight = Array.from({ length: 4 }, recall);
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([ready, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Embedding admission did not start')), 5000); })]);
+      const saturated = await recall();
+      expect(saturated.diagnostics.vector).toBe('failed');
+      expect(saturated.diagnostics.reranking).toEqual({ status: 'fallback', reason: 'provider_failed' });
+      expect(saturated.results).toHaveLength(2);
+      expect(saturated.results.every(r => r.rerankScore === undefined)).toBe(true);
+      expect(t.adapter.invoke).not.toHaveBeenCalled();
+      expect(embedding.invoke).toHaveBeenCalledTimes(4);
+    } finally {
+      if (timer) clearTimeout(timer);
+      release();
+      await Promise.allSettled(inFlight);
+    }
+    for (const result of await Promise.all(inFlight)) {
+      expect(result.diagnostics.vector).toBe('used');
+      expect(result.diagnostics.reranking).toEqual({ status: 'used' });
+    }
+    expect(provider.embed).not.toHaveBeenCalled();
+  });
+}, 120_000);
 
 it('keeps original evidence ceilings and promotion source authority on hybrid fallback', async () => {
   await standupProducerFixture(async f => {
