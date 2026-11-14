@@ -52,18 +52,30 @@ describe('pipeline-budget-v1 synthetic contract evaluation', () => {
 
   it('keeps retries/fallback/chunks on one ledger and abstains from incomplete synthesis', async () => {
     const budget = new Budget(checkedProfile({ ...starterProfile, limits: { ...starterProfile.limits, calls: 1 } }));
-    const reserve = budget.reserve({ calls: 1 }, 0);
-    budget.settle(reserve, {});
-    // Future stage composition must preserve base ranking and explicit coverage.
+    let invoked = 0;
+    const adapter: BudgetAdapter<string, string> = {
+      id: 'chunk-stub', model: 'fake', profile: 'fake', local: true, timeoutMs: 100,
+      responseBodyBytes: 100, outputTokens: 0, reasoningTokens: 0, completionTokens: 0,
+      enforceableCaps: true, cancellation: 'cooperative',
+      tokens: { kind: 'exact', model: 'fake', profile: 'fake', validationId: 'synthetic-v1', overheadTokens: 0, count: () => 1 },
+      price: { id: 'local-zero-v1', currency: 'USD', unitTokens: 1, inputMicros: 0, outputMicros: 0, reasoningMicros: 0 },
+      serialize: (chunk) => ({ chunk }), invoke: async () => { invoked++; return { value: 'chunk-1', response: 'chunk-1' }; },
+    };
     const hybrid = ['authorized-source'];
     const chunks = ['chunk-1', 'chunk-2'];
     const covered: string[] = [];
     for (const chunk of chunks) {
-      try { budget.child().reserve({ calls: 1, retries: 1 }, 0); covered.push(chunk); } catch { /* explicit omitted coverage */ }
+      const result = await runBudgetedStage(budget.child(), adapter, chunk);
+      if (result.status === 'complete') covered.push(result.value);
     }
-    expect(covered).toEqual([]);
-    expect({ ranking: hybrid, coverage: { completed: covered, skipped: chunks }, synthesis: covered.length === chunks.length ? 'complete' : 'abstain' })
-      .toEqual({ ranking: hybrid, coverage: { completed: [], skipped: chunks }, synthesis: 'abstain' });
+    expect(covered).toEqual(['chunk-1']);
+    const rerank = await runBudgetedStage(budget.child(), adapter, 'rerank-fallback', { retry: true });
+    expect(rerank).toMatchObject({ status: 'skipped', reason: 'budget_exhausted' });
+    const ranking = rerank.status === 'complete' ? [rerank.value] : hybrid;
+    expect(ranking).toEqual(hybrid);
+    const synthesis = await runBudgetedStage(budget.child(), adapter, 'synthesize');
+    expect(synthesis.status).toBe('skipped');
+    expect(invoked).toBe(1); // Neither retry, fallback nor synthesis receives a fresh allowance.
     expect(budget.snapshot().used.calls).toBe(1);
   });
 });
