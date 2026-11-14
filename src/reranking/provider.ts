@@ -15,7 +15,9 @@ export function assertRerankingEmbeddingBudget(routing: EmbeddingRouting, config
       const adapter = provider.pipelineAdapter;
       if (!adapter || adapter.id !== provider.id || adapter.local !== provider.local
         || adapter.credentials === 'missing' || typeof adapter.local !== 'boolean'
-        || !adapter.model || !adapter.profile || !adapter.enforceableCaps
+        || typeof adapter.id !== 'string' || adapter.id.length > 200
+        || typeof adapter.model !== 'string' || !adapter.model || adapter.model.length > 200
+        || typeof adapter.profile !== 'string' || !adapter.profile || adapter.profile.length > 200 || !adapter.enforceableCaps
         || !adapter.tokens || adapter.tokens.model !== adapter.model || adapter.tokens.profile !== adapter.profile
         || !adapter.tokens.validationId || !['exact', 'conservative'].includes(adapter.tokens.kind)
         || !adapter.price || adapter.price.id !== config.profile.rateSchedule || adapter.price.currency !== config.profile.currency
@@ -25,7 +27,9 @@ export function assertRerankingEmbeddingBudget(routing: EmbeddingRouting, config
       const caps = { outputTokens: adapter.outputTokens, reasoningTokens: adapter.reasoningTokens, completionTokens: adapter.completionTokens };
       if (caps.outputTokens + caps.reasoningTokens > caps.completionTokens) throw new TypeError();
       const wire = boundedJson(adapter.serialize([''], Object.freeze(caps)), probe.available('inputBytes'));
-      const tokens = adapter.tokens.count(wire) + adapter.tokens.overheadTokens;
+      const counted = adapter.tokens.count(wire);
+      if (!Number.isSafeInteger(counted) || counted < 0 || !Number.isSafeInteger(adapter.tokens.overheadTokens) || adapter.tokens.overheadTokens < 0) throw new TypeError();
+      const tokens = counted + adapter.tokens.overheadTokens;
       const inputBytes = Buffer.byteLength(wire);
       const id = probe.reserve({ ...caps, inputBytes, contextTokens: tokens, outputBytes: adapter.responseBodyBytes, calls: 1,
         spendMicros: priceMicros(adapter.price, tokens, caps.outputTokens, caps.reasoningTokens) }, inputBytes + adapter.responseBodyBytes);
