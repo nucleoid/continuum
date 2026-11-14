@@ -104,6 +104,14 @@ it('repairs with new wording/version and original durable attempt identity, then
       }};
     await f.app.query("UPDATE memories SET body='Changed source' WHERE id=$1",[source.id]);
     for(let i=0;i<5;i++) await materializeEvidence(f.app,{owner:randomUUID(),pageSize:100,deadlineMs:5000});
+    await f.owner.query(`CREATE FUNCTION reject_evidence_budget_create() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic accounting outage'; END $$;
+      CREATE TRIGGER reject_evidence_budget_create BEFORE INSERT ON pipeline_budget_workflows FOR EACH ROW EXECUTE FUNCTION reject_evidence_budget_create()`);
+    try {
+      expect(await repairEvidence(f.operator,f.adminId,randomUUID(),{owners,profile:starterProfile,adapter,providerAuthority})).toBe('unavailable');
+      expect((await f.owner.query('SELECT state,attempt_id FROM evidence_repair_jobs WHERE version_id=$1',[original])).rows[0])
+        .toMatchObject({state:'pending',attempt_id:null});
+    } finally { await f.owner.query('DROP TRIGGER reject_evidence_budget_create ON pipeline_budget_workflows; DROP FUNCTION reject_evidence_budget_create()'); }
+    await f.owner.query('UPDATE evidence_repair_jobs SET retry_at=clock_timestamp() WHERE version_id=$1',[original]);
     expect(await repairEvidence(f.operator,f.adminId,randomUUID(),{owners,profile:starterProfile,adapter,providerAuthority})).toBe('completed');
     const job=(await f.owner.query('SELECT * FROM evidence_repair_jobs WHERE version_id=$1',[original])).rows[0];
     expect(job.result_version).not.toBe(original); expect(job.workflow_id).toEqual(expect.any(String)); expect(job.attempt_id).toEqual(expect.any(String));
@@ -122,5 +130,28 @@ it('repairs with new wording/version and original durable attempt identity, then
     expect(await repairEvidence(f.operator,f.adminId,randomUUID(),{owners,profile:starterProfile,adapter,providerAuthority})).toBe('unavailable');
     expect((await f.owner.query('SELECT attempt_id FROM evidence_repair_jobs WHERE version_id=$1',[job.result_version])).rows[0].attempt_id).toBe(failed.attempt_id);
     expect((await f.owner.query('SELECT used FROM pipeline_budget_workflows WHERE id=$1',[failed.workflow_id])).rows[0].used.calls).toBe(1);
+  });
+},120_000);
+
+it('backs off unattempted repairs during policy unavailability and resumes after recovery', async () => {
+  await standupProducerFixture(async f => {
+    await addMembership(f.owner,f.adminId,f.scopeId,'writer');
+    const source=await createMemory(f.app,{scopeId:f.scopeId,scopeKind:'user',authorId:f.actorId,type:'decision',title:'Source',body:'Source',source:'manual'});
+    const version=(await f.app.query('SELECT continuum_evidence_source($1,$2) AS id',[f.actorId,source.id])).rows[0].id;
+    const original=(await f.app.query('SELECT continuum_evidence_register($1,$2,NULL,$3,$4,$5,$6,$7) AS id',
+      [f.actorId,randomUUID(),f.scopeId,'derived-observation',JSON.stringify([{versionId:version,kind:'derivation'}]),
+        {transform:'v1',model:'none',prompt:'none',schema:'v1'},'Derivative'])).rows[0].id;
+    await f.operator.query("SELECT continuum_operator_evidence_policy($1,$2,'any','unknown',NULL,NULL)",[f.adminId,source.id]);
+    for(let i=0;i<5;i++) await materializeEvidence(f.app,{owner:randomUUID(),pageSize:100,deadlineMs:5000});
+    const worker=randomUUID();
+    expect((await f.operator.query('SELECT continuum_operator_evidence_repair_claim($1,$2,30000) AS result',[f.adminId,worker])).rows[0].result)
+      .toMatchObject({outcome:'unavailable'});
+    expect((await f.owner.query('SELECT state,attempt_id FROM evidence_repair_jobs WHERE version_id=$1',[original])).rows[0])
+      .toMatchObject({state:'pending',attempt_id:null});
+    expect((await f.operator.query('SELECT continuum_operator_evidence_repair_claim($1,$2,30000) AS result',[f.adminId,worker])).rows[0].result).toBeNull();
+    await f.operator.query("SELECT continuum_operator_evidence_policy($1,$2,'any','not-required',NULL,NULL)",[f.adminId,source.id]);
+    await f.owner.query('UPDATE evidence_repair_jobs SET retry_at=clock_timestamp() WHERE version_id=$1',[original]);
+    expect((await f.operator.query('SELECT continuum_operator_evidence_repair_claim($1,$2,30000) AS result',[f.adminId,worker])).rows[0].result)
+      .toMatchObject({outcome:'claimed',versionId:original});
   });
 },120_000);
