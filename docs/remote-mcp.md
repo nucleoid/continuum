@@ -69,8 +69,15 @@ Remote full-memory reads, recall, decision history, AGENTS.md/freshness and old 
 
 ## Rollout and rollback
 
-This addition needs no migration, backfill, reindex or new credential store. Leave it disabled to preserve existing configuration. Enablement, public proxy policy, affinity and client adoption require separate operator installation work. This issue does not install or switch clients.
+Trusted compositions may additionally pass the optional [pipeline envelope](pipeline-budgets.md)
+through recall, hydration and generator services. Shared limits only tighten
+transport containment. Actual REST/MCP wrappers and double escaping still need
+the existing exact wire validation. Receipts do not enter AGENTS.md source text.
+Pipeline accounting in 0092 and exact APP/OP regrants are current binary startup
+prerequisites, even when new optional stages remain disabled.
 
-Mixed binaries against the unchanged current schema retain REST/stdio compatibility. Remote clients must stay on a compatible enabled instance. Drain remote work before disabling the endpoint or rolling back the binary; retained data and audits stay intact. Remote sessions cannot survive a process restart, credential refresh or rotation. No forced login is introduced for existing transports.
+The remote transport itself needs no separate migration, backfill, reindex or new credential store. Leave it disabled to preserve existing configuration. Enablement, public proxy policy, affinity and client adoption require separate operator installation work. This issue does not install or switch clients.
+
+Mixed binaries require the complete schema and grant profile for each binary. Remote clients must stay on a compatible enabled instance. Drain remote work before disabling the endpoint or rolling back the binary; retained data and audits stay intact. Remote sessions cannot survive a process restart, credential refresh or rotation. No forced login is introduced for existing transports.
 
 This transport was tested against the existing lock contract, SDK 1.29.0; the original compatible manifest range is preserved. Existing dependency audit findings remain separate maintenance work. The remote server does not invoke SDK OAuth client helpers and validates socket peers through Node BlockList rather than Express proxy-addr; this scoped reachability assessment does not assert that the package has no advisories.

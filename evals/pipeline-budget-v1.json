@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "version": "pipeline-budget-v1",
+  "synthetic": true,
+  "profile": "foreground-v1",
+  "stages": ["rerank", "extract", "synthesize", "refresh", "connector"],
+  "cases": [
+    {"id": "complete-local-envelope", "mode": "complete", "expected": "complete"},
+    {"id": "whole-input-overflow", "mode": "oversized", "expected": "skipped"},
+    {"id": "unknown-pricing", "mode": "unpriced", "expected": "skipped"},
+    {"id": "current-policy-denial", "mode": "denied", "expected": "skipped"}
+  ],
+  "gates": {"hardBudgetFailures": 0, "securityFailures": 0, "outcomeAccuracy": 1, "reservedSpendMicros": 0, "actualSpendMicros": 0}
+}

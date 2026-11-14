@@ -188,6 +188,12 @@ describe('recall expiry enforcement', () => {
     ])).toBe(10_000);
   });
 
+  it.each([0, -1, 30_001])('rejects invalid explicit embedding deadline %s without a budget', async (embeddingDeadlineMs) => {
+    const { scope } = await seedMemory('deadline validation');
+    await expect(recall(pool, { query: 'deadline', scopeIds: [scope.id], limit: 1, embeddingDeadlineMs }))
+      .rejects.toThrow('embeddingDeadlineMs must be an integer from 1 to 30000');
+  });
+
   it('cancels vector SQL inside the shared recall deadline', async () => {
     const { scope } = await seedMemory('bounded vector sql');
     const blocker = await pool.connect();

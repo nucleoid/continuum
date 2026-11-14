@@ -420,12 +420,13 @@ async function harness(overrides: Record<string, string> = {}, selectedPool: unk
       : { CONTINUUM_MCP_HTTP_LOOPBACK_DEV: 'true', CONTINUUM_MCP_HTTP_PEER_BURST: '100', CONTINUUM_MCP_HTTP_MESSAGE_BURST: '100' }),
     ...overrides }, proxy ? 'entra' : 'dev')!;
   let authenticationChecks = 0;
+  const checksByCredential = new Map<string, number>();
   const denied = new Set<string>();
   const unavailable = new Set<string>();
   const controller = createMcpHttpController(selected, { pool: selectedPool as never, embeddingProvider: null, info,
-    authenticator: { mode: proxy ? 'entra' : 'dev', authenticate: async (_scheme: string, credential: string) => { authenticationChecks++; if (unavailable.has(credential)) throw new Error('Synthetic dependency unavailable'); return denied.has(credential) || credential.startsWith('invalid') ? null : ({ principal: syntheticPrincipal, credential: 'dev' }); } } });
+    authenticator: { mode: proxy ? 'entra' : 'dev', authenticate: async (_scheme: string, credential: string) => { authenticationChecks++; checksByCredential.set(credential, (checksByCredential.get(credential) ?? 0) + 1); if (unavailable.has(credential)) throw new Error('Synthetic dependency unavailable'); return denied.has(credential) || credential.startsWith('invalid') ? null : ({ principal: syntheticPrincipal, credential: 'dev' }); } } });
   app.use('/mcp', controller.router);
-  return { address, controller, listener, denied, unavailable, get authenticationChecks() { return authenticationChecks; }, async close() { await controller.stop('test');
+  return { address, controller, listener, denied, unavailable, authenticationChecksFor: (credential: string) => checksByCredential.get(credential) ?? 0, get authenticationChecks() { return authenticationChecks; }, async close() { await controller.stop('test');
     listener.closeAllConnections(); await new Promise<void>((resolve) => listener.close(() => resolve())); } };
 }
 describe('remote protocol and lifecycle limits', () => {
@@ -613,12 +614,16 @@ it('sheds exhausted proxy authentication work while freshly authenticating estab
   try {
     expect((await fetch(active.address, { headers: { Authorization: 'Bearer invalid', 'X-Forwarded-Proto': 'https' } })).status).toBe(401);
     const before = active.authenticationChecks;
-    for (let index = 0; index < 8; index++) expect((await fetch(active.address, { headers: {
-      Authorization: `ApiKey invalid-${index}`, 'X-Forwarded-Proto': 'https' } })).status).toBe(429);
-    expect(active.authenticationChecks).toBe(before);
+    // The SDK opens an authenticated SSE GET asynchronously after connect.
+    // Count rejected credentials separately from that established client work.
+    for (let index = 0; index < 8; index++) {
+      expect((await fetch(active.address, { headers: {
+        Authorization: `ApiKey invalid-${index}`, 'X-Forwarded-Proto': 'https' } })).status).toBe(429);
+      expect(active.authenticationChecksFor(`invalid-${index}`)).toBe(0);
+    }
     expect((await fetch(active.address, { headers: { Authorization: 'Bearer wrong-credential',
       'Mcp-Session-Id': first.transport.sessionId!, 'X-Forwarded-Proto': 'https' } })).status).toBe(429);
-    expect(active.authenticationChecks).toBe(before);
+    expect(active.authenticationChecksFor('wrong-credential')).toBe(0);
     expect((await first.client.listTools()).tools.length).toBeGreaterThan(10);
     expect((await second.client.listTools()).tools.length).toBeGreaterThan(10);
     expect(active.authenticationChecks).toBeGreaterThan(before);
@@ -712,9 +717,9 @@ it('sheds unavailable authentication for unknown proxy callers while preserving 
     active.unavailable.add('unknown');
     const headers = { Authorization: 'Bearer unknown', 'X-Forwarded-Proto': 'https' };
     expect((await fetch(active.address, { headers })).status).toBe(503);
-    const before = active.authenticationChecks;
+    const before = active.authenticationChecksFor('unknown');
     for (let index = 0; index < 3; index++) expect((await fetch(active.address, { headers })).status).toBe(429);
-    expect(active.authenticationChecks).toBe(before);
+    expect(active.authenticationChecksFor('unknown')).toBe(before);
     expect((await client.listTools()).tools.length).toBeGreaterThan(10);
   } finally { await client.close(); await active.close(); }
 });

@@ -1,3 +1,5 @@
+import { BudgetError } from '../pipeline/budget.js';
+
 export type ServiceErrorCode =
   | 'INVALID_INPUT'
   | 'INVALID_SCOPE'
@@ -54,6 +56,9 @@ export class ServiceError extends Error {
 }
 
 export function asServiceError(error: unknown): ServiceError {
+  if (error instanceof BudgetError) return new ServiceError(
+    error.reason === 'budget_exhausted' ? 'PAYLOAD_TOO_LARGE' : 'DEPENDENCY_UNAVAILABLE',
+    'Pipeline budget does not permit this result', { cause: error });
   return error instanceof ServiceError
     ? error
     : new ServiceError('INTERNAL', 'An internal error occurred', { cause: error });

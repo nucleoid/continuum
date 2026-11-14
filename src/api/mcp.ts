@@ -16,6 +16,7 @@ import { getPool } from '../storage/pool.js';
 import { makeEmbeddingRouterFromEnv } from '../embeddings/factory.js';
 import { isDirectEntrypoint } from './entrypoint.js';
 import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoordinationContractReady, requirePromotionOutboxReady, requireStandupReady } from '../storage/provider-lifecycle.js';
+import { requirePipelineBudgetsReady } from '../storage/provider-lifecycle.js';
 import { accessibleScopes } from '../services/access.js';
 import { captureMemory } from '../services/capture.js';
 import { recallForPrincipal, type PrincipalRecallResult } from '../services/recall.js';
@@ -939,6 +940,7 @@ async function main(): Promise<void> {
   await requireCoordinationContractReady(pool, schemaOptions);
   await requirePromotionOutboxReady(pool, schemaOptions);
   await requireStandupReady(pool, { ...schemaOptions, servingPool: true });
+  await requirePipelineBudgetsReady(pool, schemaOptions);
   const authMode = authModeFromEnv();
   warnOnDevAuthMode(authMode);
   const authenticator = createAuthenticator(

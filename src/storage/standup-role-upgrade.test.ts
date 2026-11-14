@@ -9,7 +9,7 @@ import pg from 'pg';
 import { expect, it } from 'vitest';
 import { runMigrations } from './migrator.js';
 import { reconcilePgvectorProviderGrants, requireCoordinationContractReady,
-  requirePromotionOutboxReady, requireStandupReady } from './provider-lifecycle.js';
+  requirePromotionOutboxReady, requireStandupReady, requirePipelineBudgetsReady } from './provider-lifecycle.js';
 
 const databaseUrl = process.env.CONTINUUM_TEST_DATABASE_URL
   ?? 'postgres://continuum:continuum@localhost:5433/continuum';
@@ -237,6 +237,12 @@ async function roleUpgradeAcceptance(boundRuntime?: 'REST' | 'MCP') {
       CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(helper.proacl,pg_catalog.acldefault('f',helper.proowner))) acl
       WHERE namespace.nspname=$1::text AND helper.proname LIKE '%standup%' AND acl.grantee=0`, [schema])).rows).toEqual([]);
     await requireStandupReady(app, { expectedSchema: schema });
+    // Keep the historical 89->90 assertions above. Current compiled runtimes
+    // also require the independent accounting schema before their positive control.
+    const pipelineForward = '0092_pipeline_budgets.sql';
+    await copyFile(new URL(pipelineForward, source), join(directory, pipelineForward));
+    expect((await runMigrations(owner, directory)).map((entry) => entry.name)).toEqual([pipelineForward]);
+    await requirePipelineBudgetsReady(app, { expectedSchema: schema });
     await grants(false);
     expect(await profiles()).toEqual(originalProfiles); expect(await identities()).toEqual(originalIdentities);
     for (const role of [appRole,operatorRole]) await reconcilePgvectorProviderGrants(logins.get(role)!, { expectedSchema: schema });

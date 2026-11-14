@@ -7,6 +7,35 @@ function quoteIdentifier(value: string): string {
 
 export interface StartupSchemaOptions { expectedSchema?: string }
 
+/** Current serving binaries require the owner-controlled accounting capability. */
+export async function requirePipelineBudgetsReady(pool: pg.Pool, options: StartupSchemaOptions = {}): Promise<void> {
+  const unavailable = () => new ServiceError('DEPENDENCY_UNAVAILABLE', 'Pipeline accounting schema is unavailable; finish migrations before starting runtimes');
+  const client = await pool.connect().catch(() => { throw unavailable(); });
+  let discard = false;
+  try {
+    await client.query('BEGIN');
+    await client.query(`SELECT pg_catalog.set_config('statement_timeout', CASE WHEN setting::bigint BETWEEN 1 AND 5000 THEN setting||'ms' ELSE '5000ms' END,TRUE) FROM pg_catalog.pg_settings WHERE name='statement_timeout'`);
+    await client.query(`SELECT pg_catalog.set_config('lock_timeout', CASE WHEN setting::bigint BETWEEN 1 AND 1000 THEN setting||'ms' ELSE '1000ms' END,TRUE) FROM pg_catalog.pg_settings WHERE name='lock_timeout'`);
+    await requireSchemaAnchor(client, options.expectedSchema);
+    const state = (await client.query<{ schema: string; trusted: boolean }>(`
+      SELECT n.nspname AS schema, COALESCE(f.proowner=m.relowner AND f.prosecdef AND f.provolatile='s'
+        AND f.prorettype='pg_catalog.bool'::regtype AND f.pronargs=0
+        AND f.proconfig @> ARRAY[pg_catalog.format('search_path=pg_catalog, %I, pg_temp',n.nspname)]
+        AND NOT EXISTS(SELECT 1 FROM pg_catalog.aclexplode(COALESCE(f.proacl,pg_catalog.acldefault('f',f.proowner))) acl
+          WHERE acl.grantee=0 AND acl.privilege_type='EXECUTE'),FALSE) AS trusted
+      FROM pg_catalog.pg_class m JOIN pg_catalog.pg_namespace n ON n.oid=m.relnamespace
+      LEFT JOIN pg_catalog.pg_proc f ON f.oid=pg_catalog.to_regprocedure(pg_catalog.format('%I.continuum_pipeline_budgets_is_ready()',n.nspname))
+      WHERE m.oid=pg_catalog.to_regclass('memories')`)).rows[0];
+    if (!state?.trusted) throw unavailable();
+    if (!(await client.query<{ ready: boolean }>(`SELECT ${quoteIdentifier(state.schema)}.continuum_pipeline_budgets_is_ready() AS ready`)).rows[0]?.ready) throw unavailable();
+    await client.query('COMMIT');
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch { discard = true; }
+    if (error instanceof ServiceError) throw error;
+    throw unavailable();
+  } finally { client.release(discard); }
+}
+
 /** Runtime entrypoints take their schema anchor from explicit configuration. */
 export function applicationSchemaFromEnv(env: NodeJS.ProcessEnv = process.env): string {
   const schema = env.CONTINUUM_APPLICATION_SCHEMA ?? 'public';

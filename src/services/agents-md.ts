@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type pg from 'pg';
+import type { Budget } from '../pipeline/budget.js';
 import type { Memory, Principal } from '../types.js';
 import { renderAgentsMdResult } from '../agents-md/render.js';
 import { recordRead as recordReadAudit } from '../audit/log.js';
@@ -23,6 +24,7 @@ export async function prepareAgentsMdForPrincipal(
   principal: Principal,
   input: AgentsMdInput,
   readBudgetBytes?: number,
+  budget?: Budget,
 ): Promise<AgentsMdBundle> {
   try {
     // This transport deliberately uses the scoped text renderer, not ranked
@@ -36,6 +38,7 @@ export async function prepareAgentsMdForPrincipal(
       team: input.team,
       perScopeLimit: input.limit,
       readBudgetBytes,
+      budget,
     });
     const hash = createHash('sha256').update(markdown, 'utf8').digest('hex');
     return { markdown, hash, etag: `"${hash}"`, memories };
@@ -82,8 +85,11 @@ export async function renderAgentsMdForPrincipal(
   input: AgentsMdInput,
   auditMetadata: Record<string, unknown> = {},
   readBudgetBytes?: number,
+  budget?: Budget,
 ): Promise<string> {
-  const bundle = await prepareAgentsMdForPrincipal(pool, principal, input, readBudgetBytes);
+  const bundle = await prepareAgentsMdForPrincipal(pool, principal, input, readBudgetBytes, budget);
+  budget?.assertLive();
   await auditAgentsMdRead(pool, principal, input, bundle, true, auditMetadata);
+  budget?.assertLive();
   return bundle.markdown;
 }

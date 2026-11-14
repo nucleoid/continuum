@@ -2,6 +2,8 @@ import {
   EmbeddingProviderError,
   embeddingProviderHttpError,
   type EmbeddingProvider,
+  type EmbeddingCallOptions,
+  embedWithBudget,
 } from './provider.js';
 import {
   DEFAULT_EMBEDDING_TIMEOUT_MS,
@@ -109,7 +111,8 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
     this.timeoutMs = validateEmbeddingTimeout(opts.timeoutMs ?? DEFAULT_EMBEDDING_TIMEOUT_MS);
   }
 
-  async embed(texts: string[], options: { signal?: AbortSignal } = {}): Promise<number[][]> {
+  async embed(texts: string[], options: EmbeddingCallOptions = {}): Promise<number[][]> {
+    if (options.budget) return embedWithBudget(this, texts, options);
     if (texts.length === 0) return [];
     const out: number[][] = [];
     for (let offset = 0; offset < texts.length; offset += this.batchSize) {

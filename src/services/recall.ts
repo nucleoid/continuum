@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import type { Budget } from '../pipeline/budget.js';
 import type { Principal, RecallInput, RecallResult } from '../types.js';
 import { asEmbeddingRouter, type EmbeddingRouting } from '../embeddings/router.js';
 import { recall, type RecallDiagnostics } from '../storage/recall.js';
@@ -38,8 +39,10 @@ export async function recallForPrincipal(
   auditMetadata: Record<string, unknown> = {},
   logger?: RecallLogger,
   enrichment?: RecallEnrichment,
+  budget?: Budget,
 ): Promise<PrincipalRecallResult> {
   try {
+    budget?.assertLive();
     const refs = input.scopes?.map(parseScopeString);
     const { accessible, scopeIds } = await resolveReadableScopeIds(
       pool,
@@ -73,6 +76,7 @@ export async function recallForPrincipal(
       limit: input.limit ?? 10,
       embeddingGroups,
       readBudgetBytes: enrichment?.readBudgetBytes,
+      budget,
     });
     const embeddingAuditGroups = recalled.diagnostics.groups.map((group) => ({
       provider: group.provider,
@@ -103,10 +107,11 @@ export async function recallForPrincipal(
 
     // Remote delivery validation includes optional enrichments before the required audit.
     // Existing callers retain their audit-before-enrichment ordering.
-    const preparedResults = enrichment?.validateResult
-      ? await applyRetrievalEnrichers(results, principal.id, enrichment.registry, enrichment.options)
+    const preparedResults = enrichment && (enrichment.validateResult || budget)
+      ? await applyRetrievalEnrichers(results, principal.id, enrichment.registry, { ...enrichment.options, budget })
       : undefined;
     enrichment?.validateResult?.({ results: preparedResults!, accessible, diagnostics });
+    budget?.serializeOutput({ results: preparedResults ?? results, diagnostics });
 
     // Recall auditing is required. Results are not returned if this write fails.
     await recordReadAudit(pool, {
@@ -141,6 +146,7 @@ export async function recallForPrincipal(
         enrichment.options,
       )
       : results);
+    budget?.assertLive();
     return { results: enrichedResults, accessible, diagnostics };
   } catch (error) {
     throw asServiceError(error);

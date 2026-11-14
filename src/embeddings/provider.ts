@@ -1,4 +1,9 @@
+import { runBudgetedStage, type Budget, type BudgetAdapter } from '../pipeline/budget.js';
+
+export interface EmbeddingCallOptions { signal?: AbortSignal; budget?: Budget; }
 export interface EmbeddingProvider {
+  /** Explicit opt-in adapter for complete request accounting. No built-in price/token guesses. */
+  readonly pipelineAdapter?: BudgetAdapter<string[], number[][]>;
   readonly id: string;
   readonly dim: number;
   /** Provider request deadline, used to size the routed recall budget when known. */
@@ -7,7 +12,31 @@ export interface EmbeddingProvider {
   readonly batchSize?: number;
   /** Explicit data-residency capability. Never infer this from an endpoint URL. */
   readonly local?: boolean;
-  embed(texts: string[], options?: { signal?: AbortSignal }): Promise<number[][]>;
+  embed(texts: string[], options?: EmbeddingCallOptions): Promise<number[][]>;
+}
+
+export async function embedWithBudget(provider: EmbeddingProvider, texts: string[], options: EmbeddingCallOptions = {}): Promise<number[][]> {
+  if (!options.budget) return provider.embed(texts, options);
+  const adapter = provider.pipelineAdapter;
+  if (!adapter || adapter.id !== provider.id || adapter.local !== provider.local) {
+    throw new EmbeddingProviderError('EMBEDDING_FAILED', 'Embedding budget capabilities are unavailable');
+  }
+  const batchSize = provider.batchSize ?? 32;
+  if (!Number.isSafeInteger(batchSize) || batchSize < 1 || batchSize > 1000) throw new EmbeddingProviderError('EMBEDDING_FAILED', 'Invalid embedding batch capability');
+  const vectors: number[][] = [];
+  for (let offset = 0; offset < texts.length; offset += batchSize) {
+    const chunk = texts.slice(offset, offset + batchSize);
+    const outcome = await runBudgetedStage(options.budget, adapter, chunk, { signal: options.signal, transportMs: provider.timeoutMs });
+    if (outcome.status !== 'complete') throw new EmbeddingProviderError(
+      outcome.reason === 'deadline' || outcome.reason === 'cancelled' ? 'EMBEDDING_TIMEOUT' : 'EMBEDDING_FAILED',
+      'Embedding stage unavailable within its budget');
+    if (outcome.value.length !== chunk.length || outcome.value.some((vector) => !Array.isArray(vector)
+      || vector.length !== provider.dim || vector.some((n) => typeof n !== 'number' || !Number.isFinite(n)))) {
+      throw new EmbeddingProviderError('EMBEDDING_INVALID_RESPONSE', 'Invalid budgeted embedding response');
+    }
+    vectors.push(...outcome.value);
+  }
+  return vectors;
 }
 
 export type EmbeddingProviderErrorCode =
