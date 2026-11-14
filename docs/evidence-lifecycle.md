@@ -46,7 +46,10 @@ disclosure. The bound OP policy capability changes these restrictions and
 advances their generation atomically with its audit.
 
 The service uses issue 26's pure policy inside its owned READ COMMITTED
-transaction over locked, current database facts. It does not call the exclusive
+transaction over locked, current database facts. SQL establishes the principal's
+enabled state and current scope access before supplying the envelope. The pure
+policy then evaluates its expiry, residency and external restrictions; it does
+not independently query memberships. It does not call the exclusive
 autocommit adapter within that transaction. Low-level SQL capabilities are
 trusted composition boundaries, not authenticated network endpoints.
 
@@ -56,8 +59,12 @@ The guard audit must succeed. Descendant writes are asynchronous and bounded;
 the generation mismatch denies serving immediately. Positive verification
 cannot extend the captured original ceiling or revive an old derivative.
 Canonical promotion requires reciprocal links plus matching source content,
-tags and reference. It preserves the original ceiling and transitive source
-scope/policy restrictions. A source prefix or metadata marker alone cannot
+tags and reference. Its evidence lineage preserves the original ceiling and
+transitive source scope/policy restrictions. Legacy destination expiry and valid
+promotion remain independent of evidence-only eligibility. Ineligible or
+oversized snapshots deny evidence admission without rejecting the legacy write;
+the source generation still advances, so stale evidence remains unavailable.
+A source prefix or metadata marker alone cannot
 establish lineage. Promotion ancestry is bounded by the same depth/root limits.
 Its trusted transition attestation does not depend on later mutable child text.
 A fresh parent source version is published at the advanced generation before
@@ -88,6 +95,12 @@ replacements; no old quarantined prose is given to a generator. Publication
 requires newly generated wording, the exact admitted surviving parent set,
 current source authority, settled accounting, current job ownership and pointer
 CAS. Removing a citation is not repair. Missing surviving evidence abstains.
+
+Before an attempt identity is attached, temporary authority, parent-eligibility
+or accounting failures leave the job pending with a five-second retry delay.
+Each poll remains bounded and rechecks current authority. A later invalidation
+can reopen an unavailable job only when it has no attempt identity. Once an
+identity is attached, failures park it without creating another provider attempt.
 
 Timeout/requeue never resets allowance, releases ambiguous reservations or
 replaces original execution identities. Failed settlement is a bounded

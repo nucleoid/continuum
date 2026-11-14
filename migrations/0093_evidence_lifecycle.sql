@@ -102,6 +102,7 @@ CREATE TABLE evidence_repair_jobs(
   generation BIGINT NOT NULL DEFAULT 0,
   lease_until TIMESTAMPTZ,
   -- Original accounting identities survive requeue. No expiry-based refunds.
+  retry_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
   workflow_id UUID,
   attempt_id UUID,
   attempt_owner UUID,
@@ -171,7 +172,7 @@ BEGIN
         OR EXISTS(SELECT 1 FROM principal_user_scopes mapping JOIN principals owner ON owner.id=mapping.principal_id
           WHERE mapping.scope_id=upstream.scope_id AND owner.disabled_at IS NOT NULL))) THEN RETURN NULL; END IF;
   canonical:=continuum_evidence_canonical(memory);
-  IF octet_length(canonical)>1048576 THEN RAISE check_violation USING MESSAGE='evidence payload bounds exceeded'; END IF;
+  IF octet_length(canonical)>1048576 THEN RETURN NULL; END IF;
   SELECT count(*)+1 INTO total FROM evidence_source_dependencies WHERE root_id=root.id;
   IF root.lineage_parent IS NOT NULL THEN SELECT depth+1 INTO depth_value FROM evidence_versions WHERE id=root.lineage_parent; END IF;
   IF total>256 OR depth_value>16 THEN RAISE check_violation USING MESSAGE='evidence lineage bounds exceeded'; END IF;
@@ -242,11 +243,7 @@ DECLARE root evidence_roots%ROWTYPE; erased BOOLEAN; promoted memories%ROWTYPE;
 BEGIN
   IF TG_OP='UPDATE' AND NEW.state='promoted' AND NEW.promoted_to_id IS NOT NULL THEN
     SELECT * INTO promoted FROM memories WHERE id=NEW.promoted_to_id FOR UPDATE;
-    IF continuum_evidence_promotion_parent(promoted)=NEW.id THEN
-      -- Covers trusted older writers even before lazy evidence participation.
-      UPDATE memories SET expires_at=least(expires_at,OLD.expires_at,(SELECT expiry_ceiling FROM evidence_roots WHERE id=OLD.id))
-        WHERE id=promoted.id AND expires_at IS DISTINCT FROM least(expires_at,OLD.expires_at,(SELECT expiry_ceiling FROM evidence_roots WHERE id=OLD.id));
-    ELSE promoted.id:=NULL; END IF;
+    IF continuum_evidence_promotion_parent(promoted) IS DISTINCT FROM NEW.id THEN promoted.id:=NULL; END IF;
   END IF;
   SELECT * INTO root FROM evidence_roots WHERE source_memory_id=OLD.id FOR UPDATE;
   IF root.id IS NULL THEN IF TG_OP='DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF; END IF;
@@ -265,7 +262,14 @@ BEGIN
     PERFORM continuum_evidence_snapshot(NEW);
   END IF;
   IF promoted.id IS NOT NULL THEN
-    PERFORM continuum_evidence_adopt_source(NULL,promoted.id,16);
+    BEGIN
+      PERFORM continuum_evidence_adopt_source(NULL,promoted.id,16);
+    EXCEPTION WHEN check_violation THEN
+      -- Evidence-only ineligibility must not reject a valid legacy promotion.
+      -- The source fence above remains committed; lazy destination enrollment
+      -- will recheck its original ancestry and ceiling before admitting data.
+      NULL;
+    END;
   END IF;
   -- Trusted older/direct writers cannot omit the committed fence and guard audit.
   INSERT INTO audit_log(principal_id,action,metadata)
@@ -322,7 +326,7 @@ DECLARE root evidence_roots%ROWTYPE; version UUID:=gen_random_uuid(); parent_ids
 BEGIN
   IF artifact_kind IS NULL OR artifact_kind NOT IN ('extracted-assertion','derived-observation','brief-section-version','history','cache','trace','managed-export','queued-payload')
     OR jsonb_typeof(parents) IS DISTINCT FROM 'array' OR jsonb_array_length(parents) NOT BETWEEN 1 AND 64
-    OR content IS NULL OR octet_length(content)>1048576 OR node IS NULL
+    OR content IS NULL OR octet_length(content)>1048576 OR node IS NULL OR EXISTS(SELECT 1 FROM memories WHERE id=node)
     OR jsonb_typeof(identity) IS DISTINCT FROM 'object' OR NOT(identity ?& ARRAY['transform','model','prompt','schema'])
     OR EXISTS(SELECT 1 FROM jsonb_each(identity) WHERE key NOT IN ('transform','model','prompt','schema') OR jsonb_typeof(value)<>'string'
       OR (value#>>'{}')!~'^[a-zA-Z0-9_.:/-]{1,128}$') THEN
@@ -472,7 +476,9 @@ BEGIN
     ELSE
       UPDATE evidence_state SET state='quarantined' WHERE version_id=item.version_id AND state='active';
       IF item.kind<>'source-document-version' AND EXISTS(SELECT 1 FROM evidence_state WHERE version_id=item.version_id AND state='quarantined') THEN
-        INSERT INTO evidence_repair_jobs(version_id) VALUES(item.version_id) ON CONFLICT DO NOTHING;
+        INSERT INTO evidence_repair_jobs(version_id) VALUES(item.version_id)
+          ON CONFLICT(version_id) DO UPDATE SET state='pending',retry_at=clock_timestamp(),generation=evidence_repair_jobs.generation+1
+          WHERE evidence_repair_jobs.state='unavailable' AND evidence_repair_jobs.attempt_id IS NULL;
       END IF;
     END IF;
     processed:=processed+1; last_id:=item.version_id;
@@ -493,17 +499,21 @@ BEGIN
   PERFORM continuum_evidence_require_operator(actor);
   IF worker IS NULL OR lease_ms IS NULL OR lease_ms NOT BETWEEN 1 AND 30000 THEN RAISE check_violation USING MESSAGE='invalid evidence lease'; END IF;
   SELECT j.* INTO job FROM evidence_repair_jobs j JOIN evidence_versions candidate ON candidate.id=j.version_id
-    WHERE j.state='pending' OR (j.state='claimed' AND j.lease_until<=clock_timestamp())
+    WHERE (j.state='pending' AND j.retry_at<=clock_timestamp()) OR (j.state='claimed' AND j.lease_until<=clock_timestamp())
     ORDER BY candidate.depth,j.version_id FOR UPDATE OF j SKIP LOCKED LIMIT 1;
   IF job.version_id IS NULL THEN RETURN NULL; END IF;
   SELECT * INTO STRICT v FROM evidence_versions WHERE id=job.version_id;
   -- A lost/expired execution identity does not authorize another attempt. Park
   -- it with its original accounting reservation until deliberate reconciliation.
-  IF job.attempt_id IS NOT NULL OR NOT continuum_evidence_can_access(actor,v.scope_id,TRUE)
+  IF job.attempt_id IS NOT NULL
     OR NOT EXISTS(SELECT 1 FROM evidence_roots WHERE id=v.root_id AND current_version=v.id AND NOT revoked)
     OR NOT EXISTS(SELECT 1 FROM evidence_state WHERE version_id=v.id AND state='quarantined') THEN
     UPDATE pipeline_budget_workflows SET cancelled=TRUE,generation=generation+1 WHERE id=job.workflow_id AND NOT cancelled;
     UPDATE evidence_repair_jobs SET state='unavailable',generation=generation+1,owner=NULL,lease_until=NULL WHERE version_id=v.id;
+    RETURN jsonb_build_object('outcome','unavailable');
+  END IF;
+  IF NOT continuum_evidence_can_access(actor,v.scope_id,TRUE) THEN
+    UPDATE evidence_repair_jobs SET state='pending',retry_at=clock_timestamp()+interval '5 seconds',generation=generation+1,owner=NULL,lease_until=NULL WHERE version_id=v.id;
     RETURN jsonb_build_object('outcome','unavailable');
   END IF;
   SELECT jsonb_agg(jsonb_build_object('versionId',replacement,'kind',kind) ORDER BY replacement) INTO replacements FROM (
@@ -511,7 +521,7 @@ BEGIN
       JOIN evidence_roots r ON r.id=parent.root_id WHERE e.version_id=v.id AND continuum_evidence_eligible(actor,r.current_version,NULL)
   ) available;
   IF replacements IS NULL THEN
-    UPDATE evidence_repair_jobs SET state='unavailable',generation=generation+1,owner=NULL,lease_until=NULL WHERE version_id=v.id;
+    UPDATE evidence_repair_jobs SET state='pending',retry_at=clock_timestamp()+interval '5 seconds',generation=generation+1,owner=NULL,lease_until=NULL WHERE version_id=v.id;
     RETURN jsonb_build_object('outcome','unavailable');
   END IF;
   UPDATE evidence_repair_jobs SET state='claimed',owner=worker,generation=generation+1,lease_until=clock_timestamp()+lease_ms*interval '1 millisecond'
@@ -542,7 +552,8 @@ BEGIN
   IF job.state<>'claimed' OR job.owner IS DISTINCT FROM worker OR job.generation IS DISTINCT FROM epoch OR job.lease_until<=clock_timestamp() THEN
     RAISE check_violation USING MESSAGE='stale evidence repair'; END IF;
   IF registration IS NULL THEN
-    UPDATE evidence_repair_jobs SET state='unavailable',owner=NULL,lease_until=NULL WHERE version_id=version;
+    UPDATE evidence_repair_jobs SET state=CASE WHEN attempt_id IS NULL THEN 'pending' ELSE 'unavailable' END,
+      retry_at=clock_timestamp()+interval '5 seconds',owner=NULL,lease_until=NULL WHERE version_id=version;
     RETURN NULL;
   END IF;
   IF job.attempt_id IS NULL OR NOT EXISTS(SELECT 1 FROM pipeline_budget_workflows w JOIN pipeline_budget_attempts a ON a.workflow_id=w.id
@@ -566,7 +577,7 @@ CREATE FUNCTION continuum_evidence_scope_versions(target_scope UUID) RETURNS SET
   SELECT id FROM evidence_versions WHERE scope_id=target_scope
   UNION
   SELECT c.version_id FROM evidence_closure c WHERE c.root_id IN
-    (SELECT root_id FROM evidence_versions WHERE scope_id=target_scope AND kind='source-document-version');
+    (SELECT root_id FROM evidence_versions WHERE scope_id=target_scope);
 $$;
 CREATE FUNCTION continuum_evidence_scope_is_erased(target_scope UUID) RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER AS $$
   SELECT NOT EXISTS(SELECT 1 FROM evidence_payloads WHERE version_id IN (SELECT continuum_evidence_scope_versions(target_scope)))

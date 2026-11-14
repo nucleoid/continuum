@@ -6,6 +6,7 @@ import { createPrincipal } from './principals.js';
 import { createScope } from './scopes.js';
 import { addMembership } from './memberships.js';
 import { createMemory } from './memories.js';
+import { promoteMemoryWithAudit } from './promote.js';
 import { readFileSync } from 'node:fs';
 
 describe('immutable evidence and synchronous eligibility', () => {
@@ -113,6 +114,16 @@ describe('immutable evidence and synchronous eligibility', () => {
     await expect(pool.query("UPDATE memories SET state='promoted',promoted_to_id=$2 WHERE id=$1", [f.memory.id, destination.id])).resolves.toBeDefined();
     expect((await pool.query('SELECT expires_at FROM memories WHERE id=$1', [destination.id])).rows[0].expires_at).toEqual(expires);
     await expect(pool.query('SELECT continuum_evidence_source($1,$2)', [f.actor.id, destination.id])).rejects.toThrow(/unavailable/);
+  });
+  it('preserves audited promotion and returned legacy expiry after the evidence ceiling passes', async () => {
+    const f = await fixture();
+    await pool.query("UPDATE evidence_roots SET expiry_ceiling=clock_timestamp()-interval '1 second' WHERE id=$1", [f.memory.id]);
+    const target = await createScope(pool, { kind: 'project', name: randomUUID() });
+    await addMembership(pool, f.actor.id, target.id, 'writer');
+    const result = await promoteMemoryWithAudit(pool, f.actor.id, f.memory.id, { kind: 'project', name: target.name });
+    expect(result.destination.body).toBe(f.memory.body);
+    expect(result.destination.expiresAt).toEqual((await pool.query('SELECT expires_at FROM memories WHERE id=$1', [result.destination.id])).rows[0].expires_at);
+    expect((await pool.query("SELECT count(*)::int AS n FROM audit_log WHERE memory_id=$1 AND action='promote'", [f.memory.id])).rows[0].n).toBe(1);
   });
   it('fences oversized snapshots without rejecting a legacy source update', async () => {
     const f = await fixture();
