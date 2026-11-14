@@ -28,9 +28,9 @@ it('commits a cancellation fence while pre-hydration work is suspended', async (
             if (args[0] === 'COMMIT' && cancellation) fenced();
             return result;
           };
-        });
+        } });
       };
-    }) as pg.Pool;
+    } }) as pg.Pool;
     const work = processExtraction(observed, randomUUID(), f.profile, { signal: controller.signal });
     let timer: NodeJS.Timeout | undefined;
     try {
