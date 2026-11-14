@@ -59,6 +59,11 @@ Canonical promotion requires reciprocal links plus matching source content,
 tags and reference. It preserves the original ceiling and transitive source
 scope/policy restrictions. A source prefix or metadata marker alone cannot
 establish lineage. Promotion ancestry is bounded by the same depth/root limits.
+Its trusted transition attestation does not depend on later mutable child text.
+A fresh parent source version is published at the advanced generation before
+the destination adopts that exact parent closure. Stale generations are copied
+exactly and denied, never relabelled as current. Missing external validity bounds
+and non-finite policy/expiry timestamps are rejected in SQL.
 
 ## Durable work and cancellation
 
@@ -108,12 +113,15 @@ cursor. Each batch processes at most 1000 versions, clipped to the requested
 offboarding batch. Protected canonical audit receipts record progress.
 
 Completion checks actual payload rows, version state, cancelled jobs and
-revoked roots, composed with the existing canonical memory, all-provider vector,
+revoked affected current roots, composed with the existing canonical memory, all-provider vector,
 audit, coordination, outbox and Standup predicates. Counters and old receipts
 cannot prove completion. Locked residuals remain incomplete. A dirty restored
 copy forces repair even after a previous completed receipt. Shared source
 memories authored by a disabled principal remain shared; approved owned-scope
 lineage, rather than author name, selects erasure.
+Erasing old history does not revoke an independently regenerated current version
+whose new wording and exact closure no longer use the erased source. Its old
+history is erased and stale jobs remain fenced; the new authorized body survives.
 
 An already admitted request may physically send after a later fence. Stored
 erasure does not retract process memory, downloaded copies, downstream systems,
