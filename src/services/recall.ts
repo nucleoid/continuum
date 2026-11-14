@@ -233,7 +233,9 @@ export async function recallForPrincipal(
       budget?.assertLive();
       return delivered;
     }
-    return await evidenceTransaction(pool, client => deliver(client, preparedResults ?? results));
+    const delivered = await evidenceTransaction(pool, client => deliver(client, preparedResults ?? results));
+    budget?.assertLive();
+    return delivered;
   } catch (error) {
     if (reranking && ['55P03', '57014', '40P01'].includes(String((error as { code?: string })?.code))) {
       throw dependencyUnavailable(error);
