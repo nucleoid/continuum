@@ -1,6 +1,8 @@
 import { boundedJsonText } from './mcp-http-output.js';
 import { remoteExecutionContext } from './mcp-http-execution.js';
 import type pg from 'pg';
+import { assertRerankingEmbeddingBudget, type Reranking } from '../reranking/provider.js';
+import { Budget, boundedJson } from '../pipeline/budget.js';
 import { z } from 'zod';
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { CallToolResult, ServerRequest, ServerNotification } from '@modelcontextprotocol/sdk/types.js';
@@ -100,6 +102,7 @@ export interface McpDeps {
   allowedSource?: string;
   retrievalEnrichers?: RetrievalEnricherRegistry;
   enrichment?: Omit<EnrichmentOptions, 'logger'>;
+  reranking?: Reranking;
   enrichmentLogger?: EnrichmentLogger;
   promotionWebhooks?: PromotionWebhookRegistry;
 }
@@ -188,6 +191,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
   const invocation = deps.executionGuard ? remoteExecutionContext(deps.pool, deps.embeddingProvider) : undefined;
   const pool = invocation?.pool ?? deps.pool;
   const embeddingProvider = invocation?.routing ?? deps.embeddingProvider;
+  if (deps.reranking) assertRerankingEmbeddingBudget(embeddingProvider, deps.reranking);
   const principal = deps.principal;
   // Remote JSON stays compact so adversarial metadata nesting cannot expand pretty-print indentation.
   const jsonResult = (value: unknown, meta?: Record<string, unknown>) => {
@@ -205,6 +209,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
   });
   const recallProjection = ({ results, accessible }: PrincipalRecallResult) => results.map((r) => ({
     id: r.memory.id, score: r.score, scope: accessible.get(r.memory.scopeId)?.label ?? null, type: r.memory.type,
+    ...(r.rerankScore === undefined ? {} : { rerank_score: r.rerankScore }),
     title: r.memory.title, excerpt: r.excerpt, body_truncated: r.bodyTruncated, source_ref: r.memory.sourceRef,
     ...(r.memory.supersedesId ? { supersedes_id: r.memory.supersedesId } : {}), created_at: r.memory.createdAt,
     ...(r.enrichments ? { enrichments: r.enrichments } : {}),
@@ -473,6 +478,9 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     },
     async (args, extra) => {
       try {
+        const budget = deps.reranking ? new Budget(deps.reranking.profile) : undefined;
+        const frame = (value: PrincipalRecallResult) => ({ jsonrpc: '2.0', id: extra.requestId,
+          result: jsonResult(recallProjection(value), { diagnostics: value.diagnostics }) });
         const { results, accessible, diagnostics } = await recallForPrincipal(
           pool,
           embeddingProvider,
@@ -482,10 +490,20 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           logger,
           {
             registry: retrievalEnrichers,
-            options: { ...enrichment, signal: deps.executionGuard ? (enrichment.signal ? AbortSignal.any([extra.signal, enrichment.signal]) : extra.signal) : enrichment.signal, logger: deps.enrichmentLogger },
+            options: { ...enrichment, signal: deps.executionGuard || deps.reranking ? (enrichment.signal ? AbortSignal.any([extra.signal, enrichment.signal]) : extra.signal) : enrichment.signal, logger: deps.enrichmentLogger },
             readBudgetBytes: deps.readBudgetBytes,
-            validateResult: deps.readBudgetBytes === undefined ? undefined : (value) => { jsonResult(recallProjection(value), { diagnostics: value.diagnostics }); },
+            onWork: invocation?.trackWork,
+            outputBytes: budget ? value => Buffer.byteLength(boundedJson(frame(value), budget.profile.limits.outputBytes)) : undefined,
+            validateResult: deps.readBudgetBytes === undefined && !budget ? undefined : (value) => {
+              if (budget) {
+                const wire = frame(value);
+                if (deps.readBudgetBytes !== undefined) boundedJsonText(wire, deps.readBudgetBytes, false);
+                budget.serializeOutput(wire);
+              } else jsonResult(recallProjection(value), { diagnostics: value.diagnostics });
+            },
           },
+          budget,
+          deps.reranking,
         );
         return jsonResult(recallProjection({ results, accessible, diagnostics }), { diagnostics });
       } catch (error) {

@@ -12,6 +12,7 @@ export const DEFAULT_RECALL_EMBEDDING_DEADLINE_MS = 10_000;
 export const MAX_RECALL_EMBEDDING_DEADLINE_MS = 30_000;
 
 export interface RecallOptions {
+  onEmbeddingWork?: (settlement: Promise<unknown>) => void;
   budget?: Budget;
   readBudgetBytes?: number;
   query: string;
@@ -325,7 +326,7 @@ function fuse(...lists: Array<Array<{ id: string; rank: number }>>): Map<string,
   return out;
 }
 
-async function hydrate(
+export async function hydrateRecallCandidates(
   pool: Queryable,
   ids: string[],
   query: string,
@@ -334,6 +335,7 @@ async function hydrate(
   types: MemoryType[] | undefined,
   readBudgetBytes?: number,
   budget?: Budget,
+  omitAdvisory = false,
 ): Promise<RecallResult[]> {
   if (ids.length === 0) return [];
   const params: unknown[] = [ids, scopeIds];
@@ -345,12 +347,15 @@ async function hydrate(
   const where = `id = ANY($1::uuid[]) AND scope_id = ANY($2::uuid[])
     AND state = 'live' AND (expires_at IS NULL OR expires_at > pg_catalog.clock_timestamp()) ${typeFilter}`;
   readBudgetBytes ??= budget?.available('hydratedBytes');
+  const columns = MEMORY_COLUMNS.split(',').map(column => omitAdvisory && column.trim() === 'metadata'
+    ? "(m.metadata - 'related') AS metadata" : `m.${column.trim()}`).join(', ');
   const rows = readBudgetBytes === undefined
-    ? (await pool.query(`SELECT ${MEMORY_COLUMNS} FROM memories WHERE ${where}`, params)).rows
+    ? (await pool.query(omitAdvisory ? `SELECT ${columns} FROM memories m WHERE ${where}`
+      : `SELECT ${MEMORY_COLUMNS} FROM memories WHERE ${where}`, params)).rows
     : await boundedMemoryReadRows(pool,
       `SELECT m.id, ${MEMORY_READ_BUDGET_BYTES_SQL} AS budget_bytes,
          array_position($1::uuid[], m.id) AS position FROM memories m WHERE ${where}`, params,
-      `SELECT ${MEMORY_COLUMNS.split(',').map((column) => `m.${column.trim()}`).join(', ')}
+      `SELECT ${columns}
          FROM memories m JOIN budget_candidates c ON c.id=m.id ORDER BY c.position`, readBudgetBytes, budget, true);
   const byId = new Map(rows.map((r) => [r.id as string, rowToMemory(r)]));
   return ids
@@ -366,13 +371,23 @@ async function hydrate(
     });
 }
 
-export async function recall(
+export interface RecallCandidates {
+  candidates: Array<{ id: string; score: number }>;
+  diagnostics: RecallDiagnostics;
+}
+
+/** Metadata-only fusion. The optional service owns authority and hydration admission.
+ * Arm overfetch still derives from the original requested final limit. */
+export async function recallCandidates(
   pool: Queryable,
   opts: RecallOptions,
-): Promise<RecallOutput> {
+  candidateLimit = opts.limit,
+  deferCandidateCharge = false,
+): Promise<RecallCandidates> {
+  if (deferCandidateCharge && (!Number.isSafeInteger(candidateLimit) || candidateLimit < 1 || candidateLimit > 100)) throw new RangeError('Recall candidate limit must be from 1 to 100');
   opts.budget?.assertLive();
   if (opts.scopeIds.length === 0) {
-    return { results: [], diagnostics: { vector: 'disabled', groups: [] } };
+    return { candidates: [], diagnostics: { vector: 'disabled', groups: [] } };
   }
 
   // One extra identity detects overflow rather than silently changing selection.
@@ -380,7 +395,7 @@ export async function recall(
   const borrowed = !connectable(pool);
   const searchText = () => ftsHits(pool, opts.query, opts.scopeIds, opts.types, overFetch);
   const fts = await (borrowed ? queueBorrowedSql(pool, searchText) : searchText());
-  if (opts.budget && fts.length > opts.budget.available('candidates')) throw new BudgetError();
+  if (!deferCandidateCharge && opts.budget && fts.length > opts.budget.available('candidates')) throw new BudgetError();
 
   const groups = opts.embeddingGroups
     ?? (opts.embeddingProvider
@@ -415,7 +430,7 @@ export async function recall(
     const work = (async (): Promise<GroupResult> => {
       let queryVec: number[];
       try {
-        [queryVec] = await embedWithBudget(group.provider, [opts.query], { signal: controller.signal, budget: opts.budget });
+        [queryVec] = await embedWithBudget(group.provider, [opts.query], { signal: controller.signal, budget: opts.budget, onWork: opts.onEmbeddingWork });
         assertEmbeddingVectorDimension(queryVec, group.provider);
       } catch (error) {
         return {
@@ -498,11 +513,11 @@ export async function recall(
   });
 
   const fused = fuse(fts, ...vectorLists);
-  opts.budget?.consume({ candidates: fused.size });
+  if (!deferCandidateCharge) opts.budget?.consume({ candidates: fused.size });
   const ranked = Array.from(fused.entries())
     .sort(([, a], [, b]) => b - a)
-    .map(([id]) => id)
-    .slice(0, opts.limit);
+    .map(([id, score]) => ({ id, score }))
+    .slice(0, candidateLimit);
 
   const used = diagnosticGroups.filter((group) => group.status === 'used').length;
   const failed = diagnosticGroups.length - used;
@@ -511,9 +526,16 @@ export async function recall(
     : failed === 0
       ? 'used'
       : used === 0 ? 'failed' : 'partial';
-  const hydrateResults = () => hydrate(pool, ranked, opts.query, fused, opts.scopeIds, opts.types, opts.readBudgetBytes, opts.budget);
   return {
-    results: await (borrowed ? queueBorrowedSql(pool, hydrateResults) : hydrateResults()),
+    candidates: ranked,
     diagnostics: { vector, groups: diagnosticGroups },
   };
+}
+
+/** Compatible low-level final-cut wrapper. No reranker or evidence enrollment. */
+export async function recall(pool: Queryable, opts: RecallOptions): Promise<RecallOutput> {
+  const selected = await recallCandidates(pool, opts);
+  const hydrateResults = () => hydrateRecallCandidates(pool, selected.candidates.map(c => c.id), opts.query,
+    new Map(selected.candidates.map(c => [c.id, c.score])), opts.scopeIds, opts.types, opts.readBudgetBytes, opts.budget);
+  return { results: await (!connectable(pool) ? queueBorrowedSql(pool, hydrateResults) : hydrateResults()), diagnostics: selected.diagnostics };
 }

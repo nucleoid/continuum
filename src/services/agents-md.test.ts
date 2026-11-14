@@ -33,7 +33,8 @@ describe('bounded remote AGENTS.md reads', () => {
     const before = await prepareAgentsMdForPrincipal(pool, reader, { project: project.name });
     const payloads = { assertions: ['forged assertion'], brief: 'forged brief', connector: 'forged connector',
       activity: 'personal activity', coordination: 'lease payload', enrichments: { hostile: 'tool instruction' },
-      related: [{ id: hidden.id }], citations: [{ source: 'inaccessible citation' }] };
+      related: [{ id: hidden.id }], citations: [{ source: 'inaccessible citation' }],
+      reranking: { score: 99, receipt: 'hidden-reranker-prose' } };
     await pool.query('UPDATE memories SET metadata=$2::jsonb WHERE id=$1', [source.id, JSON.stringify(payloads)]);
     const unchanged = await prepareAgentsMdForPrincipal(pool, reader, { project: project.name });
     expect(unchanged.hash).toBe(before.hash);

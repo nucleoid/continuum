@@ -73,6 +73,10 @@ repository automation. Those concerns remain outside this API.
 
 ## Evidence boundaries
 
+Optional recall [reranking](reranking.md) never runs for bundles, conditional
+reads or freshness checks. Its scores, receipts and adapter prose are excluded
+from deterministic selection, exact bytes, hashes and ETags.
+
 Migration 0093 keeps evidence versions and managed derivative payloads in
 separate tables. They never become legacy memories or generator candidates.
 Adding, quarantining, repairing or erasing a derivative cannot change generated

@@ -120,6 +120,16 @@ Embedding failure can leave valid capture committed with `embedded: false`; rela
 
 ## Retrieval and providers
 
+Optional [reranking](./docs/reranking.md) is explicitly injected before recall's
+final cut, independently of presentation enrichment. Its metadata-first wider
+pool is bounded by the server profile and 100-candidate ceiling. Locked current
+source/version/root/ACL/expiry and provider decisions gate hydration, disclosure
+and final delivery. Adapter calls run outside transactions through the shared
+budget runner; invalid or unavailable work restores complete hybrid order.
+Fusion scores retain their meaning, with additive optional rerank scores and
+bounded diagnostics. Delivery audits contain only the final eligible order.
+Default and low-level recall remain hybrid. No reranker enters generated AGENTS.md.
+
 The optional [pipeline resource envelope](./docs/pipeline-budgets.md) adds checked
 immutable profiles, complete bounded adapter serialization, compatible token/
 price capabilities and shared child reservations. Unconfigured callers retain

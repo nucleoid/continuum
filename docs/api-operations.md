@@ -52,6 +52,13 @@ authentication mode as described in [authentication.md](./authentication.md).
 
 ## Recall diagnostics and embedding maintenance
 
+Custom compositions can opt into [pre-selection reranking](reranking.md) through
+`createApp` or `buildMcpServer`. Stock startup enables no adapter or paid stage.
+Qualified version/profile capabilities, current source/provider authority and a
+shared finite budget are prerequisites. Skipped work returns hybrid fallback;
+unsettled calls retain process fences. Remove the injected configuration to
+disable new admission, then drain or prove process exit. No new schema is needed.
+
 Current startup also verifies the hardened owner-controlled pipeline-accounting
 readiness helper installed by 0092. Its exact APP/OP grants expose accounting
 functions, never raw table mutation; SYNC/reporting gain no capabilities. The

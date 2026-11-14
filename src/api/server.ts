@@ -4,6 +4,7 @@ import { createMcpHttpPool } from '../storage/pool.js';
 import { randomUUID } from 'node:crypto';
 import express from 'express';
 import pg from 'pg';
+import { assertRerankingEmbeddingBudget, type Reranking } from '../reranking/provider.js';
 import { getPool, closePool } from '../storage/pool.js';
 import {
   authModeFromEnv,
@@ -106,6 +107,7 @@ export interface AppOptions {
   retrievalEnrichers?: RetrievalEnricherRegistry;
   promotionWebhooks?: PromotionWebhookRegistry;
   enrichment?: Omit<EnrichmentOptions, 'logger'>;
+  reranking?: Reranking;
 }
 
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
@@ -282,6 +284,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   const app = express();
   const logger = opts.logger ?? defaultLogger;
   const provider = opts.embeddingProvider ?? null;
+  if (opts.reranking) assertRerankingEmbeddingBudget(provider, opts.reranking);
   const readiness = opts.readiness ?? createReadinessState();
   const readinessTimeoutMs = opts.readinessTimeoutMs ?? 1_000;
   const gapConfig = opts.gapConfig ?? gapConfigFromEnv();
@@ -308,7 +311,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
     ? createMcpHttpController(opts.mcpHttpConfig, {
       pool: opts.mcpHttpPool ?? pool, embeddingProvider: provider, authenticator,
       retrievalEnrichers: opts.retrievalEnrichers, promotionWebhooks: opts.promotionWebhooks,
-      enrichment: opts.enrichment, gapConfig, relationThreshold,
+      enrichment: opts.enrichment, reranking: opts.reranking, gapConfig, relationThreshold,
       reviewHorizonDays: opts.reviewHorizonDays, info: (event) => logger.info?.(event),
     }) : undefined);
   if (opts.mcpHttpConfig && !authenticator) throw new Error('Remote MCP requires an explicit authenticator');
@@ -365,7 +368,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
         warn: (event) => (logger.warn ?? defaultLogger.warn)!(event),
       },
     },
-  }));
+  }, opts.reranking));
   v0.use(memoriesRouter(pool));
   v0.use(agentsMdRouter(pool));
   v0.use(auditRouter(pool));

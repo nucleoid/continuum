@@ -6,6 +6,10 @@ import type { EmbeddingProvider } from '../embeddings/provider.js';
 export function remoteExecutionContext(pool: pg.Pool, routing: EmbeddingRouting) {
   type Scope = { signal: AbortSignal; pending: Set<Promise<unknown>> };
   const signals = new AsyncLocalStorage<Scope>();
+  const trackWork = (work: Promise<unknown>) => {
+    const scope = signals.getStore();
+    if (scope) { scope.pending.add(work); void work.then(() => scope.pending.delete(work), () => scope.pending.delete(work)); }
+  };
   const inScope = <T>(scope: Scope | undefined, callback: () => T): T =>
     scope ? signals.run(scope, callback) : signals.exit(callback);
   const check = (args: unknown[], scope: Scope | undefined) => {
@@ -62,7 +66,7 @@ export function remoteExecutionContext(pool: pg.Pool, routing: EmbeddingRouting)
           const scope = signals.getStore(); const request = scope?.signal; request?.throwIfAborted();
           const signal = request && options?.signal ? AbortSignal.any([request, options.signal]) : request ?? options?.signal;
           const work = target.embed(texts, { ...options, signal });
-          if (scope) { scope.pending.add(work); void work.then(() => scope.pending.delete(work), () => scope.pending.delete(work)); }
+          trackWork(work);
           return work;
         };
         return typeof value === 'function' ? value.bind(target) : value;
@@ -71,10 +75,11 @@ export function remoteExecutionContext(pool: pg.Pool, routing: EmbeddingRouting)
     return wrapped;
   };
   const guardedRouting: EmbeddingRouter = {
+    requiresLocal(scope) { return router.requiresLocal?.(scope) ?? false; },
     resolve(scope) { const route = router.resolve(scope); return { ...route, provider: route.provider && wrapProvider(route.provider) }; },
     providers() { return router.providers().map(wrapProvider); },
   };
-  return { pool: guarded, routing: guardedRouting, async run<T>(signal: AbortSignal, execute: () => Promise<T>): Promise<T> {
+  return { pool: guarded, routing: guardedRouting, trackWork, async run<T>(signal: AbortSignal, execute: () => Promise<T>): Promise<T> {
     const scope = { signal, pending: new Set<Promise<unknown>>() };
     try { return await signals.run(scope, execute); }
     finally { await Promise.allSettled([...scope.pending]); }

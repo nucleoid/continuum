@@ -69,6 +69,11 @@ Remote full-memory reads, recall, decision history, AGENTS.md/freshness and old 
 
 ## Rollout and rollback
 
+When optional reranking supplies a pipeline budget, the remote call tracks the
+complete query-embedding and reranking settlement promises, including detached
+calls after a response timeout. Their actual completion remains part of bounded
+drain; cancellation and session cleanup cannot release these execution fences.
+
 Trusted compositions may additionally pass the optional [pipeline envelope](pipeline-budgets.md)
 through recall, hydration and generator services. Shared limits only tighten
 transport containment. Actual REST/MCP wrappers and double escaping still need
