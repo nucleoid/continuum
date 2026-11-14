@@ -21,6 +21,7 @@ it('records interleaved local enabled/disabled/fallback ablations without claimi
   const cleanStart = !git('status', '--porcelain'); const sourceHead = process.env.CONTINUUM_EVAL_SOURCE_SHA ?? head;
   const observations: Array<Record<string, any>> = []; let setupCalls = 0; let calls = 0;
   let effectiveProfile: Readonly<BudgetProfile> | undefined;
+  let setupMs = 0; let workMs = 0;
   const setupStarted = performance.now();
   await withEvaluationFixture(process.env.CONTINUUM_TEST_DATABASE_URL ?? 'postgres://continuum:continuum@localhost:5433/continuum', async ({ owner, app, actor }) => {
     const stub = new StubEmbeddingProvider();
@@ -41,6 +42,7 @@ it('records interleaved local enabled/disabled/fallback ablations without claimi
       shared.set(split, { scope: scope.name, refs });
     }
     expect(performance.now() - setupStarted).toBeLessThan(spec.setupDeadlineMs);
+    setupMs = performance.now() - setupStarted;
     const workStarted = performance.now();
     for (const item of seededOrder(cases, spec.seed)) {
       const { scope, refs } = shared.get(item.split)!;
@@ -94,6 +96,8 @@ it('records interleaved local enabled/disabled/fallback ablations without claimi
         }
       }
     }
+    workMs = performance.now() - workStarted;
+    expect(workMs).toBeLessThan(spec.workDeadlineMs);
   });
   const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
   const rows = cases.flatMap(item => spec.modes.map((mode: string) => {
@@ -120,9 +124,9 @@ it('records interleaved local enabled/disabled/fallback ablations without claimi
     executionOrderSha256: sha256(JSON.stringify(observations.map(o => [o.id, o.mode, o.repetition]))),
     securityFailures: observations.filter(o => o.failures.length).length, hardBudgetFailures: observations.filter(o => o.hardBudgetFailure).length,
     reservedSpendMicros: observations.reduce((n, o) => n + o.reservedSpendMicros, 0),
-    summaries, rows, observations };
+    setupMs, workMs, summaries, rows, observations };
   await mkdir('.fire-off', { recursive: true });
-  const serialized = JSON.stringify(report, null, 2) + '\n';
+  const serialized = JSON.stringify(report) + '\n';
   expect(Buffer.byteLength(serialized)).toBeLessThanOrEqual(corpus.manifest.budgets.maxArtifactBytes);
   await writeFile('.fire-off/reranking-eval.json', serialized);
   expect(report.headEnd).toBe(head); expect(report.securityFailures).toBe(spec.securityFailures); expect(report.hardBudgetFailures).toBe(spec.hardBudgetFailures);
