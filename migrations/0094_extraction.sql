@@ -146,6 +146,12 @@ CREATE FUNCTION continuum_extraction_scope_admin(actor UUID,target_scope UUID) R
     WHERE principal_id=actor AND scope_id=target_scope AND role='admin' AND active
       AND (source_kind<>'entra' OR EXISTS(SELECT 1 FROM entra_sync_state WHERE singleton AND clock_timestamp()<last_success_at+max_staleness)));
 $$;
+-- Conservative serialized control-record allowance, separate from source and
+-- generated payloads. This is an operational bound, not physical DB allocation.
+CREATE FUNCTION continuum_extraction_control_bytes(descriptor JSONB) RETURNS BIGINT LANGUAGE sql IMMUTABLE AS $$
+  SELECT 2*octet_length(descriptor::text)+8192+(descriptor->>'maxChunks')::bigint*1024
+    +(descriptor->'budget'->'limits'->>'calls')::bigint*1024;
+$$;
 CREATE FUNCTION continuum_extraction_configure(actor UUID,target_scope UUID,profile_id TEXT,source_ids TEXT[],enable BOOLEAN) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
 #variable_conflict use_column
 DECLARE result extraction_scope_config%ROWTYPE;
@@ -167,7 +173,7 @@ END $$;
 
 CREATE FUNCTION continuum_extraction_enqueue() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
 #variable_conflict use_column
-DECLARE config extraction_scope_config%ROWTYPE; profile extraction_profiles%ROWTYPE; version UUID; bytes INTEGER; run UUID; skipped BOOLEAN:=FALSE;
+DECLARE config extraction_scope_config%ROWTYPE; profile extraction_profiles%ROWTYPE; version UUID; bytes INTEGER; run UUID; skipped BOOLEAN:=FALSE; skip_reason TEXT;
 BEGIN
   SELECT * INTO config FROM extraction_scope_config WHERE scope_id=NEW.scope_id AND enabled AND NEW.source=ANY(sources) FOR SHARE;
   IF config.scope_id IS NULL THEN RETURN NEW; END IF;
@@ -175,15 +181,17 @@ BEGIN
   IF profile.id IS NULL THEN RETURN NEW; END IF;
   bytes:=octet_length(continuum_evidence_canonical(NEW));
   skipped:=bytes>least(1048576,(profile.descriptor->'budget'->>'maxItemHydratedBytes')::int,
-    (profile.descriptor->>'chunkBytes')::int*(profile.descriptor->>'maxChunks')::int);
+    (profile.descriptor->>'chunkBytes')::int*(profile.descriptor->>'maxChunks')::int)
+    OR bytes+continuum_extraction_control_bytes(profile.descriptor)>(profile.descriptor->'budget'->'limits'->>'storageBytes')::bigint;
+  IF skipped THEN skip_reason:='budget'; END IF;
   IF NOT skipped THEN
     -- Evidence admission can abstain independently of a valid legacy capture.
     BEGIN version:=continuum_evidence_source(NEW.author_id,NEW.id);
-    EXCEPTION WHEN check_violation OR insufficient_privilege THEN skipped:=TRUE; END;
+    EXCEPTION WHEN check_violation OR insufficient_privilege THEN skipped:=TRUE; skip_reason:='policy'; END;
   END IF;
   INSERT INTO extraction_runs(memory_id,scope_id,source_version,profile,descriptor,config_generation,profile_generation,state,reason,source_bytes)
     VALUES(NEW.id,NEW.scope_id,version,profile.id,profile.descriptor,config.generation,profile.generation,
-      CASE WHEN skipped THEN 'skipped' ELSE 'queued' END,CASE WHEN skipped THEN CASE WHEN version IS NULL AND bytes<=1048576 THEN 'policy' ELSE 'budget' END END,bytes)
+      CASE WHEN skipped THEN 'skipped' ELSE 'queued' END,skip_reason,bytes)
     RETURNING id INTO run;
   INSERT INTO extraction_receipts(run_id,generation,outcome,reason) SELECT id,generation,state,reason FROM extraction_runs WHERE id=run;
   INSERT INTO audit_log(principal_id,action,memory_id,scope_id,metadata) VALUES(NEW.author_id,'write',NEW.id,NEW.scope_id,
@@ -342,6 +350,9 @@ BEGIN
     RETURN jsonb_build_object('outcome','unavailable');
   END IF;
   PERFORM continuum_pipeline_create(job.workflow_id,job.budget_owner,job.descriptor->'budget');
+  IF job.started_at IS NULL THEN
+    UPDATE pipeline_budget_workflows SET used=jsonb_set(used,'{storageBytes}',to_jsonb(job.source_bytes+continuum_extraction_control_bytes(job.descriptor))) WHERE id=job.workflow_id;
+  END IF;
   UPDATE extraction_runs SET state='running',owner=worker,login_oid=binding.role_oid,binding_generation=binding.generation,
     generation=generation+1,lease_until=clock_timestamp()+interval '30 seconds',started_at=COALESCE(started_at,clock_timestamp()) WHERE id=job.id RETURNING * INTO job;
   BEGIN PERFORM continuum_extraction_gate(job.id,worker,job.generation,TRUE);
@@ -450,7 +461,7 @@ BEGIN
       END LOOP;
       payload:=jsonb_build_object('schema','extraction-v1','status','generated/unverified','sourceVersion',job.source_version,
         'sourceFamily',job.source_version,'runId',job.id,'chunkId',chunk.chunk_id,'assertion',a)::text;
-      bytes:=bytes+octet_length(payload);
+      bytes:=bytes+octet_length(payload)+4096;
       version:=continuum_evidence_register(binding.principal_id,gen_random_uuid(),NULL,job.scope_id,'extracted-assertion',
         jsonb_build_array(jsonb_build_object('versionId',job.source_version,'kind','source')),
         jsonb_build_object('transform',job.descriptor->>'version','model',job.descriptor->>'model','prompt','source-reference-v1','schema','extraction-v1'),payload);
@@ -458,7 +469,7 @@ BEGIN
     END LOOP;
     SELECT * INTO STRICT w FROM pipeline_budget_workflows WHERE id=job.workflow_id FOR UPDATE;
     IF bytes>(w.profile->'limits'->>'artifactBytes')::bigint-(w.used->>'artifactBytes')::bigint
-      OR bytes>(w.profile->'limits'->>'storageBytes')::bigint-(w.used->>'storageBytes')::bigint THEN RAISE check_violation USING MESSAGE='extraction storage unavailable'; END IF;
+      OR bytes>(w.profile->'limits'->>'storageBytes')::bigint-(w.used->>'storageBytes')::bigint THEN RAISE program_limit_exceeded USING MESSAGE='extraction storage unavailable'; END IF;
     UPDATE pipeline_budget_workflows SET used=jsonb_set(jsonb_set(used,'{artifactBytes}',to_jsonb((used->>'artifactBytes')::bigint+bytes)),
       '{storageBytes}',to_jsonb((used->>'storageBytes')::bigint+bytes)) WHERE id=w.id;
   ELSIF failure IS NULL THEN RAISE check_violation USING MESSAGE='missing extraction outcome'; END IF;
@@ -507,13 +518,13 @@ BEGIN
       'chunks',job.chunk_count,'completed',job.completed,'skipped',job.skipped,'assertions',job.assertion_count,'reason',job.reason,
       'createdAt',job.created_at,'startedAt',job.started_at,'finishedAt',job.finished_at,'identity',job.descriptor-'budget'-'accounting'-'price',
       'coverage',(SELECT COALESCE(jsonb_agg(jsonb_build_object('index',chunk_index,'status',state,'reason',reason) ORDER BY chunk_index),'[]'::jsonb) FROM extraction_chunks WHERE run_id=job.id));
+    SELECT array_agg(v) INTO versions FROM extraction_chunks c,LATERAL unnest(c.assertions) v WHERE c.run_id=job.id;
+    IF cardinality(versions)>1024 THEN RAISE check_violation USING MESSAGE='extraction read bounds exceeded'; END IF;
+    FOR version IN SELECT unnest(versions) LOOP
+      PERFORM continuum_evidence_lock(actor,ARRAY[version]);
+      IF NOT continuum_evidence_eligible(actor,version,NULL) THEN RAISE insufficient_privilege USING MESSAGE='extraction unavailable'; END IF;
+    END LOOP;
     IF include_assertions THEN
-      SELECT array_agg(v) INTO versions FROM extraction_chunks c,LATERAL unnest(c.assertions) v WHERE c.run_id=job.id;
-      IF cardinality(versions)>1024 THEN RAISE check_violation USING MESSAGE='extraction read bounds exceeded'; END IF;
-      FOR version IN SELECT unnest(versions) LOOP
-        PERFORM continuum_evidence_lock(actor,ARRAY[version]);
-        IF NOT continuum_evidence_eligible(actor,version,NULL) THEN RAISE insufficient_privilege USING MESSAGE='extraction unavailable'; END IF;
-      END LOOP;
       IF (SELECT COALESCE(sum(octet_length(payload)),0) FROM evidence_payloads WHERE version_id=ANY(versions))>262144 THEN RAISE check_violation USING MESSAGE='extraction read bounds exceeded'; END IF;
       result:=result||jsonb_build_object('items',(SELECT COALESCE(jsonb_agg(jsonb_build_object('versionId',p.version_id,'data',p.payload::jsonb) ORDER BY p.version_id),'[]'::jsonb)
         FROM evidence_payloads p WHERE p.version_id=ANY(versions)));

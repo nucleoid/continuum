@@ -57,6 +57,15 @@ and plugin schemas also bound strings and arrays.
 All errors use the normal REST envelope and include `requestId`. Raw request
 bodies, credentials, and webhook secrets are never logged.
 
+Optional [extraction](extraction.md) is disabled by default. When separately
+enabled by a scope administrator and installation operator, source-version
+enqueueing joins this same transaction, including trusted Standup attribution.
+Required admission-audit failure rolls everything back. New 202 responses add
+per-memory `extraction` statuses; replay preserves its original IDs without
+enqueueing again. Models run later outside the transaction using a separate
+approved bound worker LOGIN. Captured text stays authoritative; unverified
+assertions never enter ordinary recall or AGENTS.md.
+
 The non-owner runtime role needs the checked `ingest_deliveries`, capture,
 embedding, and audit privileges in `scripts/grant-application-role.sql`.
 Applying only an offboarding-specific subset is insufficient for webhook

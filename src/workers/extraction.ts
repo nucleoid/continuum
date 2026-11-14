@@ -81,8 +81,14 @@ export async function processExtraction(pool: pg.Pool, worker: string, profile: 
           await stop(reason === 'stale_attempt' ? 'ambiguous' : reason); return 'unavailable';
         }
       }
-      await extractionOperation(pool, 'SELECT continuum_extraction_apply($1,$2,$3,$4,$5,$6,$7) AS result',
-        [claim.id, worker, claim.generation, chunk.index, attempt, output, failure]);
+      try {
+        await extractionOperation(pool, 'SELECT continuum_extraction_apply($1,$2,$3,$4,$5,$6,$7) AS result',
+          [claim.id, worker, claim.generation, chunk.index, attempt, output, failure]);
+      } catch (error) {
+        if ((error as { code?: string }).code !== '54000') throw error;
+        await extractionOperation(pool, 'SELECT continuum_extraction_apply($1,$2,$3,$4,$5,NULL,\'budget\') AS result',
+          [claim.id, worker, claim.generation, chunk.index, attempt]);
+      }
       if (failure === 'transient') return 'unavailable';
     }
     return 'processed';

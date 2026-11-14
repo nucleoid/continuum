@@ -108,6 +108,17 @@ Decision supersession creates a successor linked through `supersedes_id`. Decisi
 
 ## Capture and ingestion
 
+The disabled-by-default [extraction pilot](./docs/extraction.md) adds atomic
+source-version enqueueing through the shared capture insert, including webhook
+replay and trusted Standup transactions. Separate scope-admin opt-in, bound
+operator profile/locality installation and an actual approved worker LOGIN are
+required. Typed workers use original durable budget identities and current
+evidence/source/expiry/lease gates. Immutable generated/unverified assertions
+remain evidence artifacts, outside legacy memories, recall, review queues and
+AGENTS.md. REST/MCP status/read/configuration/retry surfaces share services;
+stock runtimes install no model or worker. Migration 0094 adds exact grants,
+startup contracts and physical offboarding of all managed extraction bytes.
+
 `CapturePlugin.transform(event, context)` returns capture inputs. The built-ins format supplied GitHub PR/branch, ADO work-item, deploy, and terminal-summary fields. They do not invoke a built-in LLM summarizer or fetch review threads. The default registry and source allowlists are explicit; adding a transform object alone does not make an arbitrary source ID available through every transport.
 
 Manual REST capture accepts a scope object and camelCase fields such as `sourceRef`. MCP capture uses `scope_kind`, `scope_name`, and `source_ref`, with `manual` as its default source. Both delegate to the shared capture service and require current write authority. REST capture returns `scopeId` and `expiresAt`; MCP returns a scope label and `expires_at`.

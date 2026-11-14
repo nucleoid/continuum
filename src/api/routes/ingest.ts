@@ -249,7 +249,8 @@ export function ingestRouter(
     } else if (result.memoryIds.length === 0) {
       res.status(204).send();
     } else {
-      res.status(202).json({ replayed: false, memoryIds: result.memoryIds });
+      res.status(202).json({ replayed: false, memoryIds: result.memoryIds,
+        extraction: result.captures.map(capture => ({ memoryId: capture.memory.id, status: capture.extraction?.status ?? 'not-configured' })) });
     }
   });
   return router;
