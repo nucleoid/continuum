@@ -56,7 +56,10 @@ describe('immutable evidence and synchronous eligibility', () => {
     await pool.query('UPDATE scope_memberships SET active=FALSE WHERE principal_id=$1 AND scope_id=$2', [f.actor.id, f.scope.id]);
     expect(await eligible(f.actor.id, derivative)).toBe(false);
     await addMembership(pool, f.actor.id, f.scope.id, 'writer');
-    await pool.query('DELETE FROM evidence_closure WHERE version_id=$1 AND root_id=$2', [derivative, f.memory.id]);
+    await expect(pool.query('DELETE FROM evidence_closure WHERE version_id=$1 AND root_id=$2', [derivative, f.memory.id])).rejects.toThrow(/immutable/);
+    await pool.query('ALTER TABLE evidence_closure DISABLE TRIGGER evidence_closure_immutable');
+    try { await pool.query('DELETE FROM evidence_closure WHERE version_id=$1 AND root_id=$2', [derivative, f.memory.id]); }
+    finally { await pool.query('ALTER TABLE evidence_closure ENABLE TRIGGER evidence_closure_immutable'); }
     expect(await eligible(f.actor.id, derivative)).toBe(false);
     const other = await fixture(), timed = await derive(other);
     await pool.query("UPDATE memories SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [other.memory.id]);
