@@ -9,7 +9,7 @@ import pg from 'pg';
 import { expect, it } from 'vitest';
 import { runMigrations } from './migrator.js';
 import { reconcilePgvectorProviderGrants, requireCoordinationContractReady,
-  requirePromotionOutboxReady, requireStandupReady, requirePipelineBudgetsReady } from './provider-lifecycle.js';
+  requirePromotionOutboxReady, requireStandupReady, requirePipelineBudgetsReady, requireEvidenceReady } from './provider-lifecycle.js';
 
 const databaseUrl = process.env.CONTINUUM_TEST_DATABASE_URL
   ?? 'postgres://continuum:continuum@localhost:5433/continuum';
@@ -243,6 +243,10 @@ async function roleUpgradeAcceptance(boundRuntime?: 'REST' | 'MCP') {
     await copyFile(new URL(pipelineForward, source), join(directory, pipelineForward));
     expect((await runMigrations(owner, directory)).map((entry) => entry.name)).toEqual([pipelineForward]);
     await requirePipelineBudgetsReady(app, { expectedSchema: schema });
+    const evidenceForward = '0093_evidence_lifecycle.sql';
+    await copyFile(new URL(evidenceForward, source), join(directory, evidenceForward));
+    expect((await runMigrations(owner, directory)).map((entry) => entry.name)).toEqual([evidenceForward]);
+    await requireEvidenceReady(app, { expectedSchema: schema });
     await grants(false);
     expect(await profiles()).toEqual(originalProfiles); expect(await identities()).toEqual(originalIdentities);
     for (const role of [appRole,operatorRole]) await reconcilePgvectorProviderGrants(logins.get(role)!, { expectedSchema: schema });

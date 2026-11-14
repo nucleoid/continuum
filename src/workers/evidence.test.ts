@@ -1,15 +1,21 @@
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { makeTestPool } from '../storage/test-helpers.js';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { createPrincipal } from '../storage/principals.js';
 import { createScope } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import { createMemory } from '../storage/memories.js';
+import { standupProducerFixture } from '../standup/test-helpers.js';
+import { EvidencePayloadRegistry } from '../evidence/model.js';
+import { registerEvidence, readEvidence } from '../services/evidence.js';
+import { materializeEvidence, repairEvidence, type EvidenceRepairInput, type EvidenceRepairOutput } from './evidence.js';
+import { starterProfile, type BudgetAdapter } from '../pipeline/budget.js';
 
 describe('gap-aware evidence invalidation', () => {
   let pool: pg.Pool;
   beforeAll(async () => { pool = await makeTestPool(); }, 30_000);
+  beforeEach(async () => { await resetData(pool); });
   afterAll(async () => { await pool?.end(); });
   async function fixture() {
     const actor = await createPrincipal(pool, { externalId: randomUUID(), kind: 'user', displayName: 'Synthetic traversal' });
@@ -72,3 +78,49 @@ describe('gap-aware evidence invalidation', () => {
     } finally { await held.query('ROLLBACK'); held.release(); }
   });
 });
+
+it('repairs with new wording/version and original durable attempt identity, then parks failed settlement without a reset', async () => {
+  await standupProducerFixture(async f => {
+    await addMembership(f.owner,f.adminId,f.scopeId,'writer');
+    const owners=new EvidencePayloadRegistry(); owners.register('source-document-version',()=>true); owners.register('derived-observation',()=>true);
+    const source=await createMemory(f.app,{scopeId:f.scopeId,scopeKind:'user',authorId:f.actorId,type:'decision',title:'Source',body:'Initial source',source:'manual'});
+    const sourceVersion=(await f.app.query('SELECT continuum_evidence_source($1,$2) AS id',[f.actorId,source.id])).rows[0].id;
+    const node=randomUUID();
+    const original=await registerEvidence(f.app,f.actorId,{nodeId:node,expectedCurrent:null,scopeId:f.scopeId,kind:'derived-observation',parents:[{versionId:sourceVersion,kind:'derivation'}],
+      identity:{transform:'fake-v1',model:'none',prompt:'none',schema:'v1'},payload:'Original derivative'},owners);
+    const providerAuthority=async()=>{
+      const now=Number((await f.operator.query('SELECT extract(epoch FROM clock_timestamp())*1000 AS at')).rows[0].at);
+      return {locality:'local' as const,authority:{decision:'allow' as const,checkedAt:now,validUntil:now+60000}};
+    };
+    const adapter: BudgetAdapter<EvidenceRepairInput,EvidenceRepairOutput>={id:'evidence-fake',model:'fake',profile:'fake',local:true,timeoutMs:5000,responseBodyBytes:4096,
+      outputTokens:0,reasoningTokens:0,completionTokens:0,enforceableCaps:true,cancellation:'cooperative',
+      tokens:{kind:'exact',model:'fake',profile:'fake',validationId:'synthetic-v1',overheadTokens:0,count:()=>1},
+      price:{id:'local-zero-v1',currency:'USD',unitTokens:1,inputMicros:0,outputMicros:0,reasoningMicros:0},serialize:input=>input,
+      invoke:async serialized=>{
+        const input=JSON.parse(serialized) as EvidenceRepairInput;
+        const value: EvidenceRepairOutput={parents:input.parents.map(p=>({versionId:p.versionId,kind:'derivation'})),
+          identity:{transform:'repair-v1',model:'fake',prompt:'v1',schema:'v1'},payload:'New wording from currently authorized evidence'};
+        return {value,response:value};
+      }};
+    await f.app.query("UPDATE memories SET body='Changed source' WHERE id=$1",[source.id]);
+    for(let i=0;i<5;i++) await materializeEvidence(f.app,{owner:randomUUID(),pageSize:100,deadlineMs:5000});
+    expect(await repairEvidence(f.operator,f.adminId,randomUUID(),{owners,profile:starterProfile,adapter,providerAuthority})).toBe('completed');
+    const job=(await f.owner.query('SELECT * FROM evidence_repair_jobs WHERE version_id=$1',[original])).rows[0];
+    expect(job.result_version).not.toBe(original); expect(job.workflow_id).toEqual(expect.any(String)); expect(job.attempt_id).toEqual(expect.any(String));
+    expect(await readEvidence(f.app,f.actorId,job.result_version,owners)).toContain('New wording');
+    await expect(readEvidence(f.app,f.actorId,original,owners)).rejects.toMatchObject({code:'NOT_FOUND'});
+    await f.app.query("UPDATE memories SET body='Changed again' WHERE id=$1",[source.id]);
+    for(let i=0;i<8;i++) await materializeEvidence(f.app,{owner:randomUUID(),pageSize:100,deadlineMs:5000});
+    await f.owner.query(`CREATE FUNCTION reject_evidence_settlement() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.state='settled' THEN RAISE EXCEPTION 'synthetic settlement unavailable'; END IF; RETURN NEW; END $$;
+      CREATE TRIGGER reject_evidence_settlement BEFORE UPDATE ON pipeline_budget_attempts FOR EACH ROW EXECUTE FUNCTION reject_evidence_settlement()`);
+    expect(await repairEvidence(f.operator,f.adminId,randomUUID(),{owners,profile:starterProfile,adapter,providerAuthority})).toBe('unavailable');
+    const failed=(await f.owner.query('SELECT * FROM evidence_repair_jobs WHERE version_id=$1',[job.result_version])).rows[0];
+    expect(failed).toMatchObject({state:'unavailable',attempt_id:expect.any(String),attempt_owner:expect.any(String),attempt_generation:'1'});
+    const accounting=(await f.owner.query('SELECT active,used FROM pipeline_budget_workflows WHERE id=$1',[failed.workflow_id])).rows[0];
+    expect(accounting.active).toBe(1); expect(accounting.used.calls).toBe(1);
+    await f.owner.query("UPDATE evidence_repair_jobs SET state='pending' WHERE version_id=$1",[job.result_version]);
+    expect(await repairEvidence(f.operator,f.adminId,randomUUID(),{owners,profile:starterProfile,adapter,providerAuthority})).toBe('unavailable');
+    expect((await f.owner.query('SELECT attempt_id FROM evidence_repair_jobs WHERE version_id=$1',[job.result_version])).rows[0].attempt_id).toBe(failed.attempt_id);
+    expect((await f.owner.query('SELECT used FROM pipeline_budget_workflows WHERE id=$1',[failed.workflow_id])).rows[0].used.calls).toBe(1);
+  });
+},120_000);

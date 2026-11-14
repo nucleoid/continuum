@@ -34,6 +34,13 @@ creation, selector backfill execution, or access to lifecycle capability
 tables. Reapply the script after migrations that change this documented
 runtime surface.
 
+Evidence-capable binaries require the chain through 0093 and exact profile
+regrants. APP gets reviewed evidence capabilities without raw payload-table
+access; OP adds database-bound policy/repair/erasure operations. SYNC gets none
+of that evidence authority. Current startup verifies the owner-recorded evidence
+function contract. No new login, credential or reauthentication is introduced.
+See [evidence lifecycle](evidence-lifecycle.md) for the maintenance sequence.
+
 Set **Assignment required?** to **Yes** on Continuum's Entra enterprise
 application, then assign only approved users and groups. The API client used to
 obtain delegated tokens must also be present in

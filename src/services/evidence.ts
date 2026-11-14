@@ -3,9 +3,10 @@ import { EVIDENCE_LIMITS, type EvidenceEnvelope, type EvidencePayloadRegistry, t
 import { decideEvidencePolicy, type EvidenceAuthorityContext, type EvidencePolicyDecision } from '../evidence/policy.js';
 import { evidenceTransaction, evidenceEnvelope, evidencePayload, registerEvidenceVersion } from '../storage/evidence.js';
 import { ServiceError } from './errors.js';
+import { BudgetError, type Budget } from '../pipeline/budget.js';
 
 const unavailable = () => new ServiceError('NOT_FOUND', 'Evidence unavailable');
-function decision(actor: string, envelope: EvidenceEnvelope, provider?: EvidenceAuthorityContext['provider']): EvidencePolicyDecision {
+export function decideManagedEvidence(actor: string, envelope: EvidenceEnvelope, provider?: EvidenceAuthorityContext['provider']): EvidencePolicyDecision {
   const policy = { version: 'evidence-envelope-v1', currentVersion: 'evidence-envelope-v1', scopeIds: [envelope.scopeId],
     state: 'active' as const, expiresAt: envelope.expiresAt, residency: 'any' as const, connector: 'not-required' as const, repository: 'not-required' as const };
   return decideEvidencePolicy({ now: envelope.now, action: provider ? 'provider-disclosure' : 'text-hydration',
@@ -29,23 +30,41 @@ export async function registerEvidence(pool: pg.Pool, actor: string, registratio
       // SQL has locked and rechecked all parents, roots, principal and current
       // memberships. Pure policy participates before this transaction commits.
       const envelope = await evidenceEnvelope(client, actor, version);
-      if (!envelope || decision(actor, envelope).artifactRead.decision !== 'allow') throw unavailable();
+      if (!envelope || decideManagedEvidence(actor, envelope).artifactRead.decision !== 'allow') throw unavailable();
       return version;
     });
   } catch (error) { return safeError(error); }
 }
 export async function readEvidence(pool: pg.Pool, actor: string, version: string, owners: EvidencePayloadRegistry,
-  provider?: EvidenceAuthorityContext['provider']): Promise<string> {
+  provider?: EvidenceAuthorityContext['provider'], budget?: Budget): Promise<string> {
   const destination = provider === undefined ? undefined : structuredClone(provider);
   try {
     return await evidenceTransaction(pool, async client => {
       const envelope = await evidenceEnvelope(client, actor, version);
       if (!envelope || !owners.supports(envelope.kind)) throw unavailable();
-      const permit = decision(actor, envelope, destination);
+      const permit = decideManagedEvidence(actor, envelope, destination);
       if ((destination ? permit.providerDisclosure : permit.artifactRead).decision !== 'allow') throw unavailable();
+      budget?.assertLive();
+      if (budget && envelope.bytes > budget.profile.maxItemHydratedBytes) throw new BudgetError();
+      budget?.consume({ candidates: 1, hydratedBytes: envelope.bytes });
       const payload = await evidencePayload(client, actor, version, destination?.locality === 'hosted' ? 'hosted' : destination ? 'local' : null);
-      if (payload === null) throw unavailable();
+      if (payload === null || !owners.accepts(envelope.kind, payload)) throw unavailable();
+      const final = await evidenceEnvelope(client, actor, version);
+      if (!final || (destination ? decideManagedEvidence(actor, final, destination).providerDisclosure : decideManagedEvidence(actor, final).artifactRead).decision !== 'allow') throw unavailable();
+      budget?.assertLive();
       return payload;
     });
   } catch (error) { return safeError(error); }
+}
+
+export async function authorizeEvidence(pool: pg.Pool, actor: string, version: string,
+  provider?: EvidenceAuthorityContext['provider']): Promise<boolean> {
+  try {
+    return await evidenceTransaction(pool, async client => {
+      const envelope = await evidenceEnvelope(client, actor, version);
+      if (!envelope) return false;
+      const permit = decideManagedEvidence(actor, envelope, provider);
+      return (provider ? permit.providerDisclosure : permit.artifactRead).decision === 'allow';
+    });
+  } catch { return false; }
 }

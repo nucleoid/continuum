@@ -147,6 +147,10 @@ async function promoteOperation(
     [source.id, destination.id],
   );
   const updatedSource = rowToMemory(rows[0]);
+  // The database guard also constrains older/direct promotion writers. Return
+  // its committed original source ceiling rather than the provisional expiry.
+  destination.expiresAt = (await client.query<{ expires_at: Date | null }>(
+    'SELECT expires_at FROM memories WHERE id=$1', [destination.id])).rows[0].expires_at;
   if (audit) {
     await recordAudit(client, {
       principalId,

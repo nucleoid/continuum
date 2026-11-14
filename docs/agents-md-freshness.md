@@ -73,6 +73,12 @@ repository automation. Those concerns remain outside this API.
 
 ## Evidence boundaries
 
+Migration 0093 keeps evidence versions and managed derivative payloads in
+separate tables. They never become legacy memories or generator candidates.
+Adding, quarantining, repairing or erasing a derivative cannot change generated
+bytes or hashes through hidden prose. Current source selection, ACL, expiry,
+escaping/provenance and required freshness/delivery audits still govern bundles.
+
 The [evidence authorization foundation](evidence-authorization.md) does not add
 new generator inputs. Selection remains deterministic SQL over authorized live,
 unexpired source memories; arbitrary metadata cannot grant access or change

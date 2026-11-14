@@ -22,6 +22,7 @@
     "docs/api-operations.md",
     "docs/authentication.md",
     "docs/evidence-authorization.md",
+    "docs/evidence-lifecycle.md",
     "docs/pipeline-budgets.md",
     "docs/remote-mcp.md",
     "docs/audit-api.md",

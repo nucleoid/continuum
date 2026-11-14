@@ -344,6 +344,7 @@ BEGIN
   IF to_regclass(format('%I.evidence_roots',schema_name)) IS NOT NULL THEN
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_evidence_source(UUID,UUID),%I.continuum_evidence_register(UUID,UUID,UUID,UUID,TEXT,JSONB,JSONB,TEXT),%I.continuum_evidence_envelope(UUID,UUID),%I.continuum_evidence_payload(UUID,UUID,TEXT),%I.continuum_evidence_eligible(UUID,UUID,TEXT),%I.continuum_evidence_is_ready() TO %I',
       schema_name,schema_name,schema_name,schema_name,schema_name,schema_name,target_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_evidence_claim_dirty(UUID,INTEGER),%I.continuum_evidence_invalidate_page(UUID,BIGINT,UUID,BIGINT,INTEGER) TO %I',schema_name,schema_name,target_role);
   END IF;
   IF to_regclass(format('%I.memory_activity_attributions',schema_name)) IS NOT NULL THEN
     EXECUTE format('GRANT SELECT ON %I.actor_principal_mappings,%I.memory_activity_attributions,%I.standup_thread_closures TO %I',schema_name,schema_name,schema_name,target_role);

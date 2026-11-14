@@ -784,11 +784,23 @@ async function scrubPromotionScope(client: pg.PoolClient, actorId: string, princ
     [actorId, principalId, scopeId, Math.min(batchSize, 1_000)],
   );
   const activity = scrub.rows[0]?.privacy ?? { complete: false, processed: 0 };
-  return { complete: outbox.complete && activity.complete, processed: outbox.processed + activity.processed,
-    batch_full: outbox.batch_full || activity.batch_full };
+  const evidenceSchema = await client.query<{ installed: boolean; available: boolean }>(
+    `SELECT pg_catalog.to_regclass('evidence_roots') IS NOT NULL AS installed,
+      pg_catalog.to_regprocedure('continuum_operator_scrub_evidence_scope(uuid,uuid,uuid,integer)') IS NOT NULL AS available`);
+  let evidence = { complete: true, processed: 0, batch_full: false };
+  if (evidenceSchema.rows[0]?.installed) {
+    if (!evidenceSchema.rows[0].available) throw new ServiceError('DEPENDENCY_UNAVAILABLE', 'Evidence privacy migration is required');
+    evidence = (await client.query<{ privacy: typeof evidence }>(
+      'SELECT continuum_operator_scrub_evidence_scope($1,$2,$3,$4) AS privacy',
+      [actorId, principalId, scopeId, Math.min(batchSize, 1_000)])).rows[0].privacy;
+  }
+  return { complete: outbox.complete && activity.complete && evidence.complete,
+    processed: outbox.processed + activity.processed + evidence.processed,
+    batch_full: outbox.batch_full || activity.batch_full || evidence.batch_full };
 }
 
 const PRESERVED_AUDIT_OPERATIONS = [
+  'principal_evidence_privacy_repaired',
   'principal_user_scope_mapped',
   'principal_user_scope_acknowledgement_replaced',
   'principal_memory_erased',

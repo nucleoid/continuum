@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { makeTestPool } from './test-helpers.js';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { makeTestPool, resetData } from './test-helpers.js';
 import { createPrincipal } from './principals.js';
 import { createScope } from './scopes.js';
 import { addMembership } from './memberships.js';
@@ -10,6 +10,7 @@ import { createMemory } from './memories.js';
 describe('immutable evidence and synchronous eligibility', () => {
   let pool: pg.Pool;
   beforeAll(async () => { pool = await makeTestPool(); }, 30_000);
+  beforeEach(async () => { await resetData(pool); });
   afterAll(async () => { await pool?.end(); });
   async function fixture() {
     const actor = await createPrincipal(pool, { externalId: randomUUID(), kind: 'user', displayName: 'Evidence synthetic' });
@@ -90,5 +91,39 @@ describe('immutable evidence and synchronous eligibility', () => {
     const fake = await createMemory(pool, { scopeId: destinationScope.id, scopeKind: 'project', authorId: f.actor.id,
       type: 'fact', title: f.memory.title, body: f.memory.body, source: 'promote:manual', metadata: { promoted_from: f.memory.id } });
     await expect(pool.query('SELECT continuum_evidence_source($1,$2)', [f.actor.id,fake.id])).rejects.toThrow(/lineage/);
+  });
+  it('admits exactly 256 roots and rejects a larger closure before publishing', async () => {
+    const f=await fixture();
+    await pool.query(`INSERT INTO memories(id,scope_id,author_id,type,title,body,source)
+      SELECT gen_random_uuid(),$1,$2,'decision','Bounded source','Body','manual' FROM generate_series(1,251)`,[f.scope.id,f.actor.id]);
+    const sources=(await pool.query('SELECT continuum_evidence_source($1,id) AS id FROM memories WHERE scope_id=$2 ORDER BY id',[f.actor.id,f.scope.id])).rows.map(r=>r.id as string);
+    const groups:string[]=[];
+    for(let i=0;i<3;i++) groups.push(await derive(f,sources.slice(i*63,(i+1)*63)));
+    const partial=await derive(f,sources.slice(189,251));
+    const maximum=await derive(f,[...groups,partial]);
+    expect((await pool.query('SELECT root_count FROM evidence_versions WHERE id=$1',[maximum])).rows[0].root_count).toBe(256);
+    const full=await derive(f,sources.slice(189));
+    const rejected=randomUUID();
+    await expect(derive(f,[...groups,full],rejected)).rejects.toThrow(/bounds/);
+    expect((await pool.query('SELECT count(*)::int AS n FROM evidence_roots WHERE id=$1',[rejected])).rows[0].n).toBe(0);
+  },30000);
+  it('linearizes registration against source writes and rolls source changes back with failed required guard audits', async () => {
+    const f=await fixture(),held=await pool.connect(),writer=await pool.connect();
+    try{
+      await held.query('BEGIN');
+      await held.query('SELECT continuum_evidence_register($1,$2,NULL,$3,$4,$5,$6,$7)',[f.actor.id,randomUUID(),f.scope.id,'cache',
+        JSON.stringify([{versionId:f.source,kind:'copy'}]),{transform:'v1',model:'none',prompt:'none',schema:'v1'},'Bounded copy']);
+      await writer.query("SET lock_timeout='100ms'");
+      await expect(writer.query("UPDATE memories SET body='Racing change' WHERE id=$1",[f.memory.id])).rejects.toMatchObject({code:'55P03'});
+      await held.query('COMMIT');
+      await pool.query(`CREATE FUNCTION reject_evidence_guard_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        IF NEW.metadata->>'operation'='evidence_source_fenced' THEN RAISE EXCEPTION 'synthetic required audit failure'; END IF; RETURN NEW; END $$;
+        CREATE TRIGGER reject_evidence_guard_audit BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION reject_evidence_guard_audit()`);
+      try{
+        await expect(writer.query("UPDATE memories SET body='Unaudited change' WHERE id=$1",[f.memory.id])).rejects.toThrow(/required audit/);
+        expect((await pool.query('SELECT body FROM memories WHERE id=$1',[f.memory.id])).rows[0].body).toBe('Canonical source');
+        expect(await eligible(f.actor.id,f.source)).toBe(true);
+      }finally{await pool.query('DROP TRIGGER reject_evidence_guard_audit ON audit_log; DROP FUNCTION reject_evidence_guard_audit()');}
+    }finally{await held.query('ROLLBACK');held.release();writer.release();}
   });
 });

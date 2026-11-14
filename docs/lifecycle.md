@@ -57,6 +57,14 @@ lifecycle work in other scopes.
 
 ## Review queue
 
+Registered evidence sources also advance an authority generation atomically on
+substantive content, lifecycle and expiry changes, including direct writers.
+Descendants immediately fail their root gate, independently of materialization
+or the sweeper. Captured original expiry ceilings cannot be extended by renewal.
+Canonical promotion retains source restrictions and the earliest ceiling.
+Immutable evidence and repair jobs are separate from this source review queue.
+See [evidence lifecycle](evidence-lifecycle.md).
+
 `GET /api/v0/review-queue` accepts repeated `scope` and `type` query parameters,
 plus `limit`, `offset`, and `horizonDays`. `continuum.review_queue` accepts the
 equivalent `scopes`, `types`, `limit`, `offset`, and `horizon_days` fields.
