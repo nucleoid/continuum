@@ -1,5 +1,15 @@
 import { checkedProfile, type BudgetAdapter, type BudgetProfile } from '../pipeline/budget.js';
 import type { CurrentEvidenceAuthority } from '../evidence/policy.js';
+import { asEmbeddingRouter, type EmbeddingRouting } from '../embeddings/router.js';
+
+/** Reject an incompatible opt-in rather than silently replace semantic recall
+ * with lexical-only candidates. Never bypass accounting to enable a provider. */
+export function assertRerankingEmbeddingBudget(routing: EmbeddingRouting): void {
+  if (asEmbeddingRouter(routing).providers().some(provider => !provider.pipelineAdapter
+    || provider.pipelineAdapter.id !== provider.id || provider.pipelineAdapter.local !== provider.local)) {
+    throw new TypeError('Reranking requires budget-compatible embedding providers');
+  }
+}
 
 /** Reference data only. IDs are request-local aliases, never storage identities. */
 export interface RerankingInput {

@@ -1,7 +1,7 @@
 import { boundedJsonText } from './mcp-http-output.js';
 import { remoteExecutionContext } from './mcp-http-execution.js';
 import type pg from 'pg';
-import type { Reranking } from '../reranking/provider.js';
+import { assertRerankingEmbeddingBudget, type Reranking } from '../reranking/provider.js';
 import { Budget } from '../pipeline/budget.js';
 import { z } from 'zod';
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
@@ -191,6 +191,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
   const invocation = deps.executionGuard ? remoteExecutionContext(deps.pool, deps.embeddingProvider) : undefined;
   const pool = invocation?.pool ?? deps.pool;
   const embeddingProvider = invocation?.routing ?? deps.embeddingProvider;
+  if (deps.reranking) assertRerankingEmbeddingBudget(embeddingProvider);
   const principal = deps.principal;
   // Remote JSON stays compact so adversarial metadata nesting cannot expand pretty-print indentation.
   const jsonResult = (value: unknown, meta?: Record<string, unknown>) => {

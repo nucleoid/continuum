@@ -4,7 +4,7 @@ import { createMcpHttpPool } from '../storage/pool.js';
 import { randomUUID } from 'node:crypto';
 import express from 'express';
 import pg from 'pg';
-import type { Reranking } from '../reranking/provider.js';
+import { assertRerankingEmbeddingBudget, type Reranking } from '../reranking/provider.js';
 import { getPool, closePool } from '../storage/pool.js';
 import {
   authModeFromEnv,
@@ -284,6 +284,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   const app = express();
   const logger = opts.logger ?? defaultLogger;
   const provider = opts.embeddingProvider ?? null;
+  if (opts.reranking) assertRerankingEmbeddingBudget(provider);
   const readiness = opts.readiness ?? createReadinessState();
   const readinessTimeoutMs = opts.readinessTimeoutMs ?? 1_000;
   const gapConfig = opts.gapConfig ?? gapConfigFromEnv();

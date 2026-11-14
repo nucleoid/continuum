@@ -5,7 +5,7 @@ import { asEmbeddingRouter, type EmbeddingRouting } from '../embeddings/router.j
 import { recall, recallCandidates, type RecallDiagnostics, type RecallOptions } from '../storage/recall.js';
 import { evidenceTransaction } from '../storage/evidence.js';
 import type { Queryable } from '../storage/queryable.js';
-import type { Reranking } from '../reranking/provider.js';
+import { assertRerankingEmbeddingBudget, type Reranking } from '../reranking/provider.js';
 import type { RerankingDiagnostic } from '../reranking/runner.js';
 import { EVIDENCE_POLICY_VERSION } from '../evidence/policy.js';
 import { currentRecallEligibility, rerankRecallPool } from './recall-reranking.js';
@@ -56,6 +56,7 @@ export async function recallForPrincipal(
     if (signal?.aborted) cancel();
   }
   try {
+    if (reranking) assertRerankingEmbeddingBudget(embeddingRouting);
     budget?.assertLive();
     const refs = input.scopes?.map(parseScopeString);
     const { accessible, scopeIds } = await resolveReadableScopeIds(

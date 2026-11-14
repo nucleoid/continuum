@@ -15,6 +15,59 @@ import { EmbeddingRegistry, ScopeEmbeddingRouter } from '../embeddings/router.js
 import { supersedeDecision } from '../storage/supersede.js';
 import { provisionEntraGroupBinding, syncEntraMemberships } from './membership-sync.js';
 import { Budget } from '../pipeline/budget.js';
+import { getScopeByRef } from '../storage/scopes.js';
+import { promoteMemory } from '../storage/promote.js';
+
+it('keeps original evidence ceilings and promotion source authority on hybrid fallback', async () => {
+  await standupProducerFixture(async f => {
+    const org = (await getScopeByRef(f.owner, { kind: 'org', name: '' }))!;
+    await addMembership(f.owner, f.actorId, org.id, 'admin');
+    const reader = await createPrincipal(f.owner, { externalId: 'rerank-org-reader', kind: 'user', displayName: 'Org reader' });
+    const renewed = await createMemory(f.app, { scopeId: org.id, scopeKind: 'org', authorId: f.actorId,
+      type: 'fact', title: 'Evidenceceiling renewed fact', body: 'Evidenceceiling reference', source: 'manual' });
+    await f.app.query('SELECT continuum_evidence_source($1,$2)', [reader.id, renewed.id]);
+    // Advance the original ceiling fixture into the past without waiting ninety
+    // days, then exercise the actual legacy renewal/source-fence write path.
+    await f.owner.query("UPDATE evidence_roots SET expiry_ceiling=clock_timestamp()-interval '1 second' WHERE id=$1", [renewed.id]);
+    await f.owner.query("UPDATE memories SET expires_at=clock_timestamp()+interval '90 days',last_verified=clock_timestamp() WHERE id=$1", [renewed.id]);
+    const team = await createScope(f.owner, { kind: 'team', name: 'promotion-origin' });
+    await addMembership(f.owner, f.actorId, team.id, 'writer');
+    const original = await createMemory(f.app, { scopeId: team.id, scopeKind: 'team', authorId: f.actorId,
+      type: 'decision', title: 'Evidenceceiling promoted reference', body: 'Evidenceceiling source', source: 'manual' });
+    await f.app.query('SELECT continuum_evidence_source($1,$2)', [f.actorId, original.id]);
+    const promoted = await promoteMemory(f.app, f.actorId, original.id, { kind: 'org', name: '' });
+    const healthy = await createMemory(f.app, { scopeId: org.id, scopeKind: 'org', authorId: f.actorId,
+      type: 'decision', title: 'Evidenceceiling independent reference', body: 'Evidenceceiling healthy', source: 'manual' });
+    const input = { query: 'evidenceceiling', limit: 10 };
+    const baseline = await recallForPrincipal(f.app, null, reader, input);
+    expect(new Set(baseline.results.map(r => r.memory.id))).toEqual(new Set([renewed.id, promoted.destination.id, healthy.id]));
+    const t = testReranking(() => 1);
+    const result = await recallForPrincipal(f.app, null, reader, input, {}, undefined, undefined, undefined, t.config());
+    expect(result.results.map(r => r.memory.id)).toEqual([healthy.id]);
+    expect(result.diagnostics.reranking).toEqual({ status: 'fallback', reason: 'policy_denied' });
+    expect(t.adapter.invoke).not.toHaveBeenCalled();
+    expect(JSON.stringify(result.diagnostics)).not.toContain(promoted.destination.id);
+  });
+}, 120_000);
+
+it('fails closed with a bounded dependency error when current authority cannot be locked', async () => {
+  await standupProducerFixture(async f => {
+    const principal = (await getPrincipal(f.app, f.actorId))!;
+    const source = await createMemory(f.app, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId,
+      type: 'decision', title: 'Authoritylock reference', body: 'Authoritylock source', source: 'manual' });
+    const before = (await f.owner.query("SELECT count(*)::int AS n FROM audit_log WHERE query='authoritylock'")).rows[0].n;
+    const held = await f.owner.connect();
+    const t = testReranking(() => 1);
+    try {
+      await held.query('BEGIN');
+      await held.query('SELECT id FROM memories WHERE id=$1 FOR NO KEY UPDATE', [source.id]);
+      await expect(recallForPrincipal(f.app, null, principal, { query: 'authoritylock' }, {}, undefined,
+        undefined, undefined, t.config())).rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE', cause: { code: '55P03' } });
+      expect(t.adapter.invoke).not.toHaveBeenCalled();
+    } finally { await held.query('ROLLBACK'); held.release(); }
+    expect((await f.owner.query("SELECT count(*)::int AS n FROM audit_log WHERE query='authoritylock'")).rows[0].n).toBe(before);
+  });
+}, 120_000);
 
 it('suppresses cancellation after final audit commit without claiming atomic network delivery', async () => {
   await standupProducerFixture(async f => {

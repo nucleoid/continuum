@@ -31,6 +31,15 @@ fixed through inference and cannot be replaced by a newer cache entry.
 There is no derivative, advisory-relation, coordination or personal-activity
 table join. Source body text remains reference data.
 
+Opt-in eligibility is deliberately stricter than legacy recall: it requires a
+current evidence version and its inherited authority. A renewed legacy memory
+can outlive its captured evidence expiry ceiling, and a promoted memory can be
+readable under legacy scope rules while its source scope remains inaccessible.
+Such rows, non-canonical promotion lineage and snapshots above the evidence
+size limit are excluded from opt-in results, including hybrid fallback. Fallback
+restores hybrid order only among currently eligible evidence; it never bypasses
+these fences. Removing the opt-in restores the independent legacy read contract.
+
 Only request-local opaque aliases, authorized titles and existing bounded
 excerpts reach the adapter. It receives no memory/version UUID, tags, arbitrary
 metadata, source locator, principal credential or transport object. All inputs
@@ -70,8 +79,22 @@ The runner preserves conservative final-output allowance and up to one second
 of the remaining lifetime for final selection/audit. These reservations are not
 a promise that a slow required database operation will finish. REST/MCP count
 their complete actual response envelopes before success audit, in addition to
-the conservative service projection. Configured embedding/enrichment adapters
-must also support the shared budget, or their optional work skips safely.
+the conservative service projection. REST/MCP builders and direct service calls
+reject reranking compositions whose registered embedding providers lack matching
+`pipelineAdapter` accounting. Stock embedding adapters need an explicitly qualified
+budget adapter before they can be combined with reranking; no unbudgeted provider
+call substitutes for that prerequisite. Optional enrichment without compatible
+accounting still skips safely.
+
+Current database authority and required auditing remain success boundaries.
+Admission locks candidate rows in stable order before cold source enrollment,
+which writes snapshots and enrollment audits. Contention or unavailable SQL can
+fail the read within the existing finite statement/lock limits. Model failure
+can fall back; failure to establish current authority cannot safely become an
+ungated legacy read. Use finite pool acquisition and caller deadlines too.
+Enrichment is best effort for the provisional final selection. A subsequent
+authority change can omit a row or restore/refill hybrid order; newly selected
+rows can have no enrichment. No revoked row is delivered to retain enrichment.
 
 Timeout, capacity saturation, unavailable capabilities/credentials/pricing,
 policy denial, invalid output, adapter failure and durable settlement rejection
