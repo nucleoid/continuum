@@ -73,4 +73,22 @@ describe('immutable evidence and synchronous eligibility', () => {
     await expect(derive(f, [parent])).rejects.toThrow(/bounds/);
     await expect(derive(f, [next], node, next)).rejects.toThrow(/cycle/);
   });
+  it('preserves original expiry and source authority through canonical direct-writer promotion', async () => {
+    const f = await fixture();
+    await pool.query("UPDATE memories SET expires_at=clock_timestamp()+interval '1 day' WHERE id=$1", [f.memory.id]);
+    const destinationScope = await createScope(pool, { kind: 'project', name: randomUUID() });
+    await addMembership(pool, f.actor.id, destinationScope.id, 'writer');
+    const destination = await createMemory(pool, { scopeId: destinationScope.id, scopeKind: 'project', authorId: f.actor.id,
+      type: 'fact', title: f.memory.title, body: f.memory.body, source: 'promote:manual', metadata: { promoted_from: f.memory.id } });
+    await pool.query("UPDATE memories SET state='promoted',promoted_to_id=$2 WHERE id=$1", [f.memory.id,destination.id]);
+    const version = (await pool.query('SELECT continuum_evidence_source($1,$2) AS id', [f.actor.id,destination.id])).rows[0].id;
+    const ceiling = (await pool.query('SELECT expires_at FROM memories WHERE id=$1', [f.memory.id])).rows[0].expires_at;
+    expect((await pool.query('SELECT expires_at FROM evidence_versions WHERE id=$1', [version])).rows[0].expires_at).toEqual(ceiling);
+    expect(await eligible(f.actor.id,version)).toBe(true);
+    await pool.query('DELETE FROM scope_memberships WHERE principal_id=$1 AND scope_id=$2', [f.actor.id,f.scope.id]);
+    expect(await eligible(f.actor.id,version)).toBe(false);
+    const fake = await createMemory(pool, { scopeId: destinationScope.id, scopeKind: 'project', authorId: f.actor.id,
+      type: 'fact', title: f.memory.title, body: f.memory.body, source: 'promote:manual', metadata: { promoted_from: f.memory.id } });
+    await expect(pool.query('SELECT continuum_evidence_source($1,$2)', [f.actor.id,fake.id])).rejects.toThrow(/lineage/);
+  });
 });
