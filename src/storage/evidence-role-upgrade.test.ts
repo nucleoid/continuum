@@ -58,6 +58,9 @@ it('upgrades real APP/OP/SYNC profiles without raw payload grants and refuses tr
       await expect(session.query('SELECT payload FROM evidence_payloads')).rejects.toMatchObject({code:'42501'});
     }
     expect((await owner.query("SELECT has_function_privilege($1,'independent_operator_extension()','EXECUTE') AS preserved",[roles[1]])).rows[0].preserved).toBe(true);
+    await owner.query('ALTER TABLE evidence_closure DISABLE TRIGGER evidence_closure_immutable');
+    await expect(requireEvidenceReady(sessions[0],{expectedSchema:schema})).rejects.toMatchObject({code:'DEPENDENCY_UNAVAILABLE'});
+    await owner.query('ALTER TABLE evidence_closure ENABLE TRIGGER evidence_closure_immutable');
     await owner.query(`CREATE OR REPLACE FUNCTION continuum_evidence_eligible(actor UUID,version UUID,locality TEXT) RETURNS BOOLEAN LANGUAGE plpgsql VOLATILE SECURITY DEFINER AS $$ BEGIN RETURN TRUE; END $$`);
     await expect(requireEvidenceReady(sessions[0],{expectedSchema:schema})).rejects.toMatchObject({code:'DEPENDENCY_UNAVAILABLE'});
   }finally{

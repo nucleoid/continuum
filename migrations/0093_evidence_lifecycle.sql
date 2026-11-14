@@ -125,6 +125,8 @@ BEGIN RAISE check_violation USING MESSAGE='evidence provenance is immutable'; EN
 $$;
 CREATE TRIGGER evidence_version_immutable BEFORE UPDATE OR DELETE ON evidence_versions FOR EACH ROW EXECUTE FUNCTION continuum_evidence_immutable();
 CREATE TRIGGER evidence_edge_immutable BEFORE UPDATE OR DELETE ON evidence_edges FOR EACH ROW EXECUTE FUNCTION continuum_evidence_immutable();
+CREATE TRIGGER evidence_closure_immutable BEFORE UPDATE OR DELETE ON evidence_closure FOR EACH ROW EXECUTE FUNCTION continuum_evidence_immutable();
+CREATE TRIGGER evidence_source_dependencies_immutable BEFORE UPDATE OR DELETE ON evidence_source_dependencies FOR EACH ROW EXECUTE FUNCTION continuum_evidence_immutable();
 -- Payload deletion is the canonical erasure operation. It also deletes hashes.
 CREATE TRIGGER evidence_payload_immutable BEFORE UPDATE ON evidence_payloads FOR EACH ROW EXECUTE FUNCTION continuum_evidence_immutable();
 
@@ -620,7 +622,16 @@ REVOKE ALL ON FUNCTION continuum_offboarding_lifecycle_state_is_erased(UUID),con
 CREATE TABLE evidence_contract_functions(signature TEXT PRIMARY KEY,body_hash TEXT NOT NULL,definer BOOLEAN NOT NULL,volatility "char" NOT NULL);
 REVOKE ALL ON evidence_contract_functions FROM PUBLIC;
 CREATE FUNCTION continuum_evidence_is_ready() RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER AS $$
-  SELECT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='memories'::regclass AND tgname='evidence_source_fence' AND tgenabled='O')
+  SELECT EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='memories'::regclass AND tgname='evidence_source_fence' AND tgenabled='O'
+      AND tgfoid='continuum_evidence_source_fence()'::regprocedure AND tgtype=25)
+    AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='audit_log'::regclass AND tgname='guard_evidence_privacy_audit' AND tgenabled='O'
+      AND tgfoid=to_regprocedure('continuum_guard_evidence_privacy_audit()') AND tgtype=31)
+    AND NOT EXISTS(SELECT 1 FROM (VALUES
+        ('evidence_versions'::regclass,'evidence_version_immutable',27),('evidence_edges'::regclass,'evidence_edge_immutable',27),
+        ('evidence_closure'::regclass,'evidence_closure_immutable',27),('evidence_source_dependencies'::regclass,'evidence_source_dependencies_immutable',27),
+        ('evidence_payloads'::regclass,'evidence_payload_immutable',19)) expected(relation,name,type)
+      LEFT JOIN pg_trigger guard ON guard.tgrelid=expected.relation AND guard.tgname=expected.name
+      WHERE guard.oid IS NULL OR guard.tgenabled<>'O' OR guard.tgtype<>expected.type OR guard.tgfoid<>'continuum_evidence_immutable()'::regprocedure)
     AND to_regprocedure('continuum_evidence_register(uuid,uuid,uuid,uuid,text,jsonb,jsonb,text)') IS NOT NULL
     AND to_regprocedure('continuum_operator_scrub_evidence_scope(uuid,uuid,uuid,integer)') IS NOT NULL
     AND to_regclass('evidence_dirty_roots') IS NOT NULL AND to_regclass('evidence_repair_jobs') IS NOT NULL
