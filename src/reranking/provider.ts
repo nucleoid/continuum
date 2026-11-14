@@ -1,12 +1,37 @@
-import { checkedProfile, type BudgetAdapter, type BudgetProfile } from '../pipeline/budget.js';
+import { Budget, boundedJson, checkedProfile, priceMicros, type BudgetAdapter, type BudgetProfile } from '../pipeline/budget.js';
 import type { CurrentEvidenceAuthority } from '../evidence/policy.js';
 import { asEmbeddingRouter, type EmbeddingRouting } from '../embeddings/router.js';
 
 /** Reject an incompatible opt-in rather than silently replace semantic recall
  * with lexical-only candidates. Never bypass accounting to enable a provider. */
-export function assertRerankingEmbeddingBudget(routing: EmbeddingRouting): void {
-  if (asEmbeddingRouter(routing).providers().some(provider => !provider.pipelineAdapter
-    || provider.pipelineAdapter.id !== provider.id || provider.pipelineAdapter.local !== provider.local)) {
+export function assertRerankingEmbeddingBudget(routing: EmbeddingRouting, config: Pick<Reranking, 'profile'>): void {
+  try {
+    const providers = [...new Map(asEmbeddingRouter(routing).providers().map(p => [`${p.id}\0${p.dim}`, p])).values()];
+    if (config.profile.limits.calls < providers.length + 1) throw new TypeError();
+    // Admission-only probe using the same accountant. No invocation, durable
+    // charge or process slot. A real query still needs its actual reservation.
+    const probe = new Budget(config.profile);
+    for (const provider of providers) {
+      const adapter = provider.pipelineAdapter;
+      if (!adapter || adapter.id !== provider.id || adapter.local !== provider.local
+        || adapter.credentials === 'missing' || typeof adapter.local !== 'boolean'
+        || !adapter.model || !adapter.profile || !adapter.enforceableCaps
+        || !adapter.tokens || adapter.tokens.model !== adapter.model || adapter.tokens.profile !== adapter.profile
+        || !adapter.tokens.validationId || !['exact', 'conservative'].includes(adapter.tokens.kind)
+        || !adapter.price || adapter.price.id !== config.profile.rateSchedule || adapter.price.currency !== config.profile.currency
+        || !Number.isSafeInteger(adapter.timeoutMs) || adapter.timeoutMs < 1
+        || !Number.isSafeInteger(adapter.responseBodyBytes) || adapter.responseBodyBytes < 1
+        || (provider.batchSize !== undefined && (!Number.isSafeInteger(provider.batchSize) || provider.batchSize < 1 || provider.batchSize > 1000))) throw new TypeError();
+      const caps = { outputTokens: adapter.outputTokens, reasoningTokens: adapter.reasoningTokens, completionTokens: adapter.completionTokens };
+      if (caps.outputTokens + caps.reasoningTokens > caps.completionTokens) throw new TypeError();
+      const wire = boundedJson(adapter.serialize([''], Object.freeze(caps)), probe.available('inputBytes'));
+      const tokens = adapter.tokens.count(wire) + adapter.tokens.overheadTokens;
+      const inputBytes = Buffer.byteLength(wire);
+      const id = probe.reserve({ ...caps, inputBytes, contextTokens: tokens, outputBytes: adapter.responseBodyBytes, calls: 1,
+        spendMicros: priceMicros(adapter.price, tokens, caps.outputTokens, caps.reasoningTokens) }, inputBytes + adapter.responseBodyBytes);
+      probe.settle(id, {});
+    }
+  } catch {
     throw new TypeError('Reranking requires budget-compatible embedding providers');
   }
 }

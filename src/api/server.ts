@@ -284,7 +284,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   const app = express();
   const logger = opts.logger ?? defaultLogger;
   const provider = opts.embeddingProvider ?? null;
-  if (opts.reranking) assertRerankingEmbeddingBudget(provider);
+  if (opts.reranking) assertRerankingEmbeddingBudget(provider, opts.reranking);
   const readiness = opts.readiness ?? createReadinessState();
   const readinessTimeoutMs = opts.readinessTimeoutMs ?? 1_000;
   const gapConfig = opts.gapConfig ?? gapConfigFromEnv();

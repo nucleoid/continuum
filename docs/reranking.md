@@ -83,8 +83,23 @@ the conservative service projection. REST/MCP builders and direct service calls
 reject reranking compositions whose registered embedding providers lack matching
 `pipelineAdapter` accounting. Stock embedding adapters need an explicitly qualified
 budget adapter before they can be combined with reranking; no unbudgeted provider
-call substitutes for that prerequisite. Optional enrichment without compatible
+call substitutes for that prerequisite. Setup checks credentials, declared caps,
+token capability and matching pricing, and probes one complete empty-query wire
+reservation for every distinct registered provider using the same accountant.
+The call ceiling must cover all those groups plus one reranker call. This is a
+minimum compatibility check; actual queries and all later stages still need
+their complete remaining reservations. Optional enrichment without compatible
 accounting still skips safely.
+
+Budgeted query embeddings share the existing process limits: at most four active
+calls per adapter/model/profile, 128 overall and 64 MiB retained allowance. An
+unsettled detached call blocks its identity. Saturation or another embedding-group
+failure skips the whole reranker with `fallback/provider_failed`; it never scores
+a silently reduced candidate pool. Fallback uses eligible fusion order from the
+successful retrieval arms and can therefore be lexical-only, with the existing
+`vector: failed` or `partial` diagnostics. It does not promise all semantic groups
+under load. Size replicas and request admission for these limits; no unbudgeted
+retry bypasses the retained execution fences.
 
 Current database authority and required auditing remain success boundaries.
 Admission locks candidate rows in stable order before cold source enrollment,

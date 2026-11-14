@@ -9,6 +9,7 @@ import type { EvidenceEnvelope } from '../evidence/model.js';
 import { decideEvidencePolicy, type EvidenceAuthorityContext, type EvidencePolicy } from '../evidence/policy.js';
 import type { Reranking } from '../reranking/provider.js';
 import { runReranking, type RerankingDiagnostic } from '../reranking/runner.js';
+import type { BudgetReason } from '../pipeline/receipts.js';
 
 interface AdmittedRecall {
   results: RecallResult[];
@@ -56,11 +57,11 @@ export async function currentRecallEligibility(client: pg.PoolClient, actor: str
 }
 
 export async function rerankRecallPool(pool: pg.Pool, actor: string, input: RecallInput, opts: RecallOptions,
-  selected: RecallCandidates, config: Reranking, budget: Budget, signal?: AbortSignal, localOnlyScopes: ReadonlySet<string> = new Set()): Promise<AdmittedRecall> {
+  selected: RecallCandidates, config: Reranking, budget: Budget, signal?: AbortSignal, localOnlyScopes: ReadonlySet<string> = new Set(), fallbackReason?: BudgetReason): Promise<AdmittedRecall> {
   const limit = input.limit ?? 10;
   const known = sourceVersions.get(pool) ?? new Map<string, string>();
   sourceVersions.set(pool, known);
-  let reason: RerankingDiagnostic | undefined;
+  let reason: RerankingDiagnostic | undefined = fallbackReason ? { status: 'fallback', reason: fallbackReason } : undefined;
   const admitted = await evidenceTransaction(pool, async client => {
     // Metadata before lazy source enrollment or body hydration. Current membership
     // applies even if a previously resolved readable-scope list is stale.

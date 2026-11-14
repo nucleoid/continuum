@@ -56,7 +56,7 @@ export async function recallForPrincipal(
     if (signal?.aborted) cancel();
   }
   try {
-    if (reranking) assertRerankingEmbeddingBudget(embeddingRouting);
+    if (reranking) assertRerankingEmbeddingBudget(embeddingRouting, reranking);
     budget?.assertLive();
     const refs = input.scopes?.map(parseScopeString);
     const { accessible, scopeIds } = await resolveReadableScopeIds(
@@ -96,7 +96,8 @@ export async function recallForPrincipal(
       budget,
     };
     const candidatePool = reranking ? await recallCandidates(pool, recallOptions, Math.max(input.limit ?? 10, reranking.candidateLimit), true) : undefined;
-    const ranked = reranking && candidatePool ? await rerankRecallPool(pool, principal.id, input, recallOptions, candidatePool, reranking, budget!, signal, localOnlyScopes) : undefined;
+    const ranked = reranking && candidatePool ? await rerankRecallPool(pool, principal.id, input, recallOptions, candidatePool, reranking, budget!, signal, localOnlyScopes,
+      candidatePool.diagnostics.vector === 'failed' || candidatePool.diagnostics.vector === 'partial' ? 'provider_failed' : undefined) : undefined;
     const recalled = ranked && candidatePool ? { results: ranked.results, diagnostics: candidatePool.diagnostics } : await recall(pool, recallOptions);
     const embeddingAuditGroups = recalled.diagnostics.groups.map((group) => ({
       provider: group.provider,

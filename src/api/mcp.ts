@@ -191,7 +191,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
   const invocation = deps.executionGuard ? remoteExecutionContext(deps.pool, deps.embeddingProvider) : undefined;
   const pool = invocation?.pool ?? deps.pool;
   const embeddingProvider = invocation?.routing ?? deps.embeddingProvider;
-  if (deps.reranking) assertRerankingEmbeddingBudget(embeddingProvider);
+  if (deps.reranking) assertRerankingEmbeddingBudget(embeddingProvider, deps.reranking);
   const principal = deps.principal;
   // Remote JSON stays compact so adversarial metadata nesting cannot expand pretty-print indentation.
   const jsonResult = (value: unknown, meta?: Record<string, unknown>) => {
