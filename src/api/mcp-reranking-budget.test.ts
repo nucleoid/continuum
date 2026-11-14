@@ -11,7 +11,9 @@ import { EmbeddingRegistry, ScopeEmbeddingRouter } from '../embeddings/router.js
 it.each(['pricing', 'credentials', 'tokens', 'caps', 'spend', 'calls'] as const)('rejects known %s incompatibility with the reranking profile', mode => {
   const t = testReranking(() => 1);
   const makeProvider = (index: number) => {
-    const adapter = { ...t.adapter, id: `profile-embed-${index}`, local: false, responseBodyBytes: 65_536, outputTokens: 0, completionTokens: 0 };
+    const adapter = { ...t.adapter, id: `profile-embed-${index}`, local: false, responseBodyBytes: 65_536, outputTokens: 0, completionTokens: 0,
+      serialize: (texts: string[], caps: unknown) => ({ texts, caps }),
+      invoke: vi.fn(async () => { const value = [Array(768).fill(0)]; return { value, response: value }; }) };
     if (mode === 'pricing') adapter.price = { ...adapter.price!, id: 'another-schedule' };
     if (mode === 'credentials') adapter.credentials = 'missing';
     if (mode === 'tokens') adapter.tokens = undefined;

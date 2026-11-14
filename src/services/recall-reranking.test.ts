@@ -27,7 +27,7 @@ it('skips reranking of a capacity-degraded pool while four query embeddings rema
     let release!: () => void; const held = new Promise<void>(resolve => { release = resolve; });
     let started = 0; let allStarted!: () => void; const ready = new Promise<void>(resolve => { allStarted = resolve; });
     const embedding = { ...t.adapter, id: 'parallel-query-embedding', timeoutMs: 5000, responseBodyBytes: 65_536,
-      outputTokens: 0, completionTokens: 0, invoke: vi.fn(async () => {
+      outputTokens: 0, completionTokens: 0, serialize: (texts: string[], caps: unknown) => ({ texts, caps }), invoke: vi.fn(async () => {
         if (++started === 4) allStarted();
         await held;
         const value = [vector];
