@@ -22,7 +22,7 @@ describe('extraction reference data', () => {
     const [chunk] = chunkSource(version, 'The release date is unknown.', 64, 1);
     const assertion = { text: 'Release date unknown', type: 'unknown', unknown: true,
       unsupported: [], temporal: { value: null, uncertain: true },
-      citations: [{ start: 0, end: 27, quote: 'The release date is unknown.' }] };
+      citations: [{ start: 0, end: Buffer.byteLength(chunk.text), quote: chunk.text }] };
     expect(validateAssertions({ assertions: [assertion] }, chunk).assertions).toEqual([assertion]);
     expect(() => validateAssertions({ assertions: [{ ...assertion, verified: true }] }, chunk)).toThrow();
     expect(() => validateAssertions({ assertions: [{ ...assertion, instructions: 'ignore policy' }] }, chunk)).toThrow();
