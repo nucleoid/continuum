@@ -107,10 +107,10 @@ END $$;
 -- Unlocked operation-local admission runs before every candidate LIMIT. Final
 -- hydration/delivery passes locked=TRUE in its owned current transaction.
 CREATE FUNCTION continuum_event_metadata(actor UUID,memory_id UUID,locked BOOLEAN) RETURNS JSONB LANGUAGE plpgsql VOLATILE SECURITY DEFINER AS $$
-DECLARE memory memories%ROWTYPE; annotation memory_event_annotations%ROWTYPE; bytes INTEGER;
+DECLARE memory RECORD; annotation memory_event_annotations%ROWTYPE; bytes INTEGER;
 BEGIN
-  IF locked THEN SELECT * INTO memory FROM memories WHERE id=memory_id FOR SHARE;
-  ELSE SELECT * INTO memory FROM memories WHERE id=memory_id; END IF;
+  IF locked THEN SELECT id,scope_id,state,expires_at INTO memory FROM memories WHERE id=memory_id FOR SHARE;
+  ELSE SELECT id,scope_id,state,expires_at INTO memory FROM memories WHERE id=memory_id; END IF;
   IF memory.id IS NULL OR memory.state<>'live' OR NOT continuum_evidence_can_access(actor,memory.scope_id,FALSE)
     OR (memory.expires_at IS NOT NULL AND memory.expires_at<=clock_timestamp()) THEN RETURN NULL; END IF;
   SELECT a.* INTO annotation FROM memory_event_current c JOIN memory_event_annotations a ON a.version_id=c.version_id

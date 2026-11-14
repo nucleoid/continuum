@@ -2,7 +2,7 @@ import type pg from 'pg';
 import { Budget } from '../pipeline/budget.js';
 import type { Principal, RecallInput, RecallResult } from '../types.js';
 import { asEmbeddingRouter, type EmbeddingRouting } from '../embeddings/router.js';
-import { recall, recallCandidates, type RecallDiagnostics, type RecallOptions } from '../storage/recall.js';
+import { recall, recallCandidates, hydrateRecallCandidates, type RecallDiagnostics, type RecallOptions } from '../storage/recall.js';
 import { evidenceTransaction } from '../storage/evidence.js';
 import type { Queryable } from '../storage/queryable.js';
 import { assertRerankingEmbeddingBudget, type Reranking } from '../reranking/provider.js';
@@ -112,7 +112,11 @@ export async function recallForPrincipal(
       outputBytes: enrichment?.outputBytes ? rows => enrichment.outputBytes!({ results: rows, accessible, diagnostics: candidatePool.diagnostics }) : undefined,
       onWork: enrichment?.onWork,
     }) : undefined;
-    const recalled = ranked && candidatePool ? { results: ranked.results, diagnostics: candidatePool.diagnostics } : await recall(pool, recallOptions);
+    const hintPool = !ranked && eventWindow ? await recallCandidates(pool,recallOptions,100) : undefined;
+    const recalled = ranked && candidatePool ? { results: ranked.results, diagnostics: candidatePool.diagnostics }
+      : hintPool ? { diagnostics:hintPool.diagnostics, results:await hydrateRecallCandidates(pool,hintPool.candidates.map(c=>c.id),input.query,
+        new Map(hintPool.candidates.map(c=>[c.id,c.score])),scopeIds,input.types,enrichment?.readBudgetBytes,budget,false,eventFilter,principal.id) }
+        : await recall(pool, recallOptions);
     const embeddingAuditGroups = recalled.diagnostics.groups.map((group) => ({
       provider: group.provider,
       dim: group.dim,
@@ -160,7 +164,7 @@ export async function recallForPrincipal(
         return true;
       });
       if (eventWindow) {
-        const ordered = orderEventResults(deliveredResults.map(result => ({ id: result.memory.id, score: result.rerankScore ?? result.score, result })), eventWindow, annotations);
+        const ordered = orderEventResults(deliveredResults.map(result => ({ id: result.memory.id, score: result.score, rerankScore:result.rerankScore, result })), eventWindow, annotations);
         deliveredResults = ordered.map(row => row.result);
       }
       deliveredResults = deliveredResults.slice(0, input.limit ?? 10);

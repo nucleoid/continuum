@@ -21,7 +21,7 @@ import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoord
 import { requirePipelineBudgetsReady, requireEvidenceReady, requireExtractionReady, requireEventTimeReady } from '../storage/provider-lifecycle.js';
 import { configureExtraction, extractionForPrincipal, retryExtraction } from '../services/extraction.js';
 import { accessibleScopes } from '../services/access.js';
-import { captureMemory } from '../services/capture.js';
+import { captureMemory, type CaptureResult } from '../services/capture.js';
 import { eventAnnotationSchema, eventWindowSchema, type EventInspection } from '../temporal/model.js';
 import { recallForPrincipal, type PrincipalRecallResult } from '../services/recall.js';
 import {
@@ -67,7 +67,7 @@ import {
 } from '../services/memories.js';
 import type { MemoryReadRecord } from '../storage/memory-reads.js';
 import type { Memory, MemoryState, MemoryType } from '../types.js';
-import { decisionHistoryForPrincipal, supersedeForPrincipal } from '../services/supersede.js';
+import { decisionHistoryForPrincipal, supersedeForPrincipal, type SupersedeResult } from '../services/supersede.js';
 import {
   acquireLease,
   inspectLease,
@@ -441,6 +441,11 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           );
         }
         const ref = { kind: args.scope_kind as ScopeKind, name: args.scope_name };
+        const project = (result: CaptureResult) => ({
+          id: result.memory.id, scope: ref.kind === 'org' ? 'org' : `${ref.kind}:${ref.name}`,
+          expires_at: result.memory.expiresAt, embedded: result.embedded, related: result.related, extraction: result.extraction,
+          ...(result.memory.event ? { event: mcpEvent(result.memory.event) } : {}),
+        });
         const result = await captureMemory(
           pool,
           embeddingProvider,
@@ -457,17 +462,12 @@ export function buildMcpServer(deps: McpDeps): McpServer {
             eventAnnotation: args.event_annotation,
           },
           { transport: 'mcp' },
-          { relationThreshold, readBudgetBytes: deps.readBudgetBytes },
+          { relationThreshold, readBudgetBytes: deps.readBudgetBytes,
+            validateResult: deps.readBudgetBytes === undefined ? undefined : value => {
+              boundedJsonText({ jsonrpc:'2.0',id:extra.requestId,result:jsonResult(project(value)) },deps.readBudgetBytes!,false);
+            } },
         );
-        return jsonResult({
-          id: result.memory.id,
-          scope: ref.kind === 'org' ? 'org' : `${ref.kind}:${ref.name}`,
-          expires_at: result.memory.expiresAt,
-          embedded: result.embedded,
-          related: result.related,
-          extraction: result.extraction,
-          ...(result.memory.event ? { event: mcpEvent(result.memory.event) } : {}),
-        });
+        return jsonResult(project(result));
       } catch (error) {
         return errorResult(error);
       }
@@ -516,7 +516,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
                 const wire = frame(value);
                 if (deps.readBudgetBytes !== undefined) boundedJsonText(wire, deps.readBudgetBytes, false);
                 budget.serializeOutput(wire);
-              } else jsonResult(recallProjection(value), { diagnostics: value.diagnostics });
+              } else boundedJsonText({jsonrpc:'2.0',id:extra.requestId,result:jsonResult(recallProjection(value),{diagnostics:value.diagnostics})},deps.readBudgetBytes!,false);
             },
           },
           budget,
@@ -539,7 +539,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       try {
         const result = await getMemoryForPrincipal(
           pool, principal, args.memory_id, { transport: 'mcp' }, deps.readBudgetBytes,
-          deps.readBudgetBytes === undefined ? undefined : (value) => { jsonResult(mcpMemory(value)); },
+          deps.readBudgetBytes === undefined ? undefined : (value) => { boundedJsonText({jsonrpc:'2.0',id:extra.requestId,result:jsonResult(mcpMemory(value))},deps.readBudgetBytes!,false); },
         );
         return jsonResult(mcpMemory(result));
       } catch (error) {
@@ -571,7 +571,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           offset: args.offset,
           eventFilter: args.event_filter,
         }, { transport: 'mcp' }, deps.readBudgetBytes,
-          deps.readBudgetBytes === undefined ? undefined : (value) => { jsonResult(listProjection(value)); });
+          deps.readBudgetBytes === undefined ? undefined : (value) => { boundedJsonText({jsonrpc:'2.0',id:extra.requestId,result:jsonResult(listProjection(value))},deps.readBudgetBytes!,false); });
         return jsonResult(listProjection(result));
       } catch (error) {
         return errorResult(error);
@@ -596,18 +596,21 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     },
     async (args, extra) => {
       try {
+        const project = (result: SupersedeResult) => ({
+          superseded_id: result.predecessor.id, successor_id: result.successor.id,
+          scope_id: result.successor.scopeId, predecessor_state: result.predecessor.state,
+          ...(result.successor.event ? { event: mcpEvent(result.successor.event) } : {}), embedded: result.embedded,
+          ...(result.embedErrorCode ? { embedding_error_code: result.embedErrorCode } : {}),
+        });
         const result = await supersedeForPrincipal(pool, embeddingProvider, principal, {
           supersededId: args.superseded_id, title: args.title, body: args.body,
           tags: args.tags, source: args.source, sourceRef: args.source_ref, metadata: args.metadata,
           eventAnnotation: args.event_annotation,
-        }, { transport: 'mcp' }, deps.allowedSource, deps.readBudgetBytes);
-        return jsonResult({
-          superseded_id: result.predecessor.id, successor_id: result.successor.id,
-          scope_id: result.successor.scopeId, predecessor_state: result.predecessor.state,
-          ...(result.successor.event ? { event: mcpEvent(result.successor.event) } : {}),
-          embedded: result.embedded,
-          ...(result.embedErrorCode ? { embedding_error_code: result.embedErrorCode } : {}),
+        }, { transport: 'mcp' }, deps.allowedSource, deps.readBudgetBytes,
+        deps.readBudgetBytes === undefined ? undefined : value => {
+          boundedJsonText({jsonrpc:'2.0',id:extra.requestId,result:jsonResult(project(value))},deps.readBudgetBytes!,false);
         });
+        return jsonResult(project(result));
       } catch (error) {
         return errorResult(error);
       }

@@ -126,7 +126,8 @@ export function eventMatches(event: EventAnnotation | undefined, window: EventWi
   return (!window.from || !event.end || window.from < event.end) && (!window.to || !event.start || event.start < window.to);
 }
 /** Single final hint ordering. Core score always wins; a hint excludes no row. */
-export function orderEventResults<T extends { id: string; score: number }>(rows: readonly T[], window: EventWindow, events: ReadonlyMap<string, EventAnnotation>): T[] {
+export function orderEventResults<T extends { id: string; score: number; rerankScore?: number }>(rows: readonly T[], window: EventWindow, events: ReadonlyMap<string, EventAnnotation>): T[] {
   const overlaps = (id: string) => Number(eventMatches(events.get(id), { ...window, includeUnknown: false }));
-  return [...rows].sort((a,b) => b.score-a.score || overlaps(b.id)-overlaps(a.id) || a.id.localeCompare(b.id));
+  return [...rows].sort((a,b) => (b.rerankScore ?? b.score)-(a.rerankScore ?? a.score) || b.score-a.score
+    || overlaps(b.id)-overlaps(a.id) || a.id.localeCompare(b.id));
 }

@@ -34,6 +34,7 @@ export interface CaptureResult {
 }
 
 export interface CaptureOptions {
+  validateResult?: (result: CaptureResult) => void;
   readBudgetBytes?: number;
   relationThreshold?: number;
 }
@@ -400,6 +401,10 @@ export async function captureMemory(
         }
       }
 
+      const extraction = await captureExtractionStatus(client, principal.id, memory.id);
+      const result: CaptureResult = { memory, embedded, related: embedded ? related : [], extraction,
+        ...(embedErrorCode ? { embedErrorCode } : {}), ...(relationErrorCode ? { relationErrorCode } : {}) };
+      options.validateResult?.(result);
       await recordAudit(client, {
         principalId: principal.id,
         action: 'write',
@@ -424,16 +429,8 @@ export async function captureMemory(
           ...auditMetadata,
         },
       });
-      const extraction = await captureExtractionStatus(client, principal.id, memory.id);
       await client.query('COMMIT');
-      return {
-        memory,
-        embedded,
-        related: embedded ? related : [],
-        extraction,
-        ...(embedErrorCode ? { embedErrorCode } : {}),
-        ...(relationErrorCode ? { relationErrorCode } : {}),
-      };
+      return result;
     } catch (error) {
       try {
         await client.query('ROLLBACK');

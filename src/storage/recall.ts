@@ -7,8 +7,8 @@ import { vectorSearchMemoryIds } from './embeddings.js';
 import { assertEmbeddingVectorDimension } from './schema.js';
 import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
 import type { Queryable } from './queryable.js';
-import type { EventWindow } from '../temporal/model.js';
-import { eventPredicate } from './temporal.js';
+import { orderEventResults, type EventWindow, type EventAnnotation } from '../temporal/model.js';
+import { eventPredicate, readEventAnnotations } from './temporal.js';
 
 export const DEFAULT_RECALL_EMBEDDING_DEADLINE_MS = 10_000;
 export const MAX_RECALL_EMBEDDING_DEADLINE_MS = 30_000;
@@ -551,5 +551,16 @@ export async function recall(pool: Queryable, opts: RecallOptions): Promise<Reca
   const selected = await recallCandidates(pool, opts, opts.eventWindow ? 100 : opts.limit);
   const hydrateResults = () => hydrateRecallCandidates(pool, selected.candidates.map(c => c.id), opts.query,
     new Map(selected.candidates.map(c => [c.id, c.score])), opts.scopeIds, opts.types, opts.readBudgetBytes, opts.budget, false, opts.eventFilter, opts.actor);
-  return { results: await (!connectable(pool) ? queueBorrowedSql(pool, hydrateResults) : hydrateResults()), diagnostics: selected.diagnostics };
+  let results = await (!connectable(pool) ? queueBorrowedSql(pool, hydrateResults) : hydrateResults());
+  if (opts.eventWindow) {
+    const events = opts.actor ? await readEventAnnotations(pool,opts.actor,results.map(r => r.memory.id),true,opts.readBudgetBytes,opts.budget) : new Map();
+    const annotations = new Map<string,EventAnnotation>();
+    results = results.filter(r => {
+      const event = events.get(r.memory.id);
+      if (!event) return false;
+      annotations.set(r.memory.id,event.annotation);r.memory.event=event;return true;
+    });
+    results = orderEventResults(results.map(result => ({id:result.memory.id,score:result.score,result})),opts.eventWindow,annotations).map(row => row.result);
+  }
+  return { results: results.slice(0,opts.limit), diagnostics: selected.diagnostics };
 }

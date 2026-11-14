@@ -19,6 +19,7 @@ export class SupersedeStorageError extends Error {
 }
 
 export interface SupersedeWriteInput {
+  validateResult?: (result: SupersedeWriteResult) => void;
   eventAnnotation?: EventAnnotationInput;
   readBudgetBytes?: number;
   supersededId: string;
@@ -116,6 +117,7 @@ async function supersedeInTransaction(client: pg.PoolClient, input: SupersedeWri
   // Derived rows for the archived predecessor are removed in the same
   // transaction as the lifecycle transition, independent of successor I/O.
   await client.query('DELETE FROM memory_embeddings WHERE memory_id = $1', [predecessor.id]);
+  input.validateResult?.({predecessor:rowToMemory(archived.rows[0]),successor,scope});
   await recordAudit(client, {
     principalId: input.principalId, action: 'write', memoryId: successor.id, scopeId: scope.id,
     metadata: {

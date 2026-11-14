@@ -163,6 +163,7 @@ export async function supersedeForPrincipal(
   input: SupersedeInput, auditMetadata: Record<string, unknown> = {},
   allowedSource?: string,
   readBudgetBytes?: number,
+  validateResult?: (result: SupersedeResult) => void,
 ): Promise<SupersedeResult> {
   try {
     const source = input.source ?? 'manual';
@@ -176,6 +177,7 @@ export async function supersedeForPrincipal(
     try {
       result = await supersedeDecision(pool, {
         ...input, tags, source, principalId: principal.id, auditMetadata, readBudgetBytes,
+        validateResult: validateResult ? value => validateResult({ ...value, embedded:false, embedErrorCode:'EMBEDDING_FAILED' }) : undefined,
       });
     } catch (error) {
       if (error instanceof SupersedeStorageError) throw mapStorageError(error);
