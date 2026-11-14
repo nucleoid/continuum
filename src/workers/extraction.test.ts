@@ -4,11 +4,87 @@ import { extractionFixture, syntheticExtractor } from '../extraction/test-helper
 import { processExtraction, ExtractionTransientError, ExtractionWorker } from './extraction.js';
 import { createMemory } from '../storage/memories.js';
 import { requireExtractionReady, requireEvidenceReady } from '../storage/provider-lifecycle.js';
-import { extractionDescriptor } from '../extraction/provider.js';
+import { extractionDescriptor, ExtractionRegistry } from '../extraction/provider.js';
 import { chunkSource } from '../extraction/chunking.js';
 import { createScope } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import type pg from 'pg';
+
+it('leaves all queued sources untouched while credentials are missing and resumes after recovery', async () => {
+  let calls = 0; const good = syntheticExtractor();
+  const profile = syntheticExtractor(async (...args) => { calls++; return good.adapter.invoke(...args); });
+  profile.adapter.credentials = 'missing';
+  await extractionFixture(async f => {
+    for (let i = 0; i < 2; i++) await createMemory(f.app, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId,
+      type: 'decision', title: `Credential outage ${i}`, body: 'Keep queued truth', source: 'manual' });
+    for (let i = 0; i < 2; i++) expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('idle');
+    expect((await f.owner.query("SELECT count(*)::int AS n FROM extraction_runs WHERE state='queued' AND started_at IS NULL")).rows[0].n).toBe(2);
+    expect((await f.owner.query('SELECT count(*)::int AS n FROM pipeline_budget_workflows')).rows[0].n).toBe(0);
+    expect(calls).toBe(0);
+    profile.adapter.credentials = 'not-required';
+    for (let i = 0; i < 2; i++) expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('processed');
+    expect(calls).toBe(2);
+  }, profile);
+}, 120_000);
+
+it('defers an availability race after claim under the original finite workflow and retry allowance', async () => {
+  const profile = syntheticExtractor();
+  await extractionFixture(async f => {
+    const memory = await createMemory(f.app, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId,
+      type: 'decision', title: 'Post-claim outage', body: 'Keep pending chunk', source: 'manual' });
+    const observed = new Proxy(f.worker, { get(target, key) {
+      if (key !== 'connect') { const value = Reflect.get(target, key); return typeof value === 'function' ? value.bind(target) : value; }
+      return async () => {
+        const client = await target.connect();
+        return new Proxy(client, { get(connection, property) {
+          if (property !== 'query') { const value = Reflect.get(connection, property); return typeof value === 'function' ? value.bind(connection) : value; }
+          return async (...args: [string, unknown[]?]) => {
+            const result = await connection.query(...args);
+            if (args[0].includes('SELECT continuum_extraction_claim')) profile.adapter.credentials = 'missing';
+            return result;
+          };
+        } });
+      };
+    } }) as pg.Pool;
+    expect(await processExtraction(observed, randomUUID(), f.profile)).toBe('unavailable');
+    const before = (await f.owner.query('SELECT workflow_id FROM extraction_runs WHERE memory_id=$1', [memory.id])).rows[0].workflow_id;
+    const result = (await f.app.query('SELECT continuum_extraction_status($1,$2,FALSE) AS result', [f.actorId, memory.id])).rows[0].result;
+    expect(result).toMatchObject({ status: 'queued', reason: 'transient', skipped: 0 });
+    expect(result.coverage[0].status).toBe('pending');
+    expect(result.budget.charged).toMatchObject({ calls: 0, retries: 1 });
+    profile.adapter.credentials = 'not-required';
+    await f.app.query('SELECT continuum_extraction_retry($1,$2)', [f.actorId, memory.id]);
+    expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('processed');
+    expect((await f.owner.query('SELECT workflow_id FROM extraction_runs WHERE memory_id=$1', [memory.id])).rows[0].workflow_id).toBe(before);
+    expect((await f.owner.query('SELECT used FROM pipeline_budget_workflows WHERE id=$1', [before])).rows[0].used).toMatchObject({ calls: 1, retries: 1 });
+  }, profile);
+}, 120_000);
+
+it('rejects installed chunk counts above the finite call allowance in TypeScript and SQL', async () => {
+  const profile = syntheticExtractor(); profile.maxChunks = profile.budget.limits.calls + 1;
+  expect(() => new ExtractionRegistry().register(profile)).toThrow(/profile/);
+  await extractionFixture(async f => {
+    const descriptor = extractionDescriptor({ ...f.profile, maxChunks: f.profile.budget.limits.calls + 1 });
+    expect((await f.owner.query('SELECT continuum_extraction_valid_descriptor($1) AS valid', [descriptor])).rows[0].valid).toBe(false);
+    await expect(f.operator.query('SELECT continuum_operator_install_extractor($1,$2,TRUE)', [f.adminId, descriptor])).rejects.toMatchObject({ code: '23514' });
+  });
+}, 120_000);
+
+it('reports an exhausted attachment ceiling as budget without implying an ambiguous dispatch', async () => {
+  const profile = syntheticExtractor(async () => { throw new ExtractionTransientError(); });
+  profile.maxChunks = 1; profile.budget = { ...profile.budget, limits: { ...profile.budget.limits, calls: 1 } };
+  await extractionFixture(async f => {
+    const memory = await createMemory(f.app, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId,
+      type: 'decision', title: 'Original attempt ceiling', body: 'Source survives', source: 'manual' });
+    expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('unavailable');
+    await f.owner.query('UPDATE extraction_runs SET retry_at=clock_timestamp()');
+    expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('unavailable');
+    const result = (await f.app.query('SELECT continuum_extraction_status($1,$2,FALSE) AS result', [f.actorId, memory.id])).rows[0].result;
+    expect(result).toMatchObject({ status: 'skipped', reason: 'budget' });
+    expect(result.budget.charged.calls).toBe(1);
+    expect((await f.owner.query('SELECT count(*)::int AS n FROM extraction_attempts')).rows[0].n).toBe(1);
+  }, profile);
+}, 120_000);
 
 it('abandons a never-reserved skipped chunk without hiding healthy later chunks', async () => {
   const profile = syntheticExtractor(); let checks = 0;
@@ -48,7 +124,7 @@ it('reports UTF-8 chunk-count exhaustion as skipped budget without dispatch or s
   }, profile);
 }, 120_000);
 
-it('parks a revoked binding and processes another authorized scope on the same LOGIN', async () => {
+it('keeps a revoked binding queued while processing another authorized scope on the same LOGIN', async () => {
   await extractionFixture(async f => {
     const first = await createMemory(f.app, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId,
       type: 'decision', title: 'Revoked first scope', body: 'Never disclose', source: 'manual' });
@@ -60,11 +136,12 @@ it('parks a revoked binding and processes another authorized scope on the same L
     await createMemory(f.app, { scopeId: second.id, scopeKind: 'project', authorId: f.actorId,
       type: 'decision', title: 'Healthy second scope', body: 'Authorized work survives', source: 'manual' });
     await f.owner.query('UPDATE scope_memberships SET active=FALSE WHERE principal_id=$1 AND scope_id=$2', [f.producerId, f.scopeId]);
-    expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('unavailable');
-    expect((await f.owner.query('SELECT state,reason FROM extraction_runs WHERE memory_id=$1', [first.id])).rows[0])
-      .toMatchObject({ state: 'unavailable', reason: 'policy' });
     expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('processed');
+    expect((await f.owner.query('SELECT state,reason FROM extraction_runs WHERE memory_id=$1', [first.id])).rows[0])
+      .toMatchObject({ state: 'queued', reason: null });
     expect((await f.owner.query("SELECT count(*)::int AS n FROM extraction_runs WHERE state='complete'")).rows[0].n).toBe(1);
+    await f.owner.query('UPDATE scope_memberships SET active=TRUE WHERE principal_id=$1 AND scope_id=$2', [f.producerId, f.scopeId]);
+    expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('processed');
   });
 }, 120_000);
 
@@ -219,8 +296,13 @@ it('retains admission through an abort-ignoring call and suppresses its late ass
     await poll;
     const before = (await f.owner.query('SELECT active,retained_bytes FROM pipeline_budget_workflows')).rows[0];
     expect(before.active).toBe(1); expect(Number(before.retained_bytes)).toBeGreaterThan(0);
-    expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('idle');
-    finish();
+    try {
+      for (let i = 0; i < 2; i++) await createMemory(f.app, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId,
+        type: 'decision', title: `Queued behind detached ${i}`, body: 'Keep original work', source: 'manual' });
+      for (let i = 0; i < 2; i++) expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('idle');
+      expect((await f.owner.query("SELECT count(*)::int AS n FROM extraction_runs WHERE state='queued' AND started_at IS NULL")).rows[0].n).toBe(2);
+      expect((await f.owner.query('SELECT count(*)::int AS n FROM pipeline_budget_workflows')).rows[0].n).toBe(1);
+    } finally { finish(); await worker.stop(); }
     // Explicit actual promise settlement, rather than a timer or a lease, is
     // what releases retained resources. stop() remains idempotent afterwards.
     await worker.stop();
