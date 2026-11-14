@@ -254,7 +254,8 @@ export async function runBudgetedStage<I, O>(budget: Budget, adapter: BudgetAdap
       || !adapter.tokens.validationId || !['exact', 'conservative'].includes(adapter.tokens.kind)) return skip('capability_unavailable');
     if (!adapter.price || adapter.price.id !== budget.profile.rateSchedule || adapter.price.currency !== budget.profile.currency) return skip('pricing_unavailable');
     price = Object.freeze({ ...adapter.price });
-    timeoutMs = Math.floor(budget.remainingMs(Math.min(integer(adapter.timeoutMs), options.transportMs ?? budget.profile.stageMs)));
+    timeoutMs = Math.floor(budget.remainingMs(Math.min(budget.profile.stageMs, integer(adapter.timeoutMs),
+      integer(options.transportMs ?? budget.profile.stageMs))));
     if (timeoutMs < 1) return skip('deadline');
     caps = { outputTokens: integer(adapter.outputTokens), reasoningTokens: integer(adapter.reasoningTokens), completionTokens: integer(adapter.completionTokens) };
     if (caps.outputTokens + caps.reasoningTokens > caps.completionTokens) return skip('capability_unavailable');
@@ -277,6 +278,8 @@ export async function runBudgetedStage<I, O>(budget: Budget, adapter: BudgetAdap
     processState.active++; processActive++; processRetained += retained;
     processCalls.set(processKey, processState);
   } catch (error) { return skip(error instanceof BudgetError ? error.reason : 'capability_unavailable'); }
+  const stopAt = performance.now() + timeoutMs;
+  const invoke = adapter.invoke.bind(adapter);
   const controller = new AbortController();
   let detached = false;
   let settled = false;
@@ -284,6 +287,10 @@ export async function runBudgetedStage<I, O>(budget: Budget, adapter: BudgetAdap
     if (!settled && !detached) { detached = true; processState.detached++; }
   }, { once: true });
   const abort = () => controller.abort();
+  const stageLive = () => {
+    if (performance.now() >= stopAt) controller.abort();
+    return !controller.signal.aborted;
+  };
   budget.signal.addEventListener('abort', abort, { once: true });
   options.signal?.addEventListener('abort', abort, { once: true });
   if (budget.signal.aborted || options.signal?.aborted) controller.abort();
@@ -302,15 +309,15 @@ export async function runBudgetedStage<I, O>(budget: Budget, adapter: BudgetAdap
         durableReserved = await options.durable.reserve(reserve, reserve.inputBytes + reserve.outputBytes);
         if (!durableReserved) return skip('stale_attempt');
       }
-      if (controller.signal.aborted) return skip('cancelled');
+      if (!stageLive()) return skip('deadline');
       if (options.authorize && !await options.authorize()) return skip('policy_denied');
-      if (controller.signal.aborted) return skip('cancelled');
+      if (!stageLive()) return skip('deadline');
       budget.assertLive();
       if (options.durable && !await options.durable.dispatch()) return skip('stale_attempt');
-      if (controller.signal.aborted) return skip('cancelled');
+      if (!stageLive()) return skip('deadline');
       invoked = true;
-      const result = await adapter.invoke(serialized, { ...caps, signal: controller.signal,
-        timeoutMs: Math.max(1, Math.floor(budget.remainingMs(timeoutMs))), responseBodyBytes: reserve.outputBytes });
+      const result = await invoke(serialized, { ...caps, signal: controller.signal,
+        timeoutMs: Math.max(1, Math.floor(Math.min(stopAt - performance.now(), budget.remainingMs(timeoutMs)))), responseBodyBytes: reserve.outputBytes });
       const output = boundedJson(result.response, reserve.outputBytes);
       actual.outputBytes = Buffer.byteLength(output);
       const usage = result.usage;
@@ -326,13 +333,13 @@ export async function runBudgetedStage<I, O>(budget: Budget, adapter: BudgetAdap
             completionTokens: usage.completionTokens, spendMicros: priceMicros(price, inputTokens, usage.outputTokens, usage.reasoningTokens) };
         }
       }
-      if (controller.signal.aborted) return skip('deadline');
+      if (!stageLive()) return skip('deadline');
       budget.assertLive();
       if (options.authorize && !await options.authorize()) return skip('policy_denied');
-      if (controller.signal.aborted) return skip('deadline');
+      if (!stageLive()) return skip('deadline');
       const publish = !options.durable || await options.durable.settle(actual);
       durableReserved = false;
-      if (!publish || controller.signal.aborted) return skip('stale_attempt');
+      if (!publish || !stageLive()) return skip('stale_attempt');
       return { status: 'complete', value: result.value, provenance: usage?.provenance ?? 'unknown' };
     } catch (error) { return skip(error instanceof BudgetError ? error.reason : 'provider_failed'); }
     finally {
