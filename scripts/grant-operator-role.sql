@@ -137,6 +137,11 @@ BEGIN
   IF to_regprocedure(format('%I.continuum_operator_set_promotion_webhook_ids(uuid,text[])',schema_name)) IS NOT NULL THEN
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_operator_set_promotion_webhook_ids(UUID,TEXT[]) TO %I',schema_name,target_role);
   END IF;
+  -- Historical upgrade rehearsals also use the current grant assets. The
+  -- capability is granted only after its exact forward function is present.
+  IF to_regprocedure(format('%I.continuum_operator_quarantine_expired_renewal(uuid,uuid,uuid,text,uuid,uuid,bigint,uuid,integer,text)',schema_name)) IS NOT NULL THEN
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_operator_quarantine_expired_renewal(UUID,UUID,UUID,TEXT,UUID,UUID,BIGINT,UUID,INTEGER,TEXT) TO %I',schema_name,target_role);
+  END IF;
   IF to_regclass(format('%I.continuum_pgvector_role_profiles', schema_name)) IS NOT NULL THEN
     EXECUTE format(
       'SELECT %I.continuum_grant_application_vector_functions($1::name)', schema_name

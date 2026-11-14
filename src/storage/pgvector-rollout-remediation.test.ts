@@ -184,6 +184,76 @@ afterEach(async () => {
 }, 120_000);
 
 describe('pgvector rollout remediation', () => {
+  it('upgrades existing 0090 APP OP and SYNC profiles through only 0091 and verifies the retained guards on rerun', async () => {
+    await withFreshDatabase(async (root, target, url) => {
+      const schema = identifier('renewal_upgrade');
+      await target.query(`CREATE SCHEMA ${quoteIdentifier(schema)}`);
+      const owner = migrationPool(url, schema);
+      const partial = await migrationDirectoryThrough('0090_standup_activity.sql');
+      expect((await runMigrations(owner, partial)).at(-1)?.name).toBe('0090_standup_activity.sql');
+      const actor = await createPrincipal(owner, { externalId: randomUUID(), kind: 'user', displayName: 'Upgrade operator' });
+      const sync = await createPrincipal(owner, { externalId: randomUUID(), kind: 'service', displayName: 'Upgrade sync' });
+      const org = (await getScopeByRef(owner, { kind: 'org', name: '' }))!;
+      await addMembership(owner, actor.id, org.id, 'admin');
+      const appRole = identifier('renewal_app'), opRole = identifier('renewal_op'), syncRole = identifier('renewal_sync');
+      roles.push(appRole, opRole, syncRole);
+      for (const role of [appRole,opRole]) await root.query(`CREATE ROLE ${quoteIdentifier(role)} NOLOGIN`);
+      await root.query(`CREATE ROLE ${quoteIdentifier(syncRole)} LOGIN PASSWORD ${quoteLiteral(randomUUID())}`);
+      await grantApplicationRole(owner, schema, appRole);
+      await grantApplicationRole(owner, schema, opRole);
+      await grantSyncRole(owner, schema, syncRole, sync.id);
+      const opSource = await readFile(join(process.cwd(), 'scripts/grant-operator-role.sql'), 'utf8');
+      // Run the same current script on 0090 and 0091. Only the exact function's
+      // presence changes whether its new capability can be granted.
+      const grantOperator = async (source: string) => {
+        const sql = source.split(/\r?\n/).filter((line) => !line.trimStart().startsWith('\\')).join('\n')
+          .replaceAll(':"continuum_schema"',quoteIdentifier(schema)).replaceAll(":'continuum_schema'",quoteLiteral(schema))
+          .replaceAll(':"continuum_operator_role"',quoteIdentifier(opRole)).replaceAll(":'continuum_operator_role'",quoteLiteral(opRole))
+          .replaceAll(":'continuum_principal_id'",quoteLiteral(actor.id));
+        await owner.query(sql);
+      };
+      await grantOperator(opSource);
+      const profiles = async () => (await owner.query(`SELECT database_role_oid,profile_kind,provider_schema_oid FROM continuum_pgvector_role_profiles ORDER BY database_role_oid`)).rows;
+      const identities = async () => (await owner.query(`SELECT database_role,database_role_oid,principal_id,can_approve,can_sync FROM continuum_trusted_database_identities ORDER BY database_role_oid`)).rows;
+      const beforeProfiles = await profiles(), beforeIdentities = await identities();
+      expect(beforeProfiles.map((row) => row.profile_kind).sort()).toEqual(['application','operator','sync']);
+      expect(beforeIdentities).toHaveLength(2);
+      const full = await fullMigrationDirectory();
+      expect((await runMigrations(owner, full)).map((entry) => entry.name)).toEqual(['0091_coordination_renewal_quarantine.sql']);
+      const signature = `${quoteIdentifier(schema)}.continuum_operator_quarantine_expired_renewal(uuid,uuid,uuid,text,uuid,uuid,bigint,uuid,integer,text)`;
+      const allowed = async (role: string) => (await owner.query("SELECT has_function_privilege($1::name,$2::text,'EXECUTE') AS allowed", [role,signature])).rows[0].allowed;
+      for (const role of [appRole,opRole,syncRole]) expect(await allowed(role)).toBe(false);
+      expect(await profiles()).toEqual(beforeProfiles); expect(await identities()).toEqual(beforeIdentities);
+      await grantOperator(opSource);
+      await grantApplicationRole(owner, schema, appRole);
+      await grantSyncRole(owner, schema, syncRole, sync.id);
+      expect(await allowed(opRole)).toBe(true); expect(await allowed(appRole)).toBe(false); expect(await allowed(syncRole)).toBe(false);
+      expect(await profiles()).toEqual(beforeProfiles); expect(await identities()).toEqual(beforeIdentities);
+      expect(await runMigrations(owner, full)).toEqual([]);
+      // Owner-controlled drift is refused, not silently repaired by the ledger skip.
+      await owner.query('ALTER TABLE coordination_leases DISABLE TRIGGER quarantine_lease_generation');
+      await expect(runMigrations(owner, full)).rejects.toThrow('renewal quarantine trigger drift');
+      await owner.query('ALTER TABLE coordination_leases ENABLE TRIGGER quarantine_lease_generation');
+      const signature0 = 'continuum_guard_quarantined_renewal_receipt()';
+      const originalBody = (await owner.query('SELECT prosrc FROM pg_proc WHERE oid=$1::regprocedure',[signature0])).rows[0].prosrc;
+      const replaceBody = (body: string) => owner.query(`CREATE OR REPLACE FUNCTION continuum_guard_quarantined_renewal_receipt()
+        RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,${quoteIdentifier(schema)},pg_temp AS $body$${body}$body$`);
+      await replaceBody('BEGIN RETURN NEW; END;');
+      await expect(runMigrations(owner, full)).rejects.toThrow('renewal quarantine function body or trust drift');
+      await replaceBody(originalBody);
+      await owner.query('GRANT EXECUTE ON FUNCTION continuum_guard_quarantined_renewal_receipt() TO PUBLIC');
+      await expect(runMigrations(owner, full)).rejects.toThrow('renewal quarantine function body or trust drift');
+      await owner.query('REVOKE ALL ON FUNCTION continuum_guard_quarantined_renewal_receipt() FROM PUBLIC');
+      await owner.query('ALTER FUNCTION continuum_guard_quarantined_renewal_receipt() SECURITY INVOKER');
+      await expect(runMigrations(owner, full)).rejects.toThrow('renewal quarantine function body or trust drift');
+      await owner.query('ALTER FUNCTION continuum_guard_quarantined_renewal_receipt() SECURITY DEFINER');
+      await owner.query('ALTER FUNCTION continuum_guard_quarantined_renewal_receipt() SET search_path=pg_catalog');
+      await expect(runMigrations(owner, full)).rejects.toThrow('renewal quarantine function body or trust drift');
+      await owner.query(`ALTER FUNCTION continuum_guard_quarantined_renewal_receipt() SET search_path=pg_catalog,${quoteIdentifier(schema)},pg_temp`);
+      expect(await runMigrations(owner, full)).toEqual([]);
+    });
+  }, 120_000);
+
   it('supports PostgreSQL database-owner control of a hardened public app schema', async () => {
     await withFreshDatabase(async (_root, target, url) => {
       const pool = migrationPool(url, 'public');
@@ -673,6 +743,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0088_embedding_provider_scan_index_rebuild.sql' }),
         expect.objectContaining({ name: '0089_promotion_outbox.sql' }),
         expect.objectContaining({ name: '0090_standup_activity.sql' }),
+        expect.objectContaining({ name: '0091_coordination_renewal_quarantine.sql' }),
       ]);
       await grantApplicationRole(pool, applicationSchema, appRole);
       await expect(pool.query(
@@ -717,6 +788,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0088_embedding_provider_scan_index_rebuild.sql' }),
         expect.objectContaining({ name: '0089_promotion_outbox.sql' }),
         expect.objectContaining({ name: '0090_standup_activity.sql' }),
+        expect.objectContaining({ name: '0091_coordination_renewal_quarantine.sql' }),
       ]);
       await grantApplicationRole(pool, applicationSchema, appRole);
       await expect(pool.query(
@@ -897,6 +969,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0088_embedding_provider_scan_index_rebuild.sql' }),
         expect.objectContaining({ name: '0089_promotion_outbox.sql' }),
         expect.objectContaining({ name: '0090_standup_activity.sql' }),
+        expect.objectContaining({ name: '0091_coordination_renewal_quarantine.sql' }),
       ]);
       await grantApplicationRole(pool, applicationSchema, appRole);
       await expect(pool.query(
@@ -957,6 +1030,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0088_embedding_provider_scan_index_rebuild.sql' }),
         expect.objectContaining({ name: '0089_promotion_outbox.sql' }),
         expect.objectContaining({ name: '0090_standup_activity.sql' }),
+        expect.objectContaining({ name: '0091_coordination_renewal_quarantine.sql' }),
       ]);
       await grantApplicationRole(owner, applicationSchema, appRole);
       await expect(owner.query(
@@ -1250,6 +1324,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0088_embedding_provider_scan_index_rebuild.sql' }),
         expect.objectContaining({ name: '0089_promotion_outbox.sql' }),
         expect.objectContaining({ name: '0090_standup_activity.sql' }),
+        expect.objectContaining({ name: '0091_coordination_renewal_quarantine.sql' }),
       ]);
       await grantApplicationRole(owner, applicationSchema, appRole);
       await expect(owner.query(

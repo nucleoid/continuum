@@ -76,6 +76,10 @@ function safeCoordinationError(error: unknown): ServiceError {
     );
   }
   const code = (error as { code?: unknown })?.code;
+  if (code === '23514'
+    && (error as { constraint?: unknown })?.constraint === 'coordination_renewal_quarantined') {
+    return leaseLost();
+  }
   if (code === '55P03' || code === '57014' || code === '40P01' || code === '40001') {
     return new ServiceError(
       'COORDINATION_TIMEOUT',
