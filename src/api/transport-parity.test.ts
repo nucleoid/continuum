@@ -81,6 +81,15 @@ describe('REST/MCP semantic parity matrix', () => {
       expect((await pool.query("SELECT count(*)::int AS n FROM memories WHERE title='Budgeted event'")).rows[0].n).toBe(0);
     } finally { await bounded.close();await server.close(); }
   });
+  it('keeps ambiguous candidate prose in authorized inspection, outside recall summaries', async () => {
+    const app=createApp(pool),auth='Bearer entra:user:parity';
+    const captured=await request(app).post('/api/v0/capture').set('Authorization',auth).send({scope:{kind:'team',name:'payments'},type:'decision',title:'Ambiguous signal',body:'Signal reference',source:'manual',eventAnnotation:{status:'ambiguous',original:'Private date wording',candidates:[{notation:'Private candidate date'}]}});
+    expect(captured.status).toBe(201);
+    const recalled=await request(app).post('/api/v0/recall').set('Authorization',auth).send({query:'signal',eventFilter:{at:'2026-01-01T00:00:00Z',includeUnknown:true}});
+    expect(recalled.body.results[0].event.annotation).toEqual({status:'ambiguous'});
+    const fetched=await request(app).get(`/api/v0/memories/${captured.body.id}`).set('Authorization',auth);
+    expect(fetched.body.event.annotation.candidates).toEqual([{notation:'Private candidate date'}]);
+  });
 
   it.each(['rest', 'mcp'] as const)('budgets %s excerpts rather than full stored bodies with reranking enabled', async transport => {
     const team = (await getScopeByRef(pool, { kind: 'team', name: 'payments' }))!;
