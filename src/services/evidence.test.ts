@@ -17,6 +17,7 @@ it('preserves current authority, source-only generator bytes and physical offboa
     for (const kind of ['source-document-version','derived-observation','history','cache','trace','managed-export','queued-payload'] as const) owners.register(kind, () => true);
     const project = await createScope(f.owner, { kind: 'project', name: randomUUID() });
     await addMembership(f.owner, f.actorId, project.id, 'writer');
+    await addMembership(f.owner, f.adminId, project.id, 'writer');
     const source = await createMemory(f.app, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId,
       type: 'decision', title: 'Owned source', body: 'Secret source body', source: 'manual' });
     const sourceVersion = (await f.app.query('SELECT continuum_evidence_source($1,$2) AS id', [f.actorId, source.id])).rows[0].id;
@@ -37,6 +38,13 @@ it('preserves current authority, source-only generator bytes and physical offboa
     await expect(readEvidence(f.app, f.actorId, parent, new EvidencePayloadRegistry())).rejects.toMatchObject({ code: 'NOT_FOUND' });
     await f.operator.query("SELECT continuum_operator_evidence_policy($1,$2,'local-only','not-required',NULL,NULL)", [f.adminId, source.id]);
     await expect(readEvidence(f.app, f.actorId, parent, owners)).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    const independent=await createMemory(f.app,{scopeId:project.id,scopeKind:'project',authorId:f.actorId,type:'decision',
+      title:'Independent project source',body:'Independent project evidence',source:'manual'});
+    const surviving=(await f.app.query('SELECT continuum_evidence_source($1,$2) AS id',[f.actorId,independent.id])).rows[0].id;
+    const node=(await f.owner.query('SELECT root_id FROM evidence_versions WHERE id=$1',[parent])).rows[0].root_id;
+    const repaired=await registerEvidence(f.app,f.actorId,{nodeId:node,expectedCurrent:parent,scopeId:project.id,kind:'queued-payload',
+      parents:[{versionId:surviving,kind:'derivation'}],identity:{transform:'repair-v2',model:'none',prompt:'none',schema:'v1'},
+      payload:'Fresh shared wording from independent project evidence'},owners);
     await requireEvidenceReady(f.app);
     const admin = (await getPrincipal(f.owner, f.adminId))!;
     let result = await offboardPrincipal(f.operator, admin, f.actorId, { confirmationScopeId: f.scopeId, batchSize: 1 });
@@ -44,6 +52,7 @@ it('preserves current authority, source-only generator bytes and physical offboa
     expect(result.complete).toBe(true);
     expect((await f.owner.query('SELECT count(*)::int AS n FROM evidence_payloads WHERE version_id=ANY($1::uuid[])', [versions])).rows[0].n).toBe(0);
     expect((await f.owner.query("SELECT count(*)::int AS n FROM evidence_state WHERE version_id=ANY($1::uuid[]) AND state<>'erased'", [versions])).rows[0].n).toBe(0);
+    expect(await readEvidence(f.app,f.adminId,repaired,owners)).toBe('Fresh shared wording from independent project evidence');
     const receipt = (await f.owner.query("SELECT metadata FROM audit_log WHERE metadata->>'operation'='principal_evidence_privacy_repaired' LIMIT 1")).rows[0].metadata;
     await expect(f.app.query('INSERT INTO audit_log(principal_id,action,scope_id,metadata) VALUES($1,\'archive\',$2,$3)', [f.adminId,f.scopeId,receipt])).rejects.toMatchObject({ code: '42501' });
     expect((await offboardPrincipal(f.operator, admin, f.actorId, { confirmationScopeId: f.scopeId })).alreadyOffboarded).toBe(true);

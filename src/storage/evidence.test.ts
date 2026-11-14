@@ -112,6 +112,22 @@ describe('immutable evidence and synchronous eligibility', () => {
     await expect(derive(f,[...groups,full],rejected)).rejects.toThrow(/bounds/);
     expect((await pool.query('SELECT count(*)::int AS n FROM evidence_roots WHERE id=$1',[rejected])).rows[0].n).toBe(0);
   },30000);
+  it('keeps trusted promotion ancestry through later child edits and never snapshots stale upstream authority',async()=>{
+    const f=await fixture();
+    const copy=await createMemory(pool,{scopeId:f.scope.id,scopeKind:'project',authorId:f.actor.id,type:'fact',title:f.memory.title,
+      body:f.memory.body,source:'promote:manual',metadata:{promoted_from:f.memory.id}});
+    await pool.query("UPDATE memories SET state='promoted',promoted_to_id=$2 WHERE id=$1",[f.memory.id,copy.id]);
+    const parent=(await pool.query('SELECT current_version FROM evidence_roots WHERE id=$1',[f.memory.id])).rows[0].current_version;
+    await pool.query("UPDATE memories SET body='A later approved source edit' WHERE id=$1",[copy.id]);
+    expect(await eligible(f.actor.id,parent)).toBe(true);
+    const before=(await pool.query('SELECT count(*)::int AS n FROM evidence_versions WHERE root_id=$1',[copy.id])).rows[0].n;
+    // Owner fault injection models a current upstream fence without granting
+    // that private-table authority to ordinary runtime roles.
+    await pool.query("UPDATE evidence_roots SET generation=generation+1,external_state='deny' WHERE id=$1",[f.memory.id]);
+    await pool.query("UPDATE memories SET body='Cannot become a new admitted evidence version' WHERE id=$1",[copy.id]);
+    expect((await pool.query('SELECT count(*)::int AS n FROM evidence_versions WHERE root_id=$1',[copy.id])).rows[0].n).toBe(before);
+    await expect(pool.query('SELECT continuum_evidence_source($1,$2)',[f.actor.id,copy.id])).rejects.toThrow(/unavailable/);
+  });
   it('linearizes registration against source writes and rolls source changes back with failed required guard audits', async () => {
     const f=await fixture(),held=await pool.connect(),writer=await pool.connect();
     try{
