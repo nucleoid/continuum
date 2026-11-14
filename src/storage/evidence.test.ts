@@ -6,6 +6,7 @@ import { createPrincipal } from './principals.js';
 import { createScope } from './scopes.js';
 import { addMembership } from './memberships.js';
 import { createMemory } from './memories.js';
+import { readFileSync } from 'node:fs';
 
 describe('immutable evidence and synchronous eligibility', () => {
   let pool: pg.Pool;
@@ -86,6 +87,10 @@ describe('immutable evidence and synchronous eligibility', () => {
     const ceiling = (await pool.query('SELECT expires_at FROM memories WHERE id=$1', [f.memory.id])).rows[0].expires_at;
     expect((await pool.query('SELECT expires_at FROM evidence_versions WHERE id=$1', [version])).rows[0].expires_at).toEqual(ceiling);
     expect(await eligible(f.actor.id,version)).toBe(true);
+    const parent=(await pool.query('SELECT parent_id FROM evidence_edges WHERE version_id=$1',[version])).rows[0].parent_id;
+    expect(await eligible(f.actor.id,parent)).toBe(true);
+    expect((await pool.query(`SELECT root_id,generation FROM evidence_closure WHERE version_id=$1
+      EXCEPT SELECT root_id,generation FROM evidence_closure WHERE version_id=$2`,[parent,version])).rows).toEqual([]);
     await pool.query('DELETE FROM scope_memberships WHERE principal_id=$1 AND scope_id=$2', [f.actor.id,f.scope.id]);
     expect(await eligible(f.actor.id,version)).toBe(false);
     const fake = await createMemory(pool, { scopeId: destinationScope.id, scopeKind: 'project', authorId: f.actor.id,
@@ -125,5 +130,25 @@ describe('immutable evidence and synchronous eligibility', () => {
         expect(await eligible(f.actor.id,f.source)).toBe(true);
       }finally{await pool.query('DROP TRIGGER reject_evidence_guard_audit ON audit_log; DROP FUNCTION reject_evidence_guard_audit()');}
     }finally{await held.query('ROLLBACK');held.release();writer.release();}
+  });
+  it('denies missing external validity and non-finite source expiry in SQL as well as pure policy',async()=>{
+    const f=await fixture();
+    await expect(pool.query("UPDATE evidence_roots SET external_state='allow',checked_at=clock_timestamp(),valid_until=NULL WHERE id=$1",[f.memory.id])).rejects.toThrow();
+    const memory=await createMemory(pool,{scopeId:f.scope.id,scopeKind:'project',authorId:f.actor.id,type:'fact',title:'Invalid expiry',body:'Body',source:'manual'});
+    await pool.query("UPDATE memories SET expires_at='infinity'::timestamptz WHERE id=$1",[memory.id]);
+    await expect(pool.query('SELECT continuum_evidence_source($1,$2)',[f.actor.id,memory.id])).rejects.toThrow();
+  });
+  const lifecycleCases=JSON.parse(readFileSync(new URL('../../evals/evidence-lifecycle-v1.json',import.meta.url),'utf8')) as Array<{id:string;mutation:string;payload:string}>;
+  it.each(lifecycleCases)('separate lifecycle fixture $id denies disclosure/publication',async item=>{
+    const f=await fixture(),version=await derive(f);
+    if(item.mutation==='delete') await pool.query('DELETE FROM memories WHERE id=$1',[f.memory.id]);
+    else if(item.mutation==='revoke') await pool.query("UPDATE memories SET state='stale' WHERE id=$1",[f.memory.id]);
+    else {
+      await expect(pool.query('SELECT continuum_evidence_register($1,$2,NULL,$3,$4,$5,$6,$7)',[f.actor.id,randomUUID(),f.scope.id,'unsupported-wording',
+        JSON.stringify([{versionId:f.source,kind:'source'}]),{transform:'v1',model:'none',prompt:'none',schema:'v1'},item.payload])).rejects.toThrow(/kind/);
+      return;
+    }
+    expect(await eligible(f.actor.id,version)).toBe(false);
+    expect((await pool.query('SELECT continuum_evidence_payload($1,$2,NULL) AS payload',[f.actor.id,version])).rows[0].payload).toBeNull();
   });
 });
