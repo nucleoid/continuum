@@ -11,7 +11,7 @@ import { EvidencePayloadRegistry } from '../evidence/model.js';
 import { registerEvidence, readEvidence } from '../services/evidence.js';
 import { materializeEvidence, repairEvidence, type EvidenceRepairInput, type EvidenceRepairOutput } from './evidence.js';
 import { starterProfile, type BudgetAdapter } from '../pipeline/budget.js';
-import { offboardPrincipal } from '../services/offboarding.js';
+import { offboardPrincipal, mapOwnedUserScope } from '../services/offboarding.js';
 
 describe('gap-aware evidence invalidation', () => {
   let pool: pg.Pool;
@@ -144,12 +144,23 @@ it('repairs with new wording/version and original durable attempt identity, then
     try {
       await entered.promise;
       const admin=(await getPrincipal(f.owner,f.adminId))!;
+      // Repair added an acknowledged writer to this synthetic personal scope.
+      await mapOwnedUserScope(f.operator,admin,f.actorId,f.scopeId,true);
       let erased=await offboardPrincipal(f.operator,admin,f.actorId,{confirmationScopeId:f.scopeId,batchSize:100});
       for(let i=0;!erased.complete&&i<40;i++) erased=await offboardPrincipal(f.operator,admin,f.actorId,{confirmationScopeId:f.scopeId,batchSize:100});
       expect(erased.complete).toBe(true);
       expect((await f.owner.query('SELECT count(*)::int AS n FROM evidence_payloads WHERE version_id=$1',[lateVersion])).rows[0].n).toBe(0);
     } finally {release.resolve();}
     expect(await late).toBe('unavailable');
+    const until=Date.now()+5000;
+    let settled=false;
+    while(Date.now()<until) {
+      settled=(await f.owner.query(`SELECT a.state='settled' AS settled FROM pipeline_budget_attempts a JOIN evidence_repair_jobs j
+        ON j.workflow_id=a.workflow_id AND j.attempt_id=a.attempt_id WHERE j.version_id=$1`,[lateVersion])).rows[0]?.settled===true;
+      if(settled) break;
+      await new Promise(resolve=>setTimeout(resolve,10));
+    }
+    expect(settled).toBe(true);
     expect((await f.owner.query('SELECT count(*)::int AS n FROM evidence_versions WHERE root_id=$1',[lateNode])).rows[0].n).toBe(1);
     expect((await f.owner.query('SELECT state FROM evidence_repair_jobs WHERE version_id=$1',[lateVersion])).rows[0].state).toBe('cancelled');
   });

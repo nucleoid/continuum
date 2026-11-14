@@ -66,7 +66,6 @@ it('erases shared copies of personal derivatives even when every source is share
     const project = await createScope(f.owner, { kind: 'project', name: randomUUID() });
     await addMembership(f.owner, f.actorId, project.id, 'writer');
     await addMembership(f.owner, f.adminId, project.id, 'writer');
-    await addMembership(f.owner, f.adminId, f.scopeId, 'writer');
     const source = await createMemory(f.app, { scopeId: project.id, scopeKind: 'project', authorId: f.actorId,
       type: 'decision', title: 'Shared source', body: 'Shared reference', source: 'manual' });
     const sourceVersion = (await f.app.query('SELECT continuum_evidence_source($1,$2) AS id', [f.actorId, source.id])).rows[0].id;
@@ -82,7 +81,7 @@ it('erases shared copies of personal derivatives even when every source is share
     try {
       await held.query('BEGIN');
       const late = (await held.query('SELECT continuum_evidence_register($1,$2,NULL,$3,$4,$5,$6,$7) AS id',
-        [f.adminId, randomUUID(), project.id, 'cache', JSON.stringify([{versionId:personal,kind:'copy'}]),
+        [f.actorId, randomUUID(), project.id, 'cache', JSON.stringify([{versionId:personal,kind:'copy'}]),
           {transform:'late-copy-v1',model:'none',prompt:'none',schema:'v1'}, 'Concurrent personal copy'])).rows[0].id;
       copies.push(late);
       await expect(offboardPrincipal(f.operator, admin, f.actorId, { confirmationScopeId: f.scopeId, batchSize: 1 }))
