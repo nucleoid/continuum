@@ -5,7 +5,81 @@ import { processExtraction, ExtractionTransientError, ExtractionWorker } from '.
 import { createMemory } from '../storage/memories.js';
 import { requireExtractionReady, requireEvidenceReady } from '../storage/provider-lifecycle.js';
 import { extractionDescriptor } from '../extraction/provider.js';
+import { chunkSource } from '../extraction/chunking.js';
+import { createScope } from '../storage/scopes.js';
+import { addMembership } from '../storage/memberships.js';
 import type pg from 'pg';
+
+it('abandons a never-reserved skipped chunk without hiding healthy later chunks', async () => {
+  const profile = syntheticExtractor(); let checks = 0;
+  Object.defineProperty(profile.adapter, 'credentials', { enumerable: true,
+    get: () => ++checks === 1 ? 'missing' : 'not-required' });
+  await extractionFixture(async f => {
+    const memory = await createMemory(f.app, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId,
+      type: 'decision', title: 'Pre-reservation skip', body: 'a'.repeat(1400), source: 'manual' });
+    expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('processed');
+    const result = (await f.app.query('SELECT continuum_extraction_status($1,$2,TRUE) AS result', [f.actorId, memory.id])).rows[0].result;
+    expect(result).toMatchObject({ status: 'partial', skipped: 1, completed: 1 });
+    expect(result.coverage[0]).toMatchObject({ status: 'skipped', reason: 'budget' });
+    expect(result.budget.charged.calls).toBe(1);
+    expect((await f.owner.query('SELECT count(*)::int AS n FROM extraction_abandoned_attempts')).rows[0].n).toBe(1);
+    expect((await f.owner.query('SELECT count(*)::int AS n FROM extraction_dispatch_receipts')).rows[0].n).toBe(1);
+  }, profile);
+}, 120_000);
+
+it('reports UTF-8 chunk-count exhaustion as skipped budget without dispatch or source changes', async () => {
+  let calls = 0; const profile = syntheticExtractor(async () => { calls++; return { value: { assertions: [] } }; });
+  profile.chunkBytes = 17; profile.maxChunks = 64;
+  await extractionFixture(async f => {
+    const empty = (await f.owner.query(`SELECT jsonb_build_object('scopeId',$1::uuid,'title','UTF8 edge','body','',
+      'type','decision','tags','[]'::jsonb,'source','manual','sourceRef',NULL,'metadata','{}'::jsonb)::text AS value`, [f.scopeId])).rows[0].value;
+    const body = '😀'.repeat(Math.floor((17 * 64 - Buffer.byteLength(empty)) / 4));
+    const memory = await createMemory(f.app, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId,
+      type: 'decision', title: 'UTF8 edge', body, source: 'manual' });
+    const source = (await f.owner.query('SELECT continuum_evidence_canonical(m) AS value FROM memories m WHERE id=$1', [memory.id])).rows[0].value;
+    expect(Buffer.byteLength(source)).toBeLessThanOrEqual(17 * 64);
+    expect(() => chunkSource(memory.id, source, 17, 64)).toThrow(RangeError);
+    expect((await f.owner.query('SELECT state FROM extraction_runs WHERE memory_id=$1', [memory.id])).rows[0].state).toBe('queued');
+    expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('unavailable');
+    expect((await f.app.query('SELECT continuum_extraction_status($1,$2,FALSE) AS result', [f.actorId, memory.id])).rows[0].result)
+      .toMatchObject({ status: 'skipped', reason: 'budget' });
+    expect(calls).toBe(0);
+    expect((await f.owner.query('SELECT body FROM memories WHERE id=$1', [memory.id])).rows[0].body).toBe(body);
+  }, profile);
+}, 120_000);
+
+it('parks a revoked binding and processes another authorized scope on the same LOGIN', async () => {
+  await extractionFixture(async f => {
+    const first = await createMemory(f.app, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId,
+      type: 'decision', title: 'Revoked first scope', body: 'Never disclose', source: 'manual' });
+    const second = await createScope(f.owner, { kind: 'project', name: 'healthy-extraction-scope' });
+    await addMembership(f.owner, f.actorId, second.id, 'admin');
+    await addMembership(f.owner, f.producerId, second.id, 'writer');
+    await f.operator.query('SELECT continuum_operator_bind_extraction_worker($1,$2,$3,$4,$5,TRUE)', [f.adminId, f.workerRole, f.producerId, second.id, f.profile.id]);
+    await f.app.query('SELECT continuum_extraction_configure($1,$2,$3,$4,TRUE)', [f.actorId, second.id, f.profile.id, ['manual']]);
+    await createMemory(f.app, { scopeId: second.id, scopeKind: 'project', authorId: f.actorId,
+      type: 'decision', title: 'Healthy second scope', body: 'Authorized work survives', source: 'manual' });
+    await f.owner.query('UPDATE scope_memberships SET active=FALSE WHERE principal_id=$1 AND scope_id=$2', [f.producerId, f.scopeId]);
+    expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('unavailable');
+    expect((await f.owner.query('SELECT state,reason FROM extraction_runs WHERE memory_id=$1', [first.id])).rows[0])
+      .toMatchObject({ state: 'unavailable', reason: 'policy' });
+    expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('processed');
+    expect((await f.owner.query("SELECT count(*)::int AS n FROM extraction_runs WHERE state='complete'")).rows[0].n).toBe(1);
+  });
+}, 120_000);
+
+it('keeps a completed run terminal when reconciling an old settled attempt', async () => {
+  await extractionFixture(async f => {
+    await createMemory(f.app, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId,
+      type: 'decision', title: 'Completed run', body: 'Immutable completion', source: 'manual' });
+    expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('processed');
+    const before = (await f.owner.query('SELECT id,state,generation,workflow_id FROM extraction_runs')).rows[0];
+    const attempt = (await f.owner.query('SELECT attempt_id FROM extraction_attempts WHERE run_id=$1', [before.id])).rows[0].attempt_id;
+    await f.operator.query('SELECT continuum_operator_recover_extraction($1,$2,$3,$4)', [f.adminId, before.id, attempt, 'CONFIRMED ORIGINAL PROCESS EXIT']);
+    expect((await f.owner.query('SELECT id,state,generation,workflow_id FROM extraction_runs')).rows[0]).toEqual(before);
+    expect(before.state).toBe('complete');
+  });
+}, 120_000);
 
 it('caps a retry provider timeout to the original durable remaining lifetime', async () => {
   let calls = 0, retryTimeout: number | undefined;

@@ -36,4 +36,12 @@ describe('extraction reference data', () => {
     expect(() => validateAssertions({ assertions: [{ text: 'X', type: 'fact', unknown: false, unsupported: [],
       temporal: { value: null, uncertain: true }, citations: [{ start: 1, end: 4, quote: '���' }] }] }, chunk)).toThrow();
   });
+  it('rejects NUL and unpaired surrogate output fields before PostgreSQL serialization', () => {
+    const [chunk] = chunkSource(version, 'Valid reference', 64, 1);
+    const assertion = { text: 'Valid', type: 'fact', unknown: false, unsupported: [],
+      temporal: { value: null, uncertain: true }, citations: [{ start: 0, end: 15, quote: chunk.text }] };
+    for (const invalid of ['\u0000', '\ud800', '\udfff']) for (const changed of [
+      { text: invalid }, { unsupported: [invalid] }, { temporal: { value: invalid, uncertain: true } },
+    ]) expect(() => validateAssertions({ assertions: [{ ...assertion, ...changed }] }, chunk)).toThrow();
+  });
 });
