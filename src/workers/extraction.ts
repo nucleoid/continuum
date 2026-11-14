@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
-import { Budget, runBudgetedStage } from '../pipeline/budget.js';
+import { Budget, BudgetError, runBudgetedStage } from '../pipeline/budget.js';
 import { chunkSource } from '../extraction/chunking.js';
 import { EXTRACTION_PROMPT, EXTRACTION_SCHEMA, validateAssertions, type ExtractionOutput } from '../extraction/model.js';
 import { extractionDescriptor, ExtractionRegistry, type ExtractionProfile } from '../extraction/provider.js';
@@ -30,19 +30,26 @@ export async function processExtraction(pool: pg.Pool, worker: string, profile: 
     // Local clock begins before claim/accounting/hydration, leaving ten seconds
     // of lease slack for final SQL. SQL independently checks database time.
     const budget = new Budget(profile.budget);
+    const claimStarted = performance.now();
     const selected = await extractionOperation<ExtractionClaim | { outcome: 'unavailable' } | null>(pool,
       'SELECT continuum_extraction_claim($1,$2,$3) AS result', [profile.id, worker, extractionDescriptor(profile)]);
     if (!selected) return 'idle';
     if (selected.outcome !== 'claimed') return 'unavailable';
     claim = selected;
+    // Use database remaining duration, not host wall-clock agreement. Charging
+    // the complete claim round trip conservatively includes acquisition/SQL.
+    const cutoff = claimStarted + claim.remainingMs;
+    const assertLive = () => {
+      options.signal?.throwIfAborted(); budget.assertLive();
+      if (performance.now() >= cutoff) throw new BudgetError('deadline');
+    };
     abort = () => {
       budget.cancel();
       cancellation ??= stop('cancelled').catch(() => undefined);
     };
     options.signal?.addEventListener('abort', abort, { once: true });
     if (options.signal?.aborted) abort();
-    options.signal?.throwIfAborted();
-    budget.assertLive();
+    assertLive();
     const payload = await extractionOperation<string>(pool, 'SELECT continuum_extraction_hydrate($1,$2,$3) AS result', [claim.id, worker, claim.generation]);
     budget.consume({ candidates: 1, hydratedBytes: Buffer.byteLength(payload) });
     const chunks = chunkSource(claim.sourceVersion, payload, profile.chunkBytes, profile.maxChunks);
@@ -50,7 +57,7 @@ export async function processExtraction(pool: pg.Pool, worker: string, profile: 
       'SELECT continuum_extraction_prepare($1,$2,$3,$4) AS result', [claim.id, worker, claim.generation,
         JSON.stringify(chunks.map(({ text: _text, sourceFamily: _family, ...metadata }) => metadata))]);
     for (const chunk of chunks) {
-      options.signal?.throwIfAborted(); budget.assertLive();
+      assertLive();
       if (states[chunk.index]?.state !== 'pending') continue;
       let attempt = claim.attempts?.find(a => a.index === chunk.index && a.generation === claim!.generation && a.state === null)?.id;
       if (!attempt) {
@@ -75,7 +82,8 @@ export async function processExtraction(pool: pg.Pool, worker: string, profile: 
       // charges; never substitute a fresh workflow after an ambiguous failure.
       const outcome = await runBudgetedStage(budget, adapter, { schema: EXTRACTION_SCHEMA, prompt: EXTRACTION_PROMPT,
         referenceData: { trust: 'untrusted', sourceVersion: claim.sourceVersion, chunk } },
-      { signal: options.signal, authorize, durable: extractionAttempt(pool, claim, worker, attempt), onWork: options.onWork });
+      { signal: options.signal, transportMs: Math.max(0, Math.floor(cutoff - performance.now())),
+        authorize, durable: extractionAttempt(pool, claim, worker, attempt), onWork: options.onWork });
       let output: ExtractionOutput | null = null;
       let failure: string | null = null;
       if (outcome.status === 'complete') {
@@ -90,15 +98,14 @@ export async function processExtraction(pool: pg.Pool, worker: string, profile: 
           await stop(reason === 'stale_attempt' ? 'ambiguous' : reason); return 'unavailable';
         }
       }
-      options.signal?.throwIfAborted(); budget.assertLive();
-      const beforeCommit = () => { options.signal?.throwIfAborted(); budget.assertLive(); };
+      assertLive();
       try {
         await extractionOperation(pool, 'SELECT continuum_extraction_apply($1,$2,$3,$4,$5,$6,$7) AS result',
-          [claim.id, worker, claim.generation, chunk.index, attempt, output, failure], beforeCommit);
+          [claim.id, worker, claim.generation, chunk.index, attempt, output, failure], assertLive);
       } catch (error) {
         if ((error as { code?: string }).code !== '54000') throw error;
         await extractionOperation(pool, 'SELECT continuum_extraction_apply($1,$2,$3,$4,$5,NULL,\'budget\') AS result',
-          [claim.id, worker, claim.generation, chunk.index, attempt], beforeCommit);
+          [claim.id, worker, claim.generation, chunk.index, attempt], assertLive);
       }
       if (failure === 'transient') return 'unavailable';
     }

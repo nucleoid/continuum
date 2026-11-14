@@ -11,7 +11,7 @@ export async function extractionOperation<T>(pool: pg.Pool, sql: string, values:
   });
 }
 export interface ExtractionClaim {
-  outcome: 'claimed'; id: string; generation: number; sourceVersion: string; sourceBytes: number; leaseUntil: string;
+  outcome: 'claimed'; id: string; generation: number; sourceVersion: string; sourceBytes: number; leaseUntil: string; remainingMs: number;
   workflow: { id: string; owner: string; generation: number; deadline_at: string; used: BudgetAmounts };
   attempts: Array<{ id: string; index: number; generation: number; state: string | null }>;
 }

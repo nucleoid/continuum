@@ -375,6 +375,7 @@ BEGIN
   INSERT INTO audit_log(principal_id,action,scope_id,metadata) VALUES(binding.principal_id,'write',job.scope_id,jsonb_build_object('operation','extraction_claimed'));
   RETURN jsonb_build_object('outcome','claimed','id',job.id,'generation',job.generation,'sourceVersion',job.source_version,'sourceBytes',job.source_bytes,
     'descriptor',job.descriptor,'workflow',continuum_pipeline_read(job.workflow_id),'leaseUntil',job.lease_until,
+    'remainingMs',(SELECT greatest(0,floor(extract(epoch FROM (deadline_at-clock_timestamp()))*1000)) FROM pipeline_budget_workflows WHERE id=job.workflow_id),
     'attempts',(SELECT jsonb_agg(jsonb_build_object('id',a.attempt_id,'index',a.chunk_index,'generation',a.claim_generation,'state',p.state))
       FROM extraction_attempts a LEFT JOIN pipeline_budget_attempts p ON p.workflow_id=job.workflow_id AND p.attempt_id=a.attempt_id WHERE a.run_id=job.id));
 END $$;

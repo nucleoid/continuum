@@ -136,8 +136,10 @@ original attempt/LOGIN/claim identities remain immutable. Every chunk/retry
 shares the original durable calls, retries, spend, storage and deadline. A new
 local `Budget` after restart does not replace durable allowance. The workflow
 lifetime starts on first claim, not while a source waits in the queue. Its
-20-second maximum leaves lease slack for final SQL; expiry still rejects late
-publication.
+20-second maximum leaves lease slack for final SQL. Database remaining duration
+caps each provider timeout, including retries, with the complete claim round trip
+deducted conservatively and no reliance on host wall-clock agreement. Original
+local and durable cutoffs are checked again before the result transaction commits.
 
 Before hydration the durable ledger reserves source snapshot storage plus a
 conservative serialized control-record allowance for descriptors, bounded
