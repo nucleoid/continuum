@@ -137,18 +137,19 @@ describe('durable pipeline accounting', () => {
   }, 60_000);
 
   it('retains durable concurrency after a local deadline until actual provider settlement', async () => {
-    const selected = checkedProfile({ ...profile, stageMs: 10 });
+    const selected = checkedProfile({ ...profile, stageMs: 200 });
     const w = await workflow(selected);
     const budget = new Budget(selected);
     let finish!: (r: { value: string; response: unknown }) => void;
     const adapter = {
-      id: 'durable-local', model: 'fake', profile: 'fake', local: true, timeoutMs: 100, responseBodyBytes: 100,
+      id: 'durable-local', model: 'fake', profile: 'fake', local: true, timeoutMs: 1000, responseBodyBytes: 100,
       outputTokens: 0, reasoningTokens: 0, completionTokens: 0, enforceableCaps: true, cancellation: 'unsupported' as const,
       tokens: { kind: 'conservative' as const, model: 'fake', profile: 'fake', validationId: 'bytes-v1', overheadTokens: 0, count: () => 1 },
       price: { id: 'priced-v1', currency: 'USD', unitTokens: 1, inputMicros: 1, outputMicros: 0, reasoningMicros: 0 },
       serialize: () => ({ prompt: 'bounded fake' }), invoke: () => new Promise<{ value: string; response: unknown }>((r) => { finish = r; }),
     };
     expect(await runBudgetedStage(budget, adapter, 'x', { durable: pipelineAttempt(pool, { ...w, attemptId: randomUUID() }) })).toMatchObject({ reason: 'deadline' });
+    expect(typeof finish).toBe('function');
     expect((await readBudgetWorkflow(pool, w.id)).active).toBe(1);
     finish({ value: 'late', response: 'late' });
     // Join actual settlement, not a deadline receipt.

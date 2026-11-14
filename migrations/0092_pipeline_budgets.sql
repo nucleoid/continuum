@@ -37,6 +37,9 @@ LANGUAGE plpgsql IMMUTABLE AS $$
 DECLARE key TEXT; bound NUMERIC;
 BEGIN
   IF value IS NULL OR jsonb_typeof(value)<>'object' OR (SELECT count(*) FROM jsonb_object_keys(value))<>10
+    OR jsonb_typeof(value->'version') IS DISTINCT FROM 'number'
+    OR jsonb_typeof(value->'id') IS DISTINCT FROM 'string' OR jsonb_typeof(value->'currency') IS DISTINCT FROM 'string'
+    OR jsonb_typeof(value->'rateSchedule') IS DISTINCT FROM 'string'
     OR value->>'version' IS DISTINCT FROM '1' OR COALESCE(value->>'id','') !~ '^[a-z][a-z0-9.-]{0,63}$'
     OR COALESCE(value->>'currency','') !~ '^[A-Z]{3}$' OR COALESCE(value->>'rateSchedule','') !~ '^[a-z][a-z0-9.-]{0,63}$'
     OR NOT continuum_pipeline_valid_amounts(value->'limits') THEN RETURN FALSE; END IF;
@@ -104,6 +107,7 @@ DECLARE w pipeline_budget_workflows%ROWTYPE; entry RECORD; next_used JSONB;
 BEGIN
   IF NOT continuum_pipeline_valid_amounts(requested) OR requested->>'calls'<>'1' OR retained IS NULL OR retained<0 OR retained>9007199254740991
     OR attempt IS NULL OR worker IS NULL OR epoch IS NULL THEN RAISE EXCEPTION 'invalid pipeline reservation'; END IF;
+  IF (requested->>'inputBytes')::bigint+(requested->>'outputBytes')::bigint>retained THEN RAISE EXCEPTION 'invalid retained pipeline bytes'; END IF;
   SELECT * INTO STRICT w FROM pipeline_budget_workflows WHERE id=workflow FOR UPDATE;
   IF w.owner<>worker OR w.generation<>epoch OR w.cancelled OR w.deadline_at<=clock_timestamp()
     OR w.active>=(w.profile->>'maxConcurrency')::integer OR retained>(w.profile->>'maxRetainedBytes')::bigint-w.retained_bytes

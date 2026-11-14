@@ -159,7 +159,9 @@ export class Budget {
     // Reservations always represent attempts; bound retained identity history too.
     if (values.calls !== 1 || this.active >= this.profile.maxConcurrency
       || retained > this.profile.maxRetainedBytes - this.retainedBytes) throw new BudgetError();
-    const delta = amounts(values); this.consume(delta);
+    const delta = amounts(values);
+    if (delta.inputBytes > retained - delta.outputBytes) throw new BudgetError();
+    this.consume(delta);
     const id = randomUUID(); this.reservations.set(id, { amount: delta, retained });
     this.active++; this.retainedBytes += retained;
     this.receipts.add({ event: 'reserved', elapsedMs: this.elapsedMs() });

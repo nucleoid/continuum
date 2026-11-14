@@ -79,4 +79,18 @@ describe('optional pipeline service envelope parity', () => {
     expect(() => budget.serializeOutput(envelope)).toThrow();
     expect(new Budget(starterProfile).serializeOutput(envelope)).toContain('content');
   });
+  it('rechecks growth in the hydration snapshot against its already reserved allocation', async () => {
+    const memory = await seed(); let changed = false;
+    const observed = { query: (async (sql: string, values?: unknown[]) => {
+      const result = await pool.query(sql, values);
+      if (!changed && sql.startsWith('SELECT m.id,') && sql.includes('budget_bytes')) {
+        changed = true;
+        await pool.query('UPDATE memories SET body=$2 WHERE id=$1', [memory.id, 'Budget ' + 'x'.repeat(10_000)]);
+      }
+      if (sql.startsWith('WITH budget_candidates')) expect(result.rows.every((r) => r.body == null)).toBe(true);
+      return result;
+    }) as pg.Pool['query'] };
+    await expect(getReadableMemory(observed, principal.id, memory.id, undefined, new Budget(starterProfile))).rejects.toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
+    expect(changed).toBe(true);
+  });
 });
