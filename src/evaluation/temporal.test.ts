@@ -45,7 +45,7 @@ it('measures event filters separately from hint ranking and unknown-date false e
         const relevant=item.archived?[]:[{id:'primary',version:'1',grade:3,family:'primary'}];
         const metrics=scoreRetrieval(ids.map(id=>({id:id===primary.id?'primary':'decoy',version:'1'})),relevant);
         observations.push({id:item.id,mode,repetition,warmup:repetition===0,latencyMs,metrics,
-          falseExclusions:Number(!item.archived&&!ids.includes(primary.id)),securityFailures:Number(item.archived&&ids.includes(primary.id)),
+          falseExclusions:Number(!item.archived&&!ids.includes(primary.id)),securityFailures:Number(item.archived===true&&ids.includes(primary.id)),
           bytes:Buffer.byteLength(JSON.stringify(result.results)),calls:0,spendMicros:0});
         expect(observations.at(-1)!.bytes).toBeLessThanOrEqual(65536);
       }
