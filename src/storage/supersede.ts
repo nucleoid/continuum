@@ -8,6 +8,8 @@ import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
 import type { Queryable } from './queryable.js';
 import { getScope } from './scopes.js';
 import { listAllowedTagNames, lockRequestedTags } from './tag-vocabularies.js';
+import type { EventAnnotation } from '../temporal/model.js';
+import { writeEventAnnotation } from './temporal.js';
 
 export class SupersedeStorageError extends Error {
   constructor(
@@ -18,6 +20,7 @@ export class SupersedeStorageError extends Error {
 }
 
 export interface SupersedeWriteInput {
+  eventAnnotation?: EventAnnotation;
   readBudgetBytes?: number;
   supersededId: string;
   principalId: string;
@@ -105,6 +108,7 @@ async function supersedeInTransaction(client: pg.PoolClient, input: SupersedeWri
     metadata: { ...input.metadata, related: [] },
     supersedesId: predecessor.id,
   });
+  if (input.eventAnnotation !== undefined) successor.event = await writeEventAnnotation(client, input.principalId, successor.id, input.eventAnnotation);
   const archived = await client.query(
     `UPDATE memories SET state = 'archived', updated_at = now()
       WHERE id = $1 AND state = 'live' RETURNING ${MEMORY_COLUMNS}`,

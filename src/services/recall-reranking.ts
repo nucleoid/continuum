@@ -95,7 +95,7 @@ export async function rerankRecallPool(pool: pg.Pool, actor: string, input: Reca
     candidates = candidates.filter(c => versions.has(c.id));
     budget.consume({ candidates: candidates.length });
     const results = await hydrateRecallCandidates(client, candidates.map(c => c.id), input.query,
-      new Map(candidates.map(c => [c.id, c.score])), opts.scopeIds, opts.types, opts.readBudgetBytes, budget, true);
+      new Map(candidates.map(c => [c.id, c.score])), opts.scopeIds, opts.types, opts.readBudgetBytes, budget, true, opts.eventFilter, actor);
     return { results, versions };
   });
   if (admitted.results.length < 2 || reason) return { ...admitted, diagnostic: reason ?? { status: 'fallback', reason: 'capability_unavailable' } };

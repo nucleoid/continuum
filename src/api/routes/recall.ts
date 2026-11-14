@@ -7,8 +7,11 @@ import { recallForPrincipal, type RecallEnrichment, type PrincipalRecallResult }
 import type { Reranking } from '../../reranking/provider.js';
 import { Budget, boundedJson } from '../../pipeline/budget.js';
 import { RetrievalEnricherRegistry, enrichmentConfigFromEnv } from '../../extensions/retrieval.js';
+import { eventWindowSchema } from '../../temporal/model.js';
 
 const recallSchema = z.object({
+  eventFilter: eventWindowSchema.optional(),
+  eventWindow: eventWindowSchema.optional(),
   query: z.string().min(1).max(2000),
   scopes: z.array(z.string()).optional(),
   types: z
@@ -20,6 +23,7 @@ const recallSchema = z.object({
 function projection({ results, accessible, diagnostics }: PrincipalRecallResult) {
   return { results: results.map((r) => ({
     id: r.memory.id, score: r.score,
+    ...(r.memory.event ? { event: r.memory.event } : {}),
     ...(r.rerankScore === undefined ? {} : { rerankScore: r.rerankScore }),
     scope: accessible.get(r.memory.scopeId)?.label ?? null, type: r.memory.type,
     title: r.memory.title, excerpt: r.excerpt, bodyTruncated: r.bodyTruncated, sourceRef: r.memory.sourceRef,

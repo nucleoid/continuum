@@ -13,8 +13,10 @@ import {
 } from '../storage/supersede.js';
 import { record as recordAudit, recordRead as recordReadAudit } from '../audit/log.js';
 import { normalizeTags } from './tag-vocabularies.js';
+import { parseEventAnnotation, type EventAnnotation } from '../temporal/model.js';
 
 export interface SupersedeInput {
+  eventAnnotation?: EventAnnotation;
   supersededId: string; title: string; body: string; tags?: string[]; source?: string;
   sourceRef?: string; metadata?: Record<string, unknown>;
 }
@@ -168,6 +170,7 @@ export async function supersedeForPrincipal(
       throw new ServiceError('FORBIDDEN', 'credential is not allowed for this source');
     }
     validateCaptureContent({ ...input, source });
+    if (input.eventAnnotation !== undefined) parseEventAnnotation(input.eventAnnotation);
     const tags = normalizeTags(input.tags);
     let result;
     try {

@@ -6,11 +6,15 @@ import {
   listMemoriesForPrincipal,
 } from '../../services/memories.js';
 import type { MemoryReadRecord } from '../../storage/memory-reads.js';
+import { eventWindowSchema } from '../../temporal/model.js';
 
 const memoryTypes = ['fact', 'decision', 'context', 'playbook', 'relationship'] as const;
 const memoryStates = ['live', 'stale', 'archived', 'promoted'] as const;
 
 const memoryListQuery = z.object({
+  eventFilter: z.string().transform((value, context) => {
+    try { return JSON.parse(value) as unknown; } catch { context.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid event filter' }); return z.NEVER; }
+  }).pipe(eventWindowSchema).optional(),
   scope: z.string().optional(),
   type: z.enum(memoryTypes).optional(),
   state: z.enum(memoryStates).optional(),
@@ -22,6 +26,7 @@ export function restMemory(record: MemoryReadRecord) {
   const { memory } = record;
   return {
     id: memory.id,
+    ...(memory.event ? { event: memory.event } : {}),
     scope: record.scope,
     type: memory.type,
     title: memory.title,

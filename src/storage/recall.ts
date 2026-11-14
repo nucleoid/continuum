@@ -7,11 +7,16 @@ import { vectorSearchMemoryIds } from './embeddings.js';
 import { assertEmbeddingVectorDimension } from './schema.js';
 import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
 import type { Queryable } from './queryable.js';
+import type { EventWindow } from '../temporal/model.js';
+import { eventPredicate } from './temporal.js';
 
 export const DEFAULT_RECALL_EMBEDDING_DEADLINE_MS = 10_000;
 export const MAX_RECALL_EMBEDDING_DEADLINE_MS = 30_000;
 
 export interface RecallOptions {
+  actor?: string;
+  eventFilter?: EventWindow;
+  eventWindow?: EventWindow;
   onEmbeddingWork?: (settlement: Promise<unknown>) => void;
   budget?: Budget;
   readBudgetBytes?: number;
@@ -157,6 +162,8 @@ async function boundedVectorSearch(
   limit: number,
   types: MemoryType[] | undefined,
   signal: AbortSignal,
+  eventFilter?: EventWindow,
+  actor?: string,
 ): Promise<Array<{ id: string; distance: number }>> {
   const remaining = () => {
     const ms = deadlineAt - Date.now();
@@ -214,7 +221,7 @@ async function boundedVectorSearch(
       return client.query(sql, values);
     }) as Queryable['query'] };
     const hits = await vectorSearchMemoryIds(
-      bounded, queryVec, scopeIds, provider, limit, types,
+      bounded, queryVec, scopeIds, provider, limit, types, eventFilter, actor,
     );
     if (transactionStarted) {
       await client.query('COMMIT');
@@ -286,6 +293,8 @@ async function ftsHits(
   scopeIds: string[],
   types: MemoryType[] | undefined,
   limit: number,
+  eventFilter?: EventWindow,
+  actor?: string,
 ): Promise<FtsHit[]> {
   if (scopeIds.length === 0) return [];
   const params: unknown[] = [query, scopeIds];
@@ -294,6 +303,7 @@ async function ftsHits(
     params.push(types);
     typeFilter = ` AND type = ANY($${params.length}::text[])`;
   }
+  const temporal = eventPredicate(params, actor, eventFilter, 'memories.id');
   params.push(limit);
   const limitIdx = params.length;
   const { rows } = await pool.query(
@@ -306,6 +316,7 @@ async function ftsHits(
         AND (expires_at IS NULL OR expires_at > pg_catalog.clock_timestamp())
         AND to_tsvector('english', title || ' ' || body) @@ plainto_tsquery('english', $1)
         ${typeFilter}
+        ${temporal}
       ORDER BY score DESC
       LIMIT $${limitIdx}`,
     params,
@@ -336,6 +347,8 @@ export async function hydrateRecallCandidates(
   readBudgetBytes?: number,
   budget?: Budget,
   omitAdvisory = false,
+  eventFilter?: EventWindow,
+  actor?: string,
 ): Promise<RecallResult[]> {
   if (ids.length === 0) return [];
   const params: unknown[] = [ids, scopeIds];
@@ -344,14 +357,15 @@ export async function hydrateRecallCandidates(
     params.push(types);
     typeFilter = ` AND type = ANY($${params.length}::text[])`;
   }
-  const where = `id = ANY($1::uuid[]) AND scope_id = ANY($2::uuid[])
-    AND state = 'live' AND (expires_at IS NULL OR expires_at > pg_catalog.clock_timestamp()) ${typeFilter}`;
+  const temporal = eventPredicate(params, actor, eventFilter, 'm.id');
+  const where = `m.id = ANY($1::uuid[]) AND scope_id = ANY($2::uuid[])
+    AND state = 'live' AND (expires_at IS NULL OR expires_at > pg_catalog.clock_timestamp()) ${typeFilter} ${temporal}`;
   readBudgetBytes ??= budget?.available('hydratedBytes');
   const columns = MEMORY_COLUMNS.split(',').map(column => omitAdvisory && column.trim() === 'metadata'
     ? "(m.metadata - 'related') AS metadata" : `m.${column.trim()}`).join(', ');
   const rows = readBudgetBytes === undefined
     ? (await pool.query(omitAdvisory ? `SELECT ${columns} FROM memories m WHERE ${where}`
-      : `SELECT ${MEMORY_COLUMNS} FROM memories WHERE ${where}`, params)).rows
+      : `SELECT ${columns} FROM memories m WHERE ${where}`, params)).rows
     : await boundedMemoryReadRows(pool,
       `SELECT m.id, ${MEMORY_READ_BUDGET_BYTES_SQL} AS budget_bytes,
          array_position($1::uuid[], m.id) AS position FROM memories m WHERE ${where}`, params,
@@ -393,7 +407,7 @@ export async function recallCandidates(
   // One extra identity detects overflow rather than silently changing selection.
   const overFetch = Math.min(opts.limit * 5, 100, (opts.budget?.available('candidates') ?? 100) + 1);
   const borrowed = !connectable(pool);
-  const searchText = () => ftsHits(pool, opts.query, opts.scopeIds, opts.types, overFetch);
+  const searchText = () => ftsHits(pool, opts.query, opts.scopeIds, opts.types, overFetch, opts.eventFilter, opts.actor);
   const fts = await (borrowed ? queueBorrowedSql(pool, searchText) : searchText());
   if (!deferCandidateCharge && opts.budget && fts.length > opts.budget.available('candidates')) throw new BudgetError();
 
@@ -447,7 +461,7 @@ export async function recallCandidates(
       try {
         const execute = () => boundedVectorSearch(
           pool, deadlineAt, queryVec, group.scopeIds,
-          group.provider, overFetch, opts.types, controller.signal,
+          group.provider, overFetch, opts.types, controller.signal, opts.eventFilter, opts.actor,
         );
         const sql = borrowed ? queueBorrowedSql(pool, execute) : execute();
         vectorSqlWork.add(sql);
@@ -515,7 +529,7 @@ export async function recallCandidates(
   const fused = fuse(fts, ...vectorLists);
   if (!deferCandidateCharge) opts.budget?.consume({ candidates: fused.size });
   const ranked = Array.from(fused.entries())
-    .sort(([, a], [, b]) => b - a)
+    .sort(([idA, a], [idB, b]) => b - a || idA.localeCompare(idB))
     .map(([id, score]) => ({ id, score }))
     .slice(0, candidateLimit);
 
@@ -534,8 +548,8 @@ export async function recallCandidates(
 
 /** Compatible low-level final-cut wrapper. No reranker or evidence enrollment. */
 export async function recall(pool: Queryable, opts: RecallOptions): Promise<RecallOutput> {
-  const selected = await recallCandidates(pool, opts);
+  const selected = await recallCandidates(pool, opts, opts.eventWindow ? 100 : opts.limit);
   const hydrateResults = () => hydrateRecallCandidates(pool, selected.candidates.map(c => c.id), opts.query,
-    new Map(selected.candidates.map(c => [c.id, c.score])), opts.scopeIds, opts.types, opts.readBudgetBytes, opts.budget);
+    new Map(selected.candidates.map(c => [c.id, c.score])), opts.scopeIds, opts.types, opts.readBudgetBytes, opts.budget, false, opts.eventFilter, opts.actor);
   return { results: await (!connectable(pool) ? queueBorrowedSql(pool, hydrateResults) : hydrateResults()), diagnostics: selected.diagnostics };
 }

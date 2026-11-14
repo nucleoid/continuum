@@ -12,6 +12,8 @@ import { currentRecallEligibility, rerankRecallPool } from './recall-reranking.j
 import { recordRead as recordReadAudit } from '../audit/log.js';
 import { resolveReadableScopeIds, type AccessibleScope } from './access.js';
 import { asServiceError, dependencyUnavailable } from './errors.js';
+import { parseEventWindow, eventMatches, orderEventResults, type EventAnnotation } from '../temporal/model.js';
+import { readEventAnnotations } from '../storage/temporal.js';
 import { parseScopeString } from './scopes.js';
 import {
   applyRetrievalEnrichers,
@@ -61,6 +63,8 @@ export async function recallForPrincipal(
   try {
     if (reranking) assertRerankingEmbeddingBudget(embeddingRouting, reranking);
     budget?.assertLive();
+    const eventFilter = input.eventFilter === undefined ? undefined : parseEventWindow(input.eventFilter);
+    const eventWindow = input.eventWindow === undefined ? undefined : parseEventWindow(input.eventWindow);
     const refs = input.scopes?.map(parseScopeString);
     const { accessible, scopeIds } = await resolveReadableScopeIds(
       pool,
@@ -90,6 +94,9 @@ export async function recallForPrincipal(
     }
     const embeddingGroups = [...grouped.values()];
     const recallOptions: RecallOptions = {
+      actor: principal.id,
+      eventFilter,
+      eventWindow,
       query: input.query,
       scopeIds,
       types: input.types,
@@ -132,7 +139,7 @@ export async function recallForPrincipal(
         totalGroups: diagnostics.groups.length,
       });
     }
-    const results = recalled.results.slice(0, input.limit ?? 10);
+    const results = recalled.results;
 
     // Remote delivery validation includes optional enrichments before the required audit.
     // Existing callers retain their audit-before-enrichment ordering.
@@ -140,6 +147,23 @@ export async function recallForPrincipal(
       ? await applyRetrievalEnrichers(results, principal.id, enrichment.registry, { ...enrichment.options, budget })
       : undefined;
     const deliver = async (auditPool: Queryable, deliveredResults: RecallResult[]): Promise<PrincipalRecallResult> => {
+      const events = await readEventAnnotations(auditPool, principal.id, deliveredResults.map(r => r.memory.id));
+      const annotations = new Map<string, EventAnnotation>();
+      deliveredResults = deliveredResults.filter(result => {
+        const event = events.get(result.memory.id);
+        if ((eventFilter || eventWindow) && !event) return false;
+        if (eventFilter && !eventMatches(event?.annotation, eventFilter)) return false;
+        if (event) {
+          annotations.set(result.memory.id,event.annotation);
+          if (event.version || eventFilter || eventWindow) result.memory = { ...result.memory, event };
+        }
+        return true;
+      });
+      if (eventWindow) {
+        const ordered = orderEventResults(deliveredResults.map(result => ({ id: result.memory.id, score: result.rerankScore ?? result.score, result })), eventWindow, annotations);
+        deliveredResults = ordered.map(row => row.result);
+      }
+      deliveredResults = deliveredResults.slice(0, input.limit ?? 10);
       enrichment?.validateResult?.({ results: deliveredResults, accessible, diagnostics });
       if (!enrichment?.outputBytes || !enrichment.validateResult) budget?.serializeOutput({ results: deliveredResults, diagnostics });
 
@@ -205,7 +229,7 @@ export async function recallForPrincipal(
       budget?.assertLive();
       return delivered;
     }
-    return await deliver(pool, preparedResults ?? results);
+    return await evidenceTransaction(pool, client => deliver(client, preparedResults ?? results));
   } catch (error) {
     if (reranking && ['55P03', '57014', '40P01'].includes(String((error as { code?: string })?.code))) {
       throw dependencyUnavailable(error);

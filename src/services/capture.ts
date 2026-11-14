@@ -22,6 +22,8 @@ import { normalizeTags, validateTagsForScopeKind } from './tag-vocabularies.js';
 import { memoryEmbeddingText } from '../embeddings/text.js';
 import { captureExtractionStatus } from './extraction.js';
 import type { ExtractionStatus } from '../extraction/model.js';
+import { parseEventAnnotation } from '../temporal/model.js';
+import { writeEventAnnotation } from '../storage/temporal.js';
 
 export interface CaptureResult {
   memory: Memory;
@@ -74,6 +76,7 @@ export function validateCaptureContent(input: Pick<CaptureInput,
 
 function normalizeCapture(input: CaptureInput): string[] {
   validateCaptureContent(input);
+  if (input.eventAnnotation !== undefined) parseEventAnnotation(input.eventAnnotation);
   validateScopeRef(input.scope);
   return normalizeTags(input.tags);
 }
@@ -116,6 +119,7 @@ export async function captureOne(
     tags,
     metadata: { ...input.metadata, related: [] },
   });
+  if (input.eventAnnotation !== undefined) memory.event = await writeEventAnnotation(client, principal.id, memory.id, input.eventAnnotation);
 
   await recordAudit(client, {
     principalId: principal.id,
@@ -361,6 +365,7 @@ export async function captureMemory(
         tags: prepared.tags,
         metadata: { ...input.metadata, related: [] },
       });
+      if (input.eventAnnotation !== undefined) memory.event = await writeEventAnnotation(client, principal.id, memory.id, input.eventAnnotation);
 
       let embedded = false;
       if (embeddingProvider && embeddingVector) {
@@ -389,7 +394,7 @@ export async function captureMemory(
             related,
           });
           await client.query('RELEASE SAVEPOINT capture_relations');
-          memory = updatedMemory;
+          memory = { ...updatedMemory, ...(memory.event ? { event: memory.event } : {}) };
         } catch {
           await client.query('ROLLBACK TO SAVEPOINT capture_relations');
           await client.query('RELEASE SAVEPOINT capture_relations');

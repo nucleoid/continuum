@@ -4,8 +4,10 @@ import { z } from 'zod';
 import type { EmbeddingRouting } from '../../embeddings/router.js';
 import { captureMemory } from '../../services/capture.js';
 import { DEFAULT_RELATION_THRESHOLD } from '../../services/relations.js';
+import { eventAnnotationSchema } from '../../temporal/model.js';
 
 const captureSchema = z.object({
+  eventAnnotation: eventAnnotationSchema.optional(),
   scope: z.object({
     kind: z.enum(['org', 'team', 'project', 'user', 'role']),
     name: z.string(),
@@ -53,6 +55,7 @@ export function captureRouter(
       embedded: result.embedded,
       related: result.related,
       extraction: result.extraction,
+      ...(result.memory.event ? { event: result.memory.event } : {}),
     });
   });
 

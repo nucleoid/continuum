@@ -43,7 +43,7 @@ import { supersedeRouter } from './routes/supersede.js';
 import { offboardingRouter } from './routes/offboarding.js';
 import { locksRouter } from './routes/locks.js';
 import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoordinationContractReady, requirePromotionOutboxReady, requireStandupReady } from '../storage/provider-lifecycle.js';
-import { requirePipelineBudgetsReady, requireEvidenceReady, requireExtractionReady } from '../storage/provider-lifecycle.js';
+import { requirePipelineBudgetsReady, requireEvidenceReady, requireExtractionReady, requireEventTimeReady } from '../storage/provider-lifecycle.js';
 import { tagVocabulariesRouter } from './routes/tag-vocabularies.js';
 import { getPrincipalByExternalId } from '../storage/principals.js';
 import { standupRouter } from './routes/standup.js';
@@ -440,6 +440,7 @@ async function main(): Promise<void> {
   await requirePipelineBudgetsReady(pool, schemaOptions);
   await requireEvidenceReady(pool, schemaOptions);
   await requireExtractionReady(pool, schemaOptions);
+  await requireEventTimeReady(pool, schemaOptions);
   const authMode = authModeFromEnv();
   warnOnDevAuthMode(authMode);
   const authenticator = createAuthenticator(

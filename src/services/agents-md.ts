@@ -35,6 +35,8 @@ export async function prepareAgentsMdForPrincipal(
     // they do not enter this bundle or expand its scoped selection.
     // Evidence versions, derivative prose and managed copies stay outside
     // source-memory selection, freshness bytes and delivery audit identities.
+    // Explicit event annotations, corrections and query hints cannot enter this
+    // input or its bytes. Only the existing source selection defines freshness.
     const { markdown, memories } = await renderAgentsMdResult(pool, {
       principalId: principal.id,
       project: input.project,
