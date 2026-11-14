@@ -1,5 +1,5 @@
 import type pg from 'pg';
-import type { Budget } from '../pipeline/budget.js';
+import { BudgetError, type Budget } from '../pipeline/budget.js';
 import type { Memory, MemoryType, ScopeRef } from '../types.js';
 import { MEMORY_COLUMNS, rowToMemory } from '../storage/memory-row.js';
 import { accessibleScopes } from '../services/access.js';
@@ -124,6 +124,7 @@ export async function renderAgentsMdResult(
   opts: RenderOptions,
 ): Promise<RenderAgentsMdResult> {
   opts.budget?.assertLive();
+  if (opts.budget && (opts.budget.available('outputBytes') < 1024 || opts.budget.available('hydratedBytes') < 1024)) throw new BudgetError();
   // A bounded caller opts into the same metadata/snapshot gate as remote MCP.
   if (opts.budget) opts = { ...opts, readBudgetBytes: Math.min(opts.readBudgetBytes ?? Number.MAX_SAFE_INTEGER,
     opts.budget.available('hydratedBytes'), opts.budget.available('outputBytes')) };

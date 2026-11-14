@@ -148,6 +148,11 @@ BEGIN
   END IF;
   next_used:=w.used;
   FOR entry IN SELECT * FROM jsonb_each(actual) LOOP
+    IF entry.key='provenance' THEN
+      IF jsonb_typeof(entry.value)<>'string' OR NOT actual->>'provenance'=ANY(ARRAY['measured','provider-reported','estimated','unknown']) THEN
+        RAISE EXCEPTION 'invalid pipeline usage provenance'; END IF;
+      CONTINUE;
+    END IF;
     IF NOT entry.key=ANY(ARRAY['spendMicros','outputBytes','outputTokens','reasoningTokens','completionTokens'])
       OR jsonb_typeof(entry.value)<>'number' OR entry.value::text !~ '^(0|[1-9][0-9]*)$'
       OR entry.value::text::numeric>(a.reserved->>entry.key)::numeric THEN RAISE EXCEPTION 'invalid pipeline settlement'; END IF;

@@ -2,7 +2,7 @@ import type { Memory, MemoryState, MemoryType } from '../types.js';
 import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
 import type { Queryable } from './queryable.js';
 import { ServiceError } from '../services/errors.js';
-import type { Budget } from '../pipeline/budget.js';
+import { BudgetError, type Budget } from '../pipeline/budget.js';
 
 export interface MemoryReadRecord { memory: Memory; scope: string; authorDisplayName: string; }
 export interface ListMemoryFilter { scope?: string; type?: MemoryType; state: MemoryState; limit: number; offset: number; }
@@ -40,6 +40,7 @@ export async function boundedMemoryReadRows<T extends Record<string, unknown>>(
   budget?: Budget, candidatesAlreadyAdmitted = false,
 ): Promise<T[]> {
   budget?.assertLive();
+  if (budget && budget.available('hydratedBytes') < 1024) throw new BudgetError();
   if (budget) readBudgetBytes = Math.min(readBudgetBytes, budget.available('hydratedBytes'));
   requireReadBudget(1024, readBudgetBytes);
   const probe = await queryable.query<{ budget_bytes: string | number }>(metadataSql, values);

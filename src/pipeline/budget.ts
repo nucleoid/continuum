@@ -167,12 +167,14 @@ export class Budget {
     this.receipts.add({ event: 'reserved', elapsedMs: this.elapsedMs() });
     return id;
   }
-  settle(id: string, actual: Partial<Pick<BudgetAmounts, 'spendMicros' | 'outputBytes' | 'outputTokens' | 'reasoningTokens' | 'completionTokens'>>): void {
+  settle(id: string, actual: Partial<Pick<BudgetAmounts, 'spendMicros' | 'outputBytes' | 'outputTokens' | 'reasoningTokens' | 'completionTokens'>>,
+    provenance: UsageProvenance = Object.keys(actual).length ? 'measured' : 'unknown'): void {
     const reservation = this.reservations.get(id);
     if (!reservation) throw new Error('Unknown pipeline reservation');
     const keys = Object.keys(actual) as Array<keyof typeof actual>;
     if (keys.some((key) => !['spendMicros', 'outputBytes', 'outputTokens', 'reasoningTokens', 'completionTokens'].includes(key))) throw new Error('Invalid pipeline settlement');
-    const identity = boundedJson(Object.fromEntries(keys.sort().map((key) => [key, integer(actual[key]!)])), 1024);
+    if (!['measured', 'provider-reported', 'estimated', 'unknown'].includes(provenance)) throw new Error('Invalid usage provenance');
+    const identity = boundedJson({ actual: Object.fromEntries(keys.sort().map((key) => [key, integer(actual[key]!)])), provenance }, 1024);
     if (reservation.settlement !== undefined) {
       if (reservation.settlement !== identity) throw new Error('Conflicting pipeline settlement');
       return;
@@ -181,7 +183,7 @@ export class Budget {
     for (const key of keys) this.used[key] -= reservation.amount[key] - actual[key]!;
     reservation.settlement = identity;
     this.active--; this.retainedBytes -= reservation.retained;
-    this.receipts.add({ event: 'settled', elapsedMs: this.elapsedMs(), provenance: keys.length ? 'measured' : 'unknown' });
+    this.receipts.add({ event: 'settled', elapsedMs: this.elapsedMs(), provenance });
   }
 }
 
@@ -217,7 +219,7 @@ export type StageOutcome<T> = { status: 'complete'; value: T; provenance: UsageP
 export interface DurableAttempt {
   reserve(amount: BudgetAmounts, retainedBytes: number): Promise<boolean>;
   dispatch(): Promise<boolean>;
-  settle(actual: Partial<BudgetAmounts>): Promise<boolean>;
+  settle(actual: Partial<BudgetAmounts>, provenance?: UsageProvenance): Promise<boolean>;
 }
 // Replacement budgets/registries cannot clear unsettled provider fences. These
 // finite process limits tighten every caller profile and are not per-ID quotas.
@@ -304,6 +306,7 @@ export async function runBudgetedStage<I, O>(budget: Budget, adapter: BudgetAdap
     let durableReserved = false;
     let invoked = false;
     let actual: Partial<BudgetAmounts> = {};
+    let provenance: UsageProvenance = 'unknown';
     try {
       if (options.durable) {
         durableReserved = await options.durable.reserve(reserve, reserve.inputBytes + reserve.outputBytes);
@@ -327,6 +330,7 @@ export async function runBudgetedStage<I, O>(budget: Budget, adapter: BudgetAdap
           if (integer(usage[key]) > caps[key]) return skip('invalid_response');
         }
         if (usage.outputTokens + usage.reasoningTokens > usage.completionTokens) return skip('invalid_response');
+        provenance = usage.provenance;
         // Estimates/unknown do not establish that a maximum charge can be refunded.
         if (usage.provenance === 'measured' || usage.provenance === 'provider-reported') {
           actual = { ...actual, outputTokens: usage.outputTokens, reasoningTokens: usage.reasoningTokens,
@@ -337,16 +341,16 @@ export async function runBudgetedStage<I, O>(budget: Budget, adapter: BudgetAdap
       budget.assertLive();
       if (options.authorize && !await options.authorize()) return skip('policy_denied');
       if (!stageLive()) return skip('deadline');
-      const publish = !options.durable || await options.durable.settle(actual);
+      const publish = !options.durable || await options.durable.settle(actual, provenance);
       durableReserved = false;
       if (!publish || !stageLive()) return skip('stale_attempt');
       return { status: 'complete', value: result.value, provenance: usage?.provenance ?? 'unknown' };
     } catch (error) { return skip(error instanceof BudgetError ? error.reason : 'provider_failed'); }
     finally {
       if (!invoked) actual = { spendMicros: 0, outputBytes: 0, outputTokens: 0, reasoningTokens: 0, completionTokens: 0 };
-      try { if (durableReserved) await options.durable!.settle(actual); }
+      try { if (durableReserved) await options.durable!.settle(actual, provenance); }
       finally {
-        budget.settle(id, actual);
+        budget.settle(id, actual, provenance);
         settled = true; processState.active--; processActive--; processRetained -= retained;
         if (detached) processState.detached--;
         if (!processState.active) processCalls.delete(processKey);

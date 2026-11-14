@@ -43,6 +43,7 @@ export function pipelineAttempt(pool: pg.Pool, identity: { id: string; attemptId
   return {
     reserve: (requested, retained) => operation(pool, 'SELECT continuum_pipeline_reserve($1,$2,$3,$4,$5,$6) AS result', [id, attemptId, owner, generation, amounts(requested), retained]),
     dispatch: () => operation(pool, 'SELECT continuum_pipeline_dispatch($1,$2,$3,$4) AS result', [id, attemptId, owner, generation]),
-    settle: (actual) => operation(pool, 'SELECT continuum_pipeline_settle($1,$2,$3,$4,$5) AS result', [id, attemptId, owner, generation, actual]),
+    settle: (actual, provenance = Object.keys(actual).length ? 'measured' : 'unknown') => operation(pool,
+      'SELECT continuum_pipeline_settle($1,$2,$3,$4,$5) AS result', [id, attemptId, owner, generation, { ...actual, provenance }]),
   };
 }
