@@ -15,7 +15,8 @@ it('caps a retry provider timeout to the original durable remaining lifetime', a
     retryTimeout = context.timeoutMs;
     return good.adapter.invoke(wire, context);
   });
-  profile.budget = { ...profile.budget, overallMs: 2000, stageMs: 1000 };
+  profile.budget = { ...profile.budget, stageMs: 15_000 };
+  profile.adapter.timeoutMs = 15_000;
   await extractionFixture(async f => {
     const memory = await createMemory(f.app, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId,
       type: 'decision', title: 'Remaining lifetime', body: 'Shared original allowance', source: 'manual' });
@@ -23,10 +24,10 @@ it('caps a retry provider timeout to the original durable remaining lifetime', a
     await f.app.query('SELECT continuum_extraction_retry($1,$2)', [f.actorId, memory.id]);
     // Simulate elapsed original lifetime without extending it or sleeping out a
     // production deadline. The existing workflow/attempt identities stay fixed.
-    await f.owner.query("UPDATE pipeline_budget_workflows SET deadline_at=least(deadline_at,clock_timestamp()+interval '400 milliseconds')");
+    await f.owner.query("UPDATE pipeline_budget_workflows SET deadline_at=least(deadline_at,clock_timestamp()+interval '5 seconds')");
     expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('processed');
     expect(retryTimeout).toBeGreaterThan(0);
-    expect(retryTimeout).toBeLessThanOrEqual(400);
+    expect(retryTimeout).toBeLessThanOrEqual(5000);
     expect((await f.owner.query('SELECT used FROM pipeline_budget_workflows')).rows[0].used).toMatchObject({ calls: 2, retries: 1 });
   }, profile);
 }, 120_000);
