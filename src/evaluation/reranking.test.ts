@@ -21,9 +21,11 @@ it('records interleaved local enabled/disabled/fallback ablations without claimi
   const cleanStart = !git('status', '--porcelain'); const sourceHead = process.env.CONTINUUM_EVAL_SOURCE_SHA ?? head;
   const observations: Array<Record<string, any>> = []; let setupCalls = 0; let calls = 0;
   let effectiveProfile: Readonly<BudgetProfile> | undefined;
+  let postgresVersion: string | undefined;
   let setupMs = 0; let workMs = 0;
   const setupStarted = performance.now();
   await withEvaluationFixture(process.env.CONTINUUM_TEST_DATABASE_URL ?? 'postgres://continuum:continuum@localhost:5433/continuum', async ({ owner, app, actor }) => {
+    postgresVersion = (await owner.query("SELECT pg_catalog.current_setting('server_version_num') AS version")).rows[0].version;
     const stub = new StubEmbeddingProvider();
     const shared = new Map<string, { scope: string; refs: Map<string, Reference> }>();
     for (const split of ['development', 'holdout']) {
@@ -116,6 +118,7 @@ it('records interleaved local enabled/disabled/fallback ablations without claimi
   const paired = (mode: string) => rows.filter(r => r.mode === mode && r.split === 'holdout' && r.metrics.ndcg !== null)
     .map(r => ({ id: r.id, value: r.metrics.ndcg! }));
   const report = { version: spec.version, head, sourceHead, tree, headEnd: git('rev-parse', 'HEAD'), cleanStart, cleanEnd: !git('status', '--porcelain'),
+    runtime: { node: process.version, platform: process.platform, arch: process.arch, postgresVersion },
     predecessorSource: spec.predecessorSource, fixtureSha256: sha256(fixtureBytes), corpusManifest: corpus.manifestHash,
     seed: spec.seed, adapterVersion: spec.adapterVersion, adapterProfile: 'local-test-v1', profile: effectiveProfile, mode: 'local-deterministic-contract',
     qualityAcceptance: 'not_evaluated', realAdapterEnablement: 'unqualified', uncertainty: compareRuns(paired('hybrid'), paired('reranking'), relationshipGate),
