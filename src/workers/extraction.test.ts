@@ -5,6 +5,42 @@ import { processExtraction, ExtractionTransientError, ExtractionWorker } from '.
 import { createMemory } from '../storage/memories.js';
 import { requireExtractionReady, requireEvidenceReady } from '../storage/provider-lifecycle.js';
 import { extractionDescriptor } from '../extraction/provider.js';
+import type pg from 'pg';
+
+it('commits a cancellation fence while pre-hydration work is suspended', async () => {
+  await extractionFixture(async f => {
+    await createMemory(f.app, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId, type: 'decision', title: 'Cancel admission', body: 'Never disclose', source: 'manual' });
+    const controller = new AbortController();
+    let entered!: () => void, release!: () => void, fenced!: () => void;
+    const suspended = new Promise<void>(resolve => { entered = resolve; });
+    const resume = new Promise<void>(resolve => { release = resolve; });
+    const committed = new Promise<void>(resolve => { fenced = resolve; });
+    const observed = new Proxy(f.worker, { get(target, key) {
+      if (key !== 'connect') { const value = Reflect.get(target, key); return typeof value === 'function' ? value.bind(target) : value; }
+      return async () => {
+        const client = await target.connect(); let cancellation = false;
+        return new Proxy(client, { get(connection, property) {
+          if (property !== 'query') { const value = Reflect.get(connection, property); return typeof value === 'function' ? value.bind(connection) : value; }
+          return async (...args: [string, unknown[]?]) => {
+            if (args[0].includes('SELECT continuum_extraction_hydrate')) { entered(); await resume; }
+            const result = await connection.query(...args);
+            if (args[0].includes('SELECT continuum_extraction_stop')) cancellation = true;
+            if (args[0] === 'COMMIT' && cancellation) fenced();
+            return result;
+          };
+        });
+      };
+    }) as pg.Pool;
+    const work = processExtraction(observed, randomUUID(), f.profile, { signal: controller.signal });
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await suspended; controller.abort();
+      await Promise.race([committed, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Cancellation fence did not commit')), 1000); })]);
+      expect((await f.owner.query('SELECT cancelled FROM pipeline_budget_workflows')).rows[0].cancelled).toBe(true);
+    } finally { if (timer) clearTimeout(timer); release(); await work; }
+    expect((await f.owner.query("SELECT count(*)::int AS n FROM evidence_versions WHERE kind='extracted-assertion'")).rows[0].n).toBe(0);
+  });
+}, 120_000);
 
 it('runs the installed local composition through an actual non-owner LOGIN and persists immutable unverified evidence', async () => {
   await extractionFixture(async f => {

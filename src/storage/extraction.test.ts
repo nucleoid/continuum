@@ -3,6 +3,19 @@ import { expect, it } from 'vitest';
 import { standupProducerFixture } from '../standup/test-helpers.js';
 import { createMemory } from './memories.js';
 import { starterProfile } from '../pipeline/budget.js';
+import { captureMemory } from '../services/capture.js';
+import { getPrincipal } from './principals.js';
+
+it('preserves the original capture audit boundary when extraction is not configured', async () => {
+  await standupProducerFixture(async f => {
+    const actor = (await getPrincipal(f.app, f.actorId))!;
+    const scope = (await f.app.query('SELECT name FROM scopes WHERE id=$1', [f.scopeId])).rows[0].name;
+    const result = await captureMemory(f.app, null, actor, { scope: { kind: 'user', name: scope },
+      type: 'decision', title: 'Ordinary capture', body: 'Original source', source: 'manual' });
+    expect(result.extraction).toEqual({ status: 'not-configured' });
+    expect((await f.owner.query('SELECT action FROM audit_log WHERE memory_id=$1 ORDER BY id', [result.memory.id])).rows).toEqual([{ action: 'write' }]);
+  });
+}, 120_000);
 
 it('requires operator installation plus scope-admin opt-in and atomically enqueues exact captured sources', async () => {
   await standupProducerFixture(async f => {
