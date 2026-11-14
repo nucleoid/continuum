@@ -201,6 +201,16 @@ describe('frozen domain evaluator', () => {
       .toEqual({ status: 'failed', reason: 'ADAPTER_FAILED' });
   });
 
+  it('penalizes false unknowns and fabricated contradictions instead of rewarding universal marking', () => {
+    const expected = [
+      { id: 'known', label: 'implemented-fact' as const, evidence: [{ id: 'a', version: '1' }], unknown: false, contradiction: null },
+      { id: 'unknown', label: 'recorded-intent' as const, evidence: [{ id: 'b', version: '1' }], unknown: true, contradiction: 'real' },
+    ];
+    const marked = expected.map(c => ({ ...c, unknown: true, contradiction: c.contradiction ?? 'invented' }));
+    expect(scoreClaims(marked, expected)).toMatchObject({ unknownPreservation: 1, unknownPrecision: 0.5,
+      falseUnknowns: 1, contradictionPreservation: 1, contradictionPrecision: 0.5, falseContradictions: 1 });
+  });
+
   it('requires declared gates and paired evidence, with critical failures overriding quality', () => {
     expect(() => compareRuns([], [], undefined)).toThrow(/gate/i);
     const baseline = Array.from({ length: 20 }, (_, index) => ({ id: String(index), value: 0.5 }));
