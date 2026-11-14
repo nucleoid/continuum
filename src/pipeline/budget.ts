@@ -214,7 +214,8 @@ export function priceMicros(price: PriceSchedule, input: number, output: number,
   if (total > BigInt(Number.MAX_SAFE_INTEGER)) throw new BudgetError();
   return Number(total);
 }
-export type StageOutcome<T> = { status: 'complete'; value: T; provenance: UsageProvenance } | { status: 'skipped'; reason: BudgetReason };
+export type StageOutcome<T> = { status: 'complete'; value: T; provenance: UsageProvenance }
+  | { status: 'skipped'; reason: BudgetReason; retryableAdmission?: true };
 /** Optional durable hooks must commit before invocation and recheck publication at settlement.
  * A duplicate/ambiguous attempt must never return a dispatch permit. */
 export interface DurableAttempt {
@@ -254,9 +255,9 @@ export async function runBudgetedStage<I, O>(budget: Budget, adapter: BudgetAdap
   options: { signal?: AbortSignal; retry?: boolean; authorize?: () => Promise<boolean>; durable?: DurableAttempt; transportMs?: number;
     onWork?: (settlement: Promise<unknown>) => void } = {},
 ): Promise<StageOutcome<O>> {
-  const skip = (reason: BudgetReason): StageOutcome<O> => {
+  const skip = (reason: BudgetReason, retryableAdmission = false): StageOutcome<O> => {
     budget.receipts.add({ event: 'skipped', reason, elapsedMs: budget.elapsedMs() });
-    return { status: 'skipped', reason };
+    return { status: 'skipped', reason, ...(retryableAdmission ? { retryableAdmission: true as const } : {}) };
   };
   let id: string;
   let serialized: string;
@@ -299,7 +300,7 @@ export async function runBudgetedStage<I, O>(budget: Budget, adapter: BudgetAdap
     processKey = `${adapter.id}\u0000${adapter.model}\u0000${adapter.profile}`;
     processState = processCalls.get(processKey) ?? { active: 0, detached: 0 };
     retained = reserve.inputBytes + outputBytes;
-    if (processStageUnavailable(adapter.id, adapter.model, adapter.profile, retained)) return skip('budget_exhausted');
+    if (processStageUnavailable(adapter.id, adapter.model, adapter.profile, retained)) return skip('budget_exhausted', true);
     id = budget.reserve(reserve, retained);
     processState.active++; processActive++; processRetained += retained;
     processCalls.set(processKey, processState);

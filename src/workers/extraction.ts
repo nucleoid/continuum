@@ -97,8 +97,8 @@ export async function processExtraction(pool: pg.Pool, worker: string, profile: 
         catch { failure = 'invalid-output'; }
       } else {
         const reason = outcome.reason;
-        const admissionUnavailable = reason === 'credentials_unavailable' || reason === 'capability_unavailable' || reason === 'pricing_unavailable'
-          || (reason === 'budget_exhausted' && budgetedStageUnavailable(profile.budget, adapter) !== undefined);
+        const admissionUnavailable = outcome.retryableAdmission === true
+          || reason === 'credentials_unavailable' || reason === 'capability_unavailable' || reason === 'pricing_unavailable';
         failure = admissionUnavailable ? 'transient' : reason === 'provider_failed' ? transient ? 'transient' : 'permanent'
           : reason === 'deadline' || reason === 'cancelled' ? reason
           : reason === 'policy_denied' ? 'policy' : reason === 'invalid_response' ? 'invalid-output' : 'budget';
