@@ -12,6 +12,7 @@ export const DEFAULT_RECALL_EMBEDDING_DEADLINE_MS = 10_000;
 export const MAX_RECALL_EMBEDDING_DEADLINE_MS = 30_000;
 
 export interface RecallOptions {
+  onEmbeddingWork?: (settlement: Promise<unknown>) => void;
   budget?: Budget;
   readBudgetBytes?: number;
   query: string;
@@ -429,7 +430,7 @@ export async function recallCandidates(
     const work = (async (): Promise<GroupResult> => {
       let queryVec: number[];
       try {
-        [queryVec] = await embedWithBudget(group.provider, [opts.query], { signal: controller.signal, budget: opts.budget });
+        [queryVec] = await embedWithBudget(group.provider, [opts.query], { signal: controller.signal, budget: opts.budget, onWork: opts.onEmbeddingWork });
         assertEmbeddingVectorDimension(queryVec, group.provider);
       } catch (error) {
         return {

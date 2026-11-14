@@ -16,19 +16,18 @@ it.each(['embedding', 'reranking'] as const)('retains timed-out budgeted %s work
     invoke: async () => { invoked(); await held; const value = [Array(768).fill(0)]; return { value, response: value }; } };
   const provider = { id: embedding.id, dim: 768, local: true, pipelineAdapter: embedding, embed: async () => [[]] };
   const context = remoteExecutionContext({} as never, provider);
-  // Optional while establishing the red case against the old context API.
-  const onWork = (context as typeof context & { trackWork?: (work: Promise<unknown>) => void }).trackWork;
+  const onWork = context.trackWork;
   let completed = false;
   const budget = new Budget(t.config().profile);
   const signal = new AbortController().signal;
   const work = context.run(signal, async () => {
     if (kind === 'embedding') {
-      await expect(embedWithBudget(context.routing.providers()[0], ['reference'], { budget, signal, ...{ onWork } }))
+      await expect(embedWithBudget(context.routing.providers()[0], ['reference'], { budget, signal, onWork }))
         .rejects.toMatchObject({ code: 'EMBEDDING_TIMEOUT' });
     } else {
       const result = await runReranking(t.config(), budget, { query: 'reference', candidates: [
         { id: 'c0', title: 'One', excerpt: 'Reference' }, { id: 'c1', title: 'Two', excerpt: 'Reference' }] },
-      async () => true, 0, { signal, ...{ onWork } });
+      async () => true, 0, { signal, onWork });
       expect(result).toEqual({ status: 'fallback', reason: 'deadline' });
     }
   }).then(() => { completed = true; });

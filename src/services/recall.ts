@@ -32,6 +32,9 @@ export interface RecallLogger {
 
 export interface RecallEnrichment {
   readBudgetBytes?: number;
+  /** Pure complete-wire measurement; paired validator charges that wire once. */
+  outputBytes?: (result: PrincipalRecallResult) => number;
+  onWork?: (settlement: Promise<unknown>) => void;
   validateResult?: (result: PrincipalRecallResult) => void;
   registry: RetrievalEnricherRegistry;
   options: EnrichmentOptions;
@@ -93,11 +96,15 @@ export async function recallForPrincipal(
       limit: input.limit ?? 10,
       embeddingGroups,
       readBudgetBytes: enrichment?.readBudgetBytes,
+      onEmbeddingWork: enrichment?.onWork,
       budget,
     };
     const candidatePool = reranking ? await recallCandidates(pool, recallOptions, Math.max(input.limit ?? 10, reranking.candidateLimit), true) : undefined;
-    const ranked = reranking && candidatePool ? await rerankRecallPool(pool, principal.id, input, recallOptions, candidatePool, reranking, budget!, signal, localOnlyScopes,
-      candidatePool.diagnostics.vector === 'failed' || candidatePool.diagnostics.vector === 'partial' ? 'provider_failed' : undefined) : undefined;
+    const ranked = reranking && candidatePool ? await rerankRecallPool(pool, principal.id, input, recallOptions, candidatePool, reranking, budget!, signal, localOnlyScopes, {
+      fallbackReason: candidatePool.diagnostics.vector === 'failed' || candidatePool.diagnostics.vector === 'partial' ? 'provider_failed' : undefined,
+      outputBytes: enrichment?.outputBytes ? rows => enrichment.outputBytes!({ results: rows, accessible, diagnostics: candidatePool.diagnostics }) : undefined,
+      onWork: enrichment?.onWork,
+    }) : undefined;
     const recalled = ranked && candidatePool ? { results: ranked.results, diagnostics: candidatePool.diagnostics } : await recall(pool, recallOptions);
     const embeddingAuditGroups = recalled.diagnostics.groups.map((group) => ({
       provider: group.provider,
@@ -134,7 +141,7 @@ export async function recallForPrincipal(
       : undefined;
     const deliver = async (auditPool: Queryable, deliveredResults: RecallResult[]): Promise<PrincipalRecallResult> => {
       enrichment?.validateResult?.({ results: deliveredResults, accessible, diagnostics });
-      budget?.serializeOutput({ results: deliveredResults, diagnostics });
+      if (!enrichment?.outputBytes || !enrichment.validateResult) budget?.serializeOutput({ results: deliveredResults, diagnostics });
 
       // Recall auditing is required. Results are not returned if this write fails.
       await recordReadAudit(auditPool, {

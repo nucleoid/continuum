@@ -196,7 +196,13 @@ live source memories using its existing escaping/provenance boundary. Receipts
 never enter its source bytes, selection or ETag. Whole-result overflow precedes
 success read audit. Final adapters must count their actual complete output with
 `serializeOutput`, including REST/MCP wrappers and double escaping. Service
-output accounting adds a conservative projection; exact transport checks remain.
+output accounting covers the full returned object for direct library calls.
+Recall transport compositions instead measure their excerpt wire projection for
+reservation and charge that exact REST/MCP frame once before audit. Hydrated
+bodies do not become output bytes when the transport omits them. A trusted custom
+recall composition supplying `outputBytes` must pair that pure measurement with
+a `validateResult` callback that charges its complete actual wire through the
+shared budget; omission of either preserves the full service-object charge.
 
 Future composition must retain admitted hybrid ranking on reranker skip, report
 completed/skipped extraction chunks, and abstain from synthesis/refresh

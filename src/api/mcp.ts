@@ -2,7 +2,7 @@ import { boundedJsonText } from './mcp-http-output.js';
 import { remoteExecutionContext } from './mcp-http-execution.js';
 import type pg from 'pg';
 import { assertRerankingEmbeddingBudget, type Reranking } from '../reranking/provider.js';
-import { Budget } from '../pipeline/budget.js';
+import { Budget, boundedJson } from '../pipeline/budget.js';
 import { z } from 'zod';
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { CallToolResult, ServerRequest, ServerNotification } from '@modelcontextprotocol/sdk/types.js';
@@ -479,6 +479,8 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     async (args, extra) => {
       try {
         const budget = deps.reranking ? new Budget(deps.reranking.profile) : undefined;
+        const frame = (value: PrincipalRecallResult) => ({ jsonrpc: '2.0', id: extra.requestId,
+          result: jsonResult(recallProjection(value), { diagnostics: value.diagnostics }) });
         const { results, accessible, diagnostics } = await recallForPrincipal(
           pool,
           embeddingProvider,
@@ -490,13 +492,14 @@ export function buildMcpServer(deps: McpDeps): McpServer {
             registry: retrievalEnrichers,
             options: { ...enrichment, signal: deps.executionGuard || deps.reranking ? (enrichment.signal ? AbortSignal.any([extra.signal, enrichment.signal]) : extra.signal) : enrichment.signal, logger: deps.enrichmentLogger },
             readBudgetBytes: deps.readBudgetBytes,
+            onWork: invocation?.trackWork,
+            outputBytes: budget ? value => Buffer.byteLength(boundedJson(frame(value), budget.profile.limits.outputBytes)) : undefined,
             validateResult: deps.readBudgetBytes === undefined && !budget ? undefined : (value) => {
-              const wire = jsonResult(recallProjection(value), { diagnostics: value.diagnostics });
               if (budget) {
-                const frame = { jsonrpc: '2.0', id: extra.requestId, result: wire };
-                if (deps.readBudgetBytes !== undefined) boundedJsonText(frame, deps.readBudgetBytes, false);
-                budget.serializeOutput(frame);
-              }
+                const wire = frame(value);
+                if (deps.readBudgetBytes !== undefined) boundedJsonText(wire, deps.readBudgetBytes, false);
+                budget.serializeOutput(wire);
+              } else jsonResult(recallProjection(value), { diagnostics: value.diagnostics });
             },
           },
           budget,

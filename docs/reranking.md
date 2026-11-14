@@ -78,18 +78,31 @@ existing shared `Budget` and `runBudgetedStage`; there is no second accountant.
 The runner preserves conservative final-output allowance and up to one second
 of the remaining lifetime for final selection/audit. These reservations are not
 a promise that a slow required database operation will finish. REST/MCP count
-their complete actual response envelopes before success audit, in addition to
-the conservative service projection. REST/MCP builders and direct service calls
+their complete actual response envelopes before success audit. Transport
+compositions reserve from a pure wire
+measurement and charge the actual REST or complete MCP frame once, before audit.
+Full source bodies remain hydration costs, not excerpt-response output bytes.
+Direct library calls without a wire projection still budget their full returned
+objects. REST/MCP builders and direct service calls
 reject reranking compositions whose registered embedding providers lack matching
 `pipelineAdapter` accounting. Stock embedding adapters need an explicitly qualified
 budget adapter before they can be combined with reranking; no unbudgeted provider
 call substitutes for that prerequisite. Setup checks credentials, declared caps,
 token capability and matching pricing, and probes one complete minimal-query wire
 reservation for every distinct registered provider using the same accountant.
-The call ceiling must cover all those groups plus one reranker call. This is a
+All embedding reservations remain active together during setup, matching their
+concurrent execution; the concurrency and retained-byte ceilings must cover the
+combined group pool. The call ceiling must cover all groups plus one reranker
+call. This is a
 minimum compatibility check; actual queries and all later stages still need
 their complete remaining reservations. Optional enrichment without compatible
 accounting still skips safely.
+
+Remote MCP registers complete budget-stage settlement promises for query
+embeddings and reranking with its per-call execution context. A timeout may end
+the optional result while those promises still retain execution/drain fences.
+Shutdown waits within its existing runtime deadline and never reports detached
+work as drained merely because the response deadline elapsed.
 
 Budgeted query embeddings share the existing process limits: at most four active
 calls per adapter/model/profile, 128 overall and 64 MiB retained allowance. An

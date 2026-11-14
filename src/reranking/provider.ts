@@ -31,9 +31,10 @@ export function assertRerankingEmbeddingBudget(routing: EmbeddingRouting, config
       if (!Number.isSafeInteger(counted) || counted < 0 || !Number.isSafeInteger(adapter.tokens.overheadTokens) || adapter.tokens.overheadTokens < 0) throw new TypeError();
       const tokens = counted + adapter.tokens.overheadTokens;
       const inputBytes = Buffer.byteLength(wire);
-      const id = probe.reserve({ ...caps, inputBytes, contextTokens: tokens, outputBytes: adapter.responseBodyBytes, calls: 1,
+      // Recall starts routed groups concurrently. Keep every probe reservation
+      // active to validate their combined concurrency and retained allowance.
+      probe.reserve({ ...caps, inputBytes, contextTokens: tokens, outputBytes: adapter.responseBodyBytes, calls: 1,
         spendMicros: priceMicros(adapter.price, tokens, caps.outputTokens, caps.reasoningTokens) }, inputBytes + adapter.responseBodyBytes);
-      probe.settle(id, {});
     }
   } catch {
     throw new TypeError('Reranking requires budget-compatible embedding providers');

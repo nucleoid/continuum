@@ -1,6 +1,6 @@
 import { runBudgetedStage, type Budget, type BudgetAdapter } from '../pipeline/budget.js';
 
-export interface EmbeddingCallOptions { signal?: AbortSignal; budget?: Budget; }
+export interface EmbeddingCallOptions { signal?: AbortSignal; budget?: Budget; onWork?: (settlement: Promise<unknown>) => void; }
 export interface EmbeddingProvider {
   /** Explicit opt-in adapter for complete request accounting. No built-in price/token guesses. */
   readonly pipelineAdapter?: BudgetAdapter<string[], number[][]>;
@@ -26,7 +26,7 @@ export async function embedWithBudget(provider: EmbeddingProvider, texts: string
   const vectors: number[][] = [];
   for (let offset = 0; offset < texts.length; offset += batchSize) {
     const chunk = texts.slice(offset, offset + batchSize);
-    const outcome = await runBudgetedStage(options.budget, adapter, chunk, { signal: options.signal, transportMs: provider.timeoutMs });
+    const outcome = await runBudgetedStage(options.budget, adapter, chunk, { signal: options.signal, transportMs: provider.timeoutMs, onWork: options.onWork });
     if (outcome.status !== 'complete') throw new EmbeddingProviderError(
       outcome.reason === 'deadline' || outcome.reason === 'cancelled' ? 'EMBEDDING_TIMEOUT' : 'EMBEDDING_FAILED',
       'Embedding stage unavailable within its budget');

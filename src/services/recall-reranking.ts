@@ -57,11 +57,12 @@ export async function currentRecallEligibility(client: pg.PoolClient, actor: str
 }
 
 export async function rerankRecallPool(pool: pg.Pool, actor: string, input: RecallInput, opts: RecallOptions,
-  selected: RecallCandidates, config: Reranking, budget: Budget, signal?: AbortSignal, localOnlyScopes: ReadonlySet<string> = new Set(), fallbackReason?: BudgetReason): Promise<AdmittedRecall> {
+  selected: RecallCandidates, config: Reranking, budget: Budget, signal?: AbortSignal, localOnlyScopes: ReadonlySet<string> = new Set(),
+  options: { fallbackReason?: BudgetReason; outputBytes?: (results: RecallResult[]) => number; onWork?: (settlement: Promise<unknown>) => void } = {}): Promise<AdmittedRecall> {
   const limit = input.limit ?? 10;
   const known = sourceVersions.get(pool) ?? new Map<string, string>();
   sourceVersions.set(pool, known);
-  let reason: RerankingDiagnostic | undefined = fallbackReason ? { status: 'fallback', reason: fallbackReason } : undefined;
+  let reason: RerankingDiagnostic | undefined = options.fallbackReason ? { status: 'fallback', reason: options.fallbackReason } : undefined;
   const admitted = await evidenceTransaction(pool, async client => {
     // Metadata before lazy source enrollment or body hydration. Current membership
     // applies even if a previously resolved readable-scope list is stale.
@@ -101,12 +102,17 @@ export async function rerankRecallPool(pool: pg.Pool, actor: string, input: Reca
   const candidates = Object.freeze(admitted.results.map((r, i) => Object.freeze({ id: `c${i}`, title: r.memory.title, excerpt: r.excerpt })));
   const authorize = () => evidenceTransaction(pool, async client =>
     (await currentRecallIds(client, actor, admitted.versions, config)).size === admitted.results.length);
-  // Conservative complete-service output reserve for any order/refill, plus
-  // transport wrappers and the existing optional enrichment ceiling.
+  // Reserve the actual transport projection when supplied; library results
+  // otherwise include full memory bodies. Slack covers later scores/enrichment.
   let finalBytes: number;
-  try { finalBytes = Buffer.byteLength(boundedJson(admitted.results, budget.available('outputBytes'))) + 32_768; }
+  try {
+    const bytes = options.outputBytes ? options.outputBytes(admitted.results)
+      : Buffer.byteLength(boundedJson(admitted.results, budget.available('outputBytes')));
+    if (!Number.isSafeInteger(bytes) || bytes < 0) throw new BudgetError();
+    finalBytes = bytes + 65_536;
+  }
   catch { return { ...admitted, diagnostic: { status: 'fallback', reason: 'budget_exhausted' } }; }
-  const outcome = await runReranking(config, budget, Object.freeze({ query: input.query, candidates }), authorize, finalBytes, { signal });
+  const outcome = await runReranking(config, budget, Object.freeze({ query: input.query, candidates }), authorize, finalBytes, { signal, onWork: options.onWork });
   if (outcome.status === 'fallback') return { ...admitted, diagnostic: outcome };
   return { ...admitted, diagnostic: { status: 'used' }, results: admitted.results
     .map((result, i) => ({ ...result, rerankScore: outcome.scores.get(`c${i}`)!, fusionRank: i }))

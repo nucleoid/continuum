@@ -22,7 +22,7 @@ function validate(value: unknown, input: RerankingInput, version: string, maxByt
  * No retry or fresh child allowance is created on any fallback. */
 export async function runReranking(config: Reranking, budget: Budget, input: RerankingInput,
   authorize: () => Promise<boolean>, finalOutputBytes: number,
-  options: { signal?: AbortSignal; durable?: DurableAttempt } = {}): Promise<RerankingOutcome> {
+  options: { signal?: AbortSignal; durable?: DurableAttempt; onWork?: (settlement: Promise<unknown>) => void } = {}): Promise<RerankingOutcome> {
   if (config.adapter.responseBodyBytes + finalOutputBytes > budget.available('outputBytes')) {
     return { status: 'fallback', reason: 'budget_exhausted' };
   }

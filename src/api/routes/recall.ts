@@ -5,7 +5,7 @@ import type { EmbeddingRouting } from '../../embeddings/router.js';
 import type { OperationalLogger } from '../server.js';
 import { recallForPrincipal, type RecallEnrichment, type PrincipalRecallResult } from '../../services/recall.js';
 import type { Reranking } from '../../reranking/provider.js';
-import { Budget } from '../../pipeline/budget.js';
+import { Budget, boundedJson } from '../../pipeline/budget.js';
 import { RetrievalEnricherRegistry, enrichmentConfigFromEnv } from '../../extensions/retrieval.js';
 
 const recallSchema = z.object({
@@ -62,6 +62,7 @@ export function recallRouter(
           options: { ...(enrichment?.options ?? enrichmentConfigFromEnv()), signal: enrichment?.options.signal
             ? AbortSignal.any([controller.signal, enrichment.options.signal]) : controller.signal },
           validateResult: value => { enrichment?.validateResult?.(value); budget!.serializeOutput(projection(value)); },
+          outputBytes: value => Buffer.byteLength(boundedJson(projection(value), budget!.profile.limits.outputBytes)),
         } : enrichment,
         budget,
         reranking,
