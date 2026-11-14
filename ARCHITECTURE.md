@@ -109,6 +109,19 @@ Embedding failure can leave valid capture committed with `embedded: false`; rela
 
 ## Retrieval and providers
 
+The optional [pipeline resource envelope](./docs/pipeline-budgets.md) adds checked
+immutable profiles, complete bounded adapter serialization, compatible token/
+price capabilities and shared child reservations. Unconfigured callers retain
+their behavior; new priced stages have no enabled default. Deadlines suppress
+late delivery while actual settlement alone releases retained concurrency/bytes.
+Migration 0092 adds payload-free workflow/attempt accounting with database-time
+deadlines, replica-safe reservations and generation fencing. Retry/requeue never
+resets allowance or refunds ambiguous spend. Exact APP/OP capabilities and an
+owner-controlled startup gate preserve separate authority. Hydration and
+deterministic AGENTS.md rendering share optional limits; receipts remain outside
+contributed source bytes and required audits. Migration 0092 requires 0090, with
+no dependency on a contiguous ordinal sequence.
+
 The [evidence authorization foundation](./docs/evidence-authorization.md) defines
 pure typed artifact/document/provider intersection decisions and an internal
 adapter using current enabled identity and effective memberships. It adds no

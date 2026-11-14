@@ -33,6 +33,15 @@ SQL queue.
 
 ## Operator backfill procedure
 
+Trusted pipeline callers may opt into the shared [resource envelope](pipeline-budgets.md).
+Every budgeted embedding chunk requires a compatible complete-request serializer,
+qualified token bound, price identity and response/cap contract. Missing
+capabilities skip the optional group without invoking its provider. All chunks
+share one call/spend allowance and deadline; timeout retains unsettled resources.
+No built-in hosted tokenizer or pricing is inferred. Existing configured recall
+and backfill embedding calls retain these documented limits when no envelope is
+supplied; the maintenance CLI does not automatically enable a new profile.
+
 1. Apply the complete packaged chain through 0090, finish owner repair and exact
    role grants, and configure the same scope routing used by the API.
 2. Run `npm run embed-backfill -- --count`.

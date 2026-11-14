@@ -30,7 +30,7 @@ and taking the nonzero forced-exit path.
 
 ## Current schema and runtime prerequisites
 
-Apply every packaged migration through `0090`, finish the owner-only `0081`
+Apply every packaged migration through `0092`, finish the owner-only `0081`
 coordination backfill, and converge current application/operator/sync profiles
 before starting matching binaries. Use the migration-owner connection for this
 work, then restore the runtime application connection. `0083` needs database
@@ -51,6 +51,16 @@ bootstrap rule, not a runtime search-path exception. Configure the explicit
 authentication mode as described in [authentication.md](./authentication.md).
 
 ## Recall diagnostics and embedding maintenance
+
+Current startup also verifies the hardened owner-controlled pipeline-accounting
+readiness helper installed by 0092. Its exact APP/OP grants expose accounting
+functions, never raw table mutation; SYNC/reporting gain no capabilities. The
+migration requires owner TEMPORARY and ledgered 0090, independently of numeric
+gaps. Optional new stages remain disabled and have zero priced spend by default.
+Trusted compositions can propagate a checked shared profile through services;
+request fields cannot enable it. See [pipeline budgets](pipeline-budgets.md) for
+retained cancellation, durable recovery, safe receipts and complete-envelope
+accounting. Connectivity readiness does not reconcile unsettled provider charges.
 
 Optional vector failures preserve full-text candidates for the affected provider
 group. REST recall includes `diagnostics` with `vector` (`used`, `disabled`,
