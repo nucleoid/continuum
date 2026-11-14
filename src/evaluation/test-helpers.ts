@@ -577,7 +577,7 @@ function fixtureUuid(value: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 const GRANT_HASHES: Record<string, string> = {
-  'grant-application-role.sql': '955460c2f5ae7853379adb868f59230adbcc6f7a29e7f4d15383f24c9a6656c3',
+  'grant-application-role.sql': '18b4c8af821fefa9c137fda16a7eec2531d46b4ebbc4d82aac3e7d16980e955f',
   'grant-operator-role.sql': '19c9fe7f9ee03b7a5a109f8ba7637273d752be7e7cfc519416f53a6e4125ff7b',
   'grant-sync-role.sql': '35c77a918abbc297d5c1e1fd89902bc99e29ac086147edd5cc973b1879c538c3',
 };

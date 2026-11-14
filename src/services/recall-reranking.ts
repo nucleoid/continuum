@@ -66,7 +66,7 @@ export async function rerankRecallPool(pool: pg.Pool, actor: string, input: Reca
   const admitted = await evidenceTransaction(pool, async client => {
     // Metadata before lazy source enrollment or body hydration. Current membership
     // applies even if a previously resolved readable-scope list is stale.
-    const metadata = await recallAuthorityMetadata(client, actor, selected.candidates.map(c => c.id), opts.scopeIds);
+    const metadata = await recallAuthorityMetadata(client, actor, selected.candidates.map(c => c.id), opts.scopeIds, opts.eventFilter);
     const sizes = new Map(metadata.map(r => [r.id, Number(r.bytes)]));
     let candidates = selected.candidates.filter(c => sizes.has(c.id));
     const fits = (rows: typeof candidates) => rows.length <= budget.available('candidates')

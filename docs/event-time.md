@@ -17,6 +17,8 @@ bounded reference data. Ambiguous annotations hold at most eight candidates,
 each with `notation` and optional `timezone`. Original notation is at most 1024
 UTF-8 bytes; candidate notation at most 256. Invalid calendars, missing timezone,
 empty/reversed intervals, unsupported keys and excess candidates are rejected.
+Timestamps use years 0001 through 9999 and at most three fractional-second
+digits. Normalization retains millisecond precision rather than silently rounding.
 
 Recall accepts `eventFilter` and `eventWindow` (MCP `event_filter`,
 `event_window`). Each takes offset-aware `from` and/or `to`, or exclusive `at`.

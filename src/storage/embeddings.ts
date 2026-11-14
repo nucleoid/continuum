@@ -74,6 +74,7 @@ export async function vectorSearchMemoryIds(
   types?: MemoryType[],
   eventFilter?: EventWindow,
   actor?: string,
+  stableOrder = false,
 ): Promise<Array<{ id: string; distance: number }>> {
   if (scopeIds.length === 0) return [];
   assertEmbeddingVectorDimension(queryVector, provider);
@@ -106,7 +107,7 @@ export async function vectorSearchMemoryIds(
      )
      SELECT e.memory_id AS id, e.embedding ${distanceOperator} $1::${vectorType} AS distance
        FROM provider_embeddings e
-      ORDER BY e.embedding ${distanceOperator} $1::${vectorType}
+      ORDER BY e.embedding ${distanceOperator} $1::${vectorType}${stableOrder ? ', e.memory_id ASC' : ''}
       LIMIT $${limitIdx}`,
     params,
   );

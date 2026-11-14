@@ -1,16 +1,20 @@
 import type pg from 'pg';
 import type { EvidenceEnvelope } from '../evidence/model.js';
 import { MEMORY_READ_BUDGET_BYTES_SQL } from './memory-reads.js';
+import type { EventWindow } from '../temporal/model.js';
+import { eventPredicate } from './temporal.js';
 
-export async function recallAuthorityMetadata(client: pg.PoolClient, actor: string, ids: string[], scopeIds: string[]) {
+export async function recallAuthorityMetadata(client: pg.PoolClient, actor: string, ids: string[], scopeIds: string[], eventFilter?: EventWindow) {
+  const params: unknown[] = [ids,scopeIds,actor];
+  const temporal = eventPredicate(params,actor,eventFilter);
   return (await client.query<{ id: string; bytes: string }>(
     `SELECT m.id, ${MEMORY_READ_BUDGET_BYTES_SQL} AS bytes FROM memories m JOIN scopes s ON s.id=m.scope_id
      WHERE m.id=ANY($1::uuid[]) AND m.scope_id=ANY($2::uuid[]) AND m.state='live'
      AND (m.expires_at IS NULL OR m.expires_at>pg_catalog.clock_timestamp())
      AND EXISTS(SELECT 1 FROM principals p WHERE p.id=$3 AND p.disabled_at IS NULL)
      AND (s.kind='org' OR EXISTS(SELECT 1 FROM scope_memberships sm WHERE sm.scope_id=m.scope_id AND sm.principal_id=$3
-       AND sm.active AND continuum_membership_is_effective(sm.active,sm.source_kind))) ORDER BY m.id FOR UPDATE OF m`,
-    [ids, scopeIds, actor])).rows;
+       AND sm.active AND continuum_membership_is_effective(sm.active,sm.source_kind))) ${temporal} ORDER BY m.id FOR UPDATE OF m`,
+    params)).rows;
 }
 interface SourceAdmission { id: string; version: string; envelope: EvidenceEnvelope | null }
 

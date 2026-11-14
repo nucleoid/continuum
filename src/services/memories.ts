@@ -10,7 +10,7 @@ import {
 import type { MemoryState, MemoryType, Principal } from '../types.js';
 import { asServiceError, ServiceError } from './errors.js';
 import { parseScopeString } from './scopes.js';
-import { parseEventWindow, type EventWindowInput } from '../temporal/model.js';
+import { eventMatches, parseEventWindow, type EventWindowInput } from '../temporal/model.js';
 import { readEventAnnotations } from '../storage/temporal.js';
 
 export const DEFAULT_MEMORY_LIST_LIMIT = 50;
@@ -124,13 +124,18 @@ export async function listMemoriesForPrincipal(
       throw new ServiceError('INVALID_INPUT', 'Invalid memory type');
     }
     const scope = canonicalScope(input.scope);
+    const eventFilter = input.eventFilter === undefined ? undefined : parseEventWindow(input.eventFilter);
     client = await pool.connect();
     await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
-    const items = await listReadableMemories(client, principal.id, {
+    let items = await listReadableMemories(client, principal.id, {
       scope, type: input.type, state, limit, offset,
-      eventFilter: input.eventFilter === undefined ? undefined : parseEventWindow(input.eventFilter),
+      eventFilter,
     }, readBudgetBytes);
-    const events = await readEventAnnotations(client,principal.id,items.map(item => item.memory.id),true,readBudgetBytes);
+    const events = await readEventAnnotations(client,principal.id,items.map(item => item.memory.id),true,readBudgetBytes,undefined,eventFilter !== undefined);
+    if (eventFilter) items = items.filter(item => {
+      const event = events.get(item.memory.id);
+      return event !== null && event !== undefined && eventMatches(event.annotation,eventFilter);
+    });
     for (const item of items) {
       const event = events.get(item.memory.id);
       if (event && (event.version || input.eventFilter)) item.memory.event = event;

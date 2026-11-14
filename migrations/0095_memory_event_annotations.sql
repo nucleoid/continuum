@@ -133,6 +133,19 @@ BEGIN
   RETURN (metadata-'bytes')||jsonb_build_object('annotation',content::jsonb);
 END $$;
 
+-- Ordinary source reads need no historical-unknown projection. Check the empty
+-- annotation index first, preserving their source-only admission costs.
+CREATE FUNCTION continuum_event_optional_metadata(actor UUID,memory_id UUID,locked BOOLEAN) RETURNS JSONB LANGUAGE plpgsql VOLATILE SECURITY DEFINER AS $$
+BEGIN
+  IF NOT EXISTS(SELECT 1 FROM memory_event_current c WHERE c.memory_id=continuum_event_optional_metadata.memory_id) THEN RETURN NULL; END IF;
+  RETURN continuum_event_metadata(actor,memory_id,locked);
+END $$;
+CREATE FUNCTION continuum_event_optional_read(actor UUID,memory_id UUID,locked BOOLEAN) RETURNS JSONB LANGUAGE plpgsql VOLATILE SECURITY DEFINER AS $$
+BEGIN
+  IF NOT EXISTS(SELECT 1 FROM memory_event_current c WHERE c.memory_id=continuum_event_optional_read.memory_id) THEN RETURN NULL; END IF;
+  RETURN continuum_event_read(actor,memory_id,locked);
+END $$;
+
 CREATE FUNCTION continuum_event_overlap(value JSONB,window_spec JSONB) RETURNS BOOLEAN LANGUAGE plpgsql IMMUTABLE AS $$
 DECLARE at_time TIMESTAMPTZ:=(window_spec->>'at')::timestamptz; from_time TIMESTAMPTZ:=(window_spec->>'from')::timestamptz;
   to_time TIMESTAMPTZ:=(window_spec->>'to')::timestamptz; point TIMESTAMPTZ; start_at TIMESTAMPTZ; end_at TIMESTAMPTZ;
@@ -190,6 +203,7 @@ $$;
 DO $$
 DECLARE schema_name TEXT:=current_schema(); f RECORD; signature TEXT; definition TEXT; revised TEXT; candidate RECORD;
   app_signatures TEXT[]:=ARRAY['continuum_event_write(uuid,uuid,jsonb)','continuum_event_read(uuid,uuid,boolean)','continuum_event_metadata(uuid,uuid,boolean)',
+    'continuum_event_optional_metadata(uuid,uuid,boolean)','continuum_event_optional_read(uuid,uuid,boolean)',
     'continuum_event_matches(uuid,uuid,jsonb)','continuum_event_promote(uuid,uuid,uuid,uuid)','continuum_event_is_ready()'];
 BEGIN
   FOR f IN SELECT oid::regprocedure signature FROM pg_proc WHERE pronamespace=quote_ident(schema_name)::regnamespace AND proname LIKE 'continuum_event_%' LOOP

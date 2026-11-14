@@ -231,10 +231,11 @@ export async function embedCapturedMemory(
     if (!relationErrorCode) {
       await client.query('SAVEPOINT ingest_relations');
       try {
-        memory = await updateMemoryMetadata(client, memory.id, {
+        const updatedMemory = await updateMemoryMetadata(client, memory.id, {
           ...memory.metadata,
           related,
         });
+        memory = { ...updatedMemory, ...(memory.event ? {event:memory.event} : {}) };
         await client.query('RELEASE SAVEPOINT ingest_relations');
       } catch {
         await client.query('ROLLBACK TO SAVEPOINT ingest_relations');

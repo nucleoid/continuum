@@ -112,7 +112,7 @@ export async function recallForPrincipal(
       outputBytes: enrichment?.outputBytes ? rows => enrichment.outputBytes!({ results: rows, accessible, diagnostics: candidatePool.diagnostics }) : undefined,
       onWork: enrichment?.onWork,
     }) : undefined;
-    const hintPool = !ranked && eventWindow ? await recallCandidates(pool,recallOptions,100) : undefined;
+    const hintPool = !ranked && (eventWindow || eventFilter) ? await recallCandidates(pool,recallOptions,eventWindow ? 100 : recallOptions.limit) : undefined;
     const recalled = ranked && candidatePool ? { results: ranked.results, diagnostics: candidatePool.diagnostics }
       : hintPool ? { diagnostics:hintPool.diagnostics, results:await hydrateRecallCandidates(pool,hintPool.candidates.map(c=>c.id),input.query,
         new Map(hintPool.candidates.map(c=>[c.id,c.score])),scopeIds,input.types,enrichment?.readBudgetBytes,budget,false,eventFilter,principal.id) }
@@ -151,7 +151,7 @@ export async function recallForPrincipal(
       ? await applyRetrievalEnrichers(results, principal.id, enrichment.registry, { ...enrichment.options, budget })
       : undefined;
     const deliver = async (auditPool: Queryable, deliveredResults: RecallResult[]): Promise<PrincipalRecallResult> => {
-      const events = await readEventAnnotations(auditPool, principal.id, deliveredResults.map(r => r.memory.id),true,enrichment?.readBudgetBytes,budget);
+      const events = await readEventAnnotations(auditPool, principal.id, deliveredResults.map(r => r.memory.id),true,enrichment?.readBudgetBytes,budget,Boolean(eventFilter || eventWindow));
       const annotations = new Map<string, EventAnnotation>();
       deliveredResults = deliveredResults.filter(result => {
         const event = events.get(result.memory.id);

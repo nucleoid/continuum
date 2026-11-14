@@ -7,7 +7,7 @@ import { vectorSearchMemoryIds } from './embeddings.js';
 import { assertEmbeddingVectorDimension } from './schema.js';
 import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
 import type { Queryable } from './queryable.js';
-import { orderEventResults, type EventWindow, type EventAnnotation } from '../temporal/model.js';
+import { eventMatches, orderEventResults, type EventWindow, type EventAnnotation } from '../temporal/model.js';
 import { eventPredicate, readEventAnnotations } from './temporal.js';
 
 export const DEFAULT_RECALL_EMBEDDING_DEADLINE_MS = 10_000;
@@ -164,6 +164,7 @@ async function boundedVectorSearch(
   signal: AbortSignal,
   eventFilter?: EventWindow,
   actor?: string,
+  stableOrder = false,
 ): Promise<Array<{ id: string; distance: number }>> {
   const remaining = () => {
     const ms = deadlineAt - Date.now();
@@ -221,7 +222,7 @@ async function boundedVectorSearch(
       return client.query(sql, values);
     }) as Queryable['query'] };
     const hits = await vectorSearchMemoryIds(
-      bounded, queryVec, scopeIds, provider, limit, types, eventFilter, actor,
+      bounded, queryVec, scopeIds, provider, limit, types, eventFilter, actor, stableOrder,
     );
     if (transactionStarted) {
       await client.query('COMMIT');
@@ -295,6 +296,7 @@ async function ftsHits(
   limit: number,
   eventFilter?: EventWindow,
   actor?: string,
+  stableOrder = false,
 ): Promise<FtsHit[]> {
   if (scopeIds.length === 0) return [];
   const params: unknown[] = [query, scopeIds];
@@ -317,7 +319,7 @@ async function ftsHits(
         AND to_tsvector('english', title || ' ' || body) @@ plainto_tsquery('english', $1)
         ${typeFilter}
         ${temporal}
-      ORDER BY score DESC
+      ORDER BY score DESC${stableOrder ? ', id ASC' : ''}
       LIMIT $${limitIdx}`,
     params,
   );
@@ -407,7 +409,7 @@ export async function recallCandidates(
   // One extra identity detects overflow rather than silently changing selection.
   const overFetch = Math.min(opts.limit * 5, 100, (opts.budget?.available('candidates') ?? 100) + 1);
   const borrowed = !connectable(pool);
-  const searchText = () => ftsHits(pool, opts.query, opts.scopeIds, opts.types, overFetch, opts.eventFilter, opts.actor);
+  const searchText = () => ftsHits(pool, opts.query, opts.scopeIds, opts.types, overFetch, opts.eventFilter, opts.actor, opts.eventWindow !== undefined);
   const fts = await (borrowed ? queueBorrowedSql(pool, searchText) : searchText());
   if (!deferCandidateCharge && opts.budget && fts.length > opts.budget.available('candidates')) throw new BudgetError();
 
@@ -461,7 +463,7 @@ export async function recallCandidates(
       try {
         const execute = () => boundedVectorSearch(
           pool, deadlineAt, queryVec, group.scopeIds,
-          group.provider, overFetch, opts.types, controller.signal, opts.eventFilter, opts.actor,
+          group.provider, overFetch, opts.types, controller.signal, opts.eventFilter, opts.actor, opts.eventWindow !== undefined,
         );
         const sql = borrowed ? queueBorrowedSql(pool, execute) : execute();
         vectorSqlWork.add(sql);
@@ -529,7 +531,7 @@ export async function recallCandidates(
   const fused = fuse(fts, ...vectorLists);
   if (!deferCandidateCharge) opts.budget?.consume({ candidates: fused.size });
   const ranked = Array.from(fused.entries())
-    .sort(([idA, a], [idB, b]) => b - a || idA.localeCompare(idB))
+    .sort(([, a], [, b]) => b - a)
     .map(([id, score]) => ({ id, score }))
     .slice(0, candidateLimit);
 
@@ -552,15 +554,15 @@ export async function recall(pool: Queryable, opts: RecallOptions): Promise<Reca
   const hydrateResults = () => hydrateRecallCandidates(pool, selected.candidates.map(c => c.id), opts.query,
     new Map(selected.candidates.map(c => [c.id, c.score])), opts.scopeIds, opts.types, opts.readBudgetBytes, opts.budget, false, opts.eventFilter, opts.actor);
   let results = await (!connectable(pool) ? queueBorrowedSql(pool, hydrateResults) : hydrateResults());
-  if (opts.eventWindow) {
-    const events = opts.actor ? await readEventAnnotations(pool,opts.actor,results.map(r => r.memory.id),true,opts.readBudgetBytes,opts.budget) : new Map();
+  if (opts.eventWindow || opts.eventFilter) {
+    const events = opts.actor ? await readEventAnnotations(pool,opts.actor,results.map(r => r.memory.id),true,opts.readBudgetBytes,opts.budget,true) : new Map();
     const annotations = new Map<string,EventAnnotation>();
     results = results.filter(r => {
       const event = events.get(r.memory.id);
-      if (!event) return false;
+      if (!event || (opts.eventFilter && !eventMatches(event.annotation,opts.eventFilter))) return false;
       annotations.set(r.memory.id,event.annotation);r.memory.event=event;return true;
     });
-    results = orderEventResults(results.map(result => ({id:result.memory.id,score:result.score,result})),opts.eventWindow,annotations).map(row => row.result);
+    if (opts.eventWindow) results = orderEventResults(results.map(result => ({id:result.memory.id,score:result.score,result})),opts.eventWindow,annotations).map(row => row.result);
   }
   return { results: results.slice(0,opts.limit), diagnostics: selected.diagnostics };
 }
