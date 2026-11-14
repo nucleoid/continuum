@@ -109,6 +109,14 @@ Embedding failure can leave valid capture committed with `embedded: false`; rela
 
 ## Retrieval and providers
 
+The [evidence authorization foundation](./docs/evidence-authorization.md) defines
+pure typed artifact/document/provider intersection decisions and an internal
+adapter using current enabled identity and effective memberships. It adds no
+consumer pipeline, connector, publication endpoint or persistent authority cache.
+Its stage matrix and revocation requirements are normative obligations for later
+consumers; existing retrieval and generator behavior below remains implemented
+through its current services.
+
 Recall resolves readable scope UUIDs before candidate selection. English full-text search and optional provider-qualified cosine searches feed reciprocal-rank fusion with K=60. Candidate queries filter live state and expiry before ranking; hydration repeats eligibility checks. The default recall limit is 10, with a maximum of 100. Results carry bounded excerpts and a truncation flag; authorized fetch provides full content.
 
 Browse defaults to live state, 50 results, and a maximum of 100 with offset at most 10,000. Fetch and browse require an enabled caller, effective scope access, and an unexpired row. Fetch does not require live state. See [memory API](./docs/memory-api.md).

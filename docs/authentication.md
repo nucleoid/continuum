@@ -63,6 +63,13 @@ case-insensitive.
 
 ## Service API keys
 
+The internal [evidence policy foundation](evidence-authorization.md) resolves
+current identity and effective Continuum membership through these same primitives.
+It does not accept caller policy snapshots as grants or give an APP connection
+operator authority. Independent repository/connector and source-document access
+must be validated by trusted adapters before future evidence consumers disclose
+content. No new transport, declassification operation or credential is added.
+
 Service API keys contain 256 random bits and use the `ctm_` prefix. Continuum
 stores only SHA-256 hashes plus a display prefix and final four characters.
 Keys can be restricted to one write source and expire 90 days after issue or
