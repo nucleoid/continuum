@@ -140,7 +140,9 @@ BEGIN
   PERFORM continuum_evidence_require_operator(actor);
   IF enabled IS NULL OR NOT continuum_extraction_valid_descriptor(descriptor) THEN RAISE check_violation USING MESSAGE='invalid extraction profile'; END IF;
   INSERT INTO extraction_profiles VALUES(descriptor->>'id',descriptor,enabled,1)
-    ON CONFLICT(id) DO UPDATE SET descriptor=EXCLUDED.descriptor,enabled=EXCLUDED.enabled,generation=extraction_profiles.generation+1;
+    ON CONFLICT(id) DO UPDATE SET descriptor=EXCLUDED.descriptor,enabled=EXCLUDED.enabled,
+      generation=CASE WHEN (extraction_profiles.descriptor,extraction_profiles.enabled) IS NOT DISTINCT FROM (EXCLUDED.descriptor,EXCLUDED.enabled)
+        THEN extraction_profiles.generation ELSE extraction_profiles.generation+1 END;
   INSERT INTO audit_log(principal_id,action,metadata) VALUES(actor,'write',jsonb_build_object('operation','extraction_profile_installed'));
 END $$;
 
@@ -168,8 +170,11 @@ BEGIN
     OR (SELECT count(DISTINCT value) FROM unnest(source_ids) value)<>cardinality(source_ids) THEN RAISE check_violation USING MESSAGE='invalid extraction source allowlist'; END IF;
   PERFORM id FROM extraction_profiles WHERE id=profile_id AND (enabled OR NOT enable) FOR SHARE;
   IF NOT FOUND THEN RAISE check_violation USING MESSAGE='extraction profile unavailable'; END IF;
+  source_ids:=(SELECT array_agg(value ORDER BY value) FROM unnest(source_ids) value);
   INSERT INTO extraction_scope_config VALUES(target_scope,profile_id,source_ids,enable,1)
-    ON CONFLICT(scope_id) DO UPDATE SET profile=EXCLUDED.profile,sources=EXCLUDED.sources,enabled=EXCLUDED.enabled,generation=extraction_scope_config.generation+1 RETURNING * INTO result;
+    ON CONFLICT(scope_id) DO UPDATE SET profile=EXCLUDED.profile,sources=EXCLUDED.sources,enabled=EXCLUDED.enabled,
+      generation=CASE WHEN extraction_scope_config.profile=EXCLUDED.profile AND extraction_scope_config.enabled=EXCLUDED.enabled
+        AND extraction_scope_config.sources <@ EXCLUDED.sources THEN extraction_scope_config.generation ELSE extraction_scope_config.generation+1 END RETURNING * INTO result;
   INSERT INTO audit_log(principal_id,action,scope_id,metadata) VALUES(actor,'write',target_scope,jsonb_build_object('operation','extraction_configured','enabled',enable));
   RETURN to_jsonb(result);
 END $$;

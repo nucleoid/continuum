@@ -45,8 +45,9 @@ and never implies a new allowance. A real provider needs independently
 reviewed accounting and enforceable completion/response limits for that exact
 version/profile. A validation identifier alone is not qualification. The
 starter budget has zero priced spend; it cannot activate a paid provider.
-Installing or replacing a descriptor advances its generation and fences older
-work. There is no automatic provider switch or hosted fallback.
+Reinstalling an identical descriptor with the same enabled state preserves its
+generation. Replacement or an enabled-state change advances the generation and
+fences older work. There is no automatic provider switch or hosted fallback.
 
 Use a separate existing non-owner isolated LOGIN for processing. As migration
 owner, run the checked script with the actual tenant schema and worker role:
@@ -90,6 +91,11 @@ credential's capture-source restrictions or a tag vocabulary. Scope opt-in and
 operator installation/binding are separate authorities. Removing either or
 changing its generation fences in-flight output. Source-root local-only and
 current external restrictions also apply before every disclosure and commit.
+
+Repeating identical scope settings, reordering the source set or widening it
+under the same profile and enabled state preserves the generation and queued
+work. Narrowing, changing profile or enabled state advances the fence. Disabling
+and later re-enabling does not revive previously fenced runs.
 
 ## Capture, chunks and work
 
@@ -156,6 +162,11 @@ conservative serialized control-record allowance for descriptors, bounded
 chunks, attempts and receipts. Generated payloads also charge a conservative
 4 KiB per-assertion provenance allowance. These are operational retained-byte
 bounds, not measured heap or normalized physical PostgreSQL allocation.
+
+Stopping or restarting a worker permanently ends its in-flight run, including
+work not yet dispatched. The remaining queue is preserved. An expired claim's
+30-second lease outlives its original 20-second workflow, so recovery cannot
+resume that run or grant it a new budget.
 
 Only `ExtractionTransientError` from a trusted adapter classifies a transient
 provider failure. A settled transient can queue another attempt, with a 100 ms

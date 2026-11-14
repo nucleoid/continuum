@@ -111,9 +111,11 @@ export async function processExtraction(pool: pg.Pool, worker: string, profile: 
         await extractionOperation(pool, 'SELECT continuum_extraction_apply($1,$2,$3,$4,$5,$6,$7) AS result',
           [claim.id, worker, claim.generation, chunk.index, attempt, output, failure], assertLive);
       } catch (error) {
-        if ((error as { code?: string }).code !== '54000') throw error;
-        await extractionOperation(pool, 'SELECT continuum_extraction_apply($1,$2,$3,$4,$5,NULL,\'budget\') AS result',
-          [claim.id, worker, claim.generation, chunk.index, attempt], assertLive);
+        const code = (error as { code?: string }).code;
+        if (code !== '54000' && (code !== '23514' || output === null)) throw error;
+        failure = code === '54000' ? 'budget' : 'invalid-output'; output = null;
+        await extractionOperation(pool, 'SELECT continuum_extraction_apply($1,$2,$3,$4,$5,NULL,$6) AS result',
+          [claim.id, worker, claim.generation, chunk.index, attempt, failure], assertLive);
       }
       if (failure === 'transient') return 'unavailable';
     }
