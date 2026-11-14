@@ -16,7 +16,7 @@ import { supersedeDecision } from '../storage/supersede.js';
 import { provisionEntraGroupBinding, syncEntraMemberships } from './membership-sync.js';
 import { Budget } from '../pipeline/budget.js';
 import { getScopeByRef } from '../storage/scopes.js';
-import { promoteMemory } from '../storage/promote.js';
+import { promoteMemory, verifyMemory } from '../storage/promote.js';
 
 it('keeps original evidence ceilings and promotion source authority on hybrid fallback', async () => {
   await standupProducerFixture(async f => {
@@ -29,7 +29,7 @@ it('keeps original evidence ceilings and promotion source authority on hybrid fa
     // Advance the original ceiling fixture into the past without waiting ninety
     // days, then exercise the actual legacy renewal/source-fence write path.
     await f.owner.query("UPDATE evidence_roots SET expiry_ceiling=clock_timestamp()-interval '1 second' WHERE id=$1", [renewed.id]);
-    await f.owner.query("UPDATE memories SET expires_at=clock_timestamp()+interval '90 days',last_verified=clock_timestamp() WHERE id=$1", [renewed.id]);
+    await verifyMemory(f.app, f.actorId, renewed.id, true);
     const team = await createScope(f.owner, { kind: 'team', name: 'promotion-origin' });
     await addMembership(f.owner, f.actorId, team.id, 'writer');
     const original = await createMemory(f.app, { scopeId: team.id, scopeKind: 'team', authorId: f.actorId,

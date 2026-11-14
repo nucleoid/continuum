@@ -11,7 +11,7 @@ import { EVIDENCE_POLICY_VERSION } from '../evidence/policy.js';
 import { currentRecallEligibility, rerankRecallPool } from './recall-reranking.js';
 import { recordRead as recordReadAudit } from '../audit/log.js';
 import { resolveReadableScopeIds, type AccessibleScope } from './access.js';
-import { asServiceError } from './errors.js';
+import { asServiceError, dependencyUnavailable } from './errors.js';
 import { parseScopeString } from './scopes.js';
 import {
   applyRetrievalEnrichers,
@@ -199,6 +199,9 @@ export async function recallForPrincipal(
     }
     return await deliver(pool, preparedResults ?? results);
   } catch (error) {
+    if (reranking && ['55P03', '57014', '40P01'].includes(String((error as { code?: string })?.code))) {
+      throw dependencyUnavailable(error);
+    }
     throw asServiceError(error);
   } finally {
     if (reranking) signal?.removeEventListener('abort', cancel);

@@ -91,7 +91,8 @@ Admission locks candidate rows in stable order before cold source enrollment,
 which writes snapshots and enrollment audits. Contention or unavailable SQL can
 fail the read within the existing finite statement/lock limits. Model failure
 can fall back; failure to establish current authority cannot safely become an
-ungated legacy read. Use finite pool acquisition and caller deadlines too.
+ungated legacy read. Known SQL lock/statement timeouts and deadlocks return the
+bounded dependency-unavailable error. Use finite pool acquisition and caller deadlines too.
 Enrichment is best effort for the provisional final selection. A subsequent
 authority change can omit a row or restore/refill hybrid order; newly selected
 rows can have no enrichment. No revoked row is delivered to retain enrichment.
