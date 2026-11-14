@@ -43,10 +43,11 @@ import { supersedeRouter } from './routes/supersede.js';
 import { offboardingRouter } from './routes/offboarding.js';
 import { locksRouter } from './routes/locks.js';
 import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoordinationContractReady, requirePromotionOutboxReady, requireStandupReady } from '../storage/provider-lifecycle.js';
-import { requirePipelineBudgetsReady, requireEvidenceReady } from '../storage/provider-lifecycle.js';
+import { requirePipelineBudgetsReady, requireEvidenceReady, requireExtractionReady } from '../storage/provider-lifecycle.js';
 import { tagVocabulariesRouter } from './routes/tag-vocabularies.js';
 import { getPrincipalByExternalId } from '../storage/principals.js';
 import { standupRouter } from './routes/standup.js';
+import { extractionRouter } from './routes/extraction.js';
 import { producerContext, requireProducerMatch } from '../standup/activity.js';
 import type { CaptureRegistry } from '../capture/plugin.js';
 import {
@@ -380,6 +381,7 @@ export function createApp(pool: pg.Pool, opts: AppOptions = {}): express.Express
   v0.use(locksRouter(pool));
   v0.use(tagVocabulariesRouter(pool));
   v0.use(standupRouter(pool, () => new Date((opts.clock ?? Date.now)())));
+  v0.use(extractionRouter(pool));
   app.use('/api/v0', v0);
 
   app.use('/api', (_req, res) => {
@@ -437,6 +439,7 @@ async function main(): Promise<void> {
   await requireStandupReady(pool, { ...schemaOptions, servingPool: true });
   await requirePipelineBudgetsReady(pool, schemaOptions);
   await requireEvidenceReady(pool, schemaOptions);
+  await requireExtractionReady(pool, schemaOptions);
   const authMode = authModeFromEnv();
   warnOnDevAuthMode(authMode);
   const authenticator = createAuthenticator(
@@ -458,6 +461,7 @@ async function main(): Promise<void> {
     await requireStandupReady(mcpHttpPool, { ...schemaOptions, servingPool: true });
     await requirePipelineBudgetsReady(mcpHttpPool, schemaOptions);
     await requireEvidenceReady(mcpHttpPool, schemaOptions);
+    await requireExtractionReady(mcpHttpPool, schemaOptions);
   }
   const readiness = createReadinessState();
   const embeddingProvider = makeEmbeddingRouterFromEnv();
@@ -476,6 +480,7 @@ async function main(): Promise<void> {
     await requireStandupReady(producer, schemaOptions);
     await requirePipelineBudgetsReady(producer, schemaOptions);
     await requireEvidenceReady(producer, schemaOptions);
+    await requireExtractionReady(producer, schemaOptions);
     const principal = await getPrincipalByExternalId(pool, configured.principalExternalId);
     if (!principal) throw new Error('Configured standup producer principal is unavailable');
     requireProducerMatch(await producerContext(producer), principal.id, id as IngestPluginId);

@@ -88,8 +88,8 @@ atomic direct-writer source fences, current serving/disclosure gates, durable
 gap-aware invalidation/repair and canonical physical erasure proof. Registered
 sources are snapshotted lazily. Original expiry and transitive authority survive
 verification and canonical promotion. New stock startup checks the hardened
-owner-recorded evidence function contract. No derivative transport, synthesis,
-extraction, connector or paid stage is activated; recall and generated AGENTS.md
+owner-recorded evidence function contract. No stock model, worker, synthesis,
+connector or paid stage is activated; recall and generated AGENTS.md
 remain source-only. Offboarding includes every transitive managed payload copy.
 
 | Type | Initial expiry | Lifecycle behavior |
@@ -107,6 +107,17 @@ Promotion is an explicit transaction. A destination mapped to a disabled user is
 Decision supersession creates a successor linked through `supersedes_id`. Decision history follows authorized links and is audited. These operations do not imply a blanket immutable-content guarantee for every direct database access path. See [lifecycle](./docs/lifecycle.md), [src/storage/promote.ts](./src/storage/promote.ts), and [src/storage/supersede.ts](./src/storage/supersede.ts).
 
 ## Capture and ingestion
+
+The disabled-by-default [extraction pilot](./docs/extraction.md) adds atomic
+source-version enqueueing through the shared capture insert, including webhook
+replay and trusted Standup transactions. Separate scope-admin opt-in, bound
+operator profile/locality installation and an actual approved worker LOGIN are
+required. Typed workers use original durable budget identities and current
+evidence/source/expiry/lease gates. Immutable generated/unverified assertions
+remain evidence artifacts, outside legacy memories, recall, review queues and
+AGENTS.md. REST/MCP status/read/configuration/retry surfaces share services;
+stock runtimes install no model or worker. Migration 0094 adds exact grants,
+startup contracts and physical offboarding of all managed extraction bytes.
 
 `CapturePlugin.transform(event, context)` returns capture inputs. The built-ins format supplied GitHub PR/branch, ADO work-item, deploy, and terminal-summary fields. They do not invoke a built-in LLM summarizer or fetch review threads. The default registry and source allowlists are explicit; adding a transform object alone does not make an arbitrary source ID available through every transport.
 
@@ -262,7 +273,7 @@ Lease ownership is not an end-to-end side-effect fence. Downstream resources mus
 
 ## Migration and rollout
 
-The current schema includes provider-profile and coordination repairs through 0082, tag vocabularies in 0083, embedding storage/backfill/index migrations 0084 through 0088, the promotion outbox in 0089, trusted Standup activity in 0090, pipeline budgets in 0092 and evidence lifecycle in 0093. A migration filename in the ledger does not prove bounded coordination backfill completion. Owner-only schema work, backfill, effective-body verification, and execution evidence have separate roles. Execution provenance stores hashes, counts, and named variants without storing raw SQL or credential bindings; older execution history can remain unknown.
+The current schema includes provider-profile and coordination repairs through 0082, tag vocabularies in 0083, embedding storage/backfill/index migrations 0084 through 0088, the promotion outbox in 0089, trusted Standup activity in 0090, pipeline budgets in 0092, evidence lifecycle in 0093 and optional extraction in 0094. A migration filename in the ledger does not prove bounded coordination backfill completion. Owner-only schema work, backfill, effective-body verification, and execution evidence have separate roles. Execution provenance stores hashes, counts, and named variants without storing raw SQL or credential bindings; older execution history can remain unknown.
 
 Tag rollout pauses webhook intake and all memory writers, preserves queued deliveries, backs up data, migrates, deploys compatible instances, and then replays unchanged delivery identities and bytes. Migration 0083 takes an EXCLUSIVE memory-table lock, with a five-second lock wait and per-statement 60-second budget. The historical rewrite and trigger installation commit together. These limits do not bound total transaction or exclusive-lock duration. Its temporary role-planning table also requires the migration owner's database TEMPORARY privilege. Use a measured maintenance rehearsal and finite outer deadline; do not infer universal volume support from a small fixture. Exact application/operator profiles gain only the reviewed vocabulary table permissions, and sync/reporting profiles remain separate. See the dedicated rollout and rollback guide.
 

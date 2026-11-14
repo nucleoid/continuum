@@ -214,7 +214,8 @@ export function priceMicros(price: PriceSchedule, input: number, output: number,
   if (total > BigInt(Number.MAX_SAFE_INTEGER)) throw new BudgetError();
   return Number(total);
 }
-export type StageOutcome<T> = { status: 'complete'; value: T; provenance: UsageProvenance } | { status: 'skipped'; reason: BudgetReason };
+export type StageOutcome<T> = { status: 'complete'; value: T; provenance: UsageProvenance }
+  | { status: 'skipped'; reason: BudgetReason; retryableAdmission?: true };
 /** Optional durable hooks must commit before invocation and recheck publication at settlement.
  * A duplicate/ambiguous attempt must never return a dispatch permit. */
 export interface DurableAttempt {
@@ -227,13 +228,36 @@ export interface DurableAttempt {
 const processCalls = new Map<string, { active: number; detached: number }>();
 let processActive = 0;
 let processRetained = 0;
+function processStageUnavailable(id: string, model: string, profile: string, retained: number): boolean {
+  const state = processCalls.get(`${id}\u0000${model}\u0000${profile}`);
+  return !!state?.detached || (state?.active ?? 0) >= 4 || processActive >= 128
+    || retained > 64 * 1024 * 1024 - processRetained;
+}
+/** Advisory preflight for durable consumers before claiming work. This does not
+ * reserve resources; runBudgetedStage still enforces admission at dispatch. */
+export function budgetedStageUnavailable<I, O>(profile: Readonly<BudgetProfile>, adapter: BudgetAdapter<I, O>): BudgetReason | undefined {
+  try {
+    if (adapter.credentials === 'missing') return 'credentials_unavailable';
+    if (typeof adapter.local !== 'boolean' || !adapter.model || !adapter.profile || !adapter.enforceableCaps
+      || !adapter.tokens || adapter.tokens.model !== adapter.model || adapter.tokens.profile !== adapter.profile
+      || !adapter.tokens.validationId || !['exact', 'conservative'].includes(adapter.tokens.kind)
+      || typeof adapter.id !== 'string' || adapter.id.length > 200 || adapter.model.length > 200 || adapter.profile.length > 200
+      || integer(adapter.timeoutMs) < 1 || integer(adapter.responseBodyBytes) < 1
+      || integer(adapter.outputTokens) + integer(adapter.reasoningTokens) > integer(adapter.completionTokens)) return 'capability_unavailable';
+    if (!adapter.price || adapter.price.id !== profile.rateSchedule || adapter.price.currency !== profile.currency) return 'pricing_unavailable';
+    priceMicros(adapter.price, 0, 0, 0);
+    const retained = Math.min(profile.maxRetainedBytes, profile.limits.inputBytes + adapter.responseBodyBytes);
+    if (processStageUnavailable(adapter.id, adapter.model, adapter.profile, retained)) return 'budget_exhausted';
+    return undefined;
+  } catch { return 'capability_unavailable'; }
+}
 export async function runBudgetedStage<I, O>(budget: Budget, adapter: BudgetAdapter<I, O>, input: I,
   options: { signal?: AbortSignal; retry?: boolean; authorize?: () => Promise<boolean>; durable?: DurableAttempt; transportMs?: number;
     onWork?: (settlement: Promise<unknown>) => void } = {},
 ): Promise<StageOutcome<O>> {
-  const skip = (reason: BudgetReason): StageOutcome<O> => {
+  const skip = (reason: BudgetReason, retryableAdmission = false): StageOutcome<O> => {
     budget.receipts.add({ event: 'skipped', reason, elapsedMs: budget.elapsedMs() });
-    return { status: 'skipped', reason };
+    return { status: 'skipped', reason, ...(retryableAdmission ? { retryableAdmission: true as const } : {}) };
   };
   let id: string;
   let serialized: string;
@@ -276,7 +300,7 @@ export async function runBudgetedStage<I, O>(budget: Budget, adapter: BudgetAdap
     processKey = `${adapter.id}\u0000${adapter.model}\u0000${adapter.profile}`;
     processState = processCalls.get(processKey) ?? { active: 0, detached: 0 };
     retained = reserve.inputBytes + outputBytes;
-    if (processState.detached || processState.active >= 4 || processActive >= 128 || retained > 64 * 1024 * 1024 - processRetained) return skip('budget_exhausted');
+    if (processStageUnavailable(adapter.id, adapter.model, adapter.profile, retained)) return skip('budget_exhausted', true);
     id = budget.reserve(reserve, retained);
     processState.active++; processActive++; processRetained += retained;
     processCalls.set(processKey, processState);

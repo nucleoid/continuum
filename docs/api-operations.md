@@ -30,7 +30,16 @@ and taking the nonzero forced-exit path.
 
 ## Current schema and runtime prerequisites
 
-Apply every packaged migration through `0092`, finish the owner-only `0081`
+Current extraction-capable binaries additionally require 0094 after 0093/0092,
+exact APP/OP regrants and the owner-recorded extraction readiness contract.
+The [extraction pilot](extraction.md) remains disabled with no stock model or
+worker. Its REST/MCP configuration/status/read/retry calls cannot install a
+provider or impersonate the separately approved worker LOGIN. Custom runtimes
+may add `ExtractionWorker` to their existing bounded worker lifecycle using its
+dedicated pool. Shutdown reports unsettled provider work rather than claiming
+that a timeout released retained resources.
+
+Apply every packaged migration through `0094`, finish the owner-only `0081`
 coordination backfill, and converge current application/operator/sync profiles
 before starting matching binaries. Use the migration-owner connection for this
 work, then restore the runtime application connection. `0083` needs database

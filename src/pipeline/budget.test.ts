@@ -105,7 +105,7 @@ describe('one shared pipeline envelope', () => {
     const configured = adapter({ id: 'replacement-fence', invoke: () => new Promise((r) => { resolve = r; }) });
     const tiny = checkedProfile({ ...starterProfile, stageMs: 5 });
     expect(await runBudgetedStage(new Budget(tiny), configured, 'first')).toMatchObject({ reason: 'deadline' });
-    expect(await runBudgetedStage(new Budget(tiny), adapter({ id: configured.id }), 'replacement')).toMatchObject({ status: 'skipped', reason: 'budget_exhausted' });
+    expect(await runBudgetedStage(new Budget(tiny), adapter({ id: configured.id }), 'replacement')).toMatchObject({ status: 'skipped', reason: 'budget_exhausted', retryableAdmission: true });
     resolve({ value: 'late', response: 'late' });
     await new Promise((r) => setTimeout(r, 1));
     expect(await runBudgetedStage(new Budget(starterProfile), adapter({ id: configured.id }), 'after settlement')).toMatchObject({ status: 'complete' });

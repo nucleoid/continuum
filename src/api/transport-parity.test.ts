@@ -158,6 +158,7 @@ describe('REST/MCP semantic parity matrix', () => {
       expiresAt: expect.any(String),
       embedded: false,
       related: [],
+      extraction: { status: 'not-configured' },
     });
     expect(toolJson(mcp)).toEqual({
       id: expect.any(String),
@@ -165,6 +166,7 @@ describe('REST/MCP semantic parity matrix', () => {
       expires_at: expect.any(String),
       embedded: false,
       related: [],
+      extraction: { status: 'not-configured' },
     });
     const { rows } = await pool.query(
       `SELECT m.title, m.source_ref, m.tags, m.metadata, a.metadata AS audit_metadata

@@ -2,7 +2,9 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import type pg from 'pg';
 import { asEmbeddingRouter, type EmbeddingRouter, type EmbeddingRouting } from '../embeddings/router.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
-/** Request-local cancellation checks preserve rollback and never interrupt a successful commit retroactively. */
+/** Request-local cancellation checks preserve rollback and never interrupt a successful commit retroactively.
+ * Extraction status/configuration/retry use this guarded SQL path; its typed
+ * provider worker belongs to a separate bound LOGIN, outside request sessions. */
 export function remoteExecutionContext(pool: pg.Pool, routing: EmbeddingRouting) {
   type Scope = { signal: AbortSignal; pending: Set<Promise<unknown>> };
   const signals = new AsyncLocalStorage<Scope>();
