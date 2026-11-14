@@ -4,6 +4,16 @@ import { computeExpiry } from './expiry.js';
 import type { ScopeKind } from '../types.js';
 import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
 import type { Queryable } from './queryable.js';
+import type { EventAnnotationInput } from '../temporal/model.js';
+import { writeEventAnnotation } from './temporal.js';
+
+/** Shared capture/supersession primitive. The caller owns the source-write and
+ * required-audit transaction; parsing performs no provider or queue work. */
+export async function createMemoryWithEvent(client: Queryable, input: NewMemory, event?: EventAnnotationInput): Promise<Memory> {
+  const memory = await createMemory(client,input);
+  if (event !== undefined) memory.event = await writeEventAnnotation(client,input.authorId,memory.id,event);
+  return memory;
+}
 
 export interface NewMemory {
   id?: string;

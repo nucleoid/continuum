@@ -3,13 +3,12 @@ import { boundedMemoryReadRows, MEMORY_READ_BUDGET_BYTES_SQL, requireReadBudget,
 import type { Memory, Scope } from '../types.js';
 import { record as recordAudit } from '../audit/log.js';
 import { canMutateScope } from '../scopes/access.js';
-import { createMemory } from './memories.js';
+import { createMemoryWithEvent } from './memories.js';
 import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
 import type { Queryable } from './queryable.js';
 import { getScope } from './scopes.js';
 import { listAllowedTagNames, lockRequestedTags } from './tag-vocabularies.js';
-import type { EventAnnotation } from '../temporal/model.js';
-import { writeEventAnnotation } from './temporal.js';
+import type { EventAnnotationInput } from '../temporal/model.js';
 
 export class SupersedeStorageError extends Error {
   constructor(
@@ -20,7 +19,7 @@ export class SupersedeStorageError extends Error {
 }
 
 export interface SupersedeWriteInput {
-  eventAnnotation?: EventAnnotation;
+  eventAnnotation?: EventAnnotationInput;
   readBudgetBytes?: number;
   supersededId: string;
   principalId: string;
@@ -101,14 +100,13 @@ async function supersedeInTransaction(client: pg.PoolClient, input: SupersedeWri
     });
   }
 
-  const successor = await createMemory(client, {
+  const successor = await createMemoryWithEvent(client, {
     scopeId: scope.id, scopeKind: scope.kind, type: 'decision', title: input.title,
     body: input.body, authorId: input.principalId, source: input.source,
     sourceRef: input.sourceRef, tags,
     metadata: { ...input.metadata, related: [] },
     supersedesId: predecessor.id,
-  });
-  if (input.eventAnnotation !== undefined) successor.event = await writeEventAnnotation(client, input.principalId, successor.id, input.eventAnnotation);
+  }, input.eventAnnotation);
   const archived = await client.query(
     `UPDATE memories SET state = 'archived', updated_at = now()
       WHERE id = $1 AND state = 'live' RETURNING ${MEMORY_COLUMNS}`,

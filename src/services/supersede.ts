@@ -13,10 +13,10 @@ import {
 } from '../storage/supersede.js';
 import { record as recordAudit, recordRead as recordReadAudit } from '../audit/log.js';
 import { normalizeTags } from './tag-vocabularies.js';
-import { parseEventAnnotation, type EventAnnotation } from '../temporal/model.js';
+import { parseEventAnnotation, type EventAnnotationInput } from '../temporal/model.js';
 
 export interface SupersedeInput {
-  eventAnnotation?: EventAnnotation;
+  eventAnnotation?: EventAnnotationInput;
   supersededId: string; title: string; body: string; tags?: string[]; source?: string;
   sourceRef?: string; metadata?: Record<string, unknown>;
 }

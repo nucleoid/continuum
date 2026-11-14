@@ -29,6 +29,17 @@ function harness(fetch: typeof globalThis.fetch, stdin = '', stdinIsTTY = true) 
 }
 
 describe('continuum CLI', () => {
+  it('passes structured event JSON with strict client validation', async () => {
+    const fetch=vi.fn(async(_url:string|URL|Request,init?:RequestInit)=> {
+      expect(JSON.parse(String(init?.body))).toMatchObject({eventFilter:{at:'2026-02-01T00:00:00.000Z',includeUnknown:false},eventWindow:{from:'2025-01-01T00:00:00.000Z'}});
+      return Response.json({results:[]});
+    });
+    const h=harness(fetch as typeof globalThis.fetch);
+    expect(await runCli(['recall','signal','--event-filter','{"at":"2026-02-01T00:00:00Z"}','--event-window','{"from":"2025-01-01T00:00:00Z"}','--json'],h.deps)).toBe(0);
+    const bad=harness(fetch as typeof globalThis.fetch);fetch.mockClear();
+    expect(await runCli(['recall','signal','--event-filter','{"at":"2026-02-01"}','--json'],bad.deps)).toBe(2);
+    expect(fetch).not.toHaveBeenCalled();
+  });
   it('captures from non-TTY stdin and emits one JSON document', async () => {
     const fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       expect(JSON.parse(String(init?.body))).toMatchObject({

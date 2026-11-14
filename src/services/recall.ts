@@ -147,7 +147,7 @@ export async function recallForPrincipal(
       ? await applyRetrievalEnrichers(results, principal.id, enrichment.registry, { ...enrichment.options, budget })
       : undefined;
     const deliver = async (auditPool: Queryable, deliveredResults: RecallResult[]): Promise<PrincipalRecallResult> => {
-      const events = await readEventAnnotations(auditPool, principal.id, deliveredResults.map(r => r.memory.id));
+      const events = await readEventAnnotations(auditPool, principal.id, deliveredResults.map(r => r.memory.id),true,enrichment?.readBudgetBytes,budget);
       const annotations = new Map<string, EventAnnotation>();
       deliveredResults = deliveredResults.filter(result => {
         const event = events.get(result.memory.id);
@@ -201,12 +201,12 @@ export async function recallForPrincipal(
       });
       const enrichedResults = preparedResults || ranked ? deliveredResults : (enrichment
         ? await applyRetrievalEnrichers(
-          results,
+          deliveredResults,
           principal.id,
           enrichment.registry,
           enrichment.options,
         )
-        : results);
+        : deliveredResults);
       budget?.assertLive();
       return { results: enrichedResults, accessible, diagnostics };
     };
@@ -221,7 +221,7 @@ export async function recallForPrincipal(
             .sort((a, b) => fusionOrder.get(a.memory.id)! - fusionOrder.get(b.memory.id)!);
         }
         const enriched = new Map((preparedResults ?? results).map(r => [r.memory.id, r]));
-        return deliver(client, ranked.results.filter(r => eligible.has(r.memory.id)).slice(0, input.limit ?? 10)
+        return deliver(client, ranked.results.filter(r => eligible.has(r.memory.id))
           .map(r => ({ ...r, ...(enriched.get(r.memory.id)?.enrichments ? { enrichments: enriched.get(r.memory.id)!.enrichments } : {}) })));
       });
       // A committed authorized-read audit is not a network receipt. Cancellation

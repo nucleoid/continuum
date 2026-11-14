@@ -19,6 +19,35 @@ function utc(value: string): string {
 }
 const instantSchema = z.string().refine(value => { try { utc(value); return true; } catch { return false; } });
 const candidate = z.object({ notation: boundedText(256), timezone: timezone.optional() }).strict();
+function localDate(at: string, zone: string): string {
+  if (offset.test(zone)) {
+    const minutes = zone === 'Z' ? 0 : (Number(zone.slice(1,3))*60+Number(zone.slice(4))) * (zone[0] === '+' ? 1 : -1);
+    return new Date(Date.parse(at)+minutes*60_000).toISOString().slice(0,10);
+  }
+  const parts = new Intl.DateTimeFormat('en-CA',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date(at));
+  return ['year','month','day'].map(type => parts.find(p => p.type === type)!.value).join('-');
+}
+function midnight(date: string, zone: string): string {
+  if (offset.test(zone)) return utc(`${date}T00:00:00${zone}`);
+  const target = Date.parse(`${date}T00:00:00Z`);
+  const format = new Intl.DateTimeFormat('en-CA',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'});
+  const wall = (time: number) => {
+    const parts = format.formatToParts(new Date(time));
+    const part = (type: string) => parts.find(p => p.type === type)!.value;
+    return Date.parse(`${part('year')}-${part('month')}-${part('day')}T${part('hour')}:${part('minute')}:${part('second')}Z`);
+  };
+  let time = target;
+  for(let i=0;i<4;i++) time += target-wall(time);
+  if (wall(time)!==target || [time-3_600_000,time+3_600_000,time-7_200_000,time+7_200_000].some(other => wall(other)===target)) throw new Error('Ambiguous event midnight');
+  return utc(new Date(time).toISOString());
+}
+function nextDate(date: string, precision: 'day'|'month'|'year'): string {
+  const next = new Date(`${date}T00:00:00Z`);
+  if (precision==='year') next.setUTCFullYear(next.getUTCFullYear()+1);
+  else if(precision==='month') next.setUTCMonth(next.getUTCMonth()+1);
+  else next.setUTCDate(next.getUTCDate()+1);
+  return next.toISOString().slice(0,10);
+}
 const common = { original: boundedText(1024).optional(), timezone: timezone.optional() };
 const known = z.object({ status: z.literal('known'), assertion: z.enum(['asserted','mentioned']),
   precision: z.enum(['instant','day','month','year','range']), instant: instantSchema.optional(),
@@ -35,14 +64,11 @@ function normalizeAnnotation(input: z.infer<typeof known>): EventAnnotation {
   const value = { ...input };
   if (value.value !== undefined) {
     const pattern = value.precision === 'year' ? /^\d{4}$/ : value.precision === 'month' ? /^\d{4}-\d{2}$/ : value.precision === 'day' ? /^\d{4}-\d{2}-\d{2}$/ : /$a/;
-    if (!pattern.test(value.value) || !value.timezone || !offset.test(value.timezone) || value.instant || value.start || value.end) throw new Error('Invalid event period');
+    if (!pattern.test(value.value) || !value.timezone || value.instant || value.start || value.end) throw new Error('Invalid event period');
     const date = value.value + (value.precision === 'year' ? '-01-01' : value.precision === 'month' ? '-01' : '');
-    value.start = utc(`${date}T00:00:00${value.timezone}`);
-    const next = new Date(`${date}T00:00:00Z`);
-    if (value.precision === 'year') next.setUTCFullYear(next.getUTCFullYear() + 1);
-    else if (value.precision === 'month') next.setUTCMonth(next.getUTCMonth() + 1);
-    else next.setUTCDate(next.getUTCDate() + 1);
-    value.end = utc(`${next.toISOString().slice(0,10)}T00:00:00${value.timezone}`);
+    utc(`${date}T00:00:00Z`);
+    value.start = midnight(date,value.timezone);
+    value.end = midnight(nextDate(date,value.precision as 'day'|'month'|'year'),value.timezone);
     value.original ??= value.value;
   }
   if (value.precision === 'instant') {
@@ -56,6 +82,12 @@ function normalizeAnnotation(input: z.infer<typeof known>): EventAnnotation {
     if (value.end) value.end = utc(value.end);
     if (value.start && value.end && value.start >= value.end) throw new Error('Empty event interval');
     if (value.precision !== 'range' && (!value.start || !value.end)) throw new Error('Partial precision requires a bounded period');
+    if (value.precision !== 'range') {
+      if (!value.timezone) throw new Error('Partial precision requires a timezone');
+      const date = localDate(value.start!,value.timezone);
+      if ((value.precision==='month' && !date.endsWith('-01')) || (value.precision==='year' && !date.endsWith('-01-01'))
+        || value.start!==midnight(date,value.timezone) || value.end!==midnight(nextDate(date,value.precision),value.timezone)) throw new Error('Invalid event precision');
+    }
   }
   const { value: _period, ...normalized } = value;
   return normalized;
@@ -67,12 +99,14 @@ export const eventAnnotationSchema = rawAnnotation.transform((value, context): E
   try { return value.status === 'known' ? normalizeAnnotation(value) : value; }
   catch { context.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid event annotation' }); return z.NEVER; }
 });
+export type EventAnnotationInput = z.input<typeof eventAnnotationSchema>;
 export const eventWindowSchema = z.object({ from: instantSchema.optional(), to: instantSchema.optional(),
   at: instantSchema.optional(), includeUnknown: z.boolean().default(false) }).strict().superRefine((value, context) => {
   if ((!value.from && !value.to && !value.at) || (value.at && (value.from || value.to))
     || (value.from && value.to && utc(value.from) >= utc(value.to))) context.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid event window' });
 }).transform(value => ({ ...value, ...(value.from ? { from: utc(value.from) } : {}),
   ...(value.to ? { to: utc(value.to) } : {}), ...(value.at ? { at: utc(value.at) } : {}) }));
+export type EventWindowInput = z.input<typeof eventWindowSchema>;
 
 export function parseEventAnnotation(value: unknown): EventAnnotation {
   const parsed = eventAnnotationSchema.safeParse(value);

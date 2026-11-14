@@ -1,4 +1,4 @@
-import type { EventAnnotation, EventInspection, EventWindow } from './temporal/model.js';
+import type { EventAnnotationInput, EventInspection, EventWindowInput } from './temporal/model.js';
 export type ScopeKind = 'org' | 'team' | 'project' | 'user' | 'role';
 export type MemoryType = 'fact' | 'decision' | 'context' | 'playbook' | 'relationship';
 export type MemoryState = 'live' | 'stale' | 'archived' | 'promoted';
@@ -65,7 +65,7 @@ export interface Memory {
 }
 
 export interface CaptureInput {
-  eventAnnotation?: EventAnnotation;
+  eventAnnotation?: EventAnnotationInput;
   scope: ScopeRef;
   type: MemoryType;
   title: string;
@@ -77,8 +77,8 @@ export interface CaptureInput {
 }
 
 export interface RecallInput {
-  eventFilter?: EventWindow;
-  eventWindow?: EventWindow;
+  eventFilter?: EventWindowInput;
+  eventWindow?: EventWindowInput;
   query: string;
   scopes?: string[];
   types?: MemoryType[];

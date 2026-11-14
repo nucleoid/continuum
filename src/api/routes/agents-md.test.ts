@@ -10,6 +10,7 @@ import { createPrincipal } from '../../storage/principals.js';
 import { createScope, getScopeByRef } from '../../storage/scopes.js';
 import { addMembership } from '../../storage/memberships.js';
 import { createMemory } from '../../storage/memories.js';
+import { writeEventAnnotation } from '../../storage/temporal.js';
 
 describe('GET /api/v0/agents-md', () => {
   let pool: pg.Pool;
@@ -110,6 +111,17 @@ describe('GET /api/v0/agents-md', () => {
       me, orgMemory, teamMemory, projectMemory, secretMemory, roleMemory, contextMemory,
     };
   }
+
+  it('keeps annotation-only changes out of ETags, conditional reads and freshness', async () => {
+    const {orgMemory}=await seed(), url='/api/v0/agents-md?team=payments&project=booking-engine', auth='Bearer entra:user:bundle';
+    const before=await request(app).get(url).set('Authorization',auth);
+    await writeEventAnnotation(pool,orgMemory.authorId,orgMemory.id,{status:'ambiguous',candidates:[{notation:'Internal date candidate'}]});
+    const after=await request(app).get(url).set('Authorization',auth);
+    expect(after.text).toBe(before.text);expect(after.headers.etag).toBe(before.headers.etag);
+    expect((await request(app).get(url).set('Authorization',auth).set('If-None-Match',before.headers.etag)).status).toBe(304);
+    const freshness=await request(app).get('/api/v0/agents-md/freshness').set('Authorization',auth).query({team:'payments',project:'booking-engine',hash:before.headers.etag.slice(1,-1)});
+    expect(freshness.body).toEqual({fresh:true});
+  });
 
   it('keeps generator bytes, hash, selected IDs and read audit identical with enabled retrieval enrichment', async () => {
     await seed();

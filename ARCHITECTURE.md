@@ -131,6 +131,18 @@ Embedding failure can leave valid capture committed with `embedded: false`; rela
 
 ## Retrieval and providers
 
+Explicit [event time](docs/event-time.md) is independent of ingestion,
+verification and fixed expiry. Migration 0095 binds bounded immutable manual
+annotations to exact 0093 source versions; notation and comparison bounds stay
+in managed erasable evidence payloads, with owner-only machine pointers.
+REST/MCP/CLI accept typed annotations without extraction. Hard event overlap
+predicates precede every lexical/vector candidate limit and repeat at hydration
+and current delivery. A window is a non-excluding stable secondary ordering
+after relevance. Unknown/ambiguous/mention-only dates require explicit inclusion;
+historical rows have no inferred capture-time event. Event-as-of cannot reconstruct
+past knowledge, extend expiry or revive superseded/erased evidence. Annotations
+and candidates never enter generated AGENTS.md bytes or freshness.
+
 Optional [reranking](./docs/reranking.md) is explicitly injected before recall's
 final cut, independently of presentation enrichment. Its metadata-first wider
 pool is bounded by the server profile and 100-candidate ceiling. Locked current

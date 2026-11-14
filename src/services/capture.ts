@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import type { CaptureInput, Memory, Principal, Scope } from '../types.js';
 import { asEmbeddingRouter, type EmbeddingRouting } from '../embeddings/router.js';
-import { createMemory, updateMemoryMetadata } from '../storage/memories.js';
+import { createMemoryWithEvent, updateMemoryMetadata } from '../storage/memories.js';
 import { getScope, getScopeByRef } from '../storage/scopes.js';
 import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
 import { assertEmbeddingVectorDimension } from '../storage/schema.js';
@@ -23,7 +23,6 @@ import { memoryEmbeddingText } from '../embeddings/text.js';
 import { captureExtractionStatus } from './extraction.js';
 import type { ExtractionStatus } from '../extraction/model.js';
 import { parseEventAnnotation } from '../temporal/model.js';
-import { writeEventAnnotation } from '../storage/temporal.js';
 
 export interface CaptureResult {
   memory: Memory;
@@ -107,7 +106,7 @@ export async function captureOne(
   const { scope, tags } = await prepareCaptureWrite(client, principal, input);
 
   const route = asEmbeddingRouter(embeddingRouting).resolve(input.scope);
-  const memory = await createMemory(client, {
+  const memory = await createMemoryWithEvent(client, {
     scopeId: scope.id,
     scopeKind: scope.kind,
     type: input.type,
@@ -118,8 +117,7 @@ export async function captureOne(
     sourceRef: input.sourceRef ?? null,
     tags,
     metadata: { ...input.metadata, related: [] },
-  });
-  if (input.eventAnnotation !== undefined) memory.event = await writeEventAnnotation(client, principal.id, memory.id, input.eventAnnotation);
+  }, input.eventAnnotation);
 
   await recordAudit(client, {
     principalId: principal.id,
@@ -352,7 +350,7 @@ export async function captureMemory(
       const prepared = await prepareCaptureWrite(client, principal, input);
       const authorizedScope = prepared.scope;
 
-      let memory = await createMemory(client, {
+      let memory = await createMemoryWithEvent(client, {
         id: memoryId,
         scopeId: authorizedScope.id,
         scopeKind: authorizedScope.kind,
@@ -364,8 +362,7 @@ export async function captureMemory(
         sourceRef: input.sourceRef ?? null,
         tags: prepared.tags,
         metadata: { ...input.metadata, related: [] },
-      });
-      if (input.eventAnnotation !== undefined) memory.event = await writeEventAnnotation(client, principal.id, memory.id, input.eventAnnotation);
+      }, input.eventAnnotation);
 
       let embedded = false;
       if (embeddingProvider && embeddingVector) {

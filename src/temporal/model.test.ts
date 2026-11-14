@@ -10,6 +10,9 @@ describe('explicit event time', () => {
     expect(parseEventAnnotation({ status: 'known', assertion: 'asserted', precision: 'month', value: '2024-02', timezone: '+13:00' }))
       .toMatchObject({ start: '2024-01-31T11:00:00.000Z', end: '2024-02-29T11:00:00.000Z', precision: 'month' });
     expect(() => parseEventAnnotation({ status: 'known', assertion: 'asserted', precision: 'day', value: '2024-02-01' })).toThrow();
+    expect(parseEventAnnotation({status:'known',assertion:'asserted',precision:'day',value:'2026-09-27',timezone:'Pacific/Auckland'}))
+      .toMatchObject({start:'2026-09-26T12:00:00.000Z',end:'2026-09-27T11:00:00.000Z'});
+    expect(() => parseEventAnnotation({status:'known',assertion:'asserted',precision:'day',start:'2026-01-01T12:00:00Z',end:'2026-01-01T13:00:00Z',timezone:'Z'})).toThrow();
   });
   it.each(['2025-02-29T00:00:00Z','2024-02-30T00:00:00Z','2026-01-01','2026-01-01T24:00:00Z','2026-01-01T00:00:60Z','infinity'])('rejects invalid or uncertain instant %s', value => {
     expect(() => instant(value)).toThrow();

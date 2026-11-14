@@ -112,7 +112,8 @@ export async function rerankRecallPool(pool: pg.Pool, actor: string, input: Reca
     finalBytes = bytes + 65_536;
   }
   catch { return { ...admitted, diagnostic: { status: 'fallback', reason: 'budget_exhausted' } }; }
-  const outcome = await runReranking(config, budget, Object.freeze({ query: input.query, candidates }), authorize, finalBytes, { signal, onWork: options.onWork });
+  const outcome = await runReranking(config, budget, Object.freeze({ query: input.query, candidates,
+    ...(opts.eventWindow ? { eventWindow: Object.freeze({ ...opts.eventWindow }) } : {}) }), authorize, finalBytes, { signal, onWork: options.onWork });
   if (outcome.status === 'fallback') return { ...admitted, diagnostic: outcome };
   return { ...admitted, diagnostic: { status: 'used' }, results: admitted.results
     .map((result, i) => ({ ...result, rerankScore: outcome.scores.get(`c${i}`)!, fusionRank: i }))

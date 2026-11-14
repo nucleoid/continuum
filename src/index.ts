@@ -1,4 +1,5 @@
 export * from './types.js';
+export * from './temporal/model.js';
 export * from './pipeline/budget.js';
 export * from './pipeline/receipts.js';
 export * from './reranking/provider.js';

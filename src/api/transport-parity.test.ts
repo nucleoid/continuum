@@ -49,6 +49,28 @@ describe('REST/MCP semantic parity matrix', () => {
     await pool?.end();
   });
 
+  it('maps explicit manual event annotations and filters across REST and MCP', async () => {
+    const app=createApp(pool), auth='Bearer entra:user:parity';
+    const event={status:'known',assertion:'asserted',precision:'day',value:'2026-02-01',timezone:'Z'};
+    const rest=await request(app).post('/api/v0/capture').set('Authorization',auth).send({scope:{kind:'team',name:'payments'},type:'decision',title:'Temporal signal',body:'Signal reference',source:'manual',eventAnnotation:event});
+    expect(rest.status).toBe(201);expect(rest.body.event.annotation).toMatchObject({status:'known',precision:'day',start:'2026-02-01T00:00:00.000Z'});
+    const captured=toolJson(await client.callTool({name:'continuum.capture',arguments:{scope_kind:'team',scope_name:'payments',type:'decision',title:'Temporal signal',body:'Signal reference',event_annotation:event}}) as ToolResult);
+    expect(captured.event.source_version).toEqual(expect.any(String));expect(captured.event).not.toHaveProperty('sourceVersion');
+    const window={at:'2026-02-01T12:00:00Z'};
+    const recalled=await request(app).post('/api/v0/recall').set('Authorization',auth).send({query:'signal',eventFilter:window});
+    const mcp=toolJson(await client.callTool({name:'continuum.recall',arguments:{query:'signal',event_filter:window}}) as ToolResult);
+    expect(recalled.status).toBe(200);expect(mcp.map((r:any)=>r.id)).toEqual(recalled.body.results.map((r:any)=>r.id));
+    expect(mcp.every((r:any)=>r.event.annotation.precision==='day')).toBe(true);
+    const list=await request(app).get('/api/v0/memories').set('Authorization',auth).query({eventFilter:JSON.stringify({at:'2026-02-02T00:00:00Z'})});
+    expect(list.body.items).toHaveLength(0);
+    const invalid=await request(app).post('/api/v0/recall').set('Authorization',auth).send({query:'signal',eventFilter:{at:'2026-02-01'}});
+    expect(invalid.status).toBe(400);
+    const mcpInvalid=await client.callTool({name:'continuum.recall',arguments:{query:'signal',event_filter:{at:'2026-02-01'}}}) as ToolResult;
+    expect(mcpInvalid.isError).toBe(true);
+    const fetched=await request(app).get(`/api/v0/memories/${rest.body.id}`).set('Authorization',auth);
+    expect(fetched.body.event).toEqual(rest.body.event);
+  });
+
   it.each(['rest', 'mcp'] as const)('budgets %s excerpts rather than full stored bodies with reranking enabled', async transport => {
     const team = (await getScopeByRef(pool, { kind: 'team', name: 'payments' }))!;
     for (let i = 0; i < 3; i++) await createMemory(pool, { scopeId: team.id, scopeKind: 'team', authorId: principal.id,

@@ -10,7 +10,7 @@ import {
 import type { MemoryState, MemoryType, Principal } from '../types.js';
 import { asServiceError, ServiceError } from './errors.js';
 import { parseScopeString } from './scopes.js';
-import { parseEventWindow, type EventWindow } from '../temporal/model.js';
+import { parseEventWindow, type EventWindowInput } from '../temporal/model.js';
 import { readEventAnnotations } from '../storage/temporal.js';
 
 export const DEFAULT_MEMORY_LIST_LIMIT = 50;
@@ -24,7 +24,7 @@ const MEMORY_TYPES = new Set<MemoryType>([
 const MEMORY_STATES = new Set<MemoryState>(['live', 'stale', 'archived', 'promoted']);
 
 export interface ListMemoriesInput {
-  eventFilter?: EventWindow;
+  eventFilter?: EventWindowInput;
   scope?: string;
   type?: MemoryType;
   state?: MemoryState;
@@ -71,7 +71,7 @@ export async function getMemoryForPrincipal(
     if (!recordValue) {
       throw new ServiceError('MEMORY_NOT_FOUND', 'Memory not found');
     }
-    const event = (await readEventAnnotations(client,principal.id,[memoryId])).get(memoryId);
+    const event = (await readEventAnnotations(client,principal.id,[memoryId],true,readBudgetBytes)).get(memoryId);
     if (event?.version) recordValue.memory.event = event;
     if (readBudgetBytes !== undefined) requireReadBudget(Buffer.byteLength(JSON.stringify(recordValue), 'utf8') + 1024, readBudgetBytes);
     validateResult?.(recordValue);
@@ -130,7 +130,7 @@ export async function listMemoriesForPrincipal(
       scope, type: input.type, state, limit, offset,
       eventFilter: input.eventFilter === undefined ? undefined : parseEventWindow(input.eventFilter),
     }, readBudgetBytes);
-    const events = await readEventAnnotations(client,principal.id,items.map(item => item.memory.id));
+    const events = await readEventAnnotations(client,principal.id,items.map(item => item.memory.id),true,readBudgetBytes);
     for (const item of items) {
       const event = events.get(item.memory.id);
       if (event && (event.version || input.eventFilter)) item.memory.event = event;

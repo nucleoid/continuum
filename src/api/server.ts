@@ -463,6 +463,7 @@ async function main(): Promise<void> {
     await requirePipelineBudgetsReady(mcpHttpPool, schemaOptions);
     await requireEvidenceReady(mcpHttpPool, schemaOptions);
     await requireExtractionReady(mcpHttpPool, schemaOptions);
+    await requireEventTimeReady(mcpHttpPool, schemaOptions);
   }
   const readiness = createReadinessState();
   const embeddingProvider = makeEmbeddingRouterFromEnv();
@@ -482,6 +483,7 @@ async function main(): Promise<void> {
     await requirePipelineBudgetsReady(producer, schemaOptions);
     await requireEvidenceReady(producer, schemaOptions);
     await requireExtractionReady(producer, schemaOptions);
+    await requireEventTimeReady(producer, schemaOptions);
     const principal = await getPrincipalByExternalId(pool, configured.principalExternalId);
     if (!principal) throw new Error('Configured standup producer principal is unavailable');
     requireProducerMatch(await producerContext(producer), principal.id, id as IngestPluginId);

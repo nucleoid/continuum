@@ -1,5 +1,13 @@
 # Lifecycle operations
 
+Optional [event annotations](event-time.md) do not change fixed expiry,
+verification or supersession. Future asserted events cannot extend serving.
+Supersession uses only its supplied successor annotation; event dates cannot
+revive a predecessor. Canonical promotion copies current annotation evidence only
+after exact source/version and destination policy validation, retaining inherited
+source authority and original expiry. Managed annotation/history/candidate bytes
+use the existing evidence physical erasure proof, including transitive copies.
+
 Continuum's lifecycle sweeper is a one-shot operator command. Run it from a
 scheduler such as cron, systemd, or a container job:
 

@@ -10,8 +10,9 @@ REST capture and supersession accept optional `eventAnnotation`. MCP uses
 ambiguous`. Known values require `assertion: asserted | mentioned` and precision
 `instant | day | month | year | range`. An instant uses an offset-aware RFC 3339
 `instant`; a range uses `start` and/or `end`, with exclusive end. Partial periods
-use `value` (YYYY-MM-DD, YYYY-MM or YYYY) and an explicit numeric `timezone`
-offset or `Z`. Comparison bounds are UTC; original notation and timezone remain
+use `value` (YYYY-MM-DD, YYYY-MM or YYYY) and an explicit `timezone`:
+numeric offset, `Z` or an IANA zone. Day boundaries account for DST. Unresolvable
+or ambiguous midnight is rejected. Comparison bounds are UTC; original notation and timezone remain
 bounded reference data. Ambiguous annotations hold at most eight candidates,
 each with `notation` and optional `timezone`. Original notation is at most 1024
 UTF-8 bytes; candidate notation at most 256. Invalid calendars, missing timezone,
@@ -37,3 +38,33 @@ version and its current authority, original expiry and canonical erasure lineage
 They are separate from caller metadata, source prose and generated AGENTS.md.
 Changing annotations alone cannot change generator bytes, ETag or freshness.
 Extraction candidates remain generated/unverified, outside normalized event time.
+
+## Installation and recovery
+
+Apply additive migration 0095 after 0094 as migration owner with database
+TEMPORARY privilege. Published files through 0094 remain unchanged; 0091 is not a
+prerequisite. Empty annotation tables need no historical scan, backfill or vector
+reindex. Regrant exact APP and OP profiles; SYNC/reporting gain no annotation or
+payload access. Raw annotation tables are owner-only. New serving, remote MCP
+and producer pools require the owner-recorded event readiness contract. Missing
+functions, altered bodies or disabled immutable guards fail startup closed.
+
+Quiesce readers, writers and offboarding processes, back up data and ledgers,
+apply the complete chain and exact profiles, then restart compatible binaries.
+DDL uses five-second lock waits and 60-second statement bounds; these do not
+bound total maintenance time or establish volume qualification. Use a finite
+outer deadline and rehearse the actual installation. No new secret, provider
+permission, reauthentication, session invalidation or live deployment is implied.
+Old writers may omit annotations; historical data remains unknown. Old serving
+and offboarding binaries must not run with enabled temporal evidence. Disable
+new input/hints and drain readers before recovery. Binary rollback cannot undo
+erasure. Schema reversal requires verified backup and reviewed replay or forward
+recovery; never delete ledgers or rewrite published migration bytes.
+
+The separate `evals/event-time-v1.json` synthetic baseline exercises ingestion
+lag, precision, unknown dates, future events, conflicts, mention-only values and
+supersession. Its seeded interleaved baseline/filter/include-unknown/hint modes
+reuse the evaluation fixture, scoring and five-observation latency policy.
+False exclusion is reported separately from ranking quality; synthesis remains
+unsupported. This is mechanism evidence, not real-model, cross-head performance
+or normalized-storage qualification. Existing frozen inputs remain unchanged.

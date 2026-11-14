@@ -73,6 +73,12 @@ repository automation. Those concerns remain outside this API.
 
 ## Evidence boundaries
 
+Explicit event annotations, their immutable history and candidate notation live
+outside generator selection and prose. Annotation-only corrections preserve exact
+bytes, ETag and freshness. Recall event filters/windows never become implicit
+generator predicates. Existing source content, lifecycle and access changes still
+govern ordinary selection and required delivery/freshness audits.
+
 Optional recall [reranking](reranking.md) never runs for bundles, conditional
 reads or freshness checks. Its scores, receipts and adapter prose are excluded
 from deterministic selection, exact bytes, hashes and ETags.

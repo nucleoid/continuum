@@ -34,6 +34,7 @@ CREATE TRIGGER memory_event_annotation_immutable BEFORE UPDATE OR DELETE ON memo
 
 CREATE FUNCTION continuum_event_valid(value JSONB) RETURNS BOOLEAN LANGUAGE plpgsql IMMUTABLE AS $$
 DECLARE item JSONB; key TEXT; stamp TEXT; point TIMESTAMPTZ; start_at TIMESTAMPTZ; end_at TIMESTAMPTZ;
+  local_start TIMESTAMP; local_end TIMESTAMP; zone TEXT; shift INTERVAL;
 BEGIN
   IF jsonb_typeof(value) IS DISTINCT FROM 'object' OR octet_length(value::text)>8192 OR value->>'status' IS NULL THEN RETURN FALSE; END IF;
   IF EXISTS(SELECT 1 FROM jsonb_object_keys(value) k WHERE k NOT IN ('status','assertion','precision','instant','start','end','original','timezone','candidates')) THEN RETURN FALSE; END IF;
@@ -65,6 +66,19 @@ BEGIN
   IF value->>'precision'='instant' THEN RETURN value ? 'instant' AND NOT(value ?| ARRAY['start','end']); END IF;
   IF value ? 'instant' OR NOT(value ?| ARRAY['start','end']) OR (value->>'precision'<>'range' AND NOT(value ?& ARRAY['start','end'])) THEN RETURN FALSE; END IF;
   start_at:=(value->>'start')::timestamptz; end_at:=(value->>'end')::timestamptz;
+  IF value->>'precision'<>'range' THEN
+    zone:=value->>'timezone';
+    IF zone IS NULL THEN RETURN FALSE; END IF;
+    IF zone='Z' OR zone ~ '^[+-](0[0-9]|1[0-4]):[0-5][0-9]$' THEN
+      IF zone ~ '^[+-]14:' AND right(zone,2)<>'00' OR zone='-00:00' THEN RETURN FALSE; END IF;
+      shift:=CASE WHEN zone='Z' THEN interval '0 seconds' ELSE zone::interval END;
+      local_start:=(start_at AT TIME ZONE 'UTC')+shift; local_end:=(end_at AT TIME ZONE 'UTC')+shift;
+    ELSE
+      local_start:=start_at AT TIME ZONE zone; local_end:=end_at AT TIME ZONE zone;
+    END IF;
+    IF local_start<>date_trunc(value->>'precision',local_start)
+      OR local_end<>local_start+(CASE value->>'precision' WHEN 'day' THEN interval '1 day' WHEN 'month' THEN interval '1 month' ELSE interval '1 year' END) THEN RETURN FALSE; END IF;
+  END IF;
   RETURN start_at IS NULL OR end_at IS NULL OR start_at<end_at;
 EXCEPTION WHEN OTHERS THEN RETURN FALSE;
 END $$;
@@ -92,21 +106,31 @@ END $$;
 
 -- Unlocked operation-local admission runs before every candidate LIMIT. Final
 -- hydration/delivery passes locked=TRUE in its owned current transaction.
-CREATE FUNCTION continuum_event_read(actor UUID,memory_id UUID,locked BOOLEAN) RETURNS JSONB LANGUAGE plpgsql VOLATILE SECURITY DEFINER AS $$
-DECLARE memory memories%ROWTYPE; annotation memory_event_annotations%ROWTYPE; content TEXT;
+CREATE FUNCTION continuum_event_metadata(actor UUID,memory_id UUID,locked BOOLEAN) RETURNS JSONB LANGUAGE plpgsql VOLATILE SECURITY DEFINER AS $$
+DECLARE memory memories%ROWTYPE; annotation memory_event_annotations%ROWTYPE; bytes INTEGER;
 BEGIN
   IF locked THEN SELECT * INTO memory FROM memories WHERE id=memory_id FOR SHARE;
   ELSE SELECT * INTO memory FROM memories WHERE id=memory_id; END IF;
-  IF memory.id IS NULL OR NOT continuum_evidence_can_access(actor,memory.scope_id,FALSE)
+  IF memory.id IS NULL OR memory.state<>'live' OR NOT continuum_evidence_can_access(actor,memory.scope_id,FALSE)
     OR (memory.expires_at IS NOT NULL AND memory.expires_at<=clock_timestamp()) THEN RETURN NULL; END IF;
   SELECT a.* INTO annotation FROM memory_event_current c JOIN memory_event_annotations a ON a.version_id=c.version_id
     WHERE c.memory_id=memory.id;
-  IF annotation.version_id IS NULL THEN RETURN jsonb_build_object('annotation',jsonb_build_object('status','unknown'),'version',NULL,'sourceVersion',NULL); END IF;
+  IF annotation.version_id IS NULL THEN RETURN jsonb_build_object('version',NULL,'sourceVersion',NULL,'bytes',128); END IF;
   IF locked THEN PERFORM continuum_evidence_lock(actor,ARRAY[annotation.version_id]); END IF;
   IF NOT continuum_evidence_eligible(actor,annotation.version_id,NULL)
     OR NOT EXISTS(SELECT 1 FROM evidence_roots WHERE source_memory_id=memory.id AND current_version=annotation.source_version) THEN RETURN NULL; END IF;
-  SELECT payload INTO content FROM evidence_payloads WHERE version_id=annotation.version_id;
-  RETURN jsonb_build_object('annotation',content::jsonb,'version',annotation.version_id,'sourceVersion',annotation.source_version);
+  SELECT octet_length(payload) INTO bytes FROM evidence_payloads WHERE version_id=annotation.version_id;
+  IF bytes IS NULL OR bytes>8192 THEN RETURN NULL; END IF;
+  RETURN jsonb_build_object('bytes',bytes+256,'version',annotation.version_id,'sourceVersion',annotation.source_version);
+END $$;
+CREATE FUNCTION continuum_event_read(actor UUID,memory_id UUID,locked BOOLEAN) RETURNS JSONB LANGUAGE plpgsql VOLATILE SECURITY DEFINER AS $$
+DECLARE metadata JSONB; content TEXT;
+BEGIN
+  metadata:=continuum_event_metadata(actor,memory_id,locked);
+  IF metadata IS NULL THEN RETURN NULL; END IF;
+  IF metadata->>'version' IS NULL THEN RETURN jsonb_build_object('annotation',jsonb_build_object('status','unknown'),'version',NULL,'sourceVersion',NULL); END IF;
+  SELECT payload INTO content FROM evidence_payloads WHERE version_id=(metadata->>'version')::uuid;
+  RETURN (metadata-'bytes')||jsonb_build_object('annotation',content::jsonb);
 END $$;
 
 CREATE FUNCTION continuum_event_overlap(value JSONB,window_spec JSONB) RETURNS BOOLEAN LANGUAGE plpgsql IMMUTABLE AS $$
@@ -139,6 +163,7 @@ BEGIN
     OR NOT continuum_evidence_can_access(actor,destination.scope_id,TRUE)
     OR NOT EXISTS(SELECT 1 FROM memory_event_current c JOIN memory_event_annotations a ON a.version_id=c.version_id
       JOIN evidence_versions v ON v.id=a.source_version JOIN evidence_roots r ON r.id=v.root_id
+      JOIN evidence_versions current_source ON current_source.id=r.current_version AND current_source.previous_version=a.source_version
       JOIN evidence_payloads p ON p.version_id=a.source_version
       WHERE c.memory_id=source.id AND c.version_id=annotation_version AND r.source_memory_id=source.id
         AND p.payload=continuum_evidence_canonical(source)) THEN RAISE check_violation USING MESSAGE='event promotion unavailable'; END IF;
@@ -164,7 +189,7 @@ CREATE FUNCTION continuum_event_is_ready() RETURNS BOOLEAN LANGUAGE sql STABLE S
 $$;
 DO $$
 DECLARE schema_name TEXT:=current_schema(); f RECORD; signature TEXT; definition TEXT; revised TEXT; candidate RECORD;
-  app_signatures TEXT[]:=ARRAY['continuum_event_write(uuid,uuid,jsonb)','continuum_event_read(uuid,uuid,boolean)',
+  app_signatures TEXT[]:=ARRAY['continuum_event_write(uuid,uuid,jsonb)','continuum_event_read(uuid,uuid,boolean)','continuum_event_metadata(uuid,uuid,boolean)',
     'continuum_event_matches(uuid,uuid,jsonb)','continuum_event_promote(uuid,uuid,uuid,uuid)','continuum_event_is_ready()'];
 BEGIN
   FOR f IN SELECT oid::regprocedure signature FROM pg_proc WHERE pronamespace=quote_ident(schema_name)::regnamespace AND proname LIKE 'continuum_event_%' LOOP
