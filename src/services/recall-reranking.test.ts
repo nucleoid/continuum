@@ -1,6 +1,6 @@
 import { expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import type pg from 'pg';
+import pg from 'pg';
 import { standupProducerFixture } from '../standup/test-helpers.js';
 import { createMemory } from '../storage/memories.js';
 import { createPrincipal, getPrincipal } from '../storage/principals.js';
@@ -14,6 +14,37 @@ import { configureReranking } from '../reranking/provider.js';
 import { EmbeddingRegistry, ScopeEmbeddingRouter } from '../embeddings/router.js';
 import { supersedeDecision } from '../storage/supersede.js';
 import { provisionEntraGroupBinding, syncEntraMemberships } from './membership-sync.js';
+
+it('admits concurrent cold source pools without a shared-lock upgrade deadlock', async () => {
+  await standupProducerFixture(async f => {
+    const principal = (await getPrincipal(f.app, f.actorId))!;
+    const concurrent = new pg.Pool({ ...f.app.options, max: 2, connectionTimeoutMillis: 3000 });
+    const closed: Promise<void>[] = [];
+    concurrent.on('connect', client => { closed.push(new Promise(resolve => client.once('end', resolve))); });
+    try {
+      const t = testReranking(() => 1); const config = t.config();
+      for (const word of ['alpha', 'bravo', 'charlie', 'delta', 'echo']) {
+        const query = `cold${word}`; const ids = [];
+        for (let i = 0; i < 3; i++) ids.push((await createMemory(f.app, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId,
+          type: 'decision', title: `${query} source`, body: `${query} ${'padding '.repeat(i * 10)}`, source: 'manual' })).id);
+        const outcomes = await Promise.allSettled([0, 1].map(() => recallForPrincipal(concurrent, null, principal,
+          { query, limit: 1 }, {}, undefined, undefined, undefined, config)));
+        for (const outcome of outcomes) {
+          expect(outcome.status, outcome.status === 'rejected' ? String(outcome.reason?.cause?.code ?? outcome.reason?.code) : undefined).toBe('fulfilled');
+          if (outcome.status === 'fulfilled') {
+            expect(outcome.value.results).toHaveLength(1);
+            expect(ids).toContain(outcome.value.results[0].memory.id);
+          }
+        }
+      }
+    } finally {
+      await concurrent.end();
+      await Promise.race([Promise.all(closed), new Promise((_, reject) => {
+        const timer = setTimeout(() => reject(new Error('Concurrent APP sessions did not close')), 5000); timer.unref();
+      })]);
+    }
+  });
+}, 120_000);
 
 it('reranks beyond the old final cut with real APP authority and audits only delivered order', async () => {
   await standupProducerFixture(async f => {
@@ -42,6 +73,11 @@ it('reranks beyond the old final cut with real APP authority and audits only del
     const audit = (await f.owner.query("SELECT memory_id, metadata FROM audit_log WHERE metadata->>'request_id'=$1 AND memory_id IS NOT NULL", [summary.request_id])).rows;
     expect(audit).toHaveLength(1); expect(audit[0].memory_id).toBe(target.memory.id);
     expect(audit[0].metadata).toMatchObject({ rank: 1, score: target.score, rerank_score: 100 });
+    expect(summary).toMatchObject({ evidence_policy_version: 'evidence-authorization-v1',
+      reranking_adapter: { id: adapter.id, version: adapter.version, model: adapter.model, profile: adapter.profile } });
+    const exactVersion = (await f.owner.query('SELECT current_version AS version FROM evidence_roots WHERE id=$1', [target.memory.id])).rows[0].version;
+    expect(audit[0].metadata.source_version).toBe(exactVersion);
+    expect(audit[0].metadata.evidence_policy_version).toBe('evidence-authorization-v1');
     const after = await prepareAgentsMdForPrincipal(f.app, principal, {});
     expect(after.markdown).toBe(sourceBundle.markdown); expect(after.etag).toBe(sourceBundle.etag);
     await f.owner.query('UPDATE memories SET body=$2 WHERE id=$1', [target.memory.id, 'Needle current version']);

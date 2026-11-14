@@ -86,3 +86,8 @@ it('retains detached admission until actual settlement and rejects late scores',
   finish({ value: { version: 'test-v1', scores: [{ id: 'c0', score: 0 }, { id: 'c1', score: 1 }] }, response: {} });
   await vi.waitFor(() => expect(budget.snapshot().active).toBe(0));
 });
+
+it.each(['model', 'profile'] as const)('bounds configured %s identity before audit projection', field => {
+  const a = adapter(); a[field] = 'x'.repeat(129);
+  expect(() => configured(a)).toThrow('qualification');
+});
