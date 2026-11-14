@@ -38,7 +38,10 @@ SELECT continuum_operator_install_extractor(
 ```
 
 The descriptor is configuration, never credentials. Keep provider credentials in
-the implementation's private configuration. A real provider needs independently
+the implementation's private configuration. The maximum chunk count cannot
+exceed the original call allowance. Reserved and never-reserved attachment
+identities share that finite control-record ceiling; exhaustion reports budget
+and never implies a new allowance. A real provider needs independently
 reviewed accounting and enforceable completion/response limits for that exact
 version/profile. A validation identifier alone is not qualification. The
 starter budget has zero priced spend; it cannot activate a paid provider.
@@ -107,6 +110,13 @@ are one poll per second, one run per installed local registry profile, a
 shutdown waits 1..10000 ms and a registry contains at most 32 profiles. SQL uses
 five-second statement and one-second lock bounds, preserving tighter settings.
 Configure finite pool-acquisition and outer process deadlines separately.
+
+Missing credentials, incompatible capabilities/pricing or saturated/detached
+process admission leave sources queued before any claim or workflow starts.
+A binding without current writer authority is excluded before selection, so
+another authorized LOGIN can still process its queued work. A post-claim
+admission race can requeue a pending chunk under the original deadline, retry
+and attachment ceilings. It cannot renew a workflow or release ambiguous work.
 
 Chunks address the exact UTF-8 canonical evidence JSON, including its title,
 body, source/reference and metadata, excluding operational `related`. Offsets

@@ -86,13 +86,12 @@ it('reports an exhausted attachment ceiling as budget without implying an ambigu
   }, profile);
 }, 120_000);
 
-it('abandons a never-reserved skipped chunk without hiding healthy later chunks', async () => {
-  const profile = syntheticExtractor(); let checks = 0;
-  Object.defineProperty(profile.adapter, 'credentials', { enumerable: true,
-    get: () => ++checks === 1 ? 'missing' : 'not-required' });
+it('abandons a never-reserved oversized chunk without hiding healthy later chunks', async () => {
+  const profile = syntheticExtractor();
+  profile.budget = { ...profile.budget, limits: { ...profile.budget.limits, inputBytes: 1500 } };
   await extractionFixture(async f => {
     const memory = await createMemory(f.app, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId,
-      type: 'decision', title: 'Pre-reservation skip', body: 'a'.repeat(1400), source: 'manual' });
+      type: 'decision', title: 'Pre-reservation skip', body: 'a'.repeat(1100), source: 'manual' });
     expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('processed');
     const result = (await f.app.query('SELECT continuum_extraction_status($1,$2,TRUE) AS result', [f.actorId, memory.id])).rows[0].result;
     expect(result).toMatchObject({ status: 'partial', skipped: 1, completed: 1 });
@@ -106,6 +105,7 @@ it('abandons a never-reserved skipped chunk without hiding healthy later chunks'
 it('reports UTF-8 chunk-count exhaustion as skipped budget without dispatch or source changes', async () => {
   let calls = 0; const profile = syntheticExtractor(async () => { calls++; return { value: { assertions: [] }, response: {} }; });
   profile.chunkBytes = 17; profile.maxChunks = 64;
+  profile.budget = { ...profile.budget, limits: { ...profile.budget.limits, calls: 64 } };
   await extractionFixture(async f => {
     const empty = (await f.owner.query(`SELECT jsonb_build_object('scopeId',$1::uuid,'title','UTF8 edge','body','',
       'type','decision','tags','[]'::jsonb,'source','manual','sourceRef',NULL,'metadata','{}'::jsonb)::text AS value`, [f.scopeId])).rows[0].value;

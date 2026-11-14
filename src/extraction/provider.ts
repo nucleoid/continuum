@@ -20,6 +20,7 @@ export class ExtractionRegistry {
     if (!/^[a-z][a-z0-9.-]{0,63}$/.test(input.id) || !/^[a-zA-Z0-9_.:/-]{1,128}$/.test(input.version)
       || this.entries.size >= 32 || this.entries.has(input.id) || !Number.isInteger(input.chunkBytes) || input.chunkBytes < 4 || input.chunkBytes > 65_536
       || !Number.isInteger(input.maxChunks) || input.maxChunks < 1 || input.maxChunks > 64
+      || input.maxChunks > input.budget.limits.calls
       || input.budget.overallMs > 20_000 || input.adapter.timeoutMs > 15_000) throw new TypeError('Invalid extraction profile');
     this.entries.set(input.id, Object.freeze({ ...input, budget: checkedProfile(input.budget) }));
   }

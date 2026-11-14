@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
-import { Budget, BudgetError, runBudgetedStage } from '../pipeline/budget.js';
+import { Budget, BudgetError, runBudgetedStage, budgetedStageUnavailable } from '../pipeline/budget.js';
 import { chunkSource } from '../extraction/chunking.js';
 import { EXTRACTION_PROMPT, EXTRACTION_SCHEMA, validateAssertions, type ExtractionOutput } from '../extraction/model.js';
 import { extractionDescriptor, ExtractionRegistry, type ExtractionProfile } from '../extraction/provider.js';
@@ -27,6 +27,7 @@ export async function processExtraction(pool: pg.Pool, worker: string, profile: 
   };
   try {
     options.signal?.throwIfAborted();
+    if (budgetedStageUnavailable(profile.budget, profile.adapter)) return 'idle';
     // Local clock begins before claim/accounting/hydration, leaving ten seconds
     // of lease slack for final SQL. SQL independently checks database time.
     const budget = new Budget(profile.budget);
@@ -67,9 +68,9 @@ export async function processExtraction(pool: pg.Pool, worker: string, profile: 
       let attempt = claim.attempts?.find(a => a.index === chunk.index && a.generation === claim!.generation && a.state === null)?.id;
       if (!attempt) {
         attempt = randomUUID();
-        const attached = await extractionOperation<boolean>(pool, 'SELECT continuum_extraction_budget($1,$2,$3,$4,\'attach\',$5,0) AS result',
+        const attached = await extractionOperation<boolean | 'budget'>(pool, 'SELECT continuum_extraction_budget($1,$2,$3,$4,\'attach\',$5,0) AS result',
           [claim.id, worker, claim.generation, attempt, { index: chunk.index }]);
-        if (!attached) { await stop('ambiguous'); return 'unavailable'; }
+        if (attached !== true) { await stop(attached === 'budget' ? 'budget' : 'ambiguous'); return 'unavailable'; }
       }
       let transient = false;
       const adapter = { ...profile.adapter, serialize: profile.adapter.serialize.bind(profile.adapter),
@@ -96,7 +97,9 @@ export async function processExtraction(pool: pg.Pool, worker: string, profile: 
         catch { failure = 'invalid-output'; }
       } else {
         const reason = outcome.reason;
-        failure = reason === 'provider_failed' ? transient ? 'transient' : 'permanent'
+        const admissionUnavailable = reason === 'credentials_unavailable' || reason === 'capability_unavailable' || reason === 'pricing_unavailable'
+          || (reason === 'budget_exhausted' && budgetedStageUnavailable(profile.budget, adapter) !== undefined);
+        failure = admissionUnavailable ? 'transient' : reason === 'provider_failed' ? transient ? 'transient' : 'permanent'
           : reason === 'deadline' || reason === 'cancelled' ? reason
           : reason === 'policy_denied' ? 'policy' : reason === 'invalid_response' ? 'invalid-output' : 'budget';
         if (reason === 'deadline' || reason === 'cancelled' || reason === 'stale_attempt') {

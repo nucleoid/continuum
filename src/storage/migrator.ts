@@ -104,7 +104,7 @@ const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
   ['0090_standup_activity.sql', 'ddf1f0bb884df857f7b17eb9d9b91da2fa527561990fc96604b43af7af8f657e'],
   ['0092_pipeline_budgets.sql', '54c6da1355187c768e3ffe0c75affc14575b4464fdb9cf9cd3de209aa516c0c4'],
   ['0093_evidence_lifecycle.sql', '0db47973792646873e8fe628e56e0b4f98acde783ecad4d08524b985bd1c3f74'],
-  ['0094_extraction.sql', 'b397401f666b7d162a3cec407292fa0cc0461db5681e5f7a3248093bf59c82f8'],
+  ['0094_extraction.sql', '514efa46a2024a6e97f612182aacae1b5096cea2fd0a59d8cc8b96eabb707e05'],
 ]);
 const FORWARD_MIGRATION_REQUIREMENTS = new Map([
   ['0084_provider_embeddings_backfill.sql', '0083_tag_vocabularies.sql'],

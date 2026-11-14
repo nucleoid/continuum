@@ -108,6 +108,7 @@ BEGIN
     IF jsonb_typeof(d->key)<>'number' OR d->>key !~ '^(0|[1-9][0-9]*)$' OR (d->>key)::numeric>1048576 THEN RETURN FALSE; END IF;
   END LOOP;
   IF (d->>'chunkBytes')::int NOT BETWEEN 4 AND 65536 OR (d->>'maxChunks')::int NOT BETWEEN 1 AND 64
+    OR (d->>'maxChunks')::int>(d->'budget'->'limits'->>'calls')::bigint
     OR (d->'budget'->>'overallMs')::int>20000 OR (d->>'responseBodyBytes')::int NOT BETWEEN 512 AND 65536
     OR jsonb_typeof(d->'accounting') IS DISTINCT FROM 'object' OR jsonb_typeof(d->'price') IS DISTINCT FROM 'object'
     OR d->'accounting'->>'model' IS DISTINCT FROM d->>'model' OR d->'accounting'->>'profile' IS DISTINCT FROM d->>'adapterProfile'
@@ -345,16 +346,14 @@ BEGIN
   IF worker IS NULL THEN RAISE check_violation USING MESSAGE='invalid extraction worker'; END IF;
   SELECT j.* INTO job FROM extraction_runs j JOIN extraction_worker_bindings b ON b.scope_id=j.scope_id AND b.profile=j.profile
     JOIN pg_roles role ON role.oid=b.role_oid AND role.rolname=b.role_name
-    WHERE role.rolname=session_user AND b.enabled AND j.profile=profile_id AND j.descriptor=continuum_extraction_claim.descriptor
+    WHERE role.rolname=session_user AND b.enabled AND continuum_evidence_can_access(b.principal_id,j.scope_id,TRUE)
+      AND j.profile=profile_id AND j.descriptor=continuum_extraction_claim.descriptor
       AND ((j.state='queued' AND j.retry_at<=clock_timestamp()) OR (j.state='running' AND j.lease_until<=clock_timestamp()))
     ORDER BY j.retry_at,j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1;
   IF job.id IS NULL THEN RETURN NULL; END IF;
-  BEGIN binding:=continuum_extraction_binding(job.scope_id,job.profile);
-  EXCEPTION WHEN insufficient_privilege THEN
-    UPDATE extraction_runs SET state='unavailable',reason='policy',generation=generation+1,owner=NULL,lease_until=NULL WHERE id=job.id;
-    INSERT INTO extraction_receipts(run_id,generation,outcome,reason) VALUES(job.id,job.generation+1,'unavailable','policy');
-    RETURN jsonb_build_object('outcome','unavailable');
-  END;
+  -- Recheck after selection. A binding race rolls back without changing shared
+  -- work that another currently authorized LOGIN can still process.
+  binding:=continuum_extraction_binding(job.scope_id,job.profile);
   IF job.state='running' THEN
     UPDATE extraction_runs SET state='unavailable',reason='ambiguous',generation=generation+1,owner=NULL,lease_until=NULL WHERE id=job.id;
     INSERT INTO extraction_receipts(run_id,generation,outcome,reason) VALUES(job.id,job.generation+1,'unavailable','ambiguous');
@@ -400,8 +399,9 @@ BEGIN
   END IF;
   job:=continuum_extraction_gate(run_id,worker,epoch,TRUE);
   IF phase='attach' THEN
+    IF (SELECT count(*) FROM extraction_attempts WHERE run_id=job.id)>=(job.descriptor->'budget'->'limits'->>'calls')::bigint THEN
+      RETURN to_jsonb('budget'::text); END IF;
     IF attempt IS NULL OR (value->>'index')::int NOT BETWEEN 0 AND job.chunk_count-1
-      OR (SELECT count(*) FROM extraction_attempts WHERE run_id=job.id)>=(job.descriptor->'budget'->'limits'->>'calls')::bigint
       OR NOT EXISTS(SELECT 1 FROM extraction_chunks WHERE run_id=job.id AND chunk_index=(value->>'index')::int AND state='pending')
       OR EXISTS(SELECT 1 FROM extraction_attempts a LEFT JOIN pipeline_budget_attempts p ON p.workflow_id=job.workflow_id AND p.attempt_id=a.attempt_id
         WHERE a.run_id=job.id AND (p.state IS DISTINCT FROM 'settled') AND NOT EXISTS(SELECT 1 FROM extraction_abandoned_attempts WHERE attempt_id=a.attempt_id)) THEN RETURN 'false'::jsonb; END IF;
@@ -452,11 +452,20 @@ BEGIN
   IF failure IS NOT NULL AND failure NOT IN ('budget','policy','invalid-output','transient','permanent','ambiguous','deadline','cancelled') THEN RAISE check_violation USING MESSAGE='invalid extraction outcome'; END IF;
   IF failure='transient' THEN
     SELECT * INTO STRICT w FROM pipeline_budget_workflows WHERE id=job.workflow_id FOR UPDATE;
-    IF NOT EXISTS(SELECT 1 FROM extraction_attempts a JOIN pipeline_budget_attempts p ON p.workflow_id=job.workflow_id AND p.attempt_id=a.attempt_id
-      WHERE a.run_id=job.id AND a.attempt_id=attempt AND p.state='settled') OR w.active<>0 THEN RAISE check_violation USING MESSAGE='unsettled extraction retry'; END IF;
-    UPDATE extraction_runs SET state='queued',reason='transient',retry_at=clock_timestamp()+interval '100 milliseconds',owner=NULL,lease_until=NULL WHERE id=job.id;
-    INSERT INTO extraction_receipts(run_id,generation,outcome,reason) VALUES(job.id,job.generation,'retry','transient');
-    RETURN '[]'::jsonb;
+    IF w.active<>0 THEN RAISE check_violation USING MESSAGE='unsettled extraction retry'; END IF;
+    IF EXISTS(SELECT 1 FROM extraction_abandoned_attempts WHERE attempt_id=attempt)
+      AND NOT EXISTS(SELECT 1 FROM pipeline_budget_attempts WHERE workflow_id=job.workflow_id AND attempt_id=attempt) THEN
+      -- A post-claim admission race made no call. Bound its durable retry and
+      -- control records using the original retry and attachment ceilings.
+      IF (w.used->>'retries')::bigint>=(w.profile->'limits'->>'retries')::bigint THEN failure:='budget';
+      ELSE UPDATE pipeline_budget_workflows SET used=jsonb_set(used,'{retries}',to_jsonb((used->>'retries')::bigint+1)) WHERE id=w.id; END IF;
+    ELSIF NOT EXISTS(SELECT 1 FROM extraction_attempts a JOIN pipeline_budget_attempts p ON p.workflow_id=job.workflow_id AND p.attempt_id=a.attempt_id
+      WHERE a.run_id=job.id AND a.attempt_id=attempt AND p.state='settled') THEN RAISE check_violation USING MESSAGE='unsettled extraction retry'; END IF;
+    IF failure='transient' THEN
+      UPDATE extraction_runs SET state='queued',reason='transient',retry_at=clock_timestamp()+interval '100 milliseconds',owner=NULL,lease_until=NULL WHERE id=job.id;
+      INSERT INTO extraction_receipts(run_id,generation,outcome,reason) VALUES(job.id,job.generation,'retry','transient');
+      RETURN '[]'::jsonb;
+    END IF;
   END IF;
   IF output IS NOT NULL THEN
     IF failure IS NOT NULL OR jsonb_typeof(output) IS DISTINCT FROM 'object' OR (SELECT count(*) FROM jsonb_object_keys(output))<>1
