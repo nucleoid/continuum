@@ -17,6 +17,7 @@ import { hydrateRecallCandidates, recall } from './recall.js';
 import { recallAuthorityMetadata } from './recall-authority.js';
 import * as temporalStorage from './temporal.js';
 import { listMemoriesForPrincipal } from '../services/memories.js';
+import { Budget, starterProfile } from '../pipeline/budget.js';
 
 const annotation = (instant = '2026-02-01T00:00:00Z') => parseEventAnnotation({ status:'known', assertion:'asserted', precision:'instant', instant });
 const filter = parseEventWindow({ from:'2026-02-01T00:00:00Z', to:'2026-03-01T00:00:00Z' });
@@ -124,5 +125,24 @@ describe('event annotations and candidate admission', () => {
     try {
       expect((await listMemoriesForPrincipal(pool,f.actor,{scope:`project:${f.scope.name}`,eventFilter:filter})).items).toEqual([]);
     } finally {spy.mockRestore();}
+  });
+  it('suppresses delivery when the shared budget is cancelled during final commit', async () => {
+    const f=await world();await f.capture();const budget=new Budget(starterProfile);
+    const wrapped=new Proxy(pool,{get(target,key){
+      if(key==='connect') return async()=>{
+        const client=await target.connect();
+        return new Proxy(client,{get(connection,property){
+          if(property==='query') return async(...args:unknown[])=>{
+            const result=await Reflect.apply(connection.query,connection,args);
+            if(args[0]==='COMMIT') budget.cancel();return result;
+          };
+          const value=Reflect.get(connection,property,connection);return typeof value==='function'?value.bind(connection):value;
+        }});
+      };
+      const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;
+    }});
+    await expect(recallForPrincipal(wrapped,null,f.actor,{query:'signal'}, {},undefined,undefined,budget))
+      .rejects.toMatchObject({code:'DEPENDENCY_UNAVAILABLE'});
+    expect((await pool.query("SELECT count(*)::int AS n FROM audit_log WHERE action='read' AND query='signal'")).rows[0].n).toBeGreaterThan(0);
   });
 });
