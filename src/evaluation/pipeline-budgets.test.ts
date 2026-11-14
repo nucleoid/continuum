@@ -10,7 +10,12 @@ describe('pipeline-budget-v1 synthetic contract evaluation', () => {
     const fixture = JSON.parse(bytes.toString()) as { version: string; stages: string[]; cases: Array<{ id: string; mode: string; expected: string }>; gates: Record<string, number> };
     const head = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
     const sourceHead = process.env.CONTINUUM_EVAL_SOURCE_SHA ?? head;
-    expect(sourceHead).toBe(head);
+    // Ordinary PR CI can test a merge checkout. Record both identities without
+    // presenting that report as exact source-head acceptance evidence.
+    expect(sourceHead).toMatch(/^[a-f0-9]{40}$/);
+    const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).trim();
+    const clean = () => !execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim();
+    const cleanStart = clean();
     const rows = [];
     for (const stage of fixture.stages) for (const task of fixture.cases) {
       let calls = 0;
@@ -34,7 +39,11 @@ describe('pipeline-budget-v1 synthetic contract evaluation', () => {
         calls, securityFailure, hardBudgetFailure, reservedSpendMicros: usage.used.spendMicros, actualSpendMicros: 0 });
     }
     const times = rows.map((r) => r.latencyMs).sort((a, b) => a - b);
-    const report = { version: fixture.version, head, sourceHead, profile: starterProfile,
+    const headEnd = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    expect(headEnd).toBe(head);
+    const cleanEnd = clean();
+    const report = { version: fixture.version, head, sourceHead, tree, headEnd, cleanStart, cleanEnd,
+      sourceHeadEligible: head === sourceHead && cleanStart && cleanEnd, profile: starterProfile,
       fixtureSha256: createHash('sha256').update(bytes).digest('hex'), mode: 'deterministic-local-contract-stubs',
       quality: { outcomeAccuracy: rows.filter((r) => r.outcome === r.expected).length / rows.length },
       securityFailures: rows.filter((r) => r.securityFailure).length,
