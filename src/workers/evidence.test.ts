@@ -126,7 +126,7 @@ it('repairs with new wording/version and original durable attempt identity, then
     expect(failed).toMatchObject({state:'unavailable',attempt_id:expect.any(String),attempt_owner:expect.any(String),attempt_generation:'1'});
     const accounting=(await f.owner.query('SELECT active,used FROM pipeline_budget_workflows WHERE id=$1',[failed.workflow_id])).rows[0];
     expect(accounting.active).toBe(1); expect(accounting.used.calls).toBe(1);
-    await f.owner.query("UPDATE evidence_repair_jobs SET state='pending' WHERE version_id=$1",[job.result_version]);
+    await f.owner.query("UPDATE evidence_repair_jobs SET state='pending',retry_at=clock_timestamp() WHERE version_id=$1",[job.result_version]);
     expect(await repairEvidence(f.operator,f.adminId,randomUUID(),{owners,profile:starterProfile,adapter,providerAuthority})).toBe('unavailable');
     expect((await f.owner.query('SELECT attempt_id FROM evidence_repair_jobs WHERE version_id=$1',[job.result_version])).rows[0].attempt_id).toBe(failed.attempt_id);
     expect((await f.owner.query('SELECT used FROM pipeline_budget_workflows WHERE id=$1',[failed.workflow_id])).rows[0].used.calls).toBe(1);
