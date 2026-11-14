@@ -62,6 +62,8 @@ CREATE TABLE extraction_attempts(
 );
 CREATE INDEX extraction_attempt_run_idx ON extraction_attempts(run_id,chunk_index,created_at);
 CREATE TABLE extraction_dispatch_receipts(attempt_id UUID PRIMARY KEY REFERENCES extraction_attempts(attempt_id));
+CREATE TABLE extraction_abandoned_attempts(attempt_id UUID PRIMARY KEY REFERENCES extraction_attempts(attempt_id));
+CREATE TRIGGER extraction_abandoned_immutable BEFORE UPDATE OR DELETE ON extraction_abandoned_attempts FOR EACH ROW EXECUTE FUNCTION continuum_evidence_immutable();
 CREATE TRIGGER extraction_dispatch_immutable BEFORE UPDATE OR DELETE ON extraction_dispatch_receipts FOR EACH ROW EXECUTE FUNCTION continuum_evidence_immutable();
 CREATE TABLE extraction_receipts(
   id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, run_id UUID NOT NULL REFERENCES extraction_runs(id),
@@ -71,7 +73,18 @@ CREATE TABLE extraction_receipts(
 );
 CREATE TRIGGER extraction_attempt_immutable BEFORE UPDATE OR DELETE ON extraction_attempts FOR EACH ROW EXECUTE FUNCTION continuum_evidence_immutable();
 CREATE TRIGGER extraction_receipt_immutable BEFORE UPDATE OR DELETE ON extraction_receipts FOR EACH ROW EXECUTE FUNCTION continuum_evidence_immutable();
-REVOKE ALL ON extraction_profiles,extraction_scope_config,extraction_worker_bindings,extraction_runs,extraction_chunks,extraction_attempts,extraction_receipts,extraction_dispatch_receipts FROM PUBLIC;
+CREATE FUNCTION continuum_extraction_run_identity() RETURNS trigger LANGUAGE plpgsql AS $$
+#variable_conflict use_column
+BEGIN
+  IF (OLD.id,OLD.memory_id,OLD.scope_id,OLD.source_version,OLD.profile,OLD.descriptor,OLD.config_generation,OLD.profile_generation,
+    OLD.workflow_id,OLD.budget_owner,OLD.budget_generation,OLD.source_bytes,OLD.created_at) IS DISTINCT FROM
+    (NEW.id,NEW.memory_id,NEW.scope_id,NEW.source_version,NEW.profile,NEW.descriptor,NEW.config_generation,NEW.profile_generation,
+    NEW.workflow_id,NEW.budget_owner,NEW.budget_generation,NEW.source_bytes,NEW.created_at) THEN
+    RAISE check_violation USING MESSAGE='extraction run identity is immutable'; END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER extraction_run_identity BEFORE UPDATE ON extraction_runs FOR EACH ROW EXECUTE FUNCTION continuum_extraction_run_identity();
+REVOKE ALL ON extraction_profiles,extraction_scope_config,extraction_worker_bindings,extraction_runs,extraction_chunks,extraction_attempts,extraction_receipts,extraction_dispatch_receipts,extraction_abandoned_attempts FROM PUBLIC;
 REVOKE ALL ON SEQUENCE extraction_receipts_id_seq FROM PUBLIC;
 
 CREATE FUNCTION continuum_extraction_valid_descriptor(d JSONB) RETURNS BOOLEAN LANGUAGE plpgsql IMMUTABLE AS $$
@@ -86,6 +99,9 @@ BEGIN
   FOREACH key IN ARRAY ARRAY['version','model','adapter','adapterProfile'] LOOP
     IF jsonb_typeof(d->key)<>'string' OR d->>key !~ '^[a-zA-Z0-9_.:/-]{1,128}$' THEN RETURN FALSE; END IF;
   END LOOP;
+  FOREACH key IN ARRAY ARRAY['id','locality','schema','prompt','hash'] LOOP
+    IF jsonb_typeof(d->key) IS DISTINCT FROM 'string' THEN RETURN FALSE; END IF;
+  END LOOP;
   FOREACH key IN ARRAY ARRAY['chunkBytes','maxChunks','responseBodyBytes','outputTokens','reasoningTokens','completionTokens'] LOOP
     IF jsonb_typeof(d->key)<>'number' OR d->>key !~ '^(0|[1-9][0-9]*)$' OR (d->>key)::numeric>1048576 THEN RETURN FALSE; END IF;
   END LOOP;
@@ -97,7 +113,21 @@ BEGIN
     OR d->'accounting'->>'validationId' !~ '^[a-zA-Z0-9_.:/-]{1,128}$'
     OR d->'price'->>'id' IS DISTINCT FROM d->'budget'->>'rateSchedule'
     OR d->'price'->>'currency' IS DISTINCT FROM d->'budget'->>'currency' THEN RETURN FALSE; END IF;
-  RETURN TRUE;
+  IF NOT(d->'accounting' ?& ARRAY['kind','model','profile','validationId','overheadTokens'])
+    OR (SELECT count(*) FROM jsonb_object_keys(d->'accounting'))<>5
+    OR NOT(d->'price' ?& ARRAY['id','currency','unitTokens','inputMicros','outputMicros','reasoningMicros'])
+    OR (SELECT count(*) FROM jsonb_object_keys(d->'price'))<>6 THEN RETURN FALSE; END IF;
+  FOREACH key IN ARRAY ARRAY['kind','model','profile','validationId'] LOOP
+    IF jsonb_typeof(d->'accounting'->key) IS DISTINCT FROM 'string' THEN RETURN FALSE; END IF;
+  END LOOP;
+  FOREACH key IN ARRAY ARRAY['unitTokens','inputMicros','outputMicros','reasoningMicros'] LOOP
+    IF jsonb_typeof(d->'price'->key) IS DISTINCT FROM 'number' OR d->'price'->>key !~ '^(0|[1-9][0-9]*)$'
+      OR (d->'price'->>key)::numeric>9007199254740991 THEN RETURN FALSE; END IF;
+  END LOOP;
+  RETURN (d->'price'->>'unitTokens')::numeric>0 AND jsonb_typeof(d->'accounting'->'overheadTokens')='number'
+    AND d->'accounting'->>'overheadTokens' ~ '^(0|[1-9][0-9]*)$'
+    AND (d->'accounting'->>'overheadTokens')::numeric<=9007199254740991
+    AND jsonb_typeof(d->'price'->'id')='string' AND jsonb_typeof(d->'price'->'currency')='string';
 EXCEPTION WHEN OTHERS THEN RETURN FALSE;
 END $$;
 
@@ -167,7 +197,8 @@ CREATE FUNCTION continuum_extraction_erase_run(run_id UUID) RETURNS VOID LANGUAG
 DECLARE job extraction_runs%ROWTYPE;
 BEGIN
   SELECT * INTO STRICT job FROM extraction_runs WHERE id=run_id FOR UPDATE;
-  DELETE FROM extraction_chunks WHERE extraction_chunks.run_id=job.id;
+  DELETE FROM extraction_chunks WHERE (extraction_chunks.run_id,chunk_index) IN
+    (SELECT c.run_id,c.chunk_index FROM extraction_chunks c WHERE c.run_id=job.id FOR UPDATE SKIP LOCKED);
   UPDATE pipeline_budget_workflows SET cancelled=TRUE,generation=generation+1 WHERE id=job.workflow_id AND NOT cancelled;
   UPDATE extraction_runs SET state='cancelled',reason='cancelled',generation=generation+1,owner=NULL,lease_until=NULL,completed=0,skipped=0,assertion_count=0,chunk_count=0 WHERE id=job.id;
   IF job.state<>'cancelled' THEN INSERT INTO extraction_receipts(run_id,generation,outcome,reason) VALUES(job.id,job.generation+1,'cancelled','cancelled'); END IF;
@@ -349,13 +380,13 @@ BEGIN
     IF attempt IS NULL OR (value->>'index')::int NOT BETWEEN 0 AND job.chunk_count-1
       OR NOT EXISTS(SELECT 1 FROM extraction_chunks WHERE run_id=job.id AND chunk_index=(value->>'index')::int AND state='pending')
       OR EXISTS(SELECT 1 FROM extraction_attempts a LEFT JOIN pipeline_budget_attempts p ON p.workflow_id=job.workflow_id AND p.attempt_id=a.attempt_id
-        WHERE a.run_id=job.id AND (p.state IS DISTINCT FROM 'settled')) THEN RETURN 'false'::jsonb; END IF;
+        WHERE a.run_id=job.id AND (p.state IS DISTINCT FROM 'settled') AND NOT EXISTS(SELECT 1 FROM extraction_abandoned_attempts WHERE attempt_id=a.attempt_id)) THEN RETURN 'false'::jsonb; END IF;
     INSERT INTO extraction_attempts(run_id,attempt_id,chunk_index,attempt_owner,attempt_generation,login_oid,claim_generation)
       VALUES(job.id,attempt,(value->>'index')::int,job.budget_owner,job.budget_generation,job.login_oid,job.generation);
     RETURN 'true'::jsonb;
   END IF;
   SELECT * INTO STRICT original FROM extraction_attempts WHERE run_id=job.id AND attempt_id=attempt;
-  IF original.claim_generation<>epoch OR original.login_oid<>job.login_oid THEN RETURN 'false'::jsonb; END IF;
+  IF original.claim_generation<>epoch OR original.login_oid<>job.login_oid OR EXISTS(SELECT 1 FROM extraction_abandoned_attempts WHERE attempt_id=attempt) THEN RETURN 'false'::jsonb; END IF;
   IF phase='reserve' THEN
     -- Retries are charged from durable history, not a caller-selected flag.
     value:=jsonb_set(value,'{retries}',to_jsonb(CASE WHEN EXISTS(SELECT 1 FROM extraction_attempts a
@@ -454,7 +485,9 @@ BEGIN
   IF job.login_oid IS DISTINCT FROM (SELECT oid FROM pg_roles WHERE rolname=session_user) OR job.owner IS DISTINCT FROM worker OR job.generation IS DISTINCT FROM epoch
     OR job.state<>'running' OR failure IS NULL OR failure NOT IN ('budget','policy','invalid-output','permanent','ambiguous','deadline','cancelled') THEN RAISE insufficient_privilege USING MESSAGE='extraction cancellation unavailable'; END IF;
   UPDATE pipeline_budget_workflows SET cancelled=TRUE,generation=generation+1 WHERE id=job.workflow_id AND NOT cancelled;
-  UPDATE extraction_runs SET state=CASE WHEN completed>0 THEN 'partial' ELSE 'unavailable' END,reason=failure,owner=NULL,lease_until=NULL,finished_at=clock_timestamp(),generation=generation+1 WHERE id=job.id;
+  UPDATE extraction_chunks SET state='skipped',reason=failure WHERE run_id=job.id AND state='pending';
+  UPDATE extraction_runs SET state=CASE WHEN completed>0 THEN 'partial' ELSE 'unavailable' END,reason=failure,owner=NULL,lease_until=NULL,finished_at=clock_timestamp(),generation=generation+1,
+    skipped=(SELECT count(*) FROM extraction_chunks WHERE run_id=job.id AND state='skipped') WHERE id=job.id;
   INSERT INTO extraction_receipts(run_id,generation,outcome,reason) SELECT id,generation,state,reason FROM extraction_runs WHERE id=job.id;
 END $$;
 
@@ -481,9 +514,10 @@ BEGIN
         PERFORM continuum_evidence_lock(actor,ARRAY[version]);
         IF NOT continuum_evidence_eligible(actor,version,NULL) THEN RAISE insufficient_privilege USING MESSAGE='extraction unavailable'; END IF;
       END LOOP;
+      IF (SELECT COALESCE(sum(octet_length(payload)),0) FROM evidence_payloads WHERE version_id=ANY(versions))>262144 THEN RAISE check_violation USING MESSAGE='extraction read bounds exceeded'; END IF;
       result:=result||jsonb_build_object('items',(SELECT COALESCE(jsonb_agg(jsonb_build_object('versionId',p.version_id,'data',p.payload::jsonb) ORDER BY p.version_id),'[]'::jsonb)
         FROM evidence_payloads p WHERE p.version_id=ANY(versions)));
-      IF octet_length(result::text)>1048576 THEN RAISE check_violation USING MESSAGE='extraction read bounds exceeded'; END IF;
+      IF octet_length(result::text)>262144 THEN RAISE check_violation USING MESSAGE='extraction read bounds exceeded'; END IF;
     END IF;
   END IF;
   INSERT INTO audit_log(principal_id,action,memory_id,scope_id,metadata) VALUES(actor,'read',memory,scope,jsonb_build_object('operation','extraction_read','assertions',include_assertions));
@@ -510,6 +544,33 @@ BEGIN
   RETURN jsonb_build_object('status','queued','runId',job.id);
 END $$;
 
+CREATE FUNCTION continuum_operator_recover_extraction(actor UUID,run_id UUID,attempt UUID,confirmation TEXT) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
+#variable_conflict use_column
+DECLARE job extraction_runs%ROWTYPE; original extraction_attempts%ROWTYPE; accounting pipeline_budget_attempts%ROWTYPE;
+BEGIN
+  PERFORM continuum_evidence_require_operator(actor);
+  IF confirmation IS DISTINCT FROM 'CONFIRMED ORIGINAL PROCESS EXIT' THEN RAISE check_violation USING MESSAGE='extraction recovery requires proved process exit'; END IF;
+  SELECT * INTO STRICT job FROM extraction_runs WHERE id=run_id FOR UPDATE;
+  IF job.state='running' AND job.lease_until>clock_timestamp() THEN RAISE check_violation USING MESSAGE='extraction worker lease is active'; END IF;
+  SELECT * INTO STRICT original FROM extraction_attempts WHERE run_id=job.id AND attempt_id=attempt;
+  SELECT * INTO accounting FROM pipeline_budget_attempts WHERE workflow_id=job.workflow_id AND attempt_id=attempt;
+  IF accounting.attempt_id IS NOT NULL AND accounting.state<>'settled' THEN
+    PERFORM continuum_pipeline_settle(job.workflow_id,attempt,original.attempt_owner,original.attempt_generation,'{"provenance":"unknown"}'::jsonb);
+  ELSIF accounting.attempt_id IS NULL THEN
+    INSERT INTO extraction_abandoned_attempts VALUES(attempt) ON CONFLICT DO NOTHING;
+  END IF;
+  -- Recovery never creates a workflow or renews a deadline, and never restores
+  -- a cancelled job. A live remaining allowance can be retried by its scope admin.
+  IF job.state<>'cancelled' THEN
+    UPDATE extraction_runs SET state='unavailable',reason=CASE WHEN EXISTS(SELECT 1 FROM pipeline_budget_workflows
+      WHERE id=job.workflow_id AND NOT cancelled AND deadline_at>clock_timestamp() AND active=0) THEN 'transient' ELSE 'deadline' END,
+      owner=NULL,lease_until=NULL,generation=generation+1 WHERE id=job.id;
+    INSERT INTO extraction_receipts(run_id,generation,outcome,reason) SELECT id,generation,state,reason FROM extraction_runs WHERE id=job.id;
+  END IF;
+  INSERT INTO audit_log(principal_id,action,scope_id,metadata) VALUES(actor,'write',job.scope_id,jsonb_build_object('operation','extraction_process_exit_reconciled'));
+  RETURN jsonb_build_object('accounting',CASE WHEN accounting.attempt_id IS NULL THEN 'no-reservation' ELSE 'settled' END,'renewed',FALSE);
+END $$;
+
 CREATE FUNCTION continuum_extraction_hydrate(run_id UUID,worker UUID,epoch BIGINT) RETURNS TEXT LANGUAGE plpgsql SECURITY DEFINER AS $$
 #variable_conflict use_column
 DECLARE job extraction_runs%ROWTYPE; binding extraction_worker_bindings%ROWTYPE; result TEXT; w pipeline_budget_workflows%ROWTYPE;
@@ -529,7 +590,7 @@ END $$;
 
 CREATE FUNCTION continuum_extraction_prepare(run_id UUID,worker UUID,epoch BIGINT,chunks JSONB) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
 #variable_conflict use_column
-DECLARE job extraction_runs%ROWTYPE; c JSONB; previous_end INTEGER:=0; count INTEGER:=0; source TEXT; bytes BYTEA; digest TEXT; chunk_id TEXT;
+DECLARE job extraction_runs%ROWTYPE; c JSONB; previous_end INTEGER:=0; count INTEGER:=0; source TEXT; bytes BYTEA; digest TEXT; planned_id TEXT;
 BEGIN
   job:=continuum_extraction_gate(run_id,worker,epoch,TRUE);
   IF jsonb_typeof(chunks) IS DISTINCT FROM 'array' OR jsonb_array_length(chunks) NOT BETWEEN 1 AND (job.descriptor->>'maxChunks')::int THEN RAISE check_violation USING MESSAGE='invalid extraction chunks'; END IF;
@@ -541,11 +602,11 @@ BEGIN
     -- convert_from rejects invalid UTF-8 chunk boundaries.
     PERFORM convert_from(substring(bytes FROM previous_end+1 FOR (c->>'end')::int-previous_end),'UTF8');
     digest:=encode(sha256(substring(bytes FROM previous_end+1 FOR (c->>'end')::int-previous_end)),'hex');
-    chunk_id:=encode(sha256(convert_to(job.source_version::text||':'||previous_end::text||':'||(c->>'end')||':'||digest,'UTF8')),'hex');
-    IF c->>'hash' IS DISTINCT FROM digest OR c->>'id' IS DISTINCT FROM chunk_id THEN RAISE check_violation USING MESSAGE='invalid extraction chunks'; END IF;
+    planned_id:=encode(sha256(convert_to(job.source_version::text||':'||previous_end::text||':'||(c->>'end')||':'||digest,'UTF8')),'hex');
+    IF c->>'hash' IS DISTINCT FROM digest OR c->>'id' IS DISTINCT FROM planned_id THEN RAISE check_violation USING MESSAGE='invalid extraction chunks'; END IF;
     INSERT INTO extraction_chunks(run_id,chunk_index,chunk_id,content_hash,start_byte,end_byte)
-      VALUES(job.id,count,chunk_id,digest,previous_end,(c->>'end')::int) ON CONFLICT DO NOTHING;
-    IF NOT EXISTS(SELECT 1 FROM extraction_chunks WHERE run_id=job.id AND chunk_index=count AND extraction_chunks.chunk_id=continuum_extraction_prepare.chunk_id
+      VALUES(job.id,count,planned_id,digest,previous_end,(c->>'end')::int) ON CONFLICT DO NOTHING;
+    IF NOT EXISTS(SELECT 1 FROM extraction_chunks WHERE run_id=job.id AND chunk_index=count AND extraction_chunks.chunk_id=planned_id
       AND content_hash=digest AND start_byte=previous_end AND end_byte=(c->>'end')::int) THEN RAISE check_violation USING MESSAGE='conflicting extraction chunks'; END IF;
     previous_end:=(c->>'end')::int; count:=count+1;
   END LOOP;
@@ -558,6 +619,13 @@ CREATE TABLE extraction_contract_functions(signature TEXT PRIMARY KEY,body_hash 
 REVOKE ALL ON extraction_contract_functions FROM PUBLIC;
 CREATE FUNCTION continuum_extraction_is_ready() RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER AS $$
   SELECT continuum_evidence_is_ready() AND continuum_pipeline_budgets_is_ready()
+    AND NOT EXISTS(SELECT 1 FROM (VALUES
+      ('extraction_attempts'::regclass,'extraction_attempt_immutable'),('extraction_receipts'::regclass,'extraction_receipt_immutable'),
+      ('extraction_dispatch_receipts'::regclass,'extraction_dispatch_immutable'),('extraction_abandoned_attempts'::regclass,'extraction_abandoned_immutable')) expected(relation,name)
+      LEFT JOIN pg_trigger t ON t.tgrelid=expected.relation AND t.tgname=expected.name
+      WHERE t.oid IS NULL OR t.tgenabled<>'O' OR t.tgtype<>27 OR t.tgfoid<>'continuum_evidence_immutable()'::regprocedure)
+    AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='extraction_runs'::regclass AND tgname='extraction_run_identity' AND tgenabled='O'
+      AND tgfoid='continuum_extraction_run_identity()'::regprocedure AND tgtype=19)
     AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='memories'::regclass AND tgname='extraction_capture_enqueue' AND tgenabled='O'
       AND tgfoid='continuum_extraction_enqueue()'::regprocedure AND tgtype=5)
     AND EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid='evidence_payloads'::regclass AND tgname='extraction_source_erased' AND tgenabled='O'
@@ -603,7 +671,8 @@ DECLARE schema_name TEXT:=current_schema(); f RECORD; signature TEXT; definition
   app_signatures TEXT[]:=ARRAY['continuum_extraction_configure(uuid,uuid,text,text[],boolean)',
     'continuum_extraction_status(uuid,uuid,boolean)','continuum_extraction_retry(uuid,uuid)','continuum_extraction_is_ready()'];
   op_signatures TEXT[]:=ARRAY['continuum_operator_install_extractor(uuid,jsonb,boolean)',
-    'continuum_operator_bind_extraction_worker(uuid,name,uuid,uuid,text,boolean)','continuum_operator_scrub_extraction_scope(uuid,uuid,uuid,integer)'];
+    'continuum_operator_bind_extraction_worker(uuid,name,uuid,uuid,text,boolean)','continuum_operator_scrub_extraction_scope(uuid,uuid,uuid,integer)',
+    'continuum_operator_recover_extraction(uuid,uuid,uuid,text)'];
 BEGIN
   FOR f IN SELECT oid::regprocedure signature FROM pg_proc WHERE pronamespace=quote_ident(schema_name)::regnamespace
     AND (proname LIKE 'continuum_extraction_%' OR proname LIKE 'continuum_operator_%extract%'

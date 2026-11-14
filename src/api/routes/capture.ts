@@ -52,6 +52,7 @@ export function captureRouter(
       expiresAt: result.memory.expiresAt,
       embedded: result.embedded,
       related: result.related,
+      extraction: result.extraction,
     });
   });
 

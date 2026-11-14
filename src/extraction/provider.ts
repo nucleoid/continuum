@@ -18,12 +18,13 @@ export class ExtractionRegistry {
   private readonly entries = new Map<string, Readonly<ExtractionProfile>>();
   register(input: ExtractionProfile): void {
     if (!/^[a-z][a-z0-9.-]{0,63}$/.test(input.id) || !/^[a-zA-Z0-9_.:/-]{1,128}$/.test(input.version)
-      || this.entries.has(input.id) || !Number.isInteger(input.chunkBytes) || input.chunkBytes < 4 || input.chunkBytes > 65_536
+      || this.entries.size >= 32 || this.entries.has(input.id) || !Number.isInteger(input.chunkBytes) || input.chunkBytes < 4 || input.chunkBytes > 65_536
       || !Number.isInteger(input.maxChunks) || input.maxChunks < 1 || input.maxChunks > 64
       || input.budget.overallMs > 20_000 || input.adapter.timeoutMs > 15_000) throw new TypeError('Invalid extraction profile');
     this.entries.set(input.id, Object.freeze({ ...input, budget: checkedProfile(input.budget) }));
   }
   get(id: string): Readonly<ExtractionProfile> | undefined { return this.entries.get(id); }
+  ids(): string[] { return [...this.entries.keys()].sort(); }
 }
 export function extractionDescriptor(profile: Readonly<ExtractionProfile>) {
   const adapter = profile.adapter;
