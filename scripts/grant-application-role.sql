@@ -337,6 +337,10 @@ BEGIN
   IF to_regclass(format('%I.tag_vocabularies',schema_name)) IS NOT NULL THEN
     EXECUTE format('GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE %I.tag_vocabularies TO %I',schema_name,target_role);
   END IF;
+  IF to_regclass(format('%I.pipeline_budget_workflows',schema_name)) IS NOT NULL THEN
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_pipeline_create(UUID,UUID,JSONB),%I.continuum_pipeline_read(UUID),%I.continuum_pipeline_reserve(UUID,UUID,UUID,BIGINT,JSONB,BIGINT),%I.continuum_pipeline_dispatch(UUID,UUID,UUID,BIGINT),%I.continuum_pipeline_settle(UUID,UUID,UUID,BIGINT,JSONB),%I.continuum_pipeline_fence(UUID,UUID,BIGINT,UUID,BOOLEAN),%I.continuum_pipeline_budgets_is_ready() TO %I',
+      schema_name,schema_name,schema_name,schema_name,schema_name,schema_name,schema_name,target_role);
+  END IF;
   IF to_regclass(format('%I.memory_activity_attributions',schema_name)) IS NOT NULL THEN
     EXECUTE format('GRANT SELECT ON %I.actor_principal_mappings,%I.memory_activity_attributions,%I.standup_thread_closures TO %I',schema_name,schema_name,schema_name,target_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_record_standup_activity(UUID,JSONB),%I.continuum_standup_producer_context(),%I.continuum_standup_is_ready() TO %I',schema_name,schema_name,schema_name,target_role);

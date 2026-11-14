@@ -111,6 +111,7 @@ const FORWARD_MIGRATION_REQUIREMENTS = new Map([
   ['0088_embedding_provider_scan_index_rebuild.sql', '0087_embedding_provider_scan_index.sql'],
   ['0089_promotion_outbox.sql', '0088_embedding_provider_scan_index_rebuild.sql'],
   ['0090_standup_activity.sql', '0089_promotion_outbox.sql'],
+  ['0092_pipeline_budgets.sql', '0090_standup_activity.sql'],
   ['0053_offboarding_restore_contract.sql', '0052_offboarding_review_repair.sql'],
   ['0056_coordination_final_remediation.sql', '0055_coordination_review_remediation.sql'],
   ['0057_coordination_privacy_race_remediation.sql',
