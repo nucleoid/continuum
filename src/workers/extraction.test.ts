@@ -7,6 +7,46 @@ import { requireExtractionReady, requireEvidenceReady } from '../storage/provide
 import { extractionDescriptor } from '../extraction/provider.js';
 import type pg from 'pg';
 
+it('rolls back final assertion publication when the original local deadline expires during SQL admission', async () => {
+  const profile = syntheticExtractor();
+  profile.budget = { ...profile.budget, overallMs: 2000, stageMs: 500 };
+  profile.adapter.timeoutMs = 500;
+  await extractionFixture(async f => {
+    await createMemory(f.app, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId,
+      type: 'decision', title: 'Original cutoff', body: 'Keep original truth', source: 'manual' });
+    let entered!: () => void, release!: () => void;
+    const suspended = new Promise<void>(resolve => { entered = resolve; });
+    const resume = new Promise<void>(resolve => { release = resolve; });
+    let first = true;
+    const observed = new Proxy(f.worker, { get(target, key) {
+      if (key !== 'connect') { const value = Reflect.get(target, key); return typeof value === 'function' ? value.bind(target) : value; }
+      return async () => {
+        if (first) { first = false; await new Promise(resolve => setTimeout(resolve, 750)); }
+        const client = await target.connect();
+        return new Proxy(client, { get(connection, property) {
+          if (property !== 'query') { const value = Reflect.get(connection, property); return typeof value === 'function' ? value.bind(connection) : value; }
+          return async (...args: [string, unknown[]?]) => {
+            if (args[0].includes('SELECT continuum_extraction_apply')) { entered(); await resume; }
+            return connection.query(...args);
+          };
+        } });
+      };
+    } }) as pg.Pool;
+    const start = performance.now();
+    const work = processExtraction(observed, randomUUID(), f.profile);
+    let outcome: Awaited<typeof work> | undefined;
+    try {
+      await Promise.race([suspended, work.then(() => { throw new Error('Worker stopped before apply'); })]);
+      await new Promise(resolve => setTimeout(resolve, Math.max(0, 2100 - (performance.now() - start))));
+      expect((await f.owner.query('SELECT deadline_at>clock_timestamp() AS live FROM pipeline_budget_workflows')).rows[0].live).toBe(true);
+    } finally { release(); outcome = await work; }
+    expect(outcome).toBe('unavailable');
+    expect((await f.owner.query("SELECT count(*)::int AS n FROM evidence_versions WHERE kind='extracted-assertion'")).rows[0].n).toBe(0);
+    expect((await f.owner.query("SELECT count(*)::int AS n FROM audit_log WHERE metadata->>'operation'='extraction_applied'")).rows[0].n).toBe(0);
+    expect((await f.owner.query('SELECT body FROM memories WHERE scope_id=$1', [f.scopeId])).rows[0].body).toBe('Keep original truth');
+  }, profile);
+}, 120_000);
+
 it('commits a cancellation fence while pre-hydration work is suspended', async () => {
   await extractionFixture(async f => {
     await createMemory(f.app, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId, type: 'decision', title: 'Cancel admission', body: 'Never disclose', source: 'manual' });
