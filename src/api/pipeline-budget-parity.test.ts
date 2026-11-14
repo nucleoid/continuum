@@ -10,7 +10,7 @@ import { recallForPrincipal } from '../services/recall.js';
 import { prepareAgentsMdForPrincipal, renderAgentsMdForPrincipal } from '../services/agents-md.js';
 import { getReadableMemory } from '../storage/memory-reads.js';
 import { RetrievalEnricherRegistry } from '../extensions/retrieval.js';
-import { compactMcpJson } from './mcp-http-output.js';
+import { boundedJsonText } from './mcp-http-output.js';
 
 describe('optional pipeline service envelope parity', () => {
   let pool: pg.Pool;
@@ -73,7 +73,7 @@ describe('optional pipeline service envelope parity', () => {
     await seed('Budget reference', { wrappers: '\u0001"\\'.repeat(1000) });
     const result = await recallForPrincipal(pool, null, principal, { query: 'Budget' });
     const projected = { memories: result.results.map((r) => ({ title: r.memory.title, metadata: r.memory.metadata, citation: r.memory.id })) };
-    const wire = compactMcpJson(projected, 100_000, true);
+    const wire = boundedJsonText(projected, 100_000, true);
     const envelope = { content: [{ type: 'text', text: wire }] };
     const budget = new Budget(checkedProfile({ ...starterProfile, limits: { ...starterProfile.limits, outputBytes: 5000 } }));
     expect(() => budget.serializeOutput(envelope)).toThrow();

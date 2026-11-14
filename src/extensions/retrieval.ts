@@ -1,5 +1,6 @@
 import type { RecallResult } from '../types.js';
 import { ExtensionRegistry } from './registry.js';
+import { runBudgetedStage, type Budget, type BudgetAdapter } from '../pipeline/budget.js';
 
 export const DEFAULT_ENRICHER_TIMEOUT_MS = 250;
 export const DEFAULT_ENRICHMENT_MAX_BYTES = 16 * 1024;
@@ -15,6 +16,7 @@ export interface RetrievalEnricherContext {
 }
 
 export interface RetrievalEnricher {
+  readonly pipelineAdapter?: BudgetAdapter<{ results: readonly Readonly<RecallResult>[]; principalId: string }, EnrichmentOutput>;
   readonly id: string;
   enrich(
     results: readonly Readonly<RecallResult>[],
@@ -28,11 +30,12 @@ export interface EnrichmentLogger {
   warn(event: {
     event: 'retrieval_enricher_failed';
     enricherId: string;
-    reason: 'error' | 'timeout' | 'aborted' | 'invalid_output' | 'saturated' | 'oversized_input';
+    reason: 'error' | 'timeout' | 'aborted' | 'invalid_output' | 'saturated' | 'oversized_input' | 'budget_unavailable';
   }): void;
 }
 
 export interface EnrichmentOptions {
+  budget?: Budget;
   timeoutMs: number;
   maxBytes: number;
   logger?: EnrichmentLogger;
@@ -245,12 +248,24 @@ export async function applyRetrievalEnrichers(
   if (options.signal?.aborted) controller.abort();
   const completed = new Map<string, EnrichmentOutput>();
   const tasks = admitted.map(async (enricher) => {
+    let retainedWork: Promise<unknown> | undefined;
     try {
       if (controller.signal.aborted) return;
-      const raw = await enricher.enrich(input, {
-        principalId,
-        signal: controller.signal,
-      });
+      let raw: unknown;
+      if (options.budget) {
+        if (!enricher.pipelineAdapter) {
+          warn({ event: 'retrieval_enricher_failed', enricherId: enricher.id, reason: 'budget_unavailable' });
+          reported.add(enricher.id); return;
+        }
+        const outcome = await runBudgetedStage(options.budget, enricher.pipelineAdapter, { results: input, principalId }, {
+          signal: controller.signal, transportMs: options.timeoutMs, onWork: (work) => { retainedWork = work; },
+        });
+        if (outcome.status !== 'complete') {
+          warn({ event: 'retrieval_enricher_failed', enricherId: enricher.id, reason: 'budget_unavailable' });
+          reported.add(enricher.id); return;
+        }
+        raw = outcome.value;
+      } else raw = await enricher.enrich(input, { principalId, signal: controller.signal });
       if (controller.signal.aborted) return;
       const output = validateAndCloneOutput(raw, resultCount, options.maxBytes);
       if (!output) {
@@ -274,6 +289,7 @@ export async function applyRetrievalEnrichers(
       }
     } finally {
       // A response deadline is not settlement of an abort-ignoring invocation.
+      if (retainedWork) await retainedWork.catch(() => undefined);
       release(enricher);
     }
   });

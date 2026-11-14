@@ -2,6 +2,7 @@ import type { Memory, MemoryState, MemoryType } from '../types.js';
 import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
 import type { Queryable } from './queryable.js';
 import { ServiceError } from '../services/errors.js';
+import type { Budget } from '../pipeline/budget.js';
 
 export interface MemoryReadRecord { memory: Memory; scope: string; authorDisplayName: string; }
 export interface ListMemoryFilter { scope?: string; type?: MemoryType; state: MemoryState; limit: number; offset: number; }
@@ -36,44 +37,58 @@ export function requireReadBudget(bytes: number, readBudgetBytes: number): void 
  */
 export async function boundedMemoryReadRows<T extends Record<string, unknown>>(
   queryable: Queryable, metadataSql: string, values: unknown[], hydrationSql: string, readBudgetBytes: number,
+  budget?: Budget, candidatesAlreadyAdmitted = false,
 ): Promise<T[]> {
+  budget?.assertLive();
+  if (budget) readBudgetBytes = Math.min(readBudgetBytes, budget.available('hydratedBytes'));
   requireReadBudget(1024, readBudgetBytes);
   const probe = await queryable.query<{ budget_bytes: string | number }>(metadataSql, values);
-  requireReadBudget(probe.rows.reduce((sum, row) => sum + Number(row.budget_bytes), 1024), readBudgetBytes);
+  const admittedBytes = probe.rows.reduce((sum, row) => sum + Number(row.budget_bytes), 1024);
+  requireReadBudget(admittedBytes, readBudgetBytes);
+  if (budget) {
+    for (const row of probe.rows) requireReadBudget(Number(row.budget_bytes), budget.profile.maxItemHydratedBytes);
+    // Synchronous shared admission before hydration. Growth cannot consume another child's allocation.
+    budget.consume({ candidates: candidatesAlreadyAdmitted ? 0 : probe.rows.length, hydratedBytes: admittedBytes });
+    readBudgetBytes = admittedBytes;
+  }
   const parameter = `$${values.length + 1}`;
+  const snapshotGate = budget ? ` OR COALESCE(max(budget_bytes),0)>$${values.length + 2}::bigint OR count(*)>$${values.length + 3}::bigint` : '';
   const { rows } = await queryable.query<T & { budget_exceeded: boolean; candidate_count: string }>(
     `WITH budget_candidates AS MATERIALIZED (${metadataSql}),
-     read_budget AS (SELECT COALESCE(sum(budget_bytes), 0) + 1024 > ${parameter}::bigint AS budget_exceeded,
+     read_budget AS (SELECT COALESCE(sum(budget_bytes), 0) + 1024 > ${parameter}::bigint ${snapshotGate} AS budget_exceeded,
        count(*) AS candidate_count FROM budget_candidates)
      SELECT read_budget.budget_exceeded, read_budget.candidate_count, hydrated.*
        FROM read_budget LEFT JOIN LATERAL (SELECT admitted.* FROM (${hydrationSql}) admitted WHERE NOT read_budget.budget_exceeded) hydrated
-         ON NOT read_budget.budget_exceeded`, [...values, readBudgetBytes],
+         ON NOT read_budget.budget_exceeded`, [...values, readBudgetBytes,
+      ...(budget ? [budget.profile.maxItemHydratedBytes, probe.rows.length] : [])],
   );
   if (rows[0]?.budget_exceeded) throw new ServiceError('PAYLOAD_TOO_LARGE', 'Authorized result exceeds the response size limit');
   const results = rows.filter((row) => row.id !== null && row.id !== undefined);
   if (results.length !== Number(rows[0]?.candidate_count ?? 0)) throw new ServiceError('PAYLOAD_TOO_LARGE', 'Authorized result could not be read within the response size limit');
+  budget?.assertLive();
   return results;
 }
 async function readRows(
-  queryable: Queryable, where: string, suffix: string, values: unknown[], readBudgetBytes?: number,
+  queryable: Queryable, where: string, suffix: string, values: unknown[], readBudgetBytes?: number, budget?: Budget,
 ): Promise<MemoryReadRow[]> {
+  readBudgetBytes ??= budget?.available('hydratedBytes');
   if (readBudgetBytes === undefined) return (await queryable.query<MemoryReadRow>(`SELECT ${READ_SELECT} ${JOINS} WHERE ${where} ${suffix}`, values)).rows;
   const metadataSql = `SELECT m.id, ${MEMORY_READ_BUDGET_BYTES_SQL}
     + (octet_length(s.name)::bigint + octet_length(p.display_name)::bigint) AS budget_bytes,
     row_number() OVER (ORDER BY m.updated_at DESC, m.id DESC) AS position
     ${JOINS} WHERE ${where} ${suffix}`;
   return boundedMemoryReadRows<MemoryReadRow>(queryable, metadataSql, values,
-    `SELECT ${READ_SELECT} ${JOINS} JOIN budget_candidates c ON c.id = m.id ORDER BY c.position`, readBudgetBytes);
+    `SELECT ${READ_SELECT} ${JOINS} JOIN budget_candidates c ON c.id = m.id ORDER BY c.position`, readBudgetBytes, budget);
 }
-export async function getReadableMemory(queryable: Queryable, principalId: string, memoryId: string, readBudgetBytes?: number): Promise<MemoryReadRecord | null> {
-  const rows = await readRows(queryable, `m.id = $1 AND ${eligibility('$2')}`, '', [memoryId, principalId], readBudgetBytes);
+export async function getReadableMemory(queryable: Queryable, principalId: string, memoryId: string, readBudgetBytes?: number, budget?: Budget): Promise<MemoryReadRecord | null> {
+  const rows = await readRows(queryable, `m.id = $1 AND ${eligibility('$2')}`, '', [memoryId, principalId], readBudgetBytes, budget);
   return rows[0] ? rowToMemoryReadRecord(rows[0]) : null;
 }
-export async function listReadableMemories(queryable: Queryable, principalId: string, filter: ListMemoryFilter, readBudgetBytes?: number): Promise<MemoryReadRecord[]> {
+export async function listReadableMemories(queryable: Queryable, principalId: string, filter: ListMemoryFilter, readBudgetBytes?: number, budget?: Budget): Promise<MemoryReadRecord[]> {
   const where = `${eligibility('$1')} AND m.state = $2 AND ($3::text IS NULL OR m.type = $3)
     AND ($4::text IS NULL OR CASE WHEN s.kind = 'org' THEN 'org' ELSE s.kind || ':' || s.name END = $4)`;
   const rows = await readRows(queryable, where, 'ORDER BY m.updated_at DESC, m.id DESC LIMIT $5 OFFSET $6',
-    [principalId, filter.state, filter.type ?? null, filter.scope ?? null, filter.limit, filter.offset], readBudgetBytes);
+    [principalId, filter.state, filter.type ?? null, filter.scope ?? null, filter.limit, filter.offset], readBudgetBytes, budget);
   return rows.map(rowToMemoryReadRecord);
 }
 

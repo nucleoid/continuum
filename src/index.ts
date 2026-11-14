@@ -1,4 +1,7 @@
 export * from './types.js';
+export * from './pipeline/budget.js';
+export * from './pipeline/receipts.js';
+export * from './storage/pipeline-budgets.js';
 export * from './coordination/model.js';
 export * from './services/coordination.js';
 export * from './services/supersede.js';

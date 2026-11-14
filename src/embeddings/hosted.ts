@@ -3,6 +3,8 @@ import {
   EmbeddingProviderError,
   embeddingProviderHttpError,
   type EmbeddingProvider,
+  type EmbeddingCallOptions,
+  embedWithBudget,
 } from './provider.js';
 import {
   DEFAULT_EMBEDDING_TIMEOUT_MS,
@@ -109,7 +111,7 @@ export function validateVectors(items: unknown, count: number, dim: number): num
 export abstract class HostedEmbeddingProvider implements EmbeddingProvider {
   abstract readonly id: string;
   abstract readonly httpProvider: 'openai' | 'voyage' | 'gemini';
-  abstract embed(texts: string[], options?: { signal?: AbortSignal }): Promise<number[][]>;
+  abstract embed(texts: string[], options?: EmbeddingCallOptions): Promise<number[][]>;
   readonly local = false;
   readonly dim: number;
   protected readonly apiKey: string;
@@ -190,7 +192,8 @@ export class OpenAIEmbeddingProvider extends HostedEmbeddingProvider {
     super(options, 'https://api.openai.com/v1/embeddings');
     this.id = `openai:${options.model}`;
   }
-  async embed(texts: string[], options: { signal?: AbortSignal } = {}): Promise<number[][]> {
+  async embed(texts: string[], options: EmbeddingCallOptions = {}): Promise<number[][]> {
+    if (options.budget) return embedWithBudget(this, texts, options);
     const vectors: number[][] = [];
     for (let offset = 0; offset < texts.length; offset += this.batchSize) {
       const chunk = texts.slice(offset, offset + this.batchSize);
@@ -209,7 +212,8 @@ export class VoyageEmbeddingProvider extends HostedEmbeddingProvider {
     super(options, 'https://api.voyageai.com/v1/embeddings');
     this.id = `voyage:${options.model}`;
   }
-  async embed(texts: string[], options: { signal?: AbortSignal } = {}): Promise<number[][]> {
+  async embed(texts: string[], options: EmbeddingCallOptions = {}): Promise<number[][]> {
+    if (options.budget) return embedWithBudget(this, texts, options);
     const vectors: number[][] = [];
     for (let offset = 0; offset < texts.length; offset += this.batchSize) {
       const chunk = texts.slice(offset, offset + this.batchSize);

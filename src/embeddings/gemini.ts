@@ -2,6 +2,7 @@ import {
   HostedEmbeddingProvider, invalidResponse, validateVectors, type HostedOptions,
 } from './hosted.js';
 import { STORAGE_EMBEDDING_DIM } from '../storage/schema.js';
+import { embedWithBudget, type EmbeddingCallOptions } from './provider.js';
 
 /** Optional text-only Gemini adapter. Model choice is always explicit. */
 export class GeminiEmbeddingProvider extends HostedEmbeddingProvider {
@@ -29,7 +30,8 @@ export class GeminiEmbeddingProvider extends HostedEmbeddingProvider {
     this.id = `gemini:${options.model}`;
   }
 
-  async embed(texts: string[], options: { signal?: AbortSignal } = {}): Promise<number[][]> {
+  async embed(texts: string[], options: EmbeddingCallOptions = {}): Promise<number[][]> {
+    if (options.budget) return embedWithBudget(this, texts, options);
     const vectors: number[][] = [];
     for (let offset = 0; offset < texts.length; offset += this.batchSize) {
       const chunk = texts.slice(offset, offset + this.batchSize);

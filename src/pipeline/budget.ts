@@ -77,6 +77,7 @@ export function boundedJson(value: unknown, maxBytes: number): string {
     if (item === null) { append('null'); return; }
     if (typeof item === 'string') { quote(item); return; }
     if (typeof item === 'boolean' || (typeof item === 'number' && Number.isFinite(item))) { append(String(item)); return; }
+    if (item instanceof Date) { quote(Date.prototype.toISOString.call(item)); return; }
     if (typeof item !== 'object' || path.has(item)) return invalid();
     if (!Array.isArray(item) && Object.getPrototypeOf(item) !== Object.prototype && Object.getPrototypeOf(item) !== null) return invalid();
     if (Object.getOwnPropertySymbols(item).length) return invalid();
@@ -137,6 +138,12 @@ export class Budget {
     return { used: { ...this.used }, active: this.active, retainedBytes: this.retainedBytes };
   }
   available(key: BudgetDimension): number { return this.profile.limits[key] - this.used[key]; }
+  serializeOutput(value: unknown): string {
+    this.assertLive();
+    const serialized = boundedJson(value, this.available('outputBytes'));
+    this.consume({ outputBytes: Buffer.byteLength(serialized) });
+    return serialized;
+  }
   consume(values: Partial<BudgetAmounts>): void {
     this.assertLive(); const delta = amounts(values);
     for (const key of budgetDimensions) if (delta[key] > this.available(key)) throw new BudgetError();
@@ -205,7 +212,8 @@ export interface DurableAttempt {
   settle(actual: Partial<BudgetAmounts>): Promise<boolean>;
 }
 export async function runBudgetedStage<I, O>(budget: Budget, adapter: BudgetAdapter<I, O>, input: I,
-  options: { signal?: AbortSignal; retry?: boolean; authorize?: () => Promise<boolean>; durable?: DurableAttempt; transportMs?: number } = {},
+  options: { signal?: AbortSignal; retry?: boolean; authorize?: () => Promise<boolean>; durable?: DurableAttempt; transportMs?: number;
+    onWork?: (settlement: Promise<unknown>) => void } = {},
 ): Promise<StageOutcome<O>> {
   const skip = (reason: BudgetReason): StageOutcome<O> => {
     budget.receipts.add({ event: 'skipped', reason, elapsedMs: budget.elapsedMs() });
@@ -284,6 +292,8 @@ export async function runBudgetedStage<I, O>(budget: Budget, adapter: BudgetAdap
       }
       if (controller.signal.aborted) return skip('deadline');
       budget.assertLive();
+      if (options.authorize && !await options.authorize()) return skip('policy_denied');
+      if (controller.signal.aborted) return skip('deadline');
       const publish = !options.durable || await options.durable.settle(actual);
       durableReserved = false;
       if (!publish || controller.signal.aborted) return skip('stale_attempt');
@@ -295,6 +305,7 @@ export async function runBudgetedStage<I, O>(budget: Budget, adapter: BudgetAdap
       finally { budget.settle(id, actual); }
     }
   })();
+  options.onWork?.(work);
   try { return await Promise.race([work, stopped]); }
   finally {
     if (timer) clearTimeout(timer);

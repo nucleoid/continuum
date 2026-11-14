@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import type { Budget } from '../pipeline/budget.js';
 import type { Memory, MemoryType, ScopeRef } from '../types.js';
 import { MEMORY_COLUMNS, rowToMemory } from '../storage/memory-row.js';
 import { accessibleScopes } from '../services/access.js';
@@ -98,6 +99,7 @@ interface ResolvedScope {
 }
 
 export interface RenderOptions {
+  budget?: Budget;
   principalId: string;
   project?: string;
   team?: string;
@@ -121,6 +123,10 @@ export async function renderAgentsMdResult(
   pool: pg.Pool,
   opts: RenderOptions,
 ): Promise<RenderAgentsMdResult> {
+  opts.budget?.assertLive();
+  // A bounded caller opts into the same metadata/snapshot gate as remote MCP.
+  if (opts.budget) opts = { ...opts, readBudgetBytes: Math.min(opts.readBudgetBytes ?? Number.MAX_SAFE_INTEGER,
+    opts.budget.available('hydratedBytes'), opts.budget.available('outputBytes')) };
   const perScopeLimit = opts.perScopeLimit ?? 20;
   if (opts.readBudgetBytes !== undefined) requireReadBudget(1024, opts.readBudgetBytes);
   const readable = opts.readBudgetBytes === undefined ? await accessibleScopes(pool, opts.principalId) : await boundedRenderScopes(pool, opts);
@@ -189,7 +195,7 @@ export async function renderAgentsMdResult(
   });
 
   for (const scope of targets) {
-    const memories = await fetchSectionMemories(pool, scope.id, perScopeLimit, opts.principalId, opts.readBudgetBytes === undefined ? undefined : opts.readBudgetBytes - Math.max(renderedBytes, hydratedBytes));
+    const memories = await fetchSectionMemories(pool, scope.id, perScopeLimit, opts.principalId, opts.readBudgetBytes === undefined ? undefined : opts.readBudgetBytes - Math.max(renderedBytes, hydratedBytes), opts.budget);
     if (opts.readBudgetBytes !== undefined) {
       hydratedBytes += Buffer.byteLength(JSON.stringify(memories), 'utf8');
       requireReadBudget(hydratedBytes, opts.readBudgetBytes);
@@ -220,6 +226,7 @@ export async function renderAgentsMdResult(
 
   const markdown = sections.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
   if (opts.readBudgetBytes !== undefined) requireReadBudget(Buffer.byteLength(JSON.stringify(markdown), 'utf8') + 1024, opts.readBudgetBytes);
+  opts.budget?.serializeOutput(markdown);
   return { markdown, memories: deliveredMemories };
 }
 async function boundedRenderScopes(pool: pg.Pool, opts: RenderOptions): Promise<Map<string, Pick<ResolvedScope, 'id' | 'kind' | 'name'> & { label: string }>> {
@@ -241,7 +248,7 @@ async function boundedRenderScopes(pool: pg.Pool, opts: RenderOptions): Promise<
   }]));
 }
 async function fetchSectionMemories(
-  pool: pg.Pool, scopeId: string, limit: number, principalId: string, readBudgetBytes?: number,
+  pool: pg.Pool, scopeId: string, limit: number, principalId: string, readBudgetBytes?: number, budget?: Budget,
 ): Promise<Memory[]> {
   if (readBudgetBytes === undefined) {
     const { rows } = await pool.query(
@@ -264,7 +271,7 @@ async function fetchSectionMemories(
     ORDER BY array_position($2::text[], m.type), COALESCE(m.last_verified, m.updated_at) DESC, m.created_at DESC, m.id LIMIT $3`;
   const rows = await boundedMemoryReadRows(pool, metadataSql, [scopeId, TYPE_ORDER, limit, principalId],
     `SELECT ${MEMORY_COLUMNS.split(',').map((column) => `m.${column.trim()}`).join(', ')}
-      FROM memories m JOIN budget_candidates c ON c.id = m.id ORDER BY c.position`, readBudgetBytes);
+      FROM memories m JOIN budget_candidates c ON c.id = m.id ORDER BY c.position`, readBudgetBytes, budget);
   return rows.map(rowToMemory);
 }
 function capitalise(s: string): string {
