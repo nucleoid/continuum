@@ -114,7 +114,11 @@ can have narrower guarantees than authenticated services.
 The pure decision requires operation-local Continuum facts at the supplied
 database time. It does not authorize replaying a saved context later. External
 allows require `checkedAt <= now < validUntil`; no supported freshness capability
-means unknown. The adapter resolves current database identity/memberships on each
+means unknown. Both timestamps must use the same PostgreSQL time domain as `now`,
+not independently sampled application-host time. Trusted resolvers must translate
+external validity conservatively and account for clock uncertainty; if they cannot
+establish that bound, authority is unknown and disclosure denies.
+The adapter resolves current database identity/memberships on each
 invocation; sessions and provenance snapshots are not permission caches. Entra
 staleness denies sourced memberships while manual break-glass authority retains
 its documented semantics. Reactivation does not resurrect revoked keys or grants.

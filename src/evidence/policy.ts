@@ -12,6 +12,9 @@ export const EVIDENCE_ACTIONS = [
 export type EvidenceAction = typeof EVIDENCE_ACTIONS[number];
 export type EvidenceArtifactKind = typeof EVIDENCE_ARTIFACT_KINDS[number];
 
+/** Timestamps must share EvidenceAuthorityContext.now's database time domain.
+ * Trusted resolvers account for clock uncertainty or report unknown authority.
+ */
 export interface CurrentEvidenceAuthority {
   decision: 'allow' | 'deny' | 'unknown';
   checkedAt: number;

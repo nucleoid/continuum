@@ -112,6 +112,8 @@ describe('evidence authority intersection', () => {
         ...{ body: document.body, title: document.title, metadata: document } };
       if (!document.allowed) {
         expect(decideEvidencePolicy(input).artifactRead.decision).toBe('deny'); denied++;
+      } else {
+        expect(decideEvidencePolicy(input).artifactRead.decision).toBe('allow');
       }
     }
     expect(denied).toBeGreaterThan(0);

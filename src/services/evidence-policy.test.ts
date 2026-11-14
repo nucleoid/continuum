@@ -91,7 +91,7 @@ describe('trusted current evidence authority', () => {
     expect((await decideEvidenceForPrincipal(owner, reader.id, request)).artifactRead.decision).toBe('allow');
   });
 
-  it('uses frozen denied-scope attacks against real membership, independent external authority and source restrictions', async () => {
+  it('uses frozen denied-scope attacks against real membership and independent external authority', async () => {
     const corpus = await loadCorpus();
     const deniedScope = await createScope(owner, { kind: 'project', name: 'denied' });
     const attack = corpus.cases.find(item => item.id === 'cross-scope-denied')!;
