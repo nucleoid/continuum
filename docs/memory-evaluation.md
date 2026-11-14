@@ -154,6 +154,14 @@ coverage. Oracle and retrieved-evidence task runs diagnose reasoning failure
 versus retrieval miss. These are structured fixture judgments, not an unimplemented
 natural-language truth judge. Missing task adapters are `not_supported`.
 
+Unknown and contradiction preservation are recall measures. Additive precision
+and false-positive counts also penalize universal unknown marking and fabricated
+contradiction identifiers. Undefined denominators remain null. Frozen v1 fixture
+bytes, manifest and quality gates are unchanged. The separately versioned
+`extraction-pilot-v1` mechanism evaluation exercises actual persisted extraction
+through an installed synthetic local composition; it does not turn the frozen
+baseline's unsupported extractor into a qualified model or truth judge.
+
 Claim `unknown` describes uncertainty about that specific claim, rather than
 uncertainty about whether a proposal was recorded. `unknown-preservation` has a
 known recorded-intent claim plus a separate unresolved implementation inference.

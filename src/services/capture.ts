@@ -20,11 +20,14 @@ import {
 import type { Queryable } from '../storage/queryable.js';
 import { normalizeTags, validateTagsForScopeKind } from './tag-vocabularies.js';
 import { memoryEmbeddingText } from '../embeddings/text.js';
+import { captureExtractionStatus } from './extraction.js';
+import type { ExtractionStatus } from '../extraction/model.js';
 
 export interface CaptureResult {
   memory: Memory;
   embedded: boolean;
   related: RelatedMemory[];
+  extraction?: ExtractionStatus;
   embedErrorCode?: 'EMBEDDING_FAILED';
   relationErrorCode?: 'RELATION_DETECTION_FAILED';
 }
@@ -141,6 +144,7 @@ export async function captureOne(
     memory,
     embedded: false,
     related: [],
+    extraction: await captureExtractionStatus(client, principal.id, memory.id),
     ...(route.provider ? { embedErrorCode: 'EMBEDDING_FAILED' as const } : {}),
   };
 }
@@ -418,11 +422,13 @@ export async function captureMemory(
           ...auditMetadata,
         },
       });
+      const extraction = await captureExtractionStatus(client, principal.id, memory.id);
       await client.query('COMMIT');
       return {
         memory,
         embedded,
         related: embedded ? related : [],
+        extraction,
         ...(embedErrorCode ? { embedErrorCode } : {}),
         ...(relationErrorCode ? { relationErrorCode } : {}),
       };

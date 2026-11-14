@@ -766,12 +766,19 @@ describe('offboarding and erasure', () => {
     expect(standupRelations).toContain('actor_principal_mappings');
 
     const evidenceVerifier = (await pool.query(`SELECT prosrc FROM pg_proc
-      WHERE oid='continuum_offboarding_lifecycle_state_is_erased(uuid)'::regprocedure`)).rows[0].prosrc as string;
+      WHERE oid='continuum_offboarding_lifecycle_state_is_erased_pre_extraction(uuid)'::regprocedure`)).rows[0].prosrc as string;
     expect(evidenceVerifier).toContain('continuum_offboarding_lifecycle_state_is_erased_pre_evidence(target_run)');
     expect(evidenceVerifier).toContain('continuum_evidence_scope_is_erased(scope_id)');
     const evidencePhysical = (await pool.query(`SELECT prosrc FROM pg_proc
       WHERE oid='continuum_evidence_scope_is_erased(uuid)'::regprocedure`)).rows[0].prosrc as string;
     for (const relation of ['evidence_payloads', 'evidence_state', 'evidence_repair_jobs', 'evidence_roots']) expect(evidencePhysical).toContain(relation);
+    const extractionVerifier = (await pool.query(`SELECT prosrc FROM pg_proc
+      WHERE oid='continuum_offboarding_lifecycle_state_is_erased(uuid)'::regprocedure`)).rows[0].prosrc as string;
+    expect(extractionVerifier).toContain('continuum_offboarding_lifecycle_state_is_erased_pre_extraction(target_run)');
+    expect(extractionVerifier).toContain('continuum_extraction_scope_is_erased(scope_id)');
+    const extractionPhysical = (await pool.query(`SELECT prosrc FROM pg_proc
+      WHERE oid='continuum_extraction_scope_is_erased(uuid)'::regprocedure`)).rows[0].prosrc as string;
+    for (const relation of ['extraction_runs','extraction_chunks','pipeline_budget_workflows']) expect(extractionPhysical).toContain(relation);
 
 
     expect(nodes.filter((node) =>

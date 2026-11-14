@@ -43,6 +43,7 @@ src/plugins/tenants/**
 !docs/scope-provisioning.md
 !docs/tag-vocabularies.md
 !docs/standup.md
+!docs/extraction.md
 !docs/webhook-ingestion.md
 !docs/deployment.md
 # Private files remain excluded inside otherwise public source directories.

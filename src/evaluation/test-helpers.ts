@@ -336,7 +336,11 @@ export function scoreClaims(actual: Claim[], expected: Claim[], chunks: string[]
   return { alignment: ratio(aligned, actual.length), labelAccuracy: ratio(labels, expected.length),
     unsupportedAssertionRate: ratio(unsupported, actual.length), claimRecall: ratio(actual.filter(item => judgments.has(item.id)).length, expected.length),
     unknownPreservation: ratio(unknowns, expected.filter(item => item.unknown).length),
+    unknownPrecision: ratio(unknowns, actual.filter(item => item.unknown).length),
+    falseUnknowns: actual.filter(item => item.unknown).length - unknowns,
     contradictionPreservation: ratio(conflicts, expected.filter(item => item.contradiction !== null).length),
+    contradictionPrecision: ratio(conflicts, actual.filter(item => item.contradiction !== null).length),
+    falseContradictions: actual.filter(item => item.contradiction !== null).length - conflicts,
     chunkCoverage: ratio(new Set(completedChunks.filter(chunk => chunks.includes(chunk))).size, new Set(chunks).size) };
 }
 
@@ -379,7 +383,7 @@ export async function evaluateTaskPair(task: FixtureCase, retrieved: Reference[]
     const retrievedRun = await run(retrieved); const oracleRun = await run(oracleEvidence);
     const critical = retrievedRun.prohibited || oracleRun.prohibited;
     const correct = (result: typeof oracleRun) => result.abstentionError === 0 && !result.prohibited
-      && Object.entries(result.claims).every(([metric, value]) => metric === 'unsupportedAssertionRate'
+      && Object.entries(result.claims).every(([metric, value]) => ['unsupportedAssertionRate','falseUnknowns','falseContradictions'].includes(metric)
         ? value === null || value === 0 : value === null || value === 1);
     return { status: 'measured' as const, gate: critical ? 'fail' : 'pass', retrieved: retrievedRun, oracle: oracleRun,
       diagnosis: !correct(oracleRun) ? 'reasoning_failure' : !correct(retrievedRun) ? 'retrieval_miss' : 'no_miss' };
@@ -573,8 +577,8 @@ function fixtureUuid(value: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 const GRANT_HASHES: Record<string, string> = {
-  'grant-application-role.sql': '10aaad997463bdfe2335d0c4a75c9c1b9d739e366bb22c40e4222412b97159a0',
-  'grant-operator-role.sql': '1bfd0e614b00e2783cc6b69e8e721113a0efa36a704b59f974516199c768b2f0',
+  'grant-application-role.sql': 'cdd9af2fd7cda22c7a0681c77075677be908f064b8fbefbf21bc46220957f671',
+  'grant-operator-role.sql': '19c9fe7f9ee03b7a5a109f8ba7637273d752be7e7cfc519416f53a6e4125ff7b',
   'grant-sync-role.sql': '35c77a918abbc297d5c1e1fd89902bc99e29ac086147edd5cc973b1879c538c3',
 };
 /** Reviewed standalone SQL emulation, not a general-purpose psql interpreter. */

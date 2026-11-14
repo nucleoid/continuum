@@ -23,6 +23,7 @@
     "docs/authentication.md",
     "docs/evidence-authorization.md",
     "docs/evidence-lifecycle.md",
+    "docs/extraction.md",
     "docs/pipeline-budgets.md",
     "docs/reranking.md",
     "docs/remote-mcp.md",

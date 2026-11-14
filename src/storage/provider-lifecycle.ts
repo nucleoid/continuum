@@ -14,8 +14,11 @@ export async function requirePipelineBudgetsReady(pool: pg.Pool, options: Startu
 export async function requireEvidenceReady(pool: pg.Pool, options: StartupSchemaOptions = {}): Promise<void> {
   return requireOwnedReadiness(pool, options, 'continuum_evidence_is_ready');
 }
+export async function requireExtractionReady(pool: pg.Pool, options: StartupSchemaOptions = {}): Promise<void> {
+  return requireOwnedReadiness(pool, options, 'continuum_extraction_is_ready');
+}
 async function requireOwnedReadiness(pool: pg.Pool, options: StartupSchemaOptions,
-  capability: 'continuum_pipeline_budgets_is_ready' | 'continuum_evidence_is_ready'): Promise<void> {
+  capability: 'continuum_pipeline_budgets_is_ready' | 'continuum_evidence_is_ready' | 'continuum_extraction_is_ready'): Promise<void> {
   const unavailable = () => new ServiceError('DEPENDENCY_UNAVAILABLE', 'Required pipeline schema is unavailable; finish migrations before starting runtimes');
   const client = await pool.connect().catch(() => { throw unavailable(); });
   let discard = false;

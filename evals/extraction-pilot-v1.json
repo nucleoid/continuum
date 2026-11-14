@@ -1,0 +1,17 @@
+{
+  "version": "extraction-pilot-v1",
+  "synthetic": true,
+  "schema": "extraction-v1",
+  "prompt": "source-reference-v1",
+  "cases": ["known-source", "unknown-source", "empty-extraction"],
+  "gates": {
+    "sourceChanges": 0,
+    "uncitedAssertions": 0,
+    "verifiedAssertions": 0,
+    "falseUnknowns": 0,
+    "missingUnknowns": 0,
+    "unsettledAttempts": 0,
+    "spendMicros": 0
+  },
+  "qualification": "Synthetic persisted mechanism only. No real model, tokenizer, invoice, normalized storage or paired performance qualification."
+}

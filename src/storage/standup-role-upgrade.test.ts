@@ -247,6 +247,9 @@ async function roleUpgradeAcceptance(boundRuntime?: 'REST' | 'MCP') {
     await copyFile(new URL(evidenceForward, source), join(directory, evidenceForward));
     expect((await runMigrations(owner, directory)).map((entry) => entry.name)).toEqual([evidenceForward]);
     await requireEvidenceReady(app, { expectedSchema: schema });
+    const extractionForward = '0094_extraction.sql';
+    await copyFile(new URL(extractionForward, source), join(directory, extractionForward));
+    expect((await runMigrations(owner, directory)).map((entry) => entry.name)).toEqual([extractionForward]);
     await grants(false);
     expect(await profiles()).toEqual(originalProfiles); expect(await identities()).toEqual(originalIdentities);
     for (const role of [appRole,operatorRole]) await reconcilePgvectorProviderGrants(logins.get(role)!, { expectedSchema: schema });

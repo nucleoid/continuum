@@ -114,6 +114,13 @@ blocks its identity until settlement. Changing IDs cannot evade global bounds.
 Abort-ignoring dependencies can exhaust these finite fences; fix them and use
 bounded shutdown/process replacement. Deadline expiry is not successful drain.
 
+Durable consumers can use `budgetedStageUnavailable` before claiming work. This
+advisory capability/pricing/process check reserves nothing; actual dispatch
+still rechecks the shared fences. A process-admission skip marks its outcome
+`retryableAdmission` so consumers need not infer its cause from a later snapshot
+after another call settles. Retry still requires the original domain authority,
+deadline and durable allowance; the marker grants no new budget.
+
 ## Durable workflows
 
 Migration `0092_pipeline_budgets.sql` explicitly requires ledgered `0090`.

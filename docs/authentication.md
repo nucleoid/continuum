@@ -34,11 +34,13 @@ creation, selector backfill execution, or access to lifecycle capability
 tables. Reapply the script after migrations that change this documented
 runtime surface.
 
-Evidence-capable binaries require the chain through 0093 and exact profile
+Current binaries require the chain through 0094 and exact profile
 regrants. APP gets reviewed evidence capabilities without raw payload-table
 access; OP adds database-bound policy/repair/erasure operations. SYNC gets none
 of that evidence authority. Current startup verifies the owner-recorded evidence
-function contract. No new login, credential or reauthentication is introduced.
+function contracts. Existing serving credentials need no reauthentication.
+Optional extraction processing requires a separately approved bound LOGIN;
+see [extraction](extraction.md). No model is installed by stock startup.
 See [evidence lifecycle](evidence-lifecycle.md) for the maintenance sequence.
 
 Set **Assignment required?** to **Yes** on Continuum's Entra enterprise

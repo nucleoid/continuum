@@ -1,8 +1,16 @@
 # Evidence lifecycle
 
-Migration 0093 adds a lazy, internal evidence foundation. Stock REST, MCP and
-CLI do not expose derivative creation, extraction, synthesis or a connector.
-No provider or paid stage is enabled. Legacy recall and generated AGENTS.md
+The optional [extraction pilot](extraction.md) now composes this foundation.
+Its separate 0094 typed queue and bound LOGIN worker retain current source,
+root, version, policy and original expiry gates. Assertions are immutable
+generated/unverified artifacts and remain outside legacy retrieval and AGENTS.md.
+Stock runtimes install no model or worker. The internal generic repair driver
+below keeps its existing narrower availability limits.
+
+Migration 0093 adds a lazy, internal evidence foundation. Stock runtimes install
+no extraction worker/provider, synthesis or connector. The optional extraction
+pilot has separate configuration and read surfaces. No paid stage is enabled.
+Legacy recall and generated AGENTS.md
 select source memories only; evidence payload tables are separate.
 
 ## Versions and authority

@@ -18,7 +18,8 @@ import { getPool } from '../storage/pool.js';
 import { makeEmbeddingRouterFromEnv } from '../embeddings/factory.js';
 import { isDirectEntrypoint } from './entrypoint.js';
 import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoordinationContractReady, requirePromotionOutboxReady, requireStandupReady } from '../storage/provider-lifecycle.js';
-import { requirePipelineBudgetsReady, requireEvidenceReady } from '../storage/provider-lifecycle.js';
+import { requirePipelineBudgetsReady, requireEvidenceReady, requireExtractionReady } from '../storage/provider-lifecycle.js';
+import { configureExtraction, extractionForPrincipal, retryExtraction } from '../services/extraction.js';
 import { accessibleScopes } from '../services/access.js';
 import { captureMemory } from '../services/capture.js';
 import { recallForPrincipal, type PrincipalRecallResult } from '../services/recall.js';
@@ -452,6 +453,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           expires_at: result.memory.expiresAt,
           embedded: result.embedded,
           related: result.related,
+          extraction: result.extraction,
         });
       } catch (error) {
         return errorResult(error);
@@ -787,6 +789,28 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     },
   );
 
+  server.registerTool('continuum.extraction_status', {
+    description: 'Read current authorized extraction coverage and safe run identity. Generated assertions remain unverified.',
+    inputSchema: { memory_id: z.string().uuid(), include_assertions: z.boolean().default(false) },
+  }, async args => {
+    try { return jsonResult(await extractionForPrincipal(pool, principal, args.memory_id, args.include_assertions)); }
+    catch (error) { return errorResult(error); }
+  });
+  server.registerTool('continuum.extraction_retry', {
+    description: 'Scope administrator retry using only the original settled workflow allowance.',
+    inputSchema: { memory_id: z.string().uuid() },
+  }, async args => {
+    try { return jsonResult(await retryExtraction(pool, principal, args.memory_id)); }
+    catch (error) { return errorResult(error); }
+  });
+  server.registerTool('continuum.extraction_configure', {
+    description: 'Scope administrator opt-in to an operator-installed profile and reviewed source allowlist.',
+    inputSchema: { scope_id: z.string().uuid(), profile: z.string().max(64), sources: z.array(z.string()).min(1).max(6), enabled: z.boolean() },
+  }, async args => {
+    try { return jsonResult(await configureExtraction(pool, principal, args.scope_id, args.profile, args.sources, args.enabled)); }
+    catch (error) { return errorResult(error); }
+  });
+
   server.registerTool(
     'continuum.standup',
     {
@@ -960,6 +984,7 @@ async function main(): Promise<void> {
   await requireStandupReady(pool, { ...schemaOptions, servingPool: true });
   await requirePipelineBudgetsReady(pool, schemaOptions);
   await requireEvidenceReady(pool, schemaOptions);
+  await requireExtractionReady(pool, schemaOptions);
   const authMode = authModeFromEnv();
   warnOnDevAuthMode(authMode);
   const authenticator = createAuthenticator(

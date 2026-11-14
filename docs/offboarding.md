@@ -40,6 +40,15 @@ worker recovery and shutdown limits.
 
 ## Current rollout and mixed versions
 
+Optional [extraction](extraction.md) adds migration 0094 and its exact APP/OP
+regrants. Current offboarding also cancels extraction runs/workflows, physically
+removes chunk hashes/spans and checks their actual residuals alongside managed
+source/assertion payload erasure. Locked rows keep completion false. Immutable
+machine identities and payload-free accounting receipts remain; stored-state
+proof does not retract process/provider/downloaded copies. Quiesce every
+producer and worker, prove settlement or process exit, and apply downstream
+policy separately. Old artifact/offboarding binaries cannot drive this proof.
+
 Current evidence-capable binaries additionally require migration 0093, following
 0092, and exact profile regrants. Offboarding fences owned-source authority
 immediately and erases immutable source snapshots plus transitive managed

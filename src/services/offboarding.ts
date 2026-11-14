@@ -794,12 +794,23 @@ async function scrubPromotionScope(client: pg.PoolClient, actorId: string, princ
       'SELECT continuum_operator_scrub_evidence_scope($1,$2,$3,$4) AS privacy',
       [actorId, principalId, scopeId, Math.min(batchSize, 1_000)])).rows[0].privacy;
   }
-  return { complete: outbox.complete && activity.complete && evidence.complete,
-    processed: outbox.processed + activity.processed + evidence.processed,
-    batch_full: outbox.batch_full || activity.batch_full || evidence.batch_full };
+    const extractionSchema = await client.query<{ installed: boolean; available: boolean }>(
+      `SELECT pg_catalog.to_regclass('extraction_runs') IS NOT NULL AS installed,
+        pg_catalog.to_regprocedure('continuum_operator_scrub_extraction_scope(uuid,uuid,uuid,integer)') IS NOT NULL AS available`);
+    let extraction = { complete: true, processed: 0, batch_full: false };
+    if (extractionSchema.rows[0]?.installed) {
+      if (!extractionSchema.rows[0].available) throw new ServiceError('DEPENDENCY_UNAVAILABLE', 'Extraction privacy migration is required');
+      extraction = (await client.query<{ privacy: typeof extraction }>(
+        'SELECT continuum_operator_scrub_extraction_scope($1,$2,$3,$4) AS privacy',
+        [actorId, principalId, scopeId, Math.min(batchSize, 1_000)])).rows[0].privacy;
+    }
+    return { complete: outbox.complete && activity.complete && evidence.complete && extraction.complete,
+      processed: outbox.processed + activity.processed + evidence.processed + extraction.processed,
+      batch_full: outbox.batch_full || activity.batch_full || evidence.batch_full || extraction.batch_full };
 }
 
 const PRESERVED_AUDIT_OPERATIONS = [
+  'principal_extraction_privacy_repaired',
   'principal_evidence_privacy_repaired',
   'principal_user_scope_mapped',
   'principal_user_scope_acknowledgement_replaced',

@@ -8,7 +8,7 @@ import { runMigrations } from './migrator.js';
 import { createPrincipal } from './principals.js';
 import { getScopeByRef } from './scopes.js';
 import { addMembership } from './memberships.js';
-import { requireEvidenceReady } from './provider-lifecycle.js';
+import { requireEvidenceReady, requireExtractionReady } from './provider-lifecycle.js';
 
 it('upgrades real APP/OP/SYNC profiles without raw payload grants and refuses trusted-body drift at startup', async () => {
   const suffix=randomUUID().replaceAll('-','').slice(0,12),schema=`evidence_upgrade_${suffix}`;
@@ -55,9 +55,18 @@ it('upgrades real APP/OP/SYNC profiles without raw payload grants and refuses tr
         .toEqual({payload:false,serving:index!==2,erasure:index===1});
       if(index!==2) await requireEvidenceReady(session,{expectedSchema:schema});
       else await expect(requireEvidenceReady(session,{expectedSchema:schema})).rejects.toMatchObject({code:'DEPENDENCY_UNAVAILABLE'});
+      expect((await owner.query(`SELECT has_function_privilege($1,'continuum_extraction_status(uuid,uuid,boolean)','EXECUTE') AS serving,
+        has_function_privilege($1,'continuum_operator_install_extractor(uuid,jsonb,boolean)','EXECUTE') AS installation,
+        has_function_privilege($1,'continuum_extraction_claim(text,uuid,jsonb)','EXECUTE') AS worker`,[role])).rows[0])
+        .toEqual({serving:index!==2,installation:index===1,worker:false});
+      if(index!==2) await requireExtractionReady(session,{expectedSchema:schema});
+      else await expect(requireExtractionReady(session,{expectedSchema:schema})).rejects.toMatchObject({code:'DEPENDENCY_UNAVAILABLE'});
       await expect(session.query('SELECT payload FROM evidence_payloads')).rejects.toMatchObject({code:'42501'});
     }
     expect((await owner.query("SELECT has_function_privilege($1,'independent_operator_extension()','EXECUTE') AS preserved",[roles[1]])).rows[0].preserved).toBe(true);
+    await owner.query('ALTER TABLE memories DISABLE TRIGGER extraction_capture_enqueue');
+    await expect(requireExtractionReady(sessions[0],{expectedSchema:schema})).rejects.toMatchObject({code:'DEPENDENCY_UNAVAILABLE'});
+    await owner.query('ALTER TABLE memories ENABLE TRIGGER extraction_capture_enqueue');
     await owner.query('ALTER TABLE evidence_closure DISABLE TRIGGER evidence_closure_immutable');
     await expect(requireEvidenceReady(sessions[0],{expectedSchema:schema})).rejects.toMatchObject({code:'DEPENDENCY_UNAVAILABLE'});
     await owner.query('ALTER TABLE evidence_closure ENABLE TRIGGER evidence_closure_immutable');

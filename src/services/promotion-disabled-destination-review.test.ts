@@ -9,6 +9,7 @@ import { promoteMemoryWithAudit } from '../storage/promote.js';
 import { mapOwnedUserScope } from './offboarding.js';
 import { disablePrincipal } from './principal-admin.js';
 import { promoteForPrincipal } from './lifecycle.js';
+import { captureMemory } from './capture.js';
 
 describe('promotion disabled destination review', () => {
   let pool: pg.Pool;
@@ -56,5 +57,15 @@ describe('promotion disabled destination review', () => {
       SELECT source_memory_id,destination_memory_id,destination_scope_id,destination_scope_kind,destination_scope_name,principal_id
       FROM promotion_events WHERE id=$1::uuid`, [value.promoted.promotionEvent.eventId]))
       .rejects.toMatchObject({ code: '23514', constraint: 'promotion_destination_disabled' });
+  });
+  it('preserves acknowledged legacy capture with extraction disabled for a disabled mapped owner', async () => {
+    const value = await seed();
+    const result = await captureMemory(pool, null, value.writer, {
+      scope: { kind: 'user', name: value.personal.name }, type: 'decision', title: 'Authorized capture',
+      body: 'The reviewed shared-scope acknowledgement remains effective.', source: 'manual',
+    });
+    expect(result.extraction).toEqual({ status: 'not-configured' });
+    expect((await getMemory(pool, result.memory.id))?.body).toBe('The reviewed shared-scope acknowledgement remains effective.');
+    expect((await pool.query('SELECT count(*)::int AS n FROM extraction_runs WHERE memory_id=$1', [result.memory.id])).rows[0].n).toBe(0);
   });
 });
