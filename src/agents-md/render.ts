@@ -14,6 +14,7 @@ const SECTION_ORDER: Array<{ key: 'org' | 'role' | 'team' | 'project'; heading: 
 
 // Source memories only. Immutable evidence, derivative payloads and managed
 // copies have separate storage and must never be unioned into this selection.
+// Optional recall reranking is independent: no adapter calls, scores or receipts.
 // Per-section preference for which memory types lead. Context is excluded
 // from AGENTS.md by default: it decays fast and is rarely useful as
 // agent-bootstrap context.

@@ -325,7 +325,7 @@ function fuse(...lists: Array<Array<{ id: string; rank: number }>>): Map<string,
   return out;
 }
 
-async function hydrate(
+export async function hydrateRecallCandidates(
   pool: Queryable,
   ids: string[],
   query: string,
@@ -366,13 +366,23 @@ async function hydrate(
     });
 }
 
-export async function recall(
+export interface RecallCandidates {
+  candidates: Array<{ id: string; score: number }>;
+  diagnostics: RecallDiagnostics;
+}
+
+/** Metadata-only fusion. The optional service owns authority and hydration admission.
+ * Arm overfetch still derives from the original requested final limit. */
+export async function recallCandidates(
   pool: Queryable,
   opts: RecallOptions,
-): Promise<RecallOutput> {
+  candidateLimit = opts.limit,
+  deferCandidateCharge = false,
+): Promise<RecallCandidates> {
+  if (!Number.isSafeInteger(candidateLimit) || candidateLimit < 1 || candidateLimit > 100) throw new RangeError('Recall candidate limit must be from 1 to 100');
   opts.budget?.assertLive();
   if (opts.scopeIds.length === 0) {
-    return { results: [], diagnostics: { vector: 'disabled', groups: [] } };
+    return { candidates: [], diagnostics: { vector: 'disabled', groups: [] } };
   }
 
   // One extra identity detects overflow rather than silently changing selection.
@@ -380,7 +390,7 @@ export async function recall(
   const borrowed = !connectable(pool);
   const searchText = () => ftsHits(pool, opts.query, opts.scopeIds, opts.types, overFetch);
   const fts = await (borrowed ? queueBorrowedSql(pool, searchText) : searchText());
-  if (opts.budget && fts.length > opts.budget.available('candidates')) throw new BudgetError();
+  if (!deferCandidateCharge && opts.budget && fts.length > opts.budget.available('candidates')) throw new BudgetError();
 
   const groups = opts.embeddingGroups
     ?? (opts.embeddingProvider
@@ -498,11 +508,11 @@ export async function recall(
   });
 
   const fused = fuse(fts, ...vectorLists);
-  opts.budget?.consume({ candidates: fused.size });
+  if (!deferCandidateCharge) opts.budget?.consume({ candidates: fused.size });
   const ranked = Array.from(fused.entries())
     .sort(([, a], [, b]) => b - a)
-    .map(([id]) => id)
-    .slice(0, opts.limit);
+    .map(([id, score]) => ({ id, score }))
+    .slice(0, candidateLimit);
 
   const used = diagnosticGroups.filter((group) => group.status === 'used').length;
   const failed = diagnosticGroups.length - used;
@@ -511,9 +521,16 @@ export async function recall(
     : failed === 0
       ? 'used'
       : used === 0 ? 'failed' : 'partial';
-  const hydrateResults = () => hydrate(pool, ranked, opts.query, fused, opts.scopeIds, opts.types, opts.readBudgetBytes, opts.budget);
   return {
-    results: await (borrowed ? queueBorrowedSql(pool, hydrateResults) : hydrateResults()),
+    candidates: ranked,
     diagnostics: { vector, groups: diagnosticGroups },
   };
+}
+
+/** Compatible low-level final-cut wrapper. No reranker or evidence enrollment. */
+export async function recall(pool: Queryable, opts: RecallOptions): Promise<RecallOutput> {
+  const selected = await recallCandidates(pool, opts);
+  const hydrateResults = () => hydrateRecallCandidates(pool, selected.candidates.map(c => c.id), opts.query,
+    new Map(selected.candidates.map(c => [c.id, c.score])), opts.scopeIds, opts.types, opts.readBudgetBytes, opts.budget);
+  return { results: await (!connectable(pool) ? queueBorrowedSql(pool, hydrateResults) : hydrateResults()), diagnostics: selected.diagnostics };
 }

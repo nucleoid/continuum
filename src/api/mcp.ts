@@ -1,6 +1,7 @@
 import { boundedJsonText } from './mcp-http-output.js';
 import { remoteExecutionContext } from './mcp-http-execution.js';
 import type pg from 'pg';
+import type { Reranking } from '../reranking/provider.js';
 import { z } from 'zod';
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { CallToolResult, ServerRequest, ServerNotification } from '@modelcontextprotocol/sdk/types.js';
@@ -100,6 +101,7 @@ export interface McpDeps {
   allowedSource?: string;
   retrievalEnrichers?: RetrievalEnricherRegistry;
   enrichment?: Omit<EnrichmentOptions, 'logger'>;
+  reranking?: Reranking;
   enrichmentLogger?: EnrichmentLogger;
   promotionWebhooks?: PromotionWebhookRegistry;
 }
@@ -205,6 +207,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
   });
   const recallProjection = ({ results, accessible }: PrincipalRecallResult) => results.map((r) => ({
     id: r.memory.id, score: r.score, scope: accessible.get(r.memory.scopeId)?.label ?? null, type: r.memory.type,
+    ...(r.rerankScore === undefined ? {} : { rerank_score: r.rerankScore }),
     title: r.memory.title, excerpt: r.excerpt, body_truncated: r.bodyTruncated, source_ref: r.memory.sourceRef,
     ...(r.memory.supersedesId ? { supersedes_id: r.memory.supersedesId } : {}), created_at: r.memory.createdAt,
     ...(r.enrichments ? { enrichments: r.enrichments } : {}),
@@ -486,6 +489,8 @@ export function buildMcpServer(deps: McpDeps): McpServer {
             readBudgetBytes: deps.readBudgetBytes,
             validateResult: deps.readBudgetBytes === undefined ? undefined : (value) => { jsonResult(recallProjection(value), { diagnostics: value.diagnostics }); },
           },
+          undefined,
+          deps.reranking,
         );
         return jsonResult(recallProjection({ results, accessible, diagnostics }), { diagnostics });
       } catch (error) {

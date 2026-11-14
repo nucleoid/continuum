@@ -28,6 +28,8 @@ export async function runReranking(config: Reranking, budget: Budget, input: Rer
   }
   let invalid = false;
   try {
+    const transportMs = budget.remainingMs(budget.profile.overallMs) - Math.min(1000, Math.floor(budget.profile.overallMs / 4));
+    if (transportMs < 1) return { status: 'fallback', reason: 'deadline' };
     const outcome = await runBudgetedStage(budget, { ...config.adapter,
       async invoke(serialized, context) {
         const result = await config.adapter.invoke(serialized, context);
@@ -38,7 +40,7 @@ export async function runReranking(config: Reranking, budget: Budget, input: Rer
           return { ...result, value };
         } catch { invalid = true; throw new TypeError('Invalid reranking response'); }
       },
-    }, input, { ...options, authorize });
+    }, input, { ...options, authorize, transportMs });
     if (outcome.status === 'skipped') return { status: 'fallback', reason: invalid ? 'invalid_response' : outcome.reason };
     return { status: 'used', scores: new Map(outcome.value.scores.map(score => [score.id, score.score])) };
   } catch {

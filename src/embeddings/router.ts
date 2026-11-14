@@ -23,6 +23,7 @@ export interface EmbeddingRoute {
 export interface EmbeddingRouter {
   resolve(scope: ScopeRef): EmbeddingRoute;
   providers(): EmbeddingProvider[];
+  requiresLocal?(scope: ScopeRef): boolean;
 }
 
 export type EmbeddingRouting = EmbeddingRouter | EmbeddingProvider | null;
@@ -107,6 +108,10 @@ export class ScopeEmbeddingRouter implements EmbeddingRouter {
   }
 
   providers(): EmbeddingProvider[] { return this.registry.values(); }
+
+  requiresLocal(scope: ScopeRef): boolean {
+    return (this.exact.get(`${scope.kind}\u0000${scope.name}`) ?? this.kinds.get(scope.kind) ?? this.config.default) === 'local-only';
+  }
 
   configuredExactScopes(): ScopeRef[] { return [...this.exactRefs]; }
 

@@ -14,7 +14,7 @@ export function testReranking(score: (candidate: RerankingInput['candidates'][nu
     invoke: vi.fn(async serialized => {
       const { input } = JSON.parse(serialized) as { input: RerankingInput };
       const value = { version: 'deterministic-v1', scores: input.candidates.map(c => ({ id: c.id, score: score(c) })) };
-      return { value, response: value, usage: { provenance: 'measured', outputTokens: Buffer.byteLength(JSON.stringify(value)), reasoningTokens: 0,
+      return { value, response: value, usage: { provenance: 'measured' as const, outputTokens: Buffer.byteLength(JSON.stringify(value)), reasoningTokens: 0,
         completionTokens: Buffer.byteLength(JSON.stringify(value)) } };
     }),
   };

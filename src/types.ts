@@ -83,6 +83,7 @@ export interface RecallInput {
 export interface RecallResult {
   memory: Memory;
   score: number;
+  rerankScore?: number;
   excerpt: string;
   bodyTruncated: boolean;
   enrichments?: Readonly<Record<string, Readonly<Record<string, unknown>>>>;

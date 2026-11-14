@@ -35,6 +35,7 @@ export interface ReadAuditMemory {
   metadata?: {
     rank: number;
     score?: number;
+    rerank_score?: number;
     delivery?: 'agents-md';
   };
 }

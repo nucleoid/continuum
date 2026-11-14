@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { EmbeddingRouting } from '../../embeddings/router.js';
 import type { OperationalLogger } from '../server.js';
 import { recallForPrincipal, type RecallEnrichment } from '../../services/recall.js';
+import type { Reranking } from '../../reranking/provider.js';
 
 const recallSchema = z.object({
   query: z.string().min(1).max(2000),
@@ -19,6 +20,7 @@ export function recallRouter(
   embeddingProvider: EmbeddingRouting = null,
   logger?: OperationalLogger,
   enrichment?: RecallEnrichment,
+  reranking?: Reranking,
 ): Router {
   const router = Router();
 
@@ -36,11 +38,14 @@ export function recallRouter(
       { transport: 'rest' },
       logger,
       enrichment,
+      undefined,
+      reranking,
     );
     res.json({
       results: results.map((r) => ({
         id: r.memory.id,
         score: r.score,
+        ...(r.rerankScore === undefined ? {} : { rerankScore: r.rerankScore }),
         scope: accessible.get(r.memory.scopeId)?.label ?? null,
         type: r.memory.type,
         title: r.memory.title,
