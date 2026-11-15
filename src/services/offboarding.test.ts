@@ -141,6 +141,20 @@ describe('offboarding and erasure', () => {
     }
   }
 
+  it('accepts only the exact canonical audit marker without retaining extra fields', async () => {
+    const marker={redacted:'principal_offboarding'};
+    const values=[marker,{...marker,secret:'private'},null,{},['private'],
+      {operation:'api_key_issued',key_id:'synthetic-key',service_principal_id:'synthetic-principal',secret:'private'}];
+    for(const value of values) {
+      const result=(await pool.query(`SELECT continuum_offboarding_expected_audit_metadata($1::jsonb) AS current,
+        continuum_offboarding_expected_audit_metadata_pre_connector($1::jsonb) AS original`,[JSON.stringify(value)])).rows[0];
+      expect(result.current).toEqual(result.original);
+      expect(JSON.stringify(result.current)).not.toContain('private');
+    }
+    expect((await pool.query('SELECT continuum_offboarding_expected_audit_metadata($1::jsonb) AS value',
+      [JSON.stringify({...marker,secret:'private'})])).rows[0].value).toEqual(marker);
+  });
+
   it('previews, atomically redacts the owned scope, preserves shared memory, and retries safely', async () => {
     const value = await fixture();
     const preview = await offboardPrincipal(pool, value.admin, value.target.id, true);

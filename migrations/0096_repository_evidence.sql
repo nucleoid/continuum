@@ -103,6 +103,8 @@ ALTER FUNCTION continuum_evidence_eligible(UUID,UUID,TEXT) RENAME TO continuum_e
 CREATE FUNCTION continuum_evidence_eligible(actor UUID,version UUID,locality TEXT) RETURNS BOOLEAN LANGUAGE plpgsql VOLATILE SECURITY DEFINER AS $$
 BEGIN
   IF NOT continuum_evidence_eligible_pre_connector(actor,version,locality) THEN RETURN FALSE; END IF;
+  -- An empty connector history cannot be an ancestor of an existing version.
+  IF NOT EXISTS(SELECT 1 FROM connector_query_runs) THEN RETURN TRUE; END IF;
   IF EXISTS(SELECT 1 FROM evidence_closure c JOIN connector_query_runs q ON q.id=c.root_id
     LEFT JOIN connector_repository_mappings m ON m.id=q.mapping_id
     WHERE c.version_id=version AND (q.actor IS DISTINCT FROM $1 OR q.state<>'complete'
@@ -230,6 +232,14 @@ BEGIN
     jsonb_build_object('operation','connector_privacy_scrub','processed',processed)); END IF;
   RETURN jsonb_build_object('complete',clean,'processed',processed,'batch_full',NOT clean AND processed>=page_limit);
 END $$;
+-- Completed canonical redactions need no repeated execution of the original
+-- multi-branch metadata policy. Exact equality rejects markers with extra data.
+ALTER FUNCTION continuum_offboarding_expected_audit_metadata(JSONB)
+  RENAME TO continuum_offboarding_expected_audit_metadata_pre_connector;
+CREATE FUNCTION continuum_offboarding_expected_audit_metadata(audit_metadata JSONB) RETURNS JSONB LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE WHEN audit_metadata='{"redacted":"principal_offboarding"}'::jsonb THEN audit_metadata
+    ELSE continuum_offboarding_expected_audit_metadata_pre_connector(audit_metadata) END;
+$$;
 ALTER FUNCTION continuum_offboarding_lifecycle_state_is_erased(UUID) RENAME TO continuum_offboarding_lifecycle_state_is_erased_pre_connector;
 CREATE FUNCTION continuum_offboarding_lifecycle_state_is_erased(target_run UUID) RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER AS $$
   SELECT continuum_offboarding_lifecycle_state_is_erased_pre_connector(target_run) AND EXISTS(SELECT 1 FROM principal_offboarding_runs
@@ -258,7 +268,8 @@ BEGIN
   FOR f IN SELECT oid::regprocedure signature FROM pg_proc WHERE pronamespace=quote_ident(schema_name)::regnamespace
     AND (proname LIKE 'continuum_connector_%' OR proname LIKE 'continuum_operator_connector_%'
       OR proname IN ('continuum_operator_scrub_connector_scope','continuum_evidence_eligible','continuum_evidence_eligible_pre_connector',
-        'continuum_offboarding_lifecycle_state_is_erased','continuum_offboarding_lifecycle_state_is_erased_pre_connector')) LOOP
+        'continuum_offboarding_lifecycle_state_is_erased','continuum_offboarding_lifecycle_state_is_erased_pre_connector',
+        'continuum_offboarding_expected_audit_metadata','continuum_offboarding_expected_audit_metadata_pre_connector')) LOOP
     EXECUTE format('ALTER FUNCTION %s SET search_path=pg_catalog,%I,pg_temp',f.signature,schema_name);
     EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC',f.signature);
   END LOOP;
@@ -294,4 +305,5 @@ INSERT INTO connector_contract_functions SELECT oid::regprocedure::text,encode(s
   FROM pg_proc WHERE pronamespace=quote_ident(current_schema())::regnamespace
     AND (proname LIKE 'continuum_connector_%' OR proname LIKE 'continuum_operator_connector_%'
       OR proname IN ('continuum_operator_scrub_connector_scope','continuum_evidence_eligible','continuum_evidence_eligible_pre_connector',
-        'continuum_offboarding_lifecycle_state_is_erased','continuum_offboarding_lifecycle_state_is_erased_pre_connector'));
+        'continuum_offboarding_lifecycle_state_is_erased','continuum_offboarding_lifecycle_state_is_erased_pre_connector',
+        'continuum_offboarding_expected_audit_metadata','continuum_offboarding_expected_audit_metadata_pre_connector'));
