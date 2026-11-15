@@ -36,9 +36,9 @@ it('drains admitted work at the real scope cap when an edited completed source n
     expect((await f.owner.query('SELECT active FROM embedding_scope_admission WHERE scope_id=$1', [f.scopeId])).rows[0].active).toBe(10000);
     await expect(captureMemory(f.app, f.router, f.principal, input(f, 'No cap exemption')))
       .rejects.toMatchObject({ code: 'EMBEDDING_QUEUE_QUOTA_EXCEEDED' });
-    // The fixture's 131072-byte response cap supports sixteen 768-value
-    // vectors (73761 bytes), whereas thirty-two exceed it (147521 bytes).
-    const boundedProvider = { ...f.provider, batchSize: 16 };
+    // Eight fixture vectors fit both the 131072-byte adapter response cap
+    // and the pipeline serializer's 10000-node bound (6153 nodes).
+    const boundedProvider = { ...f.provider, batchSize: 8 };
     const store = new SqlEmbeddingJobStore(f.worker);
     const claims = vi.spyOn(store, 'claim');
     const hydrations = vi.spyOn(store, 'hydrate');
@@ -54,7 +54,7 @@ it('drains admitted work at the real scope cap when an edited completed source n
     })).toBe('processed');
     expect((await f.owner.query(`SELECT active,(SELECT count(*)::int FROM embedding_jobs j WHERE j.scope_id=$1
       AND j.state IN ('queued','processing','retry_wait','blocked_policy')) AS actual FROM embedding_scope_admission WHERE scope_id=$1`, [f.scopeId])).rows)
-      .toEqual([{ active: 9984, actual: 9984 }]);
+      .toEqual([{ active: 9992, actual: 9992 }]);
     expect((await f.owner.query('SELECT state FROM embedding_jobs WHERE memory_id=$1', [completed.memory.id])).rows)
       .toEqual([{ state: 'ready' }]);
     expect((await f.owner.query('SELECT status FROM embedding_sources WHERE memory_id=$1', [completed.memory.id])).rows[0].status).toBe('superseded');
