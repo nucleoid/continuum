@@ -29,7 +29,7 @@ CREATE TABLE brief_scope_epochs(scope_id UUID PRIMARY KEY REFERENCES scopes(id),
 CREATE TABLE brief_definitions(
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),scope_id UUID UNIQUE NOT NULL REFERENCES scopes(id),
   profile TEXT NOT NULL REFERENCES brief_profiles(id),enabled BOOLEAN NOT NULL,generation BIGINT NOT NULL DEFAULT 1,
-  head UUID,anchor_version UUID NOT NULL REFERENCES evidence_versions(id));
+  head UUID,anchor_version UUID NOT NULL REFERENCES evidence_versions(id),observed_frontier JSONB);
 CREATE TABLE brief_worker_bindings(
   role_oid OID NOT NULL,role_name NAME NOT NULL,principal_id UUID NOT NULL REFERENCES principals(id),scope_id UUID NOT NULL REFERENCES scopes(id),
   profile TEXT NOT NULL REFERENCES brief_profiles(id),generation UUID NOT NULL,enabled BOOLEAN NOT NULL,
@@ -37,6 +37,7 @@ CREATE TABLE brief_worker_bindings(
 CREATE TABLE brief_runs(
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),definition_id UUID NOT NULL REFERENCES brief_definitions(id),
   request_key TEXT NOT NULL CHECK(length(request_key)<=128),mode TEXT NOT NULL CHECK(mode IN ('full','delta')),dry_run BOOLEAN NOT NULL,
+  automatic BOOLEAN NOT NULL DEFAULT FALSE,
   config_generation BIGINT NOT NULL,profile_generation BIGINT NOT NULL,descriptor JSONB NOT NULL,expected_head UUID,
   state TEXT NOT NULL DEFAULT 'queued' CHECK(state IN ('queued','running','complete','unavailable','cancelled')),
   reason TEXT CHECK(reason IN ('policy','budget','invalid-output','ambiguous','cancelled','deadline','stale','provider')),
@@ -66,9 +67,9 @@ CREATE TABLE brief_dispatch_receipts(attempt_id UUID PRIMARY KEY REFERENCES brie
 CREATE TRIGGER brief_version_immutable BEFORE UPDATE OR DELETE ON brief_versions FOR EACH ROW EXECUTE FUNCTION continuum_evidence_immutable();
 CREATE TRIGGER brief_dispatch_immutable BEFORE UPDATE OR DELETE ON brief_dispatch_receipts FOR EACH ROW EXECUTE FUNCTION continuum_evidence_immutable();
 CREATE FUNCTION continuum_brief_identity() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
-  IF (NEW.id,NEW.definition_id,NEW.request_key,NEW.mode,NEW.dry_run,NEW.config_generation,NEW.profile_generation,NEW.descriptor,
+  IF (NEW.id,NEW.definition_id,NEW.request_key,NEW.mode,NEW.dry_run,NEW.automatic,NEW.config_generation,NEW.profile_generation,NEW.descriptor,
     NEW.expected_head,NEW.workflow_id,NEW.budget_owner,NEW.budget_generation,NEW.attempt_id,NEW.created_at) IS DISTINCT FROM
-    (OLD.id,OLD.definition_id,OLD.request_key,OLD.mode,OLD.dry_run,OLD.config_generation,OLD.profile_generation,OLD.descriptor,
+    (OLD.id,OLD.definition_id,OLD.request_key,OLD.mode,OLD.dry_run,OLD.automatic,OLD.config_generation,OLD.profile_generation,OLD.descriptor,
     OLD.expected_head,OLD.workflow_id,OLD.budget_owner,OLD.budget_generation,OLD.attempt_id,OLD.created_at)
     OR (OLD.deadline_at IS NOT NULL AND NEW.deadline_at IS DISTINCT FROM OLD.deadline_at)
     OR (OLD.login_oid IS NOT NULL AND (NEW.login_oid,NEW.binding_generation) IS DISTINCT FROM (OLD.login_oid,OLD.binding_generation))
@@ -186,7 +187,7 @@ CREATE FUNCTION continuum_brief_audience(actor UUID,version UUID,target_scope UU
       OR EXISTS(SELECT 1 FROM memory_activity_attributions a WHERE a.memory_id=r.source_memory_id)
       OR EXISTS(SELECT 1 FROM connector_query_runs q WHERE q.id=r.id)));
 $$;
-CREATE FUNCTION continuum_brief_enqueue(definition UUID,key TEXT,refresh_mode TEXT,dry BOOLEAN) RETURNS brief_runs LANGUAGE plpgsql SECURITY DEFINER AS $$
+CREATE FUNCTION continuum_brief_enqueue(definition UUID,key TEXT,refresh_mode TEXT,dry BOOLEAN,automatic_run BOOLEAN DEFAULT FALSE) RETURNS brief_runs LANGUAGE plpgsql SECURITY DEFINER AS $$
 #variable_conflict use_column
 DECLARE d brief_definitions%ROWTYPE; p brief_profiles%ROWTYPE; r brief_runs%ROWTYPE;
 BEGIN
@@ -194,8 +195,8 @@ BEGIN
   SELECT * INTO STRICT p FROM brief_profiles WHERE id=d.profile FOR SHARE;
   IF NOT d.enabled OR NOT p.enabled OR key IS NULL OR length(key)>128 OR refresh_mode IS NULL OR refresh_mode NOT IN ('full','delta') OR dry IS NULL THEN
     RAISE check_violation USING MESSAGE='Brief refresh unavailable'; END IF;
-  INSERT INTO brief_runs(definition_id,request_key,mode,dry_run,config_generation,profile_generation,descriptor,expected_head)
-    VALUES(d.id,key,refresh_mode,dry,d.generation,p.generation,p.descriptor,d.head) ON CONFLICT(definition_id,request_key) DO NOTHING;
+  INSERT INTO brief_runs(definition_id,request_key,mode,dry_run,automatic,config_generation,profile_generation,descriptor,expected_head)
+    VALUES(d.id,key,refresh_mode,dry,automatic_run,d.generation,p.generation,p.descriptor,d.head) ON CONFLICT(definition_id,request_key) DO NOTHING;
   SELECT * INTO STRICT r FROM brief_runs WHERE definition_id=d.id AND request_key=key;
   IF (r.mode,r.dry_run) IS DISTINCT FROM (refresh_mode,dry) THEN RAISE check_violation USING MESSAGE='Brief idempotency conflict'; END IF;
   RETURN r;
@@ -321,13 +322,14 @@ BEGIN
     JOIN pg_roles role ON role.oid=binding.role_oid AND role.rolname=binding.role_name JOIN brief_versions h ON h.id=def.head
     WHERE role.rolname=session_user AND binding.enabled AND def.enabled AND def.profile=profile_id
       AND continuum_evidence_can_access(binding.principal_id,def.scope_id,TRUE)
-      AND (h.truncated OR h.observed IS DISTINCT FROM (SELECT jsonb_object_agg(scope_id::text,generation) FROM brief_scope_epochs WHERE scope_id IN(def.scope_id,continuum_org_scope_id()))
+      AND (h.truncated OR def.observed_frontier IS DISTINCT FROM (SELECT jsonb_object_agg(scope_id::text,generation) FROM brief_scope_epochs WHERE scope_id IN(def.scope_id,continuum_org_scope_id()))
+        OR h.config_generation<>def.generation OR h.profile_generation<>(SELECT generation FROM brief_profiles WHERE id=def.profile)
         OR EXISTS(SELECT 1 FROM brief_run_inputs i WHERE i.run_id=h.run_id AND NOT continuum_brief_audience(binding.principal_id,i.version_id,def.scope_id,NULL)))
       AND NOT EXISTS(SELECT 1 FROM brief_runs r WHERE r.definition_id=def.id AND r.state IN ('queued','running'))
     ORDER BY def.id LIMIT 1 FOR UPDATE OF def SKIP LOCKED;
   IF d.id IS NOT NULL THEN
     frontier_value:=continuum_brief_frontier(d.scope_id);
-    PERFORM continuum_brief_enqueue(d.id,'repair:'||encode(sha256(convert_to(frontier_value::text,'UTF8')),'hex'),'delta',FALSE);
+    PERFORM continuum_brief_enqueue(d.id,'repair:'||encode(sha256(convert_to(frontier_value::text,'UTF8')),'hex'),'delta',FALSE,TRUE);
   END IF;
   SELECT r.* INTO j FROM brief_runs r JOIN brief_definitions def ON def.id=r.definition_id JOIN brief_worker_bindings binding ON binding.scope_id=def.scope_id AND binding.profile=def.profile
     JOIN pg_roles role ON role.oid=binding.role_oid AND role.rolname=binding.role_name
@@ -410,7 +412,7 @@ BEGIN
         SELECT 1 FROM evidence_closure c JOIN brief_run_inputs old ON old.root_id=c.root_id AND old.run_id=(SELECT run_id FROM brief_versions WHERE id=d.head)
           JOIN brief_run_inputs fresh ON fresh.root_id=old.root_id AND fresh.run_id=j.id WHERE c.version_id=bb.evidence_version AND fresh.version_id<>old.version_id);
       IF EXISTS((SELECT version_id FROM brief_run_inputs WHERE run_id=j.id EXCEPT SELECT version_id FROM brief_run_inputs WHERE run_id=(SELECT run_id FROM brief_versions WHERE id=d.head)))
-        OR frontier_value IS DISTINCT FROM (SELECT observed FROM brief_versions WHERE id=d.head) THEN dirty:=array_cat(dirty,ARRAY['unknowns','coverage']); END IF;
+        THEN dirty:=array_cat(dirty,ARRAY['unknowns','coverage']); END IF;
       -- Any currently invalid section is recomputed, never copied with stripped citations.
       SELECT ARRAY(SELECT DISTINCT unnest(dirty||COALESCE(array_agg(section) FILTER(WHERE NOT continuum_brief_audience(b.principal_id,evidence_version,d.scope_id,NULL)),'{}')))
         INTO dirty FROM brief_blocks WHERE version_id=d.head;
@@ -480,6 +482,15 @@ BEGIN
     OR jsonb_typeof(output->'claims') IS DISTINCT FROM 'array' OR jsonb_array_length(output->'claims')>32 OR octet_length(output::text)>65536
     OR (SELECT count(DISTINCT c) FROM jsonb_array_elements(output->'claims') c)<>jsonb_array_length(output->'claims') THEN
     RAISE check_violation USING MESSAGE='Brief output unavailable'; END IF;
+  -- A private/excluded mutation can dirty the installation inventory. If its
+  -- authorized canonical input did not change, an automatic check must not
+  -- create a visible history/head/freshness event or invoke synthesis.
+  IF j.automatic AND cardinality(j.sections)=0 AND jsonb_array_length(output->'claims')=0 AND d.head IS NOT NULL THEN
+    UPDATE brief_definitions SET observed_frontier=j.observed WHERE id=d.id;
+    UPDATE brief_runs SET state='complete',result_version=d.head,lease_until=NULL WHERE id=j.id;
+    INSERT INTO audit_log(principal_id,action,scope_id,metadata) VALUES(b.principal_id,'write',d.scope_id,'{"operation":"brief_inventory_checked"}');
+    RETURN d.head;
+  END IF;
   INSERT INTO brief_versions(id,definition_id,run_id,previous_version,cutoff,observed,watermark,truncated,config_generation,profile_generation,anchor_version)
     VALUES(version,d.id,j.id,d.head,j.cutoff,j.observed,j.watermark,j.truncated,j.config_generation,j.profile_generation,d.anchor_version);
   INSERT INTO brief_blocks SELECT version,bb.block_id,bb.section,bb.evidence_version FROM brief_blocks bb WHERE bb.version_id=d.head AND NOT bb.section=ANY(j.sections);
@@ -518,7 +529,7 @@ BEGIN
     RAISE check_violation USING MESSAGE='Brief version bounds unavailable'; END IF;
   PERFORM continuum_brief_charge(j.workflow_id,jsonb_build_object('artifactBytes',bytes,'storageBytes',bytes+32768));
   PERFORM continuum_brief_gate(run_id,worker,epoch,FALSE);
-  IF NOT j.dry_run THEN UPDATE brief_definitions SET head=version WHERE id=d.id AND head IS NOT DISTINCT FROM j.expected_head; END IF;
+  IF NOT j.dry_run THEN UPDATE brief_definitions SET head=version,observed_frontier=j.observed WHERE id=d.id AND head IS NOT DISTINCT FROM j.expected_head; END IF;
   INSERT INTO audit_log(principal_id,action,scope_id,metadata) VALUES(b.principal_id,'write',d.scope_id,
     jsonb_build_object('operation','brief_version_applied','dry_run',j.dry_run));
   UPDATE brief_runs SET result_version=version,state='complete',lease_until=NULL WHERE id=j.id;
@@ -560,9 +571,12 @@ BEGIN
   END LOOP;
   RETURN jsonb_build_object('scopeId',d.scope_id,'definitionId',d.id,'version',v.id,'previousVersion',v.previous_version,'blocks',blocks,
     'implementation','unknown','status',CASE WHEN denied THEN 'partial' WHEN jsonb_array_length(blocks)=0 THEN 'unknown' ELSE 'available' END,
-    'fresh',NOT denied AND v.observed=continuum_brief_frontier(d.scope_id),'cutoff',CASE WHEN NOT denied THEN v.cutoff END,
+    'fresh',NOT denied AND v.config_generation=d.generation AND EXISTS(SELECT 1 FROM brief_profiles WHERE id=d.profile AND generation=v.profile_generation),
+    'cutoff',CASE WHEN NOT denied THEN v.cutoff END,
     'coverage',CASE WHEN denied THEN 'unknown' WHEN v.truncated THEN 'partial' ELSE 'complete' END,
-    'watermark',CASE WHEN NOT denied AND NOT v.truncated THEN v.watermark END);
+    -- Scope counters include excluded changes. Keep the actual processed
+    -- watermark internal; it cannot become a reader-visible hidden count.
+    'watermark',NULL);
 END $$;
 CREATE FUNCTION continuum_brief_read(actor UUID,project_name TEXT) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
 #variable_conflict use_column
