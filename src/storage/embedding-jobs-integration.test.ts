@@ -273,8 +273,49 @@ describe('durable embedding SQL, capture and worker integration', () => {
       expect((await f.owner.query('SELECT count(*)::int AS n FROM memory_embeddings WHERE memory_id=$1', [accepted.memory.id])).rows[0].n).toBe(0);
       expect((await f.owner.query(`SELECT count(*)::int AS n FROM embedding_capture_receipts WHERE key_hash IS NOT NULL OR payload_digest IS NOT NULL`)).rows[0].n).toBe(0);
       expect((await f.owner.query(`SELECT count(*)::int AS n FROM embedding_sources WHERE input_hash IS NOT NULL OR current_target IS NOT NULL`)).rows[0].n).toBe(0);
-      await expect(captureMemory(f.app, f.router, f.principal, input(f), {}, { idempotencyKey: 'erase-this-key' })).rejects.toMatchObject({ code: 'FORBIDDEN' });
+      expect(await readEmbeddingStatus(f.app, f.actorId, accepted.memory.id)).toBeNull();
+      await expect(captureMemory(f.app, f.router, f.principal, input(f), {}, { idempotencyKey: 'erase-this-key' })).rejects.toMatchObject({ code: 'SCOPE_NOT_FOUND' });
       expect(await runWorker(f)).toBe('idle');
+    });
+  }, 60000);
+
+  it('preserves existing replay and rolls back new source/audit/job writes at real receipt and active-scope capacity', async () => {
+    await embeddingQueueFixture(async f => {
+      const accepted = await captureMemory(f.app, f.router, f.principal, input(f), {}, { idempotencyKey: 'capacity-original' });
+      // Owner-only metadata fixture fills the real retained-receipt table; no
+      // quota/counter/constraint is altered and no private source copies exist.
+      await f.owner.query(`INSERT INTO embedding_capture_receipts(principal_id,scope_id,key_hash,payload_digest,memory_id)
+        SELECT $1,$2,encode(sha256(convert_to('receipt-capacity-'||n,'UTF8')),'hex'),repeat('a',64),$3
+          FROM generate_series(1,9999) n`, [f.actorId, f.scopeId, accepted.memory.id]);
+      const counts = async () => (await f.owner.query(`SELECT (SELECT count(*)::int FROM memories) memories,
+        (SELECT count(*)::int FROM embedding_jobs) jobs,(SELECT count(*)::int FROM embedding_capture_receipts) receipts,
+        (SELECT count(*)::int FROM audit_log WHERE action='write' AND memory_id IS NOT NULL) writes`)).rows[0];
+      const beforeReceipts = await counts();
+      expect(beforeReceipts.receipts).toBe(10000);
+      await expect(captureMemory(f.app, f.router, f.principal, input(f, 'Receipt capacity refusal'), {}, { idempotencyKey: 'capacity-next' }))
+        .rejects.toMatchObject({ code: 'EMBEDDING_RECEIPT_QUOTA_EXCEEDED' });
+      expect(await counts()).toEqual(beforeReceipts);
+      expect(await captureMemory(f.app, f.router, f.principal, input(f), {}, { idempotencyKey: 'capacity-original' }))
+        .toMatchObject({ replayed: true, embedded: false, embeddingStatus: 'queued' });
+      // Seed actual current sources and enqueue using the real APP capability,
+      // in bounded batches below the unchanged five-second SQL ceiling.
+      const prefix = 'scope-capacity-' + randomUUID();
+      for (let offset = 0; offset < 9999; offset += 100) {
+        const batch = Math.min(100, 9999-offset), reference = prefix + '-' + offset;
+        await f.app.query(`INSERT INTO memories(scope_id,type,title,body,author_id,source,source_ref)
+          SELECT $1,'fact','Capacity fixture','Bounded synthetic source',$2,'manual',$3 FROM generate_series(1,$4::int)`,
+          [f.scopeId, f.actorId, reference, batch]);
+        expect((await f.app.query(`SELECT count(continuum_embedding_enqueue($1,id,$2,$3,'queued'))::int AS n
+          FROM memories WHERE source_ref=$4`, [f.actorId, f.target, f.policy, reference])).rows[0].n).toBe(batch);
+      }
+      const beforeQueue = await counts();
+      expect(beforeQueue.jobs).toBe(10000);
+      expect((await f.owner.query('SELECT active FROM embedding_scope_admission WHERE scope_id=$1', [f.scopeId])).rows[0].active).toBe(10000);
+      await expect(captureMemory(f.app, f.router, f.principal, input(f, 'Scope capacity refusal')))
+        .rejects.toMatchObject({ code: 'EMBEDDING_QUEUE_QUOTA_EXCEEDED' });
+      expect(await counts()).toEqual(beforeQueue);
+      expect(f.provider.embed).not.toHaveBeenCalled();
+      expect(f.adapter.invoke).not.toHaveBeenCalled();
     });
   }, 60000);
 });
