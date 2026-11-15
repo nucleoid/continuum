@@ -87,7 +87,8 @@ Apply owner-reviewed `0097_project_briefs.sql` after ledgered 0096. 0091 remains
 unrelated and is not a prerequisite. All published migration bytes remain intact.
 Regrant exact APP and OP profiles. SYNC/reporting receive no brief privileges.
 Serving startup now requires `continuum_brief_is_ready()`, including owner-recorded
-function bodies, search paths, ACLs and enabled guards. Connectivity readiness
+function bodies, search paths, PUBLIC execution ACLs and enabled guards. Exact
+APP/OP profile checks and regrants remain separate startup prerequisites. Connectivity readiness
 alone does not prove this contract or completed physical erasure.
 
 Trusted composition registers a `BriefProfile` in `BriefRegistry`, with an exact
@@ -141,6 +142,9 @@ A current project administrator opts in with
 `PUT /api/v0/scopes/:id/brief` and `{"profile":"reviewed-local-v1","enabled":true}`.
 Identical settings preserve the generation; profile/enabled changes fence older
 queued work. Operator installation, worker binding and project opt-in are distinct.
+First enrollment drains ongoing memory, evidence-root and event writers before
+creating its scope generations, within the existing SQL lock/statement bounds.
+Existing enrollments avoid that fence.
 
 ## REST and MCP
 
@@ -162,6 +166,7 @@ REST outputs use `runId`, `definitionId`, `scopeId`, `previousVersion`, `dryRun`
 Project names are at most 500 characters. History defaults to three versions,
 maximum ten, using an exclusive version cursor ordered by database creation time
 and UUID. Invalid/cross-definition cursors refuse the request.
+Oversized history responses refuse delivery; request a smaller page limit.
 
 A writer/admin requests a refresh, which returns a queued run, not immediate
 model completion. Repeating the same key returns the original run, and after
@@ -178,8 +183,10 @@ is withheld unless both sides remain readable. They never expose hidden old pros
 no provider call and no new visible version. `BriefWorker` is an explicit optional
 custom-runtime worker, with no stock registration. It polls once per registered
 profile, default 1000 ms (100..30000), with a 5000 ms shutdown wait (1..10000).
-At most 32 profiles are registered. One poll may enqueue one typed repair after
-invalidation; there is no general task executor, cron service or fairness promise.
+At most 32 profiles are registered. Each processing call may enqueue one typed
+repair after invalidation. A poll follows metadata progress immediately, with at
+most nine processing calls per profile under the original deadline. There is no
+general task executor, cron service or fairness promise.
 
 The inventory admits at most 32 exact source/assertion/event versions per page,
 and 63 per original run. The remaining slot in the evidence foundation's 64 direct
@@ -189,7 +196,8 @@ There are still at most 32 output blocks; a model cannot expand that output
 ceiling by returning many claims across several section calls. Metadata probes,
 admitted identities and at most 32 previous-block reconciliation identities
 consume the original candidate budget. Conservative per-page storage accounting
-can exceed physical allocation. Tight profiles safely abstain. Source snapshot
+can exceed physical allocation: each page charges the full retained manifest's
+payload allowance again. Tight profiles safely abstain. Source snapshot
 adoption and per-item/aggregate hydration,
 complete prompt/schema/citation serialization, response bytes, token/call/spend,
 control/provenance storage and final output allowance all consume the original
@@ -212,6 +220,9 @@ not completion proofs. A finite cap records partial coverage. Completed capped
 work does not enqueue another allowance merely because it is partial. Large
 scopes can remain partial and need deliberate new work; there is no unlimited
 scope-volume or universal liveness claim.
+After inventory closes, exact admitted dependencies and current authority gates
+control synthesis and publication. A later unrelated frontier change does not
+discard valid output at its recorded cutoff; the next inventory checks newer work.
 
 Allowances bound each original workflow. A deliberate new request key or a
 genuinely changed source frontier creates new work; there is no rolling
@@ -239,6 +250,8 @@ rechecks exact dependencies, source audience, enabled profile/configuration,
 binding, lease, every current section's dispatched/settled attempt, deadline and
 head CAS. Versions, typed
 dependencies, required audit and head movement commit atomically.
+The complete version, including retained blocks, must pass the ordinary guarded
+view before publication; oversized output leaves the previous head available.
 
 Crashes, stale leases, cancellation, failed settlement and ambiguous restart park
 work unavailable. They never replace identities, renew a deadline or refund
@@ -249,6 +262,8 @@ persisted at 1, 2 then 4 seconds,
 with at most three retries; tighter original limits can stop earlier. Earlier
 successful section outputs are discarded on a failed generation rather than
 stored as an unmanaged retry cache. Unknown usage retains its charged maxima.
+Backoff makes work eligible; poll cadence and other profiles can still consume
+its remaining original deadline. It does not guarantee every permitted retry.
 There is no orphan-recovery API. Late actual
 settlement uses only the original LOGIN/accounting identity and grants no publish
 permission. Duplicate apply after an ambiguous commit returns its original version.
@@ -295,8 +310,9 @@ binary rollback cannot restore erased bytes. Never delete ledgers or broaden
 roles/search paths to recover availability. No live operation is authorized here.
 
 Current promotion clients acquire both enrolled scope epochs in UUID order before
-inserting the destination. Old promotion clients lack that capability and can
-invert their epoch locks during opposite-direction promotions. Do not mix those
+inserting the destination. Lifecycle batches lock their selected memories' epochs
+in that same order before transitions. Old promotion and lifecycle clients lack
+these capabilities and can invert epoch locks. Do not mix those
 old writers with enrolled brief scopes; disabling synthesis does not remove the
 enrolled epoch rows. Regrant APP/OP profiles and restart compatible writers.
 

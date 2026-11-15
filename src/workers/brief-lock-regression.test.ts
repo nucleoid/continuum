@@ -7,7 +7,8 @@ import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import { createMemory } from '../storage/memories.js';
 import { getPrincipal } from '../storage/principals.js';
-import { refreshBrief } from '../services/briefs.js';
+import { briefForPrincipal, refreshBrief } from '../services/briefs.js';
+import { processBrief } from './briefs.js';
 
 const key = () => Math.floor(Math.random() * 1_000_000_000) + 1;
 type Result = { result?: unknown; code?: string; message?: string };
@@ -18,9 +19,9 @@ const settle = async (operation: Promise<pg.QueryResult>): Promise<Result> => {
 async function waitGate(observer: pg.PoolClient, gate: number, pids: number[]) {
   for (let i = 0; i < 75; i++) {
     const rows = (await observer.query<{ pid: number }>(`SELECT pid FROM pg_locks
-      WHERE locktype='advisory' AND NOT granted AND classid=0 AND objid=$1::oid
+      WHERE locktype='advisory' AND granted AND classid=0 AND objid=$1::oid
         AND objsubid=1 AND pid=ANY($2::int[])
-        AND database=(SELECT oid FROM pg_database WHERE datname=current_database())`, [gate, pids])).rows;
+        AND database=(SELECT oid FROM pg_database WHERE datname=current_database())`, [gate + 3, pids])).rows;
     if (pids.every(pid => rows.some(row => row.pid === pid))) return;
     await new Promise(resolve => setTimeout(resolve, 10));
   }
@@ -38,7 +39,8 @@ async function installClaimGate(owner: pg.Pool, runIds: string[], gate: number) 
     BEGIN
       IF NEW.id=ANY(ARRAY[${runIds.map(id => `'${id}'::uuid`).join(',')}])
         AND OLD.observed IS NULL AND NEW.observed IS NOT NULL THEN
-        PERFORM pg_advisory_xact_lock_shared(${gate}::bigint);
+        PERFORM pg_advisory_xact_lock_shared(${gate + 3}::bigint);
+        WHILE NOT pg_try_advisory_xact_lock_shared(${gate}::bigint) LOOP PERFORM pg_sleep(0.005); END LOOP;
       END IF;
       RETURN NEW;
     END $$;
@@ -111,7 +113,10 @@ it('an org APP writer and a source-adopting claim do not invert memory and epoch
     // before normal AFTER triggers touch the epoch. No root/counter is fabricated.
     await f.owner.query(`CREATE FUNCTION parent_lock_writer_gate() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN
-        IF NEW.id='${source.id}'::uuid THEN PERFORM pg_advisory_xact_lock(${writerGate}::bigint); END IF;
+        IF NEW.id='${source.id}'::uuid THEN
+          PERFORM pg_advisory_xact_lock_shared(${writerGate + 3}::bigint);
+          WHILE NOT pg_try_advisory_xact_lock(${writerGate}::bigint) LOOP PERFORM pg_sleep(0.005); END LOOP;
+        END IF;
         RETURN NEW;
       END $$;
       REVOKE ALL ON FUNCTION parent_lock_writer_gate() FROM PUBLIC;
@@ -145,13 +150,17 @@ it('an org APP writer and a source-adopting claim do not invert memory and epoch
     }
     expect(results[0], 'ordinary APP mutation must commit').toEqual({ result: source.id });
     expect(results[1]?.code, 'claim must not deadlock or time out').toBeUndefined();
-    // An optimistic frontier repair may truthfully defer/abstain when the writer
-    // changes the frontier. It must never publish the old inventory as complete.
-    expect(['claimed', 'progress', 'unavailable']).toContain((results[1]?.result as { outcome?: string })?.outcome);
+    expect(results[1]?.result).toMatchObject({ outcome: 'progress' });
     expect((await f.app.query('SELECT body FROM memories WHERE id=$1', [source.id])).rows[0].body).toBe('AFTER-WRITE');
-    if ((results[1]?.result as { outcome?: string })?.outcome === 'claimed') {
-      expect((await f.owner.query(`SELECT count(*)::int AS n FROM brief_run_inputs
-        WHERE run_id=$1 AND root_id=$2`, [queued.runId, source.id])).rows[0].n).toBe(1);
+    const identity = async () => (await f.owner.query(`SELECT state,inventory_restarts,workflow_id,budget_owner,deadline_at
+      FROM brief_runs WHERE id=$1`, [queued.runId])).rows[0];
+    const before = await identity();
+    expect(before).toMatchObject({ state: 'queued', inventory_restarts: 1 });
+    expect(await processBrief(f.worker, randomUUID(), f.profile)).toBe('processed');
+    const after = await identity();
+    for (const field of ['workflow_id', 'budget_owner', 'deadline_at']) {
+      expect(after[field]).toEqual(before[field]);
     }
+    expect(JSON.stringify((await briefForPrincipal(f.app, actor, f.projectName)).blocks)).toContain('AFTER-WRITE');
   });
 }, 120_000);

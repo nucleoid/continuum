@@ -99,6 +99,7 @@ export async function sweepLifecycleBatch(
       throw new Error('Lifecycle system principal is missing');
     }
 
+    await client.query('SELECT continuum_brief_lock_memory_epochs($1::uuid[])', [rows.map(row => row.id)]);
     let transitioned = 0;
     for (const row of rows) {
       const nextState = row.type === 'context' ? 'archived' : 'stale';

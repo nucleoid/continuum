@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import pg from 'pg';
-import { standupProducerFixture, quoteStandupIdentifier } from '../standup/test-helpers.js';
+import { standupConsumerFixture as standupProducerFixture, quoteStandupIdentifier } from '../standup/test-helpers.js';
 import { createScope } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import { starterProfile, type BudgetAdapter } from '../pipeline/budget.js';
@@ -46,12 +46,13 @@ export async function briefFixture(run: (f: Parameters<Parameters<typeof standup
     let worker: pg.Pool | undefined;
     try {
       await f.owner.query(`CREATE ROLE ${quoteStandupIdentifier(workerRole)} LOGIN PASSWORD '${password}'`);
-      execFileSync('psql',[process.env.CONTINUUM_TEST_DATABASE_URL!,'-X','-v','ON_ERROR_STOP=1','-v',`continuum_schema=${schema}`,
+      await f.registerRole(workerRole);
+      execFileSync('psql',[f.connectionString,'-X','-v','ON_ERROR_STOP=1','-v',`continuum_schema=${schema}`,
         '-v',`continuum_brief_worker_role=${workerRole}`,'-f',join(process.cwd(),'scripts/grant-brief-worker-role.sql')],{ timeout: 30000,stdio: 'pipe' });
       await f.operator.query('SELECT continuum_operator_install_brief_profile($1,$2,TRUE)',[f.adminId,briefDescriptor(frozen)]);
       await f.operator.query('SELECT continuum_operator_bind_brief_worker($1,$2,$3,$4,$5,TRUE)',[f.adminId,workerRole,f.producerId,project.id,profile.id]);
       const result=(await f.app.query('SELECT continuum_brief_configure($1,$2,$3,TRUE) AS result',[f.actorId,project.id,profile.id])).rows[0].result;
-      const connection=new URL(process.env.CONTINUUM_TEST_DATABASE_URL!);connection.username=workerRole;connection.password=password;
+      const connection=new URL(f.connectionString);connection.username=workerRole;connection.password=password;
       worker=new pg.Pool({ connectionString: connection.toString(),max: 2,options: `-c search_path=${schema} -c statement_timeout=5000 -c lock_timeout=1000` });
       await run({ ...f,projectId: project.id,projectName,definitionId: result.id,worker,workerRole,profile: frozen,registry });
     } finally {

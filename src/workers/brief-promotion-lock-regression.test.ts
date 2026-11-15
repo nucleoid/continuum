@@ -15,8 +15,8 @@ const settle = async (operation: Promise<PromoteResult>): Promise<Result> => {
 };
 async function waiting(observer: pg.PoolClient, gate: number, pid: number): Promise<boolean> {
   return (await observer.query(`SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory'
-    AND NOT granted AND classid=0 AND objid=$1::oid AND objsubid=1 AND pid=$2
-    AND database=(SELECT oid FROM pg_database WHERE datname=current_database())) AS value`, [gate, pid])).rows[0].value;
+    AND granted AND classid=0 AND objid=$1::oid AND objsubid=1 AND pid=$2
+    AND database=(SELECT oid FROM pg_database WHERE datname=current_database())) AS value`, [gate + 3, pid])).rows[0].value;
 }
 
 it.each([false, true])('opposite project/org APP promotions commit with distinct actors=%s', async differentActor => {
@@ -45,7 +45,8 @@ it.each([false, true])('opposite project/org APP promotions commit with distinct
     await f.owner.query(`CREATE FUNCTION parent_promotion_epoch_gate() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN
         IF OLD.id=ANY(ARRAY['${first.id}'::uuid,'${second.id}'::uuid]) AND NEW.state='promoted' THEN
-          PERFORM pg_advisory_xact_lock_shared(${gate}::bigint);
+          PERFORM pg_advisory_xact_lock_shared(${gate + 3}::bigint);
+          WHILE NOT pg_try_advisory_xact_lock_shared(${gate}::bigint) LOOP PERFORM pg_sleep(0.005); END LOOP;
         END IF;
         RETURN NEW;
       END $$;

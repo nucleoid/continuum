@@ -47,7 +47,8 @@ it('history and an ordinary claim complete without opposing memory row lock orde
     await f.owner.query(`CREATE FUNCTION parent_history_claim_gate() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN
         IF NEW.run_id='${queued.runId}'::uuid AND NEW.root_id='${low.id}'::uuid THEN
-          PERFORM pg_advisory_xact_lock(${gate}::bigint);
+          PERFORM pg_advisory_xact_lock_shared(${gate + 3}::bigint);
+          WHILE NOT pg_try_advisory_xact_lock(${gate}::bigint) LOOP PERFORM pg_sleep(0.005); END LOOP;
         END IF;
         RETURN NEW;
       END $$;
@@ -71,8 +72,8 @@ it('history and an ordinary claim complete without opposing memory row lock orde
       let entered = false;
       for (let i = 0; i < 60; i++) {
         entered = (await observer.query(`SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory'
-          AND NOT granted AND classid=0 AND objid=$1::oid AND objsubid=1 AND pid=$2
-          AND database=(SELECT oid FROM pg_database WHERE datname=current_database())) AS value`, [gate, session.pid])).rows[0].value;
+          AND granted AND classid=0 AND objid=$1::oid AND objsubid=1 AND pid=$2
+          AND database=(SELECT oid FROM pg_database WHERE datname=current_database())) AS value`, [gate + 3, session.pid])).rows[0].value;
         if (entered) break;
         await new Promise(resolve => setTimeout(resolve, 10));
       }
