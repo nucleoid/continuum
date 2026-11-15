@@ -225,3 +225,31 @@ it('declines oversized optional candidate hydration under the remaining original
   });
 }, 120000);
 
+
+
+it('does not consume a stricter SQL statement deadline as optional relation success', async () => {
+  await projectFixture(async f => {
+    const candidateInput = input(f, 'Deadline candidate', 'Bounded candidate evidence');
+    f.vectors.set(memoryEmbeddingText(candidateInput), near());
+    const candidate = await captureMemory(f.app, f.router, f.principal, candidateInput);
+    await f.owner.query('SELECT continuum_evidence_source($1,$2)', [f.actorId, candidate.memory.id]);
+    expect(await run(f)).toBe('processed');
+    const incoming = input(f, 'Deadline incoming', 'Bounded incoming evidence'); f.vectors.set(memoryEmbeddingText(incoming), unit());
+    const capture = await captureMemory(f.app, f.router, f.principal, incoming);
+    const lock = await f.owner.connect();
+    try {
+      await lock.query('BEGIN');
+      await lock.query('SELECT id FROM evidence_roots WHERE source_memory_id=$1 FOR UPDATE', [candidate.memory.id]);
+      await f.worker.query("SET statement_timeout='200ms'");
+      expect(await run(f)).toBe('unavailable');
+      expect(f.adapter.invoke).toHaveBeenCalledTimes(2); // Candidate lock is reached after real accounted dispatch.
+    } finally {
+      await lock.query('ROLLBACK'); lock.release();
+      await f.worker.query("SET statement_timeout='5s'");
+    }
+    expect((await f.owner.query('SELECT 1 FROM memory_embeddings WHERE memory_id=$1', [capture.memory.id])).rows).toEqual([]);
+    expect(await readEmbeddingStatus(f.app, f.actorId, capture.memory.id)).toMatchObject({ embedded: false, embeddingStatus: 'retry_wait' });
+    expect((await f.owner.query("SELECT 1 FROM audit_log WHERE memory_id=$1 AND metadata->>'operation'='embedding_completed'", [capture.memory.id])).rows).toEqual([]);
+    expect((await f.owner.query('SELECT failures FROM embedding_provider_control')).rows[0].failures).toBe('0');
+  });
+}, 120000);

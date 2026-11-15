@@ -7,7 +7,9 @@ import { expect, it } from 'vitest';
 import { embeddingQueueFixture } from '../embeddings/test-helpers.js';
 import { captureMemory } from '../services/capture.js';
 import { getMemoryForPrincipal } from '../services/memories.js';
-import { readEmbeddingStatus } from './embedding-jobs.js';
+import { SqlEmbeddingJobStore, readEmbeddingStatus } from './embedding-jobs.js';
+import { processEmbeddingJobs } from '../workers/embedding-jobs.js';
+import { getMemory } from './memories.js';
 import { requireEmbeddingQueueReady } from './provider-lifecycle.js';
 import { dropIsolatedTestDatabase } from './test-helpers.js';
 
@@ -79,6 +81,7 @@ it('keeps a logically restored queue ready across changed vector type OIDs while
     const maintenance = new pg.Pool({ connectionString: f.connectionString, max: 1, connectionTimeoutMillis: 5000,
       options: '-c statement_timeout=5000 -c lock_timeout=1000' });
     let owned: OwnedDatabase | undefined, acknowledged = false;
+    let restoredWorker: pg.Pool | undefined;
     let restored: pg.Pool | undefined, restoredApp: pg.Pool | undefined;
     const failures: unknown[] = [];
     try {
@@ -138,9 +141,52 @@ it('keeps a logically restored queue ready across changed vector type OIDs while
       } finally { try { await client.query('ROLLBACK'); } finally { client.release(); } }
       await requireEmbeddingQueueReady(restoredApp, { expectedSchema: schema });
       expect(f.adapter.invoke).not.toHaveBeenCalled(); expect(f.provider.embed).not.toHaveBeenCalled();
+      const workerUrl = new URL(f.worker.options.connectionString!); workerUrl.pathname = `/${database}`;
+      restoredWorker = new pg.Pool({ connectionString: workerUrl.toString(), max: 1, connectionTimeoutMillis: 5000, options: f.worker.options.options });
+      const runRestoredWorker = () => processEmbeddingJobs(new SqlEmbeddingJobStore(restoredWorker!), f.target,
+        f.policy, f.provider, f.profile, randomUUID());
+      expect(await runRestoredWorker()).toBe('processed');
+      const second = await captureMemory(restoredApp, f.router, f.principal, { scope: { kind: f.scope.kind, name: f.scope.name },
+        type: 'fact', title: 'Native optional restore source', body: 'SYNTHETIC-NATIVE-RESTORE', source: 'manual' });
+      expect(f.adapter.invoke).toHaveBeenCalledTimes(1); // The new ACK did no provider I/O.
+      expect(await runRestoredWorker()).toBe('processed');
+      expect(((await getMemory(restoredApp, second.memory.id))!.metadata.related as unknown[]).length).toBeGreaterThan(0);
+      await restoredApp.query(`UPDATE memories SET body=body||' Edited current source.',
+        metadata=jsonb_set(metadata,ARRAY['restoreNote'],to_jsonb('PRESERVE-CURRENT-NOTE'::text)),updated_at=clock_timestamp() WHERE id=$1`, [second.memory.id]);
+      const beforeNativeDecline = (await getMemory(restoredApp, second.memory.id))!;
+      // The restored DB has an acknowledged exact identity. Catalog mutation
+      // is confined to this database, with no external clients or CASCADE.
+      const databaseIdentity = (await restored.query(`SELECT current_database() AS name,oid,datdba AS owner
+        FROM pg_database WHERE datname=current_database()`)).rows[0];
+      expect(databaseIdentity).toEqual(owned);
+      const ownPids = [(await restored.query('SELECT pg_backend_pid() AS pid')).rows[0].pid,
+        (await restoredApp.query('SELECT pg_backend_pid() AS pid')).rows[0].pid,
+        (await restoredWorker.query('SELECT pg_backend_pid() AS pid')).rows[0].pid];
+      expect((await restored.query('SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND NOT(pid=ANY($1::int[]))', [ownPids])).rows).toEqual([]);
+      const collations = (await restored.query(`SELECT coll.oid,n.nspname,coll.collname,coll.collowner,coll.collversion
+        FROM pg_collation coll JOIN pg_namespace n ON n.oid=coll.collnamespace
+        WHERE n.nspname='pg_catalog' AND coll.collprovider='i' AND coll.colliculocale='en-US' ORDER BY coll.oid`)).rows;
+      expect(collations.length).toBeGreaterThan(0);
+      for (const collation of collations) expect(collation.collowner).toBe(owned!.owner);
+      await record('owned-native-collations.json', { databaseIdentity, ownPids, collations });
+      for (const collation of collations) {
+        const identity = (await restored.query('SELECT collname,collowner FROM pg_collation WHERE oid=$1', [collation.oid])).rows[0];
+        expect(identity).toEqual({ collname: collation.collname, collowner: owned!.owner });
+        await restored.query(`DROP COLLATION ${quote(collation.nspname)}.${quote(collation.collname)} RESTRICT`);
+      }
+      expect((await restored.query("SELECT oid FROM pg_collation WHERE collprovider='i' AND colliculocale='en-US'")).rows).toEqual([]);
+      await requireEmbeddingQueueReady(restoredApp, { expectedSchema: schema });
+      expect(await runRestoredWorker()).toBe('processed');
+      const afterNativeDecline = (await getMemory(restoredApp, second.memory.id))!;
+      expect(afterNativeDecline.metadata).toEqual(beforeNativeDecline.metadata);
+      expect(afterNativeDecline.updatedAt).toEqual(beforeNativeDecline.updatedAt);
+      expect(await readEmbeddingStatus(restoredApp, f.actorId, second.memory.id)).toMatchObject({ embedded: true, embeddingStatus: 'ready' });
+      expect((await restored.query(`SELECT metadata->>'relationsStatus' AS status FROM audit_log WHERE memory_id=$1
+        AND metadata->>'operation'='embedding_completed' ORDER BY id DESC LIMIT 1`, [second.memory.id])).rows[0].status).toBe('native_unavailable');
+      expect(f.adapter.invoke).toHaveBeenCalledTimes(3); expect(f.provider.embed).not.toHaveBeenCalled();
     } catch (error) { failures.push(error); }
     finally {
-      for (const pool of [restoredApp, restored]) if (pool) try { await pool.end(); } catch (error) { failures.push(error); }
+      for (const pool of [restoredWorker, restoredApp, restored]) if (pool) try { await pool.end(); } catch (error) { failures.push(error); }
       try {
         if (owned) {
           const current = (await maintenance.query('SELECT oid,datdba AS owner FROM pg_database WHERE datname=$1', [owned.name])).rows[0];
