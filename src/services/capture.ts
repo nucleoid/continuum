@@ -108,7 +108,9 @@ export async function captureOne(
   principal: Principal,
   input: CaptureInput,
   auditMetadata: Record<string, unknown> = {},
+  relationThreshold = DEFAULT_RELATION_THRESHOLD,
 ): Promise<CaptureResult> {
+  validateRelationThreshold(relationThreshold);
   const { scope, tags } = await prepareCaptureWrite(client, principal, input);
   const router = asEmbeddingRouter(embeddingRouting);
   const route = router.resolve({ kind: scope.kind, name: scope.name });
@@ -121,7 +123,7 @@ export async function captureOne(
   try { target = route.provider?.target ?? null; } catch { /* A malformed provider cannot reject a valid source write. */ }
   const embeddingStatus = (await client.query<{ status: EmbeddingStatus }>(
     'SELECT continuum_embedding_enqueue($1,$2,$3,$4,$5) AS status',
-    [principal.id, memory.id, target, router.queuePolicy ?? null, initialEmbeddingStatus(route)],
+    [principal.id, memory.id, target, { ...router.queuePolicy, relationThreshold }, initialEmbeddingStatus(route)],
   )).rows[0].status;
   await recordAudit(client, { principalId: principal.id, action: 'write', memoryId: memory.id, scopeId: scope.id,
     metadata: { ...auditMetadata, source: input.source, type: input.type, embedded: false,
@@ -178,7 +180,7 @@ export async function captureMemory(
           return result;
         }
       }
-      result = await captureOne(client, embeddingRouting, principal, input, auditMetadata);
+      result = await captureOne(client, embeddingRouting, principal, input, auditMetadata, options.relationThreshold ?? DEFAULT_RELATION_THRESHOLD);
       options.validateResult?.(result);
       if (receipt) await client.query('SELECT continuum_embedding_receipt_finish($1,$2,$3,$4,$5)',
         [principal.id, scope.id, receipt.keyHash, receipt.payloadDigest, result.memory.id]);

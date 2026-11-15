@@ -224,7 +224,7 @@ export function ingestRouter(
     const result = await processIngestDelivery(sourcePool, pluginId, id, hash, async (client) => {
       const captures = [];
       for (let index = 0; index < inputs.length; index += 1) {
-        const capture = await captureOne(client, embeddingRouting, principal, inputs[index], { transport: 'ingest' });
+        const capture = await captureOne(client, embeddingRouting, principal, inputs[index], { transport: 'ingest' }, relationThreshold);
         if (producerPool && (!proof || !await recordActivity(client, capture.memory.id, proof))) skippedAttributions += 1;
         captures.push(capture);
       }

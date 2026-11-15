@@ -144,8 +144,11 @@ The process uses a dedicated pool of two clients with finite acquisition and
 five-second statement/one-second lock ceilings, preserving stricter limits. It
 runs one dispatch per provider worker. Separate provider workers permit healthy
 routes to progress while another callback drains. Polling is one second. Claims
-contain at most 32 jobs, clamped to adapter capability and one approved privacy
-lineage unit. Metadata byte admission and a repeated locked gate bound aggregate
+contain at most 32 jobs, clamped to adapter capability, the shared pipeline JSON
+traversal allowance and one approved privacy lineage unit. The numeric 768-value
+response alone permits at most 13 jobs under the 10,000-node serializer limit.
+Adapter response envelopes and finite response-byte caps may require a smaller
+configured batch. Response validation and accounting still apply to every call. Metadata byte admission and a repeated locked gate bound aggregate
 title, separator and body hydration to 4 MiB. An individually oversized input is
 classified without loading its body. The lease is 30 seconds, renewed every ten
 seconds; renewal never extends the original accounting deadline.
@@ -155,9 +158,29 @@ residency, expiry, disabled owned-scope state and lease ownership gate hydration
 dispatch and apply. Successful vector, one completion
 identity, required audit and ready state commit together. A current vector already
 supplied by backfill reconciles without overwriting it. Backfill's own repair
-audits remain distinct. Completion changes neither source freshness nor current
-server-owned `related` metadata. The current queue accepts no worker-supplied
-relation candidates; it does not compute new advisory relations after capture.
+audits remain distinct. Completion never changes source freshness or unrelated
+current metadata. Capture and ingest retain the validated relation threshold
+(default `0.92`) as immutable advisory intent, including blocked work and later
+approved routing replacements. ACK and idempotent replay still perform no probe.
+
+Within atomic completion, SQL may probe at most five current candidates in the
+claim's same approved scope and vector space, excluding every member of that
+cohort. It charges the original candidate, hydration, output and storage
+allowances before loading text, and merges only server-owned `related` entries
+into current metadata, retaining at most five. This grants no general worker
+browse capability. Advisory metadata stays outside recall, review projections
+and generated AGENTS.md. The creator's additional memberships confer no probe
+authority.
+
+Native classification requires UTF8, PostgreSQL NFKC normalization and an actual
+catalog ICU en-US collation whose installed version matches its catalog version.
+It uses ICU lowercasing and the explicit ECMAScript whitespace set, including
+BOM and NBSP. Unicode-version differences remain possible; cross-version byte
+equivalence is not promised. Missing native capability, remaining budget, current
+candidates or bounded SQL availability may decline this optional probe while the
+vector completes and current relation metadata survives. The required completion
+audit records bounded `relationsStatus` reasons, without candidate IDs or bodies.
+An audit failure rolls vector, relations, accounting and ready state back together.
 
 ## Outages, ambiguity and privacy
 
