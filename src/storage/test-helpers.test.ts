@@ -18,7 +18,10 @@ it('rolls fixture cleanup back on seed failure and leaves every protected trigge
   try {
     await expect(resetData(pool)).rejects.toThrow('Synthetic fixture seed failure');
     expect((await pool.query('SELECT id FROM principals WHERE id=$1', [probe.id])).rowCount).toBe(1);
-    expect((await pool.query(`SELECT count(*)::int AS n FROM pg_catalog.pg_trigger WHERE tgname=ANY($1::text[]) AND tgenabled='O'`, [[
+    expect((await pool.query(`SELECT count(*)::int AS n FROM pg_catalog.pg_trigger trigger
+      JOIN pg_catalog.pg_class relation ON relation.oid=trigger.tgrelid
+      JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace
+      WHERE namespace.nspname=current_schema() AND trigger.tgname=ANY($1::text[]) AND trigger.tgenabled='O'`, [[
       'preserve_user_scope_approval_truncate', 'preserve_offboarding_event_truncate',
       'preserve_offboarding_run_event_truncate', 'preserve_offboarding_takeover_event',
       'guard_offboarding_run_truncate', 'preserve_coordination_operator_event_truncate',
@@ -42,7 +45,10 @@ it('preserves the original truncate failure and restores protected triggers befo
   try {
     await expect(resetData(pool)).rejects.toThrow('Synthetic fixture truncate failure');
     expect((await pool.query('SELECT id FROM principals WHERE id=$1', [probe.id])).rowCount).toBe(1);
-    expect((await pool.query(`SELECT count(*)::int AS n FROM pg_catalog.pg_trigger WHERE tgname=ANY($1::text[]) AND tgenabled='O'`, [[
+    expect((await pool.query(`SELECT count(*)::int AS n FROM pg_catalog.pg_trigger trigger
+      JOIN pg_catalog.pg_class relation ON relation.oid=trigger.tgrelid
+      JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace
+      WHERE namespace.nspname=current_schema() AND trigger.tgname=ANY($1::text[]) AND trigger.tgenabled='O'`, [[
       'preserve_user_scope_approval_truncate', 'preserve_offboarding_event_truncate',
       'preserve_offboarding_run_event_truncate', 'preserve_offboarding_takeover_event',
       'guard_offboarding_run_truncate', 'preserve_coordination_operator_event_truncate',
