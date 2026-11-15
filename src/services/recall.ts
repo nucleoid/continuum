@@ -13,7 +13,7 @@ import { recordRead as recordReadAudit } from '../audit/log.js';
 import { resolveReadableScopeIds, type AccessibleScope } from './access.js';
 import { asServiceError, dependencyUnavailable } from './errors.js';
 import { parseEventWindow, eventMatches, orderEventResults, type EventAnnotation } from '../temporal/model.js';
-import { readEventAnnotations } from '../storage/temporal.js';
+import { readEventAnnotations, selectEventCandidates } from '../storage/temporal.js';
 import { parseScopeString } from './scopes.js';
 import {
   applyRetrievalEnrichers,
@@ -113,9 +113,12 @@ export async function recallForPrincipal(
       onWork: enrichment?.onWork,
     }) : undefined;
     const hintPool = !ranked && (eventWindow || eventFilter) ? await recallCandidates(pool,recallOptions,eventWindow ? 100 : recallOptions.limit) : undefined;
+    const temporalCut = hintPool ? eventWindow
+      ? await evidenceTransaction(pool,client=>selectEventCandidates(client,principal.id,hintPool.candidates,eventWindow,recallOptions.limit))
+      : hintPool.candidates : undefined;
     const recalled = ranked && candidatePool ? { results: ranked.results, diagnostics: candidatePool.diagnostics }
-      : hintPool ? { diagnostics:hintPool.diagnostics, results:await hydrateRecallCandidates(pool,hintPool.candidates.map(c=>c.id),input.query,
-        new Map(hintPool.candidates.map(c=>[c.id,c.score])),scopeIds,input.types,enrichment?.readBudgetBytes,budget,false,eventFilter,principal.id) }
+      : hintPool && temporalCut ? { diagnostics:hintPool.diagnostics, results:await hydrateRecallCandidates(pool,temporalCut.map(c=>c.id),input.query,
+        new Map(temporalCut.map(c=>[c.id,c.score])),scopeIds,input.types,enrichment?.readBudgetBytes,budget,false,eventFilter,principal.id) }
         : await recall(pool, recallOptions);
     const embeddingAuditGroups = recalled.diagnostics.groups.map((group) => ({
       provider: group.provider,
@@ -151,7 +154,9 @@ export async function recallForPrincipal(
       ? await applyRetrievalEnrichers(results, principal.id, enrichment.registry, { ...enrichment.options, budget })
       : undefined;
     const deliver = async (auditPool: Queryable, deliveredResults: RecallResult[]): Promise<PrincipalRecallResult> => {
-      const events = await readEventAnnotations(auditPool, principal.id, deliveredResults.map(r => r.memory.id),true,enrichment?.readBudgetBytes,budget,Boolean(eventFilter || eventWindow));
+      const events = eventFilter || eventWindow
+        ? await readEventAnnotations(auditPool, principal.id, deliveredResults.map(r => r.memory.id),true,enrichment?.readBudgetBytes,budget,true)
+        : new Map();
       const annotations = new Map<string, EventAnnotation>();
       deliveredResults = deliveredResults.filter(result => {
         const event = events.get(result.memory.id);
@@ -237,7 +242,7 @@ export async function recallForPrincipal(
     budget?.assertLive();
     return delivered;
   } catch (error) {
-    if (reranking && ['55P03', '57014', '40P01'].includes(String((error as { code?: string })?.code))) {
+    if (['55P03', '57014', '40P01'].includes(String((error as { code?: string })?.code))) {
       throw dependencyUnavailable(error);
     }
     throw asServiceError(error);

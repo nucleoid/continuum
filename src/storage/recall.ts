@@ -8,7 +8,7 @@ import { assertEmbeddingVectorDimension } from './schema.js';
 import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
 import type { Queryable } from './queryable.js';
 import { eventMatches, orderEventResults, type EventWindow, type EventAnnotation } from '../temporal/model.js';
-import { eventPredicate, readEventAnnotations } from './temporal.js';
+import { eventPredicate, readEventAnnotations, selectEventCandidates } from './temporal.js';
 
 export const DEFAULT_RECALL_EMBEDDING_DEADLINE_MS = 10_000;
 export const MAX_RECALL_EMBEDDING_DEADLINE_MS = 30_000;
@@ -551,8 +551,9 @@ export async function recallCandidates(
 /** Compatible low-level final-cut wrapper. No reranker or evidence enrollment. */
 export async function recall(pool: Queryable, opts: RecallOptions): Promise<RecallOutput> {
   const selected = await recallCandidates(pool, opts, opts.eventWindow ? 100 : opts.limit);
-  const hydrateResults = () => hydrateRecallCandidates(pool, selected.candidates.map(c => c.id), opts.query,
-    new Map(selected.candidates.map(c => [c.id, c.score])), opts.scopeIds, opts.types, opts.readBudgetBytes, opts.budget, false, opts.eventFilter, opts.actor);
+  const cut = await selectEventCandidates(pool,opts.actor,selected.candidates,opts.eventWindow,opts.limit);
+  const hydrateResults = () => hydrateRecallCandidates(pool, cut.map(c => c.id), opts.query,
+    new Map(cut.map(c => [c.id, c.score])), opts.scopeIds, opts.types, opts.readBudgetBytes, opts.budget, false, opts.eventFilter, opts.actor);
   let results = await (!connectable(pool) ? queueBorrowedSql(pool, hydrateResults) : hydrateResults());
   if (opts.eventWindow || opts.eventFilter) {
     const events = opts.actor ? await readEventAnnotations(pool,opts.actor,results.map(r => r.memory.id),true,opts.readBudgetBytes,opts.budget,true) : new Map();

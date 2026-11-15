@@ -10,6 +10,7 @@ import { decideEvidencePolicy, type EvidenceAuthorityContext, type EvidencePolic
 import type { Reranking } from '../reranking/provider.js';
 import { runReranking, type RerankingDiagnostic } from '../reranking/runner.js';
 import type { BudgetReason } from '../pipeline/receipts.js';
+import { MAX_EVENT_INSPECTION_BYTES } from '../storage/temporal.js';
 
 interface AdmittedRecall {
   results: RecallResult[];
@@ -69,9 +70,13 @@ export async function rerankRecallPool(pool: pg.Pool, actor: string, input: Reca
     const metadata = await recallAuthorityMetadata(client, actor, selected.candidates.map(c => c.id), opts.scopeIds, opts.eventFilter);
     const sizes = new Map(metadata.map(r => [r.id, Number(r.bytes)]));
     let candidates = selected.candidates.filter(c => sizes.has(c.id));
+    const eventBytes = (rows: typeof candidates) => opts.eventFilter || opts.eventWindow
+      ? 1024 + rows.length * MAX_EVENT_INSPECTION_BYTES : 0;
     const fits = (rows: typeof candidates) => rows.length <= budget.available('candidates')
       && rows.every(c => sizes.get(c.id)! <= budget.profile.maxItemHydratedBytes)
-      && rows.reduce((n, c) => n + sizes.get(c.id)!, 1024) <= Math.min(opts.readBudgetBytes ?? Infinity, budget.available('hydratedBytes'));
+      && (!(opts.eventFilter || opts.eventWindow) || MAX_EVENT_INSPECTION_BYTES <= budget.profile.maxItemHydratedBytes)
+      && rows.reduce((n, c) => n + sizes.get(c.id)!, 1024) + eventBytes(rows)
+        <= Math.min(opts.readBudgetBytes ?? Infinity, budget.available('hydratedBytes'));
     if (!fits(candidates) || config.candidateLimit < limit) {
       candidates = candidates.slice(0, limit);
       reason = { status: 'fallback', reason: 'budget_exhausted' };

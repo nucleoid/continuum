@@ -73,8 +73,9 @@ describe('event annotations and candidate admission', () => {
     const f = await world(), good = await f.capture();
     await pool.query("UPDATE memories SET body='Changed source signal' WHERE id=$1",[good.memory.id]);
     expect(await hydrateRecallCandidates(pool,[good.memory.id],'signal',new Map(),[f.scope.id],undefined,undefined,undefined,false,filter,f.actor.id)).toEqual([]);
-    expect((await recallForPrincipal(pool,null,f.actor,{query:'signal',eventFilter:{...filter,includeUnknown:true}})).results).toEqual([]);
-    expect((await readEventAnnotations(pool,f.actor.id,[good.memory.id])).get(good.memory.id)).toBeNull();
+    const unknown=await recallForPrincipal(pool,null,f.actor,{query:'signal',eventFilter:{...filter,includeUnknown:true}});
+    expect(unknown.results.map(r=>r.memory.id)).toEqual([good.memory.id]);
+    expect((await readEventAnnotations(pool,f.actor.id,[good.memory.id])).get(good.memory.id)).toEqual({annotation:{status:'unknown'},version:null,sourceVersion:null});
     await writeEventAnnotation(pool,f.actor.id,good.memory.id,annotation());
     expect((await recallForPrincipal(pool,null,f.actor,{query:'signal',eventFilter:filter})).results).toHaveLength(1);
   });

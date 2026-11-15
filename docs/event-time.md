@@ -31,6 +31,9 @@ with explicit `includeUnknown: true` and remain visibly labelled.
 
 The window is a hint. It excludes nothing, and orders by core relevance first,
 known asserted overlap second, then stable ID. It introduces no recency weighting.
+Bounded overlap metadata selects the final candidate cut before source bodies
+are hydrated. Ordinary recall without temporal options performs no annotation
+hydration; fetch/browse inspection remains available separately.
 Filters and hints can combine; filtering precedes the single hint ordering.
 `eventFilter.at` searches currently readable, eligible evidence. It does not
 reconstruct past knowledge or revive expired, erased, archived or superseded rows.
@@ -40,8 +43,12 @@ version and its current authority, original expiry and canonical erasure lineage
 They are separate from caller metadata, source prose and generated AGENTS.md.
 Changing annotations alone cannot change generator bytes, ETag or freshness.
 Extraction candidates remain generated/unverified, outside normalized event time.
+When a source transition invalidates an annotation, the currently readable source
+projects unknown without exposing the old annotation or its version. It remains
+eligible for hints and explicit include-unknown filters. There is no silent
+carry-forward to a new source version or renewed expiry ceiling.
 
-Recall returns normalized status, precision/assertion and UTC bounds when known,
+Temporal recall returns normalized status, precision/assertion and UTC bounds when known,
 plus authorized version provenance. Original notation and ambiguity candidate
 prose are excluded from discovery summaries. Full current inspection through
 memory fetch/browse retains those bounded fields under the same evidence gate.
@@ -75,3 +82,7 @@ reuse the evaluation fixture, scoring and five-observation latency policy.
 False exclusion is reported separately from ranking quality; synthesis remains
 unsupported. This is mechanism evidence, not real-model, cross-head performance
 or normalized-storage qualification. Existing frozen inputs remain unchanged.
+Hard predicates currently evaluate the current evidence gate per scanned row.
+No tenant-volume qualification is claimed. Large scans can reach the existing
+vector deadline and fall back to lexical search; rehearse actual tenant volumes
+before making latency or vector-availability guarantees.

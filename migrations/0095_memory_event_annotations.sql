@@ -118,9 +118,11 @@ BEGIN
   IF annotation.version_id IS NULL THEN RETURN jsonb_build_object('version',NULL,'sourceVersion',NULL,'bytes',128); END IF;
   IF locked THEN PERFORM continuum_evidence_lock(actor,ARRAY[annotation.version_id]); END IF;
   IF NOT continuum_evidence_eligible(actor,annotation.version_id,NULL)
-    OR NOT EXISTS(SELECT 1 FROM evidence_roots WHERE source_memory_id=memory.id AND current_version=annotation.source_version) THEN RETURN NULL; END IF;
+    OR NOT EXISTS(SELECT 1 FROM evidence_roots WHERE source_memory_id=memory.id AND current_version=annotation.source_version) THEN
+    RETURN jsonb_build_object('version',NULL,'sourceVersion',NULL,'bytes',128);
+  END IF;
   SELECT octet_length(payload) INTO bytes FROM evidence_payloads WHERE version_id=annotation.version_id;
-  IF bytes IS NULL OR bytes>8192 THEN RETURN NULL; END IF;
+  IF bytes IS NULL OR bytes>8192 THEN RETURN jsonb_build_object('version',NULL,'sourceVersion',NULL,'bytes',128); END IF;
   RETURN jsonb_build_object('bytes',bytes+256,'version',annotation.version_id,'sourceVersion',annotation.source_version);
 END $$;
 CREATE FUNCTION continuum_event_read(actor UUID,memory_id UUID,locked BOOLEAN) RETURNS JSONB LANGUAGE plpgsql VOLATILE SECURITY DEFINER AS $$

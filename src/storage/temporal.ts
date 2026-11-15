@@ -3,6 +3,25 @@ import { parseEventAnnotation, type EventAnnotationInput, type EventInspection, 
 import type { Budget } from '../pipeline/budget.js';
 import { boundedMemoryReadRows } from './memory-reads.js';
 
+// SQL caps payloads at8192 bytes and adds256 bytes of inspection provenance.
+export const MAX_EVENT_INSPECTION_BYTES = 8192 + 256;
+
+/** Select a bounded identity cut using overlap flags, before loading source
+ * bodies. Final delivery still validates current annotations and orders once. */
+export async function selectEventCandidates<T extends { id: string; score: number }>(client: Queryable,
+  actor: string | undefined, candidates: readonly T[], window: EventWindow | undefined, limit: number): Promise<T[]> {
+  if (!window || !actor || !candidates.length) return candidates.slice(0,limit);
+  if (candidates.length>100) throw new RangeError('Too many event candidates');
+  const rows=(await client.query<{ id: string; overlaps: boolean }>(
+    `WITH locked AS MATERIALIZED (SELECT id FROM memories WHERE id=ANY($2::uuid[]) ORDER BY id FOR SHARE)
+     SELECT id,continuum_event_matches($1,id,$3::jsonb) AS overlaps FROM locked`,
+    [actor,candidates.map(c=>c.id),JSON.stringify({...window,includeUnknown:false})])).rows;
+  const overlaps=new Map(rows.map(row=>[row.id,Number(row.overlaps)]));
+  const cut=new Set([...candidates].sort((a,b)=>b.score-a.score || (overlaps.get(b.id)??0)-(overlaps.get(a.id)??0)
+    || a.id.localeCompare(b.id)).slice(0,limit).map(c=>c.id));
+  return candidates.filter(c=>cut.has(c.id));
+}
+
 export async function writeEventAnnotation(client: Queryable, actor: string, memoryId: string, value: EventAnnotationInput): Promise<EventInspection> {
   return (await client.query<{ result: EventInspection }>('SELECT continuum_event_write($1,$2,$3) AS result',
     [actor, memoryId, JSON.stringify(parseEventAnnotation(value))])).rows[0].result;
