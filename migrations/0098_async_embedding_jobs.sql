@@ -985,6 +985,9 @@ BEGIN
     WHERE m.id IN (SELECT continuum_embedding_scope_memories(target_scope)) AND (s.input_hash IS NOT NULL OR s.current_target IS NOT NULL OR NOT s.erased
       OR EXISTS(SELECT 1 FROM memory_embeddings WHERE memory_id=m.id)
       OR EXISTS(SELECT 1 FROM embedding_jobs WHERE memory_id=m.id) OR EXISTS(SELECT 1 FROM embedding_capture_receipts WHERE memory_id=m.id))
+      -- The incumbent bounded memory phase owns deletion/counting of vectors
+      -- still in this scope. Do not erase a future page's vectors ahead of it.
+      AND (m.scope_id<>target_scope OR NOT EXISTS(SELECT 1 FROM memory_embeddings WHERE memory_id=m.id))
     ORDER BY m.id LIMIT page_limit FOR UPDATE OF m SKIP LOCKED LOOP
     PERFORM continuum_embedding_erase_memory(item.id,least(page_limit,100));processed:=processed+1;
   END LOOP;

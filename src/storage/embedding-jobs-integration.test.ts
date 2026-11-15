@@ -369,14 +369,25 @@ describe('durable embedding SQL, capture and worker integration', () => {
   it('includes queue hashes, receipts, routes and vectors in real approved offboarding proof', async () => {
     await embeddingQueueFixture(async f => {
       const accepted = await captureMemory(f.app, f.router, f.principal, input(f), {}, { idempotencyKey: 'erase-this-key' });
+      await captureMemory(f.app, f.router, f.principal, input(f, 'Second erasure page'));
+      await captureMemory(f.app, f.router, f.principal, input(f, 'Third erasure page'));
       expect(await runWorker(f)).toBe('processed');
+      expect((await f.owner.query('SELECT count(*)::int AS n FROM memory_embeddings')).rows[0].n).toBe(3);
       const admin = (await getPrincipal(f.operator, f.adminId))!;
       await mapOwnedUserScope(f.operator, admin, f.actorId, f.scopeId, true);
-      let result = await offboardPrincipal(f.operator, admin, f.actorId, { confirmationScopeId: f.scopeId, batchSize: 100 });
-      for (let iteration = 0; !result.complete && iteration < 10; iteration++) {
-        result = await offboardPrincipal(f.operator, admin, f.actorId, { confirmationScopeId: f.scopeId, batchSize: 100 });
+      const checkActualCounts = async () => {
+        const actual = (await f.owner.query(`SELECT (SELECT embeddings_processed FROM principal_offboarding_runs WHERE principal_id=$1)::int AS processed,
+          (SELECT count(*) FROM memory_embeddings e JOIN memories m ON m.id=e.memory_id WHERE m.scope_id=$2)::int AS remaining`, [f.actorId, f.scopeId])).rows[0];
+        expect(actual.processed + actual.remaining).toBe(3);
+      };
+      let result = await offboardPrincipal(f.operator, admin, f.actorId, { confirmationScopeId: f.scopeId, batchSize: 1 });
+      await checkActualCounts();
+      for (let iteration = 0; !result.complete && iteration < 30; iteration++) {
+        result = await offboardPrincipal(f.operator, admin, f.actorId, { confirmationScopeId: f.scopeId, batchSize: 1 });
+        await checkActualCounts();
       }
       expect(result.complete).toBe(true);
+      expect(result.embeddings).toBe(3);
       expect((await f.owner.query('SELECT continuum_embedding_scope_is_erased($1) AS clean', [f.scopeId])).rows[0].clean).toBe(true);
       expect((await f.owner.query('SELECT count(*)::int AS n FROM memory_embeddings WHERE memory_id=$1', [accepted.memory.id])).rows[0].n).toBe(0);
       expect((await f.owner.query(`SELECT count(*)::int AS n FROM embedding_capture_receipts WHERE key_hash IS NOT NULL OR payload_digest IS NOT NULL`)).rows[0].n).toBe(0);

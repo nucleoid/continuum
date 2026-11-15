@@ -824,19 +824,21 @@ async function scrubPromotionScope(client: pg.PoolClient, actorId: string, princ
         'SELECT continuum_operator_scrub_brief_scope($1,$2,$3,$4) AS privacy',
         [actorId, principalId, scopeId, Math.min(batchSize, 1_000)])).rows[0].privacy;
     }
-    const embeddingSchema = await client.query<{ installed: boolean; available: boolean }>(
-      `SELECT pg_catalog.to_regclass('embedding_jobs') IS NOT NULL AS installed,
-        pg_catalog.to_regprocedure('continuum_operator_scrub_embedding_scope(uuid,uuid,uuid,integer)') IS NOT NULL AS available`);
-    let embedding = { complete: true, processed: 0, batch_full: false };
-    if (embeddingSchema.rows[0]?.installed) {
-      if (!embeddingSchema.rows[0].available) throw new ServiceError('DEPENDENCY_UNAVAILABLE', 'Embedding privacy migration is required');
-      embedding = (await client.query<{ privacy: typeof embedding }>(
-        'SELECT continuum_operator_scrub_embedding_scope($1,$2,$3,$4) AS privacy',
-        [actorId, principalId, scopeId, Math.min(batchSize, 1_000)])).rows[0].privacy;
-    }
-    return { complete: outbox.complete && activity.complete && evidence.complete && extraction.complete && connector.complete && briefs.complete && embedding.complete,
-      processed: outbox.processed + activity.processed + evidence.processed + extraction.processed + connector.processed + briefs.processed + embedding.processed,
-      batch_full: outbox.batch_full || activity.batch_full || evidence.batch_full || extraction.batch_full || connector.batch_full || briefs.batch_full || embedding.batch_full };
+    return { complete: outbox.complete && activity.complete && evidence.complete && extraction.complete && connector.complete && briefs.complete,
+      processed: outbox.processed + activity.processed + evidence.processed + extraction.processed + connector.processed + briefs.processed,
+      batch_full: outbox.batch_full || activity.batch_full || evidence.batch_full || extraction.batch_full || connector.batch_full || briefs.batch_full };
+}
+
+async function scrubEmbeddingScope(client: pg.PoolClient, actorId: string, principalId: string,
+  scopeId: string, batchSize: number): Promise<{ complete: boolean; processed: number; batch_full?: boolean }> {
+  const schema = await client.query<{ installed: boolean; available: boolean }>(
+    `SELECT pg_catalog.to_regclass('embedding_jobs') IS NOT NULL AS installed,
+      pg_catalog.to_regprocedure('continuum_operator_scrub_embedding_scope(uuid,uuid,uuid,integer)') IS NOT NULL AS available`);
+  if (!schema.rows[0]?.installed) return { complete: true, processed: 0 };
+  if (!schema.rows[0].available) throw new ServiceError('DEPENDENCY_UNAVAILABLE', 'Embedding privacy migration is required');
+  return (await client.query<{ privacy: { complete: boolean; processed: number; batch_full?: boolean } }>(
+    'SELECT continuum_operator_scrub_embedding_scope($1,$2,$3,$4) AS privacy',
+    [actorId, principalId, scopeId, Math.min(batchSize, 1_000)])).rows[0].privacy;
 }
 
 const PRESERVED_AUDIT_OPERATIONS = [
@@ -1588,6 +1590,7 @@ async function offboardPrincipalCore(
     let membershipCount = 0;
     let entraCount = 0;
     let aliasCount = 0;
+    let ownedCoordinationComplete = Boolean(run.rows[0].scope_cleanup_complete);
     if (!run.rows[0].scope_cleanup_complete) {
       const accessUpdate = await client.query<{
         memberships_deactivated: number;
@@ -1627,7 +1630,7 @@ async function offboardPrincipalCore(
           [principalId, scopeId],
         );
         const ownedAfter = await ownedScopePrivacyState(client, actor.id, scopeId);
-        const ownedCoordinationComplete = currentPrivacyState.rows[0]?.scope_complete === true
+        ownedCoordinationComplete = currentPrivacyState.rows[0]?.scope_complete === true
           && ownedScopeIsClean(ownedAfter);
         coordinationPrivacyComplete =
           coordinationPrivacy.rows[0]?.privacy?.complete === true
@@ -1644,9 +1647,6 @@ async function offboardPrincipalCore(
         coordinationPrivacyProgressed = coordinationPrivacyProgressed || outboxPrivacy.processed > 0;
         if (!outboxPrivacy.complete && !outboxPrivacy.batch_full && coordinationPrivacyReason === null) {
           coordinationPrivacyReason = 'lock_busy';
-        }
-        if (ownedCoordinationComplete && coordinationPrivacyComplete) {
-          await writeOffboardingRun(client, principalId, actor.id, 'scope_complete');
         }
         await client.query('RELEASE SAVEPOINT offboarding_coordination_privacy');
       } catch (error) {
@@ -1757,6 +1757,17 @@ async function offboardPrincipalCore(
         operation: 'principal_memory_erased', principal_id: principalId,
       })],
     );
+    // Count the actual incumbent vector deletion before the independent queue
+    // scrub. Completed-run repairs must start their new ledger first as well.
+    const embeddingPrivacy = await scrubEmbeddingScope(client, actor.id, principalId, scopeId, batchSize);
+    coordinationPrivacyComplete = coordinationPrivacyComplete && embeddingPrivacy.complete;
+    coordinationPrivacyProgressed = coordinationPrivacyProgressed || embeddingPrivacy.processed > 0;
+    if (!embeddingPrivacy.complete && !embeddingPrivacy.batch_full && coordinationPrivacyReason === null) {
+      coordinationPrivacyReason = 'lock_busy';
+    }
+    if (ownedCoordinationComplete && coordinationPrivacyComplete && !run.rows[0].scope_cleanup_complete) {
+      await writeOffboardingRun(client, principalId, actor.id, 'scope_complete');
+    }
     await client.query(
       `CREATE TEMP TABLE offboarding_audit_targets (
          id BIGINT PRIMARY KEY, request_id TEXT, reason TEXT NOT NULL
