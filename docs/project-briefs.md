@@ -32,10 +32,18 @@ Current/history/dry-run reads use the same locked source, root-generation,
 membership, Entra-freshness, expiry and privacy gates. A whole unavailable block
 is withheld before its prose, citations or hash are hydrated. Safe partial reads
 can retain unaffected blocks; withheld inputs mask cutoff, coverage and watermark
-metadata. Final delivered block authority is checked again after output validation
-and the required read audit, within the same transaction. Unknown/withheld are
+metadata. Final delivered block authority and the complete response projection
+are checked again after output validation and the required read audit, within the
+same transaction. A changed expiry, coverage or preview diff refuses delivery and
+rolls back that audit, including when no block was generated. Unknown/withheld are
 not proof of absence. Old permissions, a version author, a saved UUID, a source
 prefix, a caller GUC or `SET ROLE` confer no processing or reader authority.
+
+Current, history and preview reads lock their complete selected source/root union
+in UUID order before visiting individual blocks. A history page selects at most
+ten versions and 320 blocks; the internal lock helper reads metadata only and
+does not grant access or bypass any block gate. SQL deadlines still bound waits;
+this is not a universal contention or fairness guarantee.
 
 The processed watermark and scope counters remain internal; the wire `watermark`
 is null. `fresh` reports current admitted dependencies and configuration, not
@@ -189,11 +197,13 @@ budget. Final library and actual REST/MCP envelopes are measured before audit
 commit; remote limits can tighten them. Oversized results refuse delivery instead
 of truncating citations or admitting an oversized best item.
 
-Observed project/org generations are committed row state. Source and policy
-changes advance them transactionally. A page locks those rows before its source
-SELECT and records its cutoff before selection. A writer cannot commit a newer
-enrolled source behind that page's observed frontier. A changed committed epoch
-between metadata pages restarts the pre-disclosure inventory, at most twice,
+Observed project/org generations are committed row state. Canonical source and
+policy changes advance them transactionally; lazy enrollment and valid snapshot
+pointer maintenance do not represent another source change. A page reads the
+frontier before selection, samples its cutoff before a final fresh frontier read,
+and requires both tokens to match. It holds no epoch-row lock across source reads
+or snapshot adoption. A concurrent commit detected within a page or between
+metadata pages restarts the pre-disclosure inventory, at most twice,
 without refunding work or replacing its allowance/deadline. A lower-ID or delayed
 lower-sequence commit therefore cannot disappear behind a saved UUID cursor.
 The internal watermark separates inventory cycle, kind/UUID position, committed
@@ -202,6 +212,11 @@ not completion proofs. A finite cap records partial coverage. Completed capped
 work does not enqueue another allowance merely because it is partial. Large
 scopes can remain partial and need deliberate new work; there is no unlimited
 scope-volume or universal liveness claim.
+
+Allowances bound each original workflow. A deliberate new request key or a
+genuinely changed source frontier creates new work; there is no rolling
+installation-wide spend quota or automatic queue retention policy. Operators
+enabling priced profiles must separately bound incoming work and retained data.
 
 Full refresh requests every section. Delta refresh recomputes affected sections
 from the same current evidence inventory, and mechanically copies unchanged
@@ -229,7 +244,8 @@ Crashes, stale leases, cancellation, failed settlement and ambiguous restart par
 work unavailable. They never replace identities, renew a deadline or refund
 ambiguous maxima. A completed rejected provider promise can queue a retry only
 after every original attempt has actually settled and the original remaining
-call/retry/time budgets admit it. Backoff is persisted at 1, 2 then 4 seconds,
+call/retry/time budgets admit every nonempty dirty section group. Backoff is
+persisted at 1, 2 then 4 seconds,
 with at most three retries; tighter original limits can stop earlier. Earlier
 successful section outputs are discarded on a failed generation rather than
 stored as an unmanaged retry cache. Unknown usage retains its charged maxima.
@@ -259,7 +275,7 @@ actual blocks, run cancellation and workflow state; counters and old receipts ar
 insufficient. Locked gaps remain incomplete. Payload-free machine identities and
 accounting remain; process/provider/downloaded/backup copies need separate policy.
 
-Quiesce old artifact readers/writers and privacy workers, back up data and both
+Quiesce old memory/artifact readers/writers and privacy workers, back up data and both
 ledgers, apply the forward migration as owner with database TEMPORARY privilege,
 regrant exact profiles and verify readiness before restarting compatible binaries.
 0097 verifies predecessor bodies, owners, SQL-NULL search paths and ACLs before
@@ -277,6 +293,12 @@ workers while preserving current source/read/erasure guards and conservative
 accounting. Schema reversal requires a verified backup and reviewed replay;
 binary rollback cannot restore erased bytes. Never delete ledgers or broaden
 roles/search paths to recover availability. No live operation is authorized here.
+
+Current promotion clients acquire both enrolled scope epochs in UUID order before
+inserting the destination. Old promotion clients lack that capability and can
+invert their epoch locks during opposite-direction promotions. Do not mix those
+old writers with enrolled brief scopes; disabling synthesis does not remove the
+enrolled epoch rows. Regrant APP/OP profiles and restart compatible writers.
 
 The separately versioned `project-briefs-v1` evaluation measures actual persisted
 deterministic full/delta mechanics, exact alignment, labels, unknown/contradiction

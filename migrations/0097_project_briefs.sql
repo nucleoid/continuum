@@ -227,6 +227,46 @@ BEGIN
   SELECT jsonb_object_agg(scope_id::text,generation) INTO result FROM brief_scope_epochs WHERE scope_id IN (target_scope,continuum_org_scope_id());
   RETURN result;
 END $$;
+-- Canonical promotion writes the destination before the source. Acquire both
+-- enrolled epochs first, so opposite promotions cannot invert their row order.
+CREATE FUNCTION continuum_brief_promotion_lock(actor UUID,source_memory UUID,target_scope UUID) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER AS $$
+#variable_conflict use_column
+DECLARE source_scope UUID;
+BEGIN
+  SELECT scope_id INTO source_scope FROM memories WHERE id=source_memory AND state='live' AND promoted_to_id IS NULL FOR UPDATE;
+  IF source_scope IS NULL OR source_scope=target_scope
+    OR NOT continuum_evidence_can_access(actor,source_scope,TRUE) OR NOT continuum_evidence_can_access(actor,target_scope,TRUE)
+    OR NOT EXISTS(SELECT 1 FROM scopes WHERE id=target_scope)
+    OR (EXISTS(SELECT 1 FROM scopes WHERE id=target_scope AND kind='org') AND NOT EXISTS(
+      SELECT 1 FROM scope_memberships m WHERE m.principal_id=actor AND m.scope_id=target_scope AND m.role='admin'
+        AND continuum_membership_is_effective(m.active,m.source_kind))) THEN
+    RAISE insufficient_privilege USING MESSAGE='Promotion unavailable';
+  END IF;
+  PERFORM scope_id FROM brief_scope_epochs WHERE scope_id IN(source_scope,target_scope) ORDER BY scope_id FOR UPDATE;
+END $$;
+
+-- Prelock one complete read operation before visiting individual blocks or
+-- historical versions. This grants no authority and reads no managed payload.
+CREATE FUNCTION continuum_brief_lock_views(target_definition UUID,view_ids UUID[]) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER AS $$
+#variable_conflict use_column
+DECLARE evidence_ids UUID[];
+BEGIN
+  IF target_definition IS NULL OR view_ids IS NULL OR cardinality(view_ids) NOT BETWEEN 1 AND 10
+    OR EXISTS(SELECT 1 FROM unnest(view_ids) requested(id) LEFT JOIN brief_versions v
+      ON v.id=requested.id AND v.definition_id=target_definition WHERE v.id IS NULL) THEN
+    RAISE check_violation USING MESSAGE='Brief view bounds unavailable';
+  END IF;
+  SELECT array_agg(id ORDER BY id) INTO evidence_ids FROM (
+    SELECT anchor_version AS id FROM brief_versions WHERE id=ANY(view_ids) AND definition_id=target_definition
+    UNION SELECT b.evidence_version FROM brief_blocks b JOIN brief_versions v ON v.id=b.version_id
+      WHERE v.id=ANY(view_ids) AND v.definition_id=target_definition
+  ) selected;
+  IF cardinality(evidence_ids)>33*cardinality(view_ids) THEN RAISE check_violation USING MESSAGE='Brief view bounds unavailable'; END IF;
+  PERFORM m.id FROM memories m WHERE m.id IN(SELECT r.source_memory_id FROM evidence_roots r
+    JOIN evidence_closure c ON c.root_id=r.id WHERE c.version_id=ANY(evidence_ids)) ORDER BY m.id FOR SHARE;
+  PERFORM r.id FROM evidence_roots r WHERE r.id IN(SELECT root_id FROM evidence_closure
+    WHERE version_id=ANY(evidence_ids)) ORDER BY r.id FOR SHARE;
+END $$;
 CREATE FUNCTION continuum_brief_audience(actor UUID,version UUID,target_scope UUID,locality TEXT) RETURNS BOOLEAN LANGUAGE sql VOLATILE SECURITY DEFINER AS $$
   SELECT continuum_evidence_eligible(actor,version,locality) AND NOT EXISTS(
     SELECT 1 FROM evidence_closure c JOIN evidence_roots r ON r.id=c.root_id
@@ -732,6 +772,7 @@ BEGIN
   SELECT * INTO STRICT v FROM brief_versions WHERE id=version;
   SELECT * INTO STRICT d FROM brief_definitions WHERE id=v.definition_id FOR SHARE;
   PERFORM continuum_brief_authorize(actor,d.scope_id,FALSE);
+  PERFORM continuum_brief_lock_views(d.id,ARRAY[v.id]);
   PERFORM continuum_evidence_lock(actor,ARRAY[v.anchor_version],d.scope_id);
   IF NOT continuum_brief_audience(actor,v.anchor_version,d.scope_id,NULL) THEN RETURN jsonb_build_object('status','unavailable','blocks','[]'::jsonb); END IF;
   denied:=EXISTS(SELECT 1 FROM brief_run_inputs i WHERE i.run_id=v.run_id AND NOT continuum_brief_audience(actor,i.version_id,d.scope_id,NULL));
@@ -783,20 +824,26 @@ BEGIN
 END $$;
 CREATE FUNCTION continuum_brief_history(actor UUID,definition UUID,after_version UUID,page_limit INTEGER) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
 #variable_conflict use_column
-DECLARE d brief_definitions%ROWTYPE; item RECORD; items JSONB:='[]'; n INTEGER:=0; cursor UUID; result JSONB;
+DECLARE d brief_definitions%ROWTYPE; item UUID; views UUID[]; items JSONB:='[]'; n INTEGER:=0; cursor UUID; result JSONB;
 BEGIN
   SELECT * INTO STRICT d FROM brief_definitions WHERE id=definition FOR SHARE;
   PERFORM continuum_brief_authorize(actor,d.scope_id,FALSE);
   IF page_limit IS NULL OR page_limit NOT BETWEEN 1 AND 10 OR (after_version IS NOT NULL AND NOT EXISTS(SELECT 1 FROM brief_versions WHERE id=after_version AND definition_id=d.id)) THEN
     RAISE check_violation USING MESSAGE='Brief history cursor unavailable'; END IF;
-  FOR item IN SELECT v.id FROM brief_versions v JOIN brief_runs r ON r.id=v.run_id WHERE v.definition_id=d.id AND NOT r.dry_run
+  SELECT array_agg(id ORDER BY created_at DESC,id DESC) INTO views FROM (
+    SELECT v.id,v.created_at FROM brief_versions v JOIN brief_runs r ON r.id=v.run_id WHERE v.definition_id=d.id AND NOT r.dry_run
     AND (after_version IS NULL OR (v.created_at,v.id)<(SELECT created_at,id FROM brief_versions WHERE id=after_version))
-    ORDER BY v.created_at DESC,v.id DESC LIMIT page_limit+1 LOOP
-    n:=n+1; IF n>page_limit THEN EXIT; END IF;
-    result:=continuum_brief_view(actor,item.id);
-    IF octet_length(items::text)+octet_length(result::text)>131072 THEN RAISE program_limit_exceeded USING MESSAGE='Brief history unavailable'; END IF;
-    items:=items||jsonb_build_array(result); cursor:=item.id;
-  END LOOP;
+    ORDER BY v.created_at DESC,v.id DESC LIMIT page_limit+1
+  ) selected;
+  n:=COALESCE(cardinality(views),0);
+  IF n>0 THEN
+    PERFORM continuum_brief_lock_views(d.id,views[1:page_limit]);
+    FOREACH item IN ARRAY views[1:page_limit] LOOP
+      result:=continuum_brief_view(actor,item);
+      IF octet_length(items::text)+octet_length(result::text)>131072 THEN RAISE program_limit_exceeded USING MESSAGE='Brief history unavailable'; END IF;
+      items:=items||jsonb_build_array(result); cursor:=item;
+    END LOOP;
+  END IF;
   RETURN jsonb_build_object('scopeId',d.scope_id,'items',items,'nextCursor',CASE WHEN n>page_limit THEN cursor END);
 END $$;
 CREATE FUNCTION continuum_brief_result(actor UUID,run_id UUID) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
@@ -804,10 +851,12 @@ CREATE FUNCTION continuum_brief_result(actor UUID,run_id UUID) RETURNS JSONB LAN
 DECLARE j brief_runs%ROWTYPE; d brief_definitions%ROWTYPE; result JSONB; proposed JSONB; previous JSONB;
 BEGIN
   SELECT * INTO STRICT j FROM brief_runs WHERE id=run_id;
-  SELECT * INTO STRICT d FROM brief_definitions WHERE id=j.definition_id;
+  SELECT * INTO STRICT d FROM brief_definitions WHERE id=j.definition_id FOR SHARE;
   PERFORM continuum_brief_authorize(actor,d.scope_id,TRUE);
   result:=jsonb_build_object('scopeId',d.scope_id,'runId',j.id,'status',j.state,'dryRun',j.dry_run);
   IF j.state='complete' AND j.result_version IS NOT NULL THEN
+    PERFORM continuum_brief_lock_views(d.id,ARRAY(SELECT DISTINCT id FROM
+      unnest(ARRAY[j.result_version,CASE WHEN j.dry_run THEN j.expected_head END]) selected(id) WHERE id IS NOT NULL));
     proposed:=continuum_brief_view(actor,j.result_version);
     result:=result||jsonb_build_object('result',proposed);
     IF j.dry_run THEN
@@ -897,7 +946,7 @@ DO $$
 DECLARE schema_name TEXT:=current_schema(); f RECORD; signature TEXT; definition TEXT; revised TEXT; r RECORD;
   app_signatures TEXT[]:=ARRAY['continuum_brief_configure(uuid,uuid,text,boolean)','continuum_brief_refresh(uuid,text,text,boolean,text)',
     'continuum_brief_read(uuid,text)','continuum_brief_history(uuid,uuid,uuid,integer)','continuum_brief_result(uuid,uuid)','continuum_brief_is_ready()',
-    'continuum_brief_delivery(uuid,uuid,text[])'];
+    'continuum_brief_delivery(uuid,uuid,text[])','continuum_brief_promotion_lock(uuid,uuid,uuid)'];
   op_signatures TEXT[]:=ARRAY['continuum_operator_install_brief_profile(uuid,jsonb,boolean)',
     'continuum_operator_bind_brief_worker(uuid,name,uuid,uuid,text,boolean)','continuum_operator_scrub_brief_scope(uuid,uuid,uuid,integer)'];
 BEGIN

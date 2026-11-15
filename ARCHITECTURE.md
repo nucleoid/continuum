@@ -137,7 +137,8 @@ intersects eligible org references and every current dependency; privileged
 refresher/worker memberships do not widen it. Current/history/dry-run REST/MCP
 services share pre-hydration block gates, final output validation and required
 audits. Typed bound-LOGIN work pages metadata within its original allowance and
-deadline, pins committed scope generations before selection, and retains every
+deadline, compares committed scope generations around selection without holding
+epoch locks over source adoption, and retains every
 section-call attempt through finite settled-failure backoff. Explicit independent
 request contracts permit section-specific disclosure and byte-preserving delta;
 unknown isolation keeps whole-input dependencies. Full/delta publication uses

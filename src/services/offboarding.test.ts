@@ -821,6 +821,8 @@ describe('offboarding and erasure', () => {
     for (const relation of ['brief_blocks', 'brief_runs', 'brief_run_inputs', 'pipeline_budget_workflows']) {
       expect(briefPhysical).toContain(relation);
     }
+    // This checks the wrapper's retained audit predicate, not the inner brief
+    // scans: SECURITY DEFINER functions are not inlined by EXPLAIN.
     const briefPlan = (await pool.query(`EXPLAIN (FORMAT JSON) ${briefVerifier.replaceAll('target_run', '$1::uuid')}`, [runId]))
       .rows[0]['QUERY PLAN'][0].Plan as Record<string, unknown>;
     visit(briefPlan);

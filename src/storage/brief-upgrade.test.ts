@@ -50,9 +50,11 @@ it('gives APP serving but no raw/worker/operator brief capabilities and catches 
     const role=(await f.app.query('SELECT session_user AS role')).rows[0].role;
     expect((await f.owner.query(`SELECT has_table_privilege($1,'brief_blocks','SELECT,INSERT,UPDATE,DELETE') AS raw,
       has_function_privilege($1,'continuum_brief_read(uuid,text)','EXECUTE') AS serving,
+      has_function_privilege($1,'continuum_brief_promotion_lock(uuid,uuid,uuid)','EXECUTE') AS promotion,
+      has_function_privilege($1,'continuum_brief_lock_views(uuid,uuid[])','EXECUTE') AS view_lock,
       has_function_privilege($1,'continuum_brief_claim(text,uuid,jsonb)','EXECUTE') AS worker,
       has_function_privilege($1,'continuum_operator_install_brief_profile(uuid,jsonb,boolean)','EXECUTE') AS operator`,[role])).rows[0])
-      .toEqual({ raw: false,serving: true,worker: false,operator: false });
+      .toEqual({ raw: false,serving: true,promotion: true,view_lock: false,worker: false,operator: false });
     await requireBriefsReady(f.app);
     await f.owner.query('ALTER TABLE evidence_payloads DISABLE TRIGGER brief_payload_erased');
     await expect(requireBriefsReady(f.app)).rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE' });
