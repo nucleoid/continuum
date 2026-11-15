@@ -53,6 +53,8 @@ CREATE TABLE brief_runs(
   next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),failures INTEGER NOT NULL DEFAULT 0 CHECK(failures BETWEEN 0 AND 3),
   UNIQUE(definition_id,request_key));
 CREATE INDEX brief_runs_pending_idx ON brief_runs(definition_id,created_at,id) WHERE state IN ('queued','running');
+CREATE INDEX brief_runs_failed_inventory_idx ON brief_runs(definition_id,expected_head,config_generation,profile_generation,created_at DESC,id DESC)
+  WHERE state='unavailable' AND inventory_done AND NOT dry_run;
 CREATE TABLE brief_run_inputs(run_id UUID NOT NULL REFERENCES brief_runs(id),version_id UUID NOT NULL REFERENCES evidence_versions(id),
   root_id UUID NOT NULL REFERENCES evidence_roots(id),bytes INTEGER NOT NULL CHECK(bytes>=0),
   sections TEXT[] NOT NULL CHECK(cardinality(sections) BETWEEN 1 AND 5 AND sections <@ ARRAY['purpose','decisions','implementation','unknowns','coverage']::text[]),
@@ -431,7 +433,7 @@ CREATE FUNCTION continuum_brief_source_sections(memory_type TEXT) RETURNS TEXT[]
 $$;
 CREATE FUNCTION continuum_brief_claim(profile_id TEXT,worker UUID,descriptor JSONB) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
 #variable_conflict use_column
-DECLARE j brief_runs%ROWTYPE; d brief_definitions%ROWTYPE; b brief_worker_bindings%ROWTYPE; item RECORD; v UUID;
+DECLARE j brief_runs%ROWTYPE; failed_work brief_runs%ROWTYPE; d brief_definitions%ROWTYPE; b brief_worker_bindings%ROWTYPE; item RECORD; v UUID;
   n INTEGER:=0; probes INTEGER:=0; admitted INTEGER:=0; total INTEGER:=0; capacity INTEGER; phase INTEGER; after_id UUID;
   bytes BIGINT:=0; added_bytes BIGINT:=0; metadata_bytes BIGINT:=0; frontier_value JSONB; cutoff_value TIMESTAMPTZ; dirty TEXT[];
   more BOOLEAN:=FALSE; stale RECORD; all_sections TEXT[]:=ARRAY['purpose','decisions','implementation','unknowns','coverage'];
@@ -603,6 +605,31 @@ BEGIN
           EXCEPT SELECT i.version_id FROM brief_run_inputs i WHERE i.run_id=j.id AND requested.section=ANY(i.sections)))
         OR EXISTS(SELECT 1 FROM brief_blocks bb WHERE bb.version_id=d.head AND bb.section=requested.section
           AND NOT continuum_brief_audience(b.principal_id,bb.evidence_version,d.scope_id,NULL))) INTO dirty;
+    END IF;
+    -- A changed coarse epoch permits a bounded metadata inventory, not a new
+    -- paid attempt for the same failed work. Inspect one indexed predecessor;
+    -- duplicate probes retain their manifest so later epochs stay suppressed.
+    IF j.automatic AND NOT j.dry_run AND j.expected_head IS NOT NULL AND cardinality(dirty)>0 THEN
+      SELECT r.* INTO failed_work FROM brief_runs r
+        WHERE r.definition_id=j.definition_id AND r.expected_head=j.expected_head
+          AND r.config_generation=j.config_generation AND r.profile_generation=j.profile_generation
+          AND r.state='unavailable' AND r.inventory_done AND NOT r.dry_run
+        ORDER BY r.created_at DESC,r.id DESC LIMIT 1;
+      IF failed_work.id IS NOT NULL AND failed_work.descriptor=j.descriptor
+        AND failed_work.binding_generation=b.generation AND failed_work.login_oid=b.role_oid
+        AND failed_work.sections=dirty AND failed_work.truncated=j.truncated
+        AND NOT EXISTS(
+          (SELECT i.version_id,i.sections FROM brief_run_inputs i WHERE i.run_id=j.id
+            EXCEPT SELECT i.version_id,i.sections FROM brief_run_inputs i WHERE i.run_id=failed_work.id)
+          UNION ALL
+          (SELECT i.version_id,i.sections FROM brief_run_inputs i WHERE i.run_id=failed_work.id
+            EXCEPT SELECT i.version_id,i.sections FROM brief_run_inputs i WHERE i.run_id=j.id)) THEN
+        UPDATE brief_runs SET sections=dirty,state='unavailable',reason='stale',owner=NULL,lease_until=NULL,generation=generation+1 WHERE id=j.id;
+        UPDATE pipeline_budget_workflows SET cancelled=TRUE,generation=generation+1 WHERE id=j.workflow_id AND NOT cancelled;
+        INSERT INTO audit_log(principal_id,action,scope_id,metadata)
+          VALUES(b.principal_id,'write',d.scope_id,'{"operation":"brief_repair_unchanged_failed_input"}');
+        RETURN jsonb_build_object('outcome','unavailable');
+      END IF;
     END IF;
     IF EXISTS(SELECT 1 FROM brief_run_inputs i WHERE i.run_id=j.id AND i.bytes>(j.descriptor->'budget'->>'maxItemHydratedBytes')::bigint) THEN
       RAISE program_limit_exceeded USING MESSAGE='Brief input unavailable'; END IF;
