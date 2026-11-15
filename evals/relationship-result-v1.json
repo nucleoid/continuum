@@ -1,0 +1,916 @@
+{
+  "version": "relationship-result-v1",
+  "sourceHead": "e830a37ff849ffabbc0844f47c102184cea4c3a2",
+  "sourceTree": "2a91a9eff0bfd3df472116a928b8984c3dbb8e08",
+  "preregistrationSha256": "857dbe68bb6620ae7c270cb140ea7f84a679ae419cab6845870ab95113b37ce2",
+  "rawReportSha256": "e06de5f4581a609a06dfccf525d461b5ecdb2e85a6784e6e04b8f6b377a95b57",
+  "corpusManifest": "23640a26ea397e2365033884a56904e4a6c6a170dbc74d44efa57a799c4591f6",
+  "runtime": {
+    "node": "v22.23.1",
+    "platform": "linux",
+    "arch": "x64"
+  },
+  "baseline": {
+    "kind": "hybrid-sha-plus-overlap",
+    "stockReranking": "disabled",
+    "realAdapterQualification": "unqualified",
+    "reranker": {
+      "id": "local-test",
+      "version": "deterministic-v1",
+      "model": "byte-protocol-v1",
+      "profile": "local-test-v1"
+    }
+  },
+  "gate": {
+    "version": "relationship-v1",
+    "primaryMetric": "ndcg@10",
+    "minimumRelativeGain": 0.05,
+    "confidence": 0.95,
+    "minPairs": 20,
+    "bootstrapSamples": 2000,
+    "seed": 25,
+    "maximumP95Ratio": 1.1,
+    "maximumStorageRatio": 2,
+    "criticalCoverageRegression": 0,
+    "securityRegressions": 0,
+    "budgetPolicy": "identical"
+  },
+  "latencyPolicy": {
+    "version": "service-latency-v1",
+    "repetitions": 5,
+    "warmups": 1,
+    "order": "seeded-rotating-interleaved",
+    "summary": "p95-of-per-query-medians",
+    "comparison": "paired-interleaved-session"
+  },
+  "execution": {
+    "complete": true,
+    "observations": 432,
+    "independentUnits": 24,
+    "warmupsPerQueryMode": 1,
+    "measuredRepetitionsPerQueryMode": 5,
+    "calls": 864,
+    "setupCalls": 93,
+    "actualSpendMicros": 0,
+    "fallbacks": 0,
+    "cancelled": 0
+  },
+  "comparisons": {
+    "typedVsSeed": {
+      "status": "insufficient_evidence",
+      "pairs": 24,
+      "relativeGain": 0.07907086254041105,
+      "confidenceInterval": [
+        0.020085058663590987,
+        0.10394101083128586
+      ],
+      "criticalFailures": 0,
+      "resourceGate": "not_measured"
+    },
+    "typedVsControl": {
+      "status": "insufficient_evidence",
+      "pairs": 24,
+      "relativeGain": 0.07907086254041105,
+      "confidenceInterval": [
+        0.020085058663590987,
+        0.10394101083128586
+      ],
+      "criticalFailures": 0,
+      "resourceGate": "not_measured"
+    },
+    "confidenceIntervalUnits": "absolute paired nDCG@10 difference; relativeGain is relative to baseline mean"
+  },
+  "criticalCoverageRegressions": [],
+  "unmatchedControls": [],
+  "hardFailures": [],
+  "verifiedEndToEndP95": null,
+  "normalizedTotalEvidenceIndexReceiptBytes": null,
+  "storageDiagnostic": {
+    "persistedBytes": 5072376,
+    "runGrowthBytes": 1197560,
+    "emptySchemaBytes": 3874816,
+    "rawApplicationBytes": 4628480,
+    "rawDatabaseBytes": 16892431,
+    "emptyDatabaseBytes": 15694871
+  },
+  "phaseTimingsDiagnostic": {
+    "setupMs": 7214.324541,
+    "measuredMs": 9564.791763999998
+  },
+  "pairedRows": [
+    {
+      "id": "aster-refunds",
+      "mode": "seed-only",
+      "ndcg": 0.9558305893461799,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 20.50198100000125,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "aster-refunds",
+      "mode": "typed-one-hop",
+      "ndcg": 0.9558305893461799,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 20.937023999998928,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "aster-refunds",
+      "mode": "matched-extra-candidates",
+      "ndcg": 0.9558305893461799,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 19.198554999999033,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "birch-locks",
+      "mode": "seed-only",
+      "ndcg": 0.6757507974357403,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 17.917488000002777,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "birch-locks",
+      "mode": "typed-one-hop",
+      "ndcg": 0.6757507974357403,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 27.068437000001722,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "birch-locks",
+      "mode": "matched-extra-candidates",
+      "ndcg": 0.6757507974357403,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 22.141288999999233,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "cedar-tokens",
+      "mode": "seed-only",
+      "ndcg": 1,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 14.013295000000653,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "cedar-tokens",
+      "mode": "typed-one-hop",
+      "ndcg": 1,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 14.623654000002716,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "cedar-tokens",
+      "mode": "matched-extra-candidates",
+      "ndcg": 1,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 15.857304999997723,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "dune-cache",
+      "mode": "seed-only",
+      "ndcg": 0.5188972012643011,
+      "evidenceCoverage": 0.6666666666666666,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 19.053647999997338,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "dune-cache",
+      "mode": "typed-one-hop",
+      "ndcg": 0.6432170197276813,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 18.706624999998894,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "dune-cache",
+      "mode": "matched-extra-candidates",
+      "ndcg": 0.5188972012643011,
+      "evidenceCoverage": 0.6666666666666666,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 20.19287500000064,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "ember-handover",
+      "mode": "seed-only",
+      "ndcg": 0.9173194127129571,
+      "evidenceCoverage": 0.5,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 18.164182999997138,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "ember-handover",
+      "mode": "typed-one-hop",
+      "ndcg": 0.9173194127129571,
+      "evidenceCoverage": 0.5,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 18.204490000000078,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "ember-handover",
+      "mode": "matched-extra-candidates",
+      "ndcg": 0.9173194127129571,
+      "evidenceCoverage": 0.5,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 16.64464399999997,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "fjord-timezones",
+      "mode": "seed-only",
+      "ndcg": 0.9246243924703832,
+      "evidenceCoverage": 0.5,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 11.814844000000448,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "fjord-timezones",
+      "mode": "typed-one-hop",
+      "ndcg": 0.9246243924703832,
+      "evidenceCoverage": 0.5,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 13.064785999999003,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "fjord-timezones",
+      "mode": "matched-extra-candidates",
+      "ndcg": 0.9246243924703832,
+      "evidenceCoverage": 0.5,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 12.61461799999961,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "grove-access",
+      "mode": "seed-only",
+      "ndcg": 1,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 13.410354999999981,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "grove-access",
+      "mode": "typed-one-hop",
+      "ndcg": 1,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 14.320679999997083,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "grove-access",
+      "mode": "matched-extra-candidates",
+      "ndcg": 1,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 14.107435000001715,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "harbor-export",
+      "mode": "seed-only",
+      "ndcg": 0.6580725857971756,
+      "evidenceCoverage": 0.6666666666666666,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 13.670319000000745,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "harbor-export",
+      "mode": "typed-one-hop",
+      "ndcg": 0.8677244199451895,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 15.636942000001,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "harbor-export",
+      "mode": "matched-extra-candidates",
+      "ndcg": 0.6580725857971756,
+      "evidenceCoverage": 0.6666666666666666,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 15.079619000000093,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "islet-bootstrap",
+      "mode": "seed-only",
+      "ndcg": 0.7871546029909718,
+      "evidenceCoverage": 0.5,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 24.54248700000244,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "islet-bootstrap",
+      "mode": "typed-one-hop",
+      "ndcg": 0.7871546029909718,
+      "evidenceCoverage": 0.5,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 23.995081999997637,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "islet-bootstrap",
+      "mode": "matched-extra-candidates",
+      "ndcg": 0.7871546029909718,
+      "evidenceCoverage": 0.5,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 23.354105999998865,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "juniper-audit",
+      "mode": "seed-only",
+      "ndcg": 0.6131471927654584,
+      "evidenceCoverage": 0.5,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 23.79545700000017,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "juniper-audit",
+      "mode": "typed-one-hop",
+      "ndcg": 0.9197207891481876,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 27.78448500000013,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "juniper-audit",
+      "mode": "matched-extra-candidates",
+      "ndcg": 0.6131471927654584,
+      "evidenceCoverage": 0.5,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 29.241846999999325,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "kelp-builds",
+      "mode": "seed-only",
+      "ndcg": 0.28866167924141933,
+      "evidenceCoverage": 0.3333333333333333,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 19.82272500000181,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "kelp-builds",
+      "mode": "typed-one-hop",
+      "ndcg": 0.28866167924141933,
+      "evidenceCoverage": 0.3333333333333333,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 22.713832999997976,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "kelp-builds",
+      "mode": "matched-extra-candidates",
+      "ndcg": 0.28866167924141933,
+      "evidenceCoverage": 0.3333333333333333,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 24.523581000001286,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "larch-branches",
+      "mode": "seed-only",
+      "ndcg": 1,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 13.088733000000502,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "larch-branches",
+      "mode": "typed-one-hop",
+      "ndcg": 1,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 13.457173999999213,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "larch-branches",
+      "mode": "matched-extra-candidates",
+      "ndcg": 1,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 13.274607999999716,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "moraine-rollback",
+      "mode": "seed-only",
+      "ndcg": 0.6580725857971756,
+      "evidenceCoverage": 0.6666666666666666,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 13.407670000000508,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "moraine-rollback",
+      "mode": "typed-one-hop",
+      "ndcg": 0.8914743567965988,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 12.586097999999765,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "moraine-rollback",
+      "mode": "matched-extra-candidates",
+      "ndcg": 0.6580725857971756,
+      "evidenceCoverage": 0.6666666666666666,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 12.923208000000159,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "nacre-quotas",
+      "mode": "seed-only",
+      "ndcg": 0.49663925968773237,
+      "evidenceCoverage": 0.5,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 15.217249000001175,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "nacre-quotas",
+      "mode": "typed-one-hop",
+      "ndcg": 0.49663925968773237,
+      "evidenceCoverage": 0.5,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 16.39056900000287,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "nacre-quotas",
+      "mode": "matched-extra-candidates",
+      "ndcg": 0.49663925968773237,
+      "evidenceCoverage": 0.5,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 17.127026000001933,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "ochre-residency",
+      "mode": "seed-only",
+      "ndcg": 0.6934264036172708,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 18.861319999999978,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "ochre-residency",
+      "mode": "typed-one-hop",
+      "ndcg": 0.6934264036172708,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 18.025753000001714,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "ochre-residency",
+      "mode": "matched-extra-candidates",
+      "ndcg": 0.6934264036172708,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 20.158384000002115,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "pollen-leases",
+      "mode": "seed-only",
+      "ndcg": 0.5773534652239384,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 13.657168000001548,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "pollen-leases",
+      "mode": "typed-one-hop",
+      "ndcg": 0.5773534652239384,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 13.229041999999026,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "pollen-leases",
+      "mode": "matched-extra-candidates",
+      "ndcg": 0.5773534652239384,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 14.691850999999588,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "quill-package",
+      "mode": "seed-only",
+      "ndcg": 0.6309297535714575,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 15.51973800000269,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "quill-package",
+      "mode": "typed-one-hop",
+      "ndcg": 0.6309297535714575,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 15.585495999999694,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "quill-package",
+      "mode": "matched-extra-candidates",
+      "ndcg": 0.6309297535714575,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 18.713501000001997,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "reed-membership",
+      "mode": "seed-only",
+      "ndcg": 0.1310456303875653,
+      "evidenceCoverage": 0.5,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 12.930324000000837,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "reed-membership",
+      "mode": "typed-one-hop",
+      "ndcg": 0.1310456303875653,
+      "evidenceCoverage": 0.5,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 13.495780999997805,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "reed-membership",
+      "mode": "matched-extra-candidates",
+      "ndcg": 0.1310456303875653,
+      "evidenceCoverage": 0.5,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 13.927518000000418,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "sable-replay",
+      "mode": "seed-only",
+      "ndcg": 0.6735439182299785,
+      "evidenceCoverage": 0.3333333333333333,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 29.070951999998215,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "sable-replay",
+      "mode": "typed-one-hop",
+      "ndcg": 1,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 33.58497999999963,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "sable-replay",
+      "mode": "matched-extra-candidates",
+      "ndcg": 0.6735439182299785,
+      "evidenceCoverage": 0.3333333333333333,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 27.066721999999572,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "tarn-history",
+      "mode": "seed-only",
+      "ndcg": 0.9558305893461799,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 23.008762999997998,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "tarn-history",
+      "mode": "typed-one-hop",
+      "ndcg": 0.9558305893461799,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 35.124405999999,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "tarn-history",
+      "mode": "matched-extra-candidates",
+      "ndcg": 0.9558305893461799,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 33.25265500000023,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "umber-sources",
+      "mode": "seed-only",
+      "ndcg": 0.38685280723454163,
+      "evidenceCoverage": 0.5,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 18.32703400000173,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "umber-sources",
+      "mode": "typed-one-hop",
+      "ndcg": 0.38685280723454163,
+      "evidenceCoverage": 0.5,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 19.414754999997967,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "umber-sources",
+      "mode": "matched-extra-candidates",
+      "ndcg": 0.38685280723454163,
+      "evidenceCoverage": 0.5,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 17.72557500000039,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "vale-pages",
+      "mode": "seed-only",
+      "ndcg": 1,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 15.74916299999677,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "vale-pages",
+      "mode": "typed-one-hop",
+      "ndcg": 1,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 16.823419000000285,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "vale-pages",
+      "mode": "matched-extra-candidates",
+      "ndcg": 1,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 14.77657900000122,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "willow-approval",
+      "mode": "seed-only",
+      "ndcg": 0.984276488285104,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 19.393369999997958,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "willow-approval",
+      "mode": "typed-one-hop",
+      "ndcg": 0.984276488285104,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 26.31167600000117,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "willow-approval",
+      "mode": "matched-extra-candidates",
+      "ndcg": 0.984276488285104,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 27.159459999998944,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "yarrow-storage",
+      "mode": "seed-only",
+      "ndcg": 0.7871546029909718,
+      "evidenceCoverage": 0.5,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 22.943709999999555,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "yarrow-storage",
+      "mode": "typed-one-hop",
+      "ndcg": 0.9558305893461799,
+      "evidenceCoverage": 1,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 27.545061000000715,
+      "failures": [],
+      "fallbacks": 0
+    },
+    {
+      "id": "yarrow-storage",
+      "mode": "matched-extra-candidates",
+      "ndcg": 0.7871546029909718,
+      "evidenceCoverage": 0.5,
+      "abstentionErrors": 0,
+      "duplicateResults": 0,
+      "stageMedianMs": 27.945990000000165,
+      "failures": [],
+      "fallbacks": 0
+    }
+  ],
+  "decision": {
+    "outcome": "inconclusive",
+    "graphRuntimeAuthorized": false,
+    "reasons": [
+      "real-hybrid-reranker-unqualified",
+      "verified-end-to-end-pairing-unavailable",
+      "normalized-total-storage-unavailable"
+    ],
+    "arithmeticIsAcceptance": false
+  },
+  "recommendation": "Close the evaluation without production graph code. Synthetic diagnostic gain does not establish the preregistered eligible quality, latency or normalized storage gate.",
+  "validationAtSource": {
+    "focusedLinux": "15 passed, zero skipped",
+    "unitOnlyWindows": "14 passed; paired database experiment intentionally excluded",
+    "fullSourceAndPackageAndHostedAndIndependentReview": "Not established by this result artifact; required separately before merge."
+  },
+  "limitations": [
+    "Synthetic authored links are not persisted canonical database relationships.",
+    "Fixture checks do not establish SQL revocation, deletion, quarantine, residency or event-filter concurrency correctness.",
+    "No qualified model, independent paired service producer, normalized storage collector or production graph is enabled.",
+    "Whole-run storage includes setup/index allocation; it cannot establish the 2x gate."
+  ]
+}

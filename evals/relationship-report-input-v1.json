@@ -1,0 +1,28 @@
+{
+  "version": "relationship-report-input-v1",
+  "phase": "evaluation-only-preparation",
+  "execution": "not-run",
+  "decision": "inconclusive",
+  "graphRuntimeAuthorized": false,
+  "sourceBase": "3b3c1bd65c9b68f007d92fe515d6d965919b614a",
+  "preregistrationSha256": "857dbe68bb6620ae7c270cb140ea7f84a679ae419cab6845870ab95113b37ce2",
+  "ledgerSha256": "b9db6d9a2e23f80f9d04e1c71bc9257a2c39d488fa0e066b99a24d90ae4837f4",
+  "measurements": null,
+  "completedValidation": [],
+  "independentReviewsCompleted": 0,
+  "limitations": [
+    "Prepared code and fixture inputs are not measured evidence.",
+    "Stock reranking disabled; SHA vectors and deterministic overlap are not a qualified semantic baseline.",
+    "No verified paired end-to-end service timing or normalized total persisted evidence/index/receipt bytes.",
+    "No production relationship reads, graph, schema or shared helper changes.",
+    "No locked SQL policy/lifecycle concurrency or physical erasure qualification in fixture checks."
+  ],
+  "pending": [
+    "Parent grants exclusive validation slot after issue33 reservation release.",
+    "Build and focused test execution, including meaningful red/green evidence.",
+    "Current full source PostgreSQL/pgvector suite: 384 MiB, one worker, 1200 seconds, zero skips, both strict report verifiers.",
+    "Windows, package/CLI, source/container and fresh hosted checks at exact integrated head.",
+    "Parent configured-default independent review, maximum three completed rounds.",
+    "Parent adjudicates measured evidence; missing qualification remains inconclusive/no-go."
+  ]
+}
