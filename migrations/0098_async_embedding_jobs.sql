@@ -716,7 +716,9 @@ BEGIN
       (t.window_policy->>'tokens')::bigint,(t.window_policy->>'spendMicros')::bigint,start_value,start_value+(t.window_policy->>'seconds')::bigint*interval '1 second') ON CONFLICT DO NOTHING;
   SELECT * INTO STRICT w FROM embedding_dispatch_windows WHERE provider=t.provider AND dim=t.dim AND starts_at=start_value FOR UPDATE;
   IF w.dispatches>=least(w.max_dispatches,(t.window_policy->>'dispatches')::bigint) OR w.input_bytes>=least(w.max_input_bytes,(t.window_policy->>'inputBytes')::bigint)
-    OR w.tokens>=least(w.max_tokens,(t.window_policy->>'tokens')::bigint) THEN RETURN NULL; END IF;
+    OR w.tokens>=least(w.max_tokens,(t.window_policy->>'tokens')::bigint)
+    OR (least(w.max_cost_micros,(t.window_policy->>'spendMicros')::bigint)>0
+      AND w.cost_micros>=least(w.max_cost_micros,(t.window_policy->>'spendMicros')::bigint)) THEN RETURN NULL; END IF;
   -- Filter original exhausted/deadline-closed allowances before the prefix.
   -- A retry in this window cannot allocate a fresh workflow or extend its life.
   FOR item IN SELECT m.id,j.id job_id,m.scope_id,j.isolate_item,j.probe_group,j.current_window,j.workflow_id,j.budget_owner,j.budget_generation,
@@ -1267,9 +1269,11 @@ CREATE FUNCTION continuum_embedding_private_tables() RETURNS TEXT[] LANGUAGE sql
   'embedding_dispatch_windows','embedding_worker_bindings','embedding_cohorts','embedding_cohort_jobs','embedding_cohort_scopes',
   'embedding_completions','embedding_transition_receipts','embedding_recoveries','embedding_contract_functions','embedding_contract_relations']::text[] $$;
 CREATE FUNCTION continuum_embedding_relation_fingerprint(relation REGCLASS) RETURNS TEXT LANGUAGE sql STABLE SECURITY DEFINER AS $$
-  SELECT encode(sha256(convert_to(jsonb_build_object('owner',c.relowner,'kind',c.relkind,
-    'attributes',(SELECT jsonb_agg(jsonb_build_array(a.attname,a.atttypid,a.atttypmod,a.attnotnull,pg_get_expr(d.adbin,d.adrelid)) ORDER BY a.attnum)
-      FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped),
+  SELECT encode(sha256(convert_to(jsonb_build_object('owner',pg_get_userbyid(c.relowner),'kind',c.relkind,
+    'attributes',(SELECT jsonb_agg(jsonb_build_array(a.attname,type_namespace.nspname,attribute_type.typname,a.atttypmod,a.attnotnull,pg_get_expr(d.adbin,d.adrelid)) ORDER BY a.attnum)
+      FROM pg_attribute a JOIN pg_type attribute_type ON attribute_type.oid=a.atttypid
+        JOIN pg_namespace type_namespace ON type_namespace.oid=attribute_type.typnamespace
+        LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped),
     'constraints',(SELECT jsonb_agg(pg_get_constraintdef(oid,TRUE) ORDER BY conname) FROM pg_constraint WHERE conrelid=c.oid),
     'indexes',(SELECT jsonb_agg(jsonb_build_array(pg_get_indexdef(indexrelid),indisvalid,indisready) ORDER BY indexrelid::regclass::text) FROM pg_index WHERE indrelid=c.oid),
     'triggers',(SELECT jsonb_agg(jsonb_build_array(pg_get_triggerdef(oid,TRUE),tgenabled) ORDER BY tgname) FROM pg_trigger WHERE tgrelid=c.oid AND NOT tgisinternal))::text,'UTF8')),'hex')
