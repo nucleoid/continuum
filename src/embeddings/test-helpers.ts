@@ -11,6 +11,7 @@ import type { Queryable } from '../storage/queryable.js';
 import type { EmbeddingPolicyIdentity } from '../storage/embedding-jobs-model.js';
 import { getPrincipal } from '../storage/principals.js';
 import { getScope } from '../storage/scopes.js';
+import { addMembership } from '../storage/memberships.js';
 import { admitMemoryEmbedding, storeMemoryEmbeddingVector } from '../storage/embeddings.js';
 import { standupProducerFixture, quoteStandupIdentifier } from '../standup/test-helpers.js';
 
@@ -106,6 +107,9 @@ export async function embeddingQueueFixture(run: (context: Parameters<Parameters
         '-v', `continuum_embedding_worker_role=${workerRole}`, '-f', join(process.cwd(), 'scripts/grant-embedding-worker-role.sql')], { timeout: 30000, stdio: 'pipe' });
       await f.operator.query('SELECT continuum_operator_embedding_target($1,$2,$3,$4,TRUE)', [f.adminId, synthetic.target, synthetic.profile,
         { seconds: options.windowSeconds ?? 60, dispatches: 64, inputBytes: 16777216, tokens: 16777216, spendMicros: 0, rateSchedule: synthetic.profile.rateSchedule }]);
+      // Org administration does not imply write authority over personal data.
+      // This fixture explicitly approves that authority before OP worker binding.
+      await addMembership(f.owner, f.adminId, f.scopeId, 'writer');
       const routing = { default: { target: null, localOnly: false }, scopes: { [f.scopeId]: { target: synthetic.target.fingerprint, localOnly: false } }, kinds: {} };
       const digest = createHash('sha256').update(JSON.stringify(routing)).digest('hex');
       const policy = (await f.operator.query<{ policy: EmbeddingPolicyIdentity }>('SELECT continuum_operator_embedding_policy($1,$2,$3) AS policy',

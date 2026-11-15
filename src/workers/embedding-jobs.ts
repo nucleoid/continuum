@@ -189,6 +189,12 @@ export class EmbeddingJobWorker {
     return this.polling;
   }
   stop(): Promise<{ settled: boolean }> {
+    // Preserve the original bounded shutdown promise while work remains. Once
+    // actual callbacks/accounting settle, a later observation can report that
+    // fact without starting another shutdown wait or admitting more work.
+    if (this.stopped && !this.polling && !this.pending.size && !this.store.unsettledAccounting?.()) {
+      return Promise.resolve({ settled: true });
+    }
     return this.stopPromise ??= this.stopWork();
   }
   private async stopWork(): Promise<{ settled: boolean }> {

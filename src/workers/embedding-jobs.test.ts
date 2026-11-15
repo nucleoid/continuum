@@ -133,6 +133,7 @@ describe('embedding worker preparation contract', () => {
     await worker.poll(); expect(f.store.claim).toHaveBeenCalledTimes(1);
     const stopped = worker.stop(); await vi.advanceTimersByTimeAsync(5000);
     expect(await stopped).toEqual({ settled: false });
+    expect(worker.stop()).toBe(stopped);
     expect(f.store.apply).not.toHaveBeenCalled();
     result.resolve({ value: [vector()], response: [vector()] });
     await vi.advanceTimersByTimeAsync(1);
