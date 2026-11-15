@@ -64,6 +64,9 @@ it.each([{ statementMs: 0, code: '55P03' }, { statementMs: 500, code: '57014' }]
             try { await blocker.query('ROLLBACK'); } finally { blocker.release(); }
           }
         }
+        expect((await app.query(`SELECT current_setting('statement_timeout') AS statement,
+          current_setting('lock_timeout') AS lock`)).rows)
+          .toEqual([{ statement: statementMs === 0 ? '0' : '500ms', lock: '0' }]);
         expect((await f.owner.query('SELECT 1 FROM ingest_deliveries WHERE delivery_id=$1', [delivery])).rowCount).toBe(0);
         expect((await f.owner.query('SELECT 1 FROM memories WHERE source_ref=$1', [marker])).rowCount).toBe(0);
         expect((await f.owner.query("SELECT 1 FROM audit_log WHERE metadata->>'fixture'=$1", [marker])).rowCount).toBe(0);

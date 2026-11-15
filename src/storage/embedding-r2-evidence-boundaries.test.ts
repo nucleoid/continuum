@@ -113,6 +113,12 @@ it('does not reject physical erasure of legitimate pre-0098 scope history beyond
     // An actual legacy source writer's physical archive must remain possible.
     await owner.query(`UPDATE memories SET state='archived',title='[erased]',body='[erased]',metadata='{}'::jsonb WHERE id=$1`, [memory.id]);
     expect((await owner.query('SELECT revoked FROM evidence_roots WHERE id=$1', [memory.id])).rows).toEqual([{ revoked: true }]);
+    expect((await owner.query('SELECT status,input_hash,current_target,erased FROM embedding_sources WHERE memory_id=$1', [memory.id])).rows)
+      .toEqual([{ status: 'cancelled', input_hash: null, current_target: null, erased: false }]);
+    // Privacy invalidation is not a fabricated completed queue-erasure receipt,
+    // and the unchanged strict admission helper still refuses excess lineage.
+    await expect(owner.query('SELECT continuum_embedding_enroll_lineage($1)', [memory.id]))
+      .rejects.toMatchObject({ code: '23514', message: 'Embedding owned-source lineage bound exceeded' });
     await owner.query('SELECT continuum_evidence_erase_version(id) FROM evidence_versions WHERE root_id=$1 ORDER BY id', [memory.id]);
     expect((await owner.query('SELECT 1 FROM evidence_payloads p JOIN evidence_versions v ON v.id=p.version_id WHERE v.root_id=$1', [memory.id])).rowCount).toBe(0);
     expect((await owner.query('SELECT 1 FROM memory_embeddings WHERE memory_id=$1', [memory.id])).rowCount).toBe(0);
