@@ -14,6 +14,7 @@ import type { CaptureInput } from '../types.js';
 import { amounts, starterProfile } from '../pipeline/budget.js';
 import { EmbeddingItemError } from '../embeddings/provider.js';
 import { computeExpiry } from './expiry.js';
+import { requireEmbeddingQueueReady } from './provider-lifecycle.js';
 
 type Fixture = Parameters<Parameters<typeof embeddingQueueFixture>[0]>[0];
 const input = (f: Fixture, title = 'Deferred source'): CaptureInput => ({ scope: { kind: f.scope.kind, name: f.scope.name },
@@ -62,12 +63,22 @@ describe('durable embedding SQL, capture and worker integration', () => {
           .rejects.toMatchObject({ code: 'FORBIDDEN' });
         expect((await f.owner.query('SELECT count(*)::int AS n FROM embedding_completions')).rows[0].n).toBe(1);
         expect((await f.owner.query(`SELECT count(*)::int AS n FROM audit_log WHERE memory_id=$1 AND metadata->>'operation'='embedding_completed'`, [memory.id])).rows[0].n).toBe(1);
+        await f.owner.query(`UPDATE memories SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`, [memory.id]);
+        await expect(captureMemory(concurrent, f.router, f.principal, input(f), {}, { idempotencyKey: 'retained-capture-key' }))
+          .rejects.toMatchObject({ code: 'FORBIDDEN' });
       } finally { await concurrent.end(); }
     });
   }, 60000);
 
   it('requires the actual bound LOGIN and immutable descriptor, and fences original generations and late responses', async () => {
     await embeddingQueueFixture(async f => {
+      await expect(requireEmbeddingQueueReady(f.app)).resolves.toBeUndefined();
+      await f.owner.query('ALTER TABLE memory_embeddings DISABLE TRIGGER embedding_vector_guard');
+      try {
+        expect((await f.app.query('SELECT continuum_embedding_is_ready() AS ready')).rows[0].ready).toBe(false);
+        await expect(requireEmbeddingQueueReady(f.app)).rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE' });
+      } finally { await f.owner.query('ALTER TABLE memory_embeddings ENABLE TRIGGER embedding_vector_guard'); }
+      await expect(requireEmbeddingQueueReady(f.app)).resolves.toBeUndefined();
       const first = await captureMemory(f.app, f.router, f.principal, input(f));
       const store = new SqlEmbeddingJobStore(f.worker);
       await expect(f.app.query('SELECT continuum_embedding_claim($1,$2,$3,1,$4)', [f.target, f.policy, randomUUID(), f.profile]))
