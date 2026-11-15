@@ -12,11 +12,14 @@ import { previewLifecycle, sweepLifecycle, sweepLifecycleBatch } from './sweep.j
 
 describe('lifecycle sweeper', () => {
   let pool: pg.Pool;
-  const now = new Date('2026-10-04T12:00:00.000Z');
+  let now: Date;
 
   beforeEach(async () => {
     pool ??= await makeTestPool();
     await resetData(pool);
+    // Exercise the sweeper's explicit clock while vectors are honestly current
+    // under the database clock before the transition and rollback assertions.
+    now = (await pool.query("SELECT clock_timestamp()+interval '10 minutes' AS at")).rows[0].at;
   });
 
   afterAll(async () => {
@@ -46,12 +49,12 @@ describe('lifecycle sweeper', () => {
     return { memory, scope, author };
   }
 
-  async function seedEmbeddingBeforeExpiry(memoryId: string, expiresAt: Date): Promise<void> {
-    await pool.query('UPDATE memories SET expires_at = NULL WHERE id = $1', [memoryId]);
+  async function seedCurrentEmbedding(memoryId: string): Promise<void> {
+    expect((await pool.query('SELECT expires_at>clock_timestamp() AS current FROM memories WHERE id=$1', [memoryId])).rows[0].current).toBe(true);
     await expect(seedEmbeddingVectorForTest(
       pool, pool, memoryId, new Array(768).fill(0), { id: 'stub', dim: 768 },
     )).resolves.toBe(true);
-    await pool.query('UPDATE memories SET expires_at = $2 WHERE id = $1', [memoryId, expiresAt]);
+    expect((await pool.query('SELECT 1 FROM memory_embeddings WHERE memory_id=$1', [memoryId])).rowCount).toBe(1);
   }
 
   it('transitions only expired live lifecycle types at the exact boundary', async () => {
@@ -61,7 +64,7 @@ describe('lifecycle sweeper', () => {
     const future = await seed('fact', new Date(now.getTime() + 1));
     const decision = await seed('decision', new Date(now.getTime() - 1));
     const playbook = await seed('playbook', new Date(now.getTime() - 1));
-    await seedEmbeddingBeforeExpiry(context.memory.id, now);
+    await seedCurrentEmbedding(context.memory.id);
 
     const result = await sweepLifecycleBatch(pool, { now, batchSize: 20 });
 
@@ -192,7 +195,7 @@ describe('lifecycle sweeper', () => {
 
   it('rolls back state and embedding deletion when an audit insert fails', async () => {
     const context = await seed('context', now);
-    await seedEmbeddingBeforeExpiry(context.memory.id, now);
+    await seedCurrentEmbedding(context.memory.id);
     await pool.query(`
       CREATE OR REPLACE FUNCTION reject_lifecycle_audit() RETURNS trigger AS $$
       BEGIN

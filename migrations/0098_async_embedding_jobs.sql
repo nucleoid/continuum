@@ -125,7 +125,8 @@ CREATE TABLE embedding_cohorts(
   lease_until TIMESTAMPTZ NOT NULL,deadline_at TIMESTAMPTZ NOT NULL,profile JSONB NOT NULL,
   state TEXT NOT NULL DEFAULT 'attached' CHECK(state IN ('attached','reserved','dispatched','settled','complete','cancelled','abandoned')),
   reservation JSONB,retained_bytes BIGINT,hydrated_bytes BIGINT,settlement JSONB,
-  diagnostic_ambiguous BOOLEAN NOT NULL DEFAULT FALSE,created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+  diagnostic_ambiguous BOOLEAN NOT NULL DEFAULT FALSE,diagnostic_split BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 CREATE INDEX embedding_cohorts_scope_idx ON embedding_cohorts(scope_id,id);
 CREATE INDEX embedding_cohorts_workflow_idx ON embedding_cohorts(workflow_id,id);
@@ -636,6 +637,7 @@ END $$;
 CREATE FUNCTION continuum_embedding_claim(target JSONB,process_policy JSONB,worker UUID,batch INTEGER,budget JSONB) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
 DECLARE p embedding_policy%ROWTYPE; t embedding_targets%ROWTYPE; control embedding_provider_control%ROWTYPE;
   old_cohort embedding_cohorts%ROWTYPE; c embedding_cohorts%ROWTYPE; b embedding_worker_bindings%ROWTYPE;
+  old_attempt_state TEXT;
   item RECORD; selected UUID[]:='{}'; target_scope UUID; bytes BIGINT:=0; item_bytes BIGINT; probe_group_value UUID; privacy_scopes UUID[];
   w embedding_dispatch_windows%ROWTYPE; start_value TIMESTAMPTZ; original pipeline_budget_workflows%ROWTYPE;
   original_workflow UUID; original_owner UUID; original_generation BIGINT; candidate_workflow UUID;
@@ -649,8 +651,25 @@ BEGIN
   SELECT * INTO STRICT control FROM embedding_provider_control WHERE provider=t.provider AND dim=t.dim FOR UPDATE;
   IF control.state='parked' OR control.next_probe_at>clock_timestamp() THEN RETURN NULL; END IF;
   IF control.cohort_id IS NOT NULL THEN
-    SELECT * INTO STRICT old_cohort FROM embedding_cohorts WHERE id=control.cohort_id;
+    SELECT * INTO STRICT old_cohort FROM embedding_cohorts WHERE id=control.cohort_id FOR UPDATE;
     IF old_cohort.lease_until>clock_timestamp() THEN RETURN NULL; END IF;
+    IF old_cohort.reservation IS NOT NULL AND old_cohort.settlement IS NULL THEN
+      -- The provider lock plus expired cohort prevents any late dispatch
+      -- permit. Inspect the original workflow before its attempt, matching
+      -- settlement lock order. Only durable RESERVED proves no dispatch.
+      PERFORM id FROM pipeline_budget_workflows WHERE id=old_cohort.workflow_id FOR UPDATE;
+      SELECT state INTO old_attempt_state FROM pipeline_budget_attempts
+        WHERE workflow_id=old_cohort.workflow_id AND attempt_id=old_cohort.attempt_id
+          AND owner=old_cohort.attempt_owner AND generation=old_cohort.attempt_generation FOR UPDATE;
+      IF old_attempt_state='reserved' THEN
+        -- Conservatively retain every original maximum/window charge. This
+        -- releases concurrency only; it grants neither publication nor refund.
+        PERFORM continuum_pipeline_settle(old_cohort.workflow_id,old_cohort.attempt_id,old_cohort.attempt_owner,
+          old_cohort.attempt_generation,'{"provenance":"unknown"}'::jsonb);
+        UPDATE embedding_cohorts SET settlement='{"provenance":"unknown"}'::jsonb,
+          state=CASE WHEN state IN ('cancelled','abandoned') THEN state ELSE 'settled' END WHERE id=old_cohort.id;
+      END IF;
+    END IF;
     -- An expired lease never proves that an externally dispatched call settled.
     IF EXISTS(SELECT 1 FROM pipeline_budget_attempts WHERE workflow_id=old_cohort.workflow_id AND attempt_id=old_cohort.attempt_id AND state<>'settled') THEN RETURN NULL; END IF;
     FOR item IN SELECT m.id FROM memories m JOIN embedding_jobs j ON j.memory_id=m.id JOIN embedding_cohort_jobs cj ON cj.job_id=j.id
@@ -923,12 +942,17 @@ BEGIN
       jsonb_build_object('operation','embedding_transition','status','retry_wait','errorCode',code_value,'settlementPending',TRUE));
     RETURN TRUE;
   END IF;
-  -- A diagnostic singleton needs a successful control from its ORIGINAL
-  -- workflow. An all-failing tree never establishes blanket source poison.
+  -- A diagnostic singleton needs a successful sibling in its actual failed
+  -- split lineage, not necessarily the same budget window/workflow. Parent
+  -- target/policy/credential identity and immutable job completions bind proof.
   permanent:=code_value='EMBEDDING_ITEM_FAILED' AND action_value='isolate_item' AND count_value=1
     AND (NOT EXISTS(SELECT 1 FROM embedding_jobs WHERE cohort_id=cohort AND isolate_item)
-      OR EXISTS(SELECT 1 FROM embedding_cohorts successful JOIN embedding_cohort_jobs membership ON membership.cohort_id=successful.id
-        JOIN embedding_completions completed ON completed.job_id=membership.job_id WHERE successful.workflow_id=c.workflow_id));
+      OR EXISTS(SELECT 1 FROM embedding_cohort_jobs subject JOIN embedding_cohorts parent ON parent.id=subject.cohort_id
+        JOIN embedding_cohort_jobs sibling ON sibling.cohort_id=parent.id AND sibling.job_id<>subject.job_id
+        JOIN embedding_completions completed ON completed.job_id=sibling.job_id
+        WHERE subject.job_id IN(SELECT job_id FROM embedding_cohort_jobs WHERE cohort_id=cohort)
+          AND parent.diagnostic_split AND parent.target_fingerprint=c.target_fingerprint
+          AND parent.policy_generation=c.policy_generation AND parent.credential_generation=c.credential_generation));
   IF action_value='isolate_item' AND count_value>1 THEN
     left_group:=gen_random_uuid();right_group:=gen_random_uuid();
     WITH halves AS (SELECT id,row_number() OVER(ORDER BY id) position FROM embedding_jobs WHERE cohort_id=cohort AND state='processing')
@@ -940,7 +964,8 @@ BEGIN
     isolate_item=isolate_item OR action_value='isolate_item',completed_at=CASE WHEN permanent THEN clock_timestamp() END
     WHERE cohort_id=cohort AND state='processing';
   UPDATE embedding_sources s SET status=j.state FROM embedding_jobs j WHERE j.cohort_id=cohort AND j.memory_id=s.memory_id AND j.source_generation=s.generation;
-  UPDATE embedding_cohorts SET state='complete',diagnostic_ambiguous=(action_value='retry' AND code_value IN
+  UPDATE embedding_cohorts SET state='complete',diagnostic_split=action_value='isolate_item' AND count_value>1,
+    diagnostic_ambiguous=(action_value='retry' AND code_value IN
     ('EMBEDDING_FAILED','EMBEDDING_INVALID_RESPONSE','EMBEDDING_SERVER')) OR (action_value='isolate_item' AND count_value=1 AND NOT permanent) WHERE id=cohort;
   UPDATE embedding_provider_control SET cohort_id=NULL,
     failures=CASE WHEN credential_generation<>c.credential_generation OR permanent OR (action_value='isolate_item' AND count_value>1) THEN failures ELSE failures_value END,
@@ -1061,7 +1086,24 @@ BEGIN
   PERFORM continuum_evidence_require_operator(actor);
   IF operation IS NULL OR operation NOT IN ('pause','resume','drain','retry','cancel','reconcile') OR page_limit IS NULL OR page_limit NOT BETWEEN 1 AND 1000 THEN
     RAISE check_violation USING MESSAGE='Invalid embedding operation'; END IF;
-  IF target IS NULL THEN
+  IF operation='cancel' THEN
+    IF target IS NOT NULL THEN SELECT * INTO STRICT t FROM embedding_targets WHERE fingerprint=target FOR SHARE; END IF;
+    -- NULL selects one global page, including accepted target-less work. It
+    -- adds no authority and does not erase a source, receipt or original charge.
+    FOR item IN SELECT m.id memory_id,j.id,j.source_generation,j.target_fingerprint FROM embedding_jobs j
+      JOIN memories m ON m.id=j.memory_id WHERE (target IS NULL OR j.target_fingerprint=target)
+        AND j.state IN ('queued','processing','retry_wait','blocked_policy')
+      ORDER BY j.id LIMIT page_limit FOR UPDATE OF m SKIP LOCKED LOOP
+      UPDATE pipeline_budget_workflows w SET cancelled=TRUE,generation=w.generation+1 FROM embedding_cohorts c JOIN embedding_cohort_jobs cj ON cj.cohort_id=c.id
+        WHERE cj.job_id=item.id AND w.id=c.workflow_id AND NOT w.cancelled;
+      UPDATE embedding_cohorts SET state='cancelled',lease_until=clock_timestamp() WHERE id IN
+        (SELECT cohort_id FROM embedding_cohort_jobs WHERE job_id=item.id) AND state IN ('attached','reserved','dispatched','settled');
+      UPDATE embedding_jobs SET state='cancelled',lease_owner=NULL,lease_until=NULL,lease_generation=lease_generation+1 WHERE id=item.id;
+      UPDATE embedding_sources SET status='cancelled' WHERE memory_id=item.memory_id AND generation=item.source_generation
+        AND current_target IS NOT DISTINCT FROM item.target_fingerprint;
+      processed:=processed+1;
+    END LOOP;
+  ELSIF target IS NULL THEN
     IF operation NOT IN ('pause','resume','drain') THEN RAISE check_violation USING MESSAGE='Embedding target is required'; END IF;
     UPDATE embedding_policy SET paused=operation<>'resume' WHERE singleton;
   ELSE
@@ -1079,14 +1121,6 @@ BEGIN
           AND continuum_embedding_source_eligible(m.id) AND continuum_embedding_route(m.scope_id)->>'target'=target
         ORDER BY j.id LIMIT page_limit FOR UPDATE OF m SKIP LOCKED LOOP
         UPDATE embedding_jobs SET state='queued',available_at=clock_timestamp(),failure_code=NULL WHERE id=item.id;processed:=processed+1;
-      END LOOP;
-    ELSIF operation='cancel' THEN
-      FOR item IN SELECT m.id memory_id,j.id FROM embedding_jobs j JOIN memories m ON m.id=j.memory_id WHERE j.target_fingerprint=target
-        AND j.state IN ('queued','processing','retry_wait','blocked_policy') ORDER BY j.id LIMIT page_limit FOR UPDATE OF m SKIP LOCKED LOOP
-        UPDATE pipeline_budget_workflows w SET cancelled=TRUE,generation=w.generation+1 FROM embedding_cohorts c JOIN embedding_cohort_jobs cj ON cj.cohort_id=c.id
-          WHERE cj.job_id=item.id AND w.id=c.workflow_id AND NOT w.cancelled;
-        UPDATE embedding_jobs SET state='cancelled',lease_owner=NULL,lease_until=NULL,lease_generation=lease_generation+1 WHERE id=item.id;
-        UPDATE embedding_sources SET status='cancelled' WHERE memory_id=item.memory_id;processed:=processed+1;
       END LOOP;
     ELSIF operation='reconcile' THEN
       -- Only previously accepted queue work is eligible. This does not enqueue

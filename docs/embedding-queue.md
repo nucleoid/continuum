@@ -87,9 +87,16 @@ npm run admin -- embedding-control resume <target-fingerprint>
 npm run admin -- embedding-control reconcile <target-fingerprint> 100
 npm run admin -- embedding-control retry <target-fingerprint> 100
 npm run admin -- embedding-control cancel <target-fingerprint> 100
+npm run admin -- embedding-control cancel all 100
 npm run admin -- embedding-metrics
 npm run admin -- embedding-leases all 100
 ```
+
+`cancel all` processes one aggregate bounded page, including target-less blocked
+work. It releases active processing admission without archiving source memories,
+discarding replay guarantees or refunding original charges. Repeat deliberately
+for further pages. Cancellation does not prove remote execution has stopped and
+does not perform privacy erasure.
 
 Configuration files are bounded to 64 KiB. A target file contains `target`,
 `profile`, `window` and `enabled`. `target` is the credential-free
@@ -164,7 +171,9 @@ Explicit multi-input rejection splits subsequent work into durable halves under
 the original workflow. Diagnostic dispatch is bounded to 64 calls and eight
 ambiguous failures, further limited by the original profile and window. A
 diagnostic singleton becomes permanent only after explicit input rejection and
-a successful control in that workflow. An all-failing tree remains retryable.
+a successful sibling in its actual split lineage under the same target, policy
+and credential generation. That evidence can survive a later approved window;
+it grants no new dispatch allowance. An all-failing tree remains retryable.
 
 Finite window charges span endpoint/policy rotations of one provider identity.
 Retries within one approved window reuse the original workflow, owner, deadline
@@ -186,7 +195,10 @@ cohort/owner identities for deliberate recovery, separately from aggregate metri
 
 A timeout cannot forcibly settle an abort-ignoring implementation. Process and
 database provider fences remain until actual settlement. An expired lease alone
-does not authorize another ambiguous dispatch. Stop every original sender and
+does not authorize another ambiguous dispatch. If the original database attempt
+is still provably reserved, an expired cohort can be fenced and settled without
+refund or publication: no dispatch permit was issued. A dispatched unknown
+attempt still requires actual settlement or proved-exit recovery. Stop every original sender and
 verify exit before `embedding-recover-process recovery.json`, containing
 `cohortId`, `originalOwner` and confirmation `CONFIRMED ORIGINAL PROCESS EXIT`.
 The bound operator's confirmation is an operational attestation, not database
