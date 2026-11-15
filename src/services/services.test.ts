@@ -494,21 +494,43 @@ describe('shared services', () => {
 
   it('rolls vector and completion back on worker metadata failure, then commits one derived success', async () => {
     await embeddingQueueFixture(async f => {
+      expect((await f.owner.query('SELECT continuum_embedding_relation_collation() IS NOT NULL AS supported')).rows)
+        .toEqual([{ supported: true }]);
+      const store = new SqlEmbeddingJobStore(f.worker);
+      const run = () => processEmbeddingJobs(store, f.target, f.policy,
+        f.provider, f.profile, randomUUID());
+      const candidate = await captureMemory(f.app, f.router, f.principal, {
+        scope: { kind: f.scope.kind, name: f.scope.name }, type: 'fact',
+        title: 'Atomic completion neighbor', body: 'An eligible current relation candidate.', source: 'manual',
+      }, {}, { relationThreshold: 1 });
+      expect(candidate.embeddingStatus).toBe('queued');
+      expect(await run()).toBe('processed');
       const captured = await captureMemory(f.app, f.router, f.principal, {
         scope: { kind: f.scope.kind, name: f.scope.name }, type: 'fact',
         title: 'Atomic worker completion', body: 'Source capture already committed.', source: 'manual',
-      });
+      }, {}, { relationThreshold: 0.9 });
+      const before = (await f.owner.query('SELECT metadata,updated_at FROM memories WHERE id=$1', [captured.memory.id])).rows;
       const originalAudit = (await f.owner.query('SELECT metadata FROM audit_log WHERE memory_id=$1', [captured.memory.id])).rows;
+      const apply = vi.spyOn(store, 'apply');
       await f.owner.query(`CREATE FUNCTION reject_test_embedding_metadata() RETURNS trigger LANGUAGE plpgsql AS $$
         BEGIN RAISE EXCEPTION 'private metadata failure'; END $$;
         CREATE TRIGGER reject_test_embedding_metadata BEFORE UPDATE OF metadata ON memories
-        FOR EACH ROW EXECUTE FUNCTION reject_test_embedding_metadata()`);
-      const run = () => processEmbeddingJobs(new SqlEmbeddingJobStore(f.worker), f.target, f.policy,
-        f.provider, f.profile, randomUUID());
-      expect(await run()).toBe('unavailable');
+        FOR EACH ROW WHEN (NEW.id='${captured.memory.id}'::uuid
+          AND NEW.metadata IS DISTINCT FROM OLD.metadata
+          AND NEW.metadata->'related' @> '[{"id":"${candidate.memory.id}"}]'::jsonb)
+        EXECUTE FUNCTION reject_test_embedding_metadata()`);
+      try {
+        expect(await run()).toBe('unavailable');
+        expect(apply).toHaveBeenCalledTimes(1);
+        await expect(apply.mock.results[0].value).rejects.toThrow('private metadata failure');
+      } finally {
+        await f.owner.query('DROP TRIGGER reject_test_embedding_metadata ON memories; DROP FUNCTION reject_test_embedding_metadata()');
+      }
+      expect((await f.owner.query('SELECT metadata,updated_at FROM memories WHERE id=$1', [captured.memory.id])).rows).toEqual(before);
+      expect((await f.owner.query(`SELECT 1 FROM embedding_completions c JOIN embedding_jobs j ON j.id=c.job_id
+        WHERE j.memory_id=$1`, [captured.memory.id])).rowCount).toBe(0);
       expect((await f.owner.query('SELECT 1 FROM memory_embeddings WHERE memory_id=$1', [captured.memory.id])).rowCount).toBe(0);
       expect((await f.owner.query('SELECT metadata FROM audit_log WHERE memory_id=$1', [captured.memory.id])).rows).toEqual(originalAudit);
-      await f.owner.query('DROP TRIGGER reject_test_embedding_metadata ON memories; DROP FUNCTION reject_test_embedding_metadata()');
       const deadline = Date.now() + 3000;
       for (;;) {
         const due = (await f.owner.query('SELECT available_at<=clock_timestamp() AS due FROM embedding_jobs WHERE memory_id=$1', [captured.memory.id])).rows[0].due;
@@ -520,7 +542,21 @@ describe('shared services', () => {
       expect((await f.owner.query('SELECT 1 FROM memory_embeddings WHERE memory_id=$1', [captured.memory.id])).rowCount).toBe(1);
       expect((await f.owner.query('SELECT state FROM embedding_jobs WHERE memory_id=$1', [captured.memory.id])).rows).toEqual([{ state: 'ready' }]);
       expect((await f.owner.query('SELECT metadata FROM audit_log WHERE memory_id=$1 AND metadata->>\'embedding_status\'=\'queued\'', [captured.memory.id])).rows).toEqual(originalAudit);
-      expect((await f.owner.query('SELECT count(*)::int AS count FROM embedding_completions')).rows[0].count).toBe(1);
+      expect((await f.owner.query('SELECT count(*)::int AS count FROM embedding_completions')).rows[0].count).toBe(2);
+      const completionAudit = () => f.owner.query(`SELECT metadata FROM audit_log
+        WHERE memory_id=$1 AND metadata->>'operation'='embedding_completed'`, [captured.memory.id]);
+      const successAudit = (await completionAudit()).rows;
+      expect(successAudit).toHaveLength(1);
+      expect(successAudit[0].metadata.relationsStatus).toBe('computed');
+      const after = (await f.owner.query('SELECT metadata,updated_at FROM memories WHERE id=$1', [captured.memory.id])).rows;
+      expect(after[0].metadata.related).toEqual([expect.objectContaining({ id: candidate.memory.id,
+        relation: 'possible-conflict', provider: f.provider.id, threshold: 0.9 })]);
+      expect({ ...after[0].metadata, related: before[0].metadata.related }).toEqual(before[0].metadata);
+      expect(after[0].updated_at).toEqual(before[0].updated_at);
+      expect(await run()).toBe('idle');
+      expect((await completionAudit()).rows).toEqual(successAudit);
+      expect((await f.owner.query('SELECT metadata,updated_at FROM memories WHERE id=$1', [captured.memory.id])).rows).toEqual(after);
+      expect((await f.owner.query('SELECT count(*)::int AS count FROM embedding_completions')).rows[0].count).toBe(2);
     });
   }, 120_000);
 
