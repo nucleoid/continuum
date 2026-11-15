@@ -39,6 +39,12 @@ rolls back that audit, including when no block was generated. Unknown/withheld a
 not proof of absence. Old permissions, a version author, a saved UUID, a source
 prefix, a caller GUC or `SET ROLE` confer no processing or reader authority.
 
+Current, history and preview reads lock their complete selected source/root union
+in UUID order before visiting individual blocks. A history page selects at most
+ten versions and 320 blocks; the internal lock helper reads metadata only and
+does not grant access or bypass any block gate. SQL deadlines still bound waits;
+this is not a universal contention or fairness guarantee.
+
 The processed watermark and scope counters remain internal; the wire `watermark`
 is null. `fresh` reports current admitted dependencies and configuration, not
 absence of newer unprocessed evidence. Coverage describes the recorded cutoff.
@@ -269,7 +275,7 @@ actual blocks, run cancellation and workflow state; counters and old receipts ar
 insufficient. Locked gaps remain incomplete. Payload-free machine identities and
 accounting remain; process/provider/downloaded/backup copies need separate policy.
 
-Quiesce old artifact readers/writers and privacy workers, back up data and both
+Quiesce old memory/artifact readers/writers and privacy workers, back up data and both
 ledgers, apply the forward migration as owner with database TEMPORARY privilege,
 regrant exact profiles and verify readiness before restarting compatible binaries.
 0097 verifies predecessor bodies, owners, SQL-NULL search paths and ACLs before
@@ -287,6 +293,12 @@ workers while preserving current source/read/erasure guards and conservative
 accounting. Schema reversal requires a verified backup and reviewed replay;
 binary rollback cannot restore erased bytes. Never delete ledgers or broaden
 roles/search paths to recover availability. No live operation is authorized here.
+
+Current promotion clients acquire both enrolled scope epochs in UUID order before
+inserting the destination. Old promotion clients lack that capability and can
+invert their epoch locks during opposite-direction promotions. Do not mix those
+old writers with enrolled brief scopes; disabling synthesis does not remove the
+enrolled epoch rows. Regrant APP/OP profiles and restart compatible writers.
 
 The separately versioned `project-briefs-v1` evaluation measures actual persisted
 deterministic full/delta mechanics, exact alignment, labels, unknown/contradiction

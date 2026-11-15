@@ -48,9 +48,9 @@ it('never drains an epoch past a concurrent already-enrolled source omitted by i
       }
       expect(entered, 'claim must reach the owned inventory gate').toBe(true);
       const added = await createMemory(f.app, {
-          scopeId: f.projectId, scopeKind: 'project', authorId: actor.id,
-          type: 'decision', title: 'Concurrent committed input',
-          body: 'CONCURRENT-ENROLLED-INPUT', source: 'manual',
+        scopeId: f.projectId, scopeKind: 'project', authorId: actor.id,
+        type: 'decision', title: 'Concurrent committed input',
+        body: 'CONCURRENT-ENROLLED-INPUT', source: 'manual',
       });
       await f.app.query('SELECT continuum_evidence_source($1,$2)', [actor.id, added.id]);
       committed = true;
