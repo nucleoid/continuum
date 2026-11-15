@@ -16,6 +16,10 @@ export async function repositoryMapping(pool: pg.Pool, actor: string, id: string
   return evidenceTransaction(pool, async client =>
     (await client.query<{ value: RepositoryMapping | null }>('SELECT continuum_connector_mapping($1,$2) AS value', [actor, id])).rows[0].value);
 }
+export async function connectorAdmission(pool: pg.Pool, actor: string, mapping: RepositoryMapping, stage: 'permission' | 'content'): Promise<boolean> {
+  return evidenceTransaction(pool, async client => (await client.query<{ value: boolean }>(
+    'SELECT continuum_connector_admission($1,$2,$3,$4) AS value', [actor, mapping.id, mapping.generation, stage])).rows[0].value);
+}
 export async function startConnectorRun(pool: pg.Pool, actor: string, mapping: RepositoryMapping, execution: ConnectorExecution): Promise<boolean> {
   return evidenceTransaction(pool, async client => (await client.query<{ value: boolean }>(
     'SELECT continuum_connector_start($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) AS value',

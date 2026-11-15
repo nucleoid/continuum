@@ -14,6 +14,11 @@ describe('source-neutral repository evidence boundary', () => {
     expect(registry.ids()).toEqual([]);
     expect(registry.get('engram')).toBeUndefined();
     expect(() => registry.register({ id: '../content-selected' } as never)).toThrow();
+    const connector = { id: 'fixture', version: 'v1', classes: ['source-code' as const], open: () => ({} as never) };
+    registry.register(connector);
+    expect(registry.ids()).toEqual(['fixture']);
+    expect(() => registry.register(connector)).toThrow();
+    expect(() => registry.register({ ...connector, id: 'other', classes: ['mutate'] } as never)).toThrow();
   });
   it('rejects cross-repository spill, oversized output and guessed exact freshness', () => {
     const request = { repository: 'stable-repository', evidenceClass: 'source-code' as const,

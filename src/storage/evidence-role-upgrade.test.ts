@@ -8,7 +8,7 @@ import { runMigrations } from './migrator.js';
 import { createPrincipal } from './principals.js';
 import { getScopeByRef } from './scopes.js';
 import { addMembership } from './memberships.js';
-import { requireEvidenceReady, requireExtractionReady, requireEventTimeReady } from './provider-lifecycle.js';
+import { requireEvidenceReady, requireExtractionReady, requireEventTimeReady, requireConnectorEvidenceReady } from './provider-lifecycle.js';
 
 it('upgrades real APP/OP/SYNC profiles without raw payload grants and refuses trusted-body drift at startup', async () => {
   const suffix=randomUUID().replaceAll('-','').slice(0,12),schema=`evidence_upgrade_${suffix}`;
@@ -65,9 +65,18 @@ it('upgrades real APP/OP/SYNC profiles without raw payload grants and refuses tr
         has_table_privilege($1,'memory_event_annotations','SELECT,INSERT,UPDATE,DELETE') AS raw`,[role])).rows[0]).toEqual({serving:index!==2,raw:false});
       if(index!==2) await requireEventTimeReady(session,{expectedSchema:schema});
       else await expect(requireEventTimeReady(session,{expectedSchema:schema})).rejects.toMatchObject({code:'DEPENDENCY_UNAVAILABLE'});
+      expect((await owner.query(`SELECT has_function_privilege($1,'continuum_connector_mapping(uuid,uuid)','EXECUTE') AS serving,
+        has_function_privilege($1,'continuum_operator_connector_mapping(uuid,uuid,uuid,text,text,text,text,boolean)','EXECUTE') AS configure,
+        has_function_privilege($1,'continuum_evidence_eligible_pre_connector(uuid,uuid,text)','EXECUTE') AS bypass,
+        has_table_privilege($1,'connector_query_runs','SELECT,INSERT,UPDATE,DELETE') AS raw`,[role])).rows[0])
+        .toEqual({serving:index!==2,configure:index===1,bypass:false,raw:false});
+      if(index!==2) await requireConnectorEvidenceReady(session,{expectedSchema:schema});
+      else await expect(requireConnectorEvidenceReady(session,{expectedSchema:schema})).rejects.toMatchObject({code:'DEPENDENCY_UNAVAILABLE'});
       await expect(session.query('SELECT payload FROM evidence_payloads')).rejects.toMatchObject({code:'42501'});
     }
     expect((await owner.query("SELECT has_function_privilege($1,'independent_operator_extension()','EXECUTE') AS preserved",[roles[1]])).rows[0].preserved).toBe(true);
+    await owner.query(`CREATE OR REPLACE FUNCTION continuum_connector_mapping(actor UUID,mapping UUID) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$ BEGIN RETURN NULL; END $$`);
+    await expect(requireConnectorEvidenceReady(sessions[0],{expectedSchema:schema})).rejects.toMatchObject({code:'DEPENDENCY_UNAVAILABLE'});
     await owner.query('ALTER TABLE memories DISABLE TRIGGER extraction_capture_enqueue');
     await expect(requireExtractionReady(sessions[0],{expectedSchema:schema})).rejects.toMatchObject({code:'DEPENDENCY_UNAVAILABLE'});
     await owner.query('ALTER TABLE memories ENABLE TRIGGER extraction_capture_enqueue');

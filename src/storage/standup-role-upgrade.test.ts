@@ -253,6 +253,9 @@ async function roleUpgradeAcceptance(boundRuntime?: 'REST' | 'MCP') {
     const temporalForward = '0095_memory_event_annotations.sql';
     await copyFile(new URL(temporalForward, source), join(directory, temporalForward));
     expect((await runMigrations(owner, directory)).map(entry => entry.name)).toEqual([temporalForward]);
+    const connectorForward = '0096_repository_evidence.sql';
+    await copyFile(new URL(connectorForward, source), join(directory, connectorForward));
+    expect((await runMigrations(owner, directory)).map(entry => entry.name)).toEqual([connectorForward]);
     await grants(false);
     expect(await profiles()).toEqual(originalProfiles); expect(await identities()).toEqual(originalIdentities);
     for (const role of [appRole,operatorRole]) await reconcilePgvectorProviderGrants(logins.get(role)!, { expectedSchema: schema });

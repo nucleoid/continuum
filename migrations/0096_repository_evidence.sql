@@ -68,6 +68,16 @@ BEGIN
   RETURN jsonb_build_object('id',m.id,'scopeId',m.scope_id,'connectorId',m.connector_id,'connectorVersion',m.connector_version,
     'repository',m.repository,'generation',m.generation,'residency',m.residency,'now',extract(epoch FROM clock_timestamp())*1000);
 END $$;
+CREATE FUNCTION continuum_connector_admission(actor UUID,mapping UUID,epoch BIGINT,stage TEXT) RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE m JSONB;
+BEGIN
+  IF stage IS NULL OR stage NOT IN ('permission','content') THEN RETURN FALSE; END IF;
+  m:=continuum_connector_mapping(actor,mapping);
+  IF m IS NULL OR (m->>'generation')::bigint<>epoch THEN RETURN FALSE; END IF;
+  INSERT INTO audit_log(principal_id,action,scope_id,metadata) VALUES(actor,'read',(m->>'scopeId')::uuid,
+    jsonb_build_object('operation','connector_'||stage||'_admitted'));
+  RETURN TRUE;
+END $$;
 CREATE FUNCTION continuum_connector_start(actor UUID,run_id UUID,mapping UUID,epoch BIGINT,workflow UUID,worker UUID,workflow_epoch BIGINT,permission UUID,query UUID,delivery UUID)
 RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER AS $$
 DECLARE m JSONB; w pipeline_budget_workflows%ROWTYPE;
@@ -132,8 +142,11 @@ BEGIN
     OR NOT EXISTS(SELECT 1 FROM pipeline_budget_attempts a WHERE a.workflow_id=q.workflow_id AND a.attempt_id=q.query_attempt AND a.state='settled')
     OR jsonb_typeof(receipt) IS DISTINCT FROM 'object' OR octet_length(receipt::text)>8192
     OR receipt->>'schema' IS DISTINCT FROM 'repository-evidence-v1' OR receipt->>'outcome' IS DISTINCT FROM 'complete'
-    OR receipt->>'freshness' NOT IN ('exact','unknown') OR receipt->>'evidenceClass' NOT IN ('repository-brief','indexed-symbol','source-code','file-context','flow','contract-impact')
+    OR receipt->>'freshness' IS NULL OR receipt->>'freshness' NOT IN ('exact','unknown')
+    OR receipt->>'evidenceClass' IS NULL OR receipt->>'evidenceClass' NOT IN ('repository-brief','indexed-symbol','source-code','file-context','flow','contract-impact')
     OR jsonb_typeof(receipt->'truncated') IS DISTINCT FROM 'boolean' OR NOT(receipt ?& ARRAY['commit','indexWatermark'])
+    OR (receipt->'commit'<>'null'::jsonb AND (jsonb_typeof(receipt->'commit')<>'string' OR receipt->>'commit'!~'^[0-9a-f]{40}([0-9a-f]{24})?$'))
+    OR (receipt->'indexWatermark'<>'null'::jsonb AND (jsonb_typeof(receipt->'indexWatermark')<>'string' OR receipt->>'indexWatermark'!~'^[a-zA-Z0-9_.:/-]{1,128}$'))
     OR EXISTS(SELECT 1 FROM jsonb_object_keys(receipt) k WHERE k NOT IN ('schema','outcome','evidenceClass','freshness','commit','indexWatermark','truncated'))
     OR content IS NULL OR octet_length(content)>65536 THEN RAISE check_violation USING MESSAGE='Repository evidence unavailable'; END IF;
   INSERT INTO evidence_roots(id,scope_id,expiry_ceiling,residency,external_state,checked_at,valid_until)
@@ -178,7 +191,7 @@ BEGIN
       AND (r.revoked OR r.generation<>c.generation OR NOT continuum_evidence_can_access(actor,r.scope_id,FALSE))) THEN RETURN NULL; END IF;
   IF EXISTS(SELECT 1 FROM evidence_closure c JOIN connector_query_runs q ON q.id=c.root_id WHERE c.version_id=version
     AND (q.actor IS DISTINCT FROM $1 OR q.state<>'complete' OR q.expires_at<=clock_timestamp())) THEN RETURN NULL; END IF;
-  SELECT jsonb_agg(jsonb_build_object('runId',q.id,'mapping',continuum_connector_mapping(actor,q.mapping_id)) ORDER BY q.id)
+  SELECT jsonb_agg(jsonb_build_object('runId',q.id,'mapping',continuum_connector_mapping($1,q.mapping_id)) ORDER BY q.id)
     INTO result FROM evidence_closure c JOIN connector_query_runs q ON q.id=c.root_id WHERE c.version_id=version;
   RETURN result;
 END $$;
@@ -200,8 +213,8 @@ BEGIN
     ORDER BY id LIMIT page_limit FOR UPDATE SKIP LOCKED LOOP
     UPDATE connector_repository_mappings SET repository=NULL,enabled=FALSE,generation=generation+1 WHERE id=item.id; processed:=processed+1;
   END LOOP;
-  FOR item IN SELECT id,workflow_id FROM connector_query_runs WHERE scope_id=target_scope
-    AND (actor IS NOT NULL OR mapping_id IS NOT NULL OR state<>'cancelled') ORDER BY id LIMIT page_limit FOR UPDATE SKIP LOCKED LOOP
+  FOR item IN SELECT q.id,q.workflow_id FROM connector_query_runs q WHERE q.scope_id=target_scope
+    AND (q.actor IS NOT NULL OR q.mapping_id IS NOT NULL OR q.state<>'cancelled') ORDER BY q.id LIMIT page_limit FOR UPDATE SKIP LOCKED LOOP
     UPDATE pipeline_budget_workflows SET cancelled=TRUE,generation=generation+1 WHERE id=item.workflow_id AND NOT cancelled;
     UPDATE connector_query_runs SET actor=NULL,mapping_id=NULL,state='cancelled',permit_xid=NULL,permit_until=NULL WHERE id=item.id; processed:=processed+1;
   END LOOP;
@@ -230,7 +243,7 @@ CREATE FUNCTION continuum_connector_is_ready() RETURNS BOOLEAN LANGUAGE sql STAB
 $$;
 DO $$
 DECLARE schema_name TEXT:=current_schema(); f RECORD; signature TEXT; definition TEXT; revised TEXT; candidate RECORD;
-  app_signatures TEXT[]:=ARRAY['continuum_connector_mapping(uuid,uuid)',
+  app_signatures TEXT[]:=ARRAY['continuum_connector_mapping(uuid,uuid)','continuum_connector_admission(uuid,uuid,bigint,text)',
     'continuum_connector_start(uuid,uuid,uuid,bigint,uuid,uuid,bigint,uuid,uuid,uuid)',
     'continuum_connector_permit(uuid,uuid,bigint,timestamp with time zone,timestamp with time zone,text,text)',
     'continuum_connector_finish(uuid,uuid,jsonb,text)','continuum_connector_fail(uuid,uuid,text)','continuum_connector_dependencies(uuid,uuid)','continuum_connector_is_ready()'];
@@ -244,6 +257,13 @@ BEGIN
     EXECUTE format('ALTER FUNCTION %s SET search_path=pg_catalog,%I,pg_temp',f.signature,schema_name);
     EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC',f.signature);
   END LOOP;
+  -- Renaming preserves explicit ACLs. The old gate must never remain an APP
+  -- bypass; only the new wrapper is public to valid upgraded profiles.
+  FOR f IN SELECT r.rolname FROM pg_proc p CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl,acldefault('f',p.proowner))) acl
+    JOIN pg_roles r ON r.oid=acl.grantee WHERE p.oid='continuum_evidence_eligible_pre_connector(uuid,uuid,text)'::regprocedure
+      AND acl.grantee<>p.proowner LOOP
+    EXECUTE format('REVOKE ALL ON FUNCTION continuum_evidence_eligible_pre_connector(uuid,uuid,text) FROM %I',f.rolname);
+  END LOOP;
   FOREACH signature IN ARRAY ARRAY['continuum_assert_application_role_allowlist(name,boolean)','continuum_assert_standup_application_role_allowlist(name,boolean)'] LOOP
     definition:=pg_get_functiondef(signature::regprocedure);
     revised:=replace(definition,'(''continuum_standup_is_ready()'')','(''continuum_standup_is_ready()''),('''||replace(array_to_string(app_signatures,'''),('''),' ','')||''')');
@@ -255,6 +275,7 @@ BEGIN
   FOR candidate IN SELECT * FROM continuum_connector_upgrade_roles LOOP
     IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE oid=candidate.role_oid AND rolname=candidate.role_name) THEN CONTINUE; END IF;
     FOREACH signature IN ARRAY app_signatures LOOP EXECUTE format('GRANT EXECUTE ON FUNCTION %I.%s TO %I',schema_name,signature,candidate.role_name); END LOOP;
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_evidence_eligible(uuid,uuid,text) TO %I',schema_name,candidate.role_name);
     IF candidate.operator THEN FOREACH signature IN ARRAY op_signatures LOOP EXECUTE format('GRANT EXECUTE ON FUNCTION %I.%s TO %I',schema_name,signature,candidate.role_name); END LOOP; END IF;
     PERFORM continuum_assert_application_role_allowlist(candidate.role_name,candidate.operator);
   END LOOP;

@@ -47,6 +47,8 @@ export function validateRepositoryEvidence(value: unknown, request: RepositoryEv
     boundedJson(value, REPOSITORY_EVIDENCE_LIMITS.responseBytes);
     const parsed = repositoryResponseSchema.parse(value);
     return parsed.items.length <= request.maxResults && parsed.items.every(item => item.repository === request.repository
+      && (request.evidenceClass !== 'source-code' || item.kind === 'vcs')
+      && (request.evidenceClass !== 'indexed-symbol' || item.kind === 'indexed')
       && (request.commit === null || (item.commit === request.commit && item.kind !== 'history')));
   } catch { return false; }
 }

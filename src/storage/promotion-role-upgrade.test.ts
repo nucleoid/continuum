@@ -152,7 +152,7 @@ async function roleUpgradeAcceptance(review?: 'poison' | 'null' | 'regrant' | 'e
     // Preserve the historical 88->89 assertions above. Current promotion and
     // offboarding implementations require the independent forward foundations.
     const currentForwards = ['0090_standup_activity.sql','0092_pipeline_budgets.sql',
-      '0093_evidence_lifecycle.sql','0094_extraction.sql','0095_memory_event_annotations.sql'];
+      '0093_evidence_lifecycle.sql','0094_extraction.sql','0095_memory_event_annotations.sql','0096_repository_evidence.sql'];
     for (const file of currentForwards) await copyFile(new URL(file,migrationSource),join(directory,file));
     expect((await runMigrations(owner,directory)).map(entry=>entry.name)).toEqual(currentForwards);
     expect(await profiles()).toEqual(originalProfiles);

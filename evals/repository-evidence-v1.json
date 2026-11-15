@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "qualification": "Synthetic neutral contracts only; no real upstream, model, paid billing or normalized storage qualification",
+  "samplesPerVariant": 3,
+  "variants": [
+    { "id": "non-code-baseline", "expected": "baseline" },
+    { "id": "allowed-code", "expected": "complete" },
+    { "id": "denied-code", "expected": "denied" },
+    { "id": "unavailable-code", "expected": "unavailable" },
+    { "id": "stale-code", "expected": "stale" }
+  ],
+  "gates": { "securityFailures": 0, "outcomeAccuracy": 1, "variantCoverage": 1, "spendMicros": 0 }
+}

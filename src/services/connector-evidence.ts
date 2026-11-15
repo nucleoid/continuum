@@ -1,8 +1,8 @@
 import type pg from 'pg';
-import { Budget, BudgetError, boundedJson, budgetedStageUnavailable, runBudgetedStage, type BudgetAdapter } from '../pipeline/budget.js';
+import { Budget, BudgetError, amounts, boundedJson, budgetedStageUnavailable, runBudgetedStage, type BudgetAdapter } from '../pipeline/budget.js';
 import { pipelineAttempt } from '../storage/pipeline-budgets.js';
 import { evidenceEnvelope, evidencePayload, evidenceTransaction } from '../storage/evidence.js';
-import { connectorDependencies, finishConnectorRun, permitConnector, repositoryMapping, startConnectorRun,
+import { connectorAdmission, connectorDependencies, finishConnectorRun, permitConnector, repositoryMapping, startConnectorRun,
   type ConnectorExecution, type ConnectorPermit, type RepositoryMapping } from '../storage/connector-receipts.js';
 import { decideEvidencePolicy } from '../evidence/policy.js';
 import { decideManagedEvidence } from './evidence.js';
@@ -52,10 +52,16 @@ async function probe(pool: pg.Pool, actor: string, mapping: RepositoryMapping,
   adapter: BudgetAdapter<RepositoryPermissionRequest, RepositoryAuthority>, options: ConnectorEvidenceOptions, attemptId: string): Promise<
     { proof: RepositoryAuthority; checkedAt: number } | { outcome: ConnectorOutcome }> {
   const checkedAt = mapping.now; // Conservative database time BEFORE serialization/remote work.
+  let admitted = false;
   const result = await runBudgetedStage(options.budget, adapter, { repository: mapping.repository, principalId: actor }, {
     signal: options.signal, onWork: options.onWork,
     durable: pipelineAttempt(pool, { id: options.execution.workflowId, attemptId, owner: options.execution.workerId, generation: options.execution.generation }),
-    authorize: async () => sameMapping(mapping, await repositoryMapping(pool, actor, mapping.id)),
+    authorize: async () => {
+      if (!sameMapping(mapping, await repositoryMapping(pool, actor, mapping.id))) return false;
+      if (admitted) return true;
+      admitted = true;
+      return connectorAdmission(pool, actor, mapping, 'permission');
+    },
   });
   if (result.status !== 'complete') return { outcome: stageReason(result.reason) } as const;
   const parsed = repositoryAuthoritySchema.safeParse(result.value);
@@ -88,12 +94,23 @@ async function executeQuery(pool: pg.Pool, actor: string, mappingId: string,
     const first = await probe(pool, actor, mapping, session.permission, options, options.execution.permissionAttempt);
     if (!('proof' in first)) return fail(first.outcome);
     if (input.commit !== null && input.commit !== first.proof.commit) return fail('stale');
+    // Reserve worst-case managed costs before content I/O in BOTH ledgers.
+    // Non-call dimensions have no optimistic refund on failure/restart.
+    if (session.query.responseBodyBytes > options.budget.profile.maxItemHydratedBytes) return fail('budget');
+    const managed = { candidates: input.maxResults, hydratedBytes: session.query.responseBodyBytes,
+      artifactBytes: session.query.responseBodyBytes, storageBytes: session.query.responseBodyBytes + REPOSITORY_EVIDENCE_LIMITS.receiptBytes };
+    options.budget.consume(managed);
+    const durableQuery = pipelineAttempt(pool, { id: options.execution.workflowId, attemptId: options.execution.queryAttempt,
+      owner: options.execution.workerId, generation: options.execution.generation });
+    let contentAdmitted = false;
     const queried = await runBudgetedStage(options.budget, session.query, input, { signal: options.signal, onWork: options.onWork,
-      durable: pipelineAttempt(pool, { id: options.execution.workflowId, attemptId: options.execution.queryAttempt,
-        owner: options.execution.workerId, generation: options.execution.generation }),
+      durable: { ...durableQuery, reserve: (requested, retained) => durableQuery.reserve(amounts({ ...requested, ...managed }), retained) },
       authorize: async () => {
         const current = await repositoryMapping(pool, actor, mapping.id);
-        return sameMapping(mapping, current) && currentPolicy(actor, current, first.proof, first.checkedAt, session.query.local);
+        if (!sameMapping(mapping, current) || !currentPolicy(actor, current, first.proof, first.checkedAt, session.query.local)) return false;
+        if (contentAdmitted) return true;
+        contentAdmitted = true;
+        return connectorAdmission(pool, actor, current, 'content');
       } });
     if (queried.status !== 'complete') return fail(stageReason(queried.reason));
     if (!validateRepositoryEvidence(queried.value, input)) return fail('unavailable');
@@ -108,8 +125,7 @@ async function executeQuery(pool: pg.Pool, actor: string, mappingId: string,
     const receipt: ConnectorReceipt = { schema: 'repository-evidence-v1', outcome: 'complete', evidenceClass,
       freshness: queried.value.items.length > 0 && queried.value.items.every(item => item.commit !== null && item.kind !== 'history') ? 'exact' : 'unknown',
       commit: final.proof.commit, indexWatermark: final.proof.indexWatermark, truncated: queried.value.truncated };
-    options.budget.consume({ candidates: queried.value.items.length, hydratedBytes: Buffer.byteLength(content),
-      artifactBytes: Buffer.byteLength(content), storageBytes: Buffer.byteLength(content) + Buffer.byteLength(boundedJson(receipt, REPOSITORY_EVIDENCE_LIMITS.receiptBytes)) });
+    boundedJson(receipt, REPOSITORY_EVIDENCE_LIMITS.receiptBytes);
     return await evidenceTransaction(pool, async client => {
       if (!await permitConnector(client, actor, { runId: options.execution.runId, generation: mapping.generation,
         checkedAt: final.checkedAt, validUntil: final.checkedAt + final.proof.validForMs, commit: final.proof.commit, indexWatermark: final.proof.indexWatermark })) return fail('denied');
@@ -128,6 +144,7 @@ async function executeQuery(pool: pg.Pool, actor: string, mappingId: string,
 
 export async function queryConnectorEvidence(pool: pg.Pool, actor: string, mappingId: string,
   request: Omit<import('../connectors/evidence.js').RepositoryEvidenceRequest, 'repository'>, options: ConnectorEvidenceOptions): Promise<ConnectorEvidenceResult> {
+  options = { ...options, execution: { ...options.execution } };
   const result = await executeQuery(pool, actor, mappingId, request, options);
   if (result.receipt.outcome !== 'complete') {
     try {
@@ -144,6 +161,9 @@ export async function queryConnectorEvidence(pool: pg.Pool, actor: string, mappi
  * no cross-principal cache. Callers must persist these identities for retry. */
 export async function readConnectorEvidence(pool: pg.Pool, actor: string, version: string, options: ConnectorEvidenceOptions,
   attempts: ReadonlyMap<string, string>, provider?: import('../evidence/policy.js').EvidenceAuthorityContext['provider']): Promise<string | null> {
+  options = { ...options, execution: { ...options.execution } };
+  attempts = new Map(attempts);
+  provider = provider === undefined ? undefined : structuredClone(provider);
   try {
     const dependencies = await connectorDependencies(pool, actor, version);
     if (!dependencies?.length || dependencies.length > 64) return null;
