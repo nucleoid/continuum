@@ -103,11 +103,8 @@ BEGIN
     OR d->'qualification'->>'kind' NOT IN ('synthetic-only','operator-qualified')
     OR (d->'qualification'->>'kind'='synthetic-only' AND d->>'locality' IS DISTINCT FROM 'local')
     OR (d->'qualification'->>'kind'='operator-qualified' AND COALESCE(d->'qualification'->>'reportSha256','')!~'^[0-9a-f]{64}$')
-    OR (d->'budget'->'limits'->>'spendMicros')::numeric IS DISTINCT FROM 0::numeric
-    OR d->'price'->>'id' IS DISTINCT FROM 'local-zero-v1' OR d->'budget'->>'rateSchedule' IS DISTINCT FROM 'local-zero-v1'
-    OR (d->'price'->>'inputMicros')::numeric IS DISTINCT FROM 0::numeric
-    OR (d->'price'->>'outputMicros')::numeric IS DISTINCT FROM 0::numeric
-    OR (d->'price'->>'reasoningMicros')::numeric IS DISTINCT FROM 0::numeric THEN RETURN FALSE; END IF;
+    OR (d->'qualification'->>'kind'='synthetic-only'
+      AND (d->'budget'->'limits'->>'spendMicros')::numeric IS DISTINCT FROM 0::numeric) THEN RETURN FALSE; END IF;
   -- Reuse the reviewed complete accounting descriptor validator, with only its
   -- extraction-specific schema/chunk fields substituted. No extraction queue dependency.
   probe:=(d-'qualification'-'isolation')||jsonb_build_object('schema','extraction-v1','prompt','source-reference-v1','chunkBytes',65536,'maxChunks',1);
