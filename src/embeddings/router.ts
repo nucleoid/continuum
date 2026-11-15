@@ -1,6 +1,7 @@
 import type { EmbeddingProvider } from './provider.js';
 import type { ScopeKind, ScopeRef } from '../types.js';
 import type { Queryable } from '../storage/queryable.js';
+import type { EmbeddingPolicyIdentity } from '../storage/embedding-jobs-model.js';
 
 export type ProviderSelection = string | 'local-only' | 'none';
 
@@ -21,6 +22,8 @@ export interface EmbeddingRoute {
 }
 
 export interface EmbeddingRouter {
+  /** Operator-issued durable identity. An absent identity cannot dispatch queued work. */
+  readonly queuePolicy?: EmbeddingPolicyIdentity;
   resolve(scope: ScopeRef): EmbeddingRoute;
   providers(): EmbeddingProvider[];
   requiresLocal?(scope: ScopeRef): boolean;

@@ -8,7 +8,8 @@
   "bin": {
     "continuum-tags": "bin/continuum-tags.mjs",
     "continuum": "bin/continuum.mjs",
-    "continuum-migrate": "bin/continuum-migrate.mjs"
+    "continuum-migrate": "bin/continuum-migrate.mjs",
+    "continuum-embed-worker": "bin/continuum-embed-worker.mjs"
   },
   "types": "dist/index.d.ts",
   "files": [
@@ -36,6 +37,7 @@
     "docs/cli.md",
     "docs/coordination.md",
     "docs/embedding-backfill.md",
+    "docs/embedding-queue.md",
     "docs/extensions.md",
     "docs/knowledge-gap-insights.md",
     "docs/lifecycle.md",
@@ -94,7 +96,8 @@
     "tags:dev": "tsx src/cli/tag-vocabularies.ts",
     "embed-backfill": "node dist/maintenance/embed-backfill-cli.js",
     "embed-backfill:dev": "tsx src/maintenance/embed-backfill-cli.ts",
-    "test:container-entrypoint": "node --test deploy/container-entrypoint.test.mjs"
+    "test:container-entrypoint": "node --test deploy/container-entrypoint.test.mjs",
+    "embed-worker": "node dist/workers/embedding-worker-cli.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",

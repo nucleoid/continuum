@@ -13,7 +13,9 @@ import { StubEmbeddingProvider } from '../embeddings/stub.js';
 import { GeminiEmbeddingProvider } from '../embeddings/gemini.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import { captureSources } from '../capture/source.js';
-import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
+import { admitMemoryEmbedding, storeMemoryEmbeddingVector } from '../storage/embeddings.js';
+import { registerEmbeddingTargetForTest, withSyntheticTargetForTest } from '../embeddings/test-helpers.js';
+import { staticEmbeddingRouter } from '../embeddings/router.js';
 import { LIFECYCLE_PRINCIPAL_ID } from '../lifecycle/principal.js';
 import { recordRead } from '../audit/log.js';
 import { PromotionWebhookRegistry } from '../extensions/promotion.js';
@@ -60,9 +62,12 @@ describe('MCP server', () => {
     const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
     await addMembership(pool, me.id, teamPayments.id, 'writer');
 
+    const configured = selectedProvider && selectedProvider.dim === 768 ? withSyntheticTargetForTest(selectedProvider) : null;
+    const policy = configured ? await registerEmbeddingTargetForTest(pool, configured, [teamPayments.id, org.id]) : undefined;
+
     const server = buildMcpServer({
       pool: selectedPool,
-      embeddingProvider: selectedProvider,
+      embeddingProvider: configured ? Object.assign(staticEmbeddingRouter(configured), { queuePolicy: policy }) : selectedProvider,
       principal: me,
       logger,
       promotionWebhooks,
@@ -211,11 +216,11 @@ describe('MCP server', () => {
     ]);
   });
 
-  it('returns capture success without exposing embedding failures and audits safely', async () => {
+  it('returns queued capture without invoking an offline provider or exposing private details', async () => {
     const privateMessage = 'provider token private-mcp-value';
     const failingProvider: EmbeddingProvider = {
       id: 'test:failing', dim: 768,
-      async embed() { throw new Error(privateMessage); },
+      embed: vi.fn(async () => { throw new Error(privateMessage); }),
     };
     const { client } = await connectClient(failingProvider);
 
@@ -233,6 +238,7 @@ describe('MCP server', () => {
       scope: 'team:payments',
       expires_at: expect.any(String),
       embedded: false,
+      embedding_status: 'queued',
       related: [],
       extraction: { status: 'not-configured' },
     });
@@ -241,7 +247,9 @@ describe('MCP server', () => {
       'SELECT metadata::text AS metadata FROM audit_log WHERE memory_id = $1',
       [body.id],
     );
-    expect(rows[0].metadata).toContain('EMBEDDING_FAILED');
+    expect(rows[0].metadata).toContain('queued');
+    expect(rows[0].metadata).not.toContain('EMBEDDING_FAILED');
+    expect(failingProvider.embed).not.toHaveBeenCalled();
     expect(rows[0].metadata).not.toContain(privateMessage);
     expect(rows[0].metadata).not.toContain('private-mcp-memory-text');
   });
@@ -307,9 +315,10 @@ describe('MCP server', () => {
         source: 'manual',
       },
     })) as CallToolResult;
-    const created = parseJsonResult(capture) as { id: string; embedded: boolean };
+    const created = parseJsonResult(capture) as { id: string; embedded: boolean; embedding_status: string; related: unknown[] };
     expect(created.id).toMatch(/^[0-9a-f-]{36}$/);
-    expect(created.embedded).toBe(true);
+    expect(created).toMatchObject({ embedded: false, embedding_status: 'queued', related: [] });
+    expect((await pool.query('SELECT 1 FROM memory_embeddings WHERE memory_id=$1', [created.id])).rowCount).toBe(0);
 
     const recall = (await client.callTool({
       name: 'continuum.recall',
@@ -434,6 +443,7 @@ describe('MCP server', () => {
         memory.id,
         highSimilarityVector,
         provider,
+        (await admitMemoryEmbedding(pool, memory.id, provider))!,
       );
     }
 
@@ -450,7 +460,8 @@ describe('MCP server', () => {
       });
       decisionIds.push(memory.id);
       const [decisionVector] = await provider.embed([`lower similarity ${i}`]);
-      await storeMemoryEmbeddingVector(pool, memory.id, decisionVector, provider);
+      await storeMemoryEmbeddingVector(pool, memory.id, decisionVector, provider,
+        (await admitMemoryEmbedding(pool, memory.id, provider))!);
     }
 
     const recall = (await client.callTool({

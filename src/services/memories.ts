@@ -12,6 +12,7 @@ import { asServiceError, ServiceError } from './errors.js';
 import { parseScopeString } from './scopes.js';
 import { eventMatches, parseEventWindow, type EventWindowInput } from '../temporal/model.js';
 import { readEventAnnotations } from '../storage/temporal.js';
+import { readEmbeddingStatus } from '../storage/embedding-jobs.js';
 
 export const DEFAULT_MEMORY_LIST_LIMIT = 50;
 export const MAX_MEMORY_LIST_LIMIT = 100;
@@ -67,12 +68,17 @@ export async function getMemoryForPrincipal(
   try {
     client = await pool.connect();
     await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
+    await client.query(`SELECT pg_catalog.set_config('statement_timeout',CASE WHEN setting::bigint BETWEEN 1 AND 5000 THEN setting||'ms' ELSE '5000ms' END,TRUE) FROM pg_catalog.pg_settings WHERE name='statement_timeout'`);
+    await client.query(`SELECT pg_catalog.set_config('lock_timeout',CASE WHEN setting::bigint BETWEEN 1 AND 1000 THEN setting||'ms' ELSE '1000ms' END,TRUE) FROM pg_catalog.pg_settings WHERE name='lock_timeout'`);
+    const embedding = await readEmbeddingStatus(client, principal.id, memoryId);
+    if (!embedding) throw new ServiceError('MEMORY_NOT_FOUND', 'Memory not found');
     const recordValue = await getReadableMemory(client, principal.id, memoryId, readBudgetBytes);
     if (!recordValue) {
       throw new ServiceError('MEMORY_NOT_FOUND', 'Memory not found');
     }
     const event = (await readEventAnnotations(client,principal.id,[memoryId],true,readBudgetBytes)).get(memoryId);
     if (event?.version) recordValue.memory.event = event;
+    recordValue.embedding = embedding;
     if (readBudgetBytes !== undefined) requireReadBudget(Buffer.byteLength(JSON.stringify(recordValue), 'utf8') + 1024, readBudgetBytes);
     validateResult?.(recordValue);
     await recordRead(client, {

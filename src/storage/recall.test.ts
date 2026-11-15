@@ -10,6 +10,7 @@ import { createScope } from './scopes.js';
 import { makeTestPool, resetData } from './test-helpers.js';
 import { createMemory } from './memories.js';
 import type { Queryable } from './queryable.js';
+import { registerEmbeddingTargetForTest, withSyntheticTargetForTest } from '../embeddings/test-helpers.js';
 
 describe('recall expiry enforcement', () => {
   let pool: pg.Pool;
@@ -133,12 +134,15 @@ describe('recall expiry enforcement', () => {
       id: 'provider:second', dim: 768,
       embed: vi.fn(() => new Promise<number[][]>((resolve) => { resolveSecond = resolve; })),
     };
+    const other = await seedMemory('concurrent second group');
+    await registerEmbeddingTargetForTest(pool, withSyntheticTargetForTest(first), [scope.id]);
+    await registerEmbeddingTargetForTest(pool, withSyntheticTargetForTest(second), [other.scope.id]);
     const pending = recall(pool, {
-      query: 'concurrent groups', scopeIds: [scope.id], limit: 10,
+      query: 'concurrent groups', scopeIds: [scope.id, other.scope.id], limit: 10,
       embeddingDeadlineMs: 1_000,
       embeddingGroups: [
         { scopeIds: [scope.id], provider: first },
-        { scopeIds: [scope.id], provider: second },
+        { scopeIds: [other.scope.id], provider: second },
       ],
     });
     for (let attempt = 0; attempt < 100 && second.embed.mock.calls.length === 0; attempt += 1) {
@@ -158,12 +162,15 @@ describe('recall expiry enforcement', () => {
     const { scope } = await seedMemory('shared deadline');
     const fast = { id: 'provider:fast', dim: 768, async embed() { return [Array(768).fill(0)]; } };
     const stuck = { id: 'provider:stuck', dim: 768, async embed() { return new Promise<number[][]>(() => undefined); } };
+    const other = await seedMemory('shared stuck deadline');
+    await registerEmbeddingTargetForTest(pool, withSyntheticTargetForTest(fast), [scope.id]);
+    await registerEmbeddingTargetForTest(pool, withSyntheticTargetForTest(stuck), [other.scope.id]);
     const recalled = await recall(pool, {
-      query: 'shared deadline', scopeIds: [scope.id], limit: 10,
+      query: 'shared deadline', scopeIds: [scope.id, other.scope.id], limit: 10,
       embeddingDeadlineMs: 100,
       embeddingGroups: [
         { scopeIds: [scope.id], provider: fast },
-        { scopeIds: [scope.id], provider: stuck },
+        { scopeIds: [other.scope.id], provider: stuck },
       ],
     });
     expect(recalled.diagnostics).toEqual({
@@ -203,6 +210,7 @@ describe('recall expiry enforcement', () => {
       id: 'provider:sql-timeout', dim: 768,
       async embed() { return [Array(768).fill(0) as number[]]; },
     };
+    await registerEmbeddingTargetForTest(pool, withSyntheticTargetForTest(provider), [scope.id]);
     const started = Date.now();
     try {
       const recalled = await recall(pool, {
@@ -236,6 +244,7 @@ describe('recall expiry enforcement', () => {
       id: 'provider:connection-timeout', dim: 768,
       async embed() { return [Array(768).fill(0) as number[]]; },
     };
+    await registerEmbeddingTargetForTest(pool, withSyntheticTargetForTest(provider), [scope.id]);
 
     const recalled = await recall(queryable, {
       query: 'bounded connection wait', scopeIds: [scope.id], limit: 10,
@@ -284,6 +293,7 @@ describe('recall expiry enforcement', () => {
       id: 'ollama:local', dim: 768, local: true,
       async embed() { return [Array(768).fill(0) as number[]]; },
     };
+    await registerEmbeddingTargetForTest(pool, withSyntheticTargetForTest(provider), [scope.id]);
 
     const recalled = await recall(queryable, {
       query: 'vector sql fallback', scopeIds: [scope.id], limit: 10,

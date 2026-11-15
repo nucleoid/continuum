@@ -34,8 +34,10 @@ it('advances beyond a32-input page under one allowance and restarts for a lower-
     expect(seen.size).toBe(0);
     const original=await identity(f,queued.runId);
     expect((await f.owner.query('SELECT count(*)::int AS n FROM brief_run_inputs WHERE run_id=$1',[queued.runId])).rows[0].n).toBe(32);
-    const later=await source(f,'DELAYED-LOWER-ID');
-    await f.owner.query("UPDATE memories SET id='00000000-0000-4000-8000-000000000099' WHERE id=$1",[later.id]);
+    await createMemory(f.app,{
+      id: '00000000-0000-4000-8000-000000000099',scopeId: f.projectId,scopeKind: 'project',authorId: f.actorId,type: 'decision',
+      title: 'DELAYED-LOWER-ID',body: 'DELAYED-LOWER-ID',source: 'manual',
+    });
     expect(await processBrief(f.worker,randomUUID(),f.profile)).toBe('progress');
     expect(await identity(f,queued.runId)).toEqual(original);
     expect(await processBrief(f.worker,randomUUID(),f.profile)).toBe('processed');

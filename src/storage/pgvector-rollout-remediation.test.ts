@@ -13,9 +13,9 @@ import { join } from 'node:path';
 import pg from 'pg';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  storeMemoryEmbeddingVector,
   vectorSearchMemoryIds,
 } from './embeddings.js';
+import { seedEmbeddingVectorForTest, withSyntheticTargetForTest } from '../embeddings/test-helpers.js';
 import { runMigrations } from './migrator.js';
 import { reconcilePgvectorProviderGrants } from './provider-lifecycle.js';
 import { createPrincipal } from './principals.js';
@@ -581,8 +581,8 @@ describe('pgvector rollout remediation', () => {
         [memoryId, scopeId, principalId],
       );
       const vector = [1, ...Array(767).fill(0)] as number[];
-      const provider = { id: 'test:least-privilege', dim: 768 };
-      await storeMemoryEmbeddingVector(owner, memoryId, vector, provider);
+      const provider = withSyntheticTargetForTest({ id: 'test:least-privilege', dim: 768 });
+      await seedEmbeddingVectorForTest(owner, owner, memoryId, vector, provider);
 
       const runtime = migrationPool(url, applicationSchema, appRole);
       expect((await runtime.query(
@@ -679,6 +679,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0095_memory_event_annotations.sql' }),
         expect.objectContaining({ name: '0096_repository_evidence.sql' }),
         expect.objectContaining({ name: '0097_project_briefs.sql' }),
+        expect.objectContaining({ name: '0098_async_embedding_jobs.sql' }),
       ]);
       await grantApplicationRole(pool, applicationSchema, appRole);
       await expect(pool.query(
@@ -729,6 +730,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0095_memory_event_annotations.sql' }),
         expect.objectContaining({ name: '0096_repository_evidence.sql' }),
         expect.objectContaining({ name: '0097_project_briefs.sql' }),
+        expect.objectContaining({ name: '0098_async_embedding_jobs.sql' }),
       ]);
       await grantApplicationRole(pool, applicationSchema, appRole);
       await expect(pool.query(
@@ -915,6 +917,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0095_memory_event_annotations.sql' }),
         expect.objectContaining({ name: '0096_repository_evidence.sql' }),
         expect.objectContaining({ name: '0097_project_briefs.sql' }),
+        expect.objectContaining({ name: '0098_async_embedding_jobs.sql' }),
       ]);
       await grantApplicationRole(pool, applicationSchema, appRole);
       await expect(pool.query(
@@ -981,6 +984,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0095_memory_event_annotations.sql' }),
         expect.objectContaining({ name: '0096_repository_evidence.sql' }),
         expect.objectContaining({ name: '0097_project_briefs.sql' }),
+        expect.objectContaining({ name: '0098_async_embedding_jobs.sql' }),
       ]);
       await grantApplicationRole(owner, applicationSchema, appRole);
       await expect(owner.query(
@@ -1280,6 +1284,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0095_memory_event_annotations.sql' }),
         expect.objectContaining({ name: '0096_repository_evidence.sql' }),
         expect.objectContaining({ name: '0097_project_briefs.sql' }),
+        expect.objectContaining({ name: '0098_async_embedding_jobs.sql' }),
       ]);
       await grantApplicationRole(owner, applicationSchema, appRole);
       await expect(owner.query(
@@ -1904,30 +1909,37 @@ describe('pgvector rollout remediation', () => {
       });
       secondRuntime.on('error', () => undefined);
       trackPool(secondRuntime);
-      await expect(vectorSearchMemoryIds(
-        secondRuntime, [1, ...Array(767).fill(0)], [secondIds.scope],
-        { id: 'test:shared-provider', dim: 768 }, 5,
-      )).resolves.toEqual([{ id: secondIds.memory, distance: 0 }]);
+      // This tenant intentionally remains pre-0080. Probe its legacy qualified
+      // provider permission directly; current readers require the full0098 gate.
+      const legacySecondHits = async () => (await secondRuntime.query(`SELECT m.id,
+        e.embedding OPERATOR(continuum_extensions.<=>) $1::continuum_extensions.vector AS distance
+        FROM memory_embeddings e JOIN memories m ON m.id=e.memory_id
+        WHERE m.scope_id=$2 AND e.provider='test:shared-provider' AND e.dim=768
+          AND m.state='live' AND (m.expires_at IS NULL OR m.expires_at>clock_timestamp())
+        ORDER BY distance,m.id LIMIT 5`, [`[${[1, ...Array(767).fill(0)].join(',')}]`, secondIds.scope])).rows;
+      await expect(legacySecondHits()).resolves.toEqual([{ id: secondIds.memory, distance: 0 }]);
 
       await runMigrations(firstOwner, await fullMigrationDirectory());
-      await expect(vectorSearchMemoryIds(
-        secondRuntime, [1, ...Array(767).fill(0)], [secondIds.scope],
-        { id: 'test:shared-provider', dim: 768 }, 5,
-      )).resolves.toEqual([{ id: secondIds.memory, distance: 0 }]);
+      await expect(legacySecondHits()).resolves.toEqual([{ id: secondIds.memory, distance: 0 }]);
 
       await runMigrations(secondOwner, await fullMigrationDirectory());
+      // These legacy pre-0080 profiles now use current vector admission. Apply
+      // the checked current capability grants before exercising that API.
+      await grantApplicationRole(firstOwner, firstSchema, firstAppRole);
+      await grantApplicationRole(secondOwner, secondSchema, secondAppRole);
       const firstRuntime = migrationPool(url, firstSchema, firstAppRole);
-      for (const [runtime, ids] of [[firstRuntime, firstIds], [secondRuntime, secondIds]] as const) {
-        await expect(storeMemoryEmbeddingVector(runtime, ids.memory, [1, ...Array(767).fill(0)],
-          { id: 'test:shared-provider', dim: 768 })).resolves.toBe(true);
+      const currentProvider = withSyntheticTargetForTest({ id: 'test:shared-provider', dim: 768 });
+      for (const [tenantOwner, runtime, ids] of [[firstOwner, firstRuntime, firstIds], [secondOwner, secondRuntime, secondIds]] as const) {
+        await expect(seedEmbeddingVectorForTest(tenantOwner, runtime, ids.memory, [1, ...Array(767).fill(0)],
+          currentProvider)).resolves.toBe(true);
       }
       await expect(vectorSearchMemoryIds(
         firstRuntime, [1, ...Array(767).fill(0)], [firstIds.scope],
-        { id: 'test:shared-provider', dim: 768 }, 5,
+        currentProvider, 5,
       )).resolves.toEqual([{ id: firstIds.memory, distance: 0 }]);
       await expect(vectorSearchMemoryIds(
         secondRuntime, [1, ...Array(767).fill(0)], [secondIds.scope],
-        { id: 'test:shared-provider', dim: 768 }, 5,
+        currentProvider, 5,
       )).resolves.toEqual([{ id: secondIds.memory, distance: 0 }]);
     });
   }, 360_000);

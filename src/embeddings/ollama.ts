@@ -10,6 +10,7 @@ import {
   validateEmbeddingTimeout,
   withEmbeddingTimeout,
 } from './timeout.js';
+import { embeddingTarget, MEMORY_EMBEDDING_INPUT_TRANSFORM } from './target.js';
 
 const DEFAULT_BATCH_SIZE = 32;
 const MAX_BATCH_SIZE = 1_000;
@@ -92,6 +93,11 @@ function positiveInteger(value: number, name: string, maximum?: number): number 
 }
 
 export class OllamaEmbeddingProvider implements EmbeddingProvider {
+  get target() {
+    return this.dim === 768 ? embeddingTarget({ space: { provider: this.id, model: this.model,
+      profile: 'ollama-embed-v1', dim: 768, inputTransform: MEMORY_EMBEDDING_INPUT_TRANSFORM },
+    endpoint: `${this.baseUrl}/api/embed`, local: this.local }) : undefined;
+  }
   readonly id: string;
   readonly dim: number;
   readonly local = true;

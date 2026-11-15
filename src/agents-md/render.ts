@@ -18,6 +18,8 @@ const SECTION_ORDER: Array<{ key: 'org' | 'role' | 'team' | 'project'; heading: 
 // Optional recall reranking is independent: no adapter calls, scores or receipts.
 // Event annotations and temporal candidates are excluded. Event filters/hints
 // are explicit recall/browse inputs and never implicit generator predicates.
+// Deferred embedding jobs/status/receipts and vector generations are separate
+// operational state. A queued source uses this same source-only SQL selection.
 // Per-section preference for which memory types lead. Context is excluded
 // from AGENTS.md by default: it decays fast and is rarely useful as
 // agent-bootstrap context.

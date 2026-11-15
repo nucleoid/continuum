@@ -7,12 +7,17 @@ import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import { accessibleScopes, canReadScope, canWriteScope } from './access.js';
-import { captureMemory, embedCapturedMemory } from './capture.js';
+import { captureMemory } from './capture.js';
 import { recallForPrincipal } from './recall.js';
 import { renderAgentsMdForPrincipal } from './agents-md.js';
 import { ServiceError } from './errors.js';
 import { createMemory } from '../storage/memories.js';
-import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
+import { embeddingQueueFixture, registerEmbeddingTargetForTest, seedEmbeddingVectorForTest, withSyntheticTargetForTest } from '../embeddings/test-helpers.js';
+import { staticEmbeddingRouter } from '../embeddings/router.js';
+import { detectRelatedMemories } from './relations.js';
+import { processEmbeddingJobs } from '../workers/embedding-jobs.js';
+import { SqlEmbeddingJobStore } from '../storage/embedding-jobs.js';
+import { randomUUID } from 'node:crypto';
 import {
   promoteForPrincipal,
   VERIFICATION_NOTE_MAX_LENGTH,
@@ -49,6 +54,12 @@ describe('shared services', () => {
       kind: 'user',
       displayName: 'Other Author',
     });
+  }
+
+  async function configuredCapture(provider: EmbeddingProvider) {
+    const configured = withSyntheticTargetForTest(provider);
+    const policy = await registerEmbeddingTargetForTest(pool, configured);
+    return Object.assign(staticEmbeddingRouter(configured), { queuePolicy: policy });
   }
 
   it('adds implicit org read to the canonical accessible-scope set', async () => {
@@ -202,13 +213,13 @@ describe('shared services', () => {
       scopeId: team.id,
       tags: ['decision'],
       sourceRef: 'https://example.test/source/1',
-      metadata: { branch: 'main' },
+      metadata: { branch: 'main', related: [] },
     });
     const { rows } = await pool.query(
       'SELECT metadata FROM audit_log WHERE memory_id = $1',
       [result.memory.id],
     );
-    expect(rows).toEqual([{ metadata: { source: 'manual', type: 'fact', embedded: false } }]);
+    expect(rows).toEqual([{ metadata: { source: 'manual', type: 'fact', embedded: false, embedding_status: 'not_configured' } }]);
   });
 
   it.each([
@@ -241,17 +252,17 @@ describe('shared services', () => {
     expect(rows[0]).toEqual({ memories: 0, embeddings: 0, audits: 0 });
   });
 
-  it('sanitizes embedding failures in results and audit metadata', async () => {
+  it('queues an offline provider without exposing private failure details or invoking it', async () => {
     const { principal } = await seedWriter();
     const provider: EmbeddingProvider = {
       id: 'test:failing',
-      dim: 3,
-      async embed() {
+      dim: 768,
+      embed: vi.fn(async () => {
         throw new Error('provider secret: api-key-123');
-      },
+      }),
     };
 
-    const result = await captureMemory(pool, provider, principal, {
+    const result = await captureMemory(pool, await configuredCapture(provider), principal, {
       scope: { kind: 'team', name: 'payments' },
       type: 'fact',
       title: 'Retry limit',
@@ -259,38 +270,46 @@ describe('shared services', () => {
       source: 'manual',
     });
 
-    expect(result).toMatchObject({ embedded: false, embedErrorCode: 'EMBEDDING_FAILED' });
+    expect(result).toMatchObject({ embedded: false, embeddingStatus: 'queued', related: [] });
+    expect(result.embedErrorCode).toBeUndefined();
+    expect(provider.embed).not.toHaveBeenCalled();
     const { rows } = await pool.query(
       'SELECT metadata::text AS metadata FROM audit_log WHERE memory_id = $1',
       [result.memory.id],
     );
-    expect(rows[0].metadata).toContain('EMBEDDING_FAILED');
+    expect(rows[0].metadata).toContain('queued');
+    expect(rows[0].metadata).not.toContain('EMBEDDING_FAILED');
     expect(rows[0].metadata).not.toContain('api-key-123');
   });
 
-  it('computes once and persists an exact normalized duplicate candidate', async () => {
-    const { principal } = await seedWriter();
+  it('keeps duplicate advice out of capture while preserving the explicit normalized classifier', async () => {
+    const { principal, team } = await seedWriter();
     const embed = vi.fn(async () => [unitVector(1)]);
     const provider: EmbeddingProvider = { id: 'test:relations', dim: 768, embed };
+    const router = await configuredCapture(provider);
 
-    const first = await captureMemory(pool, provider, principal, {
+    const first = await captureMemory(pool, router, principal, {
       scope: { kind: 'team', name: 'payments' }, type: 'fact',
       title: ' Deploy policy ', body: 'No Fridays.\r\n', source: 'manual',
     });
-    const second = await captureMemory(pool, provider, principal, {
+    await seedEmbeddingVectorForTest(pool, pool, first.memory.id, unitVector(1), provider);
+    const second = await captureMemory(pool, router, principal, {
       scope: { kind: 'team', name: 'payments' }, type: 'fact',
       title: 'deploy POLICY', body: ' No   Fridays. ', source: 'manual',
     });
 
-    expect(embed).toHaveBeenCalledTimes(2);
+    expect(embed).not.toHaveBeenCalled();
     expect(first.related).toEqual([]);
-    expect(second.related).toEqual([expect.objectContaining({
+    expect(second.related).toEqual([]);
+    const related = await detectRelatedMemories(pool, unitVector(1), [team.id], provider,
+      { type: 'fact', title: 'deploy POLICY', body: ' No   Fridays. ' }, second.memory.id);
+    expect(related).toEqual([expect.objectContaining({
       id: first.memory.id, similarity: expect.closeTo(1, 8),
       relation: 'possible-duplicate', provider: provider.id, threshold: 0.92,
       detectedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
     })]);
     const stored = await pool.query('SELECT metadata FROM memories WHERE id = $1', [second.memory.id]);
-    expect(stored.rows[0].metadata.related).toEqual(second.related);
+    expect(stored.rows[0].metadata.related).toEqual([]);
   });
 
   it('returns the five highest same-family readable candidates and filters unsafe rows', async () => {
@@ -309,7 +328,7 @@ describe('shared services', () => {
         title: `Visible ${index}`, body: `Candidate ${index}`,
         authorId: author.id, source: 'manual',
       });
-      await storeMemoryEmbeddingVector(pool, memory.id, unitVector(similarity), provider);
+      await seedEmbeddingVectorForTest(pool, pool, memory.id, unitVector(similarity), provider);
       valid.push({ id: memory.id, similarity });
     }
     const unsafe = [] as Array<Awaited<ReturnType<typeof createMemory>>>;
@@ -324,25 +343,33 @@ describe('shared services', () => {
         scopeId: scope.id, scopeKind: scope.kind, type: 'fact', title,
         body: `${title}-body`, authorId: author.id, source: 'manual',
       });
-      await storeMemoryEmbeddingVector(pool, memory.id, unitVector(0.999), provider);
+      await seedEmbeddingVectorForTest(pool, pool, memory.id, unitVector(0.999), provider);
       unsafe.push(memory);
     }
     await pool.query("UPDATE memories SET state = 'stale' WHERE id = $1", [unsafe[1].id]);
     await pool.query("UPDATE memories SET expires_at = now() - interval '1 second' WHERE id = $1", [unsafe[2].id]);
-    await pool.query("UPDATE memory_embeddings SET provider = 'other:provider' WHERE memory_id = $1", [unsafe[3].id]);
-    await pool.query('UPDATE memory_embeddings SET dim = 767 WHERE memory_id = $1', [unsafe[4].id]);
+    await expect(pool.query("UPDATE memory_embeddings SET provider = 'other:provider' WHERE memory_id = $1", [unsafe[3].id]))
+      .rejects.toThrow(/Embedding source or vector space unavailable/i);
+    await expect(pool.query('UPDATE memory_embeddings SET dim = 767 WHERE memory_id = $1', [unsafe[4].id]))
+      .rejects.toThrow(/Embedding source or vector space unavailable|dimension/i);
+    // Invalid provenance can no longer be installed by a current writer. Keep
+    // these denied fixture candidates absent rather than bypassing that guard.
+    await pool.query('DELETE FROM memory_embeddings WHERE memory_id=ANY($1::uuid[])', [[unsafe[3].id, unsafe[4].id]]);
 
     const result = await captureMemory(pool, provider, principal, {
       scope: { kind: 'team', name: 'payments' }, type: 'fact',
       title: 'Incoming policy', body: 'Incoming candidate body', source: 'manual',
     });
 
-    expect(result.related.map((item) => item.id)).toEqual(valid.slice(0, 5).map((item) => item.id));
-    expect(result.related.map((item) => item.similarity)).toEqual(
+    expect(result.related).toEqual([]);
+    const related = await detectRelatedMemories(pool, unitVector(1), [team.id, org.id], provider,
+      { type: 'fact', title: 'Incoming policy', body: 'Incoming candidate body' }, result.memory.id);
+    expect(related.map((item) => item.id)).toEqual(valid.slice(0, 5).map((item) => item.id));
+    expect(related.map((item) => item.similarity)).toEqual(
       valid.slice(0, 5).map((item) => expect.closeTo(item.similarity, 6)),
     );
-    expect(result.related.every((item) => item.relation === 'possible-conflict')).toBe(true);
-    const serialized = JSON.stringify(result);
+    expect(related.every((item) => item.relation === 'possible-conflict')).toBe(true);
+    const serialized = JSON.stringify({ result, related });
     for (const marker of ['private-title-marker', 'stale-title-marker', 'expired-title-marker',
       'wrong-provider-title-marker', 'wrong-dimension-title-marker']) {
       expect(serialized).not.toContain(marker);
@@ -359,7 +386,7 @@ describe('shared services', () => {
       scopeId: team.id, scopeKind: team.kind, type: 'context', title: 'Nearby',
       body: 'Below the default.', authorId: author.id, source: 'manual',
     });
-    await storeMemoryEmbeddingVector(pool, candidate.id, unitVector(0.91), provider);
+    await seedEmbeddingVectorForTest(pool, pool, candidate.id, unitVector(0.91), provider);
 
     const defaultResult = await captureMemory(pool, provider, principal, {
       scope: { kind: 'team', name: 'payments' }, type: 'context',
@@ -371,176 +398,167 @@ describe('shared services', () => {
     }, {}, { relationThreshold: 0.9 });
 
     expect(defaultResult.related).toEqual([]);
-    expect(loweredResult.related.map((item) => item.id)).toEqual([
+    expect(loweredResult.related).toEqual([]);
+    expect(await detectRelatedMemories(pool, unitVector(1), [team.id], provider,
+      { type: 'context', title: 'Default', body: 'No candidate.' }, defaultResult.memory.id)).toEqual([]);
+    await seedEmbeddingVectorForTest(pool, pool, defaultResult.memory.id, unitVector(1), provider);
+    const related = await detectRelatedMemories(pool, unitVector(1), [team.id], provider,
+      { type: 'context', title: 'Lowered', body: 'Candidate.' }, loweredResult.memory.id, 0.9);
+    expect(related.map((item) => item.id)).toEqual([
       defaultResult.memory.id,
       candidate.id,
     ]);
-    expect(loweredResult.related).toEqual(expect.arrayContaining([
+    expect(related).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: candidate.id, relation: 'possible-duplicate', threshold: 0.9,
       }),
     ]));
   });
 
-  it('commits the provider embedding with empty relations and sanitized audit when probing fails', async () => {
+  it('does not run optional relation probes during capture acknowledgement', async () => {
     const { principal } = await seedWriter();
-    const provider: EmbeddingProvider = {
-      id: 'test:probe-failure', dim: 768, async embed() { return [unitVector(1)]; },
-    };
-
-    const result = await captureMemory(
-      poolRejecting(pool, 'SELECT ranked.memory_id AS id, m.type, m.title'), provider, principal,
-      {
+    const provider: EmbeddingProvider = { id: 'test:probe-failure', dim: 768,
+      embed: vi.fn(async () => [unitVector(1)]) };
+    const result = await captureMemory(poolRejecting(pool, 'SELECT ranked.memory_id AS id, m.type, m.title'),
+      await configuredCapture(provider), principal, {
         scope: { kind: 'team', name: 'payments' }, type: 'fact',
-        title: 'Probe fallback', body: 'private-probe-body', source: 'manual',
-      },
-    );
-
-    expect(result).toMatchObject({
-      embedded: true, related: [], relationErrorCode: 'RELATION_DETECTION_FAILED',
-    });
-    const { rows } = await pool.query(
-      `SELECT a.metadata::text AS metadata,
-              EXISTS (SELECT 1 FROM memory_embeddings e WHERE e.memory_id = a.memory_id)
-                AS embedded
-         FROM audit_log a WHERE memory_id = $1`,
-      [result.memory.id],
-    );
-    expect(rows[0].embedded).toBe(true);
-    expect(rows[0].metadata).toContain('RELATION_DETECTION_FAILED');
+        title: 'Probe-independent capture', body: 'private-probe-body', source: 'manual',
+      });
+    expect(result).toMatchObject({ embedded: false, embeddingStatus: 'queued', related: [] });
+    expect(result.relationErrorCode).toBeUndefined();
+    expect(provider.embed).not.toHaveBeenCalled();
+    const { rows } = await pool.query(`SELECT a.metadata::text AS metadata,
+      EXISTS (SELECT 1 FROM memory_embeddings e WHERE e.memory_id=a.memory_id) AS embedded
+      FROM audit_log a WHERE memory_id=$1`, [result.memory.id]);
+    expect(rows[0].embedded).toBe(false);
+    expect(rows[0].metadata).toContain('queued');
     expect(rows[0].metadata).not.toContain('database detail');
     expect(rows[0].metadata).not.toContain('private-probe-body');
   });
 
-  it('documents the v0 race by allowing concurrent duplicates to miss each other', async () => {
+  it('accepts concurrent sources without synchronous relation probes or provider work', async () => {
     const { principal } = await seedWriter();
-    const provider: EmbeddingProvider = {
-      id: 'test:concurrency', dim: 768, async embed() { return [unitVector(1)]; },
-    };
-    const probes = poolSynchronizingRelationProbes(pool, 2);
-
-    const captures = Promise.all(['one', 'two'].map((suffix) => captureMemory(
-      probes.pool, provider, principal, {
-        scope: { kind: 'team', name: 'payments' }, type: 'fact',
-        title: 'Concurrent duplicate', body: 'Same content.',
-        source: 'manual', sourceRef: suffix,
-      },
-    )));
-
-    void captures.catch(() => undefined);
-    let deadline: ReturnType<typeof setTimeout> | undefined;
-    try {
-      await Promise.race([probes.allRead, new Promise<never>((_resolve, reject) => {
-        deadline = setTimeout(() => reject(new Error('Both actual relation reads did not reach the barrier')), 3_000);
-      })]);
-      expect(probes.readCount()).toBe(2);
-      // Neither capture may begin its write until both real relation queries
-      // have finished against the empty candidate set. This is the supported
-      // advisory race, not a race between barrier release and query snapshots.
-      expect((await pool.query(`SELECT count(*)::int AS count FROM memories
-        WHERE title='Concurrent duplicate'`)).rows).toEqual([{ count: 0 }]);
-      probes.release();
-      const results = await captures;
-      expect(results.map((result) => result.related)).toEqual([[], []]);
-      expect(results.every((result) => result.embedded)).toBe(true);
-      expect(results.every((result) => result.relationErrorCode === undefined)).toBe(true);
-      expect(new Set(results.map((result) => result.memory.id)).size).toBe(2);
-    } finally {
-      if (deadline) clearTimeout(deadline);
-      probes.release();
-      await captures.catch(() => undefined);
-    }
+    const provider: EmbeddingProvider = { id: 'test:concurrency', dim: 768,
+      embed: vi.fn(async () => [unitVector(1)]) };
+    const router = await configuredCapture(provider);
+    let relationQueries = 0;
+    const observed = poolWithQueryObserver(pool, sql => {
+      if (sql.includes('WITH provider_embeddings')) relationQueries++;
+    });
+    const results = await Promise.all(['one', 'two'].map(suffix => captureMemory(observed, router, principal, {
+      scope: { kind: 'team', name: 'payments' }, type: 'fact', title: 'Concurrent duplicate',
+      body: 'Same content.', source: 'manual', sourceRef: suffix,
+    })));
+    expect(results.map(result => result.related)).toEqual([[], []]);
+    expect(results.every(result => !result.embedded && result.embeddingStatus === 'queued')).toBe(true);
+    expect(new Set(results.map(result => result.memory.id)).size).toBe(2);
+    expect((await pool.query('SELECT count(*)::int AS count FROM embedding_jobs')).rows[0].count).toBe(2);
+    expect(provider.embed).not.toHaveBeenCalled();
+    expect(relationQueries).toBe(0);
   });
 
-  it('recovers from an embedding storage failure and still commits memory plus audit', async () => {
+  it('commits valid source and audit while an incompatible unapproved target stays blocked', async () => {
     const { principal } = await seedWriter();
-    const provider: EmbeddingProvider = {
-      id: 'test:invalid-vector',
-      dim: 0,
-      async embed() {
-        return [[]];
-      },
-    };
-
+    const provider: EmbeddingProvider = { id: 'test:invalid-vector', dim: 0,
+      embed: vi.fn(async () => [[]]) };
     const result = await captureMemory(pool, provider, principal, {
-      scope: { kind: 'team', name: 'payments' },
-      type: 'fact',
-      title: 'Retry limit',
-      body: 'Three attempts.',
-      source: 'manual',
+      scope: { kind: 'team', name: 'payments' }, type: 'fact', title: 'Retry limit',
+      body: 'Three attempts.', source: 'manual',
     });
-
-    expect(result).toMatchObject({ embedded: false, embedErrorCode: 'EMBEDDING_FAILED' });
-    const { rows } = await pool.query(
-      `SELECT m.id, a.metadata
-         FROM memories m
-         JOIN audit_log a ON a.memory_id = m.id
-        WHERE m.id = $1`,
-      [result.memory.id],
-    );
+    expect(result).toMatchObject({ embedded: false, embeddingStatus: 'blocked_policy', related: [] });
+    expect(result.embedErrorCode).toBeUndefined();
+    expect(provider.embed).not.toHaveBeenCalled();
+    const { rows } = await pool.query(`SELECT m.id,a.metadata FROM memories m
+      JOIN audit_log a ON a.memory_id=m.id WHERE m.id=$1`, [result.memory.id]);
     expect(rows).toHaveLength(1);
-    expect(rows[0].metadata.embedding_error_code).toBe('EMBEDDING_FAILED');
+    expect(rows[0].metadata.embedding_status).toBe('blocked_policy');
+    expect(rows[0].metadata.embedding_error_code).toBeUndefined();
   });
 
-  it('does not report a post-commit embedding when the memory is no longer live', async () => {
-    const { principal } = await seedWriter();
-    const captured = await captureMemory(pool, null, principal, {
-      scope: { kind: 'team', name: 'payments' },
-      type: 'fact',
-      title: 'Archived before embedding',
-      body: 'Must remain without a vector.',
-      source: 'manual',
+  it('cancels queued work before an archived source can be hydrated or embedded', async () => {
+    await embeddingQueueFixture(async f => {
+      const captured = await captureMemory(f.app, f.router, f.principal, {
+        scope: { kind: f.scope.kind, name: f.scope.name }, type: 'fact',
+        title: 'Archived before embedding', body: 'Must remain without a vector.', source: 'manual',
+      });
+      expect(captured.embeddingStatus).toBe('queued');
+      await f.owner.query("UPDATE memories SET state='archived' WHERE id=$1", [captured.memory.id]);
+      expect(await processEmbeddingJobs(new SqlEmbeddingJobStore(f.worker), f.target, f.policy,
+        f.provider, f.profile, randomUUID())).toBe('idle');
+      expect(f.adapter.invoke).not.toHaveBeenCalled();
+      expect((await f.owner.query('SELECT state FROM embedding_jobs WHERE memory_id=$1', [captured.memory.id])).rows)
+        .toEqual([{ state: 'cancelled' }]);
+      expect((await f.owner.query('SELECT 1 FROM memory_embeddings WHERE memory_id=$1', [captured.memory.id])).rowCount).toBe(0);
     });
-    await pool.query(`UPDATE memories SET state = 'archived' WHERE id = $1`, [captured.memory.id]);
-    const provider: EmbeddingProvider = {
-      id: 'test:lifecycle-noop', dim: 768, async embed() { return [unitVector(1)]; },
-    };
+  }, 120_000);
 
-    const result = await embedCapturedMemory(pool, provider, captured);
-
-    expect(result.embedded).toBe(false);
-    expect((await pool.query(
-      'SELECT count(*)::int AS count FROM memory_embeddings WHERE memory_id = $1',
-      [captured.memory.id],
-    )).rows[0].count).toBe(0);
-  });
-
-  it('recovers when related metadata persistence fails after embedding storage', async () => {
-    const { principal } = await seedWriter();
-    const provider: EmbeddingProvider = {
-      id: 'test:metadata-failure', dim: 768, async embed() { return [unitVector(1)]; },
-    };
-
-    const result = await captureMemory(
-      poolRejecting(pool, 'UPDATE memories'), provider, principal,
-      {
-        scope: { kind: 'team', name: 'payments' }, type: 'fact',
-        title: 'Metadata fallback', body: 'Capture still commits.', source: 'manual',
-      },
-    );
-
-    expect(result).toMatchObject({
-      embedded: true, related: [], relationErrorCode: 'RELATION_DETECTION_FAILED',
+  it('rolls vector and completion back on worker metadata failure, then commits one derived success', async () => {
+    await embeddingQueueFixture(async f => {
+      expect((await f.owner.query('SELECT continuum_embedding_relation_collation() IS NOT NULL AS supported')).rows)
+        .toEqual([{ supported: true }]);
+      const store = new SqlEmbeddingJobStore(f.worker);
+      const run = () => processEmbeddingJobs(store, f.target, f.policy,
+        f.provider, f.profile, randomUUID());
+      const candidate = await captureMemory(f.app, f.router, f.principal, {
+        scope: { kind: f.scope.kind, name: f.scope.name }, type: 'fact',
+        title: 'Atomic completion neighbor', body: 'An eligible current relation candidate.', source: 'manual',
+      }, {}, { relationThreshold: 1 });
+      expect(candidate.embeddingStatus).toBe('queued');
+      expect(await run()).toBe('processed');
+      const captured = await captureMemory(f.app, f.router, f.principal, {
+        scope: { kind: f.scope.kind, name: f.scope.name }, type: 'fact',
+        title: 'Atomic worker completion', body: 'Source capture already committed.', source: 'manual',
+      }, {}, { relationThreshold: 0.9 });
+      const before = (await f.owner.query('SELECT metadata,updated_at FROM memories WHERE id=$1', [captured.memory.id])).rows;
+      const originalAudit = (await f.owner.query('SELECT metadata FROM audit_log WHERE memory_id=$1', [captured.memory.id])).rows;
+      const apply = vi.spyOn(store, 'apply');
+      await f.owner.query(`CREATE FUNCTION reject_test_embedding_metadata() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'private metadata failure'; END $$;
+        CREATE TRIGGER reject_test_embedding_metadata BEFORE UPDATE OF metadata ON memories
+        FOR EACH ROW WHEN (NEW.id='${captured.memory.id}'::uuid
+          AND NEW.metadata IS DISTINCT FROM OLD.metadata
+          AND NEW.metadata->'related' @> '[{"id":"${candidate.memory.id}"}]'::jsonb)
+        EXECUTE FUNCTION reject_test_embedding_metadata()`);
+      try {
+        expect(await run()).toBe('unavailable');
+        expect(apply).toHaveBeenCalledTimes(1);
+        await expect(apply.mock.results[0].value).rejects.toThrow('private metadata failure');
+      } finally {
+        await f.owner.query('DROP TRIGGER reject_test_embedding_metadata ON memories; DROP FUNCTION reject_test_embedding_metadata()');
+      }
+      expect((await f.owner.query('SELECT metadata,updated_at FROM memories WHERE id=$1', [captured.memory.id])).rows).toEqual(before);
+      expect((await f.owner.query(`SELECT 1 FROM embedding_completions c JOIN embedding_jobs j ON j.id=c.job_id
+        WHERE j.memory_id=$1`, [captured.memory.id])).rowCount).toBe(0);
+      expect((await f.owner.query('SELECT 1 FROM memory_embeddings WHERE memory_id=$1', [captured.memory.id])).rowCount).toBe(0);
+      expect((await f.owner.query('SELECT metadata FROM audit_log WHERE memory_id=$1', [captured.memory.id])).rows).toEqual(originalAudit);
+      const deadline = Date.now() + 3000;
+      for (;;) {
+        const due = (await f.owner.query('SELECT available_at<=clock_timestamp() AS due FROM embedding_jobs WHERE memory_id=$1', [captured.memory.id])).rows[0].due;
+        if (due) break;
+        if (Date.now() >= deadline) throw new Error('Settled worker retry did not become due within bounded first backoff');
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      expect(await run()).toBe('processed');
+      expect((await f.owner.query('SELECT 1 FROM memory_embeddings WHERE memory_id=$1', [captured.memory.id])).rowCount).toBe(1);
+      expect((await f.owner.query('SELECT state FROM embedding_jobs WHERE memory_id=$1', [captured.memory.id])).rows).toEqual([{ state: 'ready' }]);
+      expect((await f.owner.query('SELECT metadata FROM audit_log WHERE memory_id=$1 AND metadata->>\'embedding_status\'=\'queued\'', [captured.memory.id])).rows).toEqual(originalAudit);
+      expect((await f.owner.query('SELECT count(*)::int AS count FROM embedding_completions')).rows[0].count).toBe(2);
+      const completionAudit = () => f.owner.query(`SELECT metadata FROM audit_log
+        WHERE memory_id=$1 AND metadata->>'operation'='embedding_completed'`, [captured.memory.id]);
+      const successAudit = (await completionAudit()).rows;
+      expect(successAudit).toHaveLength(1);
+      expect(successAudit[0].metadata.relationsStatus).toBe('computed');
+      const after = (await f.owner.query('SELECT metadata,updated_at FROM memories WHERE id=$1', [captured.memory.id])).rows;
+      expect(after[0].metadata.related).toEqual([expect.objectContaining({ id: candidate.memory.id,
+        relation: 'possible-conflict', provider: f.provider.id, threshold: 0.9 })]);
+      expect({ ...after[0].metadata, related: before[0].metadata.related }).toEqual(before[0].metadata);
+      expect(after[0].updated_at).toEqual(before[0].updated_at);
+      expect(await run()).toBe('idle');
+      expect((await completionAudit()).rows).toEqual(successAudit);
+      expect((await f.owner.query('SELECT metadata,updated_at FROM memories WHERE id=$1', [captured.memory.id])).rows).toEqual(after);
+      expect((await f.owner.query('SELECT count(*)::int AS count FROM embedding_completions')).rows[0].count).toBe(2);
     });
-    const { rows } = await pool.query(
-      `SELECT m.metadata,
-              EXISTS (SELECT 1 FROM memory_embeddings e WHERE e.memory_id = m.id) AS embedded,
-              a.metadata AS audit_metadata
-         FROM memories m
-         JOIN audit_log a ON a.memory_id = m.id
-        WHERE m.id = $1`,
-      [result.memory.id],
-    );
-    expect(rows).toEqual([{
-      metadata: { related: [] },
-      embedded: true,
-      audit_metadata: {
-        source: 'manual', type: 'fact', embedded: true,
-        embedding: { provider: 'test:metadata-failure', dim: 768, status: 'succeeded' },
-        relation_error_code: 'RELATION_DETECTION_FAILED',
-      },
-    }]);
-  });
+  }, 120_000);
 
   it('maps invalid programmatic relation configuration to a safe internal error', async () => {
     const { principal } = await seedWriter();
@@ -556,79 +574,77 @@ describe('shared services', () => {
     expect(rows[0].count).toBe(0);
   });
 
-  it('calls the embedding provider before opening the capture transaction', async () => {
+  it('commits the capture transaction without calling an embedding provider at any phase', async () => {
     const { principal } = await seedWriter();
     let transactionOpen = false;
+    let opened = false;
     const wrappedPool = poolWithQueryObserver(pool, (sql) => {
-      if (sql === 'BEGIN') transactionOpen = true;
+      if (sql.startsWith('BEGIN')) { transactionOpen = true; opened = true; }
       if (sql === 'COMMIT' || sql === 'ROLLBACK') transactionOpen = false;
     });
     const provider: EmbeddingProvider = {
       id: 'test:timing',
-      dim: 3,
-      async embed() {
-        expect(transactionOpen).toBe(false);
-        return [[0.1, 0.2, 0.3]];
-      },
+      dim: 768,
+      embed: vi.fn(async () => [unitVector(1)]),
     };
 
-    await captureMemory(wrappedPool, provider, principal, {
+    await captureMemory(wrappedPool, await configuredCapture(provider), principal, {
       scope: { kind: 'team', name: 'payments' },
-      type: 'fact', title: 'Timing', body: 'Provider first.', source: 'manual',
+      type: 'fact', title: 'Timing', body: 'Source acknowledgement first.', source: 'manual',
     });
+    expect(opened).toBe(true);
+    expect(transactionOpen).toBe(false);
+    expect(provider.embed).not.toHaveBeenCalled();
   });
 
-  it('does not hold a checked-out client while awaiting the embedding provider', async () => {
+  it('releases its capture client without waiting on the deferred embedding provider', async () => {
     const { principal } = await seedWriter();
     let checkedOutClients = 0;
     const wrappedPool = poolWithClientCount(pool, (count) => {
       checkedOutClients = count;
     });
-    let clientsObservedDuringEmbed = -1;
     const provider: EmbeddingProvider = {
-      id: 'test:no-client-during-embed', dim: 3,
-      async embed() {
-        clientsObservedDuringEmbed = checkedOutClients;
-        return [[0.1, 0.2, 0.3]];
-      },
+      id: 'test:no-client-during-embed', dim: 768,
+      embed: vi.fn(async () => new Promise<number[][]>(() => undefined)),
     };
 
-    await captureMemory(wrappedPool, provider, principal, {
+    await captureMemory(wrappedPool, await configuredCapture(provider), principal, {
       scope: { kind: 'team', name: 'payments' },
-      type: 'fact', title: 'No held client', body: 'Embed first.', source: 'manual',
+      type: 'fact', title: 'No held client', body: 'Deferred work.', source: 'manual',
     });
-    expect(clientsObservedDuringEmbed).toBe(0);
+    expect(checkedOutClients).toBe(0);
+    expect(provider.embed).not.toHaveBeenCalled();
   });
 
-  it('rechecks writer authorization after embedding before capture insert', async () => {
+  it('checks current writer authorization inside capture before its atomic insert and enqueue', async () => {
     const { principal, team } = await seedWriter();
-    const embedStarted = deferred<void>();
-    const continueEmbedding = deferred<void>();
+    const checkReached = deferred<void>();
+    const continueCheck = deferred<void>();
     const provider: EmbeddingProvider = {
-      id: 'test:revocation-race', dim: 3,
-      async embed() {
-        embedStarted.resolve();
-        await continueEmbedding.promise;
-        return [[0.1, 0.2, 0.3]];
-      },
+      id: 'test:revocation-race', dim: 768,
+      embed: vi.fn(async () => [unitVector(1)]),
     };
 
-    const capture = captureMemory(pool, provider, principal, {
+    const capture = captureMemory(poolPausingBeforeMembershipCheck(pool, 1, checkReached, continueCheck),
+      await configuredCapture(provider), principal, {
       scope: { kind: 'team', name: 'payments' },
       type: 'fact', title: 'Revoked write', body: 'Must not persist.', source: 'manual',
     });
-    await embedStarted.promise;
+    void capture.catch(() => undefined);
+    await checkReached.promise;
     await pool.query(
       'DELETE FROM scope_memberships WHERE principal_id = $1 AND scope_id = $2',
       [principal.id, team.id],
     );
-    continueEmbedding.resolve();
+    continueCheck.resolve();
 
     await expect(capture).rejects.toMatchObject<ServiceError>({ code: 'FORBIDDEN' });
     const { rows } = await pool.query(
       `SELECT count(*)::int AS count FROM memories WHERE title = 'Revoked write'`,
     );
     expect(rows[0].count).toBe(0);
+    expect((await pool.query('SELECT 1 FROM embedding_jobs')).rowCount).toBe(0);
+    expect(provider.embed).not.toHaveBeenCalled();
   });
 
   it('rolls capture back when the required write audit fails', async () => {
@@ -649,30 +665,33 @@ describe('shared services', () => {
     expect(rows[0].count).toBe(0);
   });
 
-  it('rolls the embedding row back with the memory when audit fails', async () => {
+  it('rolls the source, queued job and optional receipt back when the capture audit fails', async () => {
     const { principal } = await seedWriter();
     const provider: EmbeddingProvider = {
       id: 'test:success',
-      dim: 3,
-      async embed() { return [[0.1, 0.2, 0.3]]; },
+      dim: 768,
+      embed: vi.fn(async () => [unitVector(1)]),
     };
 
     await expect(captureMemory(
       poolRejecting(pool, 'INSERT INTO audit_log'),
-      provider,
+      await configuredCapture(provider),
       principal,
       {
         scope: { kind: 'team', name: 'payments' },
         type: 'fact', title: 'Atomic vector', body: 'Rollback all.', source: 'manual',
-      },
+      }, {}, { idempotencyKey: 'required-audit-rollback' },
     )).rejects.toMatchObject<ServiceError>({ code: 'INTERNAL' });
 
     const { rows } = await pool.query(
       `SELECT
          (SELECT count(*)::int FROM memories WHERE title = 'Atomic vector') AS memories,
-         (SELECT count(*)::int FROM memory_embeddings) AS embeddings`,
+         (SELECT count(*)::int FROM memory_embeddings) AS embeddings,
+         (SELECT count(*)::int FROM embedding_jobs) AS jobs,
+         (SELECT count(*)::int FROM embedding_capture_receipts) AS receipts`,
     );
-    expect(rows[0]).toEqual({ memories: 0, embeddings: 0 });
+    expect(rows[0]).toEqual({ memories: 0, embeddings: 0, jobs: 0, receipts: 0 });
+    expect(provider.embed).not.toHaveBeenCalled();
   });
 
   it('destroys the client after rollback failure and preserves the original error', async () => {
@@ -1553,29 +1572,6 @@ function unitVector(similarity: number): number[] {
   vector[0] = similarity;
   vector[1] = Math.sqrt(1 - similarity * similarity);
   return vector;
-}
-
-function poolSynchronizingRelationProbes(pool: pg.Pool, expected: number): {
-  pool: pg.Pool; allRead: Promise<void>; release(): void; readCount(): number;
-} {
-  let reached = 0;
-  const allReached = deferred<void>();
-  const releaseReads = deferred<void>();
-  const wrapped = {
-    connect: pool.connect.bind(pool),
-    query: (async (...args: unknown[]) => {
-      const sql = typeof args[0] === 'string' ? args[0] : '';
-      const result = await Reflect.apply(pool.query, pool, args);
-      if (sql.includes('SELECT ranked.memory_id AS id, m.type, m.title')) {
-        reached += 1;
-        if (reached === expected) allReached.resolve();
-        await releaseReads.promise;
-      }
-      return result;
-    }) as pg.Pool['query'],
-  } as unknown as pg.Pool;
-  return { pool: wrapped, allRead: allReached.promise,
-    release: () => releaseReads.resolve(), readCount: () => reached };
 }
 
 function poolWithClientCount(pool: pg.Pool, onCount: (count: number) => void): pg.Pool {

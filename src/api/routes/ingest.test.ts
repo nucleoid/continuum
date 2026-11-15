@@ -7,7 +7,8 @@ import { makeTestPool, resetData } from '../../storage/test-helpers.js';
 import { createPrincipal } from '../../storage/principals.js';
 import { createScope } from '../../storage/scopes.js';
 import { addMembership } from '../../storage/memberships.js';
-import { EmbeddingRegistry, ScopeEmbeddingRouter } from '../../embeddings/router.js';
+import { EmbeddingRegistry, ScopeEmbeddingRouter, staticEmbeddingRouter } from '../../embeddings/router.js';
+import { registerEmbeddingTargetForTest, withSyntheticTargetForTest } from '../../embeddings/test-helpers.js';
 import { createAuthenticator } from '../auth.js';
 import { getScopeByRef } from '../../storage/scopes.js';
 import { issueApiKey } from '../../services/api-keys.js';
@@ -102,15 +103,15 @@ describe('webhook ingestion transport', () => {
 
     const replay = await request(target).post('/api/v0/ingest/github-pr').set(headers).send(raw);
     expect(replay.status).toBe(200);
-    expect(replay.body).toEqual({ replayed: true, memoryIds: first.body.memoryIds });
+    expect(replay.body).toEqual({ replayed: true, memoryIds: first.body.memoryIds, embeddings: first.body.embeddings });
 
     const changedHeaderReplay = await request(target).post('/api/v0/ingest/github-pr')
       .set({ ...headers, 'X-GitHub-Delivery': 'delivery-2' }).send(raw);
     expect(changedHeaderReplay.status).toBe(200);
-    expect(changedHeaderReplay.body).toEqual({ replayed: true, memoryIds: first.body.memoryIds });
+    expect(changedHeaderReplay.body).toEqual({ replayed: true, memoryIds: first.body.memoryIds, embeddings: first.body.embeddings });
 
     const { rows } = await pool.query(
-      `SELECT m.author_id, m.source, a.metadata FROM memories m JOIN audit_log a ON a.memory_id = m.id`,
+      `SELECT m.author_id, m.source, a.metadata FROM memories m JOIN audit_log a ON a.memory_id = m.id WHERE a.action='write'`,
     );
     expect(rows).toEqual([expect.objectContaining({
       author_id: principal.id,
@@ -416,13 +417,15 @@ describe('webhook ingestion transport', () => {
       .toEqual(['old-login', 'renamed-login']);
   });
 
-  it('keeps capture and audit when post-commit embedding fails', async () => {
-    await seedService('service:deploy-embedding');
+  it('queues source and audit atomically without invoking an offline ingestion provider', async () => {
+    const { project } = await seedService('service:deploy-embedding');
+    const embed = vi.fn(async () => { throw new Error('private-provider-secret'); });
+    const provider = withSyntheticTargetForTest({ id: 'test:failing', dim: 768, embed });
+    const policy = await registerEmbeddingTargetForTest(pool, provider, [project.id]);
     const target = createApp(pool, {
       requestIdFactory: () => requestId,
       logger: { info() {}, error() {} },
-      embeddingProvider: { id: 'test:failing', dim: 768,
-        async embed() { throw new Error('private-provider-secret'); } },
+      embeddingProvider: Object.assign(staticEmbeddingRouter(provider), { queuePolicy: policy }),
       ingestConfig: { plugins: { 'deploy-event': {
         enabled: true, auth: { kind: 'bearer' }, principalExternalId: 'service:deploy-embedding',
       } } },
@@ -433,18 +436,23 @@ describe('webhook ingestion transport', () => {
       .send({ project: 'booking-engine', environment: 'prod', version: 'v2', status: 'success' });
     expect(response.status).toBe(202);
     const { rows } = await pool.query('SELECT metadata::text AS metadata FROM audit_log');
-    expect(rows[0].metadata).toContain('EMBEDDING_FAILED');
+    expect(rows[0].metadata).toContain('queued');
+    expect(rows[0].metadata).not.toContain('EMBEDDING_FAILED');
     expect(rows[0].metadata).not.toContain('private-provider-secret');
     expect((await pool.query('SELECT id FROM memories')).rows).toHaveLength(1);
+    expect((await pool.query('SELECT memory_id FROM embedding_jobs')).rows).toHaveLength(1);
+    expect(embed).not.toHaveBeenCalled();
   });
 
-  it('stores post-commit embeddings and appends derived provenance without mutating capture audit', async () => {
-    await seedService('service:deploy-vector');
+  it('records queued provenance without claiming a derived embedding on ingestion acknowledgement', async () => {
+    const { project } = await seedService('service:deploy-vector');
+    const embed = vi.fn(async () => [Array.from({ length: 768 }, () => 0.01)]);
+    const provider = withSyntheticTargetForTest({ id: 'test:vector', dim: 768, embed });
+    const policy = await registerEmbeddingTargetForTest(pool, provider, [project.id]);
     const target = createApp(pool, {
       requestIdFactory: () => requestId,
       logger: { info() {}, error() {} },
-      embeddingProvider: { id: 'test:vector', dim: 768,
-        async embed() { return [Array.from({ length: 768 }, () => 0.01)]; } },
+      embeddingProvider: Object.assign(staticEmbeddingRouter(provider), { queuePolicy: policy }),
       ingestConfig: { plugins: { 'deploy-event': {
         enabled: true, auth: { kind: 'bearer' }, principalExternalId: 'service:deploy-vector',
       } } },
@@ -454,30 +462,34 @@ describe('webhook ingestion transport', () => {
       .set('Idempotency-Key', 'deploy-vector-1')
       .send({ project: 'booking-engine', environment: 'prod', version: 'v3', status: 'success' });
     expect(response.status).toBe(202);
-    expect((await pool.query('SELECT memory_id FROM memory_embeddings')).rows).toHaveLength(1);
+    expect((await pool.query('SELECT memory_id FROM memory_embeddings')).rows).toHaveLength(0);
+    expect((await pool.query('SELECT memory_id FROM embedding_jobs')).rows).toHaveLength(1);
+    expect(embed).not.toHaveBeenCalled();
     expect((await pool.query('SELECT metadata FROM audit_log ORDER BY id')).rows).toEqual([
       { metadata: expect.objectContaining({
-        embedded: false, embedding_error_code: 'EMBEDDING_FAILED', transport: 'ingest',
-      }) },
-      { metadata: expect.objectContaining({
-        record_kind: 'embedding', embedded: true,
-        embedding: { provider: 'test:vector', dim: 768, status: 'succeeded' },
+        embedded: false, embedding_status: 'queued', transport: 'ingest',
+        embedding: { provider: 'test:vector', dim: 768, status: 'queued' },
       }) },
     ]);
   });
 
   it('routes webhook embeddings by target scope and preserves provider provenance', async () => {
-    await seedService('service:deploy-routed');
+    const { project } = await seedService('service:deploy-routed');
     const defaultEmbed = vi.fn(async () => [Array.from({ length: 768 }, () => 0.02)]);
     const projectEmbed = vi.fn(async () => [Array.from({ length: 768 }, () => 0.01)]);
+    const defaultProvider = withSyntheticTargetForTest({ id: 'test:default', dim: 768, local: false, embed: defaultEmbed });
+    const privateProvider = withSyntheticTargetForTest({ id: 'test:private', dim: 768, local: true, embed: projectEmbed });
+    await registerEmbeddingTargetForTest(pool, defaultProvider);
+    const policy = await registerEmbeddingTargetForTest(pool, privateProvider, [project.id]);
     const registry = new EmbeddingRegistry([
-      ['default', { id: 'test:default', dim: 768, embed: defaultEmbed }],
-      ['private', { id: 'test:private', dim: 768, embed: projectEmbed }],
+      ['default', defaultProvider],
+      ['private', privateProvider],
     ]);
     const routing = new ScopeEmbeddingRouter(registry, {
       default: 'default',
       rules: [{ match: { kind: 'project', name: 'booking-engine' }, provider: 'private' }],
     });
+    Object.assign(routing, { queuePolicy: policy });
     const target = createApp(pool, {
       embeddingProvider: routing,
       ingestConfig: { plugins: { 'deploy-event': {
@@ -491,15 +503,17 @@ describe('webhook ingestion transport', () => {
       .send({ project: 'booking-engine', environment: 'prod', version: 'v4', status: 'success' })
       .expect(202);
 
-    expect(projectEmbed).toHaveBeenCalledOnce();
+    expect(projectEmbed).not.toHaveBeenCalled();
     expect(defaultEmbed).not.toHaveBeenCalled();
     const { rows } = await pool.query(
-      `SELECT metadata FROM audit_log WHERE metadata->>'record_kind' = 'embedding'`,
+      `SELECT metadata FROM audit_log WHERE action='write'`,
     );
     expect(rows[0].metadata).toMatchObject({
-      embedded: true,
-      embedding: { provider: 'test:private', dim: 768, status: 'succeeded' },
+      embedded: false, embedding_status: 'queued',
+      embedding: { provider: 'test:private', dim: 768, status: 'queued' },
     });
+    expect((await pool.query('SELECT target_fingerprint FROM embedding_jobs')).rows)
+      .toEqual([{ target_fingerprint: privateProvider.target.fingerprint }]);
   });
 
   it('normalizes provider timestamps to UTC and rejects malformed timestamps', async () => {
@@ -549,7 +563,8 @@ describe('webhook ingestion transport', () => {
     const replay = await send().expect(200);
     expect(replay.body.memoryIds).toEqual(success.body.memoryIds);
     expect((await pool.query('SELECT id FROM memories')).rows).toHaveLength(1);
-    expect((await pool.query('SELECT id FROM audit_log')).rows).toHaveLength(1);
+    expect((await pool.query("SELECT action,metadata->>'operation' AS operation FROM audit_log ORDER BY id")).rows)
+      .toEqual([{ action: 'write', operation: null }, { action: 'read', operation: 'embedding_status' }]);
   });
 
   it('fails closed when an idempotency key is reused for a different payload', async () => {

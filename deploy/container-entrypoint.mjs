@@ -6,6 +6,7 @@ export const SECRET_SETTINGS = Object.freeze([
  'CONTINUUM_DATABASE_URL', 'CONTINUUM_BEARER', 'CONTINUUM_PRINCIPAL_EXTERNAL_ID',
  'CONTINUUM_TOKEN', 'OPENAI_API_KEY', 'VOYAGE_API_KEY', 'GEMINI_API_KEY',
  'CONTINUUM_ADMIN_ACTOR', 'CONTINUUM_GRAPH_ACCESS_TOKEN', 'CONTINUUM_MEMBERSHIP_SYNC_ACTOR',
+ 'CONTINUUM_EMBEDDING_WORKER_DATABASE_URL',
  'CONTINUUM_AUDIT_RETENTION_PRINCIPAL_EXTERNAL_ID', 'CONTINUUM_EMBEDDING_CONFIG',
  ...['GITHUB_PR', 'GITHUB_BRANCH', 'ADO_WORKITEM', 'DEPLOY_EVENT', 'TERMINAL_SUMMARY']
   .flatMap(source => ['PRINCIPAL', 'DATABASE_URL', 'ACTOR_EXTERNAL_ID',
@@ -63,12 +64,14 @@ export function loadSecretFiles(env, root = '/run/secrets') {
 const COMMANDS = Object.freeze({
  continuum: 'bin/continuum.mjs', 'continuum-tags': 'bin/continuum-tags.mjs',
  'continuum-migrate': 'bin/continuum-migrate.mjs',
+ 'continuum-embed-worker': 'bin/continuum-embed-worker.mjs',
 });
 const SCRIPTS = new Set([
  ...Object.values(COMMANDS), 'dist/api/server.js', 'dist/api/mcp.js',
  'dist/storage/migrate-cli.js', 'dist/identity/admin-cli.js', 'dist/identity/sync-cli.js',
  'dist/lifecycle/sweep-cli.js', 'dist/maintenance/audit-retention-cli.js',
  'dist/maintenance/embed-backfill-cli.js', 'dist/cli/tag-vocabularies.js',
+ 'dist/workers/embedding-worker-cli.js',
 ]);
 export function resolveCommand(args) {
  const supplied = args.length ? [...args] : ['dist/api/server.js'];

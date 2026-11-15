@@ -62,6 +62,9 @@ try {
   if (packageJson.bin?.['continuum-tags'] !== 'bin/continuum-tags.mjs') {
     throw new Error('Packed package does not expose the tag vocabulary binary through its wrapper');
   }
+  if (packageJson.bin?.['continuum-embed-worker'] !== 'bin/continuum-embed-worker.mjs') {
+    throw new Error('Packed package does not expose the independent embedding worker');
+  }
   const installedRoot = join(temporary, 'node_modules', '@continuum', 'core');
   for (const required of [
     'migrations/0001_init.sql',
@@ -87,6 +90,11 @@ try {
     'migrations/0090_standup_activity.sql',
     'migrations/0094_extraction.sql',
     'migrations/0095_memory_event_annotations.sql',
+    'migrations/0098_async_embedding_jobs.sql',
+    'scripts/grant-embedding-worker-role.sql',
+    'docs/embedding-queue.md',
+    'dist/workers/embedding-worker-cli.js',
+    'bin/continuum-embed-worker.mjs',
     'docs/event-time.md',
     'dist/temporal/model.js',
     'scripts/grant-extraction-worker-role.sql',
@@ -136,6 +144,21 @@ try {
   if (!containerHelp.startsWith('Usage: continuum <command>')) {
     throw new Error('Installed container launcher did not preserve wrapper argv');
   }
+  const workerLauncher = join(temporary, 'node_modules', '.bin',
+    process.platform === 'win32' ? 'continuum-embed-worker.cmd' : 'continuum-embed-worker');
+  const workerHelp = execFileSync(workerLauncher, ['--help'], {
+    cwd: temporary, encoding: 'utf8', timeout: 10000, shell: process.platform === 'win32',
+    env: { ...process.env, CONTINUUM_EMBEDDING_WORKER_DATABASE_URL: '', CONTINUUM_EMBEDDING_WORKER_COMPOSITION: '' },
+  });
+  if (!workerHelp.startsWith('Usage: continuum-embed-worker\n')) {
+    throw new Error('Installed embedding worker launcher did not execute its own help');
+  }
+  const containerWorkerHelp = execFileSync(process.execPath,
+    [join(installedRoot, 'deploy/container-entrypoint.mjs'), 'continuum-embed-worker', '--help'], {
+      cwd: temporary, encoding: 'utf8', timeout: 10000,
+      env: { ...process.env, CONTINUUM_EMBEDDING_WORKER_DATABASE_URL: undefined, CONTINUUM_EMBEDDING_WORKER_COMPOSITION: undefined },
+    });
+  if (containerWorkerHelp !== workerHelp) throw new Error('Installed container worker dispatch changed wrapper arguments');
   const installedTagLauncher = join(
     temporary,
     'node_modules',

@@ -338,7 +338,16 @@ FROM :"continuum_app_role";
 DO $tag_profile$
 DECLARE schema_name TEXT:=current_setting('continuum.application_grant_schema');
         target_role NAME:=current_setting('continuum.application_grant_target')::name;
+        signature TEXT;
 BEGIN
+  IF to_regclass(format('%I.embedding_jobs',schema_name)) IS NOT NULL THEN
+    FOR signature IN EXECUTE format('SELECT unnest(%I.continuum_embedding_app_signatures())',schema_name) LOOP
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.%s TO %I',schema_name,signature,target_role);
+    END LOOP;
+    FOR signature IN EXECUTE format('SELECT unnest(%I.continuum_embedding_operator_signatures())',schema_name) LOOP
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.%s FROM %I',schema_name,signature,target_role);
+    END LOOP;
+  END IF;
   IF to_regclass(format('%I.memory_event_annotations',schema_name)) IS NOT NULL THEN
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_event_write(UUID,UUID,JSONB),%I.continuum_event_read(UUID,UUID,BOOLEAN),%I.continuum_event_metadata(UUID,UUID,BOOLEAN),%I.continuum_event_matches(UUID,UUID,JSONB),%I.continuum_event_promote(UUID,UUID,UUID,UUID),%I.continuum_event_optional_metadata(UUID,UUID,BOOLEAN),%I.continuum_event_optional_read(UUID,UUID,BOOLEAN),%I.continuum_event_is_ready() TO %I',schema_name,schema_name,schema_name,schema_name,schema_name,schema_name,schema_name,schema_name,target_role);
   END IF;

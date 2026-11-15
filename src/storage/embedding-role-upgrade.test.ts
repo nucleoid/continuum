@@ -148,6 +148,23 @@ it('adds embedding state grants to live application and operator profiles withou
         }
       }
     }
+    // Historical 83->88 profile and access assertions above remain complete.
+    // Current compiled CLI readiness also requires the later pipeline schemas.
+    const currentPrerequisites = [
+      '0089_promotion_outbox.sql', '0090_standup_activity.sql', '0092_pipeline_budgets.sql',
+      '0093_evidence_lifecycle.sql', '0094_extraction.sql', '0095_memory_event_annotations.sql',
+      '0096_repository_evidence.sql', '0097_project_briefs.sql', '0098_async_embedding_jobs.sql',
+    ];
+    for (const file of currentPrerequisites) await copyFile(new URL(file, migrations), join(directory, file));
+    expect((await runMigrations(owner, directory)).map(entry => entry.name)).toEqual(currentPrerequisites);
+    await grant('grant-application-role.sql', { continuum_app_role: applicationRole });
+    await grant('grant-application-role.sql', { continuum_app_role: operatorRole });
+    await grant('grant-operator-role.sql', { continuum_operator_role: operatorRole, continuum_principal_id: administrator });
+    await grant('grant-sync-role.sql', { continuum_sync_role: syncRole, continuum_principal_id: syncPrincipal });
+    expect((await owner.query(
+      `SELECT database_role_oid,profile_kind,provider_schema_oid FROM continuum_pgvector_role_profiles ORDER BY database_role_oid`,
+    )).rows).toEqual(profileIdentities);
+
     async function runCompiledCli(role: string, expectedSchema = schema) {
       const url = new URL(databaseUrl);
       url.username = role; url.password = passwords.get(role)!;

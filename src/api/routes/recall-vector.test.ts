@@ -1,4 +1,5 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import request from 'supertest';
 import { makeTestPool, resetData } from '../../storage/test-helpers.js';
@@ -10,9 +11,12 @@ import { StubEmbeddingProvider } from '../../embeddings/stub.js';
 import type { EmbeddingProvider } from '../../embeddings/provider.js';
 import { createMemory } from '../../storage/memories.js';
 import {
-  storeMemoryEmbeddingVector,
   vectorSearchMemoryIds,
 } from '../../storage/embeddings.js';
+import { embeddingQueueFixture, registerEmbeddingTargetForTest, seedEmbeddingVectorForTest, withSyntheticTargetForTest } from '../../embeddings/test-helpers.js';
+import { staticEmbeddingRouter } from '../../embeddings/router.js';
+import { processEmbeddingJobs } from '../../workers/embedding-jobs.js';
+import { SqlEmbeddingJobStore } from '../../storage/embedding-jobs.js';
 
 class NamedStubEmbeddingProvider implements EmbeddingProvider {
   readonly dim = 768;
@@ -46,7 +50,8 @@ describe('capture + recall with embeddings', () => {
   beforeEach(async () => {
     pool ??= await makeTestPool();
     await resetData(pool);
-    app = createApp(pool, { embeddingProvider: provider });
+    const policy = await registerEmbeddingTargetForTest(pool, provider);
+    app = createApp(pool, { embeddingProvider: Object.assign(staticEmbeddingRouter(provider), { queuePolicy: policy }) });
   });
 
   afterAll(async () => {
@@ -64,43 +69,52 @@ describe('capture + recall with embeddings', () => {
     return { principal, scope };
   }
 
-  it('persists an embedding row on capture and surfaces it on recall', async () => {
-    await seedActor();
-    const create = await request(app)
-      .post('/api/v0/capture')
-      .set('Authorization', 'Bearer entra:user:vec')
-      .send({
-        scope: { kind: 'team', name: 'payments' },
-        type: 'decision',
-        title: 'Checkout retry policy',
-        body: 'Retry checkout requests with exponential backoff capped at 30 seconds.',
-        source: 'manual',
-      });
-    expect(create.status).toBe(201);
-    expect(create.body.embedded).toBe(true);
+  it('acknowledges first, then persists a vector through the bound worker before semantic recall', async () => {
+    await embeddingQueueFixture(async f => {
+      const queuedApp = createApp(f.app, { embeddingProvider: f.router });
+      const create = await request(queuedApp)
+        .post('/api/v0/capture')
+        .set('Authorization', `Bearer ${f.principal.externalId}`)
+        .send({
+          scope: { kind: f.scope.kind, name: f.scope.name },
+          type: 'decision',
+          title: 'Checkout retry policy',
+          body: 'Retry checkout requests with exponential backoff capped at 30 seconds.',
+          source: 'manual',
+        });
+      expect(create.status).toBe(201);
+      expect(create.body).toMatchObject({ embedded: false, embeddingStatus: 'queued', related: [] });
+      expect(f.provider.embed).not.toHaveBeenCalled();
+      expect(f.adapter.invoke).not.toHaveBeenCalled();
+      expect((await f.owner.query('SELECT 1 FROM memory_embeddings WHERE memory_id=$1', [create.body.id])).rowCount).toBe(0);
+      expect(await processEmbeddingJobs(new SqlEmbeddingJobStore(f.worker), f.target, f.policy,
+        f.provider, f.profile, randomUUID())).toBe('processed');
 
-    const stored = await pool.query(
-      'SELECT provider, dim FROM memory_embeddings WHERE memory_id = $1',
-      [create.body.id],
-    );
-    expect(stored.rowCount).toBe(1);
-    expect(stored.rows[0].provider).toBe(provider.id);
-    expect(stored.rows[0].dim).toBe(provider.dim);
+      const stored = await f.owner.query(
+        'SELECT provider, dim FROM memory_embeddings WHERE memory_id = $1',
+        [create.body.id],
+      );
+      expect(stored.rowCount).toBe(1);
+      expect(stored.rows[0].provider).toBe(f.provider.id);
+      expect(stored.rows[0].dim).toBe(f.provider.dim);
+      expect((await f.owner.query('SELECT state FROM embedding_jobs WHERE memory_id=$1', [create.body.id])).rows)
+        .toEqual([{ state: 'ready' }]);
 
-    const recall = await request(app)
-      .post('/api/v0/recall')
-      .set('Authorization', 'Bearer entra:user:vec')
-      .send({ query: 'checkout retry policy' });
-    expect(recall.status).toBe(200);
-    const ids = recall.body.results.map((r: { id: string }) => r.id);
-    expect(ids).toContain(create.body.id);
-    const { rows: readRows } = await pool.query(
-      `SELECT memory_id, metadata FROM audit_log
-        WHERE action = 'read' ORDER BY id`,
-    );
-    expect(readRows.filter((row) => row.memory_id === create.body.id)).toHaveLength(1);
-    expect(readRows[1].metadata).toMatchObject({ rank: 1, record_kind: 'result' });
-  });
+      const recall = await request(queuedApp)
+        .post('/api/v0/recall')
+        .set('Authorization', `Bearer ${f.principal.externalId}`)
+        .send({ query: 'checkout retry policy' });
+      expect(recall.status).toBe(200);
+      const ids = recall.body.results.map((r: { id: string }) => r.id);
+      expect(ids).toContain(create.body.id);
+      const { rows: readRows } = await f.owner.query(
+        `SELECT memory_id, metadata FROM audit_log
+          WHERE action = 'read' AND principal_id=$1 ORDER BY id`, [f.principal.id],
+      );
+      expect(readRows.filter((row) => row.memory_id === create.body.id)).toHaveLength(1);
+      expect(readRows[1].metadata).toMatchObject({ rank: 1, record_kind: 'result' });
+    });
+  }, 120_000);
 
   it('falls back gracefully when no embeddings exist for some memories', async () => {
     const { scope, principal } = await seedActor();
@@ -141,6 +155,8 @@ describe('capture + recall with embeddings', () => {
         body: 'Material that does not contain the recall terms.',
         source: 'manual',
       });
+    await seedEmbeddingVectorForTest(pool, pool, oldProviderMemory.body.id,
+      (await providerA.embed(['Old provider only\n\nMaterial that does not contain the recall terms.']))[0], providerA);
     const activeProviderMemory = await request(appB)
       .post('/api/v0/capture')
       .set('Authorization', 'Bearer entra:user:vec')
@@ -151,6 +167,11 @@ describe('capture + recall with embeddings', () => {
         body: 'Different material without the recall terms.',
         source: 'manual',
       });
+    await seedEmbeddingVectorForTest(pool, pool, activeProviderMemory.body.id,
+      (await providerB.embed(['Active provider only\n\nDifferent material without the recall terms.']))[0], providerB);
+
+    // Match the static router's default across its original unscoped query group.
+    await registerEmbeddingTargetForTest(pool, providerB);
 
     const recall = await request(appB)
       .post('/api/v0/recall')
@@ -171,7 +192,7 @@ describe('capture + recall with embeddings', () => {
     ]);
   });
 
-  it('ignores wrong-dimension rows and still returns FTS results', async () => {
+  it('rejects wrong-dimension vector writes and still returns FTS results', async () => {
     const { scope, principal } = await seedActor();
     const memory = await pool.query(
       `INSERT INTO memories (id, scope_id, type, title, body, author_id, source)
@@ -181,11 +202,11 @@ describe('capture + recall with embeddings', () => {
       [scope.id, principal.id],
     );
     const [vector] = await provider.embed(['wrong dimension metadata']);
-    await pool.query(
+    await expect(pool.query(
       `INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
        VALUES ($1, $2, 384, $3)`,
       [memory.rows[0].id, provider.id, `[${vector.join(',')}]`],
-    );
+    )).rejects.toThrow(/Embedding source or vector space unavailable|dimension/i);
 
     const vectorOnlyRecall = await request(app)
       .post('/api/v0/recall')
@@ -208,6 +229,7 @@ describe('capture + recall with embeddings', () => {
   it('applies type filters before vector ranking and limiting', async () => {
     const { scope, principal } = await seedActor();
     const controlledProvider = new ControlledEmbeddingProvider();
+    await registerEmbeddingTargetForTest(pool, withSyntheticTargetForTest(controlledProvider));
     app = createApp(pool, { embeddingProvider: controlledProvider });
     const [highSimilarityVector] = await controlledProvider.embed(['higher similarity']);
     const [lowSimilarityVector] = await controlledProvider.embed(['lower similarity']);
@@ -222,7 +244,8 @@ describe('capture + recall with embeddings', () => {
         authorId: principal.id,
         source: 'manual',
       });
-      await storeMemoryEmbeddingVector(
+      await seedEmbeddingVectorForTest(
+        pool,
         pool,
         memory.id,
         highSimilarityVector,
@@ -242,7 +265,8 @@ describe('capture + recall with embeddings', () => {
         source: 'manual',
       });
       decisionIds.push(memory.id);
-      await storeMemoryEmbeddingVector(
+      await seedEmbeddingVectorForTest(
+        pool,
         pool,
         memory.id,
         lowSimilarityVector,
@@ -287,13 +311,15 @@ describe('capture + recall with embeddings', () => {
       authorId: principal.id,
       source: 'manual',
     });
-    await storeMemoryEmbeddingVector(
+    await seedEmbeddingVectorForTest(
+      pool,
       pool,
       expired.id,
       highSimilarityVector,
       controlledProvider,
     );
-    await storeMemoryEmbeddingVector(
+    await seedEmbeddingVectorForTest(
+      pool,
       pool,
       live.id,
       lowSimilarityVector,

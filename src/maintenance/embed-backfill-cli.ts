@@ -3,7 +3,7 @@ import { isDirectEntrypoint } from '../api/entrypoint.js';
 import { makeEmbeddingRouterFromEnv } from '../embeddings/factory.js';
 import { parseScopeString } from '../services/scopes.js';
 import { closePool, getPool } from '../storage/pool.js';
-import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoordinationContractReady } from '../storage/provider-lifecycle.js';
+import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoordinationContractReady, requireEmbeddingQueueReady } from '../storage/provider-lifecycle.js';
 import type { ScopeRef } from '../types.js';
 import {
   runEmbeddingBackfill,
@@ -106,6 +106,7 @@ async function main(): Promise<void> {
     const startup = { expectedSchema: applicationSchemaFromEnv(process.env) };
     await reconcilePgvectorProviderGrants(pool, startup);
     await requireCoordinationContractReady(pool, startup);
+    await requireEmbeddingQueueReady(pool, startup);
     const report = await runEmbedBackfillCli(pool, options);
     process.stdout.write(`${JSON.stringify(report)}\n`);
     process.exitCode = embedBackfillExitCode(report);

@@ -229,3 +229,5 @@ The production Compose readiness check calls /health/ready; /health/live remains
 ## Isolated UAT
 
 See [UAT deployment](uat-deployment.md), [client onboarding](uat-client-onboarding.md) and [Delivery Forge smoke](delivery-forge-uat.md). The optional Gemini adapter uses an explicit model-qualified 768-dimensional profile; only approved non-sensitive scopes may route to it. Local-only scopes never fall through to hosted providers. Guides and SDK fixtures do not establish live deployment, native-client isolation or owner acceptance. Keep private configuration and receipts outside tracked artifacts.
+
+Startup also requires the [deferred embedding schema](embedding-queue.md). This verifies schema and exact role contracts, not provider health, worker presence or an empty backlog. Capture commits queued work without provider I/O. Run the separate explicitly composed worker using its dedicated two-client LOGIN pool; REST and stdio/HTTP MCP do not host it.

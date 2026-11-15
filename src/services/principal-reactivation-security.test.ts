@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import pg, { type PoolConfig } from 'pg';
 import { LIFECYCLE_PRINCIPAL_ID } from '../lifecycle/principal.js';
-import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
+import { seedEmbeddingVectorForTest } from '../embeddings/test-helpers.js';
 import { processIngestDelivery } from '../storage/ingest-deliveries.js';
 import { addMembership } from '../storage/memberships.js';
 import { createPrincipal } from '../storage/principals.js';
@@ -410,6 +410,11 @@ describe('principal reactivation database trust boundary', () => {
         [target.id, principalPseudonym],
       );
       await pool.query('UPDATE scopes SET name = $2 WHERE id = $1', [scope.id, scopePseudonym]);
+      const protectedReceipt = (await pool.query(`SELECT id FROM audit_log WHERE scope_id=$1
+        AND metadata->>'operation'='principal_evidence_privacy_repaired' ORDER BY id LIMIT 1`, [scope.id])).rows[0];
+      expect(protectedReceipt).toBeDefined();
+      await expect(pool.query('UPDATE audit_log SET query=NULL WHERE id=$1', [protectedReceipt.id]))
+        .rejects.toThrow(/privacy evidence is immutable/i);
       await pool.query(
         `UPDATE audit_log audit SET query = NULL,
                 metadata = continuum_offboarding_expected_audit_metadata(audit.metadata)
@@ -423,6 +428,7 @@ describe('principal reactivation database trust boundary', () => {
           'principal_memory_erased',
           'principal_offboarded',
           'principal_offboarding_repaired',
+          'principal_evidence_privacy_repaired',
         ]],
       );
       const forged = (await rolePool.query(
@@ -531,6 +537,7 @@ describe('principal reactivation database trust boundary', () => {
           'principal_memory_erased',
           'principal_offboarded',
           'principal_offboarding_repaired',
+          'principal_evidence_privacy_repaired',
         ]],
       )).rows[0].id as string;
       await pool.query(
@@ -770,8 +777,8 @@ describe('principal reactivation database trust boundary', () => {
           source: 'terminal-summary',
         })],
       );
-      await storeMemoryEmbeddingVector(
-        rolePool, delivery.memoryIds[0], Array(768).fill(0), { id: 'test', dim: 768 },
+      await seedEmbeddingVectorForTest(
+        pool, rolePool, delivery.memoryIds[0], Array(768).fill(0), { id: 'test', dim: 768 },
       );
       await expect(issueApiKey(rolePool, admin, service.id, 'terminal-summary'))
         .resolves.toMatchObject({ allowedSource: 'terminal-summary' });
@@ -848,7 +855,7 @@ describe('principal reactivation database trust boundary', () => {
           `INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
            VALUES ($1, 'forged', 768, $2)`,
           [memoryId, `[${Array(768).fill(0).join(',')}]`],
-          /embedding requires a live memory/i,
+          /embedding requires a live memory|Embedding source or vector space unavailable/i,
         );
       } finally {
         client.release();

@@ -10,7 +10,8 @@ import { authenticateIngest } from '../../ingest/auth.js';
 import type { Authenticator } from '../auth.js';
 import type { IngestConfig, IngestPluginId } from '../../ingest/config.js';
 import { ServiceError } from '../../services/errors.js';
-import { captureOne, embedCapturedMemory } from '../../services/capture.js';
+import { captureOne } from '../../services/capture.js';
+import { embeddingStatusForPrincipal } from '../../services/embedding-jobs.js';
 import { activityProof, producerContext, requireProducerMatch, recordActivity, type ProducerContext } from '../../standup/activity.js';
 import { DEFAULT_RELATION_THRESHOLD } from '../../services/relations.js';
 import {
@@ -223,7 +224,7 @@ export function ingestRouter(
     const result = await processIngestDelivery(sourcePool, pluginId, id, hash, async (client) => {
       const captures = [];
       for (let index = 0; index < inputs.length; index += 1) {
-        const capture = await captureOne(client, embeddingRouting, principal, inputs[index], { transport: 'ingest' });
+        const capture = await captureOne(client, embeddingRouting, principal, inputs[index], { transport: 'ingest' }, relationThreshold);
         if (producerPool && (!proof || !await recordActivity(client, capture.memory.id, proof))) skippedAttributions += 1;
         captures.push(capture);
       }
@@ -234,22 +235,20 @@ export function ingestRouter(
         try { warn({ event: 'standup_attribution_skipped', count: skippedAttributions }); }
         catch { /* Optional operational logging cannot invalidate a committed capture. */ }
       }
-      await Promise.allSettled(
-        result.captures.map((capture) => embedCapturedMemory(
-          pool,
-          embeddingRouting,
-          capture,
-          { relationThreshold },
-        )),
-      );
     }
 
     if (result.replayed) {
-      res.status(200).json({ replayed: true, memoryIds: result.memoryIds });
+      const embeddings = [];
+      for (const memoryId of result.memoryIds) {
+        const status = await embeddingStatusForPrincipal(sourcePool, principal, memoryId, { transport: 'ingest' });
+        if (status) embeddings.push({ memoryId, embeddingStatus: status.embeddingStatus });
+      }
+      res.status(200).json({ replayed: true, memoryIds: result.memoryIds, embeddings });
     } else if (result.memoryIds.length === 0) {
       res.status(204).send();
     } else {
       res.status(202).json({ replayed: false, memoryIds: result.memoryIds,
+        embeddings: result.captures.map(capture => ({ memoryId: capture.memory.id, embeddingStatus: capture.embeddingStatus })),
         extraction: result.captures.map(capture => ({ memoryId: capture.memory.id, status: capture.extraction?.status ?? 'not-configured' })) });
     }
   });

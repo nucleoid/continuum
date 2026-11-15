@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type pg from 'pg';
 import request from 'supertest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -11,6 +11,8 @@ import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import { createMemory } from '../storage/memories.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
+import { registerEmbeddingTargetForTest, withSyntheticTargetForTest } from '../embeddings/test-helpers.js';
+import { staticEmbeddingRouter } from '../embeddings/router.js';
 import { RetrievalEnricherRegistry } from '../extensions/retrieval.js';
 import { PromotionWebhookRegistry } from '../extensions/promotion.js';
 import { testReranking } from '../reranking/test-helpers.js';
@@ -199,6 +201,7 @@ describe('REST/MCP semantic parity matrix', () => {
       scopeId: expect.any(String),
       expiresAt: expect.any(String),
       embedded: false,
+      embeddingStatus: 'not_configured',
       related: [],
       extraction: { status: 'not-configured' },
     });
@@ -207,6 +210,7 @@ describe('REST/MCP semantic parity matrix', () => {
       scope: 'team:payments',
       expires_at: expect.any(String),
       embedded: false,
+      embedding_status: 'not_configured',
       related: [],
       extraction: { status: 'not-configured' },
     });
@@ -224,7 +228,7 @@ describe('REST/MCP semantic parity matrix', () => {
         tags: ['session'],
         metadata: { transport: 'mcp-value', related: [] },
         audit_metadata: {
-          source: 'manual', type: 'fact', embedded: false, transport: 'mcp',
+          source: 'manual', type: 'fact', embedded: false, embedding_status: 'not_configured', transport: 'mcp',
         },
       },
       {
@@ -232,7 +236,7 @@ describe('REST/MCP semantic parity matrix', () => {
         source_ref: 'rest-ref',
         tags: ['session'],
         metadata: { transport: 'rest-value', related: [] },
-        audit_metadata: { source: 'manual', type: 'fact', embedded: false },
+        audit_metadata: { source: 'manual', type: 'fact', embedded: false, embedding_status: 'not_configured' },
       },
     ]);
   });
@@ -269,20 +273,23 @@ describe('REST/MCP semantic parity matrix', () => {
     expect(rows[0].memories).toBe(0);
   });
 
-  it('returns the same safe relation fields from REST and MCP capture', async () => {
+  it('acknowledges queued REST and MCP capture with empty advisory relations and no provider calls', async () => {
     const vector = Array(768).fill(0) as number[];
     vector[0] = 1;
-    const provider: EmbeddingProvider = {
-      id: 'test:transport-relations', dim: 768, async embed() { return [vector]; },
-    };
-    const relationServer = buildMcpServer({ pool, embeddingProvider: provider, principal });
+    const provider: EmbeddingProvider = withSyntheticTargetForTest({
+      id: 'test:transport-relations', dim: 768, local: true, embed: vi.fn(async () => [vector]),
+    });
+    const scope = (await getScopeByRef(pool, { kind: 'team', name: 'payments' }))!;
+    const queuePolicy = await registerEmbeddingTargetForTest(pool, provider, [scope.id]);
+    const routing = Object.assign(staticEmbeddingRouter(provider), { queuePolicy });
+    const relationServer = buildMcpServer({ pool, embeddingProvider: routing, principal });
     const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
     const relationClient = new Client({ name: 'relation-parity', version: '0.0.1' });
     await Promise.all([
       relationServer.connect(serverTransport), relationClient.connect(clientTransport),
     ]);
 
-    const first = await request(createApp(pool, { embeddingProvider: provider }))
+    const first = await request(createApp(pool, { embeddingProvider: routing }))
       .post('/api/v0/capture')
       .set('Authorization', 'Bearer entra:user:parity')
       .send({
@@ -296,7 +303,7 @@ describe('REST/MCP semantic parity matrix', () => {
         title: 'Parity policy changed', body: 'Never deploy on Fridays.', source: 'manual',
       },
     })) as ToolResult);
-    const rest = await request(createApp(pool, { embeddingProvider: provider }))
+    const rest = await request(createApp(pool, { embeddingProvider: routing }))
       .post('/api/v0/capture')
       .set('Authorization', 'Bearer entra:user:parity')
       .send({
@@ -305,22 +312,13 @@ describe('REST/MCP semantic parity matrix', () => {
       });
 
     expect(first.body.related).toEqual([]);
-    expect(mcp.related[0]).toMatchObject({
-      id: first.body.id, relation: 'possible-conflict',
-      similarity: expect.any(Number), provider: provider.id, threshold: 0.92,
-      detectedAt: expect.any(String),
-    });
-    expect(rest.body.related[0]).toMatchObject({
-      id: expect.any(String),
-      relation: mcp.related[0].relation,
-      similarity: mcp.related[0].similarity,
-      provider: mcp.related[0].provider,
-      threshold: mcp.related[0].threshold,
-      detectedAt: expect.any(String),
-    });
-    expect(Object.keys(rest.body.related[0]).sort()).toEqual(
-      ['detectedAt', 'id', 'provider', 'relation', 'similarity', 'threshold'].sort(),
-    );
+    expect(first.body).toMatchObject({ embedded: false, embeddingStatus: 'queued' });
+    expect(mcp).toMatchObject({ embedded: false, embedding_status: 'queued', related: [] });
+    expect(rest.body).toMatchObject({ embedded: false, embeddingStatus: 'queued', related: [] });
+    expect(provider.embed).not.toHaveBeenCalled();
+    expect((await pool.query('SELECT count(*)::int AS n FROM embedding_jobs')).rows[0].n).toBe(3);
+    await relationClient.close();
+    await relationServer.close();
   });
 
   it('creates the same registered webhook delivery rows for REST and MCP promotion', async () => {
@@ -509,8 +507,14 @@ describe('REST/MCP semantic parity matrix', () => {
       id: memory.id, scope: 'project:memory-parity', body: 'The complete parity body.',
       author_id: principal.id, author_display_name: 'Parity User', source_ref: 'parity-ref',
     });
-    expect(restList.body.items).toEqual([restFetch.body]);
-    expect(mcpList.items).toEqual([mcpFetch]);
+    const { embeddingStatus, embedded, embedding, ...restRecord } = restFetch.body;
+    const { embedding_status, embedded: mcpEmbedded, embedding: mcpEmbedding, ...mcpRecord } = mcpFetch;
+    expect({ embeddingStatus, embedded }).toEqual({ embeddingStatus: 'not_configured', embedded: false });
+    expect({ embedding_status, embedded: mcpEmbedded }).toEqual({ embedding_status: 'not_configured', embedded: false });
+    expect(embedding).toMatchObject({ attempts: 0, acceptedAt: null, completedAt: null, nextAttemptAt: null });
+    expect(mcpEmbedding).toEqual({ attempts: 0, accepted_at: null, completed_at: null, next_attempt_at: null });
+    expect(restList.body.items).toEqual([restRecord]);
+    expect(mcpList.items).toEqual([mcpRecord]);
     expect(restList.body).toMatchObject({ limit: 50, offset: 0 });
     expect(mcpList).toMatchObject({ limit: 50, offset: 0 });
   });

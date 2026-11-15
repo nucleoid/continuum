@@ -17,7 +17,7 @@ import { provisionEntraGroupBinding, syncEntraMemberships } from './membership-s
 import { Budget } from '../pipeline/budget.js';
 import { getScopeByRef } from '../storage/scopes.js';
 import { promoteMemory, verifyMemory } from '../storage/promote.js';
-import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
+import { registerEmbeddingTargetForTest, seedEmbeddingVectorForTest } from '../embeddings/test-helpers.js';
 
 it('skips reranking of a capacity-degraded pool while four query embeddings remain unsettled', async () => {
   await standupProducerFixture(async f => {
@@ -38,8 +38,9 @@ it('skips reranking of a capacity-degraded pool while four query embeddings rema
     for (let i = 0; i < 2; i++) {
       const source = await createMemory(f.app, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId,
         type: 'decision', title: `Capacityneedle source ${i}`, body: `Capacityneedle reference ${i}`, source: 'manual' });
-      await storeMemoryEmbeddingVector(f.app, source.id, vector, provider);
+      await seedEmbeddingVectorForTest(f.owner, f.app, source.id, vector, provider);
     }
+    await registerEmbeddingTargetForTest(f.owner, provider);
     const config = t.config();
     const recall = () => recallForPrincipal(f.app, provider, principal, { query: 'capacityneedle', limit: 2 }, {}, undefined, undefined, undefined, config);
     const inFlight = Array.from({ length: 4 }, recall);

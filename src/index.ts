@@ -63,3 +63,11 @@ export * from './briefs/provider.js';
 export * from './briefs/render.js';
 export * from './services/briefs.js';
 export * from './workers/briefs.js';
+
+export * from './embeddings/target.js';
+export * from './embeddings/failure-policy.js';
+export * from './storage/embedding-jobs-model.js';
+export * from './storage/embedding-jobs.js';
+export * from './storage/embeddings.js';
+export * from './services/embedding-jobs.js';
+export * from './workers/embedding-jobs.js';

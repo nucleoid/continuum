@@ -13,7 +13,7 @@ import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import { issueApiKey } from '../services/api-keys.js';
 import { mapOwnedUserScope } from '../services/offboarding.js';
-import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
+import { registerEmbeddingTargetForTest, seedEmbeddingVectorForTest, withSyntheticTargetForTest } from '../embeddings/test-helpers.js';
 import { claimPromotionDeliveries, completePromotionDelivery } from '../storage/promotion-events.js';
 
 // Compiled custom compositions exercise optional extensions. Stock main()
@@ -200,6 +200,9 @@ it('composes compiled APP transports and real credentials with same-schema appro
     await addMembership(owner, actor.id, shared.id, 'writer');
     await addMembership(owner, actor.id, personal.id, 'writer');
     await addMembership(owner, target.id, personal.id, 'writer');
+    const vectorFixtureA = withSyntheticTargetForTest({ id: 'combined:provider-a', dim: 768, local: true });
+    const vectorFixtureB = withSyntheticTargetForTest({ id: 'combined:provider-b', dim: 768, local: true });
+    const embeddingPolicy = await registerEmbeddingTargetForTest(owner, vectorFixtureA);
     for (const [index, role] of [appRole, opRole, producerRole].entries()) {
       await maintenance.query(`CREATE ROLE ${quote(role)} LOGIN PASSWORD ${literal(passwords[index])}`);
       rolesCreated.push(role);
@@ -279,10 +282,14 @@ const authenticator = createAuthenticator(pool,readerMode ? 'dev' : 'entra', {te
 const auth = await authenticator.authenticate('Bearer',process.env.CONTINUUM_BEARER);
 if (!auth || auth.principal.id !== process.env.COMBINED_ACTOR) throw new Error('Real stored credential rejected');
 const stub = new StubEmbeddingProvider();
-const provider = {id:'combined:provider-a',dim:768,requestTimeoutMs:1000,embed:async(texts) => {
+const {embeddingTarget} = await import(${moduleUrl('embeddings/target.js')});
+const {staticEmbeddingRouter} = await import(${moduleUrl('embeddings/router.js')});
+const provider = {id:'combined:provider-a',dim:768,local:true,requestTimeoutMs:1000,
+target:embeddingTarget({space:{provider:'combined:provider-a',model:'synthetic-static-vector-v1',profile:'synthetic-fixture-v1',dim:768,inputTransform:'memory-title-body-v1'},endpoint:'http://fixture.invalid/static-vector',local:true}),embed:async(texts) => {
   if (texts.some(text => text === 'combined outage')) throw new Error('PRIVATE_PROVIDER_FAILURE');
   return stub.embed(texts);
 }};
+const embeddingRouting = Object.assign(staticEmbeddingRouter(provider),{queuePolicy:JSON.parse(process.env.COMBINED_EMBEDDING_POLICY)});
 const enrichers = new RetrievalEnricherRegistry();
 enrichers.register({id:'combined',enrich:async(results) => results.map(result => ({reference:result.memory.id}))});
 const hooks = new PromotionWebhookRegistry();
@@ -303,12 +310,12 @@ if (process.argv[2] === 'REST') {
   }
   const worker = new PromotionEventWorker(pool,hooks,{owner:'combined-worker',pollMs:50,claimBatch:1,leaseMs:10000,callbackTimeoutMs:1000,databaseTimeoutMs:1000,shutdownWaitMs:1000,maxAttempts:3,baseBackoffMs:100,maxBackoffMs:1000,logger});
   const readiness = createReadinessState();
-  const app = createApp(pool,{authenticator,readiness,clock:readerMode ? ()=>Date.parse(process.env.COMBINED_READER_NOW) : undefined,ingestConfig,ingestProducerPools:producerPool ? {'terminal-summary':producerPool} : {},embeddingProvider:provider,retrievalEnrichers:enrichers,promotionWebhooks:hooks,enrichment:{timeoutMs:100,maxBytes:1024}});
+  const app = createApp(pool,{authenticator,readiness,clock:readerMode ? ()=>Date.parse(process.env.COMBINED_READER_NOW) : undefined,ingestConfig,ingestProducerPools:producerPool ? {'terminal-summary':producerPool} : {},embeddingProvider:embeddingRouting,retrievalEnrichers:enrichers,promotionWebhooks:hooks,enrichment:{timeoutMs:100,maxBytes:1024}});
   const runtime = await startRuntime(app,{host:'127.0.0.1',port:0,readiness,workers:readerMode ? [] : [worker],closePool:async()=>{await producerPool?.end();await pool.end();},shutdownTimeoutMs:1000,logger});
   process.on('message', message => {if (message?.kind === 'stop-worker') void worker.stop().then(()=>process.send?.({kind:'worker-stopped'})).catch(()=>process.exit(1));});
   process.send?.({kind:'ready',role,port:runtime.server.address().port});
 } else {
-  const server = buildMcpServer({pool,principal:auth.principal,now:readerMode ? ()=>new Date(process.env.COMBINED_READER_NOW) : undefined,allowedSource:auth.allowedSource,embeddingProvider:provider,retrievalEnrichers:enrichers,promotionWebhooks:hooks,enrichment:{timeoutMs:100,maxBytes:1024}});
+  const server = buildMcpServer({pool,principal:auth.principal,now:readerMode ? ()=>new Date(process.env.COMBINED_READER_NOW) : undefined,allowedSource:auth.allowedSource,embeddingProvider:embeddingRouting,retrievalEnrichers:enrichers,promotionWebhooks:hooks,enrichment:{timeoutMs:100,maxBytes:1024}});
   await server.connect(new StdioServerTransport());
   process.once('SIGTERM',()=>{void server.close().then(()=>pool.end()).then(()=>process.exit(0)).catch(()=>process.exit(1));});
   process.send?.({kind:'ready',role});
@@ -316,6 +323,7 @@ if (process.argv[2] === 'REST') {
 `, 'utf8');
     const env = { ...process.env, PGOPTIONS: '', CONTINUUM_DATABASE_URL: application.url,
       CONTINUUM_APPLICATION_SCHEMA: schema, CONTINUUM_AUTH_MODE: 'entra', CONTINUUM_BEARER: key.key, COMBINED_ACTOR: actor.id,
+      COMBINED_EMBEDDING_POLICY: JSON.stringify(embeddingPolicy),
       CONTINUUM_INGEST_TERMINAL_SUMMARY_ENABLED: 'true', CONTINUUM_INGEST_TERMINAL_SUMMARY_PRINCIPAL: actor.externalId,
       CONTINUUM_INGEST_TERMINAL_SUMMARY_DATABASE_URL: producer.url,
       CONTINUUM_INGEST_TERMINAL_SUMMARY_ACTOR_EXTERNAL_ID: externalActor };
@@ -368,7 +376,7 @@ if (process.argv[2] === 'REST') {
     const captured = await cli(['capture', '--scope', `project:${shared.name}`, '--type', 'fact',
       '--title', 'Combined shared sentinel', '--body', 'combined outage shared reference', '--tags', 'decision']);
     expect(captured.code).toBe(0); const sentinelId = captured.payload.id as string;
-    expect(captured.payload.embedded).toBe(true);
+    expect(captured.payload).toMatchObject({ embedded: false, embeddingStatus: 'queued', related: [] });
     const captureBody = { scope: { kind: 'project', name: shared.name }, type: 'fact',
       title: 'Combined reference', body: 'combined outage reference', source: 'manual', tags: ['decision'] };
     const normal = await http('/capture', 'POST', captureBody); expect(normal.status).toBe(201);
@@ -378,7 +386,8 @@ if (process.argv[2] === 'REST') {
     const personalCapture = await http('/capture', 'POST', { ...captureBody,
       scope: { kind: 'user', name: personal.name }, title: 'Combined personal private',
       body: 'PERSONAL_ONLY_sensitive_reference' });
-    expect(personalCapture.status).toBe(201); expect(personalCapture.json().embedded).toBe(true);
+    expect(personalCapture.status).toBe(201);
+    expect(personalCapture.json()).toMatchObject({ embedded: false, embeddingStatus: 'queued', related: [] });
     expect((await http('/tag-vocabularies?scopeKind=project')).json().entries.some((entry: any) => entry.tag === 'decision')).toBe(true);
     const count = async () => (await owner.query('SELECT count(*)::int AS count FROM memories')).rows[0].count;
     const beforeDenied = await count();
@@ -394,7 +403,11 @@ if (process.argv[2] === 'REST') {
     expect(await count()).toBe(beforeDenied);
     expect((await owner.query('SELECT count(*)::int AS count FROM promotion_events')).rows[0].count).toBe(0);
     const vector = Array(768).fill(0) as number[]; vector[0] = 1;
-    expect(await storeMemoryEmbeddingVector(application.pool, sentinelId, vector, { id: 'combined:provider-b', dim: 768 })).toBe(true);
+    // Fixture vectors exercise APP reader/privacy boundaries after acknowledgement.
+    // They are explicit approved repairs, not claimed capture/worker completion.
+    expect(await seedEmbeddingVectorForTest(owner, application.pool, sentinelId, vector, vectorFixtureA)).toBe(true);
+    expect(await seedEmbeddingVectorForTest(owner, application.pool, sentinelId, vector, vectorFixtureB)).toBe(true);
+    await registerEmbeddingTargetForTest(owner, vectorFixtureA, [shared.id]);
     expect((await owner.query('SELECT provider FROM memory_embeddings WHERE memory_id=$1 ORDER BY provider', [sentinelId])).rows)
       .toEqual([{ provider: 'combined:provider-a' }, { provider: 'combined:provider-b' }]);
     const recalled = await cli(['recall', 'shared reference', '--scopes', `project:${shared.name}`, '--limit', '5']);
@@ -442,8 +455,8 @@ if (process.argv[2] === 'REST') {
     expect((await owner.query('SELECT webhook_id FROM promotion_event_deliveries ORDER BY event_id')).rows)
       .toEqual(Array(3).fill({ webhook_id: 'combined-hook' }));
     const personalMemory = personalCapture.json().id as string;
-    expect(await storeMemoryEmbeddingVector(application.pool, personalMemory, vector, { id: 'combined:provider-a', dim: 768 })).toBe(true);
-    expect(await storeMemoryEmbeddingVector(application.pool, personalMemory, vector, { id: 'combined:provider-b', dim: 768 })).toBe(true);
+    expect(await seedEmbeddingVectorForTest(owner, application.pool, personalMemory, vector, vectorFixtureA)).toBe(true);
+    expect(await seedEmbeddingVectorForTest(owner, application.pool, personalMemory, vector, vectorFixtureB)).toBe(true);
     expect((await owner.query('SELECT provider FROM memory_embeddings WHERE memory_id=$1 ORDER BY provider', [personalMemory])).rows)
       .toEqual([{ provider: 'combined:provider-a' }, { provider: 'combined:provider-b' }]);
     const runId = randomUUID();

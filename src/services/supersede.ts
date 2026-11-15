@@ -4,7 +4,8 @@ import type { EmbeddingProvider } from '../embeddings/provider.js';
 import type { Memory, Principal } from '../types.js';
 import { validateCaptureContent } from './capture.js';
 import { asServiceError, dependencyUnavailable, ServiceError } from './errors.js';
-import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
+import { storeMemoryEmbeddingVector, admitMemoryEmbedding, embeddingInputMatches } from '../storage/embeddings.js';
+import { memoryEmbeddingText } from '../embeddings/text.js';
 import {
   getDecisionHistory,
   supersedeDecision,
@@ -119,10 +120,11 @@ async function embedSuccessor(
   }
 
   let vector: number[];
+  let admission;
   try {
-    [vector] = await provider.embed([
-      `${result.successor.title}\n\n${result.successor.body}`,
-    ]);
+    admission = await admitMemoryEmbedding(pool, result.successor.id, provider);
+    if (!admission || !embeddingInputMatches(admission, memoryEmbeddingText(result.successor))) throw new Error('Embedding source changed');
+    [vector] = await provider.embed([memoryEmbeddingText(result.successor)]);
   } catch {
     await tryRecordEmbeddingOutcome(pool, result, provider, 'failed');
     return { embedded: false, embedErrorCode: 'EMBEDDING_FAILED' };
@@ -138,7 +140,7 @@ async function embedSuccessor(
   try {
     await client.query('BEGIN');
     const stored = await storeMemoryEmbeddingVector(
-      client, result.successor.id, vector, provider,
+      client, result.successor.id, vector, provider, admission,
     );
     await recordEmbeddingOutcome(client, result, provider, stored ? 'succeeded' : 'failed');
     await client.query('COMMIT');

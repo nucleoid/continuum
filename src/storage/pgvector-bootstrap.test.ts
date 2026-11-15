@@ -5,10 +5,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pg from 'pg';
 import { describe, expect, it } from 'vitest';
-import {
-  vectorSearchMemoryIds,
-  vectorSearchRelatedMemories,
-} from './embeddings.js';
 import { runMigrations } from './migrator.js';
 
 const DATABASE_URL =
@@ -246,23 +242,24 @@ describe('pgvector schema contract', () => {
         const provider = { id: 'test:public-less', dim: 768 };
         const vector = [1, ...Array(767).fill(0)] as number[];
         // This intentionally bootstrap-only database retains the original key.
-        // Seed through compatible SQL, then exercise the current qualified
-        // search APIs without adding public to the runtime search path.
-        // Current composite-key persistence is covered after the real 0088
-        // upgrade in the role and provider-rollout suites.
+        // Exercise compatible qualified SQL without adding public to the path.
+        // Current APIs require0098 and are covered after the full upgrade in
+        // the role/provider-rollout suites, not this deliberate0001 fixture.
         expect((await runtime.query(`INSERT INTO memory_embeddings(memory_id,provider,dim,embedding)
           VALUES($1::uuid,$2::text,$3::integer,$4::public.vector) RETURNING memory_id`,
         [memoryId, provider.id, provider.dim, `[${vector.join(',')}]`])).rows)
           .toEqual([{ memory_id: memoryId }]);
-        await expect(vectorSearchMemoryIds(runtime, vector, [scopeId], provider, 5))
-          .resolves.toEqual([{ id: memoryId, distance: 0 }]);
-        await expect(vectorSearchRelatedMemories(
-          runtime,
-          vector,
-          [scopeId],
-          provider,
-          { threshold: 0.9, excludeMemoryId: randomUUID(), limit: 5 },
-        )).resolves.toEqual([{
+        const legacyRows = (await runtime.query(`SELECT m.id,m.type,m.title,m.body,
+          e.embedding OPERATOR(public.<=>) $1::public.vector AS distance
+          FROM memory_embeddings e JOIN memories m ON m.id=e.memory_id
+          WHERE m.scope_id=$2 AND e.provider=$3 AND e.dim=$4
+            AND m.state='live' AND (m.expires_at IS NULL OR m.expires_at>clock_timestamp())
+            AND m.id<>$5 AND 1-(e.embedding OPERATOR(public.<=>) $1::public.vector)>=$6
+          ORDER BY distance,m.id LIMIT 5`,
+        [`[${vector.join(',')}]`,scopeId,provider.id,provider.dim,randomUUID(),0.9])).rows;
+        expect(legacyRows.map(row => ({ id: row.id, distance: row.distance })))
+          .toEqual([{ id: memoryId, distance: 0 }]);
+        expect(legacyRows).toEqual([{
           id: memoryId,
           type: 'fact',
           title: 'Vector contract',

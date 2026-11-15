@@ -37,7 +37,8 @@ import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { createPrincipal } from '../storage/principals.js';
 import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { createMemory } from '../storage/memories.js';
-import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
+import { registerEmbeddingTargetForTest, seedEmbeddingVectorForTest, withSyntheticTargetForTest } from '../embeddings/test-helpers.js';
+import { staticEmbeddingRouter } from '../embeddings/router.js';
 import { addMembership } from '../storage/memberships.js';
 import { buildMcpServer } from './mcp.js';
 import { createAuthenticator } from './auth.js';
@@ -299,12 +300,15 @@ describe('real SDK remote MCP with current database authority', () => {
     } finally { await proxyClient.close(); await remote.stop('test'); proxyServer.closeAllConnections();
       await new Promise<void>((resolve) => proxyServer.close(() => resolve())); await cleanup(); }
   });
-  it('bounds legacy candidate hydration through actual SDK capture option wiring', async () => {
+  it('acknowledges SDK capture without hydrating oversized legacy relation candidates', async () => {
     const vector = [1, ...Array(767).fill(0)];
-    const provider = { id: 'sdk-relation-budget:fixture', dim: 768, embed: async (texts: string[]) => texts.map(() => vector) };
+    let providerCalls = 0;
+    const provider = withSyntheticTargetForTest({ id: 'sdk-relation-budget:fixture', dim: 768,
+      embed: async (texts: string[]) => { providerCalls++; return texts.map(() => vector); } });
     const legacy = await createMemory(pool, { scopeId, scopeKind: 'project', type: 'decision', title: 'Legacy',
       body: 'legacy-body '.repeat(200000), source: 'manual', authorId: principalId });
-    await storeMemoryEmbeddingVector(pool, legacy.id, vector, provider);
+    await seedEmbeddingVectorForTest(pool, pool, legacy.id, vector, provider);
+    const queuePolicy = await registerEmbeddingTargetForTest(pool, provider, [scopeId]);
     const queries: string[] = [];
     const observed = new Proxy(pool, { get(target, property) {
       const value = Reflect.get(target, property);
@@ -316,7 +320,8 @@ describe('real SDK remote MCP with current database authority', () => {
     const address = new URL(`http://127.0.0.1:${(sdkServer.address() as { port: number }).port}/mcp`);
     const policy = mcpHttpConfigFromEnv({ CONTINUUM_MCP_HTTP_ENABLED: 'true', CONTINUUM_MCP_PUBLIC_URL: address.href,
       CONTINUUM_MCP_HTTP_LOOPBACK_DEV: 'true' }, 'entra')!;
-    const remote = createMcpHttpController(policy, { pool: observed, embeddingProvider: provider,
+    const remote = createMcpHttpController(policy, { pool: observed,
+      embeddingProvider: Object.assign(staticEmbeddingRouter(provider), { queuePolicy }),
       authenticator: createAuthenticator(observed, 'entra', entra) });
     app.use('/mcp', remote.router);
     const sdk = new Client({ name: 'sdk-capture-budget', version: '1' });
@@ -326,14 +331,15 @@ describe('real SDK remote MCP with current database authority', () => {
         type: 'decision', title: 'New reference', body: 'New reference', source: 'manual' } });
       expect(result.isError).not.toBe(true);
       const captured = JSON.parse((result.content as Array<{ text: string }>)[0].text);
-      expect(captured).toMatchObject({ embedded: true, related: [] });
+      expect(captured).toMatchObject({ embedded: false, embedding_status: 'queued', related: [] });
+      expect(providerCalls).toBe(0);
       expect(JSON.stringify(result)).not.toContain('legacy-body');
-      expect(queries.some((sql) => sql.includes('octet_length(m.body)'))).toBe(true);
+      expect(queries.some((sql) => sql.includes('WITH provider_embeddings'))).toBe(false);
       expect(queries.some((sql) => /SELECT[^;]*m\.title, m\.body/.test(sql))).toBe(false);
       expect((await pool.query('SELECT md5(body) AS hash,state,metadata FROM memories WHERE id=$1', [legacy.id])).rows[0])
         .toEqual({ hash: createHash('md5').update(legacy.body).digest('hex'), state: 'live', metadata: {} });
       expect((await pool.query('SELECT metadata FROM audit_log WHERE memory_id=$1', [captured.id])).rows[0].metadata)
-        .toMatchObject({ embedded: true, relation_error_code: 'RELATION_DETECTION_FAILED' });
+        .toMatchObject({ embedded: false, embedding_status: 'queued' });
       expect((await pool.query('SELECT 1 FROM audit_log WHERE memory_id=$1', [legacy.id])).rowCount).toBe(0);
     } finally { await sdk.close(); await remote.stop('test'); sdkServer.closeAllConnections();
       await new Promise<void>((resolve) => sdkServer.close(() => resolve())); await cleanup(); }

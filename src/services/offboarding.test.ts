@@ -4,7 +4,8 @@ import { promisify } from 'node:util';
 import type pg from 'pg';
 import { createAuthenticator } from '../api/auth.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
-import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
+import { admitMemoryEmbedding, storeMemoryEmbeddingVector } from '../storage/embeddings.js';
+import { registerEmbeddingTargetForTest, seedEmbeddingVectorForTest, withSyntheticTargetForTest } from '../embeddings/test-helpers.js';
 import { addMembership } from '../storage/memberships.js';
 import { createMemory } from '../storage/memories.js';
 import { selectGapCandidates } from '../storage/gaps.js';
@@ -75,8 +76,8 @@ describe('offboarding and erasure', () => {
       scopeId: shared.id, scopeKind: 'team', type: 'fact', title: 'Shared title',
       body: 'Shared body', authorId: target.id, source: 'manual',
     });
-    await storeMemoryEmbeddingVector(
-      pool, personalMemory.id, Array(768).fill(0), { id: 'test', dim: 768 },
+    await seedEmbeddingVectorForTest(
+      pool, pool, personalMemory.id, Array(768).fill(0), { id: 'test', dim: 768 },
     );
     return { admin, target, personal, shared, personalMemory, sharedMemory };
   }
@@ -396,7 +397,7 @@ describe('offboarding and erasure', () => {
       title: 'Restored private title', body: 'Restored private body',
       authorId: value.target.id, source: 'terminal-summary',
     });
-    await storeMemoryEmbeddingVector(pool, recaptured.id, Array(768).fill(1), { id: 'test', dim: 768 });
+    await seedEmbeddingVectorForTest(pool, pool, recaptured.id, Array(768).fill(1), { id: 'test', dim: 768 });
     const erasedAgain = await offboardPrincipal(pool, value.admin, value.target.id);
     expect(erasedAgain.alreadyOffboarded).toBe(false);
     expect((await pool.query(
@@ -450,13 +451,21 @@ describe('offboarding and erasure', () => {
         WHERE id = $1`,
       [canonical.id],
     );
-    await pool.query('ALTER TABLE memory_embeddings DISABLE TRIGGER require_embeddable_memory');
-    await pool.query(
-      `INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
-       VALUES ($1, 'test', 768, $3), ($2, 'test', 768, $3)`,
-      [dirty.id, canonical.id, `[${Array(768).fill(0).join(',')}]`],
-    );
-    await pool.query('ALTER TABLE memory_embeddings ENABLE TRIGGER require_embeddable_memory');
+    // Owner-only restored-corruption witness. These NULL-provenance rows are
+    // deliberately impossible through current APP writers; physical repair
+    // must still erase them after a historical restore or owner mistake.
+    await pool.query(`ALTER TABLE memory_embeddings DISABLE TRIGGER require_embeddable_memory;
+      ALTER TABLE memory_embeddings DISABLE TRIGGER embedding_vector_guard`);
+    try {
+      await pool.query(
+        `INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
+         VALUES ($1, 'test', 768, $3), ($2, 'test', 768, $3)`,
+        [dirty.id, canonical.id, `[${Array(768).fill(0).join(',')}]`],
+      );
+    } finally {
+      await pool.query(`ALTER TABLE memory_embeddings ENABLE TRIGGER embedding_vector_guard;
+        ALTER TABLE memory_embeddings ENABLE TRIGGER require_embeddable_memory`);
+    }
     const repaired = await offboardPrincipal(pool, value.admin, value.target.id);
     expect(repaired).toMatchObject({ alreadyOffboarded: false, liveMemories: 1, embeddings: 2 });
     expect((await pool.query('SELECT title, state FROM memories WHERE id = $1', [dirty.id])).rows[0])
@@ -804,7 +813,7 @@ describe('offboarding and erasure', () => {
     for (const relation of ['connector_query_runs','connector_repository_mappings']) expect(connectorPhysical).toContain(relation);
 
     const briefVerifier = (await pool.query(`SELECT prosrc FROM pg_proc
-      WHERE oid='continuum_offboarding_lifecycle_state_is_erased(uuid)'::regprocedure`)).rows[0].prosrc as string;
+      WHERE oid='continuum_offboarding_lifecycle_state_is_erased_pre_embedding(uuid)'::regprocedure`)).rows[0].prosrc as string;
     expect(briefVerifier).toContain('continuum_offboarding_lifecycle_state_is_erased_pre_brief(target_run)');
     expect(briefVerifier).toContain('continuum_brief_scope_is_erased(scope_id)');
     const briefPhysical = (await pool.query(`SELECT prosrc FROM pg_proc
@@ -817,6 +826,19 @@ describe('offboarding and erasure', () => {
     const briefPlan = (await pool.query(`EXPLAIN (FORMAT JSON) ${briefVerifier.replaceAll('target_run', '$1::uuid')}`, [runId]))
       .rows[0]['QUERY PLAN'][0].Plan as Record<string, unknown>;
     visit(briefPlan);
+
+    const embeddingVerifier = (await pool.query(`SELECT prosrc FROM pg_proc
+      WHERE oid='continuum_offboarding_lifecycle_state_is_erased(uuid)'::regprocedure`)).rows[0].prosrc as string;
+    expect(embeddingVerifier).toContain('continuum_offboarding_lifecycle_state_is_erased_pre_embedding(target_run)');
+    expect(embeddingVerifier).toContain('continuum_embedding_scope_is_erased(scope_id)');
+    const embeddingPhysical = (await pool.query(`SELECT prosrc FROM pg_proc
+      WHERE oid='continuum_embedding_scope_is_erased(uuid)'::regprocedure`)).rows[0].prosrc as string;
+    for (const relation of ['embedding_sources', 'embedding_jobs', 'embedding_capture_receipts', 'embedding_cohorts', 'memory_embeddings']) {
+      expect(embeddingPhysical).toContain(relation);
+    }
+    const embeddingPlan = (await pool.query(`EXPLAIN (FORMAT JSON) ${embeddingVerifier.replaceAll('target_run', '$1::uuid')}`, [runId]))
+      .rows[0]['QUERY PLAN'][0].Plan as Record<string, unknown>;
+    visit(embeddingPlan);
 
     expect(nodes.filter((node) =>
       node['Node Type'] === 'Seq Scan'
@@ -1134,20 +1156,23 @@ describe('offboarding and erasure', () => {
     let embeddingStarted!: () => void;
     const started = new Promise<void>((resolve) => { embeddingStarted = resolve; });
     const release = new Promise<void>((resolve) => { releaseEmbedding = resolve; });
-    const provider: EmbeddingProvider = {
+    const provider = withSyntheticTargetForTest<EmbeddingProvider>({
       id: 'blocking-test', dim: 768,
       async embed() {
         embeddingStarted();
         await release;
         return [Array(768).fill(0)];
       },
-    };
+    });
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await registerEmbeddingTargetForTest(pool, provider, [value.personal.id, value.shared.id, org.id]);
     const recall = recallForPrincipal(pool, provider, value.target, {
       query: 'Private body', limit: 10,
     });
-    await started;
-    await offboardPrincipal(pool, value.admin, value.target.id);
-    releaseEmbedding();
+    try {
+      await started;
+      await offboardPrincipal(pool, value.admin, value.target.id);
+    } finally { releaseEmbedding(); }
     await expect(recall).rejects.toMatchObject({ code: 'INTERNAL' });
     expect((await pool.query(
       `SELECT count(*)::int AS count FROM audit_log
@@ -1157,10 +1182,14 @@ describe('offboarding and erasure', () => {
 
   it('leaves an exact redacted clean state and durable evidence outside audit retention', async () => {
     const value = await fixture();
+    expect((await pool.query('SELECT count(*)::int AS n FROM memory_embeddings WHERE memory_id=$1', [value.personalMemory.id])).rows[0].n).toBe(1);
     await pool.query(
       `UPDATE memories SET expires_at = now(), last_verified = now() WHERE id = $1`,
       [value.personalMemory.id],
     );
+    // Expiry is now an immediate vector-generation fence. Offboarding counts
+    // only vectors still present when its own erasure begins.
+    expect((await pool.query('SELECT count(*)::int AS n FROM memory_embeddings WHERE memory_id=$1', [value.personalMemory.id])).rows[0].n).toBe(0);
     const result = await offboardPrincipal(pool, value.admin, value.target.id);
     expect((await pool.query(
       `SELECT type, title, body, metadata, tags, source, source_ref, state,
@@ -1181,7 +1210,7 @@ describe('offboarding and erasure', () => {
          FROM principal_offboarding_events WHERE principal_id = $1 ORDER BY id`,
       [value.target.id],
     )).rows[0];
-    expect(durable).toMatchObject({ memories: 1, embeddings: 1, memberships: 1 });
+    expect(durable).toMatchObject({ memories: 1, embeddings: 0, memberships: 1 });
     expect(durable.evidence).toMatchObject({ memberPrincipalIds: [] });
     expect((await pool.query(
       `SELECT metadata->>'phase' AS phase FROM coordination_operator_events
@@ -1190,11 +1219,17 @@ describe('offboarding and erasure', () => {
       { phase: 'started' }, { phase: 'completed' },
       { phase: 'started' }, { phase: 'completed' },
     ]);
-    await pool.query('DELETE FROM audit_log');
+    const protectedReceipts = (await pool.query(`SELECT id,metadata FROM audit_log
+      WHERE metadata->>'operation'='principal_evidence_privacy_repaired' ORDER BY id`)).rows;
+    expect(protectedReceipts.length).toBeGreaterThan(0);
+    await expect(pool.query(`DELETE FROM audit_log WHERE metadata->>'operation'='principal_evidence_privacy_repaired'`))
+      .rejects.toThrow(/privacy evidence is immutable/i);
+    await pool.query(`DELETE FROM audit_log WHERE metadata->>'operation' IS DISTINCT FROM 'principal_evidence_privacy_repaired'`);
+    expect((await pool.query(`SELECT id,metadata FROM audit_log ORDER BY id`)).rows).toEqual(protectedReceipts);
     const retry = await offboardPrincipal(pool, value.admin, value.target.id);
     expect(retry.alreadyOffboarded).toBe(true);
     expect(retry.originalOffboarding).toMatchObject({
-      memories: 1, embeddings: 1, memberships: 1,
+      memories: 1, embeddings: 0, memberships: 1,
     });
     expect((await pool.query(
       `SELECT metadata->>'phase' AS phase FROM coordination_operator_events
@@ -1211,19 +1246,22 @@ describe('offboarding and erasure', () => {
       [value.personalMemory.id])).rows[0].count).toBe(1);
     const archiver = await pool.connect();
     const vector = Array(768).fill(1) as number[];
+    const provider = withSyntheticTargetForTest({ id: 'test', dim: 768 });
+    await registerEmbeddingTargetForTest(pool, provider, [value.personal.id]);
+    const admission = (await admitMemoryEmbedding(pool, value.personalMemory.id, provider))!;
     let lateEmbedding: Promise<boolean> | undefined;
     try {
       await archiver.query('BEGIN');
       await archiver.query(`UPDATE memories SET state = 'archived' WHERE id = $1`, [value.personalMemory.id]);
       lateEmbedding = storeMemoryEmbeddingVector(
-        pool, value.personalMemory.id, vector, { id: 'test', dim: 768 },
+        pool, value.personalMemory.id, vector, provider, admission,
       );
       void lateEmbedding.catch(() => undefined);
       await archiver.query('COMMIT');
       await expect(lateEmbedding).resolves.toBe(false);
       await expect(pool.query(`INSERT INTO memory_embeddings(memory_id,provider,dim,embedding)
         VALUES($1::uuid,'test',768,$2)`, [value.personalMemory.id, `[${vector.join(',')}]`]))
-        .rejects.toThrow(/embedding requires a live memory/i);
+        .rejects.toThrow(/embedding requires a live memory|Embedding source or vector space unavailable/i);
       expect((await pool.query(
         'SELECT count(*)::int AS count FROM memory_embeddings WHERE memory_id = $1',
         [value.personalMemory.id],

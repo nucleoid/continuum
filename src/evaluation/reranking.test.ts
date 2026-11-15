@@ -10,7 +10,7 @@ import { StubEmbeddingProvider } from '../embeddings/stub.js';
 import { createScope } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import { createMemory } from '../storage/memories.js';
-import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
+import { seedEmbeddingVectorForTest } from '../embeddings/test-helpers.js';
 import { recallForPrincipal } from '../services/recall.js';
 
 it('records interleaved local enabled/disabled/fallback ablations without claiming model qualification', async () => {
@@ -39,7 +39,7 @@ it('records interleaved local enabled/disabled/fallback ablations without claimi
         const memory = await createMemory(app, { scopeId: scope.id, scopeKind: 'project', authorId: actor.id,
           title: doc.title, body: doc.body, sourceRef: `${doc.id}@${doc.version}`, type: 'decision', source: 'manual' });
         refs.set(memory.id, { id: doc.id, version: doc.version });
-        await storeMemoryEmbeddingVector(app, memory.id, (await stub.embed([`${doc.title}\n\n${doc.body}`]))[0], stub); setupCalls++;
+        await seedEmbeddingVectorForTest(owner, app, memory.id, (await stub.embed([`${doc.title}\n\n${doc.body}`]))[0], stub); setupCalls++;
       }
       shared.set(split, { scope: scope.name, refs });
     }
@@ -76,7 +76,7 @@ it('records interleaved local enabled/disabled/fallback ablations without claimi
             async invoke(wire) { calls++; actualResources.inputBytes += Buffer.byteLength(wire); actualResources.inputTokenUnits += Buffer.byteLength(wire);
               const value = await stub.embed(JSON.parse(wire).texts); actualResources.responseBytes += Buffer.byteLength(JSON.stringify(value)); return { value, response: value,
               usage: { provenance: 'measured', outputTokens: 0, reasoningTokens: 0, completionTokens: 0 } }; } };
-          const provider = { id: stub.id, dim: 768, local: true, pipelineAdapter: embedding, embed: stub.embed.bind(stub) };
+          const provider = { id: stub.id, dim: 768, local: true, target: stub.target, pipelineAdapter: embedding, embed: stub.embed.bind(stub) };
           const budget = new Budget(profile); const beforeCalls = calls;
           const began = performance.now();
           const result = await recallForPrincipal(app, mode === 'lexical' ? null : provider, actor,

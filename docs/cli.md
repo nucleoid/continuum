@@ -303,3 +303,5 @@ mappings, then restart compatible binaries with distinct serving and producer
 roles. Startup rejects a bound producer on the serving pool but does not monitor
 later binding changes. See [Standup](./standup.md) for attributed ingestion and
 recovery; the HTTP CLI has no separate Standup command.
+
+Capture optionally accepts `--idempotency-key` (1 to 128 visible ASCII characters) and sends the REST Idempotency-Key header. Retain it across ambiguity; the CLI never resubmits automatically. Capture output includes deferred `embeddingStatus`; `embedded` means an exact current vector, and initial `related` is empty. The separate `continuum-embed-worker` executable requires explicit trusted composition and a dedicated worker connection. See [deferred embeddings](embedding-queue.md) for replay, configuration and OP commands.

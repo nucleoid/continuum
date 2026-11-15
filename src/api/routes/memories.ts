@@ -26,6 +26,8 @@ export function restMemory(record: MemoryReadRecord) {
   const { memory } = record;
   return {
     id: memory.id,
+    ...(record.embedding ? { embeddingStatus: record.embedding.embeddingStatus, embedded: record.embedding.embedded,
+      embedding: record.embedding } : {}),
     ...(memory.event ? { event: memory.event } : {}),
     scope: record.scope,
     type: memory.type,

@@ -184,6 +184,7 @@ async function commandCapture(args: string[], client: ApiClient, deps: CliDepend
     source: { type: 'string', default: 'manual' }, 'source-ref': { type: 'string' },
     metadata: { type: 'string' },
     'event-annotation': { type: 'string' },
+    'idempotency-key': { type: 'string' },
   } });
   if (positionals.length) throw new CliError('capture does not accept positional arguments', 2);
   if (values.body !== undefined && values['body-file'] !== undefined) {
@@ -223,8 +224,9 @@ async function commandCapture(args: string[], client: ApiClient, deps: CliDepend
     ...(values['source-ref'] ? { sourceRef: values['source-ref'] } : {}),
     ...(metadata ? { metadata } : {}),
     ...(values['event-annotation'] !== undefined ? { eventAnnotation: temporalOption(values['event-annotation'],'--event-annotation',true) } : {}),
-  });
-  emit(deps, values.json, result, `Captured ${humanText(result.id)}\n`);
+  }, values['idempotency-key']);
+  const status = typeof result.embeddingStatus === 'string' ? ` (${humanText(result.embeddingStatus)})` : '';
+  emit(deps, values.json, result, `Captured ${humanText(result.id)}${status}\n`);
 }
 
 async function commandRecall(args: string[], client: ApiClient, deps: CliDependencies) {
