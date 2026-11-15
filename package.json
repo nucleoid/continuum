@@ -18,6 +18,7 @@
     "!dist/**/*.test.*",
     "!dist/**/*.spec.*",
     "!dist/**/test-helpers.*",
+    "!dist/fixtures/**",
     "!dist/**/*.map",
     "docs/agents-md-freshness.md",
     "docs/api-operations.md",

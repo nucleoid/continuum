@@ -6,7 +6,7 @@ import { createPrincipal, getPrincipal } from '../storage/principals.js';
 import { createScope } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import { createMemory } from '../storage/memories.js';
-import { standupProducerFixture } from '../standup/test-helpers.js';
+import { standupConsumerFixture as standupProducerFixture } from '../standup/test-helpers.js';
 import { EvidencePayloadRegistry } from '../evidence/model.js';
 import { registerEvidence, readEvidence } from '../services/evidence.js';
 import { materializeEvidence, repairEvidence, type EvidenceRepairInput, type EvidenceRepairOutput } from './evidence.js';

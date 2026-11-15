@@ -198,7 +198,7 @@ it('physically erases assertions, hashes and queued copies and refuses completio
     const memory = await capture(f);
     expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('processed');
     const schema = (await f.owner.query('SELECT current_schema() AS name')).rows[0].name as string;
-    const lock = new pg.Client({ connectionString: process.env.CONTINUUM_TEST_DATABASE_URL!, options: `-c search_path=${schema}` });
+    const lock = new pg.Client({ connectionString: f.connectionString, options: `-c search_path=${schema}` });
     await lock.connect();
     try {
       await lock.query('BEGIN'); await lock.query('SELECT * FROM extraction_chunks FOR UPDATE');

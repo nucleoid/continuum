@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { vi } from 'vitest';
-import { standupProducerFixture } from '../standup/test-helpers.js';
+import { standupConsumerFixture as standupProducerFixture } from '../standup/test-helpers.js';
 import { addMembership } from '../storage/memberships.js';
 import { Budget, starterProfile, type BudgetAdapter } from '../pipeline/budget.js';
 import { createBudgetWorkflow } from '../storage/pipeline-budgets.js';
