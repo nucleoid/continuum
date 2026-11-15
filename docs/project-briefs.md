@@ -240,3 +240,8 @@ extraction/absent connector ablations. Frozen v1 inputs and existing score gates
 remain unchanged. Reports are synthetic mechanism evidence only. Real model
 quality, live connector authority, paid cost, paired performance, normalized
 storage and production acceptance remain unqualified.
+
+The extraction ablation seeds a duplicate managed generated assertion; it does
+not invoke or bill an extractor. The connector ablation registers no connector.
+Latency uses five sequential observations per variant/mode without a warmup;
+these diagnostics do not meet the frozen paired performance acceptance protocol.

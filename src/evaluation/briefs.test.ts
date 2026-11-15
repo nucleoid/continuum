@@ -79,6 +79,9 @@ it('measures persisted synthetic claim alignment, precision, budgets and full/de
     if (execFileSync('git',['status','--porcelain'],{ encoding: 'utf8' }).trim() || process.env.CONTINUUM_EVAL_SOURCE_SHA!==head) throw new Error('Brief report requires clean exact source identity');
     await writeFile(path,JSON.stringify({ version: spec.version,fixtureSha256: createHash('sha256').update(bytes).digest('hex'),head,rows,failures,
       profile: profile.version,model: profile.adapter.model,prompt: spec.prompt,schema: spec.schema,qualification: spec.qualification,
-      realModelQualified: false,pairedPerformanceQualified: false,normalizedStorageQualified: false,connectorQualification: 'absent, implementation unknown' },null,2)+'\n',{ flag: 'wx' });
+      realModelQualified: false,pairedPerformanceQualified: false,normalizedStorageQualified: false,connectorQualification: 'absent, implementation unknown',
+      sampling: 'Five sequential observations per variant/mode; no warmup or paired latency acceptance.',
+      ablationLimits: { extraction: 'Seeded duplicate extracted-assertion via managed registration; no extractor invoked or charged.',
+        connector: 'No connector registered or queried; implementation remains unknown.' } },null,2)+'\n',{ flag: 'wx' });
   }
 },120000);
