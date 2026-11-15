@@ -194,6 +194,27 @@ describe('embedding handoff storage boundaries', () => {
       .toEqual([{ count: 0 }]);
   });
 
+  it('proves the published archived-state trigger independently of the new vector guard', async () => {
+    const value = await memory();
+    await client.query("UPDATE memories SET state='archived' WHERE id=$1::uuid", [value.id]);
+    // Owner-only isolation of the older boundary. Keep every published trigger,
+    // constraint, grant and SQL function unchanged; restore the new guard even
+    // when the precise legacy rejection is missing.
+    await client.query('ALTER TABLE memory_embeddings DISABLE TRIGGER embedding_vector_guard');
+    try {
+      await expect(client.query(
+        `INSERT INTO memory_embeddings(memory_id,provider,dim,embedding)
+         VALUES($1::uuid,'test:published-guard',768,$2)`, [value.id, `[${firstVector.join(',')}]`],
+      )).rejects.toThrow(/embedding requires a live memory/i);
+    } finally {
+      await client.query('ALTER TABLE memory_embeddings ENABLE TRIGGER embedding_vector_guard');
+    }
+    expect((await client.query(`SELECT tgenabled FROM pg_trigger
+      WHERE tgrelid='memory_embeddings'::regclass AND tgname='embedding_vector_guard'`)).rows)
+      .toEqual([{ tgenabled: 'O' }]);
+    expect((await client.query('SELECT 1 FROM memory_embeddings WHERE memory_id=$1', [value.id])).rowCount).toBe(0);
+  });
+
   it('retains dimension rejection before database access', async () => {
     const query = vi.fn();
     await expect(storeMemoryEmbeddingVector({ query } as never,
