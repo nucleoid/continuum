@@ -13,8 +13,8 @@ import { createMemory } from '../../storage/memories.js';
 import {
   vectorSearchMemoryIds,
 } from '../../storage/embeddings.js';
-import { embeddingQueueFixture, registerEmbeddingTargetForTest, seedEmbeddingVectorForTest } from '../../embeddings/test-helpers.js';
-import { EmbeddingRegistry, ScopeEmbeddingRouter, staticEmbeddingRouter } from '../../embeddings/router.js';
+import { embeddingQueueFixture, registerEmbeddingTargetForTest, seedEmbeddingVectorForTest, withSyntheticTargetForTest } from '../../embeddings/test-helpers.js';
+import { staticEmbeddingRouter } from '../../embeddings/router.js';
 import { processEmbeddingJobs } from '../../workers/embedding-jobs.js';
 import { SqlEmbeddingJobStore } from '../../storage/embedding-jobs.js';
 
@@ -57,13 +57,6 @@ describe('capture + recall with embeddings', () => {
   afterAll(async () => {
     await pool?.end();
   });
-
-  // These selected-provider fixtures approve only the team's route. Other
-  // authorized scopes remain lexical, rather than claiming an unapproved target.
-  const scopedApp = (selected: EmbeddingProvider) => createApp(pool, { embeddingProvider: new ScopeEmbeddingRouter(
-    new EmbeddingRegistry([['selected', selected]]),
-    { default: 'none', rules: [{ match: { kind: 'team', name: 'payments' }, provider: 'selected' }] },
-  ) });
 
   async function seedActor() {
     const principal = await createPrincipal(pool, {
@@ -149,8 +142,8 @@ describe('capture + recall with embeddings', () => {
     await seedActor();
     const providerA = new NamedStubEmbeddingProvider('stub:model-a');
     const providerB = new NamedStubEmbeddingProvider('stub:model-b');
-    const appA = scopedApp(providerA);
-    const appB = scopedApp(providerB);
+    const appA = createApp(pool, { embeddingProvider: providerA });
+    const appB = createApp(pool, { embeddingProvider: providerB });
 
     const oldProviderMemory = await request(appA)
       .post('/api/v0/capture')
@@ -176,6 +169,9 @@ describe('capture + recall with embeddings', () => {
       });
     await seedEmbeddingVectorForTest(pool, pool, activeProviderMemory.body.id,
       (await providerB.embed(['Active provider only\n\nDifferent material without the recall terms.']))[0], providerB);
+
+    // Match the static router's default across its original unscoped query group.
+    await registerEmbeddingTargetForTest(pool, providerB);
 
     const recall = await request(appB)
       .post('/api/v0/recall')
@@ -233,7 +229,8 @@ describe('capture + recall with embeddings', () => {
   it('applies type filters before vector ranking and limiting', async () => {
     const { scope, principal } = await seedActor();
     const controlledProvider = new ControlledEmbeddingProvider();
-    app = scopedApp(controlledProvider);
+    await registerEmbeddingTargetForTest(pool, withSyntheticTargetForTest(controlledProvider));
+    app = createApp(pool, { embeddingProvider: controlledProvider });
     const [highSimilarityVector] = await controlledProvider.embed(['higher similarity']);
     const [lowSimilarityVector] = await controlledProvider.embed(['lower similarity']);
 

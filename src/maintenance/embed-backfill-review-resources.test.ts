@@ -110,7 +110,7 @@ describe('embedding resource review', () => {
       await blocker.query('SELECT id FROM memories WHERE id=$1::uuid FOR UPDATE', [locked.memories[0].id]);
       const blockerPid = Number((await blocker.query('SELECT pg_catalog.pg_backend_pid() AS pid')).rows[0].pid);
       const observed = observedPool(pool, async (client, sql, execute) => {
-        if (sql.includes('locked_memory') && workerPid === 0) {
+        if (sql.includes('continuum_embedding_admit_vector') && workerPid === 0) {
           workerPid = Number((await client.query('SELECT pg_catalog.pg_backend_pid() AS pid')).rows[0].pid);
         }
         return execute();

@@ -12,7 +12,7 @@ import { supersedeForPrincipal } from '../services/supersede.js';
 import { promoteMemoryWithAudit, verifyMemory } from './promote.js';
 import { readEventAnnotations, writeEventAnnotation } from './temporal.js';
 import { parseEventAnnotation, parseEventWindow } from '../temporal/model.js';
-import { seedEmbeddingVectorForTest } from '../embeddings/test-helpers.js';
+import { registerEmbeddingTargetForTest, seedEmbeddingVectorForTest, withSyntheticTargetForTest } from '../embeddings/test-helpers.js';
 import { hydrateRecallCandidates, recall } from './recall.js';
 import { recallAuthorityMetadata } from './recall-authority.js';
 import * as temporalStorage from './temporal.js';
@@ -126,8 +126,9 @@ describe('event annotations and candidate admission', () => {
     const sorted=[first.memory.id,second.memory.id].sort(),target=sorted[1];
     await writeEventAnnotation(pool,f.actor.id,sorted[0],annotation('2025-01-01T00:00:00Z'));
     const provider={id:'temporal-tie',dim:768,local:true,embed:async()=>[Array.from({length:768},(_,i)=>Number(i===0))]};
+    await registerEmbeddingTargetForTest(pool,withSyntheticTargetForTest(provider));
     for(const id of sorted) await seedEmbeddingVectorForTest(pool,pool,id,Array.from({length:768},(_,i)=>Number(i===(id===target?0:1))),provider);
-    const result=await recallForPrincipal(pool,provider,f.actor,{query:'signal',limit:1,eventWindow:filter,scopes:[`${f.scope.kind}:${f.scope.name}`]});
+    const result=await recallForPrincipal(pool,provider,f.actor,{query:'signal',limit:1,eventWindow:filter});
     expect(result.results.map(r=>r.memory.id)).toEqual([target]);
   });
   it('returns a bounded dependency failure on temporal authority lock contention', async () => {

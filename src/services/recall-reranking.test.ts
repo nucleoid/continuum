@@ -4,7 +4,7 @@ import pg from 'pg';
 import { standupConsumerFixture as standupProducerFixture } from '../standup/test-helpers.js';
 import { createMemory } from '../storage/memories.js';
 import { createPrincipal, getPrincipal } from '../storage/principals.js';
-import { createScope, getScope } from '../storage/scopes.js';
+import { createScope } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import { recallForPrincipal } from './recall.js';
 import { testReranking } from '../reranking/test-helpers.js';
@@ -17,7 +17,7 @@ import { provisionEntraGroupBinding, syncEntraMemberships } from './membership-s
 import { Budget } from '../pipeline/budget.js';
 import { getScopeByRef } from '../storage/scopes.js';
 import { promoteMemory, verifyMemory } from '../storage/promote.js';
-import { seedEmbeddingVectorForTest } from '../embeddings/test-helpers.js';
+import { registerEmbeddingTargetForTest, seedEmbeddingVectorForTest } from '../embeddings/test-helpers.js';
 
 it('skips reranking of a capacity-degraded pool while four query embeddings remain unsettled', async () => {
   await standupProducerFixture(async f => {
@@ -40,9 +40,9 @@ it('skips reranking of a capacity-degraded pool while four query embeddings rema
         type: 'decision', title: `Capacityneedle source ${i}`, body: `Capacityneedle reference ${i}`, source: 'manual' });
       await seedEmbeddingVectorForTest(f.owner, f.app, source.id, vector, provider);
     }
+    await registerEmbeddingTargetForTest(f.owner, provider);
     const config = t.config();
-    const approvedScope = (await getScope(f.app, f.scopeId))!;
-    const recall = () => recallForPrincipal(f.app, provider, principal, { query: 'capacityneedle', limit: 2, scopes: [`${approvedScope.kind}:${approvedScope.name}`] }, {}, undefined, undefined, undefined, config);
+    const recall = () => recallForPrincipal(f.app, provider, principal, { query: 'capacityneedle', limit: 2 }, {}, undefined, undefined, undefined, config);
     const inFlight = Array.from({ length: 4 }, recall);
     let timer: NodeJS.Timeout | undefined;
     try {
