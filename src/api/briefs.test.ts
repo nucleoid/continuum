@@ -77,6 +77,28 @@ it('shares bounded current/history/full/delta/dry-run services with explicit RES
         expect(JSON.stringify(tooLarge)).not.toContain('Source remains source');expect(await reads()).toBe(beforeFailure);
       } finally { await smallClient.close();await smallServer.close(); }
 
+      const resultBytes=Buffer.byteLength(JSON.stringify({ content: [{ type: 'text',text: JSON.stringify(mcp) }] }));
+      const boundaryServer=buildMcpServer({ pool: f.app,principal: actor,embeddingProvider: null,readBudgetBytes: resultBytes+16 });
+      const boundaryClient=new Client({ name: 'brief-envelope-boundary',version: '1' });
+      const [boundaryA,boundaryB]=InMemoryTransport.createLinkedPair();
+      try {
+        await Promise.all([boundaryServer.connect(boundaryA),boundaryClient.connect(boundaryB)]);
+        const requestId='b'.repeat(96),receiveBoundary=boundaryB.onmessage;
+        const response=new Promise<unknown>(resolve => {
+          boundaryB.onmessage=(message,extra) => {
+            if ('id' in message && message.id===requestId && 'result' in message) resolve(message.result);
+            else receiveBoundary?.(message,extra);
+          };
+        });
+        // The result fits, but a legal remote request ID takes the complete
+        // JSON-RPC envelope over its limit. Rejection must precede read audit.
+        await boundaryB.send({ jsonrpc: '2.0',id: requestId,method: 'tools/call',
+          params: { name: 'continuum.brief',arguments: { project: f.projectName } } });
+        const bounded=await response;
+        expect((bounded as { isError?: boolean }).isError).toBe(true);
+        expect(decode(bounded).error.code).toBe('PAYLOAD_TOO_LARGE');expect(await reads()).toBe(beforeFailure);
+      } finally { await boundaryClient.close();await boundaryServer.close(); }
+
       const key=Math.floor(Math.random()*1_000_000_000)+1;
       await f.owner.query(`CREATE FUNCTION test_brief_read_cancel_gate() RETURNS trigger LANGUAGE plpgsql AS $$
         BEGIN

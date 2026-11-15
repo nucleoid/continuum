@@ -2,7 +2,7 @@
  * out of tsc/package/container output. No serving relationship implementation. */
 import { execFileSync } from 'node:child_process';
 import { readFile, stat, writeFile, mkdir, mkdtemp, rm, rmdir } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { loadCorpus, retrievalInput, checkDelivered, scoreRetrieval, compareRuns, relationshipGate,
@@ -587,8 +587,15 @@ it('records paired typed-link/control diagnostics using the actual frozen #25 fi
       'Fixture checks do not establish SQL revocation, deletion, quarantine, residency or event-filter concurrency correctness.',
       'No qualified model, independent paired service producer, normalized storage collector or production graph is enabled.',
       'Whole-run storage includes setup/index allocation; it cannot establish the 2x gate.'] };
-  await mkdir('.fire-off', { recursive: true });
-  await persistReport('.fire-off/relationship-eval.json', report, failure);
+  const reportPath = process.env.CONTINUUM_RELATIONSHIP_EVAL_REPORT;
+  if (reportPath) {
+    await mkdir(dirname(resolve(reportPath)), { recursive: true });
+    await persistReport(reportPath, report, failure);
+  } else if (failure || hardFailures.length) {
+    await mkdir('.fire-off', { recursive: true });
+    const directory = await mkdtemp(resolve('.fire-off', 'relationship-failure-'));
+    await persistReport(resolve(directory, 'report.json'), report, failure);
+  }
   expect(report.complete).toBe(true); expect(hardFailures).toEqual([]);
   expect(report.decision.graphRuntimeAuthorized).toBe(false); expect(report.headEnd).toBe(head);
 }, 300_000);
