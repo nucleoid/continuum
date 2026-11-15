@@ -56,6 +56,23 @@ async function standupFixture(run: (context: StandupFixtureContext) => Promise<v
   });
   track(owner);
   const created: string[] = [];
+  async function createRole(role: string, password: string) {
+    const sql = `CREATE ROLE ${quoteStandupIdentifier(role)} LOGIN PASSWORD ${literal(password)}`;
+    if (!database) { await maintenance.query(sql); created.push(role); return; }
+    const client = await maintenance.connect(); let discard = false;
+    try {
+      await client.query('BEGIN');
+      await client.query(sql);
+      // Register the exact uncommitted OID before making a cluster LOGIN live.
+      await database.registerRole(role, client);
+      await client.query('COMMIT');
+      created.push(role);
+    } catch (error) {
+      try { await client.query('ROLLBACK'); }
+      catch (cleanup) { discard = true; throw new AggregateError([error, cleanup], 'Fixture role creation and rollback failed'); }
+      throw error;
+    } finally { client.release(discard); }
+  }
   try {
     if (!database) {
       await maintenance.query(`CREATE SCHEMA ${quoteStandupIdentifier(schema)}`);
@@ -84,9 +101,7 @@ async function standupFixture(run: (context: StandupFixtureContext) => Promise<v
     }
     for (const role of roles) {
       const password = randomUUID();
-      await maintenance.query(`CREATE ROLE ${quoteStandupIdentifier(role)} LOGIN PASSWORD ${literal(password)}`);
-      created.push(role);
-      await registerRole(role);
+      await createRole(role, password);
       await grant(role);
       if (role === roles[2]) await grant(role, admin.id);
       const url = new URL(fixtureConnectionString); url.username = role; url.password = password;
@@ -97,9 +112,7 @@ async function standupFixture(run: (context: StandupFixtureContext) => Promise<v
     async function addOperator(actorId: string): Promise<pg.Pool> {
       const role = `standup_takeover_${suffix}`;
       const password = randomUUID();
-      await maintenance.query(`CREATE ROLE ${quoteStandupIdentifier(role)} LOGIN PASSWORD ${literal(password)}`);
-      created.push(role);
-      await registerRole(role);
+      await createRole(role, password);
       await grant(role); await grant(role, actorId);
       const url = new URL(fixtureConnectionString); url.username = role; url.password = password;
       const pool = new pg.Pool({ connectionString: url.toString(), max: 1,

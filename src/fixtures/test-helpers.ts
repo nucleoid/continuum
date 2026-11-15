@@ -169,8 +169,8 @@ export async function cloneConsumerDatabase(template: ConsumerTemplate | undefin
     finally { await probe.end(); }
     const owned = database;
     return { connectionString, schema: SCHEMA,
-      registerRole: async (name: string) => {
-        const role = (await pool.query<{ oid: number }>('SELECT oid FROM pg_roles WHERE rolname=$1', [name])).rows[0];
+      registerRole: async (name: string, creatingClient?: pg.PoolClient) => {
+        const role = (await (creatingClient ?? pool).query<{ oid: number }>('SELECT oid FROM pg_roles WHERE rolname=$1', [name])).rows[0];
         if (!role || existingRoles.has(role.oid)) throw new Error('Cannot register a preexisting fixture role');
         if (!owned.roles.some(item => item.oid === role.oid)) owned.roles.push({ name, oid: role.oid });
         await record(template, owned);
