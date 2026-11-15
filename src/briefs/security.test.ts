@@ -75,3 +75,44 @@ it('fences current/history on expiry without a sweeper and erases block hashes w
     expect((await f.owner.query("SELECT count(*)::int AS n FROM evidence_payloads WHERE payload LIKE '%ERASABLE WORDS%'")).rows[0].n).toBe(0);
   });
 },120000);
+
+it('rechecks both dry-run diff sides after an audit crosses the previous source expiry',async () => {
+  let empty=false;const normal=syntheticBrief();
+  const profile=syntheticBrief(async (serialized,caps) => empty
+    ? { value: { claims: [] },response: { claims: [] } }
+    : normal.adapter.invoke(serialized,caps));
+  await briefFixture(async f => {
+    const actor=(await getPrincipal(f.app,f.actorId))!;
+    const memory=await createMemory(f.app,{ scopeId: f.projectId,scopeKind: 'project',authorId: actor.id,
+      type: 'decision',title: 'Expiring previous side',body: 'PRIVATE PREVIOUS CLAIM',source: 'manual' });
+    await f.owner.query("UPDATE memories SET expires_at=clock_timestamp()+interval '4 seconds' WHERE id=$1",[memory.id]);
+    await refreshBrief(f.app,actor,{ project: f.projectName,mode: 'full',dryRun: false,idempotencyKey: 'diff-head' });
+    expect(await processBrief(f.worker,randomUUID(),f.profile)).toBe('processed');
+    const head=await briefForPrincipal(f.app,actor,f.projectName);
+    const oldBlocks=head.blocks as { id: string }[];expect(oldBlocks).toHaveLength(1);
+    empty=true;
+    const input={ project: f.projectName,mode: 'full' as const,dryRun: true,idempotencyKey: 'diff-empty-preview' };
+    await refreshBrief(f.app,actor,input);
+    expect(await processBrief(f.worker,randomUUID(),f.profile)).toBe('processed');
+    expect(await refreshBrief(f.app,actor,input)).toMatchObject({ result: { blocks: [] },
+      diff: { status: 'available',added: [],removed: [oldBlocks[0].id] } });
+    expect((await f.owner.query('SELECT expires_at>clock_timestamp() AS live FROM memories WHERE id=$1',[memory.id])).rows[0].live).toBe(true);
+    const before=(await f.owner.query("SELECT count(*)::int AS n FROM audit_log WHERE metadata->>'operation'='brief_read'")).rows[0].n;
+    // Natural database time advances after the first authorized projection.
+    // No source mutation, sweeper, authority or clock override is involved.
+    await f.owner.query(`CREATE FUNCTION test_brief_diff_expiry() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.metadata->>'operation'='brief_read' THEN
+          PERFORM pg_sleep(GREATEST(0,EXTRACT(EPOCH FROM (SELECT expires_at FROM memories
+            WHERE id='${memory.id}'::uuid)-clock_timestamp()))+0.05);
+        END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER test_brief_diff_expiry BEFORE INSERT ON audit_log
+        FOR EACH ROW EXECUTE FUNCTION test_brief_diff_expiry()`);
+    await expect(refreshBrief(f.app,actor,input)).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect((await f.owner.query("SELECT count(*)::int AS n FROM audit_log WHERE metadata->>'operation'='brief_read'")).rows[0].n).toBe(before);
+    await f.owner.query('DROP TRIGGER test_brief_diff_expiry ON audit_log;DROP FUNCTION test_brief_diff_expiry()');
+    expect(await refreshBrief(f.app,actor,input)).toMatchObject({ diff: { status: 'withheld' } });
+  },profile);
+},120000);

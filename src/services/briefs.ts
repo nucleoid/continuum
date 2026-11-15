@@ -46,6 +46,13 @@ async function operation(pool: pg.Pool, principal: Principal, sql: string, value
         if (value.result) await check(value.result as Record<string,unknown>);
       };
       await check(result);
+      if ((result.diff as { status?: string } | undefined)?.status === 'available') {
+        // Removed hashes belong to the previous view. Recheck both complete
+        // views after validation/audit, including an empty proposed version.
+        const diff=(await client.query<{ diff: { status?: string } | null }>(
+          "SELECT continuum_brief_result($1,$2)->'diff' AS diff",[principal.id,result.runId])).rows[0]?.diff;
+        if (diff?.status !== 'available') throw new ServiceError('CONFLICT','Brief current source authority unavailable');
+      }
       options.signal?.throwIfAborted(); budget.assertLive();
       return result;
     });
