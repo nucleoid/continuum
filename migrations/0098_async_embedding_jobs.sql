@@ -927,10 +927,11 @@ BEGIN
       WHERE m.scope_id=$2 AND e.provider=$3 AND e.dim=768 AND e.space_fingerprint=$4
         AND NOT EXISTS(SELECT 1 FROM embedding_cohort_jobs cj JOIN embedding_jobs j ON j.id=cj.job_id WHERE cj.cohort_id=$5 AND j.memory_id=m.id)
         AND continuum_embedding_vector_is_current(m.id,e.provider,e.dim)
+        AND (e.embedding OPERATOR(%I.<=>) $1::%I.vector) BETWEEN 0 AND 2
         AND 1-(e.embedding OPERATOR(%I.<=>) $1::%I.vector)>=$6
       ORDER BY distance,m.id LIMIT 5 FOR SHARE OF m SKIP LOCKED)
       SELECT COALESCE(jsonb_agg(jsonb_build_object(''id'',id,''bytes'',bytes,''distance'',distance) ORDER BY distance,id),''[]''::jsonb) FROM ranked',
-      provider_namespace,provider_namespace,provider_namespace,provider_namespace)
+      provider_namespace,provider_namespace,provider_namespace,provider_namespace,provider_namespace,provider_namespace)
       INTO candidates USING vector_text,c.scope_id,target->'space'->>'provider',target->>'spaceFingerprint',cohort,threshold_value;
   EXCEPTION WHEN query_canceled OR lock_not_available OR deadlock_detected THEN RETURN 'query_unavailable';
   END;
