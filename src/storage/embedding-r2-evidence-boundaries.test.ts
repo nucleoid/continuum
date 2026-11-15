@@ -75,6 +75,59 @@ it('fails closed without a root/memory wait cycle while actual evidence erasure 
   });
 }, 60000);
 
+it.each(['body', 'related-only'] as const)('keeps a %s memory update from blocking the actual root erasure callback', async kind => {
+  await embeddingQueueFixture(async f => {
+    const captured = await captureMemory(f.app, f.router, f.principal, {
+      scope: { kind: f.scope.kind, name: f.scope.name }, type: 'fact',
+      title: 'Canonical root writer', body: 'Original source bytes.', source: 'manual',
+    });
+    const version = (await f.app.query('SELECT continuum_evidence_source($1,$2) AS id', [f.actorId, captured.memory.id])).rows[0].id;
+    const before = (await f.owner.query('SELECT title,body,metadata FROM memories WHERE id=$1', [captured.memory.id])).rows;
+    const schema = (await f.owner.query('SELECT current_schema() AS name')).rows[0].name;
+    const writer = await f.app.connect();
+    const eraser = new pg.Client({ connectionString: f.connectionString,
+      options: `-c search_path=${schema} -c statement_timeout=5000 -c lock_timeout=1000` });
+    let erase: Promise<{ error?: unknown }> | undefined;
+    try {
+      await eraser.connect(); await writer.query('BEGIN');
+      const writerPid = (await writer.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+      const erasePid = (await eraser.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+      await writer.query('SELECT id FROM memories WHERE id=$1 FOR UPDATE', [captured.memory.id]);
+      await eraser.query('BEGIN');
+      erase = eraser.query('SELECT continuum_evidence_erase_version($1)', [version]).then(async () => {
+        await eraser.query('COMMIT'); return {};
+      }, async (error: unknown) => { await eraser.query('ROLLBACK'); return { error }; });
+      let blocked = false;
+      const observeBy = Date.now() + 750;
+      while (Date.now() < observeBy) {
+        blocked = (await f.owner.query('SELECT $2::int=ANY(pg_blocking_pids($1)) AS blocked', [erasePid, writerPid])).rows[0].blocked;
+        if (blocked) break;
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      if (!blocked) throw new Error('Actual root erasure did not establish its source-row wait');
+      let writeError: unknown;
+      try {
+        if (kind === 'body') await writer.query("UPDATE memories SET body='Attempted replacement' WHERE id=$1", [captured.memory.id]);
+        // Even a canonical-unchanged related no-op reaches the published AFTER
+        // fence. It must not wait on a root owned by the erasure callback.
+        else await writer.query("UPDATE memories SET metadata=jsonb_set(metadata,'{related}','[]'::jsonb) WHERE id=$1", [captured.memory.id]);
+      } catch (error) { writeError = error; }
+      await writer.query('ROLLBACK');
+      const erased = await erase;
+      console.log('actual memory writer root outcomes', { kind, writeError: (writeError as { code?: string } | undefined)?.code,
+        erasureError: (erased.error as { code?: string } | undefined)?.code });
+      expect(writeError).toMatchObject({ code: '55P03' }); expect(erased.error).toBeUndefined();
+      expect((await f.owner.query('SELECT title,body,metadata FROM memories WHERE id=$1', [captured.memory.id])).rows).toEqual(before);
+      expect((await f.owner.query('SELECT 1 FROM evidence_payloads WHERE version_id=$1', [version])).rowCount).toBe(0);
+      expect((await f.owner.query('SELECT state FROM evidence_state WHERE version_id=$1', [version])).rows).toEqual([{ state: 'erased' }]);
+      // The root lock is not a blanket prohibition on ordinary uncontented writes.
+      expect((await writer.query('UPDATE memories SET body=body WHERE id=$1', [captured.memory.id])).rowCount).toBe(1);
+      expect((await f.owner.query('SELECT revoked FROM evidence_roots WHERE source_memory_id=$1', [captured.memory.id])).rows)
+        .toEqual([{ revoked: true }]);
+    } finally { await writer.query('ROLLBACK'); writer.release(); await erase; await eraser.end(); }
+  });
+}, 60000);
+
 it('does not reject physical erasure of legitimate pre-0098 scope history beyond the new admission bound', async () => {
   const suffix = randomUUID().replaceAll('-', '').slice(0, 16), schema = `embedding_lineage_${suffix}`;
   const url = process.env.CONTINUUM_TEST_DATABASE_URL ?? 'postgres://continuum:continuum@localhost:5433/continuum';
