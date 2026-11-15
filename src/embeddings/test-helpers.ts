@@ -55,7 +55,8 @@ export async function registerEmbeddingTargetForTest(owner: Queryable,
   const digest = createHash('sha256').update(JSON.stringify(routing)).digest('hex');
   return (await owner.query<{ result: EmbeddingPolicyIdentity }>(`INSERT INTO embedding_policy(singleton,generation,digest,routing)
     VALUES(TRUE,1,$1,$2) ON CONFLICT(singleton) DO UPDATE SET generation=CASE WHEN embedding_policy.routing=EXCLUDED.routing THEN embedding_policy.generation ELSE embedding_policy.generation+1 END,
-    digest=EXCLUDED.digest,routing=EXCLUDED.routing RETURNING jsonb_build_object('generation',generation::text,'digest',digest) AS result`, [digest, routing])).rows[0].result;
+    digest=CASE WHEN embedding_policy.routing=EXCLUDED.routing THEN embedding_policy.digest ELSE EXCLUDED.digest END,
+    routing=EXCLUDED.routing RETURNING jsonb_build_object('generation',generation::text,'digest',digest) AS result`, [digest, routing])).rows[0].result;
 }
 /** Precomputed fixture vectors only. Race tests must retain an explicitly
  * admitted earlier generation instead of calling this seeding convenience. */

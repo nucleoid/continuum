@@ -824,7 +824,7 @@ export async function runBaseline(corpus: Corpus, databaseUrl: string, head: str
             context = { tombstones: memories.size, residualVectors: 0 };
             diagnostics = 'physical_memory_vector_erasure';
           } else {
-            const provider = ablation === 'lexical' ? null : { id: stub.id, dim: 768, local: true,
+            const provider = ablation === 'lexical' ? null : { id: stub.id, dim: 768, local: true, target: stub.target,
               embed: async (texts: string[]) => { calls++; if (ablation === 'fallback' || item.id === 'unavailable-vector-provider') throw new Error('synthetic unavailable'); return stub.embed(texts); } };
             const hostedSpy = { id: 'stub:hosted-spy', dim: 768, local: false,
               embed: async () => { calls++; failures.push('local-only-egress'); throw new Error('Hosted calls forbidden'); } };

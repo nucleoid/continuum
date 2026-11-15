@@ -6,6 +6,7 @@ import { createScope } from '../storage/scopes.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { EmbeddingRegistry, ScopeEmbeddingRouter } from '../embeddings/router.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
+import { registerEmbeddingTargetForTest, withSyntheticTargetForTest } from '../embeddings/test-helpers.js';
 import { runEmbeddingBackfill } from './embed-backfill.js';
 
 const hydrationLimit = 4 * 1024 * 1024;
@@ -62,7 +63,7 @@ describe('embedding resource review', () => {
   });
 
   it('bounds aggregate hydration after two packed rows grow before their content query', async () => {
-    const { memories } = await seed('growth-after-scan', 2);
+    const { scope, memories } = await seed('growth-after-scan', 2);
     let grew = false;
     let peak = 0;
     const observed = observedPool(pool, async (_client, sql, execute) => {
@@ -78,6 +79,7 @@ describe('embedding resource review', () => {
     });
     const provider: EmbeddingProvider = { id: 'test:growth-after-scan', dim: 768, local: true,
       embed: async (texts) => texts.map(() => vector) };
+    await registerEmbeddingTargetForTest(pool, withSyntheticTargetForTest(provider), [scope.id]);
     const report = await runEmbeddingBackfill(observed, provider, { batchSize: 2, maxRows: 10 });
     expect(grew).toBe(true);
     expect(peak).toBeLessThanOrEqual(hydrationLimit);
@@ -87,11 +89,13 @@ describe('embedding resource review', () => {
 
   it('bounds a held memory lock before continuing to an unrelated provider', async () => {
     const locked = await seed('blocked-provider');
-    await seed('healthy-provider');
+    const healthy = await seed('healthy-provider');
     const blockedProvider: EmbeddingProvider = { id: 'test:blocked-provider', dim: 768, local: true,
       embed: async (texts) => texts.map(() => vector) };
     const healthyEmbed = vi.fn(async (texts: string[]) => texts.map(() => vector));
     const healthyProvider: EmbeddingProvider = { id: 'test:healthy-provider', dim: 768, local: false, embed: healthyEmbed };
+    await registerEmbeddingTargetForTest(pool, withSyntheticTargetForTest(blockedProvider), [locked.scope.id]);
+    await registerEmbeddingTargetForTest(pool, withSyntheticTargetForTest(healthyProvider), [healthy.scope.id]);
     const routing = new ScopeEmbeddingRouter(new EmbeddingRegistry([['blocked', blockedProvider], ['healthy', healthyProvider]]),
       { default: 'blocked', rules: [{ match: { kind: 'project', name: 'healthy-provider' }, provider: 'healthy' }] });
     const blocker = await pool.connect();

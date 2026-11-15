@@ -103,15 +103,15 @@ describe('webhook ingestion transport', () => {
 
     const replay = await request(target).post('/api/v0/ingest/github-pr').set(headers).send(raw);
     expect(replay.status).toBe(200);
-    expect(replay.body).toEqual({ replayed: true, memoryIds: first.body.memoryIds });
+    expect(replay.body).toEqual({ replayed: true, memoryIds: first.body.memoryIds, embeddings: first.body.embeddings });
 
     const changedHeaderReplay = await request(target).post('/api/v0/ingest/github-pr')
       .set({ ...headers, 'X-GitHub-Delivery': 'delivery-2' }).send(raw);
     expect(changedHeaderReplay.status).toBe(200);
-    expect(changedHeaderReplay.body).toEqual({ replayed: true, memoryIds: first.body.memoryIds });
+    expect(changedHeaderReplay.body).toEqual({ replayed: true, memoryIds: first.body.memoryIds, embeddings: first.body.embeddings });
 
     const { rows } = await pool.query(
-      `SELECT m.author_id, m.source, a.metadata FROM memories m JOIN audit_log a ON a.memory_id = m.id`,
+      `SELECT m.author_id, m.source, a.metadata FROM memories m JOIN audit_log a ON a.memory_id = m.id WHERE a.action='write'`,
     );
     expect(rows).toEqual([expect.objectContaining({
       author_id: principal.id,
@@ -477,8 +477,8 @@ describe('webhook ingestion transport', () => {
     const { project } = await seedService('service:deploy-routed');
     const defaultEmbed = vi.fn(async () => [Array.from({ length: 768 }, () => 0.02)]);
     const projectEmbed = vi.fn(async () => [Array.from({ length: 768 }, () => 0.01)]);
-    const defaultProvider = withSyntheticTargetForTest({ id: 'test:default', dim: 768, embed: defaultEmbed });
-    const privateProvider = withSyntheticTargetForTest({ id: 'test:private', dim: 768, embed: projectEmbed });
+    const defaultProvider = withSyntheticTargetForTest({ id: 'test:default', dim: 768, local: false, embed: defaultEmbed });
+    const privateProvider = withSyntheticTargetForTest({ id: 'test:private', dim: 768, local: true, embed: projectEmbed });
     await registerEmbeddingTargetForTest(pool, defaultProvider);
     const policy = await registerEmbeddingTargetForTest(pool, privateProvider, [project.id]);
     const registry = new EmbeddingRegistry([
@@ -563,7 +563,8 @@ describe('webhook ingestion transport', () => {
     const replay = await send().expect(200);
     expect(replay.body.memoryIds).toEqual(success.body.memoryIds);
     expect((await pool.query('SELECT id FROM memories')).rows).toHaveLength(1);
-    expect((await pool.query('SELECT id FROM audit_log')).rows).toHaveLength(1);
+    expect((await pool.query("SELECT action,metadata->>'operation' AS operation FROM audit_log ORDER BY id")).rows)
+      .toEqual([{ action: 'write', operation: null }, { action: 'read', operation: 'embedding_status' }]);
   });
 
   it('fails closed when an idempotency key is reused for a different payload', async () => {
