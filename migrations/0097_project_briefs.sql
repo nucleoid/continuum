@@ -137,6 +137,12 @@ BEGIN
   PERFORM continuum_brief_authorize(actor,target_scope,TRUE);
   IF NOT continuum_extraction_scope_admin(actor,target_scope) THEN RAISE insufficient_privilege USING MESSAGE='Brief administration unavailable'; END IF;
   IF enable IS NULL OR NOT EXISTS(SELECT 1 FROM brief_profiles WHERE id=profile_id AND (enabled OR NOT enable)) THEN RAISE check_violation USING MESSAGE='Brief profile unavailable'; END IF;
+  IF NOT EXISTS(SELECT 1 FROM brief_scope_epochs WHERE scope_id=target_scope)
+    OR NOT EXISTS(SELECT 1 FROM brief_scope_epochs WHERE scope_id=continuum_org_scope_id()) THEN
+    -- Drain writers whose earlier triggers saw no epoch row. Serialize first
+    -- enrollments before creating our own anchor, avoiding table-lock upgrades.
+    LOCK TABLE memories,evidence_roots,memory_event_current IN SHARE ROW EXCLUSIVE MODE;
+  END IF;
   SELECT * INTO d FROM brief_definitions WHERE scope_id=target_scope FOR UPDATE;
   IF d.id IS NULL THEN
     node:=gen_random_uuid(); version:=gen_random_uuid();
