@@ -804,9 +804,19 @@ async function scrubPromotionScope(client: pg.PoolClient, actorId: string, princ
         'SELECT continuum_operator_scrub_extraction_scope($1,$2,$3,$4) AS privacy',
         [actorId, principalId, scopeId, Math.min(batchSize, 1_000)])).rows[0].privacy;
     }
-    return { complete: outbox.complete && activity.complete && evidence.complete && extraction.complete,
-      processed: outbox.processed + activity.processed + evidence.processed + extraction.processed,
-      batch_full: outbox.batch_full || activity.batch_full || evidence.batch_full || extraction.batch_full };
+    const connectorSchema = await client.query<{ installed: boolean; available: boolean }>(
+      `SELECT pg_catalog.to_regclass('connector_query_runs') IS NOT NULL AS installed,
+        pg_catalog.to_regprocedure('continuum_operator_scrub_connector_scope(uuid,uuid,uuid,integer)') IS NOT NULL AS available`);
+    let connector = { complete: true, processed: 0, batch_full: false };
+    if (connectorSchema.rows[0]?.installed) {
+      if (!connectorSchema.rows[0].available) throw new ServiceError('DEPENDENCY_UNAVAILABLE', 'Connector privacy migration is required');
+      connector = (await client.query<{ privacy: typeof connector }>(
+        'SELECT continuum_operator_scrub_connector_scope($1,$2,$3,$4) AS privacy',
+        [actorId, principalId, scopeId, Math.min(batchSize, 1_000)])).rows[0].privacy;
+    }
+    return { complete: outbox.complete && activity.complete && evidence.complete && extraction.complete && connector.complete,
+      processed: outbox.processed + activity.processed + evidence.processed + extraction.processed + connector.processed,
+      batch_full: outbox.batch_full || activity.batch_full || evidence.batch_full || extraction.batch_full || connector.batch_full };
 }
 
 const PRESERVED_AUDIT_OPERATIONS = [

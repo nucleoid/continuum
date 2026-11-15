@@ -1,7 +1,7 @@
 import type { EvidenceArtifactKind, EvidencePolicy } from './policy.js';
 
 export const EVIDENCE_LIMITS = Object.freeze({ parents: 64, roots: 256, depth: 16, payloadBytes: 1_048_576, page: 100, maxPage: 1000 });
-export type ManagedEvidenceKind = Exclude<EvidenceArtifactKind, 'connector-evidence' | 'connector-receipt'>;
+export type ManagedEvidenceKind = EvidenceArtifactKind;
 export type EvidenceEdgeKind = 'source' | 'assertion' | 'derivation' | 'copy';
 export interface EvidenceParent { versionId: string; kind: EvidenceEdgeKind }
 export interface EvidenceRegistration {
@@ -25,7 +25,7 @@ export interface EvidenceEnvelope {
 export class EvidencePayloadRegistry {
   private readonly validators = new Map<ManagedEvidenceKind, (payload: string) => boolean>();
   register(kind: ManagedEvidenceKind, validate: (payload: string) => boolean): void {
-    if (!['source-document-version', 'extracted-assertion', 'derived-observation', 'brief-section-version', 'history', 'cache', 'trace', 'managed-export', 'queued-payload'].includes(kind)
+    if (!['source-document-version', 'extracted-assertion', 'derived-observation', 'brief-section-version', 'history', 'cache', 'trace', 'managed-export', 'queued-payload', 'connector-evidence', 'connector-receipt'].includes(kind)
       || this.validators.has(kind)) throw new TypeError('Unsupported or duplicate evidence payload owner');
     this.validators.set(kind, validate);
   }

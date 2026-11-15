@@ -37,6 +37,8 @@ export async function prepareAgentsMdForPrincipal(
     // source-memory selection, freshness bytes and delivery audit identities.
     // Explicit event annotations, corrections and query hints cannot enter this
     // input or its bytes. Only the existing source selection defines freshness.
+    // Repository query receipts and retained connector evidence have separate
+    // current upstream authority. Neither is an input to this source renderer.
     const { markdown, memories } = await renderAgentsMdResult(pool, {
       principalId: principal.id,
       project: input.project,

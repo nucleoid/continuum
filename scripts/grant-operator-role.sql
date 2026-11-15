@@ -125,6 +125,9 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_operator_install_extractor(UUID,JSONB,BOOLEAN),%I.continuum_operator_bind_extraction_worker(UUID,NAME,UUID,UUID,TEXT,BOOLEAN),%I.continuum_operator_scrub_extraction_scope(UUID,UUID,UUID,INTEGER) TO %I',schema_name,schema_name,schema_name,target_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_operator_recover_extraction(UUID,UUID,UUID,TEXT) TO %I',schema_name,target_role);
   END IF;
+  IF to_regclass(format('%I.connector_query_runs',schema_name)) IS NOT NULL THEN
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_connector_mapping(UUID,UUID),%I.continuum_connector_start(UUID,UUID,UUID,BIGINT,UUID,UUID,BIGINT,UUID,UUID,UUID),%I.continuum_connector_permit(UUID,UUID,BIGINT,TIMESTAMPTZ,TIMESTAMPTZ,TEXT,TEXT),%I.continuum_connector_finish(UUID,UUID,JSONB,TEXT),%I.continuum_connector_fail(UUID,UUID,TEXT),%I.continuum_connector_dependencies(UUID,UUID),%I.continuum_connector_is_ready(),%I.continuum_operator_connector_mapping(UUID,UUID,UUID,TEXT,TEXT,TEXT,TEXT,BOOLEAN),%I.continuum_operator_scrub_connector_scope(UUID,UUID,UUID,INTEGER) TO %I',schema_name,schema_name,schema_name,schema_name,schema_name,schema_name,schema_name,schema_name,schema_name,target_role);
+  END IF;
   IF to_regclass(format('%I.evidence_roots',schema_name)) IS NOT NULL THEN
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_operator_evidence_policy(UUID,UUID,TEXT,TEXT,TIMESTAMPTZ,TIMESTAMPTZ),%I.continuum_operator_scrub_evidence_scope(UUID,UUID,UUID,INTEGER),%I.continuum_operator_evidence_repair_claim(UUID,UUID,INTEGER),%I.continuum_operator_evidence_repair_attach(UUID,UUID,UUID,BIGINT,UUID,UUID,UUID,BIGINT),%I.continuum_operator_evidence_repair_finish(UUID,UUID,UUID,BIGINT,JSONB) TO %I',schema_name,schema_name,schema_name,schema_name,schema_name,target_role);
   END IF;
