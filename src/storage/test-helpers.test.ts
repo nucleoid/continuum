@@ -31,3 +31,25 @@ it('rolls fixture cleanup back on seed failure and leaves every protected trigge
   expect((await pool.query(`SELECT count(*)::int AS n FROM principals WHERE id IN
     ('00000000-0000-4000-8000-000000000011','00000000-0000-4000-8000-000000000012')`)).rows[0].n).toBe(2);
 }, 30000);
+
+it('preserves the original truncate failure and restores protected triggers before reusing its Pool', async () => {
+  const probe = await createPrincipal(pool, { externalId: 'fixture-truncate-' + randomUUID(), kind: 'user', displayName: 'Truncate probe' });
+  await pool.query(`CREATE FUNCTION test_reset_truncate_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN RAISE EXCEPTION 'Synthetic fixture truncate failure'; END $$;
+    REVOKE ALL ON FUNCTION test_reset_truncate_failure() FROM PUBLIC;
+    CREATE TRIGGER test_reset_truncate_failure BEFORE TRUNCATE ON scopes
+      FOR EACH STATEMENT EXECUTE FUNCTION test_reset_truncate_failure()`);
+  try {
+    await expect(resetData(pool)).rejects.toThrow('Synthetic fixture truncate failure');
+    expect((await pool.query('SELECT id FROM principals WHERE id=$1', [probe.id])).rowCount).toBe(1);
+    expect((await pool.query(`SELECT count(*)::int AS n FROM pg_catalog.pg_trigger WHERE tgname=ANY($1::text[]) AND tgenabled='O'`, [[
+      'preserve_user_scope_approval_truncate', 'preserve_offboarding_event_truncate',
+      'preserve_offboarding_run_event_truncate', 'preserve_offboarding_takeover_event',
+      'guard_offboarding_run_truncate', 'preserve_coordination_operator_event_truncate',
+    ]])).rows[0].n).toBe(6);
+  } finally {
+    await pool.query('DROP TRIGGER test_reset_truncate_failure ON scopes; DROP FUNCTION test_reset_truncate_failure()');
+    await resetData(pool);
+  }
+  expect((await pool.query('SELECT id FROM principals WHERE id=$1', [probe.id])).rowCount).toBe(0);
+}, 30000);
