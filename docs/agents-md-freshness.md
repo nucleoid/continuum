@@ -73,6 +73,12 @@ repository automation. Those concerns remain outside this API.
 
 ## Evidence boundaries
 
+Maintained [project briefs](project-briefs.md), immutable histories, dry runs and
+durable synthesis work are separate from contributed source memories. Enabling,
+refreshing, withholding or erasing them cannot change source selection, rendered
+bytes, ETag or freshness unless an authorized contributed memory itself changes.
+The generator never invokes their provider or copies their prose.
+
 Explicit event annotations, their immutable history and candidate notation live
 outside generator selection and prose. Annotation-only corrections preserve exact
 bytes, ETag and freshness. Recall event filters/windows never become implicit

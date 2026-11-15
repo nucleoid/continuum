@@ -650,12 +650,13 @@ CREATE FUNCTION continuum_brief_scope_is_erased(target_scope UUID) RETURNS BOOLE
 $$;
 CREATE FUNCTION continuum_operator_scrub_brief_scope(actor UUID,subject UUID,target_scope UUID,page_limit INTEGER) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
 #variable_conflict use_column
-DECLARE item RECORD; processed INTEGER:=0; clean BOOLEAN;
+DECLARE item RECORD; processed INTEGER:=0; clean BOOLEAN; run principal_offboarding_runs%ROWTYPE;
 BEGIN
   PERFORM continuum_evidence_require_operator(actor);
   PERFORM * FROM continuum_operator_coordination_scope_privacy_state(actor,target_scope);
   IF page_limit IS NULL OR page_limit NOT BETWEEN 1 AND 1000 OR NOT EXISTS(SELECT 1 FROM principal_user_scopes WHERE principal_id=subject AND scope_id=target_scope)
     OR NOT EXISTS(SELECT 1 FROM principal_offboarding_runs WHERE principal_id=subject AND scope_id=target_scope) THEN RAISE insufficient_privilege USING MESSAGE='Brief erasure requires approved lifecycle'; END IF;
+  SELECT * INTO STRICT run FROM principal_offboarding_runs WHERE principal_id=subject AND scope_id=target_scope FOR SHARE;
   FOR item IN SELECT j.id,j.workflow_id FROM brief_runs j WHERE EXISTS(SELECT 1 FROM brief_run_inputs i WHERE i.run_id=j.id
     AND i.version_id IN(SELECT continuum_evidence_scope_versions(target_scope))) AND (j.state<>'cancelled' OR j.owner IS NOT NULL OR j.lease_until IS NOT NULL
       OR EXISTS(SELECT 1 FROM pipeline_budget_workflows w WHERE w.id=j.workflow_id AND NOT w.cancelled))
@@ -665,8 +666,11 @@ BEGIN
     processed:=processed+1;
   END LOOP;
   clean:=continuum_brief_scope_is_erased(target_scope);
+  -- Brief work is part of managed evidence privacy. Reuse its protected,
+  -- approval-bound receipt instead of another per-row audit classifier wrapper.
   IF processed>0 THEN INSERT INTO audit_log(principal_id,action,scope_id,metadata) VALUES(actor,'archive',target_scope,
-    jsonb_build_object('operation','brief_privacy_scrub','processed',processed)); END IF;
+    jsonb_build_object('operation','principal_evidence_privacy_repaired','principal_id',subject,'run_id',run.run_id,
+      'approval_id',run.approval_id::text,'acknowledged_evidence_hash',run.approval_evidence_hash,'rows_processed',processed)); END IF;
   RETURN jsonb_build_object('complete',clean,'processed',processed,'batch_full',NOT clean AND processed>=page_limit);
 END $$;
 ALTER FUNCTION continuum_offboarding_lifecycle_state_is_erased(UUID) RENAME TO continuum_offboarding_lifecycle_state_is_erased_pre_brief;
