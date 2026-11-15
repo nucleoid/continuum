@@ -1,10 +1,27 @@
 # Bounded relationship experiment
 
-Decision: **inconclusive, no graph runtime authorized**. Measurements and validation
-of this new experiment have not run. The new source-checkout prototype, authored
-synthetic link ledger and preregistration prepare the evaluation; they establish
-no quality, latency, security, deletion or storage benefit. An inconclusive or
-negative outcome is a valid reason to close the experiment without serving code.
+Decision: **inconclusive, no graph runtime authorized**. The frozen experiment
+completed 432 observations across 24 independent holdout units at source commit
+`e830a37ff849ffabbc0844f47c102184cea4c3a2`. All 15 focused Linux tests passed.
+The synthetic gain does not establish eligible model quality, end-to-end latency
+or normalized storage benefit. Close this evaluation without production graph
+code; the preregistered gate does not justify serving complexity.
+
+The [versioned result](../evals/relationship-result-v1.json) publishes all paired
+query/mode rows, uncertainty, source identity, input hashes and raw-report digest.
+Typed links improved synthetic nDCG@10 by 7.91% relative to both seed-only and
+matched extra-candidate controls. The paired 95% bootstrap interval for the
+absolute nDCG difference was [0.02009, 0.10394]. There were no observed fixture
+security failures, critical coverage regressions, unmatched controls or fallbacks.
+The run made 864 adapter calls plus 93 setup calls, with zero paid spend.
+
+Both comparisons remain `insufficient_evidence`: the SHA/overlap baseline is
+unqualified, audited end-to-end service timing was not measured, and total
+persisted evidence/index/receipt amplification was not normalized. The 5,072,376
+persisted diagnostic bytes include 3,874,816 bytes of empty-schema allocation;
+they cannot establish the 2x storage gate. These fixture outcomes do not prove
+production concurrency or physical erasure. The original report-input file is
+the preserved preregistration-time preparation snapshot, not the measured result.
 
 The experiment reuses the actual [memory evaluation](memory-evaluation.md)
 loader, frozen corpus, relevance scorer, family coverage, paired bootstrap,
@@ -73,8 +90,8 @@ scores. Diagnostics contain bounded categories without hidden identities or raw
 errors. These fixture checks do not prove the locked database concurrency,
 physical erasure or provider-disclosure contracts of a future serving consumer.
 
-After a clean source checkpoint and an exclusive validation slot, the parent can
-run the focused file using the existing locked dependencies and a disposable
+To reproduce the focused run, use a clean source checkpoint, an exclusive
+validation slot, the existing locked dependencies and a disposable
 PostgreSQL 16/pgvector maintenance connection:
 
 ```powershell
@@ -110,11 +127,12 @@ are unqualified for model quality. No arithmetic result overrides these limits.
 The report therefore cannot authorize serving graph work, even with a positive
 synthetic score. The existing #25 acceptance fence is preserved.
 
-Remaining acceptance requires real current-head validation, independent review,
-an eligible baseline, verified paired service timing, normalized total persisted
-storage, and actual current-policy/lifecycle concurrency evidence. A positive
-prototype can only inform a separately assigned integration phase. Final source,
-Windows, package/CLI, container and hosted checks remain the parent's gates.
+Enabling a future graph requires an eligible baseline, verified paired service
+timing, normalized total persisted storage and actual current-policy/lifecycle
+concurrency evidence. This inconclusive result authorizes no integration phase.
+The result artifact records focused validation at its own source commit; it
+does not substitute for final-source, Windows, package/CLI, container, hosted
+checks or independent review of the experiment change.
 
 There is no reauthentication, session invalidation, configuration/secret change,
 provider permission, migration, backfill, reindex or deployment. Rollback removes
