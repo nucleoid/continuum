@@ -82,7 +82,8 @@ CREATE FUNCTION continuum_brief_valid_descriptor(d JSONB) RETURNS BOOLEAN LANGUA
 DECLARE probe JSONB;
 BEGIN
   IF d->>'schema' IS DISTINCT FROM 'project-brief-v1' OR d->>'prompt' IS DISTINCT FROM 'brief-reference-v1'
-    OR NOT(d ? 'qualification') OR d->'qualification'->>'kind' IS NULL
+    OR jsonb_typeof(d->'qualification') IS DISTINCT FROM 'object' OR d->'qualification'->>'kind' IS NULL
+    OR EXISTS(SELECT 1 FROM jsonb_object_keys(d->'qualification') k WHERE k NOT IN ('kind','reportSha256'))
     OR d->'qualification'->>'kind' NOT IN ('synthetic-only','operator-qualified')
     OR (d->'qualification'->>'kind'='synthetic-only' AND d->>'locality' IS DISTINCT FROM 'local')
     OR (d->'qualification'->>'kind'='operator-qualified' AND COALESCE(d->'qualification'->>'reportSha256','')!~'^[0-9a-f]{64}$')
@@ -348,7 +349,9 @@ BEGIN
   -- Attach all original identities before enrollment or payload hydration.
   BEGIN
     PERFORM continuum_brief_gate(j.id,worker,j.generation,TRUE);
-    PERFORM continuum_brief_charge(j.workflow_id,jsonb_build_object('storageBytes',32768+2*octet_length(j.descriptor::text),'outputBytes',262144));
+    -- Conservative metadata/diff/control admission, independent of denied row
+    -- counts. Three 33-identity probes plus at most 32 previous block identities.
+    PERFORM continuum_brief_charge(j.workflow_id,jsonb_build_object('candidates',132,'storageBytes',32768+2*octet_length(j.descriptor::text),'outputBytes',262144));
     FOR item IN SELECT m.id FROM memories m LEFT JOIN evidence_roots r ON r.source_memory_id=m.id
       WHERE m.scope_id IN(d.scope_id,continuum_org_scope_id()) AND m.state='live' AND (m.expires_at IS NULL OR m.expires_at>clock_timestamp())
         AND NOT EXISTS(SELECT 1 FROM memory_activity_attributions a WHERE a.memory_id=m.id)
@@ -391,6 +394,12 @@ BEGIN
       JOIN brief_run_inputs source ON source.version_id=a.source_version AND source.run_id=j.id
       WHERE continuum_brief_audience(b.principal_id,a.version_id,d.scope_id,j.descriptor->>'locality')
         AND NOT EXISTS(SELECT 1 FROM brief_run_inputs i WHERE i.run_id=j.id AND i.version_id=a.version_id)) THEN n:=33; END IF;
+    IF EXISTS(SELECT 1 FROM evidence_versions e JOIN evidence_roots r ON r.current_version=e.id
+      WHERE e.kind='extracted-assertion' AND e.scope_id IN(d.scope_id,continuum_org_scope_id())
+        AND continuum_brief_audience(b.principal_id,e.id,d.scope_id,j.descriptor->>'locality')
+        AND NOT EXISTS(SELECT 1 FROM brief_run_inputs i WHERE i.run_id=j.id AND i.version_id=e.id)
+        AND NOT EXISTS(SELECT 1 FROM evidence_closure c JOIN brief_run_inputs i ON i.root_id=c.root_id AND i.run_id=j.id
+          JOIN evidence_versions source ON source.id=i.version_id AND source.kind='source-document-version' WHERE c.version_id=e.id)) THEN n:=33; END IF;
     SELECT watermark INTO prior FROM brief_versions WHERE id=d.head;
     dirty:=all_sections;
     IF j.mode='delta' AND d.head IS NOT NULL AND EXISTS(SELECT 1 FROM brief_versions h WHERE h.id=d.head
@@ -420,7 +429,7 @@ BEGIN
   INSERT INTO audit_log(principal_id,action,scope_id,metadata) VALUES(b.principal_id,'write',d.scope_id,'{"operation":"brief_claimed"}');
   RETURN jsonb_build_object('outcome','claimed','id',j.id,'generation',j.generation,'attemptId',j.attempt_id,'sections',j.sections,
     'remainingMs',greatest(0,floor(extract(epoch FROM(j.deadline_at-clock_timestamp()))*1000)),
-    'candidates',least(n,32),'hydratedBytes',bytes,'storageBytes',bytes+32768+2*octet_length(j.descriptor::text));
+    'candidates',132+least(n,32),'hydratedBytes',bytes,'storageBytes',bytes+32768+2*octet_length(j.descriptor::text));
 END $$;
 
 CREATE FUNCTION continuum_brief_hydrate(run_id UUID,worker UUID,epoch BIGINT) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
@@ -451,7 +460,7 @@ BEGIN
   ELSIF phase='dispatch' THEN
     result:=continuum_pipeline_dispatch(j.workflow_id,j.attempt_id,j.budget_owner,j.budget_generation);
     IF result THEN INSERT INTO brief_dispatch_receipts VALUES(j.attempt_id); END IF; RETURN result;
-  ELSIF phase='authorize' THEN RETURN TRUE;
+  ELSIF phase='authorize' THEN RETURN value=j.descriptor;
   ELSE RAISE check_violation USING MESSAGE='Brief accounting phase unavailable'; END IF;
 END $$;
 
@@ -565,6 +574,23 @@ BEGIN
   IF d.id IS NULL OR d.head IS NULL THEN RETURN jsonb_build_object('scopeId',target_scope,'status','unknown','enabled',COALESCE(d.enabled,FALSE),'blocks','[]'::jsonb,'implementation','unknown'); END IF;
   RETURN continuum_brief_view(actor,d.head)||jsonb_build_object('enabled',d.enabled);
 END $$;
+CREATE FUNCTION continuum_brief_delivery(actor UUID,version UUID,block_ids TEXT[]) RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER AS $$
+#variable_conflict use_column
+DECLARE d brief_definitions%ROWTYPE; v brief_versions%ROWTYPE; bb RECORD;
+BEGIN
+  IF block_ids IS NULL OR cardinality(block_ids)>32 THEN RETURN FALSE; END IF;
+  SELECT * INTO v FROM brief_versions WHERE id=version;
+  IF v.id IS NULL THEN RETURN FALSE; END IF;
+  SELECT * INTO STRICT d FROM brief_definitions WHERE id=v.definition_id FOR SHARE;
+  PERFORM continuum_brief_authorize(actor,d.scope_id,FALSE);
+  PERFORM continuum_evidence_lock(actor,ARRAY[v.anchor_version],d.scope_id);
+  IF NOT continuum_brief_audience(actor,v.anchor_version,d.scope_id,NULL) THEN RETURN FALSE; END IF;
+  FOR bb IN SELECT unnest(block_ids) id LOOP
+    IF NOT EXISTS(SELECT 1 FROM brief_blocks b WHERE b.version_id=v.id AND b.block_id=bb.id
+      AND continuum_brief_audience(actor,b.evidence_version,d.scope_id,NULL)) THEN RETURN FALSE; END IF;
+  END LOOP;
+  RETURN TRUE;
+END $$;
 CREATE FUNCTION continuum_brief_history(actor UUID,definition UUID,after_version UUID,page_limit INTEGER) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
 #variable_conflict use_column
 DECLARE d brief_definitions%ROWTYPE; item RECORD; items JSONB:='[]'; n INTEGER:=0; cursor UUID; result JSONB;
@@ -664,7 +690,8 @@ $$;
 DO $$
 DECLARE schema_name TEXT:=current_schema(); f RECORD; signature TEXT; definition TEXT; revised TEXT; r RECORD;
   app_signatures TEXT[]:=ARRAY['continuum_brief_configure(uuid,uuid,text,boolean)','continuum_brief_refresh(uuid,text,text,boolean,text)',
-    'continuum_brief_read(uuid,text)','continuum_brief_history(uuid,uuid,uuid,integer)','continuum_brief_result(uuid,uuid)','continuum_brief_is_ready()'];
+    'continuum_brief_read(uuid,text)','continuum_brief_history(uuid,uuid,uuid,integer)','continuum_brief_result(uuid,uuid)','continuum_brief_is_ready()',
+    'continuum_brief_delivery(uuid,uuid,text[])'];
   op_signatures TEXT[]:=ARRAY['continuum_operator_install_brief_profile(uuid,jsonb,boolean)',
     'continuum_operator_bind_brief_worker(uuid,name,uuid,uuid,text,boolean)','continuum_operator_scrub_brief_scope(uuid,uuid,uuid,integer)'];
 BEGIN

@@ -14,6 +14,7 @@ const SECTION_ORDER: Array<{ key: 'org' | 'role' | 'team' | 'project'; heading: 
 
 // Source memories only. Immutable evidence, derivative payloads and managed
 // copies have separate storage and must never be unioned into this selection.
+// Maintained briefs, their dry runs and durable work never enter this renderer.
 // Optional recall reranking is independent: no adapter calls, scores or receipts.
 // Event annotations and temporal candidates are excluded. Event filters/hints
 // are explicit recall/browse inputs and never implicit generator predicates.

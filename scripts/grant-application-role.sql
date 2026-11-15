@@ -356,7 +356,7 @@ BEGIN
       schema_name,schema_name,schema_name,schema_name,schema_name,schema_name,schema_name,target_role);
   END IF;
   IF to_regclass(format('%I.brief_definitions',schema_name)) IS NOT NULL THEN
-    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_brief_configure(UUID,UUID,TEXT,BOOLEAN),%I.continuum_brief_refresh(UUID,TEXT,TEXT,BOOLEAN,TEXT),%I.continuum_brief_read(UUID,TEXT),%I.continuum_brief_history(UUID,UUID,UUID,INTEGER),%I.continuum_brief_result(UUID,UUID),%I.continuum_brief_is_ready() TO %I',schema_name,schema_name,schema_name,schema_name,schema_name,schema_name,target_role);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_brief_configure(UUID,UUID,TEXT,BOOLEAN),%I.continuum_brief_refresh(UUID,TEXT,TEXT,BOOLEAN,TEXT),%I.continuum_brief_read(UUID,TEXT),%I.continuum_brief_history(UUID,UUID,UUID,INTEGER),%I.continuum_brief_result(UUID,UUID),%I.continuum_brief_is_ready(),%I.continuum_brief_delivery(UUID,UUID,TEXT[]) TO %I',schema_name,schema_name,schema_name,schema_name,schema_name,schema_name,schema_name,target_role);
     EXECUTE format('REVOKE ALL ON FUNCTION %I.continuum_operator_install_brief_profile(UUID,JSONB,BOOLEAN),%I.continuum_operator_bind_brief_worker(UUID,NAME,UUID,UUID,TEXT,BOOLEAN),%I.continuum_operator_scrub_brief_scope(UUID,UUID,UUID,INTEGER) FROM %I',schema_name,schema_name,schema_name,target_role);
   END IF;
   IF to_regclass(format('%I.connector_query_runs',schema_name)) IS NOT NULL THEN

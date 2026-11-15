@@ -32,7 +32,7 @@ export async function processBrief(pool: pg.Pool, worker: string, profile: Reado
     let output = { claims: [] } as ReturnType<typeof validateBriefOutput>;
     if (lease.sections.length) {
       const authorize = async () => {
-        try { return await briefOperation<boolean>(pool, "SELECT continuum_brief_budget($1,$2,$3,'authorize','{}',0) AS result", [lease!.id, worker, lease!.generation]); }
+        try { return await briefOperation<boolean>(pool, "SELECT continuum_brief_budget($1,$2,$3,'authorize',$4,0) AS result", [lease!.id, worker, lease!.generation,briefDescriptor(profile)]); }
         catch { return false; }
       };
       // Settlement I/O rejection is caught by this domain boundary. It retains

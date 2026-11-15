@@ -36,6 +36,16 @@ async function operation(pool: pg.Pool, principal: Principal, sql: string, value
       options.signal?.throwIfAborted();
       if (read || result.result !== undefined) await client.query(`INSERT INTO audit_log(principal_id,action,scope_id,metadata)
         VALUES($1,'read',$2,'{"operation":"brief_read"}')`, [principal.id, result.scopeId ?? null]);
+      const check = async (value: Record<string, unknown>): Promise<void> => {
+        if (typeof value.version === 'string' && Array.isArray(value.blocks)) {
+          const valid=(await client.query<{ valid: boolean }>('SELECT continuum_brief_delivery($1,$2,$3) AS valid',
+            [principal.id,value.version,value.blocks.map(b=>(b as { id: string }).id)])).rows[0].valid;
+          if (!valid) throw new ServiceError('CONFLICT','Brief current source authority unavailable');
+        }
+        if (Array.isArray(value.items)) for (const item of value.items) await check(item as Record<string,unknown>);
+        if (value.result) await check(value.result as Record<string,unknown>);
+      };
+      await check(result);
       options.signal?.throwIfAborted(); budget.assertLive();
       return result;
     });
