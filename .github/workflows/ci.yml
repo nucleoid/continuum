@@ -20,7 +20,7 @@ jobs:
   linux:
     name: Linux build and test
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -48,7 +48,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-      - run: npm test -- --maxWorkers=1 --reporter=default --reporter=json --outputFile=test-results.json
+      - run: timeout --signal=TERM --kill-after=10s 1200s npm test -- --maxWorkers=1 --reporter=default --reporter=json --outputFile=test-results.json
       - name: Verify complete source test coverage
         if: always()
         run: node scripts/verify-ci-test-report.mjs
