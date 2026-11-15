@@ -31,7 +31,6 @@ it('never drains an epoch past a concurrent already-enrolled source omitted by i
         FOR EACH ROW EXECUTE FUNCTION parent_brief_inventory_gate()`);
     const blocker = await f.owner.connect();
     let pending: Promise<'idle' | 'progress' | 'processed' | 'unavailable'> | undefined;
-    let writerFenced = false;
     let committed = false;
     let outcome: 'idle' | 'progress' | 'processed' | 'unavailable' | undefined;
     try {
@@ -48,42 +47,34 @@ it('never drains an epoch past a concurrent already-enrolled source omitted by i
         await new Promise(resolve => setTimeout(resolve, 10));
       }
       expect(entered, 'claim must reach the owned inventory gate').toBe(true);
-      try {
-        const added = await createMemory(f.app, {
+      const added = await createMemory(f.app, {
           scopeId: f.projectId, scopeKind: 'project', authorId: actor.id,
           type: 'decision', title: 'Concurrent committed input',
           body: 'CONCURRENT-ENROLLED-INPUT', source: 'manual',
-        });
-        await f.app.query('SELECT continuum_evidence_source($1,$2)', [actor.id, added.id]);
-        committed = true;
-      } catch (error) {
-        // A repaired early epoch fence may legitimately serialize/refuse the
-        // writer under the existing 1s lock/5s statement limits. Never raise them
-        // merely to create the race. Other errors do not prove safe fencing.
-        const code = (error as { code?: string }).code;
-        if (code !== '55P03' && code !== '57014') throw error;
-        writerFenced = true;
-      }
+      });
+      await f.app.query('SELECT continuum_evidence_source($1,$2)', [actor.id, added.id]);
+      committed = true;
     } finally {
       await blocker.query('SELECT pg_advisory_unlock($1::bigint)', [key]);
       blocker.release();
       if (pending) outcome = await pending;
     }
-    if (writerFenced) {
-      expect(committed).toBe(false);
-      return;
-    }
     expect(committed).toBe(true);
-    const current = await briefForPrincipal(f.app, actor, f.projectName);
-    const containsConcurrentInput = JSON.stringify(current.blocks).includes('CONCURRENT-ENROLLED-INPUT');
-    expect(outcome === 'processed' && current.fresh === true
-      && current.coverage === 'complete' && !containsConcurrentInput,
-    'a post-commit cutoff cannot drain the newer epoch while omitting its enrolled input').toBe(false);
-    if (outcome === 'processed' && !containsConcurrentInput) {
-      // A truthful partial first version still has to remain discoverably dirty.
-      expect(await processBrief(f.worker, randomUUID(), f.profile)).toBe('processed');
-      expect(JSON.stringify((await briefForPrincipal(f.app, actor, f.projectName)).blocks))
-        .toContain('CONCURRENT-ENROLLED-INPUT');
+    expect(outcome, 'a changed committed frontier must defer the original inventory').toBe('progress');
+    const accounting = async () => (await f.owner.query(`SELECT r.workflow_id,r.budget_owner,r.attempt_id,r.deadline_at,w.used
+      FROM brief_runs r JOIN pipeline_budget_workflows w ON w.id=r.workflow_id WHERE r.id=$1`, [queued.runId])).rows[0];
+    const before = await accounting();
+    expect(await processBrief(f.worker, randomUUID(), f.profile)).toBe('processed');
+    const after = await accounting();
+    for (const field of ['workflow_id', 'budget_owner', 'attempt_id', 'deadline_at']) {
+      expect(after[field]).toEqual(before[field]);
     }
+    for (const field of Object.keys(before.used)) {
+      expect(Number(after.used[field])).toBeGreaterThanOrEqual(Number(before.used[field]));
+    }
+    const current = await briefForPrincipal(f.app, actor, f.projectName);
+    expect(current).toMatchObject({ fresh: true, coverage: 'complete' });
+    expect(JSON.stringify(current.blocks)).toContain('INITIAL-INPUT');
+    expect(JSON.stringify(current.blocks)).toContain('CONCURRENT-ENROLLED-INPUT');
   });
 }, 120_000);
