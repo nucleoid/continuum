@@ -33,10 +33,12 @@ it.each(['source','membership','configuration','audit'] as const)('rejects stale
 it('retains original ambiguous attempt maxima across timeout, replay, restart and late settlement',async () => {
   let finish!: () => void;const blocked=new Promise<void>(resolve => { finish=resolve; });let calls=0;
   const good=syntheticBrief();const profile=syntheticBrief(async (...args) => { calls++;await blocked;return good.adapter.invoke(...args); });
-  profile.adapter.timeoutMs=30;
+  profile.adapter.timeoutMs=1000;
   await briefFixture(async f => {
     await capture(f);const before=await request(f,'original');
-    expect(await processBrief(f.worker,randomUUID(),f.profile)).toBe('unavailable');
+    const pending: Promise<unknown>[]=[];
+    expect(await processBrief(f.worker,randomUUID(),f.profile,{ onWork: work=>pending.push(work) })).toBe('unavailable');
+    expect(calls).toBe(1);
     const original=(await f.owner.query('SELECT workflow_id,attempt_id,budget_owner,budget_generation,deadline_at FROM brief_runs')).rows[0];
     expect((await f.owner.query('SELECT active,used FROM pipeline_budget_workflows')).rows[0]).toMatchObject({ active: 1,used: { calls: 1 } });
     expect((await request(f,'original')).runId).toBe(before.runId);
@@ -44,8 +46,7 @@ it('retains original ambiguous attempt maxima across timeout, replay, restart an
     expect(calls).toBe(1);
     expect((await f.owner.query('SELECT workflow_id,attempt_id,budget_owner,budget_generation,deadline_at FROM brief_runs')).rows[0]).toEqual(original);
     finish();
-    const deadline=Date.now()+2000;
-    while ((await f.owner.query('SELECT active FROM pipeline_budget_workflows')).rows[0].active!==0 && Date.now()<deadline) await new Promise(resolve=>setTimeout(resolve,10));
+    await Promise.allSettled(pending);
     expect((await f.owner.query('SELECT active,used FROM pipeline_budget_workflows')).rows[0]).toMatchObject({ active: 0,used: { calls: 1 } });
     expect((await f.owner.query('SELECT count(*)::int AS n FROM brief_versions')).rows[0].n).toBe(0);
   },profile);

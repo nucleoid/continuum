@@ -163,6 +163,13 @@ BEGIN
 END $$;
 CREATE TRIGGER brief_memory_changed AFTER INSERT OR UPDATE OR DELETE ON memories FOR EACH ROW EXECUTE FUNCTION continuum_brief_source_changed();
 CREATE TRIGGER brief_root_changed AFTER INSERT OR UPDATE ON evidence_roots FOR EACH ROW EXECUTE FUNCTION continuum_brief_source_changed();
+CREATE FUNCTION continuum_brief_event_changed() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
+#variable_conflict use_column
+BEGIN
+  PERFORM continuum_brief_touch(scope_id) FROM memories WHERE id=NEW.memory_id;
+  RETURN NULL;
+END $$;
+CREATE TRIGGER brief_event_changed AFTER INSERT OR UPDATE ON memory_event_current FOR EACH ROW EXECUTE FUNCTION continuum_brief_event_changed();
 CREATE FUNCTION continuum_brief_frontier(target_scope UUID) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
 #variable_conflict use_column
 DECLARE result JSONB;
@@ -313,7 +320,8 @@ BEGIN
     JOIN pg_roles role ON role.oid=binding.role_oid AND role.rolname=binding.role_name JOIN brief_versions h ON h.id=def.head
     WHERE role.rolname=session_user AND binding.enabled AND def.enabled AND def.profile=profile_id
       AND continuum_evidence_can_access(binding.principal_id,def.scope_id,TRUE)
-      AND h.observed IS DISTINCT FROM (SELECT jsonb_object_agg(scope_id::text,generation) FROM brief_scope_epochs WHERE scope_id IN(def.scope_id,continuum_org_scope_id()))
+      AND (h.truncated OR h.observed IS DISTINCT FROM (SELECT jsonb_object_agg(scope_id::text,generation) FROM brief_scope_epochs WHERE scope_id IN(def.scope_id,continuum_org_scope_id()))
+        OR EXISTS(SELECT 1 FROM brief_run_inputs i WHERE i.run_id=h.run_id AND NOT continuum_brief_audience(binding.principal_id,i.version_id,def.scope_id,NULL)))
       AND NOT EXISTS(SELECT 1 FROM brief_runs r WHERE r.definition_id=def.id AND r.state IN ('queued','running'))
     ORDER BY def.id LIMIT 1 FOR UPDATE OF def SKIP LOCKED;
   IF d.id IS NOT NULL THEN
@@ -352,9 +360,23 @@ BEGIN
       INSERT INTO brief_run_inputs SELECT j.id,e.id,e.root_id,octet_length(p.payload) FROM evidence_versions e JOIN evidence_payloads p ON p.version_id=e.id WHERE e.id=v;
     END LOOP;
     IF n<=32 THEN
+      -- Explicit event metadata is separate exact evidence, never inferred from
+      -- receipt time or old annotation prose. Its own version is a dependency.
+      FOR item IN SELECT e.id,e.root_id,octet_length(p.payload) bytes FROM brief_run_inputs source
+        JOIN memory_event_annotations a ON a.source_version=source.version_id JOIN memory_event_current current ON current.version_id=a.version_id
+        JOIN evidence_versions e ON e.id=a.version_id JOIN evidence_payloads p ON p.version_id=e.id
+        WHERE source.run_id=j.id AND continuum_brief_audience(b.principal_id,e.id,d.scope_id,j.descriptor->>'locality') ORDER BY e.id LIMIT 33 LOOP
+        n:=n+1; IF n>32 THEN EXIT; END IF;
+        INSERT INTO brief_run_inputs VALUES(j.id,item.id,item.root_id,item.bytes);
+      END LOOP;
+    END IF;
+    IF n<=32 THEN
       FOR item IN SELECT e.id,e.root_id,octet_length(p.payload) bytes FROM evidence_versions e JOIN evidence_roots r ON r.current_version=e.id
         JOIN evidence_payloads p ON p.version_id=e.id WHERE e.kind='extracted-assertion' AND e.scope_id IN(d.scope_id,continuum_org_scope_id())
-          AND continuum_brief_audience(b.principal_id,e.id,d.scope_id,j.descriptor->>'locality') ORDER BY e.id LIMIT 33 LOOP
+          AND continuum_brief_audience(b.principal_id,e.id,d.scope_id,j.descriptor->>'locality')
+          AND NOT EXISTS(SELECT 1 FROM evidence_closure c JOIN brief_run_inputs i ON i.root_id=c.root_id AND i.run_id=j.id
+            JOIN evidence_versions source ON source.id=i.version_id AND source.kind='source-document-version' WHERE c.version_id=e.id)
+        ORDER BY e.id LIMIT 33 LOOP
         n:=n+1; IF n>32 THEN EXIT; END IF;
         INSERT INTO brief_run_inputs VALUES(j.id,item.id,item.root_id,item.bytes);
       END LOOP;
@@ -365,9 +387,14 @@ BEGIN
     IF EXISTS(SELECT 1 FROM memories m WHERE m.scope_id IN(d.scope_id,continuum_org_scope_id()) AND m.state='live'
       AND (m.expires_at IS NULL OR m.expires_at>clock_timestamp()) AND NOT EXISTS(SELECT 1 FROM memory_activity_attributions a WHERE a.memory_id=m.id)
       AND NOT EXISTS(SELECT 1 FROM evidence_roots r WHERE r.source_memory_id=m.id)) THEN n:=33; END IF;
+    IF EXISTS(SELECT 1 FROM memory_event_current current JOIN memory_event_annotations a ON a.version_id=current.version_id
+      JOIN brief_run_inputs source ON source.version_id=a.source_version AND source.run_id=j.id
+      WHERE continuum_brief_audience(b.principal_id,a.version_id,d.scope_id,j.descriptor->>'locality')
+        AND NOT EXISTS(SELECT 1 FROM brief_run_inputs i WHERE i.run_id=j.id AND i.version_id=a.version_id)) THEN n:=33; END IF;
     SELECT watermark INTO prior FROM brief_versions WHERE id=d.head;
     dirty:=all_sections;
-    IF j.mode='delta' AND d.head IS NOT NULL AND NOT EXISTS(
+    IF j.mode='delta' AND d.head IS NOT NULL AND EXISTS(SELECT 1 FROM brief_versions h WHERE h.id=d.head
+      AND h.config_generation=j.config_generation AND h.profile_generation=j.profile_generation) AND NOT EXISTS(
       (SELECT root_id FROM brief_run_inputs WHERE run_id=j.id EXCEPT SELECT root_id FROM brief_run_inputs WHERE run_id=(SELECT run_id FROM brief_versions WHERE id=d.head))
       UNION ALL (SELECT root_id FROM brief_run_inputs WHERE run_id=(SELECT run_id FROM brief_versions WHERE id=d.head) EXCEPT SELECT root_id FROM brief_run_inputs WHERE run_id=j.id)) THEN
       SELECT COALESCE(array_agg(DISTINCT section),'{}') INTO dirty FROM brief_blocks bb WHERE bb.version_id=d.head AND EXISTS(
@@ -478,6 +505,8 @@ BEGIN
     END IF;
     INSERT INTO brief_blocks VALUES(version,claim_key,claim->>'section',ev);
   END LOOP;
+  IF (SELECT count(*) FROM brief_blocks WHERE version_id=version)>32 OR j.cutoff<(SELECT cutoff FROM brief_versions WHERE id=d.head) THEN
+    RAISE check_violation USING MESSAGE='Brief version bounds unavailable'; END IF;
   PERFORM continuum_brief_charge(j.workflow_id,jsonb_build_object('artifactBytes',bytes,'storageBytes',bytes+32768));
   PERFORM continuum_brief_gate(run_id,worker,epoch,FALSE);
   IF NOT j.dry_run THEN UPDATE brief_definitions SET head=version WHERE id=d.id AND head IS NOT DISTINCT FROM j.expected_head; END IF;
@@ -509,6 +538,7 @@ BEGIN
   PERFORM continuum_brief_authorize(actor,d.scope_id,FALSE);
   PERFORM continuum_evidence_lock(actor,ARRAY[v.anchor_version],d.scope_id);
   IF NOT continuum_brief_audience(actor,v.anchor_version,d.scope_id,NULL) THEN RETURN jsonb_build_object('status','unavailable','blocks','[]'::jsonb); END IF;
+  denied:=EXISTS(SELECT 1 FROM brief_run_inputs i WHERE i.run_id=v.run_id AND NOT continuum_brief_audience(actor,i.version_id,d.scope_id,NULL));
   -- Each block is gated before its prose, citation identities or hash are read.
   FOR bb IN SELECT evidence_version FROM brief_blocks WHERE version_id=v.id ORDER BY evidence_version LOOP
     PERFORM continuum_evidence_lock(actor,ARRAY[bb.evidence_version],d.scope_id);
@@ -555,15 +585,27 @@ BEGIN
 END $$;
 CREATE FUNCTION continuum_brief_result(actor UUID,run_id UUID) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
 #variable_conflict use_column
-DECLARE j brief_runs%ROWTYPE; d brief_definitions%ROWTYPE; result JSONB;
+DECLARE j brief_runs%ROWTYPE; d brief_definitions%ROWTYPE; result JSONB; proposed JSONB; previous JSONB;
 BEGIN
   SELECT * INTO STRICT j FROM brief_runs WHERE id=run_id;
   SELECT * INTO STRICT d FROM brief_definitions WHERE id=j.definition_id;
   PERFORM continuum_brief_authorize(actor,d.scope_id,TRUE);
   result:=jsonb_build_object('scopeId',d.scope_id,'runId',j.id,'status',j.state,'dryRun',j.dry_run);
   IF j.state='complete' AND j.result_version IS NOT NULL THEN
-    result:=result||jsonb_build_object('result',continuum_brief_view(actor,j.result_version));
-    -- No old-prose diff: a dry run exposes only its currently gated proposed blocks.
+    proposed:=continuum_brief_view(actor,j.result_version);
+    result:=result||jsonb_build_object('result',proposed);
+    IF j.dry_run THEN
+      previous:=CASE WHEN j.expected_head IS NULL THEN '{"status":"unknown","blocks":[]}'::jsonb ELSE continuum_brief_view(actor,j.expected_head) END;
+      IF proposed->>'status' IN ('partial','unavailable') OR previous->>'status' IN ('partial','unavailable') THEN
+        result:=result||jsonb_build_object('diff',jsonb_build_object('status','withheld'));
+      ELSE
+        result:=result||jsonb_build_object('diff',jsonb_build_object('status','available',
+          'added',COALESCE((SELECT jsonb_agg(b->>'id' ORDER BY b->>'id') FROM jsonb_array_elements(proposed->'blocks') b
+            WHERE NOT EXISTS(SELECT 1 FROM jsonb_array_elements(previous->'blocks') old WHERE old->>'id'=b->>'id')),'[]'),
+          'removed',COALESCE((SELECT jsonb_agg(b->>'id' ORDER BY b->>'id') FROM jsonb_array_elements(previous->'blocks') b
+            WHERE NOT EXISTS(SELECT 1 FROM jsonb_array_elements(proposed->'blocks') fresh WHERE fresh->>'id'=b->>'id')),'[]')));
+      END IF;
+    END IF;
   END IF;
   RETURN result;
 END $$;
@@ -617,7 +659,7 @@ CREATE FUNCTION continuum_brief_is_ready() RETURNS BOOLEAN LANGUAGE sql STABLE S
         OR EXISTS(SELECT 1 FROM aclexplode(COALESCE(f.proacl,acldefault('f',f.proowner))) a WHERE a.grantee=0 AND a.privilege_type='EXECUTE'))
     AND (SELECT count(*) FROM pg_trigger WHERE (tgrelid,tgname) IN (('memories'::regclass,'brief_memory_changed'),('evidence_roots'::regclass,'brief_root_changed'),
       ('evidence_payloads'::regclass,'brief_payload_erased'),('brief_runs'::regclass,'brief_run_identity'),('brief_versions'::regclass,'brief_version_immutable'),
-      ('brief_dispatch_receipts'::regclass,'brief_dispatch_immutable')) AND tgenabled='O' AND NOT tgisinternal)=6;
+      ('brief_dispatch_receipts'::regclass,'brief_dispatch_immutable'),('memory_event_current'::regclass,'brief_event_changed')) AND tgenabled='O' AND NOT tgisinternal)=7;
 $$;
 DO $$
 DECLARE schema_name TEXT:=current_schema(); f RECORD; signature TEXT; definition TEXT; revised TEXT; r RECORD;

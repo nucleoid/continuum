@@ -6,7 +6,7 @@ export const BRIEF_SCHEMA = 'project-brief-v1' as const;
 export const BRIEF_PROMPT = 'brief-reference-v1' as const;
 export const BRIEF_SECTIONS = ['purpose', 'decisions', 'implementation', 'unknowns', 'coverage'] as const;
 export type BriefSection = typeof BRIEF_SECTIONS[number];
-export interface BriefSource { id: string; version: string; family: string; kind: 'source-document-version' | 'extracted-assertion'; text: string }
+export interface BriefSource { id: string; version: string; family: string; kind: 'source-document-version' | 'extracted-assertion' | 'derived-observation'; text: string }
 export interface BriefInput {
   schema: typeof BRIEF_SCHEMA; prompt: typeof BRIEF_PROMPT; sections: BriefSection[];
   referenceData: { trust: 'untrusted'; sources: BriefSource[] };

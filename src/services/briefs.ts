@@ -34,7 +34,7 @@ async function operation(pool: pg.Pool, principal: Principal, sql: string, value
       budget.serializeOutput(result);
       options.validateResult?.(result, budget);
       options.signal?.throwIfAborted();
-      if (read) await client.query(`INSERT INTO audit_log(principal_id,action,scope_id,metadata)
+      if (read || result.result !== undefined) await client.query(`INSERT INTO audit_log(principal_id,action,scope_id,metadata)
         VALUES($1,'read',$2,'{"operation":"brief_read"}')`, [principal.id, result.scopeId ?? null]);
       options.signal?.throwIfAborted(); budget.assertLive();
       return result;
