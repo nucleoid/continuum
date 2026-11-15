@@ -39,8 +39,19 @@ it('drains admitted work at the real scope cap when an edited completed source n
     // The fixture's 131072-byte response cap supports sixteen 768-value
     // vectors (73761 bytes), whereas thirty-two exceed it (147521 bytes).
     const boundedProvider = { ...f.provider, batchSize: 16 };
-    expect(await processEmbeddingJobs(new SqlEmbeddingJobStore(f.worker), f.target,
-      f.policy, boundedProvider, f.profile, randomUUID())).toBe('processed');
+    const store = new SqlEmbeddingJobStore(f.worker);
+    const claims = vi.spyOn(store, 'claim');
+    const hydrations = vi.spyOn(store, 'hydrate');
+    const completions = vi.spyOn(store, 'apply');
+    const failures = vi.spyOn(store, 'fail');
+    const outcome = await processEmbeddingJobs(store, f.target, f.policy, boundedProvider, f.profile, randomUUID());
+    const claimResults = await Promise.allSettled(claims.mock.results.map(result => result.value));
+    expect(outcome, JSON.stringify({
+      claims: claimResults.map(result => result.status === 'rejected' ? { error: result.reason?.code, message: result.reason?.message }
+        : { jobs: result.value?.jobs.length, remainingMs: result.value?.remainingMs }),
+      hydrations: hydrations.mock.calls.length, completions: completions.mock.calls.length,
+      failures: failures.mock.calls.map(call => call[1]), providerCalls: vi.mocked(f.adapter.invoke).mock.calls.length,
+    })).toBe('processed');
     expect((await f.owner.query(`SELECT active,(SELECT count(*)::int FROM embedding_jobs j WHERE j.scope_id=$1
       AND j.state IN ('queued','processing','retry_wait','blocked_policy')) AS actual FROM embedding_scope_admission WHERE scope_id=$1`, [f.scopeId])).rows)
       .toEqual([{ active: 9984, actual: 9984 }]);

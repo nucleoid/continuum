@@ -22,7 +22,10 @@ async function operatorOperation<T>(pool: pg.Pool, sql: string, values: unknown[
   catch (error) {
     if (error instanceof ServiceError) throw error;
     const code = (error as { code?: unknown })?.code;
-    if (code === '42501') throw new ServiceError('FORBIDDEN', 'Embedding operation requires a bound operator session and current manual org administrator');
+    if (code === '42501' || (code === 'P0001'
+      && (error as { message?: unknown })?.message === 'operation requires a role-name/OID-bound trusted approve identity')) {
+      throw new ServiceError('FORBIDDEN', 'Embedding operation requires a bound operator session and current manual org administrator', { cause: error });
+    }
     if (code === '23514' || code === 'P0002' || code === '23505') throw new ServiceError('CONFLICT', 'Embedding policy or original work is unavailable');
     throw new ServiceError('DEPENDENCY_UNAVAILABLE', 'Embedding dependency unavailable');
   }
