@@ -116,14 +116,20 @@ exclusively; select a new path or preserve a previous report before requesting
 the same path again. Default `npm test` still executes the complete experiment
 and assertions, without persisting a successful experiment report. No raw bodies
 or credentials are included in the report. An incomplete run fails, never skips.
-An ordinary setup, measurement or delivery-assertion failure preserves completed
-observations and the active attempt's known resource usage before propagating the
-failure. Without an explicit report path, failure evidence is retained in a new
+With valid source identity and writable report storage, a setup, measurement or
+delivery-assertion failure preserves completed observations and the active
+attempt's known resource usage before propagating the failure.
+Without an explicit report path, failure evidence is retained in a new
 private `.fire-off/relationship-failure-*/report.json` directory. Its report marks
 execution incomplete and cannot enable graph runtime.
 Forced process termination can prevent final report creation; retain the process
 log as incomplete evidence. A repeated output path fails without replacing the
 earlier report.
+Git prerequisite checks run before measurement. Missing history, failed identity
+collection, an existing requested path, the 1 MiB report ceiling or storage errors
+can prevent final report creation. A persistence error may replace the original
+failure; retain the process log as incomplete evidence in those cases. An earlier
+report is never replaced by recovery from a failed write.
 
 One warmup and five measured repetitions run in seeded rotating interleaved mode order.
 Reports retain exact input hashes, source/checkpoint cleanliness, execution order,
