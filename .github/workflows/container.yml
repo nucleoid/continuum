@@ -42,7 +42,16 @@ jobs:
           cache: npm
       - name: Required source and package validation
         run: |
-          command -v psql
+          pg16_bin=/usr/lib/postgresql/16/bin
+          for pg16_tool in psql pg_dump pg_restore; do
+            test -x "$pg16_bin/$pg16_tool"
+            pg16_version=$("$pg16_bin/$pg16_tool" --version)
+            case "$pg16_version" in
+              *"(PostgreSQL) 16."*) ;;
+              *) echo "Required PostgreSQL 16 client unavailable: $pg16_tool" >&2; exit 1 ;;
+            esac
+          done
+          export PATH="$pg16_bin:$PATH"
           npm ci --ignore-scripts --no-audit --no-fund
           npm run build
           CONTINUUM_TEST_CONSUMER_TEMPLATE=1 timeout --signal=TERM --kill-after=10s 1200s npm test -- --maxWorkers=1 --reporter=json --outputFile=test-results.json

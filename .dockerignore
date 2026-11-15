@@ -35,6 +35,7 @@ src/plugins/tenants/**
 !docs/cli.md
 !docs/coordination.md
 !docs/embedding-backfill.md
+!docs/embedding-queue.md
 !docs/extensions.md
 !docs/knowledge-gap-insights.md
 !docs/lifecycle.md
