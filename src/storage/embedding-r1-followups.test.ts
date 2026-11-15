@@ -6,6 +6,7 @@ import { EmbeddingItemError } from '../embeddings/provider.js';
 import { captureMemory } from '../services/capture.js';
 import { controlEmbeddingJobs } from '../services/embedding-jobs.js';
 import { getPrincipal } from './principals.js';
+import { addMembership } from './memberships.js';
 import { SqlEmbeddingJobStore, readEmbeddingStatus } from './embedding-jobs.js';
 import { processEmbeddingJobs } from '../workers/embedding-jobs.js';
 import { amounts } from '../pipeline/budget.js';
@@ -97,6 +98,8 @@ it('cancels a global bounded page of actual target-less blocked jobs without los
     expect((await f.owner.query('SELECT count(*)::int AS n FROM embedding_capture_receipts')).rows[0].n).toBe(2);
     for (let i = 0; i < captures.length; i++) expect(await captureMemory(f.app, unavailable, f.principal,
       captures[i], {}, { idempotencyKey: 'blocked-key-' + i })).toMatchObject({ replayed: true, memory: { id: accepted[i].memory.id }, embeddingStatus: 'cancelled' });
+    const org = (await f.owner.query("SELECT id FROM scopes WHERE kind='org' AND name=''")).rows[0].id;
+    await addMembership(f.owner, f.actorId, org, 'admin');
     await f.owner.query(`UPDATE scope_memberships SET active=FALSE WHERE principal_id=$1 AND role='admin'`, [f.adminId]);
     await expect(controlEmbeddingJobs(f.operator, admin, 'cancel', null, 1)).rejects.toMatchObject({ code: 'FORBIDDEN' });
     expect(f.adapter.invoke).not.toHaveBeenCalled();
