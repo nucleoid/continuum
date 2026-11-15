@@ -209,7 +209,7 @@ describe('durable embedding SQL, capture and worker integration', () => {
       const leases = (await f.operator.query('SELECT continuum_operator_embedding_leases($1,$2,10) AS result', [f.adminId, f.target.fingerprint])).rows[0].result;
       expect(JSON.stringify(leases)).toContain(claim.id);
       await store.attempt(claim).settle({}, 'unknown');
-      expect(await store.fail(claim, { code: 'EMBEDDING_STORAGE', action: 'retry' })).toBe(true);
+      expect(await store.fail(claim, { code: 'EMBEDDING_BUDGET', action: 'retry' })).toBe(true);
       const snapshot = async () => ({
         source: (await f.owner.query('SELECT * FROM embedding_sources WHERE memory_id=$1', [accepted.memory.id])).rows,
         jobs: (await f.owner.query('SELECT * FROM embedding_jobs WHERE memory_id=$1 ORDER BY id', [accepted.memory.id])).rows,
@@ -222,7 +222,9 @@ describe('durable embedding SQL, capture and worker integration', () => {
       for (let repeat = 0; repeat < 3; repeat++) expect(await control('reconcile')).toMatchObject({ processed: 0 });
       expect(await snapshot()).toEqual(original);
       expect((await f.operator.query('SELECT continuum_operator_embedding_metrics($1) AS result', [f.adminId])).rows[0].result)
-        .toEqual(expect.arrayContaining([expect.objectContaining({ status: 'retry_wait', count: 1, attempts: 1 })]));
+        .toEqual(expect.arrayContaining([expect.objectContaining({ status: 'retry_wait', count: 1, attempts: 1,
+          quotaWaitCount: 1, recoveries: 0, targetGroupsTruncated: false,
+          targetGroups: [expect.objectContaining({ target: f.target.fingerprint, count: 1, quotaWaitCount: 1, recoveries: 0 })] })]));
       // A genuinely changed, explicitly approved profile policy may reconcile
       // accepted work, while immutable old attempts/charges remain intact.
       await f.operator.query('SELECT continuum_operator_embedding_target($1,$2,$3,$4,TRUE)', [f.adminId, f.target, f.profile,
@@ -265,6 +267,12 @@ describe('durable embedding SQL, capture and worker integration', () => {
       expect((await f.owner.query('SELECT state,settlement FROM pipeline_budget_attempts WHERE workflow_id=$1', [claim.workflowId])).rows[0])
         .toEqual({ state: 'settled', settlement: { provenance: 'unknown' } });
       expect((await f.owner.query(`SELECT count(*)::int AS n FROM audit_log WHERE metadata->>'operation'='embedding_process_exit_reconciled'`)).rows[0].n).toBe(1);
+      const metrics = (await f.operator.query('SELECT continuum_operator_embedding_metrics($1) AS result', [f.adminId])).rows[0].result;
+      expect(metrics).toEqual(expect.arrayContaining([expect.objectContaining({ status: 'retry_wait', count: 1,
+        quotaWaitCount: 0, recoveries: 1, targetGroupsTruncated: false,
+        targetGroups: [expect.objectContaining({ target: f.target.fingerprint, count: 1, quotaWaitCount: 0, recoveries: 1 })] })]));
+      expect(JSON.stringify(metrics)).not.toContain(claim.id);
+      expect(JSON.stringify(metrics)).not.toContain(claim.jobs[0].memoryId);
       expect(f.adapter.invoke).not.toHaveBeenCalled();
     }, { windowSeconds: 86400 });
   }, 60000);
