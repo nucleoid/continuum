@@ -31,8 +31,6 @@ it('upgrades real APP/OP/SYNC profiles without raw payload grants and refuses tr
       ...Object.entries(variables).flatMap(([k,v])=>['-v',`${k}=${v}`]),'-f',join(process.cwd(),'scripts',file)],{timeout:30000,stdio:'pipe'});
     for(const role of roles){ await maintenance.query(`CREATE ROLE "${role}" LOGIN PASSWORD '${password}'`);created.push(role); }
     grant('grant-application-role.sql',{continuum_app_role:roles[0]});
-    grant('grant-operator-role.sql',{continuum_operator_role:roles[0],continuum_principal_id:admin.id});
-    grant('grant-application-role.sql',{continuum_app_role:roles[0]});
     grant('grant-operator-role.sql',{continuum_operator_role:roles[1],continuum_principal_id:admin.id});
     grant('grant-sync-role.sql',{continuum_sync_role:roles[2],continuum_principal_id:service.id});
     // An independent, already reviewed extension is preserved by name-based
@@ -76,7 +74,8 @@ it('upgrades real APP/OP/SYNC profiles without raw payload grants and refuses tr
       await expect(session.query('SELECT payload FROM evidence_payloads')).rejects.toMatchObject({code:'42501'});
     }
     expect((await owner.query("SELECT has_function_privilege($1,'independent_operator_extension()','EXECUTE') AS preserved",[roles[1]])).rows[0].preserved).toBe(true);
-    grant('grant-application-role.sql',{continuum_app_role:roles[1]});
+    grant('grant-operator-role.sql',{continuum_operator_role:roles[0],continuum_principal_id:admin.id});
+    grant('grant-application-role.sql',{continuum_app_role:roles[0]});
     expect((await owner.query(`SELECT has_function_privilege($1,'continuum_operator_connector_mapping(uuid,uuid,uuid,text,text,text,text,boolean)','EXECUTE') AS configure,
       has_function_privilege($1,'continuum_operator_scrub_connector_scope(uuid,uuid,uuid,integer)','EXECUTE') AS erasure,
       has_function_privilege($1,'continuum_connector_mapping(uuid,uuid)','EXECUTE') AS serving`,[roles[0]])).rows[0])
