@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { standupProducerFixture } from '../standup/test-helpers.js';
+import { standupConsumerFixture as standupProducerFixture } from '../standup/test-helpers.js';
 
 it('installs empty disabled briefs without granting ordinary APP worker authority', async () => {
   await standupProducerFixture(async f => {

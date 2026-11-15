@@ -69,7 +69,7 @@ it('automatically discovers a delayed lower-sequence commit and repairs under a 
     const actor=(await getPrincipal(f.app,f.actorId))!;
     const low=await f.owner.connect();
     const schema=(await low.query('SELECT current_schema() AS name')).rows[0].name;
-    const high=new pg.Client({ connectionString: process.env.CONTINUUM_TEST_DATABASE_URL!,options: `-c search_path=${schema} -c statement_timeout=5000 -c lock_timeout=1000` });
+    const high=new pg.Client({ connectionString: f.connectionString,options: `-c search_path=${schema} -c statement_timeout=5000 -c lock_timeout=1000` });
     // Scope generations are committed row state, independent of this sequence's allocation order.
     try {
       await low.query('CREATE SEQUENCE synthetic_commit_order');await low.query('BEGIN');

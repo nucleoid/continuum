@@ -65,7 +65,7 @@ it('erases all historical/dry-run block bytes and hashes by owned-source lineage
     await f.owner.query('UPDATE memories SET scope_id=$2 WHERE id=$1',[memory.id,f.scopeId]);
     expect((await briefForPrincipal(f.app,actor,f.projectName)).blocks).toEqual([]);
     const schema=(await f.owner.query('SELECT current_schema() AS name')).rows[0].name;
-    const lock=new pg.Client({ connectionString: process.env.CONTINUUM_TEST_DATABASE_URL!,options: `-c search_path=${schema}` });
+    const lock=new pg.Client({ connectionString: f.connectionString,options: `-c search_path=${schema}` });
     await lock.connect();
     try {
       await lock.query('BEGIN');await lock.query('SELECT id FROM brief_runs FOR UPDATE');
