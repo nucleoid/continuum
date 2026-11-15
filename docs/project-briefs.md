@@ -262,6 +262,14 @@ persisted at 1, 2 then 4 seconds,
 with at most three retries; tighter original limits can stop earlier. Earlier
 successful section outputs are discarded on a failed generation rather than
 stored as an unmanaged retry cache. Unknown usage retains its charged maxima.
+An automatic refresh with a completed inventory checks the latest failed
+inventory for the same head, configuration, profile and worker binding. Identical
+admitted versions and dirty sections cannot buy another provider attempt. A new
+coarse frontier can retain a separately charged bounded metadata probe, whose
+unused provider allowance is cancelled before dispatch. The original paid
+workflow, attempts, deadline and charges remain unchanged. Genuinely changed
+inputs or context can repair automatically; a deliberate new manual key can
+request new work on the same inputs. Replaying that key does not repeat it.
 Backoff makes work eligible; poll cadence and other profiles can still consume
 its remaining original deadline. It does not guarantee every permitted retry.
 There is no orphan-recovery API. Late actual
@@ -308,6 +316,11 @@ workers while preserving current source/read/erasure guards and conservative
 accounting. Schema reversal requires a verified backup and reviewed replay;
 binary rollback cannot restore erased bytes. Never delete ledgers or broaden
 roles/search paths to recover availability. No live operation is authorized here.
+
+Configuring a previously unenrolled project creates its definition and scope
+epochs even when the requested initial state is disabled. The first-configuration
+writer fence and compatible-writer requirements therefore apply before that
+configuration request; disabling synthesis does not un-enroll a scope.
 
 Current promotion clients acquire both enrolled scope epochs in UUID order before
 inserting the destination. Lifecycle batches lock their selected memories' epochs
