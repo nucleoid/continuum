@@ -1162,7 +1162,8 @@ describe('offboarding and erasure', () => {
         return [Array(768).fill(0)];
       },
     });
-    await registerEmbeddingTargetForTest(pool, provider, [value.personal.id, value.shared.id]);
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await registerEmbeddingTargetForTest(pool, provider, [value.personal.id, value.shared.id, org.id]);
     const recall = recallForPrincipal(pool, provider, value.target, {
       query: 'Private body', limit: 10,
     });
