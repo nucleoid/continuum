@@ -26,7 +26,7 @@ it.each(['source','membership','configuration','audit'] as const)('rejects stale
     expect(await processBrief(f.worker,randomUUID(),f.profile)).toBe('unavailable');
     expect((await f.owner.query('SELECT count(*)::int AS n FROM brief_versions')).rows[0].n).toBe(0);
     expect((await f.owner.query('SELECT head FROM brief_definitions')).rows[0].head).toBeNull();
-    expect((await f.owner.query('SELECT used FROM pipeline_budget_workflows')).rows[0].used.calls).toBe(1);
+    expect((await f.owner.query('SELECT used FROM pipeline_budget_workflows')).rows[0].used.calls).toBe(boundary==='audit' ? 2 : 1);
   },profile);
 },120000);
 

@@ -11,7 +11,7 @@ import type { BriefInput, BriefOutput, BriefClaim, BriefSection } from './model.
 
 /** Synthetic byte protocol only. Never a semantic model or implementation proof. */
 export function syntheticBrief(invoke?: BudgetAdapter<BriefInput,BriefOutput>['invoke']): BriefProfile {
-  return { id: 'synthetic-brief-v1',version: 'synthetic-brief-v1',qualification: { kind: 'synthetic-only' },
+  return { id: 'synthetic-brief-v1',version: 'synthetic-brief-v1',qualification: { kind: 'synthetic-only' },isolation: 'independent-section-requests-v1',
     budget: { ...starterProfile,overallMs: 20000,limits: { ...starterProfile.limits,contextTokens: 131072,outputTokens: 65536,completionTokens: 65536 } },
     adapter: { id: 'synthetic-brief',model: 'synthetic-byte-model',profile: 'synthetic-brief-v1',local: true,
       timeoutMs: 1000,responseBodyBytes: 16384,outputTokens: 16384,reasoningTokens: 0,completionTokens: 16384,

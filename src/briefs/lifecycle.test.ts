@@ -7,19 +7,32 @@ import { getPrincipal } from '../storage/principals.js';
 import { briefForPrincipal,refreshBrief } from '../services/briefs.js';
 import { offboardPrincipal } from '../services/offboarding.js';
 import { processBrief } from '../workers/briefs.js';
+import type { BriefInput,BriefClaim } from './model.js';
 
-it('keeps a bounded inventory incomplete without claiming its observed frontier fully processed',async () => {
+it('finishes a bounded multi-page allowance honestly partial without renewing it on each poll',async () => {
+  const profile=syntheticBrief(async wire=>{
+    const input=JSON.parse(wire).input as BriefInput;
+    const claims: BriefClaim[]=input.sections.includes('decisions') ? [{ section: 'decisions',label: 'recorded_intent',
+      text: input.referenceData.sources.map(s=>JSON.parse(s.text).body).sort().join('; '),unknown: false,contradiction: false,
+      citations: input.referenceData.sources.slice(0,8).map(s=>({ version: s.version,quote: s.text.slice(0,80) })) }] : [];
+    const value={ claims };return { value,response: value };
+  });
   await briefFixture(async f => {
     const actor=(await getPrincipal(f.app,f.actorId))!;
-    for (let i=0;i<33;i++) await createMemory(f.app,{ scopeId: f.projectId,scopeKind: 'project',authorId: actor.id,type: 'decision',title: `Plan ${i}`,body: `Recorded plan ${i}`,source: 'manual' });
+    for (let i=0;i<64;i++) await createMemory(f.app,{ scopeId: f.projectId,scopeKind: 'project',authorId: actor.id,type: 'decision',title: `Plan ${i}`,body: `Recorded plan ${i}`,source: 'manual' });
     await refreshBrief(f.app,actor,{ project: f.projectName,mode: 'full',dryRun: false,idempotencyKey: 'bounded' });
+    expect(await processBrief(f.worker,randomUUID(),f.profile)).toBe('progress');
     expect(await processBrief(f.worker,randomUUID(),f.profile)).toBe('processed');
     const result=await briefForPrincipal(f.app,actor,f.projectName);
-    expect(result.blocks).toHaveLength(32);expect(result.coverage).toBe('partial');expect(result.watermark).toBeNull();
+    expect(result.blocks).toHaveLength(1);expect(result.coverage).toBe('partial');expect(result.watermark).toBeNull();
     const run=(await f.owner.query('SELECT observed,watermark,truncated FROM brief_runs')).rows[0];
-    expect(run.observed).not.toBeNull();expect(run.watermark).toBeNull();expect(run.truncated).toBe(true);
-    expect((await f.owner.query('SELECT used FROM pipeline_budget_workflows')).rows[0].used.candidates).toBe(164);
-  });
+    expect(run.observed).not.toBeNull();expect(run.watermark.complete).toBe(false);expect(run.truncated).toBe(true);
+    expect((await f.owner.query('SELECT count(*)::int AS n FROM brief_run_inputs')).rows[0].n).toBe(63);
+    const used=(await f.owner.query('SELECT used FROM pipeline_budget_workflows')).rows[0].used;
+    expect(used.candidates).toBeGreaterThanOrEqual(63);expect(used.candidates).toBeLessThanOrEqual(f.profile.budget.limits.candidates);
+    expect(await processBrief(f.worker,randomUUID(),f.profile)).toBe('idle');
+    expect((await f.owner.query('SELECT count(*)::int AS n FROM pipeline_budget_workflows')).rows[0].n).toBe(1);
+  },profile);
 },120000);
 
 it('binds explicit event metadata to its exact current version and never revives an old annotation after source change',async () => {
@@ -33,9 +46,11 @@ it('binds explicit event metadata to its exact current version and never revives
     await refreshBrief(f.app,actor,{ project: f.projectName,mode: 'full',dryRun: false,idempotencyKey: 'event' });
     expect(await processBrief(f.worker,randomUUID(),f.profile)).toBe('processed');
     expect(inputs[0]).toContain(event.version);expect(inputs[0]).toContain('2030-01-01');
+    const firstCalls=inputs.length;
     await f.owner.query("UPDATE memories SET body='Updated plan, date unknown' WHERE id=$1",[memory.id]);
     expect(await processBrief(f.worker,randomUUID(),f.profile)).toBe('processed');
-    expect(inputs[1]).not.toContain(event.version);expect(inputs[1]).not.toContain('2030-01-01');
+    expect(inputs.slice(firstCalls).length).toBeGreaterThan(0);
+    for (const input of inputs.slice(firstCalls)) { expect(input).not.toContain(event.version);expect(input).not.toContain('2030-01-01'); }
   },profile);
 },120000);
 

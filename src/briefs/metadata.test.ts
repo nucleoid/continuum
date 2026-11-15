@@ -15,6 +15,7 @@ it('keeps excluded private evidence out of visible freshness, watermarks, histor
     await createMemory(f.app,{ scopeId: f.projectId,scopeKind: 'project',authorId: actor.id,type: 'decision',title: 'Shared',body: 'Shared recorded source',source: 'manual' });
     await refreshBrief(f.app,actor,{ project: f.projectName,mode: 'full',dryRun: false,idempotencyKey: 'shared' });
     expect(await processBrief(f.worker,randomUUID(),f.profile)).toBe('processed');
+    const initialCalls=calls;expect(initialCalls).toBeGreaterThan(0);
     const before=await briefForPrincipal(f.app,actor,f.projectName);
     const privateSource=await createMemory(f.app,{ scopeId: f.scopeId,scopeKind: 'user',authorId: actor.id,type: 'decision',title: 'Private',body: 'HIDDEN MUST NOT AFFECT METADATA',source: 'manual' });
     const source=(await f.app.query('SELECT continuum_evidence_source($1,$2) AS id',[actor.id,privateSource.id])).rows[0].id;
@@ -25,7 +26,7 @@ it('keeps excluded private evidence out of visible freshness, watermarks, histor
     expect(await briefForPrincipal(f.app,actor,f.projectName)).toEqual(before);
     expect(await processBrief(f.worker,randomUUID(),f.profile)).toBe('processed');
     expect(await briefForPrincipal(f.app,actor,f.projectName)).toEqual(before);
-    expect(calls).toBe(1);
+    expect(calls).toBe(initialCalls);
     expect((await f.owner.query('SELECT count(*)::int AS n FROM brief_versions')).rows[0].n).toBe(1);
   },profile);
 },120000);

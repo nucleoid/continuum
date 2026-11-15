@@ -50,10 +50,26 @@ fields, duplicate claims, unsupported labels and conflicts with fewer than two
 cited versions. These checks establish citation mechanics, not a natural-language
 truth judge. A configured model still requires separately qualified semantic
 alignment, labels, unknown and contradiction false-positive measurements.
-Every input disclosed to a synthesis call restricts every generated block,
-including inputs omitted from citations. This conservative dependency closure
-can dirty the whole brief when one input changes. Reuse also requires identical
-disclosed input versions; an omitted citation cannot launder hidden prose.
+Every input disclosed to a synthesis call restricts every block it generates,
+including inputs omitted from citations. Without a declared isolation contract,
+one call receives the whole inventory and every block inherits it. A source
+change can therefore dirty the whole brief; an omitted citation never narrows
+its authority. Reuse requires identical disclosed input versions.
+
+The optional `independent-section-requests-v1` profile contract permits separate
+purpose, decision and combined implementation/unknown/coverage calls. Ordinary
+decision sources enter the decision and combined groups; other source memories
+enter the purpose and combined groups. Unknown assertion influence enters all
+groups. Each generated block inherits every input of its actual group. The
+combined group sees the complete admitted inventory. Unchanged groups retain
+their exact block bytes, identities and dependencies mechanically.
+
+This contract requires independent adapter requests with no shared conversation,
+response cache or other cross-group content context. The descriptor pins the
+trusted composition's declaration; a label or report hash does not prove provider
+context isolation. Real-provider qualification must verify it. Missing isolation
+uses `whole-inputs-v1`, with whole-input calls and dependencies. Stock installation
+still has no provider. The local synthetic fixture only demonstrates mechanics.
 `renderBrief` escapes all contributed text and locators inside reference-data
 boundaries. Source text cannot select tools, identities, credentials or policies.
 
@@ -145,15 +161,24 @@ is withheld unless both sides remain readable. They never expose hidden old pros
 
 ## Bounded refresh and workers
 
-`processBrief` executes one domain run. `BriefWorker` is an explicit optional
+`processBrief` executes one inventory page or completes one domain run. Its
+`progress` outcome means committed metadata progress, with the same queued run,
+no provider call and no new visible version. `BriefWorker` is an explicit optional
 custom-runtime worker, with no stock registration. It polls once per registered
 profile, default 1000 ms (100..30000), with a 5000 ms shutdown wait (1..10000).
 At most 32 profiles are registered. One poll may enqueue one typed repair after
 invalidation; there is no general task executor, cron service or fairness promise.
 
-The inventory admits at most 32 exact source/assertion/event versions. Metadata
-and reconciliation reserve a conservative fixed 132 candidate units in addition
-to selected inputs. Tight profiles safely abstain. Per-item/aggregate hydration,
+The inventory admits at most 32 exact source/assertion/event versions per page,
+and 63 per original run. The remaining slot in the evidence foundation's 64 direct
+parent bound belongs to the restrictive policy anchor. Pages advance a persisted
+kind/UUID cursor inside the same original workflow, deadline and allowance.
+There are still at most 32 output blocks; a model cannot expand that output
+ceiling by returning many claims across several section calls. Metadata probes,
+admitted identities and at most 32 previous-block reconciliation identities
+consume the original candidate budget. Conservative per-page storage accounting
+can exceed physical allocation. Tight profiles safely abstain. Source snapshot
+adoption and per-item/aggregate hydration,
 complete prompt/schema/citation serialization, response bytes, token/call/spend,
 control/provenance storage and final output allowance all consume the original
 budget. Final library and actual REST/MCP envelopes are measured before audit
@@ -161,34 +186,50 @@ commit; remote limits can tighten them. Oversized results refuse delivery instea
 of truncating citations or admitting an oversized best item.
 
 Observed project/org generations are committed row state. Source and policy
-changes advance them transactionally. Short snapshot/apply fences use current
-dependency generations and scope rows, not allocation-order sequence MAX or a
-timestamp cursor. A later lower-sequence commit remains dirty. A bounded cut or
-new un-enrolled source records incomplete coverage and preserves the previous
-processed watermark; its observed generation is not a claim that the stream was
-drained. Large scopes can remain partial and require deliberate new refresh work.
-No unbounded scan-progress, liveness or tenant-volume qualification is claimed.
+changes advance them transactionally. A page locks those rows before its source
+SELECT and records its cutoff before selection. A writer cannot commit a newer
+enrolled source behind that page's observed frontier. A changed committed epoch
+between metadata pages restarts the pre-disclosure inventory, at most twice,
+without refunding work or replacing its allowance/deadline. A lower-ID or delayed
+lower-sequence commit therefore cannot disappear behind a saved UUID cursor.
+The internal watermark separates inventory cycle, kind/UUID position, committed
+scope frontier and complete coverage; allocation-order MAX and timestamps are
+not completion proofs. A finite cap records partial coverage. Completed capped
+work does not enqueue another allowance merely because it is partial. Large
+scopes can remain partial and need deliberate new work; there is no unlimited
+scope-volume or universal liveness claim.
 
 Full refresh requests every section. Delta refresh recomputes affected sections
 from the same current evidence inventory, and mechanically copies unchanged
-blocks with their exact bytes/dependencies. New/removed families, changed
-configuration or unknown dependency scope conservatively dirty the whole brief.
+blocks with their exact bytes/dependencies. New/removed inputs dirty every group
+to which they were disclosed. Changed configuration or unknown dependency scope
+can conservatively dirty the whole brief.
 Canonical content identities preserve unchanged blocks during full regeneration
 too. Deterministic fixtures converge; stochastic models require semantic/citation
 convergence measurements, not promised byte equality.
 
-Run, workflow, attempt, budget owner/generation and LOGIN binding attach before
-hydration. The immutable workflow lifetime is at most 20 seconds, with a 30-second
+Run, workflow, original first-attempt identity, budget owner/generation and LOGIN
+binding attach before hydration. Each actual section call receives a distinct,
+immutable payload-free attempt record in that same workflow, bounded by its call
+ceiling. No retry overwrites an older attempt. The immutable workflow lifetime
+is at most 20 seconds, with a 30-second
 lease and provider timeout at most 15 seconds. Time begins before the claim round
 trip; database remaining duration and the local monotonic clock both bound work.
 Provider I/O runs outside transactions. Apply locks the definition/head and
 rechecks exact dependencies, source audience, enabled profile/configuration,
-binding, lease, original settled attempt, deadline and head CAS. Versions, typed
+binding, lease, every current section's dispatched/settled attempt, deadline and
+head CAS. Versions, typed
 dependencies, required audit and head movement commit atomically.
 
-Crashes, stale leases, cancellation, failed settlement and restart park work
-unavailable; they never replace identities, renew a deadline or refund ambiguous
-maxima. There is no automatic provider retry or orphan-recovery API. Late actual
+Crashes, stale leases, cancellation, failed settlement and ambiguous restart park
+work unavailable. They never replace identities, renew a deadline or refund
+ambiguous maxima. A completed rejected provider promise can queue a retry only
+after every original attempt has actually settled and the original remaining
+call/retry/time budgets admit it. Backoff is persisted at 1, 2 then 4 seconds,
+with at most three retries; tighter original limits can stop earlier. Earlier
+successful section outputs are discarded on a failed generation rather than
+stored as an unmanaged retry cache. Unknown usage retains its charged maxima.
+There is no orphan-recovery API. Late actual
 settlement uses only the original LOGIN/accounting identity and grants no publish
 permission. Duplicate apply after an ambiguous commit returns its original version.
 An invalid/failed generation preserves the independently readable unaffected old
