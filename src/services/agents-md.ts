@@ -33,6 +33,8 @@ export async function prepareAgentsMdForPrincipal(
     // Pre-selection rerankers also belong exclusively to recall, never bundles.
     // Personal standup attribution and closure tables are a separate reader;
     // they do not enter this bundle or expand its scoped selection.
+    // Maintained brief definitions, versions, dry runs and worker results never
+    // become contributed source memories or generator/freshness inputs.
     // Evidence versions, derivative prose and managed copies stay outside
     // source-memory selection, freshness bytes and delivery audit identities.
     // Explicit event annotations, corrections and query hints cannot enter this
