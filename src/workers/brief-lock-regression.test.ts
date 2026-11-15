@@ -18,9 +18,9 @@ const settle = async (operation: Promise<pg.QueryResult>): Promise<Result> => {
 async function waitGate(observer: pg.PoolClient, gate: number, pids: number[]) {
   for (let i = 0; i < 75; i++) {
     const rows = (await observer.query<{ pid: number }>(`SELECT pid FROM pg_locks
-      WHERE locktype='advisory' AND NOT granted AND classid=0 AND objid=$1::oid
+      WHERE locktype='advisory' AND granted AND classid=0 AND objid=$1::oid
         AND objsubid=1 AND pid=ANY($2::int[])
-        AND database=(SELECT oid FROM pg_database WHERE datname=current_database())`, [gate, pids])).rows;
+        AND database=(SELECT oid FROM pg_database WHERE datname=current_database())`, [gate + 3, pids])).rows;
     if (pids.every(pid => rows.some(row => row.pid === pid))) return;
     await new Promise(resolve => setTimeout(resolve, 10));
   }
@@ -38,7 +38,8 @@ async function installClaimGate(owner: pg.Pool, runIds: string[], gate: number) 
     BEGIN
       IF NEW.id=ANY(ARRAY[${runIds.map(id => `'${id}'::uuid`).join(',')}])
         AND OLD.observed IS NULL AND NEW.observed IS NOT NULL THEN
-        PERFORM pg_advisory_xact_lock_shared(${gate}::bigint);
+        PERFORM pg_advisory_xact_lock_shared(${gate + 3}::bigint);
+        WHILE NOT pg_try_advisory_xact_lock_shared(${gate}::bigint) LOOP PERFORM pg_sleep(0.005); END LOOP;
       END IF;
       RETURN NEW;
     END $$;
@@ -111,7 +112,10 @@ it('an org APP writer and a source-adopting claim do not invert memory and epoch
     // before normal AFTER triggers touch the epoch. No root/counter is fabricated.
     await f.owner.query(`CREATE FUNCTION parent_lock_writer_gate() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN
-        IF NEW.id='${source.id}'::uuid THEN PERFORM pg_advisory_xact_lock(${writerGate}::bigint); END IF;
+        IF NEW.id='${source.id}'::uuid THEN
+          PERFORM pg_advisory_xact_lock_shared(${writerGate + 3}::bigint);
+          WHILE NOT pg_try_advisory_xact_lock(${writerGate}::bigint) LOOP PERFORM pg_sleep(0.005); END LOOP;
+        END IF;
         RETURN NEW;
       END $$;
       REVOKE ALL ON FUNCTION parent_lock_writer_gate() FROM PUBLIC;

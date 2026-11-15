@@ -23,7 +23,10 @@ it('never drains an epoch past a concurrent already-enrolled source omitted by i
     const key = Math.floor(Math.random() * 1_000_000_000) + 1;
     await f.owner.query(`CREATE FUNCTION parent_brief_inventory_gate() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN
-        IF NEW.run_id='${queued.runId}'::uuid THEN PERFORM pg_advisory_xact_lock(${key}::bigint); END IF;
+        IF NEW.run_id='${queued.runId}'::uuid THEN
+          PERFORM pg_advisory_xact_lock_shared(${key + 3}::bigint);
+          WHILE NOT pg_try_advisory_xact_lock(${key}::bigint) LOOP PERFORM pg_sleep(0.005); END LOOP;
+        END IF;
         RETURN NEW;
       END $$;
       REVOKE ALL ON FUNCTION parent_brief_inventory_gate() FROM PUBLIC;
@@ -39,10 +42,10 @@ it('never drains an epoch past a concurrent already-enrolled source omitted by i
       let entered = false;
       for (let probe = 0; probe < 75; probe++) {
         entered = (await blocker.query<{ entered: boolean }>(`SELECT EXISTS(
-          SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted
+          SELECT 1 FROM pg_locks WHERE locktype='advisory' AND granted
             AND classid=0 AND objid=$1::oid
             AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
-        ) AS entered`, [key])).rows[0].entered;
+        ) AS entered`, [key + 3])).rows[0].entered;
         if (entered) break;
         await new Promise(resolve => setTimeout(resolve, 10));
       }
