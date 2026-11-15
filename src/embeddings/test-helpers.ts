@@ -13,7 +13,7 @@ import { getPrincipal } from '../storage/principals.js';
 import { getScope } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import { admitMemoryEmbedding, storeMemoryEmbeddingVector } from '../storage/embeddings.js';
-import { standupProducerFixture, quoteStandupIdentifier } from '../standup/test-helpers.js';
+import { standupConsumerFixture as standupProducerFixture, quoteStandupIdentifier } from '../standup/test-helpers.js';
 
 /** Explicit synthetic request identity for existing static-vector test doubles.
  * This is not a production fallback or a descriptor inferred for historical data. */
@@ -100,10 +100,11 @@ export async function embeddingQueueFixture(run: (context: Parameters<Parameters
     if (options.profile) synthetic.profile = options.profile;
     const schema = (await f.owner.query('SELECT current_schema() AS name')).rows[0].name as string;
     const workerRole = `embed_worker_${randomUUID().replaceAll('-','').slice(0,16)}`, password = randomUUID();
-    const connection = process.env.CONTINUUM_TEST_DATABASE_URL ?? 'postgres://continuum:continuum@localhost:5433/continuum';
+    const connection = f.connectionString;
     let worker: pg.Pool | undefined;
     try {
       await f.owner.query(`CREATE ROLE ${quoteStandupIdentifier(workerRole)} LOGIN PASSWORD '${password}'`);
+      await f.registerRole(workerRole);
       execFileSync('psql', [connection, '-X', '-v', 'ON_ERROR_STOP=1', '-v', `continuum_schema=${schema}`,
         '-v', `continuum_embedding_worker_role=${workerRole}`, '-f', join(process.cwd(), 'scripts/grant-embedding-worker-role.sql')], { timeout: 30000, stdio: 'pipe' });
       await f.operator.query('SELECT continuum_operator_embedding_target($1,$2,$3,$4,TRUE)', [f.adminId, synthetic.target, synthetic.profile,
