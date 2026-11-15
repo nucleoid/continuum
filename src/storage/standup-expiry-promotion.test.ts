@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { standupProducerFixture } from '../standup/test-helpers.js';
+import { standupConsumerFixture as standupProducerFixture } from '../standup/test-helpers.js';
 import { TRUSTED_ACTIVITY_METADATA_KEYS } from '../capture/metadata.js';
 import { createMemory } from './memories.js';
 import { createScope } from './scopes.js';

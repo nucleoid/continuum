@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { expect, it } from 'vitest';
-import { standupProducerFixture as fixture } from '../standup/test-helpers.js';
+import { standupConsumerFixture as fixture } from '../standup/test-helpers.js';
 import { createPrincipal, getPrincipal } from './principals.js';
 import { createScope } from './scopes.js';
 import { addMembership } from './memberships.js';

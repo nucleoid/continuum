@@ -1,7 +1,7 @@
 import { createHmac } from 'node:crypto';
 import request from 'supertest';
 import { expect, it, vi } from 'vitest';
-import { standupProducerFixture as fixture } from '../standup/test-helpers.js';
+import { standupConsumerFixture as fixture } from '../standup/test-helpers.js';
 import { getPrincipal } from '../storage/principals.js';
 import { createScope } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';

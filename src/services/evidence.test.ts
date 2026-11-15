@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, it } from 'vitest';
-import { standupProducerFixture } from '../standup/test-helpers.js';
+import { standupConsumerFixture as standupProducerFixture } from '../standup/test-helpers.js';
 import { EvidencePayloadRegistry } from '../evidence/model.js';
 import { registerEvidence, readEvidence } from './evidence.js';
 import { createMemory } from '../storage/memories.js';

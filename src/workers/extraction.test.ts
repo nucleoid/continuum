@@ -46,10 +46,11 @@ it('lets a healthy bound LOGIN process work while another bound principal has lo
     let pool: pg.Pool | undefined;
     try {
       await f.owner.query(`CREATE ROLE ${quoteStandupIdentifier(role)} LOGIN PASSWORD '${password}'`);
-      execFileSync('psql', [process.env.CONTINUUM_TEST_DATABASE_URL!, '-X', '-v', 'ON_ERROR_STOP=1', '-v', `continuum_schema=${schema}`,
+      await f.registerRole(role);
+      execFileSync('psql', [f.connectionString, '-X', '-v', 'ON_ERROR_STOP=1', '-v', `continuum_schema=${schema}`,
         '-v', `continuum_extraction_worker_role=${role}`, '-f', join(process.cwd(), 'scripts/grant-extraction-worker-role.sql')], { timeout: 30_000, stdio: 'pipe' });
       await f.operator.query('SELECT continuum_operator_bind_extraction_worker($1,$2,$3,$4,$5,TRUE)', [f.adminId, role, peer.id, f.scopeId, f.profile.id]);
-      const connection = new URL(process.env.CONTINUUM_TEST_DATABASE_URL!); connection.username = role; connection.password = password;
+      const connection = new URL(f.connectionString); connection.username = role; connection.password = password;
       pool = new pg.Pool({ connectionString: connection.toString(), max: 2, options: `-c search_path=${schema} -c statement_timeout=5000 -c lock_timeout=1000` });
       await f.owner.query('UPDATE scope_memberships SET active=FALSE WHERE principal_id=$1 AND scope_id=$2', [f.producerId, f.scopeId]);
       expect(await processExtraction(f.worker, randomUUID(), f.profile)).toBe('idle');
