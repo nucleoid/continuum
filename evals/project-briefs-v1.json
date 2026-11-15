@@ -1,0 +1,11 @@
+{
+  "version": "project-briefs-v1",
+  "synthetic": true,
+  "schema": "project-brief-v1",
+  "prompt": "brief-reference-v1",
+  "variants": ["source-only", "duplicate-extraction", "connector-absent"],
+  "modes": ["full", "delta"],
+  "samples": 5,
+  "gates": {"alignment": 1, "labelAccuracy": 1, "unknownPrecision": 1, "contradictionPrecision": 1, "falseUnknowns": 0, "falseContradictions": 0, "spendMicros": 0, "convergenceFailures": 0},
+  "qualification": "Deterministic persisted mechanics and citation convergence only. No real-model, tokenizer, invoice, live connector, normalized storage or paired performance qualification."
+}

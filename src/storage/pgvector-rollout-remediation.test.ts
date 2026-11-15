@@ -678,6 +678,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0094_extraction.sql' }),
         expect.objectContaining({ name: '0095_memory_event_annotations.sql' }),
         expect.objectContaining({ name: '0096_repository_evidence.sql' }),
+        expect.objectContaining({ name: '0097_project_briefs.sql' }),
       ]);
       await grantApplicationRole(pool, applicationSchema, appRole);
       await expect(pool.query(
@@ -727,6 +728,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0094_extraction.sql' }),
         expect.objectContaining({ name: '0095_memory_event_annotations.sql' }),
         expect.objectContaining({ name: '0096_repository_evidence.sql' }),
+        expect.objectContaining({ name: '0097_project_briefs.sql' }),
       ]);
       await grantApplicationRole(pool, applicationSchema, appRole);
       await expect(pool.query(
@@ -912,6 +914,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0094_extraction.sql' }),
         expect.objectContaining({ name: '0095_memory_event_annotations.sql' }),
         expect.objectContaining({ name: '0096_repository_evidence.sql' }),
+        expect.objectContaining({ name: '0097_project_briefs.sql' }),
       ]);
       await grantApplicationRole(pool, applicationSchema, appRole);
       await expect(pool.query(
@@ -977,6 +980,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0094_extraction.sql' }),
         expect.objectContaining({ name: '0095_memory_event_annotations.sql' }),
         expect.objectContaining({ name: '0096_repository_evidence.sql' }),
+        expect.objectContaining({ name: '0097_project_briefs.sql' }),
       ]);
       await grantApplicationRole(owner, applicationSchema, appRole);
       await expect(owner.query(
@@ -1275,6 +1279,7 @@ describe('pgvector rollout remediation', () => {
         expect.objectContaining({ name: '0094_extraction.sql' }),
         expect.objectContaining({ name: '0095_memory_event_annotations.sql' }),
         expect.objectContaining({ name: '0096_repository_evidence.sql' }),
+        expect.objectContaining({ name: '0097_project_briefs.sql' }),
       ]);
       await grantApplicationRole(owner, applicationSchema, appRole);
       await expect(owner.query(

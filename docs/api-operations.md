@@ -30,6 +30,15 @@ and taking the nonzero forced-exit path.
 
 ## Current schema and runtime prerequisites
 
+Brief-capable binaries require 0097 after 0096, exact APP/OP regrants and the
+owner-recorded brief readiness contract, including source/event/erasure guards.
+[Project briefs](project-briefs.md) remain disabled with an empty synthesis
+registry and no stock worker. Custom `BriefWorker` instances use dedicated bound
+LOGIN pools in the existing worker lifecycle. REST/MCP requests enqueue typed
+work and cannot install a model or reuse a refresher's privileged repository
+credentials. Current/history/dry-run output validation and final authority checks
+precede transactional delivery success. Shutdown retains unsettled work fences.
+
 Current extraction-capable binaries additionally require 0094 after 0093/0092,
 exact APP/OP regrants and the owner-recorded extraction readiness contract.
 The [extraction pilot](extraction.md) remains disabled with no stock model or

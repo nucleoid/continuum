@@ -126,6 +126,7 @@ async function promoteOperation(
     );
   }
 
+  await client.query('SELECT continuum_brief_promotion_lock($1,$2,$3)', [principalId, source.id, destinationScope.id]);
   const destinationMetadata = stripTrustedActivityMetadata(source.metadata);
   const sourceEvent = (await readEventAnnotations(client, principalId, [source.id])).get(source.id);
   delete destinationMetadata.related;
