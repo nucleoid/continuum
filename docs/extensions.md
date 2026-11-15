@@ -1,5 +1,14 @@
 # Extension points
 
+The [optional repository-evidence port](repository-evidence.md) is a separate
+authorization-capable pipeline boundary. It defaults empty, receives no request
+bearer through enrichment, and requires independently verified repository
+authority before content dispatch. Its managed receipts are not retrieval
+enrichment or generated AGENTS.md inputs. Stock REST/MCP expose no connector
+query endpoint; an explicit trusted library consumer supplies its transport,
+opaque authorization context and original durable budget identities. The
+Engram factory stays disabled until its documented capability gate passes.
+
 Continuum exposes in-process extension registries for retrieval enrichment and
 promotion notification. Both registries reject invalid or duplicate IDs and
 execute extensions in sorted ID order. IDs must match

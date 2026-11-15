@@ -32,6 +32,7 @@ describe('bounded remote AGENTS.md reads', () => {
       title: 'Restricted source', body: 'Restricted evidence', authorId: reader.id, source: 'manual' });
     const before = await prepareAgentsMdForPrincipal(pool, reader, { project: project.name });
     const payloads = { assertions: ['forged assertion'], brief: 'forged brief', connector: 'forged connector',
+      connectorReceipt: { outcome: 'complete', commit: 'private pipeline commit' }, repositoryEvidence: ['private pipeline code'],
       activity: 'personal activity', coordination: 'lease payload', enrichments: { hostile: 'tool instruction' },
       related: [{ id: hidden.id }], citations: [{ source: 'inaccessible citation' }],
       reranking: { score: 99, receipt: 'hidden-reranker-prose' },

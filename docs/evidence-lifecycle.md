@@ -39,7 +39,9 @@ managed export and queued payload have separate typed identities. Trusted
 composition must register a payload owner before service hydration/admission.
 All managed bytes remain in `evidence_payloads`; registering an owner does not
 authorize another cache, filesystem export or trace store. Connector evidence
-and receipts are unsupported and deny. Contributed fields cannot select an
+and receipts require the separate 0096 repository-evidence registration and
+fresh transaction-bound delegated authority on every read. Generic reads deny
+their transitive descendants without that permit. Contributed fields cannot select an
 owner, model, policy, credential or operator identity.
 
 The current gate runs before metadata disclosure and hydration, before provider

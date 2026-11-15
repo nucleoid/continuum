@@ -131,6 +131,17 @@ Embedding failure can leave valid capture committed with `embedded: false`; rela
 
 ## Retrieval and providers
 
+The optional [repository-evidence port](docs/repository-evidence.md) has an empty
+trusted registry and explicit library consumers. Independent delegated upstream
+repository permission intersects current Continuum scope, source/privacy,
+connector generation and residency policy before content I/O. Migration 0096
+stores original durable query/attempt identities and managed receipts/evidence;
+every subsequent read requires a fresh transaction-bound permission permit.
+Transitive copies share current policy and physical erasure. Stock transports
+install no connector; the Engram factory remains capability-gated and disabled.
+No repository content, receipt or connector candidate enters ordinary recall
+or generated AGENTS.md.
+
 Explicit [event time](docs/event-time.md) is independent of ingestion,
 verification and fixed expiry. Migration 0095 binds bounded immutable manual
 annotations to exact 0093 source versions; notation and comparison bounds stay

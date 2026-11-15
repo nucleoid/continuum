@@ -40,6 +40,18 @@ worker recovery and shutdown limits.
 
 ## Current rollout and mixed versions
 
+Optional [repository evidence](repository-evidence.md) adds migration 0096 and
+exact APP/OP capability regrants. Managed connector receipt and evidence bytes,
+hashes and all transitive copies use canonical evidence erasure. A bounded
+connector phase also cancels original workflows, detaches principal/mapping
+links and physically clears owned-scope repository keys. Completion verifies
+actual residual state, including locked rows. Historical opaque accounting
+UUIDs remain; no raw query or credential is stored. Quiesce old artifact and
+offboarding binaries before enabling connector data. Stored erasure cannot
+retract upstream, process, downloaded or backup copies. No adapter, repository
+grant, credential acquisition, reindex or live operation is activated by this
+upgrade; the default registry is empty.
+
 Optional [extraction](extraction.md) adds migration 0094 and its exact APP/OP
 regrants. Current offboarding also cancels extraction runs/workflows, physically
 removes chunk hashes/spans and checks their actual residuals alongside managed

@@ -53,3 +53,8 @@ export * from './extensions/index.js';
 export * from './audit/log.js';
 export * from './audit/query.js';
 export * from './services/principal-admin.js';
+export * from './connectors/evidence.js';
+export * from './connectors/registry.js';
+export * from './connectors/engram.js';
+export * from './services/connector-evidence.js';
+export type { ConnectorExecution, RepositoryMapping } from './storage/connector-receipts.js';

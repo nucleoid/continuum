@@ -18,7 +18,7 @@ import { getPool } from '../storage/pool.js';
 import { makeEmbeddingRouterFromEnv } from '../embeddings/factory.js';
 import { isDirectEntrypoint } from './entrypoint.js';
 import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoordinationContractReady, requirePromotionOutboxReady, requireStandupReady } from '../storage/provider-lifecycle.js';
-import { requirePipelineBudgetsReady, requireEvidenceReady, requireExtractionReady, requireEventTimeReady } from '../storage/provider-lifecycle.js';
+import { requirePipelineBudgetsReady, requireEvidenceReady, requireExtractionReady, requireEventTimeReady, requireConnectorEvidenceReady } from '../storage/provider-lifecycle.js';
 import { configureExtraction, extractionForPrincipal, retryExtraction } from '../services/extraction.js';
 import { accessibleScopes } from '../services/access.js';
 import { captureMemory, type CaptureResult } from '../services/capture.js';
@@ -1010,6 +1010,7 @@ async function main(): Promise<void> {
   await requireEvidenceReady(pool, schemaOptions);
   await requireExtractionReady(pool, schemaOptions);
   await requireEventTimeReady(pool, schemaOptions);
+  await requireConnectorEvidenceReady(pool, schemaOptions);
   const authMode = authModeFromEnv();
   warnOnDevAuthMode(authMode);
   const authenticator = createAuthenticator(

@@ -106,6 +106,7 @@ const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
   ['0093_evidence_lifecycle.sql', '0db47973792646873e8fe628e56e0b4f98acde783ecad4d08524b985bd1c3f74'],
   ['0094_extraction.sql', 'd4077efa310f5a2ee949bcedb8cff472f8f797a666c99c670ed5d0e3bbc328ba'],
   ['0095_memory_event_annotations.sql', 'ecf6716a81778a671ca6bc5170a8c60a68f9e1442c1e09c2e4c5988d46dff5f3'],
+  ['0096_repository_evidence.sql', '256c4c4be0a3d15926b5b8a80b19b292eb6efdfb59d754a24079be890e93c511'],
 ]);
 const FORWARD_MIGRATION_REQUIREMENTS = new Map([
   ['0084_provider_embeddings_backfill.sql', '0083_tag_vocabularies.sql'],
@@ -119,6 +120,7 @@ const FORWARD_MIGRATION_REQUIREMENTS = new Map([
   ['0093_evidence_lifecycle.sql', '0092_pipeline_budgets.sql'],
   ['0094_extraction.sql', '0093_evidence_lifecycle.sql'],
   ['0095_memory_event_annotations.sql', '0094_extraction.sql'],
+  ['0096_repository_evidence.sql', '0095_memory_event_annotations.sql'],
   ['0053_offboarding_restore_contract.sql', '0052_offboarding_review_repair.sql'],
   ['0056_coordination_final_remediation.sql', '0055_coordination_review_remediation.sql'],
   ['0057_coordination_privacy_race_remediation.sql',
