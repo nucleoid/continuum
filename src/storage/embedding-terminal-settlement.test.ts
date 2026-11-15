@@ -73,8 +73,10 @@ it('still rejects conflicting known settlement without changing the original led
     const claim = (await store.claim(f.target, f.policy, randomUUID(), 1, f.profile))!;
     await store.hydrate(claim, 4194304);
     expect(await store.attempt(claim).reserve(reservation, 5096)).toBe(true);
-    expect(await store.attempt(claim).settle({ spendMicros: 0 }, 'measured')).toBe(true);
+    // A never-dispatched reservation can settle without publication authority.
+    expect(await store.attempt(claim).settle({ spendMicros: 0 }, 'measured')).toBe(false);
     const before = (await f.owner.query('SELECT * FROM pipeline_budget_attempts WHERE workflow_id=$1', [claim.workflowId])).rows;
+    expect(before[0]).toMatchObject({ state: 'settled', settlement: { spendMicros: 0, provenance: 'measured' } });
     await expect(store.attempt(claim).settle({ spendMicros: 1 }, 'measured'))
       .rejects.toMatchObject({ code: '23514', message: 'Conflicting embedding settlement' });
     expect((await f.owner.query('SELECT * FROM pipeline_budget_attempts WHERE workflow_id=$1', [claim.workflowId])).rows).toEqual(before);
