@@ -9,6 +9,7 @@ import { createPrincipal } from './principals.js';
 import { getScopeByRef } from './scopes.js';
 import { addMembership } from './memberships.js';
 import { requireEvidenceReady, requireExtractionReady, requireEventTimeReady, requireConnectorEvidenceReady } from './provider-lifecycle.js';
+import { standupProducerFixture } from '../standup/test-helpers.js';
 
 it('upgrades real APP/OP/SYNC profiles without raw payload grants and refuses trusted-body drift at startup', async () => {
   const suffix=randomUUID().replaceAll('-','').slice(0,12),schema=`evidence_upgrade_${suffix}`;
@@ -75,12 +76,6 @@ it('upgrades real APP/OP/SYNC profiles without raw payload grants and refuses tr
       await expect(session.query('SELECT payload FROM evidence_payloads')).rejects.toMatchObject({code:'42501'});
     }
     expect((await owner.query("SELECT has_function_privilege($1,'independent_operator_extension()','EXECUTE') AS preserved",[roles[1]])).rows[0].preserved).toBe(true);
-    grant('grant-operator-role.sql',{continuum_operator_role:roles[0],continuum_principal_id:admin.id});
-    grant('grant-application-role.sql',{continuum_app_role:roles[0]});
-    expect((await owner.query(`SELECT has_function_privilege($1,'continuum_operator_connector_mapping(uuid,uuid,uuid,text,text,text,text,boolean)','EXECUTE') AS configure,
-      has_function_privilege($1,'continuum_operator_scrub_connector_scope(uuid,uuid,uuid,integer)','EXECUTE') AS erasure,
-      has_function_privilege($1,'continuum_connector_mapping(uuid,uuid)','EXECUTE') AS serving`,[roles[0]])).rows[0])
-      .toEqual({configure:false,erasure:false,serving:true});
     await owner.query(`CREATE OR REPLACE FUNCTION continuum_connector_mapping(actor UUID,mapping UUID) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$ BEGIN RETURN NULL; END $$`);
     await expect(requireConnectorEvidenceReady(sessions[0],{expectedSchema:schema})).rejects.toMatchObject({code:'DEPENDENCY_UNAVAILABLE'});
     await owner.query('ALTER TABLE memories DISABLE TRIGGER extraction_capture_enqueue');
@@ -98,3 +93,21 @@ it('upgrades real APP/OP/SYNC profiles without raw payload grants and refuses tr
     await maintenance.end();await rm(directory,{recursive:true,force:true});
   }
 },120000);
+
+it('revokes connector operator capabilities when a real LOGIN is reprofiled to APP', async () => {
+  await standupProducerFixture(async f => {
+    const schema = (await f.owner.query('SELECT current_schema() AS schema')).rows[0].schema;
+    const role = (await f.app.query('SELECT session_user AS role')).rows[0].role;
+    for (const [file, variables] of [
+      ['grant-operator-role.sql', { continuum_operator_role: role, continuum_principal_id: f.adminId }],
+      ['grant-application-role.sql', { continuum_app_role: role }],
+    ] as const) execFileSync('psql', [process.env.CONTINUUM_TEST_DATABASE_URL!, '-X', '-v', 'ON_ERROR_STOP=1',
+      '-v', `continuum_schema=${schema}`, ...Object.entries(variables).flatMap(([key, value]) => ['-v', `${key}=${value}`]),
+      '-f', join(process.cwd(), 'scripts', file)], { timeout: 30000, stdio: 'pipe' });
+    expect((await f.owner.query(`SELECT has_function_privilege($1,'continuum_operator_connector_mapping(uuid,uuid,uuid,text,text,text,text,boolean)','EXECUTE') AS configure,
+      has_function_privilege($1,'continuum_operator_scrub_connector_scope(uuid,uuid,uuid,integer)','EXECUTE') AS erasure,
+      has_function_privilege($1,'continuum_connector_mapping(uuid,uuid)','EXECUTE') AS serving`, [role])).rows[0])
+      .toEqual({ configure: false, erasure: false, serving: true });
+    await requireConnectorEvidenceReady(f.app, { expectedSchema: schema });
+  });
+}, 120000);
