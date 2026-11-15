@@ -223,11 +223,21 @@ BEGIN
   INSERT INTO embedding_source_scopes SELECT memory,unnest(scopes_value) ON CONFLICT DO NOTHING;
 END $$;
 CREATE FUNCTION continuum_embedding_evidence_fence() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
-DECLARE memory UUID; status_value TEXT; current_generation BIGINT; target_value JSONB; retained INTEGER:=0;
+DECLARE memory UUID; status_value TEXT; current_generation BIGINT; target_value JSONB; retained INTEGER:=0; lineage_exceeded BOOLEAN:=FALSE;
 BEGIN
   IF TG_TABLE_NAME='evidence_roots' THEN
-    IF NEW.source_memory_id IS NOT NULL THEN PERFORM continuum_embedding_enroll_lineage(NEW.source_memory_id); END IF;
-    IF (OLD.generation,OLD.revoked,OLD.residency,OLD.external_state,OLD.checked_at,OLD.valid_until,OLD.expiry_ceiling,OLD.scope_id)
+    IF NEW.source_memory_id IS NOT NULL THEN
+      BEGIN
+        PERFORM continuum_embedding_enroll_lineage(NEW.source_memory_id);
+      EXCEPTION WHEN check_violation THEN
+        IF SQLERRM<>'Embedding owned-source lineage bound exceeded' THEN RAISE; END IF;
+        -- Historical scopes can exceed a new admission bound after upgrade.
+        -- Deny embedding without rejecting the privacy fence or pretending the
+        -- retained jobs/receipts have already been physically scrubbed.
+        lineage_exceeded:=TRUE;
+      END;
+    END IF;
+    IF NOT lineage_exceeded AND (OLD.generation,OLD.revoked,OLD.residency,OLD.external_state,OLD.checked_at,OLD.valid_until,OLD.expiry_ceiling,OLD.scope_id)
       IS NOT DISTINCT FROM (NEW.generation,NEW.revoked,NEW.residency,NEW.external_state,NEW.checked_at,NEW.valid_until,NEW.expiry_ceiling,NEW.scope_id) THEN RETURN NEW; END IF;
     memory:=NEW.source_memory_id;
   ELSE
@@ -236,8 +246,9 @@ BEGIN
   END IF;
   IF memory IS NULL THEN RETURN NEW; END IF;
   PERFORM id FROM memories WHERE id=memory FOR UPDATE;
-  status_value:=CASE WHEN continuum_embedding_source_eligible(memory) THEN 'superseded' ELSE 'cancelled' END;
-  UPDATE embedding_sources SET generation=generation+1,status=status_value,current_target=NULL WHERE memory_id=memory AND NOT erased
+  status_value:=CASE WHEN NOT lineage_exceeded AND continuum_embedding_source_eligible(memory) THEN 'superseded' ELSE 'cancelled' END;
+  UPDATE embedding_sources SET generation=generation+1,status=status_value,current_target=NULL,
+    input_hash=CASE WHEN lineage_exceeded THEN NULL ELSE input_hash END WHERE memory_id=memory AND NOT erased
     RETURNING generation INTO current_generation;
   UPDATE embedding_jobs SET state=status_value,lease_owner=NULL,lease_until=NULL,lease_generation=lease_generation+1
     WHERE memory_id=memory AND state IN ('queued','processing','retry_wait','blocked_policy');
@@ -248,7 +259,7 @@ BEGIN
   -- transition without inventing a new provider result or completion receipt.
   SELECT t.descriptor INTO target_value FROM memories m JOIN embedding_targets t
     ON t.fingerprint=continuum_embedding_route(m.scope_id)->>'target' AND t.enabled WHERE m.id=memory;
-  IF target_value IS NOT NULL AND continuum_embedding_source_policy(memory,target_value) THEN
+  IF NOT lineage_exceeded AND target_value IS NOT NULL AND continuum_embedding_source_policy(memory,target_value) THEN
     UPDATE memory_embeddings e SET source_generation=current_generation
       FROM embedding_sources s,memories m,embedding_vector_spaces v
       WHERE e.memory_id=memory AND s.memory_id=memory AND m.id=memory AND NOT s.erased
@@ -290,7 +301,7 @@ BEGIN
   IF NOT continuum_embedding_source_eligible(memory) THEN RETURN FALSE; END IF;
   FOR root IN SELECT r.* FROM evidence_roots r WHERE r.source_memory_id=memory OR r.id IN (
     SELECT d.upstream_root_id FROM evidence_source_dependencies d JOIN evidence_roots own_root ON own_root.id=d.root_id WHERE own_root.source_memory_id=memory)
-    ORDER BY r.id FOR SHARE LOOP
+    ORDER BY r.id FOR SHARE NOWAIT LOOP
     IF root.current_version IS NULL OR NOT EXISTS(SELECT 1 FROM evidence_state WHERE version_id=root.current_version AND state='active')
       OR NOT EXISTS(SELECT 1 FROM evidence_payloads WHERE version_id=root.current_version) OR root.revoked OR root.external_state IN ('deny','unknown') OR (root.expiry_ceiling IS NOT NULL AND root.expiry_ceiling<=clock_timestamp())
       OR (root.external_state='allow' AND (root.checked_at IS NULL OR root.valid_until IS NULL OR root.checked_at>clock_timestamp() OR root.valid_until<=clock_timestamp()))
@@ -301,6 +312,10 @@ BEGIN
       THEN RETURN FALSE; END IF;
   END LOOP;
   RETURN TRUE;
+EXCEPTION WHEN lock_not_available THEN
+  -- A concurrent evidence fence may own a root before its memory callback.
+  -- Never wait in the opposite order or omit a locked root from admission.
+  RETURN FALSE;
 END $$;
 CREATE FUNCTION continuum_embedding_admit_vector(memory UUID,target JSONB) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
 DECLARE s embedding_sources%ROWTYPE; t embedding_targets%ROWTYPE; p embedding_policy%ROWTYPE; m RECORD; route JSONB;

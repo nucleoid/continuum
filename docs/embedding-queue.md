@@ -139,6 +139,10 @@ content or a remotely selected module. Providers must supply a complete matching
 pipeline serializer, qualified token bound, finite approved pricing and response
 capability. Stock provider constructors describe their vector spaces but do not
 manufacture these accounting capabilities. Unqualified composition fails closed.
+Imports inside the composition resolve from that module's location, not the
+worker's working directory. For a module outside the installation, use absolute
+file URLs for runtime imports or make its dependencies available from its own
+directory.
 
 The process uses a dedicated pool of two clients with finite acquisition and
 five-second statement/one-second lock ceilings, preserving stricter limits. It

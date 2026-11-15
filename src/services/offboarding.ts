@@ -829,13 +829,24 @@ async function scrubPromotionScope(client: pg.PoolClient, actorId: string, princ
       batch_full: outbox.batch_full || activity.batch_full || evidence.batch_full || extraction.batch_full || connector.batch_full || briefs.batch_full };
 }
 
-async function scrubEmbeddingScope(client: pg.PoolClient, actorId: string, principalId: string,
-  scopeId: string, batchSize: number): Promise<{ complete: boolean; processed: number; batch_full?: boolean }> {
+async function embeddingScopeScrubAvailable(client: pg.PoolClient): Promise<boolean> {
   const schema = await client.query<{ installed: boolean; available: boolean }>(
     `SELECT pg_catalog.to_regclass('embedding_jobs') IS NOT NULL AS installed,
-      pg_catalog.to_regprocedure('continuum_operator_scrub_embedding_scope(uuid,uuid,uuid,integer)') IS NOT NULL AS available`);
-  if (!schema.rows[0]?.installed) return { complete: true, processed: 0 };
+      COALESCE(pg_catalog.has_function_privilege(pg_catalog.to_regprocedure(
+        'continuum_operator_scrub_embedding_scope(uuid,uuid,uuid,integer)'), 'EXECUTE'), FALSE) AS available`);
+  if (!schema.rows[0]?.installed) return false;
   if (!schema.rows[0].available) throw new ServiceError('DEPENDENCY_UNAVAILABLE', 'Embedding privacy migration is required');
+  return true;
+}
+
+function isEmbeddingPrivacyUnavailable(error: unknown): boolean {
+  return error instanceof ServiceError && error.code === 'DEPENDENCY_UNAVAILABLE'
+    && error.message === 'Embedding privacy migration is required';
+}
+
+async function scrubEmbeddingScope(client: pg.PoolClient, actorId: string, principalId: string,
+  scopeId: string, batchSize: number): Promise<{ complete: boolean; processed: number; batch_full?: boolean }> {
+  if (!await embeddingScopeScrubAvailable(client)) return { complete: true, processed: 0 };
   return (await client.query<{ privacy: { complete: boolean; processed: number; batch_full?: boolean } }>(
     'SELECT continuum_operator_scrub_embedding_scope($1,$2,$3,$4) AS privacy',
     [actorId, principalId, scopeId, Math.min(batchSize, 1_000)])).rows[0].privacy;
@@ -1614,6 +1625,9 @@ async function offboardPrincipalCore(
       await client.query('SAVEPOINT offboarding_coordination_privacy');
       let ownedLiveLeaseUntil: Date | null = null;
       try {
+        // A missing queue migration/regrant pauses privacy after authorized
+        // access revocation, using this existing durable pending path.
+        await embeddingScopeScrubAvailable(client);
         const ownedBefore = await ownedScopePrivacyState(client, actor.id, scopeId);
         ownedLiveLeaseUntil = ownedBefore.live_lease_until;
         await client.query(
@@ -1650,7 +1664,8 @@ async function offboardPrincipalCore(
         }
         await client.query('RELEASE SAVEPOINT offboarding_coordination_privacy');
       } catch (error) {
-        if (!isCoordinationContractPending(error) && !isOwnedScopeLiveLease(error)) throw error;
+        if (!isCoordinationContractPending(error) && !isOwnedScopeLiveLease(error)
+            && !isEmbeddingPrivacyUnavailable(error)) throw error;
         const reason: CoordinationPrivacyBlockReason = isOwnedScopeLiveLease(error)
           ? 'owned_live_lease' : 'migration_pending';
         await client.query('ROLLBACK TO SAVEPOINT offboarding_coordination_privacy');

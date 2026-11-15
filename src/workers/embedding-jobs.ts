@@ -115,9 +115,11 @@ export async function processEmbeddingJobs(store: EmbeddingJobStore, target: Emb
     budget.consume({ candidates: data.items.length,
       hydratedBytes: data.items.reduce((sum, item) => sum + Buffer.byteLength(memoryEmbeddingText(item)), 0) });
     let providerFailure: EmbeddingAttemptFailure | undefined;
+    let providerInvoked = false;
     const wrapped: BudgetAdapter<string[], number[][]> = { ...adapter,
       serialize: adapter.serialize.bind(adapter),
       invoke: async (...args) => {
+        providerInvoked = true;
         try { return await adapter.invoke(...args); }
         catch (error) { providerFailure = classifyEmbeddingFailure(error); throw error; }
       } };
@@ -130,7 +132,7 @@ export async function processEmbeddingJobs(store: EmbeddingJobStore, target: Emb
       const failure: EmbeddingAttemptFailure = providerFailure ?? {
         code: outcome.reason === 'policy_denied' ? 'EMBEDDING_POLICY'
           : outcome.reason === 'cancelled' ? 'EMBEDDING_CANCELLED'
-          : outcome.reason === 'deadline' ? 'EMBEDDING_TIMEOUT'
+          : outcome.reason === 'deadline' ? (providerInvoked ? 'EMBEDDING_TIMEOUT' : 'EMBEDDING_BUDGET')
           : outcome.reason === 'invalid_response' ? 'EMBEDDING_INVALID_RESPONSE'
           : outcome.reason === 'provider_failed' || outcome.reason === 'stale_attempt' ? 'EMBEDDING_STORAGE'
           : outcome.reason === 'budget_exhausted' ? 'EMBEDDING_BUDGET' : 'EMBEDDING_POLICY', action: 'retry' };
