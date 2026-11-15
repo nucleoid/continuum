@@ -1179,7 +1179,7 @@ CREATE FUNCTION continuum_embedding_relation_fingerprint(relation REGCLASS) RETU
       FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped),
     'constraints',(SELECT jsonb_agg(pg_get_constraintdef(oid,TRUE) ORDER BY conname) FROM pg_constraint WHERE conrelid=c.oid),
     'indexes',(SELECT jsonb_agg(jsonb_build_array(pg_get_indexdef(indexrelid),indisvalid,indisready) ORDER BY indexrelid::regclass::text) FROM pg_index WHERE indrelid=c.oid),
-    'triggers',(SELECT jsonb_agg(pg_get_triggerdef(oid,TRUE) ORDER BY tgname) FROM pg_trigger WHERE tgrelid=c.oid AND NOT tgisinternal))::text,'UTF8')),'hex')
+    'triggers',(SELECT jsonb_agg(jsonb_build_array(pg_get_triggerdef(oid,TRUE),tgenabled) ORDER BY tgname) FROM pg_trigger WHERE tgrelid=c.oid AND NOT tgisinternal))::text,'UTF8')),'hex')
     FROM pg_class c WHERE c.oid=relation;
 $$;
 CREATE FUNCTION continuum_embedding_is_ready() RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER AS $$
