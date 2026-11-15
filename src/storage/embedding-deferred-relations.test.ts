@@ -261,3 +261,56 @@ it('does not consume a stricter SQL statement deadline as optional relation succ
     expect((await f.owner.query('SELECT failures FROM embedding_provider_control')).rows[0].failures).toBe('0');
   });
 }, 120000);
+
+
+it('retains two failed relation-read debits across audit rollback and declines a third read under the same settled provider attempt', async () => {
+  await projectFixture(async f => {
+    await publish(f, input(f, 'Retained candidate', 'C'.repeat(6000)), near());
+    const tight = { ...f.profile, maxItemHydratedBytes: 12000, limits: { ...f.profile.limits, hydratedBytes: 30000 } };
+    const admin = (await getPrincipal(f.owner, f.adminId))!;
+    await configureEmbeddingTarget(f.operator, admin, f.target, tight,
+      { seconds: 60, dispatches: 64, inputBytes: 16777216, tokens: 16777216, spendMicros: 0, rateSchedule: tight.rateSchedule }, true);
+    f.profile = tight; f.origin.profile = tight; await f.route();
+    const incoming = input(f, 'Retained incoming', 'Small source whose advisory work retries'); f.vectors.set(memoryEmbeddingText(incoming), unit());
+    const accepted = await captureMemory(f.app, f.router, f.principal, incoming);
+    await f.owner.query(`CREATE FUNCTION relation_read_debit_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      IF NEW.memory_id='${accepted.memory.id}'::uuid AND NEW.metadata->>'operation'='embedding_completed' THEN
+        RAISE EXCEPTION 'Synthetic relation debit audit failure: %',NEW.metadata->>'relationsStatus'; END IF;
+      RETURN NEW; END $$;
+      CREATE TRIGGER relation_read_debit_fault BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION relation_read_debit_fault()`);
+    const store = new SqlEmbeddingJobStore(f.worker), apply = store.apply.bind(store);
+    let assertionFailure: unknown; let originalWorkflow: string | undefined; const debits: number[] = [];
+    vi.spyOn(store, 'apply').mockImplementation(async (claim, vectors) => {
+      try {
+        originalWorkflow = claim.workflowId;
+        const inspect = async () => (await f.owner.query('SELECT id,owner,generation,deadline_at,profile,used FROM pipeline_budget_workflows WHERE id=$1', [claim.workflowId])).rows[0];
+        const before = await inspect();
+        const identity = (value: typeof before) => ({ id: value.id, owner: value.owner, generation: value.generation, deadline: value.deadline_at, profile: value.profile });
+        for (let i = 0; i < 2; i++) {
+          await expect(apply(claim, vectors)).rejects.toThrow('Synthetic relation debit audit failure: computed');
+          const retained = await inspect(); debits.push(retained.used.hydratedBytes);
+          expect(identity(retained)).toEqual(identity(before));
+          expect(retained.used.hydratedBytes).toBeGreaterThan((i ? debits[i - 1] : before.used.hydratedBytes) + 14000);
+          expect(retained.used.hydratedBytes).toBeLessThanOrEqual(tight.limits.hydratedBytes);
+          expect((await f.owner.query('SELECT 1 FROM memory_embeddings WHERE memory_id=$1', [accepted.memory.id])).rows).toEqual([]);
+          expect((await f.owner.query('SELECT 1 FROM embedding_completions WHERE job_id=$1', [claim.jobs[0].id])).rows).toEqual([]);
+        }
+        await f.owner.query('DROP TRIGGER relation_read_debit_fault ON audit_log');
+        return await apply(claim, vectors); // A fresh declined prepare must not resurrect the earlier funded cap.
+      } catch (error) { assertionFailure = error; throw error; }
+    });
+    try {
+      const result = await run(f, store);
+      if (assertionFailure) throw assertionFailure;
+      expect(result).toBe('processed'); expect(debits).toHaveLength(2);
+      expect(await relations(f, accepted.memory.id)).toEqual([]);
+      expect(await readEmbeddingStatus(f.app, f.actorId, accepted.memory.id)).toMatchObject({ embedded: true, embeddingStatus: 'ready' });
+      const retained = (await f.owner.query('SELECT used FROM pipeline_budget_workflows WHERE id=$1', [originalWorkflow])).rows[0].used;
+      expect(retained.hydratedBytes).toBe(debits[1]); expect(retained).toMatchObject({ calls: 1, retries: 0 });
+      expect((await f.owner.query('SELECT count(*)::int AS n FROM pipeline_budget_attempts WHERE workflow_id=$1', [originalWorkflow])).rows[0].n).toBe(1);
+      expect((await f.owner.query(`SELECT metadata->>'relationsStatus' AS status FROM audit_log
+        WHERE memory_id=$1 AND metadata->>'operation'='embedding_completed'`, [accepted.memory.id])).rows).toEqual([{ status: 'budget' }]);
+      expect(f.adapter.invoke).toHaveBeenCalledTimes(2);
+    } finally { await f.owner.query('DROP TRIGGER IF EXISTS relation_read_debit_fault ON audit_log'); }
+  });
+}, 120000);
