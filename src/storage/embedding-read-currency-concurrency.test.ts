@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import pg from 'pg';
 import { expect, it } from 'vitest';
 import { embeddingQueueFixture } from '../embeddings/test-helpers.js';
 import { captureMemory } from '../services/capture.js';
@@ -17,8 +18,10 @@ it.each(['body', 'related-only'] as const)('does not let a read-only vector tran
       f.provider, f.profile, randomUUID())).toBe('processed');
     const before = (await f.owner.query('SELECT generation FROM embedding_sources WHERE memory_id=$1', [captured.memory.id])).rows[0];
     const reader = await f.app.connect();
-    const writer = await f.app.connect();
+    const writer = new pg.Client({ connectionString: f.app.options.connectionString,
+      options: f.app.options.options, connectionTimeoutMillis: 5000 });
     try {
+      await writer.connect();
       await reader.query('BEGIN');
       expect(await vectorSearchMemoryIds(reader, Array(768).fill(0.125), [f.scopeId], f.provider, 1))
         .toEqual([{ id: captured.memory.id, distance: 0 }]);
@@ -36,10 +39,10 @@ it.each(['body', 'related-only'] as const)('does not let a read-only vector tran
       expect(writeError).toBeUndefined();
       const after = (await f.owner.query('SELECT generation FROM embedding_sources WHERE memory_id=$1', [captured.memory.id])).rows[0];
       expect(after.generation === before.generation).toBe(kind === 'related-only');
-      expect((await f.app.query('SELECT continuum_embedding_vector_is_current($1,$2,768) AS current',
+      expect((await writer.query('SELECT continuum_embedding_vector_is_current($1,$2,768) AS current',
         [captured.memory.id, f.provider.id])).rows[0].current).toBe(kind === 'related-only');
     } finally {
-      await writer.query('ROLLBACK'); writer.release();
+      await writer.query('ROLLBACK'); await writer.end();
       await reader.query('ROLLBACK'); reader.release();
     }
   });
