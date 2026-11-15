@@ -2,7 +2,7 @@
 SET LOCAL lock_timeout='5s';
 SET LOCAL statement_timeout='60s';
 DO $$ BEGIN
-  IF continuum_connector_is_ready() IS NOT TRUE OR EXISTS(
+  IF EXISTS(
     SELECT 1 FROM (SELECT * FROM evidence_contract_functions UNION ALL SELECT * FROM extraction_contract_functions
       UNION ALL SELECT * FROM memory_event_contract_functions UNION ALL SELECT * FROM connector_contract_functions) c
     LEFT JOIN pg_proc f ON f.oid=to_regprocedure(c.signature)
@@ -12,6 +12,8 @@ DO $$ BEGIN
       OR NOT COALESCE(f.proconfig @> ARRAY[format('search_path=pg_catalog, %I, pg_temp',current_schema())],FALSE)
       OR EXISTS(SELECT 1 FROM aclexplode(COALESCE(f.proacl,acldefault('f',f.proowner))) a WHERE a.grantee=0 AND a.privilege_type='EXECUTE'))
   THEN RAISE EXCEPTION 'brief predecessor integrity unavailable'; END IF;
+  -- Never execute a predecessor readiness body before verifying its identity.
+  IF continuum_connector_is_ready() IS NOT TRUE THEN RAISE EXCEPTION 'brief predecessor integrity unavailable'; END IF;
 END $$;
 CREATE TEMP TABLE continuum_brief_upgrade_roles(role_oid OID PRIMARY KEY,role_name NAME,operator BOOLEAN) ON COMMIT DROP;
 DO $$ DECLARE r RECORD; BEGIN
@@ -470,7 +472,7 @@ END $$;
 CREATE FUNCTION continuum_brief_apply(run_id UUID,worker UUID,epoch BIGINT,output JSONB) RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER AS $$
 #variable_conflict use_column
 DECLARE j brief_runs%ROWTYPE; d brief_definitions%ROWTYPE; b brief_worker_bindings%ROWTYPE; claim JSONB; citation JSONB;
-  version UUID:=gen_random_uuid(); ev UUID; parent_ids UUID[]; parents JSONB; claim_key TEXT; bytes BIGINT:=0;
+  version UUID:=gen_random_uuid(); ev UUID; parent_ids UUID[]; cited_ids UUID[]; parents JSONB; claim_key TEXT; bytes BIGINT:=0;
 BEGIN
   SELECT * INTO STRICT j FROM brief_runs WHERE id=run_id FOR UPDATE;
   -- Ambiguous commit replay returns the same logical result, never reapplies.
@@ -504,25 +506,31 @@ BEGIN
       OR (claim->>'section'='implementation' AND (claim->>'label'<>'inference' OR claim->>'unknown'<>'true'))
       OR jsonb_typeof(claim->'citations') IS DISTINCT FROM 'array' OR jsonb_array_length(claim->'citations') NOT BETWEEN 1 AND 8 THEN
       RAISE check_violation USING MESSAGE='Brief claim unavailable'; END IF;
-    parent_ids:=ARRAY[d.anchor_version];
+    -- Citation correctness is not an information-flow proof. Every input that
+    -- reached synthesis restricts every generated block, including uncited text.
+    SELECT array_append(COALESCE(array_agg(version_id ORDER BY version_id),'{}'),d.anchor_version) INTO parent_ids FROM brief_run_inputs WHERE brief_run_inputs.run_id=j.id;
+    cited_ids:='{}';
     FOR citation IN SELECT value FROM jsonb_array_elements(claim->'citations') LOOP
       IF jsonb_typeof(citation) IS DISTINCT FROM 'object' OR NOT(citation ?& ARRAY['version','quote']) OR (SELECT count(*) FROM jsonb_object_keys(citation))<>2
         OR jsonb_typeof(citation->'quote') IS DISTINCT FROM 'string' OR length(citation->>'quote') NOT BETWEEN 1 AND 1000
         OR NOT EXISTS(SELECT 1 FROM brief_run_inputs i JOIN evidence_payloads p ON p.version_id=i.version_id WHERE i.run_id=j.id
           AND i.version_id=(citation->>'version')::uuid AND strpos(p.payload,citation->>'quote')>0)
-        OR (citation->>'version')::uuid=ANY(parent_ids) THEN RAISE check_violation USING MESSAGE='Brief citation unavailable'; END IF;
-      parent_ids:=array_append(parent_ids,(citation->>'version')::uuid);
+        OR (citation->>'version')::uuid=ANY(cited_ids) THEN RAISE check_violation USING MESSAGE='Brief citation unavailable'; END IF;
+      cited_ids:=array_append(cited_ids,(citation->>'version')::uuid);
     END LOOP;
-    IF claim->>'contradiction'='true' AND cardinality(parent_ids)<3 THEN RAISE check_violation USING MESSAGE='Brief contradiction unavailable'; END IF;
+    IF claim->>'contradiction'='true' AND cardinality(cited_ids)<2 THEN RAISE check_violation USING MESSAGE='Brief contradiction unavailable'; END IF;
     claim_key:=encode(sha256(convert_to(claim::text,'UTF8')),'hex');
     SELECT bb.evidence_version INTO ev FROM brief_blocks bb JOIN evidence_payloads p ON p.version_id=bb.evidence_version
       WHERE bb.version_id=d.head AND bb.block_id=claim_key AND p.payload=claim::text
-        AND continuum_brief_audience(b.principal_id,bb.evidence_version,d.scope_id,NULL);
+        AND continuum_brief_audience(b.principal_id,bb.evidence_version,d.scope_id,NULL)
+        AND NOT EXISTS((SELECT version_id FROM brief_run_inputs WHERE run_id=j.id EXCEPT SELECT version_id FROM brief_run_inputs WHERE run_id=(SELECT run_id FROM brief_versions WHERE id=d.head))
+          UNION ALL (SELECT version_id FROM brief_run_inputs WHERE run_id=(SELECT run_id FROM brief_versions WHERE id=d.head) EXCEPT SELECT version_id FROM brief_run_inputs WHERE run_id=j.id));
     IF ev IS NULL THEN
       SELECT jsonb_agg(jsonb_build_object('versionId',id,'kind','derivation') ORDER BY id) INTO parents FROM unnest(parent_ids) id;
       ev:=continuum_evidence_register(b.principal_id,gen_random_uuid(),NULL,d.scope_id,'brief-section-version',parents,
         jsonb_build_object('transform',j.descriptor->>'version','model',j.descriptor->>'model','prompt','brief-reference-v1','schema','project-brief-v1'),claim::text);
-      bytes:=bytes+octet_length(claim::text)+4096;
+      SELECT bytes+octet_length(claim::text)+octet_length(provenance::text)+root_count*256+parent_count*128+4096 INTO bytes
+        FROM evidence_versions WHERE id=ev;
     END IF;
     INSERT INTO brief_blocks VALUES(version,claim_key,claim->>'section',ev);
   END LOOP;
@@ -695,16 +703,16 @@ CREATE FUNCTION continuum_offboarding_lifecycle_state_is_erased(target_run UUID)
 $$;
 CREATE TABLE brief_contract_functions(signature TEXT PRIMARY KEY,body_hash TEXT NOT NULL,definer BOOLEAN NOT NULL,volatility "char" NOT NULL);
 REVOKE ALL ON brief_contract_functions FROM PUBLIC;
-CREATE FUNCTION continuum_brief_is_ready() RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER AS $$
-  SELECT continuum_connector_is_ready() AND EXISTS(SELECT 1 FROM brief_contract_functions)
-    AND NOT EXISTS(SELECT 1 FROM (SELECT * FROM brief_contract_functions UNION ALL SELECT * FROM evidence_contract_functions
+CREATE FUNCTION continuum_brief_is_ready() RETURNS BOOLEAN LANGUAGE plpgsql STABLE SECURITY DEFINER AS $$
+BEGIN
+  IF NOT EXISTS(SELECT 1 FROM brief_contract_functions) OR EXISTS(SELECT 1 FROM (SELECT * FROM brief_contract_functions UNION ALL SELECT * FROM evidence_contract_functions
       UNION ALL SELECT * FROM extraction_contract_functions UNION ALL SELECT * FROM memory_event_contract_functions
       UNION ALL SELECT * FROM connector_contract_functions) c LEFT JOIN pg_proc f ON f.oid=to_regprocedure(c.signature)
       WHERE f.oid IS NULL OR encode(sha256(convert_to(f.prosrc,'UTF8')),'hex')<>c.body_hash OR f.prosecdef<>c.definer OR f.provolatile<>c.volatility
         OR f.proowner<>(SELECT relowner FROM pg_class WHERE oid='memories'::regclass)
         OR NOT COALESCE(f.proconfig @> ARRAY[format('search_path=pg_catalog, %I, pg_temp',(SELECT n.nspname FROM pg_namespace n JOIN pg_class m ON m.relnamespace=n.oid WHERE m.oid='memories'::regclass))],FALSE)
-        OR EXISTS(SELECT 1 FROM aclexplode(COALESCE(f.proacl,acldefault('f',f.proowner))) a WHERE a.grantee=0 AND a.privilege_type='EXECUTE'))
-    AND NOT EXISTS(SELECT 1 FROM (VALUES
+        OR EXISTS(SELECT 1 FROM aclexplode(COALESCE(f.proacl,acldefault('f',f.proowner))) a WHERE a.grantee=0 AND a.privilege_type='EXECUTE')) THEN RETURN FALSE; END IF;
+  RETURN continuum_connector_is_ready() AND NOT EXISTS(SELECT 1 FROM (VALUES
       ('memories'::regclass,'brief_memory_changed','continuum_brief_source_changed()'::regprocedure,29),
       ('evidence_roots'::regclass,'brief_root_changed','continuum_brief_source_changed()'::regprocedure,21),
       ('evidence_payloads'::regclass,'brief_payload_erased','continuum_brief_payload_erased()'::regprocedure,9),
@@ -715,6 +723,7 @@ CREATE FUNCTION continuum_brief_is_ready() RETURNS BOOLEAN LANGUAGE sql STABLE S
       LEFT JOIN pg_trigger t ON t.tgrelid=expected.relation AND t.tgname=expected.name
       WHERE t.oid IS NULL OR t.tgenabled<>'O' OR t.tgisinternal OR t.tgfoid<>expected.function_id OR t.tgtype<>expected.type
         OR t.tgnargs<>0 OR t.tgqual IS NOT NULL OR t.tgattr::text<>'');
+END;
 $$;
 DO $$
 DECLARE schema_name TEXT:=current_schema(); f RECORD; signature TEXT; definition TEXT; revised TEXT; r RECORD;

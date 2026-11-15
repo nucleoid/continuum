@@ -50,6 +50,10 @@ fields, duplicate claims, unsupported labels and conflicts with fewer than two
 cited versions. These checks establish citation mechanics, not a natural-language
 truth judge. A configured model still requires separately qualified semantic
 alignment, labels, unknown and contradiction false-positive measurements.
+Every input disclosed to a synthesis call restricts every generated block,
+including inputs omitted from citations. This conservative dependency closure
+can dirty the whole brief when one input changes. Reuse also requires identical
+disclosed input versions; an omitted citation cannot launder hidden prose.
 `renderBrief` escapes all contributed text and locators inside reference-data
 boundaries. Source text cannot select tools, identities, credentials or policies.
 
