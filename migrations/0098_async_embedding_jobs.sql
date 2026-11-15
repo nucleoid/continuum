@@ -945,7 +945,7 @@ BEGIN
       SELECT COALESCE(jsonb_agg(jsonb_build_object(''id'',id,''bytes'',bytes,''distance'',distance) ORDER BY distance,id),''[]''::jsonb) FROM ranked',
       provider_namespace,provider_namespace,provider_namespace,provider_namespace,provider_namespace,provider_namespace)
       INTO candidates USING vector_text,c.scope_id,target->'space'->>'provider',target->>'spaceFingerprint',cohort,threshold_value;
-  EXCEPTION WHEN query_canceled OR lock_not_available OR deadlock_detected THEN RETURN 'query_unavailable';
+  EXCEPTION WHEN lock_not_available OR deadlock_detected THEN RETURN 'query_unavailable';
   END;
   candidate_count:=jsonb_array_length(candidates);
   IF candidate_count=0 THEN RETURN 'none'; END IF;
@@ -986,7 +986,7 @@ BEGIN
         'relation',relation_value,'provider',target->'space'->>'provider','threshold',threshold_value,'detectedAt',clock_timestamp()));
     END LOOP;
   EXCEPTION WHEN undefined_function OR feature_not_supported OR invalid_parameter_value THEN RETURN 'native_unavailable';
-    WHEN query_canceled OR lock_not_available OR deadlock_detected THEN RETURN 'query_unavailable';
+    WHEN lock_not_available OR deadlock_detected THEN RETURN 'query_unavailable';
   END;
   IF relations='[]'::jsonb THEN RETURN 'none'; END IF;
   -- Preserve unrelated current metadata, existing advisory entries and source

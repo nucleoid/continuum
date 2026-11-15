@@ -180,7 +180,9 @@ equivalence is not promised. Missing native capability, remaining budget, curren
 candidates or bounded SQL availability may decline this optional probe while the
 vector completes and current relation metadata survives. The required completion
 audit records bounded `relationsStatus` reasons, without candidate IDs or bodies.
-An audit failure rolls vector, relations, accounting and ready state back together.
+An audit failure rolls vector, relations and ready state back together. The outer
+SQL statement deadline is never consumed as an optional decline: it aborts apply
+and leaves truthful retry state rather than publishing a late vector.
 
 ## Outages, ambiguity and privacy
 

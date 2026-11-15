@@ -4,9 +4,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { EmbeddingTimeoutError, OllamaEmbeddingProvider } from './ollama.js';
 
 function response(body: unknown, ok = true, status = 200): Response {
-  return {
-    ok, status, statusText: ok ? 'OK' : 'ERR', json: async () => body,
-  } as unknown as Response;
+  return new Response(JSON.stringify(body), {
+    status, statusText: ok ? 'OK' : 'ERR', headers: { 'Content-Type': 'application/json' },
+  });
 }
 
 describe('OllamaEmbeddingProvider', () => {

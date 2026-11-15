@@ -62,7 +62,7 @@ describe('hosted embedding providers', () => {
   ])('classifies HTTP %i as provider-wide %s', async (status, code) => {
     const provider = new OpenAIEmbeddingProvider({
       apiKey: 'secret', model: 'model', dim: 2,
-      fetchImpl: vi.fn(async () => ({ ok: false, status }) as Response),
+      fetchImpl: vi.fn(async () => new Response(null, { status })),
     });
     await expect(provider.embed(['one'])).rejects.toMatchObject({
       code, failureScope: 'provider',
