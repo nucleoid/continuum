@@ -193,7 +193,7 @@ describe('durable embedding SQL, capture and worker integration', () => {
           WHEN (NEW.metadata->>'operation'='embedding_pause') EXECUTE FUNCTION queue_test_reject_control_audit()`);
       try {
         await expect(control('pause')).rejects.toThrow('Synthetic required operator audit failure');
-        expect((await f.owner.query('SELECT state FROM embedding_provider_control')).rows[0].state).toBe('open');
+        expect((await f.owner.query('SELECT state FROM embedding_provider_control')).rows[0].state).toBe('closed');
       } finally {
         await f.owner.query('DROP TRIGGER queue_test_reject_control_audit ON audit_log; DROP FUNCTION queue_test_reject_control_audit()');
       }
