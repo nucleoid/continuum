@@ -1,7 +1,7 @@
 # Bounded relationship experiment
 
 Decision: **inconclusive, no graph runtime authorized**. The frozen experiment
-completed 432 observations across 24 independent holdout units at source commit
+completed 360 measured observations plus 72 warmups across 24 independent holdout units at source commit
 `e830a37ff849ffabbc0844f47c102184cea4c3a2`. All 15 focused Linux tests passed.
 The synthetic gain does not establish eligible model quality, end-to-end latency
 or normalized storage benefit. Close this evaluation without production graph
@@ -14,6 +14,9 @@ matched extra-candidate controls. The paired 95% bootstrap interval for the
 absolute nDCG difference was [0.02009, 0.10394]. There were no observed fixture
 security failures, critical coverage regressions, unmatched controls or fallbacks.
 The run made 864 adapter calls plus 93 setup calls, with zero paid spend.
+The matched control was rank-identical to seed-only in every query/repetition.
+Under this unqualified reranker it could not separate candidate-count effects
+from link semantics; the comparisons are diagnostic rather than that proof.
 
 Both comparisons remain `insufficient_evidence`: the SHA/overlap baseline is
 unqualified, audited end-to-end service timing was not measured, and total
@@ -98,6 +101,7 @@ PostgreSQL 16/pgvector maintenance connection:
 ```powershell
 $env:NODE_OPTIONS = '--max-old-space-size=384'
 $env:CONTINUUM_EVAL_SOURCE_SHA = git rev-parse HEAD
+$env:CONTINUUM_RELATIONSHIP_EVAL_REPORT = '.fire-off/relationship-eval.json'
 # Set CONTINUUM_TEST_DATABASE_URL through the existing private test configuration.
 npx --no-install vitest run src/evaluation/relationship-experiment.test.ts --maxWorkers=1
 ```
@@ -107,17 +111,21 @@ requires the existing CREATE DATABASE/ROLE and migration-owner test privileges;
 runtime candidates use its actual APP LOGIN. It creates and cleans only its own
 random database/roles. The frozen maximum is 1,024 total local adapter calls,
 including setup and warmups, with 120 seconds each for setup and measured work.
-The runner writes a new private `.fire-off/relationship-eval.json` exclusively;
-preserve a previous report before another run. No raw bodies or credentials are
-included in the report. An incomplete run fails, never silently skips.
+An explicitly requested `CONTINUUM_RELATIONSHIP_EVAL_REPORT` is written
+exclusively; select a new path or preserve a previous report before requesting
+the same path again. Default `npm test` still executes the complete experiment
+and assertions, without persisting a successful experiment report. No raw bodies
+or credentials are included in the report. An incomplete run fails, never skips.
 An ordinary setup, measurement or delivery-assertion failure preserves completed
 observations and the active attempt's known resource usage before propagating the
-failure. Its report marks execution incomplete and cannot enable graph runtime.
+failure. Without an explicit report path, failure evidence is retained in a new
+private `.fire-off/relationship-failure-*/report.json` directory. Its report marks
+execution incomplete and cannot enable graph runtime.
 Forced process termination can prevent final report creation; retain the process
 log as incomplete evidence. A repeated output path fails without replacing the
 earlier report.
 
-One warmup and five observations run in seeded rotating interleaved mode order.
+One warmup and five measured repetitions run in seeded rotating interleaved mode order.
 Reports retain exact input hashes, source/checkpoint cleanliness, execution order,
 per-query scores, coverage, abstention, fallbacks, resource charges and topology
 diagnostics. Candidate lookup plus fixture prototype timing is **not** an audited

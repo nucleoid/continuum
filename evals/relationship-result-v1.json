@@ -46,6 +46,8 @@
   "execution": {
     "complete": true,
     "observations": 432,
+    "measuredObservations": 360,
+    "warmupObservations": 72,
     "independentUnits": 24,
     "warmupsPerQueryMode": 1,
     "measuredRepetitionsPerQueryMode": 5,
@@ -55,6 +57,7 @@
     "fallbacks": 0,
     "cancelled": 0
   },
+  "controlLimitation": "The matched extra-candidate control was rank-identical to seed-only for every query/repetition under the unqualified reranker, so it did not isolate candidate-count effects from link semantics.",
   "comparisons": {
     "typedVsSeed": {
       "status": "insufficient_evidence",
