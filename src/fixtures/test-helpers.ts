@@ -114,8 +114,10 @@ export default async function setup(project: TestProject): Promise<(() => Promis
       (SELECT oid FROM pg_roles WHERE rolname=session_user) AS owner`)).rows[0];
     await owner.end(); owner = undefined;
     await pool.query(`ALTER DATABASE ${quote(template.seed.name)} ALLOW_CONNECTIONS false`);
-    if ((await pool.query('SELECT 1 FROM pg_stat_activity WHERE datname=$1', [template.seed.name])).rowCount) {
-      throw new Error('Consumer template sockets did not drain');
+    const drainDeadline = Date.now() + 5000;
+    while ((await pool.query('SELECT 1 FROM pg_stat_activity WHERE datname=$1', [template.seed.name])).rowCount) {
+      if (Date.now() >= drainDeadline) throw new Error('Consumer template sockets did not drain');
+      await new Promise(resolve => setTimeout(resolve, 20));
     }
     await writeFile(join(directory, 'manifest.json'), JSON.stringify({ ...template, versions,
       provenance: 'Migrations executed in seed; consumers use physical clones, never relabelled migration execution' }, null, 2) + '\n');
