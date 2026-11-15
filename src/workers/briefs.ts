@@ -87,7 +87,12 @@ export class BriefWorker {
     if (this.stopped || this.polling) return;
     this.polling = (async () => { for (const id of this.registry.ids()) {
       if (this.stopped) break;
-      await processBrief(this.pool,this.owner,this.registry.get(id)!,{ signal: this.controller.signal,onWork: this.track });
+      // Drain finite inventory pages now; the next configured poll may be later
+      // than this run's original deadline. Never extend its allowance or clock.
+      for (let page=0;page<9 && !this.stopped;page++) {
+        const outcome=await processBrief(this.pool,this.owner,this.registry.get(id)!,{ signal: this.controller.signal,onWork: this.track });
+        if (outcome!=='progress') break;
+      }
     } })();
     try { await this.polling; } finally { this.polling=undefined; }
   }

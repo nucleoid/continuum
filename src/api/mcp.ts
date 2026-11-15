@@ -817,14 +817,16 @@ export function buildMcpServer(deps: McpDeps): McpServer {
 
   // Projection is validated and charged inside the service transaction, before
   // required audits/publication commit, including remote double escaping.
-  const briefWire = (value: Record<string, unknown>, budget: Budget) => {
-    budget.serializeOutput(jsonResult(mcpBrief(value)));
+  const briefWire = (requestId: string | number) => (value: Record<string, unknown>, budget: Budget) => {
+    const frame = { jsonrpc: '2.0', id: requestId, result: jsonResult(mcpBrief(value)) };
+    budget.serializeOutput(frame);
+    if (deps.readBudgetBytes !== undefined) boundedJsonText(frame, deps.readBudgetBytes, false);
   };
   server.registerTool('continuum.brief', {
     description: 'Read currently authorized project brief blocks. Implementation proof may be unknown.',
     inputSchema: { project: z.string().min(1).max(500) },
   }, async (args, extra) => {
-    try { return jsonResult(mcpBrief(await briefForPrincipal(pool,principal,args.project,{ signal: extra.signal,validateResult: briefWire }))); }
+    try { return jsonResult(mcpBrief(await briefForPrincipal(pool,principal,args.project,{ signal: extra.signal,validateResult: briefWire(extra.requestId) }))); }
     catch(error) { return errorResult(error); }
   });
   server.registerTool('continuum.refresh_brief', {
@@ -832,7 +834,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     inputSchema: { project: z.string().min(1).max(500),mode: z.enum(['full','delta']),dry_run: z.boolean().default(false),idempotency_key: z.string().min(1).max(128) },
   }, async (args, extra) => {
     try { return jsonResult(mcpBrief(await refreshBrief(pool,principal,{ project: args.project,mode: args.mode,dryRun: args.dry_run,idempotencyKey: args.idempotency_key },
-      { signal: extra.signal,validateResult: briefWire }))); }
+      { signal: extra.signal,validateResult: briefWire(extra.requestId) }))); }
     catch(error) { return errorResult(error); }
   });
   server.registerTool('continuum.brief_history', {
@@ -840,14 +842,14 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     inputSchema: { brief_id: z.string().uuid(),cursor: z.string().uuid().optional(),limit: z.number().int().min(1).max(10).default(3) },
   }, async (args, extra) => {
     try { return jsonResult(mcpBrief(await briefHistoryForPrincipal(pool,principal,args.brief_id,{ cursor: args.cursor,limit: args.limit },
-      { signal: extra.signal,validateResult: briefWire }))); }
+      { signal: extra.signal,validateResult: briefWire(extra.requestId) }))); }
     catch(error) { return errorResult(error); }
   });
   server.registerTool('continuum.brief_configure', {
     description: 'Project administrator opt-in to an operator-installed synthesis profile. Default disabled.',
     inputSchema: { scope_id: z.string().uuid(),profile: z.string().max(64),enabled: z.boolean() },
   }, async (args, extra) => {
-    try { return jsonResult(mcpBrief(await configureBrief(pool,principal,args.scope_id,args.profile,args.enabled,{ signal: extra.signal,validateResult: briefWire }))); }
+    try { return jsonResult(mcpBrief(await configureBrief(pool,principal,args.scope_id,args.profile,args.enabled,{ signal: extra.signal,validateResult: briefWire(extra.requestId) }))); }
     catch(error) { return errorResult(error); }
   });
 

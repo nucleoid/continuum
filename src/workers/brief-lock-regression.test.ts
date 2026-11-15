@@ -7,7 +7,8 @@ import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import { createMemory } from '../storage/memories.js';
 import { getPrincipal } from '../storage/principals.js';
-import { refreshBrief } from '../services/briefs.js';
+import { briefForPrincipal, refreshBrief } from '../services/briefs.js';
+import { processBrief } from './briefs.js';
 
 const key = () => Math.floor(Math.random() * 1_000_000_000) + 1;
 type Result = { result?: unknown; code?: string; message?: string };
@@ -149,13 +150,17 @@ it('an org APP writer and a source-adopting claim do not invert memory and epoch
     }
     expect(results[0], 'ordinary APP mutation must commit').toEqual({ result: source.id });
     expect(results[1]?.code, 'claim must not deadlock or time out').toBeUndefined();
-    // An optimistic frontier repair may truthfully defer/abstain when the writer
-    // changes the frontier. It must never publish the old inventory as complete.
-    expect(['claimed', 'progress', 'unavailable']).toContain((results[1]?.result as { outcome?: string })?.outcome);
+    expect(results[1]?.result).toMatchObject({ outcome: 'progress' });
     expect((await f.app.query('SELECT body FROM memories WHERE id=$1', [source.id])).rows[0].body).toBe('AFTER-WRITE');
-    if ((results[1]?.result as { outcome?: string })?.outcome === 'claimed') {
-      expect((await f.owner.query(`SELECT count(*)::int AS n FROM brief_run_inputs
-        WHERE run_id=$1 AND root_id=$2`, [queued.runId, source.id])).rows[0].n).toBe(1);
+    const identity = async () => (await f.owner.query(`SELECT state,inventory_restarts,workflow_id,budget_owner,deadline_at
+      FROM brief_runs WHERE id=$1`, [queued.runId])).rows[0];
+    const before = await identity();
+    expect(before).toMatchObject({ state: 'queued', inventory_restarts: 1 });
+    expect(await processBrief(f.worker, randomUUID(), f.profile)).toBe('processed');
+    const after = await identity();
+    for (const field of ['workflow_id', 'budget_owner', 'deadline_at']) {
+      expect(after[field]).toEqual(before[field]);
     }
+    expect(JSON.stringify((await briefForPrincipal(f.app, actor, f.projectName)).blocks)).toContain('AFTER-WRITE');
   });
 }, 120_000);

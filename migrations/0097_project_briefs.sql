@@ -245,6 +245,17 @@ BEGIN
   PERFORM scope_id FROM brief_scope_epochs WHERE scope_id IN(source_scope,target_scope) ORDER BY scope_id FOR UPDATE;
 END $$;
 
+-- Call only after the batch owns its selected memory rows. Derive scope locks
+-- from those bounded identities before any per-row trigger advances an epoch.
+CREATE FUNCTION continuum_brief_lock_memory_epochs(memory_ids UUID[]) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN
+  IF memory_ids IS NULL OR cardinality(memory_ids)>1000 OR array_position(memory_ids,NULL) IS NOT NULL THEN
+    RAISE check_violation USING MESSAGE='Brief memory batch bounds unavailable';
+  END IF;
+  PERFORM scope_id FROM brief_scope_epochs WHERE scope_id IN(SELECT scope_id FROM memories WHERE id=ANY(memory_ids))
+    ORDER BY scope_id FOR UPDATE;
+END $$;
+
 -- Prelock one complete read operation before visiting individual blocks or
 -- historical versions. This grants no authority and reads no managed payload.
 CREATE FUNCTION continuum_brief_lock_views(target_definition UUID,view_ids UUID[]) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER AS $$
@@ -280,8 +291,14 @@ DECLARE d brief_definitions%ROWTYPE; p brief_profiles%ROWTYPE; r brief_runs%ROWT
 BEGIN
   SELECT * INTO STRICT d FROM brief_definitions WHERE id=definition FOR SHARE;
   SELECT * INTO STRICT p FROM brief_profiles WHERE id=d.profile FOR SHARE;
-  IF NOT d.enabled OR NOT p.enabled OR key IS NULL OR length(key)>128 OR refresh_mode IS NULL OR refresh_mode NOT IN ('full','delta') OR dry IS NULL THEN
+  IF key IS NULL OR length(key)>128 OR refresh_mode IS NULL OR refresh_mode NOT IN ('full','delta') OR dry IS NULL THEN
     RAISE check_violation USING MESSAGE='Brief refresh unavailable'; END IF;
+  SELECT * INTO r FROM brief_runs WHERE definition_id=d.id AND request_key=key;
+  IF r.id IS NOT NULL THEN
+    IF (r.mode,r.dry_run) IS DISTINCT FROM (refresh_mode,dry) THEN RAISE check_violation USING MESSAGE='Brief idempotency conflict'; END IF;
+    RETURN r;
+  END IF;
+  IF NOT d.enabled OR NOT p.enabled THEN RAISE check_violation USING MESSAGE='Brief refresh unavailable'; END IF;
   INSERT INTO brief_runs(definition_id,request_key,mode,dry_run,automatic,config_generation,profile_generation,descriptor,expected_head)
     VALUES(d.id,key,refresh_mode,dry,automatic_run,d.generation,p.generation,p.descriptor,d.head) ON CONFLICT(definition_id,request_key) DO NOTHING;
   SELECT * INTO STRICT r FROM brief_runs WHERE definition_id=d.id AND request_key=key;
@@ -390,7 +407,7 @@ BEGIN
     OR d.head IS DISTINCT FROM j.expected_head OR NOT EXISTS(SELECT 1 FROM brief_profiles WHERE id=d.profile AND enabled
       AND generation=j.profile_generation AND descriptor=j.descriptor)
     OR EXISTS(SELECT 1 FROM unnest(ids) v WHERE NOT continuum_brief_audience(b.principal_id,v,d.scope_id,CASE WHEN disclosure THEN j.descriptor->>'locality' END))
-    OR (j.observed IS NOT NULL AND j.observed IS DISTINCT FROM continuum_brief_frontier(d.scope_id))
+    OR (NOT j.inventory_done AND j.observed IS NOT NULL AND j.observed IS DISTINCT FROM continuum_brief_frontier(d.scope_id))
     OR NOT EXISTS(SELECT 1 FROM pipeline_budget_workflows WHERE id=j.workflow_id AND owner=j.budget_owner AND generation=j.budget_generation
       AND NOT cancelled AND deadline_at=j.deadline_at AND deadline_at>clock_timestamp()) THEN RAISE check_violation USING MESSAGE='Brief work unavailable'; END IF;
   RETURN j;
@@ -543,7 +560,7 @@ BEGIN
       -- page. No restart, backoff or later claim refunds these original totals.
       metadata_bytes:=admitted*256+4096+octet_length(j.descriptor::text);
       -- Source payloads are managed evidence, not copied queue text. Charge
-      -- newly admitted manifest payload allowance on each committed page too.
+      -- the full retained manifest payload allowance again on each page too.
       SELECT COALESCE(sum(i.bytes),0) INTO added_bytes FROM brief_run_inputs i WHERE i.run_id=j.id;
       PERFORM continuum_brief_charge(j.workflow_id,jsonb_build_object('candidates',probes+admitted,'storageBytes',metadata_bytes+added_bytes));
       -- Sample time before the fresh frontier snapshot. A later commit belongs
@@ -726,6 +743,8 @@ BEGIN
     RAISE check_violation USING MESSAGE='Brief version bounds unavailable'; END IF;
   PERFORM continuum_brief_charge(j.workflow_id,jsonb_build_object('artifactBytes',bytes,'storageBytes',bytes+32768));
   PERFORM continuum_brief_gate(run_id,worker,epoch,FALSE);
+  -- Reused and new blocks must fit the same guarded view before any head move.
+  PERFORM continuum_brief_view(b.principal_id,version);
   IF NOT j.dry_run THEN UPDATE brief_definitions SET head=version,observed_frontier=j.observed WHERE id=d.id AND head IS NOT DISTINCT FROM j.expected_head; END IF;
   INSERT INTO audit_log(principal_id,action,scope_id,metadata) VALUES(b.principal_id,'write',d.scope_id,
     jsonb_build_object('operation','brief_version_applied','dry_run',j.dry_run));
@@ -946,7 +965,7 @@ DO $$
 DECLARE schema_name TEXT:=current_schema(); f RECORD; signature TEXT; definition TEXT; revised TEXT; r RECORD;
   app_signatures TEXT[]:=ARRAY['continuum_brief_configure(uuid,uuid,text,boolean)','continuum_brief_refresh(uuid,text,text,boolean,text)',
     'continuum_brief_read(uuid,text)','continuum_brief_history(uuid,uuid,uuid,integer)','continuum_brief_result(uuid,uuid)','continuum_brief_is_ready()',
-    'continuum_brief_delivery(uuid,uuid,text[])','continuum_brief_promotion_lock(uuid,uuid,uuid)'];
+    'continuum_brief_delivery(uuid,uuid,text[])','continuum_brief_promotion_lock(uuid,uuid,uuid)','continuum_brief_lock_memory_epochs(uuid[])'];
   op_signatures TEXT[]:=ARRAY['continuum_operator_install_brief_profile(uuid,jsonb,boolean)',
     'continuum_operator_bind_brief_worker(uuid,name,uuid,uuid,text,boolean)','continuum_operator_scrub_brief_scope(uuid,uuid,uuid,integer)'];
 BEGIN
