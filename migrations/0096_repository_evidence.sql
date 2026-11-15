@@ -36,6 +36,7 @@ CREATE TABLE connector_query_runs(
   permit_xid BIGINT,permit_until TIMESTAMPTZ,
   CHECK(permission_attempt<>query_attempt AND permission_attempt<>delivery_attempt AND query_attempt<>delivery_attempt)
 );
+CREATE INDEX connector_mappings_scope_idx ON connector_repository_mappings(scope_id,id);
 CREATE INDEX connector_runs_scope_idx ON connector_query_runs(scope_id,id);
 CREATE INDEX connector_runs_mapping_idx ON connector_query_runs(mapping_id,id);
 REVOKE ALL ON connector_repository_mappings,connector_query_runs FROM PUBLIC;
@@ -83,7 +84,9 @@ RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER AS $$
 DECLARE m JSONB; w pipeline_budget_workflows%ROWTYPE;
 BEGIN
   m:=continuum_connector_mapping(actor,mapping);
-  IF m IS NULL OR (m->>'generation')::bigint<>epoch THEN RETURN FALSE; END IF;
+  IF m IS NULL OR (m->>'generation')::bigint<>epoch OR run_id IS NULL
+    OR EXISTS(SELECT 1 FROM memories WHERE id=run_id)
+    OR EXISTS(SELECT 1 FROM evidence_roots WHERE id=run_id) THEN RETURN FALSE; END IF;
   SELECT * INTO w FROM pipeline_budget_workflows WHERE id=workflow FOR SHARE;
   IF NOT FOUND OR w.owner<>worker OR w.generation<>workflow_epoch OR w.cancelled OR w.deadline_at<=clock_timestamp()
     OR (w.profile->'limits'->>'spendMicros')::bigint<>0 THEN RETURN FALSE; END IF;
@@ -134,7 +137,8 @@ DECLARE q connector_query_runs%ROWTYPE; r UUID:=gen_random_uuid(); e UUID; node 
 BEGIN
   SELECT * INTO q FROM connector_query_runs WHERE id=run_id AND connector_query_runs.actor=$1 FOR UPDATE;
   IF NOT FOUND OR q.state<>'pending' OR q.permit_xid IS DISTINCT FROM txid_current() OR q.permit_until<=clock_timestamp()
-    OR q.expires_at<=clock_timestamp() THEN RAISE check_violation USING MESSAGE='Repository evidence unavailable'; END IF;
+    OR q.expires_at<=clock_timestamp() OR EXISTS(SELECT 1 FROM memories WHERE id=run_id)
+    THEN RAISE check_violation USING MESSAGE='Repository evidence unavailable'; END IF;
   SELECT * INTO STRICT m FROM connector_repository_mappings WHERE id=q.mapping_id FOR SHARE;
   IF NOT m.enabled OR m.generation<>q.mapping_generation OR NOT continuum_evidence_can_access(actor,q.scope_id,FALSE)
     OR NOT EXISTS(SELECT 1 FROM pipeline_budget_workflows w WHERE w.id=q.workflow_id AND w.owner=q.worker_id

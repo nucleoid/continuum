@@ -15,6 +15,16 @@ import { readBudgetWorkflow } from '../storage/pipeline-budgets.js';
 
 const request = { evidenceClass: 'source-code' as const, query: 'synthetic source', commit: 'a'.repeat(40), maxResults: 2 };
 describe('explicit repository evidence pipeline', () => {
+  it('rejects existing memory identities as connector authority roots before any upstream work', async () => {
+    await connectorFixture(async f => {
+      const source = await createMemory(f.owner, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId,
+        type: 'decision', title: 'Existing source identity', body: 'Source stays independent', source: 'manual' });
+      const options = await f.options(); options.execution.runId = source.id;
+      expect((await queryConnectorEvidence(f.app, f.actorId, f.mappingId, request, options)).receipt.outcome).toBe('budget');
+      expect(f.permissionCalls).not.toHaveBeenCalled(); expect(f.queryCalls).not.toHaveBeenCalled();
+      expect((await f.owner.query('SELECT count(*)::int AS n FROM connector_query_runs')).rows[0].n).toBe(0);
+    });
+  }, 120_000);
   it('requires independently allowed upstream authority before content, even with Continuum access and known mapping', async () => {
     await connectorFixture(async f => {
       for (const decision of ['deny', 'unknown'] as const) {

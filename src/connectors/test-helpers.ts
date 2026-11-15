@@ -20,7 +20,7 @@ export function syntheticRepositoryAdapter<I, O>(id: string, invoke: (input: I, 
     serialize: (input, caps) => ({ input, caps }),
     invoke: async (serialized, context) => {
       const value = await invoke(JSON.parse(serialized).input as I, context.signal);
-      if (Buffer.byteLength(JSON.stringify(value)) > context.responseBodyBytes) throw new Error('Synthetic response cap');
+      if (Buffer.byteLength(JSON.stringify(value)) > Math.min(context.responseBodyBytes, context.outputTokens, context.completionTokens)) throw new Error('Synthetic response cap');
       return { value, response: value };
     } };
 }
