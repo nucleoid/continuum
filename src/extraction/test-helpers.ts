@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import pg from 'pg';
-import { standupProducerFixture, quoteStandupIdentifier } from '../standup/test-helpers.js';
+import { standupConsumerFixture as standupProducerFixture, quoteStandupIdentifier } from '../standup/test-helpers.js';
 import { starterProfile, type BudgetAdapter } from '../pipeline/budget.js';
 import { ExtractionRegistry, extractionDescriptor, type ExtractionInput, type ExtractionProfile } from './provider.js';
 import type { ExtractionOutput } from './model.js';
@@ -33,12 +33,13 @@ export async function extractionFixture(run: (f: Parameters<Parameters<typeof st
   return standupProducerFixture(async f => {
     const workerRole = `extract_worker_${randomUUID().replaceAll('-', '').slice(0, 16)}`, password = randomUUID();
     const schema = (await f.owner.query('SELECT current_schema() AS name')).rows[0].name as string;
-    const url = process.env.CONTINUUM_TEST_DATABASE_URL!;
+    const url = f.connectionString;
     const registry = new ExtractionRegistry(); registry.register(profile);
     const frozen = registry.get(profile.id)!;
     let worker: pg.Pool | undefined;
     try {
       await f.owner.query(`CREATE ROLE ${quoteStandupIdentifier(workerRole)} LOGIN PASSWORD '${password}'`);
+      await f.registerRole(workerRole);
       execFileSync('psql', [url, '-X', '-v', 'ON_ERROR_STOP=1', '-v', `continuum_schema=${schema}`, '-v', `continuum_extraction_worker_role=${workerRole}`,
         '-f', join(process.cwd(), 'scripts/grant-extraction-worker-role.sql')], { timeout: 30_000, stdio: 'pipe' });
       await f.operator.query('SELECT continuum_operator_install_extractor($1,$2,TRUE)', [f.adminId, extractionDescriptor(frozen)]);

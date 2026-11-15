@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, it } from 'vitest';
-import { quoteStandupIdentifier as quote, standupProducerFixture as fixture } from '../standup/test-helpers.js';
+import { quoteStandupIdentifier as quote, standupConsumerFixture as fixture } from '../standup/test-helpers.js';
 import { createPrincipal, getPrincipal } from './principals.js';
 import { getScopeByRef } from './scopes.js';
 import { addMembership } from './memberships.js';

@@ -2,28 +2,53 @@ import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import pg from 'pg';
-import { expect } from 'vitest';
+import { expect, inject } from 'vitest';
 import { runMigrations } from '../storage/migrator.js';
 import { createPrincipal } from '../storage/principals.js';
 import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import { mapOwnedUserScope } from '../services/offboarding.js';
+import { cloneConsumerDatabase, consumerTemplateEnabled } from '../fixtures/test-helpers.js';
 
 const connectionString = process.env.CONTINUUM_TEST_DATABASE_URL ?? 'postgres://continuum:continuum@localhost:5433/continuum';
 export const quoteStandupIdentifier = (value: string) => '"' + value.replaceAll('"', '""') + '"';
 const literal = (value: string) => "'" + value.replaceAll("'", "''") + "'";
 
-export async function standupProducerFixture(run: (context: { owner: pg.Pool; producer: pg.Pool; app: pg.Pool;
+interface StandupFixtureContext { owner: pg.Pool; producer: pg.Pool; app: pg.Pool;
   operator: pg.Pool; adminId: string; actorId: string; producerId: string; producerRole: string;
-  scopeId: string; scopeKind: 'user'; namespace: string; addOperator(actorId: string): Promise<pg.Pool> }) => Promise<void>,
-  family: 'github' | 'deploy-event' | 'terminal-summary' = 'github') {
+  scopeId: string; scopeKind: 'user'; namespace: string; connectionString: string;
+  registerRole(name: string): Promise<void>; addOperator(actorId: string): Promise<pg.Pool> }
+type Family = 'github' | 'deploy-event' | 'terminal-summary';
+
+/** Migration, profile and provenance fixtures always execute fresh migrations. */
+export function standupProducerFixture(run: (context: StandupFixtureContext) => Promise<void>, family: Family = 'github') {
+  return standupFixture(run, family);
+}
+/** Ordinary consumers opt in without changing the shared database environment. */
+export async function standupConsumerFixture(run: (context: StandupFixtureContext) => Promise<void>, family: Family = 'github') {
+  if (!consumerTemplateEnabled()) return standupFixture(run, family);
+  const database = await cloneConsumerDatabase(inject('consumerTemplate'));
+  let failure: unknown;
+  try { await standupFixture(run, family, database); }
+  catch (error) { failure = error; throw error; }
+  finally {
+    try { await database.dispose(); }
+    catch (cleanup) { throw failure === undefined ? cleanup : new AggregateError([failure, cleanup], 'Consumer fixture and cleanup failed'); }
+  }
+}
+
+async function standupFixture(run: (context: StandupFixtureContext) => Promise<void>,
+  family: Family,
+  database?: Awaited<ReturnType<typeof cloneConsumerDatabase>>) {
   const suffix = randomUUID().replaceAll('-', '').slice(0, 16);
-  const schema = `standup_roles_${suffix}`;
+  const schema = database?.schema ?? `standup_roles_${suffix}`;
+  const fixtureConnectionString = database?.connectionString ?? connectionString;
+  const registerRole = database?.registerRole ?? (async () => {});
   const namespace = `${family}.${suffix}`;
   const roles = ['app', 'producer', 'operator'].map((kind) => `standup_${kind}_${suffix}`);
-  const maintenance = new pg.Pool({ connectionString, max: 1,
+  const maintenance = new pg.Pool({ connectionString: fixtureConnectionString, max: 1,
     options: '-c statement_timeout=5000 -c lock_timeout=1000' });
-  const owner = new pg.Pool({ connectionString, max: 1, options: `-c search_path=${schema} -c statement_timeout=60000 -c lock_timeout=5000` });
+  const owner = new pg.Pool({ connectionString: fixtureConnectionString, max: 1, options: `-c search_path=${schema} -c statement_timeout=60000 -c lock_timeout=5000` });
   const logins: pg.Pool[] = [];
   const clientClosures: Promise<void>[] = [];
   const track = (pool: pg.Pool) => pool.on('connect', (client) => {
@@ -31,9 +56,28 @@ export async function standupProducerFixture(run: (context: { owner: pg.Pool; pr
   });
   track(owner);
   const created: string[] = [];
+  async function createRole(role: string, password: string) {
+    const sql = `CREATE ROLE ${quoteStandupIdentifier(role)} LOGIN PASSWORD ${literal(password)}`;
+    if (!database) { await maintenance.query(sql); created.push(role); return; }
+    const client = await maintenance.connect(); let discard = false;
+    try {
+      await client.query('BEGIN');
+      await client.query(sql);
+      // Register the exact uncommitted OID before making a cluster LOGIN live.
+      await database.registerRole(role, client);
+      await client.query('COMMIT');
+      created.push(role);
+    } catch (error) {
+      try { await client.query('ROLLBACK'); }
+      catch (cleanup) { discard = true; throw new AggregateError([error, cleanup], 'Fixture role creation and rollback failed'); }
+      throw error;
+    } finally { client.release(discard); }
+  }
   try {
-    await maintenance.query(`CREATE SCHEMA ${quoteStandupIdentifier(schema)}`);
-    await runMigrations(owner);
+    if (!database) {
+      await maintenance.query(`CREATE SCHEMA ${quoteStandupIdentifier(schema)}`);
+      await runMigrations(owner);
+    }
     const admin = await createPrincipal(owner, { externalId: `admin:${suffix}`, kind: 'user', displayName: 'Administrator' });
     const actor = await createPrincipal(owner, { externalId: `actor:${suffix}`, kind: 'user', displayName: 'Actual Actor' });
     const service = await createPrincipal(owner, { externalId: `producer:${suffix}`, kind: 'service', displayName: 'Producer' });
@@ -57,11 +101,10 @@ export async function standupProducerFixture(run: (context: { owner: pg.Pool; pr
     }
     for (const role of roles) {
       const password = randomUUID();
-      await maintenance.query(`CREATE ROLE ${quoteStandupIdentifier(role)} LOGIN PASSWORD ${literal(password)}`);
-      created.push(role);
+      await createRole(role, password);
       await grant(role);
       if (role === roles[2]) await grant(role, admin.id);
-      const url = new URL(connectionString); url.username = role; url.password = password;
+      const url = new URL(fixtureConnectionString); url.username = role; url.password = password;
       logins.push(new pg.Pool({ connectionString: url.toString(), max: 1,
         options: `-c search_path=${schema} -c statement_timeout=5000 -c lock_timeout=1000` }));
       track(logins.at(-1)!);
@@ -69,10 +112,9 @@ export async function standupProducerFixture(run: (context: { owner: pg.Pool; pr
     async function addOperator(actorId: string): Promise<pg.Pool> {
       const role = `standup_takeover_${suffix}`;
       const password = randomUUID();
-      await maintenance.query(`CREATE ROLE ${quoteStandupIdentifier(role)} LOGIN PASSWORD ${literal(password)}`);
-      created.push(role);
+      await createRole(role, password);
       await grant(role); await grant(role, actorId);
-      const url = new URL(connectionString); url.username = role; url.password = password;
+      const url = new URL(fixtureConnectionString); url.username = role; url.password = password;
       const pool = new pg.Pool({ connectionString: url.toString(), max: 1,
         options: `-c search_path=${schema} -c statement_timeout=5000 -c lock_timeout=1000` });
       logins.push(pool); track(pool); return pool;
@@ -83,7 +125,8 @@ export async function standupProducerFixture(run: (context: { owner: pg.Pool; pr
     await operator.query('SELECT continuum_operator_map_standup_actor($1::uuid,$2::text,$3::text,$4::uuid,$5::text)',
       [admin.id, namespace, '42', actor.id, 'Reviewed source identity']);
     await run({ owner, producer, app, operator, adminId: admin.id, actorId: actor.id,
-      producerId: service.id, producerRole: roles[1], scopeId: scope.id, scopeKind: 'user', namespace, addOperator });
+      producerId: service.id, producerRole: roles[1], scopeId: scope.id, scopeKind: 'user', namespace,
+      connectionString: fixtureConnectionString, registerRole, addOperator });
   } finally {
     const failures: unknown[] = [];
     const ended = await Promise.allSettled([...logins, owner].map((pool) => pool.end()));
@@ -96,12 +139,14 @@ export async function standupProducerFixture(run: (context: { owner: pg.Pool; pr
     } catch (error) { failures.push(error); }
     finally { if (closeTimer) clearTimeout(closeTimer); }
     try {
-      await maintenance.query(`DROP SCHEMA IF EXISTS ${quoteStandupIdentifier(schema)} CASCADE`);
-      for (const role of created.reverse()) {
-        try {
-          await maintenance.query(`DROP OWNED BY ${quoteStandupIdentifier(role)}`);
-          await maintenance.query(`DROP ROLE ${quoteStandupIdentifier(role)}`);
-        } catch (error) { failures.push(error); }
+      if (!database) {
+        await maintenance.query(`DROP SCHEMA IF EXISTS ${quoteStandupIdentifier(schema)} CASCADE`);
+        for (const role of created.reverse()) {
+          try {
+            await maintenance.query(`DROP OWNED BY ${quoteStandupIdentifier(role)}`);
+            await maintenance.query(`DROP ROLE ${quoteStandupIdentifier(role)}`);
+          } catch (error) { failures.push(error); }
+        }
       }
     } catch (error) { failures.push(error); }
     finally {

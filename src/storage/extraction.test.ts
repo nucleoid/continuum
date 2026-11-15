@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, it } from 'vitest';
-import { standupProducerFixture } from '../standup/test-helpers.js';
+import { standupConsumerFixture as standupProducerFixture } from '../standup/test-helpers.js';
 import { createMemory } from './memories.js';
 import { starterProfile } from '../pipeline/budget.js';
 import { captureMemory } from '../services/capture.js';

@@ -49,6 +49,8 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: timeout --signal=TERM --kill-after=10s 1200s npm test -- --maxWorkers=1 --reporter=default --reporter=json --outputFile=test-results.json
+        env:
+          CONTINUUM_TEST_CONSUMER_TEMPLATE: '1'
       - name: Verify complete source test coverage
         if: always()
         run: node scripts/verify-ci-test-report.mjs

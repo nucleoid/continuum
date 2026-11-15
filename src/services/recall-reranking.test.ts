@@ -1,7 +1,7 @@
 import { expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
-import { standupProducerFixture } from '../standup/test-helpers.js';
+import { standupConsumerFixture as standupProducerFixture } from '../standup/test-helpers.js';
 import { createMemory } from '../storage/memories.js';
 import { createPrincipal, getPrincipal } from '../storage/principals.js';
 import { createScope } from '../storage/scopes.js';
