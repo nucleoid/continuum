@@ -13,6 +13,7 @@ import { processEmbeddingJobs } from '../workers/embedding-jobs.js';
 import type { CaptureInput } from '../types.js';
 import { amounts, starterProfile } from '../pipeline/budget.js';
 import { EmbeddingItemError } from '../embeddings/provider.js';
+import { computeExpiry } from './expiry.js';
 
 type Fixture = Parameters<Parameters<typeof embeddingQueueFixture>[0]>[0];
 const input = (f: Fixture, title = 'Deferred source'): CaptureInput => ({ scope: { kind: f.scope.kind, name: f.scope.name },
@@ -300,14 +301,21 @@ describe('durable embedding SQL, capture and worker integration', () => {
       // Seed actual current sources and enqueue using the real APP capability,
       // in bounded batches below the unchanged five-second SQL ceiling.
       const prefix = 'scope-capacity-' + randomUUID();
-      for (let offset = 0; offset < 9999; offset += 100) {
-        const batch = Math.min(100, 9999-offset), reference = prefix + '-' + offset;
-        await f.app.query(`INSERT INTO memories(scope_id,type,title,body,author_id,source,source_ref)
-          SELECT $1,'fact','Capacity fixture','Bounded synthetic source',$2,'manual',$3 FROM generate_series(1,$4::int)`,
-          [f.scopeId, f.actorId, reference, batch]);
+      for (let offset = 0; offset < 9998; offset += 100) {
+        const batch = Math.min(100, 9998-offset), reference = prefix + '-' + offset;
+        await f.app.query(`INSERT INTO memories(id,scope_id,type,title,body,author_id,source,source_ref,expires_at)
+          SELECT gen_random_uuid(),$1,'fact','Capacity fixture','Bounded synthetic source',$2,'manual',$3,$5 FROM generate_series(1,$4::int)`,
+          [f.scopeId, f.actorId, reference, batch, computeExpiry('fact', f.scope.kind)]);
         expect((await f.app.query(`SELECT count(continuum_embedding_enqueue($1,id,$2,$3,'queued'))::int AS n
           FROM memories WHERE source_ref=$4`, [f.actorId, f.target, f.policy, reference])).rows[0].n).toBe(batch);
       }
+      const concurrent = new pg.Pool({ connectionString: f.app.options.connectionString, options: f.app.options.options,
+        max: 2, connectionTimeoutMillis: 5000 });
+      try {
+        const race = await Promise.allSettled(['A','B'].map(label => captureMemory(concurrent, f.router, f.principal, input(f, 'Last capacity slot '+label))));
+        expect(race.filter(result => result.status==='fulfilled')).toHaveLength(1);
+        expect(race.filter(result => result.status==='rejected')).toMatchObject([{ reason: { code: 'EMBEDDING_QUEUE_QUOTA_EXCEEDED' } }]);
+      } finally { await concurrent.end(); }
       const beforeQueue = await counts();
       expect(beforeQueue.jobs).toBe(10000);
       expect((await f.owner.query('SELECT active FROM embedding_scope_admission WHERE scope_id=$1', [f.scopeId])).rows[0].active).toBe(10000);
