@@ -303,7 +303,7 @@ END $$;
 CREATE FUNCTION continuum_brief_claim(profile_id TEXT,worker UUID,descriptor JSONB) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
 #variable_conflict use_column
 DECLARE j brief_runs%ROWTYPE; d brief_definitions%ROWTYPE; b brief_worker_bindings%ROWTYPE; item RECORD; v UUID; n INTEGER:=0;
-  bytes BIGINT:=0; observed JSONB; prior JSONB; dirty TEXT[]; all_sections TEXT[]:=ARRAY['purpose','decisions','implementation','unknowns','coverage'];
+  bytes BIGINT:=0; frontier_value JSONB; prior JSONB; dirty TEXT[]; all_sections TEXT[]:=ARRAY['purpose','decisions','implementation','unknowns','coverage'];
 BEGIN
   PERFORM continuum_brief_assert_worker(session_user);
   IF worker IS NULL THEN RAISE check_violation USING MESSAGE='Brief worker unavailable'; END IF;
@@ -317,8 +317,8 @@ BEGIN
       AND NOT EXISTS(SELECT 1 FROM brief_runs r WHERE r.definition_id=def.id AND r.state IN ('queued','running'))
     ORDER BY def.id LIMIT 1 FOR UPDATE OF def SKIP LOCKED;
   IF d.id IS NOT NULL THEN
-    observed:=continuum_brief_frontier(d.scope_id);
-    PERFORM continuum_brief_enqueue(d.id,'repair:'||encode(sha256(convert_to(observed::text,'UTF8')),'hex'),'delta',FALSE);
+    frontier_value:=continuum_brief_frontier(d.scope_id);
+    PERFORM continuum_brief_enqueue(d.id,'repair:'||encode(sha256(convert_to(frontier_value::text,'UTF8')),'hex'),'delta',FALSE);
   END IF;
   SELECT r.* INTO j FROM brief_runs r JOIN brief_definitions def ON def.id=r.definition_id JOIN brief_worker_bindings binding ON binding.scope_id=def.scope_id AND binding.profile=def.profile
     JOIN pg_roles role ON role.oid=binding.role_oid AND role.rolname=binding.role_name
@@ -359,7 +359,7 @@ BEGIN
         INSERT INTO brief_run_inputs VALUES(j.id,item.id,item.root_id,item.bytes);
       END LOOP;
     END IF;
-    observed:=continuum_brief_frontier(d.scope_id);
+    frontier_value:=continuum_brief_frontier(d.scope_id);
     -- New un-enrolled committed sources or a bounded cut leave the processed
     -- frontier incomplete. The observed frontier is never advertised as drained.
     IF EXISTS(SELECT 1 FROM memories m WHERE m.scope_id IN(d.scope_id,continuum_org_scope_id()) AND m.state='live'
@@ -374,7 +374,7 @@ BEGIN
         SELECT 1 FROM evidence_closure c JOIN brief_run_inputs old ON old.root_id=c.root_id AND old.run_id=(SELECT run_id FROM brief_versions WHERE id=d.head)
           JOIN brief_run_inputs fresh ON fresh.root_id=old.root_id AND fresh.run_id=j.id WHERE c.version_id=bb.evidence_version AND fresh.version_id<>old.version_id);
       IF EXISTS((SELECT version_id FROM brief_run_inputs WHERE run_id=j.id EXCEPT SELECT version_id FROM brief_run_inputs WHERE run_id=(SELECT run_id FROM brief_versions WHERE id=d.head)))
-        OR observed IS DISTINCT FROM (SELECT observed FROM brief_versions WHERE id=d.head) THEN dirty:=array_cat(dirty,ARRAY['unknowns','coverage']); END IF;
+        OR frontier_value IS DISTINCT FROM (SELECT observed FROM brief_versions WHERE id=d.head) THEN dirty:=array_cat(dirty,ARRAY['unknowns','coverage']); END IF;
       -- Any currently invalid section is recomputed, never copied with stripped citations.
       SELECT ARRAY(SELECT DISTINCT unnest(dirty||COALESCE(array_agg(section) FILTER(WHERE NOT continuum_brief_audience(b.principal_id,evidence_version,d.scope_id,NULL)),'{}')))
         INTO dirty FROM brief_blocks WHERE version_id=d.head;
@@ -383,7 +383,7 @@ BEGIN
     IF EXISTS(SELECT 1 FROM brief_run_inputs i WHERE i.run_id=j.id AND i.bytes>(j.descriptor->'budget'->>'maxItemHydratedBytes')::bigint) THEN
       RAISE program_limit_exceeded USING MESSAGE='Brief input unavailable'; END IF;
     PERFORM continuum_brief_charge(j.workflow_id,jsonb_build_object('candidates',least(n,32),'hydratedBytes',bytes,'storageBytes',bytes));
-    UPDATE brief_runs SET cutoff=clock_timestamp(),observed=continuum_brief_claim.observed,watermark=CASE WHEN n>32 THEN prior ELSE continuum_brief_claim.observed END,
+    UPDATE brief_runs SET cutoff=clock_timestamp(),observed=frontier_value,watermark=CASE WHEN n>32 THEN prior ELSE frontier_value END,
       truncated=n>32,sections=dirty WHERE id=j.id RETURNING * INTO j;
     PERFORM continuum_brief_gate(j.id,worker,j.generation,TRUE);
   EXCEPTION WHEN check_violation OR insufficient_privilege OR program_limit_exceeded THEN
@@ -431,7 +431,7 @@ END $$;
 CREATE FUNCTION continuum_brief_apply(run_id UUID,worker UUID,epoch BIGINT,output JSONB) RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER AS $$
 #variable_conflict use_column
 DECLARE j brief_runs%ROWTYPE; d brief_definitions%ROWTYPE; b brief_worker_bindings%ROWTYPE; claim JSONB; citation JSONB;
-  version UUID:=gen_random_uuid(); ev UUID; parent_ids UUID[]; parents JSONB; block_id TEXT; bytes BIGINT:=0;
+  version UUID:=gen_random_uuid(); ev UUID; parent_ids UUID[]; parents JSONB; claim_key TEXT; bytes BIGINT:=0;
 BEGIN
   SELECT * INTO STRICT j FROM brief_runs WHERE id=run_id FOR UPDATE;
   -- Ambiguous commit replay returns the same logical result, never reapplies.
@@ -466,9 +466,9 @@ BEGIN
       parent_ids:=array_append(parent_ids,(citation->>'version')::uuid);
     END LOOP;
     IF claim->>'contradiction'='true' AND cardinality(parent_ids)<3 THEN RAISE check_violation USING MESSAGE='Brief contradiction unavailable'; END IF;
-    block_id:=encode(sha256(convert_to(claim::text,'UTF8')),'hex');
+    claim_key:=encode(sha256(convert_to(claim::text,'UTF8')),'hex');
     SELECT bb.evidence_version INTO ev FROM brief_blocks bb JOIN evidence_payloads p ON p.version_id=bb.evidence_version
-      WHERE bb.version_id=d.head AND bb.block_id=continuum_brief_apply.block_id AND p.payload=claim::text
+      WHERE bb.version_id=d.head AND bb.block_id=claim_key AND p.payload=claim::text
         AND continuum_brief_audience(b.principal_id,bb.evidence_version,d.scope_id,NULL);
     IF ev IS NULL THEN
       SELECT jsonb_agg(jsonb_build_object('versionId',id,'kind','derivation') ORDER BY id) INTO parents FROM unnest(parent_ids) id;
@@ -476,7 +476,7 @@ BEGIN
         jsonb_build_object('transform',j.descriptor->>'version','model',j.descriptor->>'model','prompt','brief-reference-v1','schema','project-brief-v1'),claim::text);
       bytes:=bytes+octet_length(claim::text)+4096;
     END IF;
-    INSERT INTO brief_blocks VALUES(version,block_id,claim->>'section',ev);
+    INSERT INTO brief_blocks VALUES(version,claim_key,claim->>'section',ev);
   END LOOP;
   PERFORM continuum_brief_charge(j.workflow_id,jsonb_build_object('artifactBytes',bytes,'storageBytes',bytes+32768));
   PERFORM continuum_brief_gate(run_id,worker,epoch,FALSE);
