@@ -805,13 +805,38 @@ describe('offboarding and erasure', () => {
     for (const relation of ['extraction_runs','extraction_chunks','pipeline_budget_workflows']) expect(extractionPhysical).toContain(relation);
 
     const connectorVerifier = (await pool.query(`SELECT prosrc FROM pg_proc
-      WHERE oid='continuum_offboarding_lifecycle_state_is_erased(uuid)'::regprocedure`)).rows[0].prosrc as string;
+      WHERE oid='continuum_offboarding_lifecycle_state_is_erased_pre_brief(uuid)'::regprocedure`)).rows[0].prosrc as string;
     expect(connectorVerifier).toContain('continuum_offboarding_lifecycle_state_is_erased_pre_connector(target_run)');
     expect(connectorVerifier).toContain('continuum_connector_scope_is_erased(scope_id)');
     const connectorPhysical = (await pool.query(`SELECT prosrc FROM pg_proc
       WHERE oid='continuum_connector_scope_is_erased(uuid)'::regprocedure`)).rows[0].prosrc as string;
     for (const relation of ['connector_query_runs','connector_repository_mappings']) expect(connectorPhysical).toContain(relation);
 
+    const briefVerifier = (await pool.query(`SELECT prosrc FROM pg_proc
+      WHERE oid='continuum_offboarding_lifecycle_state_is_erased_pre_embedding(uuid)'::regprocedure`)).rows[0].prosrc as string;
+    expect(briefVerifier).toContain('continuum_offboarding_lifecycle_state_is_erased_pre_brief(target_run)');
+    expect(briefVerifier).toContain('continuum_brief_scope_is_erased(scope_id)');
+    const briefPhysical = (await pool.query(`SELECT prosrc FROM pg_proc
+      WHERE oid='continuum_brief_scope_is_erased(uuid)'::regprocedure`)).rows[0].prosrc as string;
+    for (const relation of ['brief_blocks', 'brief_runs', 'brief_run_inputs', 'pipeline_budget_workflows']) {
+      expect(briefPhysical).toContain(relation);
+    }
+    const briefPlan = (await pool.query(`EXPLAIN (FORMAT JSON) ${briefVerifier.replaceAll('target_run', '$1::uuid')}`, [runId]))
+      .rows[0]['QUERY PLAN'][0].Plan as Record<string, unknown>;
+    visit(briefPlan);
+
+    const embeddingVerifier = (await pool.query(`SELECT prosrc FROM pg_proc
+      WHERE oid='continuum_offboarding_lifecycle_state_is_erased(uuid)'::regprocedure`)).rows[0].prosrc as string;
+    expect(embeddingVerifier).toContain('continuum_offboarding_lifecycle_state_is_erased_pre_embedding(target_run)');
+    expect(embeddingVerifier).toContain('continuum_embedding_scope_is_erased(scope_id)');
+    const embeddingPhysical = (await pool.query(`SELECT prosrc FROM pg_proc
+      WHERE oid='continuum_embedding_scope_is_erased(uuid)'::regprocedure`)).rows[0].prosrc as string;
+    for (const relation of ['embedding_sources', 'embedding_jobs', 'embedding_capture_receipts', 'embedding_cohorts', 'memory_embeddings']) {
+      expect(embeddingPhysical).toContain(relation);
+    }
+    const embeddingPlan = (await pool.query(`EXPLAIN (FORMAT JSON) ${embeddingVerifier.replaceAll('target_run', '$1::uuid')}`, [runId]))
+      .rows[0]['QUERY PLAN'][0].Plan as Record<string, unknown>;
+    visit(embeddingPlan);
 
     expect(nodes.filter((node) =>
       node['Node Type'] === 'Seq Scan'

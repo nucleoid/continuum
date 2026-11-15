@@ -40,6 +40,16 @@ worker recovery and shutdown limits.
 
 ## Current rollout and mixed versions
 
+Optional [project briefs](project-briefs.md) add 0097 and exact APP/OP regrants.
+Current/history/dry-run prose and citations use managed evidence erasure; indexed
+block hashes are removed with their payloads. A bounded brief phase cancels
+original runs/workflows by owned-source-scope lineage, including prior scopes
+after a move. Actual block/run/workflow residuals participate in completion;
+locked rows and old receipts cannot establish erasure. No source text is stored
+in work records. Quiesce old artifact/offboarding processes and separately handle
+in-process/provider/downloaded/backup copies. Registry and worker remain absent
+by default; no deployment or forced regeneration is implied.
+
 Optional [repository evidence](repository-evidence.md) adds migration 0096 and
 exact APP/OP capability regrants. Managed connector receipt and evidence bytes,
 hashes and all transitive copies use canonical evidence erasure. A bounded

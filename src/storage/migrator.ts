@@ -107,7 +107,8 @@ const PUBLISHED_MIGRATION_CHECKSUMS = new Map([
   ['0094_extraction.sql', 'd4077efa310f5a2ee949bcedb8cff472f8f797a666c99c670ed5d0e3bbc328ba'],
   ['0095_memory_event_annotations.sql', 'ecf6716a81778a671ca6bc5170a8c60a68f9e1442c1e09c2e4c5988d46dff5f3'],
   ['0096_repository_evidence.sql', '256c4c4be0a3d15926b5b8a80b19b292eb6efdfb59d754a24079be890e93c511'],
-  ['0098_async_embedding_jobs.sql', 'c066dfc643403f2fd20b1e78e10ed7814838b18c528364baed4a0b36f440cea0'],
+  ['0097_project_briefs.sql', 'c68a1983b9f554a694631c6f59e0792b589cf100b09bd9dd7374786d3f3c365a'],
+  ['0098_async_embedding_jobs.sql', '1b362625c31cc15adb72cc66c5d6d47863bd5b07d39e6f0573dd648cf86ca8aa'],
 ]);
 const FORWARD_MIGRATION_REQUIREMENTS = new Map([
   ['0084_provider_embeddings_backfill.sql', '0083_tag_vocabularies.sql'],
@@ -122,7 +123,8 @@ const FORWARD_MIGRATION_REQUIREMENTS = new Map([
   ['0094_extraction.sql', '0093_evidence_lifecycle.sql'],
   ['0095_memory_event_annotations.sql', '0094_extraction.sql'],
   ['0096_repository_evidence.sql', '0095_memory_event_annotations.sql'],
-  ['0098_async_embedding_jobs.sql', '0096_repository_evidence.sql'],
+  ['0097_project_briefs.sql', '0096_repository_evidence.sql'],
+  ['0098_async_embedding_jobs.sql', '0097_project_briefs.sql'],
   ['0053_offboarding_restore_contract.sql', '0052_offboarding_review_repair.sql'],
   ['0056_coordination_final_remediation.sql', '0055_coordination_review_remediation.sql'],
   ['0057_coordination_privacy_race_remediation.sql',

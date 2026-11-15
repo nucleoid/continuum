@@ -131,6 +131,22 @@ The worker uses finite provider windows, original durable accounting, renewable 
 
 ## Retrieval and providers
 
+Opt-in [maintained project briefs](docs/project-briefs.md) use migration 0097,
+immutable structured versions and managed evidence blocks. One project audience
+intersects eligible org references and every current dependency; privileged
+refresher/worker memberships do not widen it. Current/history/dry-run REST/MCP
+services share pre-hydration block gates, final output validation and required
+audits. Typed bound-LOGIN work pages metadata within its original allowance and
+deadline, pins committed scope generations before selection, and retains every
+section-call attempt through finite settled-failure backoff. Explicit independent
+request contracts permit section-specific disclosure and byte-preserving delta;
+unknown isolation keeps whole-input dependencies. Full/delta publication uses
+head CAS. Physical erasure includes
+historical/preview payloads, hashes and run cancellation. The synthesis registry
+is empty by default; stock runtimes install no provider or worker. Implementation
+proof remains unknown without independent audience repository authority. Briefs
+never enter legacy memories, ordinary recall or generated AGENTS.md.
+
 The optional [repository-evidence port](docs/repository-evidence.md) has an empty
 trusted registry and explicit library consumers. Independent delegated upstream
 repository permission intersects current Continuum scope, source/privacy,

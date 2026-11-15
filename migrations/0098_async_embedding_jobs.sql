@@ -2,12 +2,12 @@
 SET LOCAL lock_timeout='5s';
 SET LOCAL statement_timeout='60s';
 DO $$ DECLARE ledger TEXT; drift BOOLEAN; BEGIN
-  IF continuum_connector_is_ready() IS NOT TRUE THEN RAISE EXCEPTION 'embedding predecessor integrity unavailable'; END IF;
+  IF continuum_connector_is_ready() IS NOT TRUE OR continuum_brief_is_ready() IS NOT TRUE THEN
+    RAISE EXCEPTION 'embedding predecessor integrity unavailable'; END IF;
   -- Forward wrapping must not adopt a modified predecessor as its baseline.
   FOREACH ledger IN ARRAY ARRAY['evidence_contract_functions','extraction_contract_functions',
     'memory_event_contract_functions','connector_contract_functions','brief_contract_functions'] LOOP
     IF to_regclass(format('%I.%I',current_schema(),ledger)) IS NULL THEN
-      IF ledger='brief_contract_functions' THEN CONTINUE; END IF;
       RAISE EXCEPTION 'embedding predecessor integrity unavailable';
     END IF;
     EXECUTE format('SELECT NOT EXISTS(SELECT 1 FROM %I.%I) OR EXISTS(SELECT 1 FROM %I.%I c
@@ -1156,7 +1156,7 @@ CREATE FUNCTION continuum_embedding_relation_fingerprint(relation REGCLASS) RETU
     FROM pg_class c WHERE c.oid=relation;
 $$;
 CREATE FUNCTION continuum_embedding_is_ready() RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER AS $$
-  SELECT continuum_connector_is_ready() AND EXISTS(SELECT 1 FROM embedding_contract_functions) AND EXISTS(SELECT 1 FROM embedding_contract_relations)
+  SELECT continuum_brief_is_ready() AND EXISTS(SELECT 1 FROM embedding_contract_functions) AND EXISTS(SELECT 1 FROM embedding_contract_relations)
     AND NOT EXISTS(SELECT 1 FROM embedding_contract_functions c LEFT JOIN pg_proc f ON f.oid=to_regprocedure(c.signature)
       WHERE f.oid IS NULL OR encode(sha256(convert_to(f.prosrc,'UTF8')),'hex')<>c.body_hash OR f.prosecdef<>c.definer OR f.provolatile<>c.volatility
         OR f.proowner<>(SELECT relowner FROM pg_class WHERE oid='memories'::regclass)
