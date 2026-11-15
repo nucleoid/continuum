@@ -70,4 +70,12 @@ describe('production entrypoint callers', () => {
       expect.stringMatching(/\/tag-vocabularies\.(?:ts|js)$/),
     );
   });
+
+  it('embedding worker delegates its production guard and starts no process on import', async () => {
+    await import('../workers/embedding-worker-cli.js');
+    expect(entrypointMocks.isDirectEntrypoint).toHaveBeenCalledOnce();
+    expect(entrypointMocks.isDirectEntrypoint).toHaveBeenCalledWith(
+      expect.stringMatching(/\/embedding-worker-cli\.(?:ts|js)$/),
+    );
+  });
 });

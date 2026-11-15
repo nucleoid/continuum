@@ -35,10 +35,22 @@ test('invalid secrets fail before dispatch without exposing values', () => {
 });
 test('dispatch permits only installed public entrypoints', () => {
  assert.deepEqual(resolveCommand(['continuum', '--help']), ['bin/continuum.mjs', '--help']);
+ assert.deepEqual(resolveCommand(['continuum-embed-worker', '--help']), ['bin/continuum-embed-worker.mjs', '--help']);
  assert.deepEqual(resolveCommand(['node', 'dist/api/mcp.js']), ['dist/api/mcp.js']);
  assert.deepEqual(resolveCommand([]), ['dist/api/server.js']);
  for (const args of [['sh', '-c', 'anything'], ['node', '-e', 'anything'],
   ['node', '../dist/api/server.js'], ['dist/test.js']]) assert.throws(() => resolveCommand(args));
+});
+
+test('independent embedding worker database secrets use the checked file boundary', () => {
+ const root = mkdtempSync(join(tmpdir(), 'continuum-worker-secret-'));
+ try {
+  writeFileSync(join(root, 'database'), 'postgres://synthetic:synthetic@db/fixture\n');
+  const env = { CONTINUUM_EMBEDDING_WORKER_DATABASE_URL_FILE: join(root, 'database') };
+  loadSecretFiles(env, root);
+  assert.equal(env.CONTINUUM_EMBEDDING_WORKER_DATABASE_URL, 'postgres://synthetic:synthetic@db/fixture');
+  assert.equal(env.CONTINUUM_EMBEDDING_WORKER_DATABASE_URL_FILE, undefined);
+ } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 import { spawnSync } from 'node:child_process';
