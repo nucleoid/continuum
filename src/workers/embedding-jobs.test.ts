@@ -194,4 +194,3 @@ it('records worker cancellation before a cooperative adapter abort rejection', a
     await Promise.allSettled(tracked);
   }
 });
-

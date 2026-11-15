@@ -301,13 +301,16 @@ END $$;
 -- Quota rejection still rolls the complete source/audit/job transaction back.
 CREATE TRIGGER embedding_job_admission AFTER INSERT OR UPDATE OR DELETE ON embedding_jobs FOR EACH ROW EXECUTE FUNCTION continuum_embedding_job_admission();
 
-CREATE FUNCTION continuum_embedding_source_policy(memory UUID,target JSONB) RETURNS BOOLEAN LANGUAGE plpgsql VOLATILE SECURITY DEFINER AS $$
+-- Read currency checks use current snapshots without retaining row locks that
+-- would reject otherwise independent legacy memory writes. Publication and
+-- dispatch still require the separate locking source-policy capability below.
+CREATE FUNCTION continuum_embedding_source_policy_snapshot(memory UUID,target JSONB) RETURNS BOOLEAN LANGUAGE plpgsql VOLATILE SECURITY DEFINER AS $$
 DECLARE root RECORD;
 BEGIN
   IF NOT continuum_embedding_source_eligible(memory) THEN RETURN FALSE; END IF;
   FOR root IN SELECT r.* FROM evidence_roots r WHERE r.source_memory_id=memory OR r.id IN (
     SELECT d.upstream_root_id FROM evidence_source_dependencies d JOIN evidence_roots own_root ON own_root.id=d.root_id WHERE own_root.source_memory_id=memory)
-    ORDER BY r.id FOR SHARE NOWAIT LOOP
+    ORDER BY r.id LOOP
     IF root.current_version IS NULL OR NOT EXISTS(SELECT 1 FROM evidence_state WHERE version_id=root.current_version AND state='active')
       OR NOT EXISTS(SELECT 1 FROM evidence_payloads WHERE version_id=root.current_version) OR root.revoked OR root.external_state IN ('deny','unknown') OR (root.expiry_ceiling IS NOT NULL AND root.expiry_ceiling<=clock_timestamp())
       OR (root.external_state='allow' AND (root.checked_at IS NULL OR root.valid_until IS NULL OR root.checked_at>clock_timestamp() OR root.valid_until<=clock_timestamp()))
@@ -318,6 +321,14 @@ BEGIN
       THEN RETURN FALSE; END IF;
   END LOOP;
   RETURN TRUE;
+END $$;
+CREATE FUNCTION continuum_embedding_source_policy(memory UUID,target JSONB) RETURNS BOOLEAN LANGUAGE plpgsql VOLATILE SECURITY DEFINER AS $$
+BEGIN
+  IF NOT continuum_embedding_source_eligible(memory) THEN RETURN FALSE; END IF;
+  PERFORM r.id FROM evidence_roots r WHERE r.source_memory_id=memory OR r.id IN (
+    SELECT d.upstream_root_id FROM evidence_source_dependencies d JOIN evidence_roots own_root ON own_root.id=d.root_id WHERE own_root.source_memory_id=memory)
+    ORDER BY r.id FOR SHARE NOWAIT;
+  RETURN continuum_embedding_source_policy_snapshot(memory,target);
 EXCEPTION WHEN lock_not_available THEN
   -- A concurrent evidence fence may own a root before its memory callback.
   -- Never wait in the opposite order or omit a locked root from admission.
@@ -353,7 +364,7 @@ CREATE FUNCTION continuum_embedding_vector_is_current(memory UUID,provider_id TE
     JOIN memories m ON m.id=e.memory_id JOIN embedding_targets t ON t.fingerprint=continuum_embedding_route(m.scope_id)->>'target'
     WHERE e.memory_id=memory AND e.provider=provider_id AND e.dim=dimension AND e.source_generation=s.generation AND NOT s.erased AND s.input_hash IS NOT NULL
       AND e.space_fingerprint=v.space_fingerprint AND t.provider=e.provider AND t.dim=e.dim AND t.enabled
-      AND t.descriptor->>'spaceFingerprint'=v.space_fingerprint AND continuum_embedding_source_policy(memory,t.descriptor));
+      AND t.descriptor->>'spaceFingerprint'=v.space_fingerprint AND continuum_embedding_source_policy_snapshot(memory,t.descriptor));
 $$;
 CREATE FUNCTION continuum_embedding_vector_guard() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
 DECLARE source embedding_sources%ROWTYPE; registered embedding_vector_spaces%ROWTYPE;
@@ -896,6 +907,13 @@ BEGIN
     -- solely to record actual settlement. This grants no hydration/publication.
     SELECT * INTO c FROM embedding_cohorts WHERE id=cohort FOR UPDATE;
     IF c.settlement IS NOT NULL THEN
+      -- A different process may already have conservatively settled the exact
+      -- undispatched original reservation. A stale measured acknowledgement
+      -- neither refunds that charge nor blocks the original process forever.
+      IF c.settlement='{"provenance":"unknown"}'::jsonb AND EXISTS(
+        SELECT 1 FROM pipeline_budget_attempts accounting WHERE accounting.workflow_id=workflow AND accounting.attempt_id=attempt
+          AND accounting.owner=original_owner AND accounting.generation=original_epoch
+          AND accounting.state='settled' AND accounting.settlement=c.settlement) THEN RETURN FALSE; END IF;
       IF c.settlement IS DISTINCT FROM value THEN RAISE check_violation USING MESSAGE='Conflicting embedding settlement'; END IF;
       RETURN FALSE;
     END IF;

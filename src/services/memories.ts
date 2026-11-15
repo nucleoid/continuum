@@ -68,6 +68,8 @@ export async function getMemoryForPrincipal(
   try {
     client = await pool.connect();
     await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
+    await client.query(`SELECT pg_catalog.set_config('statement_timeout',CASE WHEN setting::bigint BETWEEN 1 AND 5000 THEN setting||'ms' ELSE '5000ms' END,TRUE) FROM pg_catalog.pg_settings WHERE name='statement_timeout'`);
+    await client.query(`SELECT pg_catalog.set_config('lock_timeout',CASE WHEN setting::bigint BETWEEN 1 AND 1000 THEN setting||'ms' ELSE '1000ms' END,TRUE) FROM pg_catalog.pg_settings WHERE name='lock_timeout'`);
     const embedding = await readEmbeddingStatus(client, principal.id, memoryId);
     if (!embedding) throw new ServiceError('MEMORY_NOT_FOUND', 'Memory not found');
     const recordValue = await getReadableMemory(client, principal.id, memoryId, readBudgetBytes);

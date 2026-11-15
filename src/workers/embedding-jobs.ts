@@ -129,9 +129,9 @@ export async function processEmbeddingJobs(store: EmbeddingJobStore, target: Emb
       authorize: async () => live() && await store.authorize(claim!) && live(),
     });
     if (outcome.status !== 'complete') {
-      const failure: EmbeddingAttemptFailure = providerFailure ?? {
+      const failure: EmbeddingAttemptFailure = outcome.reason === 'cancelled'
+        ? { code: 'EMBEDDING_CANCELLED', action: 'retry' } : providerFailure ?? {
         code: outcome.reason === 'policy_denied' ? 'EMBEDDING_POLICY'
-          : outcome.reason === 'cancelled' ? 'EMBEDDING_CANCELLED'
           : outcome.reason === 'deadline' ? (providerInvoked ? 'EMBEDDING_TIMEOUT' : 'EMBEDDING_BUDGET')
           : outcome.reason === 'invalid_response' ? 'EMBEDDING_INVALID_RESPONSE'
           : outcome.reason === 'provider_failed' || outcome.reason === 'stale_attempt' ? 'EMBEDDING_STORAGE'
