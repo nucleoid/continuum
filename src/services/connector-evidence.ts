@@ -87,7 +87,8 @@ async function probe(pool: pg.Pool, actor: string, mapping: RepositoryMapping,
 /** Explicit internal pipeline consumer only. No ordinary recall, capture,
  * transport credential or generator path implicitly invokes this service. */
 async function executeQuery(pool: pg.Pool, actor: string, mappingId: string,
-  request: Omit<import('../connectors/evidence.js').RepositoryEvidenceRequest, 'repository'>, options: ConnectorEvidenceOptions): Promise<ConnectorEvidenceResult> {
+  request: Omit<import('../connectors/evidence.js').RepositoryEvidenceRequest, 'repository'>, options: ConnectorEvidenceOptions,
+  invocation: { started: boolean }): Promise<ConnectorEvidenceResult> {
   const parsedRequest = repositoryRequestSchema.omit({ repository: true }).safeParse(request);
   const evidenceClass = parsedRequest.success ? parsedRequest.data.evidenceClass : 'repository-brief';
   const fail = (outcome: ConnectorOutcome): ConnectorEvidenceResult => ({ receipt: safeReceipt(evidenceClass, outcome) });
@@ -104,6 +105,7 @@ async function executeQuery(pool: pg.Pool, actor: string, mappingId: string,
       || budgetedStageUnavailable(options.budget.profile, session.permission) || budgetedStageUnavailable(options.budget.profile, session.query)) return fail('unavailable');
     if (mapping.residency === 'local-only' && (!session.permission.local || !session.query.local)) return fail('denied');
     if (!await startConnectorRun(pool, actor, mapping, options.execution)) return fail('budget');
+    invocation.started = true;
     const first = await probe(pool, actor, mapping, session.permission, options, options.execution.permissionAttempt);
     if (!('proof' in first)) return fail(first.outcome);
     if (input.commit !== null && input.commit !== first.proof.commit) return fail('stale');
@@ -159,11 +161,13 @@ async function executeQuery(pool: pg.Pool, actor: string, mappingId: string,
 export async function queryConnectorEvidence(pool: pg.Pool, actor: string, mappingId: string,
   request: Omit<import('../connectors/evidence.js').RepositoryEvidenceRequest, 'repository'>, options: ConnectorEvidenceOptions): Promise<ConnectorEvidenceResult> {
   options = { ...options, execution: { ...options.execution } };
-  const result = await executeQuery(pool, actor, mappingId, request, options);
-  if (result.receipt.outcome !== 'complete') {
+  const invocation = { started: false };
+  const result = await executeQuery(pool, actor, mappingId, request, options, invocation);
+  if (invocation.started && result.receipt.outcome !== 'complete') {
     try {
-      await evidenceTransaction(pool, client => client.query('SELECT continuum_connector_fail($1,$2,$3)',
-        [actor, options.execution.runId, result.receipt.outcome]));
+      await evidenceTransaction(pool, client => client.query('SELECT continuum_connector_fail($1,$2,$3,$4,$5,$6)',
+        [actor, options.execution.runId, result.receipt.outcome, options.execution.workflowId,
+          options.execution.workerId, options.execution.generation]));
     } catch { return { receipt: safeReceipt(result.receipt.evidenceClass, 'unavailable') }; }
   }
   try { options.budget.assertLive(); } catch { return { receipt: safeReceipt(result.receipt.evidenceClass, 'timeout') }; }

@@ -44,11 +44,13 @@ describe('connector durable admission', () => {
       expect((await owner.query('SELECT continuum_event_is_ready() AS ready')).rows[0].ready).toBe(true);
       for(const signature of ['continuum_evidence_payload(uuid,uuid,text)','continuum_extraction_status(uuid,uuid,boolean)']) {
         const definition=(await owner.query('SELECT pg_get_functiondef($1::regprocedure) AS body',[signature])).rows[0].body as string;
-        await owner.query(`ALTER FUNCTION ${signature} SECURITY INVOKER`);
-        expect((await owner.query('SELECT continuum_event_is_ready() AS ready')).rows[0].ready).toBe(false);
-        await expect(runMigrations(owner)).rejects.toThrow(/predecessor integrity/);
-        expect((await owner.query("SELECT to_regclass('connector_query_runs') AS relation")).rows[0].relation).toBeNull();
-        await owner.query(definition);
+        for(const change of ['SECURITY INVOKER','RESET search_path']) {
+          await owner.query(`ALTER FUNCTION ${signature} ${change}`);
+          if(change==='SECURITY INVOKER') expect((await owner.query('SELECT continuum_event_is_ready() AS ready')).rows[0].ready).toBe(false);
+          await expect(runMigrations(owner)).rejects.toThrow(/predecessor integrity/);
+          expect((await owner.query("SELECT to_regclass('connector_query_runs') AS relation")).rows[0].relation).toBeNull();
+          await owner.query(definition);
+        }
       }
       await runMigrations(owner);
       expect((await owner.query('SELECT continuum_connector_is_ready() AS ready')).rows[0].ready).toBe(true);

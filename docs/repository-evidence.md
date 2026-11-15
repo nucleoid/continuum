@@ -71,6 +71,9 @@ The caller supplies a previously created durable workflow and original run,
 worker, generation and three distinct attempt UUIDs. SQL persists those
 identities before the first probe. The original workflow deadline is also the
 immutable receipt/evidence expiry ceiling. Duplicate runs never dispatch again.
+Only the invocation that admitted a run may record its failure outcome, bound
+to the original workflow, worker and generation. Rejected retries leave the
+original pending run and its audit outcome intact.
 Retry/restart cannot replace identities or reset allowance. Read operations
 must likewise persist their supplied workflow and per-root permission attempt
 identities; they do not create a new query allowance. Multiple roots share the
@@ -154,8 +157,13 @@ bytes remain unchanged; 0091 is not required. Quiesce affected readers, artifact
 writers and offboarding processes, back up data and ledgers, migrate under a
 finite outer deadline, then explicitly regrant exact APP/OP profiles and verify
 `continuum_connector_is_ready()`. Current stock runtimes require that hardened
-owner-recorded gate. The migration creates empty tables and forward wrappers
-without a historical scan; five-second lock and 60-second statement budgets do
+owner-recorded gate. The migration refuses drift in prerequisite integrity
+ledgers before changing their reviewed wrappers. New connector tables start
+empty, but replacing the evidence-kind constraint scans existing
+`evidence_versions` rows under an ACCESS EXCLUSIVE lock. Rehearse with the actual
+store size: the fixed 60-second statement budget can abort this validation and
+roll back the upgrade without data loss. A store that exceeds it needs separately
+reviewed maintenance work. Five-second lock and 60-second statement budgets do
 not bound the whole maintenance or advisory-lock duration.
 
 No reauthentication, upstream credential, repository grant, reindex or backfill

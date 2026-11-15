@@ -30,6 +30,10 @@ describe('explicit repository evidence pipeline', () => {
         const retry=await queryConnectorEvidence(f.app,f.actorId,f.mappingId,request,
           {...options,budget:new Budget(starterProfile)});
         expect(retry.receipt.outcome).toBe('budget');
+        expect((await queryConnectorEvidence(f.app,f.actorId,f.mappingId,request,
+          {...options,registry:new RepositoryEvidenceRegistry(),budget:new Budget(starterProfile)})).receipt.outcome).toBe('unavailable');
+        await f.app.query('SELECT continuum_connector_fail($1,$2,$3,$4,$5,$6)',
+          [f.actorId,options.execution.runId,'budget',randomUUID(),options.execution.workerId,options.execution.generation]);
         expect((await f.owner.query('SELECT state,outcome FROM connector_query_runs WHERE id=$1',[options.execution.runId])).rows[0])
           .toEqual({state:'pending',outcome:null});
       } finally {release();completed=await pending;}

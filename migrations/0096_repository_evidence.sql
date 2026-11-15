@@ -1,6 +1,21 @@
 -- Optional empty repository-evidence boundary. No credentials, remote calls or backfill.
 SET LOCAL lock_timeout='5s';
 SET LOCAL statement_timeout='60s';
+-- Never turn installed drift into the baseline for a forward wrapper.
+DO $$ BEGIN
+  IF continuum_event_is_ready() IS NOT TRUE OR EXISTS(
+    SELECT 1 FROM (
+      SELECT * FROM evidence_contract_functions UNION ALL
+      SELECT * FROM extraction_contract_functions UNION ALL
+      SELECT * FROM memory_event_contract_functions
+    ) c LEFT JOIN pg_proc f ON f.oid=to_regprocedure(c.signature)
+    WHERE f.oid IS NULL OR encode(sha256(convert_to(f.prosrc,'UTF8')),'hex')<>c.body_hash
+      OR f.prosecdef<>c.definer OR f.provolatile<>c.volatility
+      OR f.proowner<>(SELECT relowner FROM pg_class WHERE oid='memories'::regclass)
+      OR NOT COALESCE(f.proconfig @> ARRAY[format('search_path=pg_catalog, %I, pg_temp',current_schema())],FALSE)
+      OR EXISTS(SELECT 1 FROM aclexplode(COALESCE(f.proacl,acldefault('f',f.proowner))) acl WHERE acl.grantee=0 AND acl.privilege_type='EXECUTE')
+  ) THEN RAISE EXCEPTION 'connector predecessor integrity unavailable'; END IF;
+END $$;
 CREATE TEMP TABLE continuum_connector_upgrade_roles(role_oid OID PRIMARY KEY,role_name NAME,operator BOOLEAN) ON COMMIT DROP;
 DO $$ DECLARE candidate RECORD; BEGIN
   FOR candidate IN SELECT p.*,r.rolname FROM continuum_pgvector_role_profiles p JOIN pg_roles r ON r.oid=p.database_role_oid
@@ -178,11 +193,12 @@ BEGIN
   RETURN jsonb_build_object('receiptVersion',r,'evidenceVersion',e);
 END $$;
 
-CREATE FUNCTION continuum_connector_fail(actor UUID,run_id UUID,result TEXT) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER AS $$
+CREATE FUNCTION continuum_connector_fail(actor UUID,run_id UUID,result TEXT,workflow UUID,worker UUID,workflow_epoch BIGINT) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER AS $$
 DECLARE target_scope UUID;
 BEGIN
   IF result IS NULL OR result NOT IN ('denied','unavailable','stale','budget','timeout') THEN RAISE check_violation USING MESSAGE='Invalid connector outcome'; END IF;
   UPDATE connector_query_runs SET state='complete',outcome=result WHERE id=run_id AND connector_query_runs.actor=$1 AND state='pending'
+    AND workflow_id=workflow AND worker_id=worker AND workflow_generation=workflow_epoch
     RETURNING scope_id INTO target_scope;
   IF FOUND THEN INSERT INTO audit_log(principal_id,action,scope_id,metadata) VALUES(actor,'write',target_scope,
     jsonb_build_object('operation','connector_query_outcome','outcome',result)); END IF;
@@ -265,7 +281,7 @@ DECLARE schema_name TEXT:=current_schema(); f RECORD; signature TEXT; definition
   app_signatures TEXT[]:=ARRAY['continuum_connector_mapping(uuid,uuid)','continuum_connector_admission(uuid,uuid,bigint,text)',
     'continuum_connector_start(uuid,uuid,uuid,bigint,uuid,uuid,bigint,uuid,uuid,uuid)',
     'continuum_connector_permit(uuid,uuid,bigint,timestamp with time zone,timestamp with time zone,text,text)',
-    'continuum_connector_finish(uuid,uuid,jsonb,text)','continuum_connector_fail(uuid,uuid,text)','continuum_connector_dependencies(uuid,uuid)','continuum_connector_is_ready()'];
+    'continuum_connector_finish(uuid,uuid,jsonb,text)','continuum_connector_fail(uuid,uuid,text,uuid,uuid,bigint)','continuum_connector_dependencies(uuid,uuid)','continuum_connector_is_ready()'];
   op_signatures TEXT[]:=ARRAY['continuum_operator_connector_mapping(uuid,uuid,uuid,text,text,text,text,boolean)',
     'continuum_operator_scrub_connector_scope(uuid,uuid,uuid,integer)'];
 BEGIN
@@ -300,11 +316,13 @@ BEGIN
     PERFORM continuum_assert_application_role_allowlist(candidate.role_name,candidate.operator);
   END LOOP;
 END $$;
--- Existing readiness ledgers must follow the reviewed forward wrappers.
+-- Only these verified predecessor definitions were changed above.
 UPDATE evidence_contract_functions c SET body_hash=encode(sha256(convert_to(f.prosrc,'UTF8')),'hex'),definer=f.prosecdef,volatility=f.provolatile
-  FROM pg_proc f WHERE f.oid=to_regprocedure(c.signature);
+  FROM pg_proc f WHERE f.oid=to_regprocedure(c.signature) AND f.oid IN (
+    'continuum_evidence_eligible(uuid,uuid,text)'::regprocedure,'continuum_offboarding_lifecycle_state_is_erased(uuid)'::regprocedure,
+    'continuum_offboarding_expected_audit_metadata(jsonb)'::regprocedure);
 UPDATE extraction_contract_functions c SET body_hash=encode(sha256(convert_to(f.prosrc,'UTF8')),'hex'),definer=f.prosecdef,volatility=f.provolatile
-  FROM pg_proc f WHERE f.oid=to_regprocedure(c.signature);
+  FROM pg_proc f WHERE f.oid=to_regprocedure(c.signature) AND f.oid='continuum_offboarding_lifecycle_state_is_erased(uuid)'::regprocedure;
 INSERT INTO connector_contract_functions SELECT oid::regprocedure::text,encode(sha256(convert_to(prosrc,'UTF8')),'hex'),prosecdef,provolatile
   FROM pg_proc WHERE pronamespace=quote_ident(current_schema())::regnamespace
     AND (proname LIKE 'continuum_connector_%' OR proname LIKE 'continuum_operator_connector_%'
