@@ -24,6 +24,7 @@ export function syntheticEmbeddingTargetForTest(provider: Pick<EmbeddingProvider
 }
 export function withSyntheticTargetForTest<T extends Pick<EmbeddingProvider, 'id' | 'dim' | 'local' | 'target'>>(provider: T): T & { target: NonNullable<EmbeddingProvider['target']> } {
   if (!provider.target) Object.defineProperty(provider, 'target', { value: syntheticEmbeddingTargetForTest(provider), configurable: true });
+  if (provider.local === undefined) Object.defineProperty(provider, 'local', { value: provider.target!.local, configurable: true });
   return provider as T & { target: NonNullable<EmbeddingProvider['target']> };
 }
 

@@ -1018,7 +1018,7 @@ CREATE FUNCTION continuum_offboarding_lifecycle_state_is_erased(target_run UUID)
 $$;
 
 CREATE FUNCTION continuum_operator_embedding_control(actor UUID,operation TEXT,target TEXT,page_limit INTEGER) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
-DECLARE t embedding_targets%ROWTYPE; item RECORD; processed INTEGER:=0;
+DECLARE t embedding_targets%ROWTYPE; p embedding_policy%ROWTYPE; item RECORD; processed INTEGER:=0;
 BEGIN
   PERFORM continuum_evidence_require_operator(actor);
   IF operation IS NULL OR operation NOT IN ('pause','resume','drain','retry','cancel','reconcile') OR page_limit IS NULL OR page_limit NOT BETWEEN 1 AND 1000 THEN
@@ -1027,6 +1027,7 @@ BEGIN
     IF operation NOT IN ('pause','resume','drain') THEN RAISE check_violation USING MESSAGE='Embedding target is required'; END IF;
     UPDATE embedding_policy SET paused=operation<>'resume' WHERE singleton;
   ELSE
+    IF operation='reconcile' THEN SELECT * INTO STRICT p FROM embedding_policy WHERE singleton FOR SHARE; END IF;
     SELECT * INTO STRICT t FROM embedding_targets WHERE fingerprint=target FOR SHARE;
     IF operation IN ('pause','drain') THEN
       UPDATE embedding_provider_control SET state='parked' WHERE provider=t.provider AND dim=t.dim;
@@ -1055,15 +1056,19 @@ BEGIN
       FOR item IN SELECT m.id FROM memories m JOIN embedding_sources s ON s.memory_id=m.id
         WHERE s.status IN ('queued','processing','retry_wait','blocked_policy','superseded') AND NOT s.erased
           AND EXISTS(SELECT 1 FROM embedding_jobs j WHERE j.memory_id=m.id)
+          AND NOT EXISTS(SELECT 1 FROM embedding_jobs current_job WHERE current_job.memory_id=m.id AND current_job.source_generation=s.generation
+            AND current_job.target_fingerprint=target AND current_job.policy_generation=p.generation)
           AND continuum_embedding_route(m.scope_id)->>'target'=target AND continuum_embedding_source_policy(m.id,t.descriptor)
         ORDER BY m.id LIMIT page_limit FOR UPDATE OF m SKIP LOCKED LOOP
+        UPDATE pipeline_budget_workflows workflow SET cancelled=TRUE,generation=workflow.generation+1 FROM embedding_cohorts old_claim
+          JOIN embedding_cohort_jobs membership ON membership.cohort_id=old_claim.id JOIN embedding_jobs old_job ON old_job.id=membership.job_id
+          WHERE old_job.memory_id=item.id AND workflow.id=old_claim.workflow_id AND NOT workflow.cancelled;
         UPDATE embedding_jobs SET state='superseded',lease_owner=NULL,lease_until=NULL,lease_generation=lease_generation+1
-          WHERE memory_id=item.id AND state IN ('queued','processing','retry_wait','blocked_policy')
-            AND (target_fingerprint IS DISTINCT FROM target OR policy_generation IS DISTINCT FROM (SELECT generation FROM embedding_policy WHERE singleton));
+          WHERE memory_id=item.id AND state IN ('queued','processing','retry_wait','blocked_policy');
         UPDATE embedding_sources SET generation=generation+1 WHERE memory_id=item.id;
         INSERT INTO embedding_jobs(memory_id,scope_id,source_generation,target_fingerprint,policy_generation,state)
-          SELECT m.id,m.scope_id,s.generation,target,p.generation,'queued' FROM memories m JOIN embedding_sources s ON s.memory_id=m.id CROSS JOIN embedding_policy p
-          WHERE m.id=item.id AND p.singleton ON CONFLICT DO NOTHING;
+          SELECT m.id,m.scope_id,s.generation,target,p.generation,'queued' FROM memories m JOIN embedding_sources s ON s.memory_id=m.id
+          WHERE m.id=item.id ON CONFLICT DO NOTHING;
         UPDATE embedding_sources SET current_target=target,status='queued' WHERE memory_id=item.id;processed:=processed+1;
       END LOOP;
     END IF;
@@ -1077,12 +1082,28 @@ CREATE FUNCTION continuum_operator_embedding_metrics(actor UUID) RETURNS JSONB L
 DECLARE result JSONB;
 BEGIN
   PERFORM continuum_evidence_require_operator(actor);
-  SELECT COALESCE(jsonb_agg(jsonb_build_object('status',state,'count',count_value,'oldestAgeSeconds',age_value,'attempts',attempt_value,
-      'latestHeartbeatAgeSeconds',heartbeat_age_value) ORDER BY state),'[]'::jsonb)
-    INTO result FROM (SELECT state,count(*) count_value,greatest(0,floor(extract(epoch FROM clock_timestamp()-min(accepted_at)))) age_value,
+  WITH counts AS (SELECT state,count(*) count_value,greatest(0,floor(extract(epoch FROM clock_timestamp()-min(accepted_at)))) age_value,
       least(9007199254740991,sum(attempts)) attempt_value,
+      count(*) FILTER(WHERE state='retry_wait' AND failure_code='EMBEDDING_BUDGET') quota_count,
       CASE WHEN state='processing' THEN greatest(0,floor(extract(epoch FROM clock_timestamp()-max(lease_until)+interval '30 seconds'))) END heartbeat_age_value
-      FROM embedding_jobs GROUP BY state) counts;
+      FROM embedding_jobs GROUP BY state),
+    groups AS (SELECT j.state,j.target_fingerprint,count(*) count_value,
+        count(*) FILTER(WHERE j.state='retry_wait' AND j.failure_code='EMBEDDING_BUDGET') quota_count
+      FROM embedding_jobs j JOIN embedding_targets t ON t.fingerprint=j.target_fingerprint GROUP BY j.state,j.target_fingerprint),
+    bounded_targets AS (SELECT target_fingerprint,row_number() OVER(ORDER BY target_fingerprint) position
+      FROM (SELECT DISTINCT target_fingerprint FROM groups ORDER BY target_fingerprint LIMIT 101) targets),
+    recoveries AS (SELECT j.state,j.target_fingerprint,count(DISTINCT r.cohort_id) count_value
+      FROM embedding_jobs j JOIN embedding_cohort_jobs membership ON membership.job_id=j.id
+        JOIN embedding_recoveries r ON r.cohort_id=membership.cohort_id GROUP BY j.state,j.target_fingerprint)
+  SELECT COALESCE(jsonb_agg(jsonb_build_object('status',counts.state,'count',counts.count_value,'oldestAgeSeconds',counts.age_value,
+      'attempts',counts.attempt_value,'latestHeartbeatAgeSeconds',counts.heartbeat_age_value,'quotaWaitCount',counts.quota_count,
+      'recoveries',(SELECT COALESCE(sum(r.count_value),0) FROM recoveries r WHERE r.state=counts.state),
+      'targetGroupsTruncated',EXISTS(SELECT 1 FROM bounded_targets WHERE position>100),
+      'targetGroups',(SELECT COALESCE(jsonb_agg(jsonb_build_object('target',g.target_fingerprint,'count',g.count_value,
+          'quotaWaitCount',g.quota_count,'recoveries',COALESCE(r.count_value,0)) ORDER BY g.target_fingerprint),'[]'::jsonb)
+        FROM groups g JOIN bounded_targets b ON b.target_fingerprint=g.target_fingerprint AND b.position<=100
+          LEFT JOIN recoveries r ON r.state=g.state AND r.target_fingerprint=g.target_fingerprint WHERE g.state=counts.state))
+      ORDER BY counts.state),'[]'::jsonb) INTO result FROM counts;
   INSERT INTO audit_log(principal_id,action,metadata) VALUES(actor,'read',jsonb_build_object('operation','embedding_metrics'));
   RETURN result;
 END $$;

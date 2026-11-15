@@ -120,7 +120,7 @@ describe('provider-qualified storage', () => {
 describe('vector search filters', () => {
   const vector = Array(768).fill(0) as number[];
   const scopeIds = ['00000000-0000-0000-0000-000000000001'];
-  const provider = { id: target.space.provider, dim: 768, target };
+  const provider = { id: target.space.provider, dim: 768, local: true, target };
 
   it('does not inspect vector storage when the approved target is no longer current', async () => {
     const db = queryable();

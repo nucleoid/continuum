@@ -19,8 +19,9 @@ export interface MemoryEmbeddingAdmission {
 /** Metadata admission before hydration/provider I/O. Never refresh this identity
  * after a provider response, even when the source appears live again. */
 export async function admitMemoryEmbedding(pool: Queryable, memoryId: string,
-  provider: Pick<EmbeddingProvider, 'id' | 'dim' | 'target'>): Promise<MemoryEmbeddingAdmission | null> {
-  if (!provider.target || provider.target.space.provider !== provider.id || provider.target.space.dim !== provider.dim) {
+  provider: Pick<EmbeddingProvider, 'id' | 'dim' | 'target' | 'local'>): Promise<MemoryEmbeddingAdmission | null> {
+  if (!provider.target || provider.target.space.provider !== provider.id || provider.target.space.dim !== provider.dim
+    || provider.target.local !== (provider.local === true)) {
     throw new Error('Embedding vector-space descriptor is unavailable');
   }
   return (await pool.query<{ admission: MemoryEmbeddingAdmission | null }>(
@@ -31,8 +32,9 @@ export function embeddingInputMatches(admission: MemoryEmbeddingAdmission, text:
   return createHash('sha256').update(text).digest('hex') === admission.inputHash;
 }
 export async function embeddingTargetIsCurrent(pool: Queryable,
-  provider: Pick<EmbeddingProvider, 'id' | 'dim' | 'target'>, scopeIds: string[]): Promise<boolean> {
-  if (!provider.target || provider.target.space.provider !== provider.id || provider.target.space.dim !== provider.dim) return false;
+  provider: Pick<EmbeddingProvider, 'id' | 'dim' | 'target' | 'local'>, scopeIds: string[]): Promise<boolean> {
+  if (!provider.target || provider.target.space.provider !== provider.id || provider.target.space.dim !== provider.dim
+    || provider.target.local !== (provider.local === true)) return false;
   return (await pool.query<{ current: boolean }>('SELECT continuum_embedding_target_is_current($1,$2) AS current',
     [provider.target, scopeIds])).rows[0].current === true;
 }
@@ -90,7 +92,7 @@ export async function vectorSearchMemoryIds(
   pool: Queryable,
   queryVector: number[],
   scopeIds: string[],
-  provider: Pick<EmbeddingProvider, 'id' | 'dim' | 'target'>,
+  provider: Pick<EmbeddingProvider, 'id' | 'dim' | 'target' | 'local'>,
   limit: number,
   types?: MemoryType[],
   eventFilter?: EventWindow,
@@ -149,7 +151,7 @@ export async function vectorSearchRelatedMemories(
   pool: Queryable,
   queryVector: number[],
   scopeIds: string[],
-  provider: Pick<EmbeddingProvider, 'id' | 'dim' | 'target'>,
+  provider: Pick<EmbeddingProvider, 'id' | 'dim' | 'target' | 'local'>,
   options: { threshold: number; excludeMemoryId: string; limit: number; readBudgetBytes?: number },
 ): Promise<RelatedMemorySearchHit[]> {
   if (scopeIds.length === 0) return [];

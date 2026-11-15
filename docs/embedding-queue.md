@@ -98,6 +98,9 @@ the durable generation/digest; configure the same values in each serving process
 as `CONTINUUM_EMBEDDING_POLICY_GENERATION` and
 `CONTINUUM_EMBEDDING_POLICY_DIGEST`, alongside its normal provider routing.
 Drift produces blocked work rather than process-local authorization.
+Reconciliation only replaces pending accepted work that lacks the current
+approved target and policy generation. Repeating it under unchanged policy does
+not create another job, renew an original workflow or reset retained charges.
 
 A binding file contains `role`, enabled service `principalId`, `scopeId`,
 `target` fingerprint and `enabled`. First create a dedicated non-owner LOGIN and
@@ -198,8 +201,14 @@ all provider vectors in bounded pages. Actual residual predicates include locked
 rows and reopen dirty completion. Opaque nonpayload accounting remains; progress
 counters do not replace physical proof.
 
-Metrics expose bounded aggregate status/count/age/attempt data through OP, with no
-source text, memory-ID labels, raw errors or credentials. Example alerts: oldest
+Metrics preserve aggregate status/count/age/attempt and heartbeat data through OP.
+Additive `targetGroups` contain at most 100 distinct approved opaque targets;
+`targetGroupsTruncated` explicitly marks omitted groups. State and target
+`quotaWaitCount` count current retry waits classified `EMBEDDING_BUDGET`, not
+outage backoff or every possible exhausted allowance. `recoveries` count durable
+process-exit recovery receipts for jobs in that state; changing state moves that
+observation. There are no source text, memory-ID, raw error or credential labels.
+These observations never replace physical privacy proof. Example alerts: oldest
 queued age above the team's target, processing without a healthy worker heartbeat,
 repeated quota delay, parked provider, and new permanent failures. Operators must
 install their own monitoring; these examples are not deployed alerts.
