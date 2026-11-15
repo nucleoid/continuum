@@ -555,7 +555,7 @@ BEGIN
   END IF;
   SELECT * INTO STRICT a FROM brief_run_attempts WHERE run_id=j.id AND attempt_id=(value->>'attemptId')::uuid AND claim_generation=j.generation;
   IF phase='reserve' THEN
-    IF (value->'amounts'->>'retries')::integer IS DISTINCT FROM CASE WHEN a.retry THEN 1 ELSE 0 END THEN RAISE check_violation USING MESSAGE='Brief retry accounting unavailable'; END IF;
+    IF (value->'amounts'->>'retries')::integer IS DISTINCT FROM (CASE WHEN a.retry THEN 1 ELSE 0 END) THEN RAISE check_violation USING MESSAGE='Brief retry accounting unavailable'; END IF;
     RETURN to_jsonb(continuum_pipeline_reserve(j.workflow_id,a.attempt_id,j.budget_owner,j.budget_generation,value->'amounts',retained));
   ELSIF phase='dispatch' THEN
     result:=continuum_pipeline_dispatch(j.workflow_id,a.attempt_id,j.budget_owner,j.budget_generation);
