@@ -98,7 +98,7 @@ it('does not reject physical erasure of legitimate pre-0098 scope history beyond
     await owner.query('SELECT continuum_evidence_source($1,$2)', [actor.id, memory.id]);
     // Every immutable version is produced by the actual published memory fence
     // and source snapshot. No direct version/dependency insert or guard bypass.
-    await owner.query(`INSERT INTO scopes(kind,name) SELECT 'project','legacy-${suffix}-'||n FROM generate_series(1,256) n`);
+    await owner.query(`INSERT INTO scopes(id,kind,name) SELECT gen_random_uuid(),'project','legacy-${suffix}-'||n FROM generate_series(1,256) n`);
     await owner.query(`DO $$ DECLARE item RECORD; BEGIN
       FOR item IN SELECT id FROM scopes WHERE name LIKE 'legacy-${suffix}-%' ORDER BY id LOOP
         UPDATE memories SET scope_id=item.id WHERE id='${memory.id}'::uuid;

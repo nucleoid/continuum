@@ -35,7 +35,7 @@ it.each(['grant', 'function'] as const)('commits access revocation while the new
       await expect(offboardPrincipal(f.operator, f.principal, f.actorId, options))
         .rejects.toMatchObject({ code: 'FORBIDDEN' });
       await expect(offboardPrincipal(f.app, admin, f.actorId, options))
-        .rejects.toMatchObject({ code: '42501' });
+        .rejects.toMatchObject({ code: 'FORBIDDEN', status: 403 });
       expect((await f.owner.query('SELECT disabled_at FROM principals WHERE id=$1', [f.actorId])).rows)
         .toEqual([{ disabled_at: null }]);
       expect((await f.owner.query('SELECT 1 FROM principal_offboarding_runs WHERE principal_id=$1', [f.actorId])).rowCount).toBe(0);
