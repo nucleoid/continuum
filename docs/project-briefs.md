@@ -85,9 +85,13 @@ alone does not prove this contract or completed physical erasure.
 Trusted composition registers a `BriefProfile` in `BriefRegistry`, with an exact
 adapter/model/profile, version, complete serializer, validated token accounting,
 enforceable response/completion caps, finite `BudgetProfile` and qualification.
-The current port admits only `local-zero-v1` zero-price schedules and zero spend.
-`synthetic-only` qualification requires local execution. An `operator-qualified`
-profile carries the SHA-256 of its separately reviewed actual evidence report.
+Spend defaults to zero. `synthetic-only` qualification requires local execution
+and a zero spend allowance. An `operator-qualified` profile can declare a finite
+nonzero allowance with a matching validated price schedule and currency. It is
+unavailable until a bound OP explicitly installs that descriptor and a project
+administrator enables it. Every call reserves its conservative maximum before
+dispatch; unknown usage retains that charge. An `operator-qualified` profile
+carries the SHA-256 of its separately reviewed actual evidence report.
 That report reference is an operator attestation, not runtime proof of review.
 Synthetic tests cannot manufacture it. No real provider is bundled or qualified.
 Credentials stay in trusted installation code, outside descriptors, reference

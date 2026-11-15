@@ -13,7 +13,7 @@ export class BriefRegistry {
     const budget = checkedProfile(profile.budget);
     if (!/^[a-z][a-z0-9.-]{0,63}$/.test(profile.id) || !/^[a-zA-Z0-9_.:/-]{1,128}$/.test(profile.version)
       || this.entries.size >= 32 || this.entries.has(profile.id) || budget.overallMs > 20_000 || profile.adapter.timeoutMs > 15_000
-      || budget.limits.spendMicros !== 0 || budget.rateSchedule !== 'local-zero-v1'
+      || (profile.qualification.kind === 'synthetic-only' && budget.limits.spendMicros !== 0)
       || (profile.isolation !== undefined && profile.isolation !== 'independent-section-requests-v1')
       || Object.keys(profile.qualification).some(k=>!['kind','reportSha256'].includes(k))
       || (!profile.adapter.local && profile.qualification.kind === 'synthetic-only')
