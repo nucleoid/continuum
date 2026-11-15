@@ -238,11 +238,19 @@ it('does not consume a stricter SQL statement deadline as optional relation succ
     const capture = await captureMemory(f.app, f.router, f.principal, incoming);
     const lock = await f.owner.connect();
     try {
-      await lock.query('BEGIN');
-      await lock.query('SELECT id FROM evidence_roots WHERE source_memory_id=$1 FOR UPDATE', [candidate.memory.id]);
+      const invoke = vi.mocked(f.adapter.invoke).getMockImplementation()!;
+      vi.mocked(f.adapter.invoke).mockImplementation(async (...args) => {
+        const response = await invoke(...args);
+        // Acquire only after actual incoming dispatch, so this exercises the
+        // optional apply probe rather than earlier metadata availability gates.
+        await lock.query('BEGIN');
+        await lock.query('SELECT id FROM evidence_roots WHERE source_memory_id=$1 FOR UPDATE', [candidate.memory.id]);
+        return response;
+      });
       await f.worker.query("SET statement_timeout='200ms'");
-      expect(await run(f)).toBe('unavailable');
-      expect(f.adapter.invoke).toHaveBeenCalledTimes(2); // Candidate lock is reached after real accounted dispatch.
+      const outcome = await run(f);
+      expect(f.adapter.invoke).toHaveBeenCalledTimes(2);
+      expect(outcome).toBe('unavailable');
     } finally {
       await lock.query('ROLLBACK'); lock.release();
       await f.worker.query("SET statement_timeout='5s'");
