@@ -1,2 +1,3 @@
 *.sql text eol=lf
 evals/fixtures/v1/*.json -text
+evals/event-time-v1.json -text

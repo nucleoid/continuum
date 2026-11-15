@@ -3,9 +3,11 @@ import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
 import type { Queryable } from './queryable.js';
 import { ServiceError } from '../services/errors.js';
 import { BudgetError, type Budget } from '../pipeline/budget.js';
+import type { EventWindow } from '../temporal/model.js';
+import { eventPredicate } from './temporal.js';
 
 export interface MemoryReadRecord { memory: Memory; scope: string; authorDisplayName: string; }
-export interface ListMemoryFilter { scope?: string; type?: MemoryType; state: MemoryState; limit: number; offset: number; }
+export interface ListMemoryFilter { scope?: string; type?: MemoryType; state: MemoryState; limit: number; offset: number; eventFilter?: EventWindow; }
 interface MemoryReadRow extends Record<string, unknown> { scope_label: string; author_display_name: string; }
 function rowToMemoryReadRecord(row: MemoryReadRow): MemoryReadRecord {
   return { memory: rowToMemory(row), scope: row.scope_label, authorDisplayName: row.author_display_name };
@@ -87,10 +89,12 @@ export async function getReadableMemory(queryable: Queryable, principalId: strin
   return rows[0] ? rowToMemoryReadRecord(rows[0]) : null;
 }
 export async function listReadableMemories(queryable: Queryable, principalId: string, filter: ListMemoryFilter, readBudgetBytes?: number, budget?: Budget): Promise<MemoryReadRecord[]> {
+  const params: unknown[] = [principalId, filter.state, filter.type ?? null, filter.scope ?? null, filter.limit, filter.offset];
+  const temporal = eventPredicate(params, principalId, filter.eventFilter);
   const where = `${eligibility('$1')} AND m.state = $2 AND ($3::text IS NULL OR m.type = $3)
-    AND ($4::text IS NULL OR CASE WHEN s.kind = 'org' THEN 'org' ELSE s.kind || ':' || s.name END = $4)`;
+    AND ($4::text IS NULL OR CASE WHEN s.kind = 'org' THEN 'org' ELSE s.kind || ':' || s.name END = $4) ${temporal}`;
   const rows = await readRows(queryable, where, 'ORDER BY m.updated_at DESC, m.id DESC LIMIT $5 OFFSET $6',
-    [principalId, filter.state, filter.type ?? null, filter.scope ?? null, filter.limit, filter.offset], readBudgetBytes, budget);
+    params, readBudgetBytes, budget);
   return rows.map(rowToMemoryReadRecord);
 }
 

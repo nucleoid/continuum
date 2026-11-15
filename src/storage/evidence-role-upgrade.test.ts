@@ -8,7 +8,7 @@ import { runMigrations } from './migrator.js';
 import { createPrincipal } from './principals.js';
 import { getScopeByRef } from './scopes.js';
 import { addMembership } from './memberships.js';
-import { requireEvidenceReady, requireExtractionReady } from './provider-lifecycle.js';
+import { requireEvidenceReady, requireExtractionReady, requireEventTimeReady } from './provider-lifecycle.js';
 
 it('upgrades real APP/OP/SYNC profiles without raw payload grants and refuses trusted-body drift at startup', async () => {
   const suffix=randomUUID().replaceAll('-','').slice(0,12),schema=`evidence_upgrade_${suffix}`;
@@ -61,6 +61,10 @@ it('upgrades real APP/OP/SYNC profiles without raw payload grants and refuses tr
         .toEqual({serving:index!==2,installation:index===1,worker:false});
       if(index!==2) await requireExtractionReady(session,{expectedSchema:schema});
       else await expect(requireExtractionReady(session,{expectedSchema:schema})).rejects.toMatchObject({code:'DEPENDENCY_UNAVAILABLE'});
+      expect((await owner.query(`SELECT has_function_privilege($1,'continuum_event_write(uuid,uuid,jsonb)','EXECUTE') AS serving,
+        has_table_privilege($1,'memory_event_annotations','SELECT,INSERT,UPDATE,DELETE') AS raw`,[role])).rows[0]).toEqual({serving:index!==2,raw:false});
+      if(index!==2) await requireEventTimeReady(session,{expectedSchema:schema});
+      else await expect(requireEventTimeReady(session,{expectedSchema:schema})).rejects.toMatchObject({code:'DEPENDENCY_UNAVAILABLE'});
       await expect(session.query('SELECT payload FROM evidence_payloads')).rejects.toMatchObject({code:'42501'});
     }
     expect((await owner.query("SELECT has_function_privilege($1,'independent_operator_extension()','EXECUTE') AS preserved",[roles[1]])).rows[0].preserved).toBe(true);

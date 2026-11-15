@@ -14,6 +14,7 @@ import { stripTrustedActivityMetadata } from '../capture/metadata.js';
 import { listAllowedTagNames, lockRequestedTags } from './tag-vocabularies.js';
 import { enqueuePromotionEvent } from './promotion-events.js';
 import type { PromotionEvent } from '../extensions/promotion.js';
+import { readEventAnnotations } from './temporal.js';
 
 export interface PromoteResult {
   source: Memory;
@@ -126,6 +127,7 @@ async function promoteOperation(
   }
 
   const destinationMetadata = stripTrustedActivityMetadata(source.metadata);
+  const sourceEvent = (await readEventAnnotations(client, principalId, [source.id])).get(source.id);
   delete destinationMetadata.related;
   const destination = await createMemory(client, {
     scopeId: destinationScope.id,
@@ -147,6 +149,10 @@ async function promoteOperation(
     [source.id, destination.id],
   );
   const updatedSource = rowToMemory(rows[0]);
+  if (sourceEvent?.version) {
+    await client.query('SELECT continuum_event_promote($1,$2,$3,$4)', [principalId,source.id,destination.id,sourceEvent.version]);
+    destination.event = (await readEventAnnotations(client, principalId, [destination.id])).get(destination.id) ?? undefined;
+  }
   if (audit) {
     await recordAudit(client, {
       principalId,

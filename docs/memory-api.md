@@ -1,5 +1,14 @@
 # Memory fetch and browse API
 
+Explicit [event time](event-time.md) is additive optional inspection metadata
+under `event`, containing `annotation`, immutable `version` and `sourceVersion`
+(MCP `source_version`). Historical unannotated rows are not inferred from capture
+timestamps. Recall accepts separate `eventFilter` and `eventWindow`; MCP uses
+`event_filter` and `event_window`, with nested `include_unknown`. Browse accepts
+an explicitly requested `eventFilter` JSON query parameter (MCP `event_filter`
+object), applied before pagination. Ordinary browse timestamp ordering is unchanged.
+Event-as-of uses current access and lifecycle, never retrospective knowledge.
+
 Recall is a discovery surface and returns excerpts. Use point fetch or browse to
 read complete stored records. Both surfaces enforce the caller's readable scope
 set, including implicit org access, and audit successful reads without copying

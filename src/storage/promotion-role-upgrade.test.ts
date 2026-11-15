@@ -149,6 +149,14 @@ async function roleUpgradeAcceptance(review?: 'poison' | 'null' | 'regrant' | 'e
         'continuum_promotion_webhook_ids()','EXECUTE') AS allowed`)).rows)
         .toEqual([{ allowed: role === appRole || role === operatorRole }]);
     }
+    // Preserve the historical 88->89 assertions above. Current promotion and
+    // offboarding implementations require the independent forward foundations.
+    const currentForwards = ['0090_standup_activity.sql','0092_pipeline_budgets.sql',
+      '0093_evidence_lifecycle.sql','0094_extraction.sql','0095_memory_event_annotations.sql'];
+    for (const file of currentForwards) await copyFile(new URL(file,migrationSource),join(directory,file));
+    expect((await runMigrations(owner,directory)).map(entry=>entry.name)).toEqual(currentForwards);
+    expect(await profiles()).toEqual(originalProfiles);
+    expect(await identities()).toEqual(originalIdentities);
     const app = logins.get(appRole)!;
     const sourceScope = await createScope(owner, { kind: 'team', name: 'role-upgrade-source' });
     const destinationScope = await createScope(owner, { kind: 'project', name: 'role-upgrade-target' });

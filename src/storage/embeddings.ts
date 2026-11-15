@@ -3,6 +3,8 @@ import type { EmbeddingProvider } from '../embeddings/provider.js';
 import type { MemoryType } from '../types.js';
 import type { Queryable } from './queryable.js';
 import { assertEmbeddingVectorDimension } from './schema.js';
+import type { EventWindow } from '../temporal/model.js';
+import { eventPredicate } from './temporal.js';
 
 function toPgVector(v: number[]): string {
   return `[${v.join(',')}]`;
@@ -70,6 +72,9 @@ export async function vectorSearchMemoryIds(
   provider: Pick<EmbeddingProvider, 'id' | 'dim'>,
   limit: number,
   types?: MemoryType[],
+  eventFilter?: EventWindow,
+  actor?: string,
+  stableOrder = false,
 ): Promise<Array<{ id: string; distance: number }>> {
   if (scopeIds.length === 0) return [];
   assertEmbeddingVectorDimension(queryVector, provider);
@@ -84,6 +89,7 @@ export async function vectorSearchMemoryIds(
     params.push(types);
     typeFilter = ` AND m.type = ANY($${params.length}::text[])`;
   }
+  const temporal = eventPredicate(params, actor, eventFilter);
   params.push(limit);
   const limitIdx = params.length;
   const { distanceOperator, vectorType } = await vectorSqlNames(pool);
@@ -97,10 +103,11 @@ export async function vectorSearchMemoryIds(
           AND m.state = 'live'
           AND (m.expires_at IS NULL OR m.expires_at > pg_catalog.clock_timestamp())
           ${typeFilter}
+          ${temporal}
      )
      SELECT e.memory_id AS id, e.embedding ${distanceOperator} $1::${vectorType} AS distance
        FROM provider_embeddings e
-      ORDER BY e.embedding ${distanceOperator} $1::${vectorType}
+      ORDER BY e.embedding ${distanceOperator} $1::${vectorType}${stableOrder ? ', e.memory_id ASC' : ''}
       LIMIT $${limitIdx}`,
     params,
   );

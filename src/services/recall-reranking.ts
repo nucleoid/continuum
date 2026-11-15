@@ -10,6 +10,7 @@ import { decideEvidencePolicy, type EvidenceAuthorityContext, type EvidencePolic
 import type { Reranking } from '../reranking/provider.js';
 import { runReranking, type RerankingDiagnostic } from '../reranking/runner.js';
 import type { BudgetReason } from '../pipeline/receipts.js';
+import { MAX_EVENT_INSPECTION_BYTES } from '../storage/temporal.js';
 
 interface AdmittedRecall {
   results: RecallResult[];
@@ -66,12 +67,16 @@ export async function rerankRecallPool(pool: pg.Pool, actor: string, input: Reca
   const admitted = await evidenceTransaction(pool, async client => {
     // Metadata before lazy source enrollment or body hydration. Current membership
     // applies even if a previously resolved readable-scope list is stale.
-    const metadata = await recallAuthorityMetadata(client, actor, selected.candidates.map(c => c.id), opts.scopeIds);
+    const metadata = await recallAuthorityMetadata(client, actor, selected.candidates.map(c => c.id), opts.scopeIds, opts.eventFilter);
     const sizes = new Map(metadata.map(r => [r.id, Number(r.bytes)]));
     let candidates = selected.candidates.filter(c => sizes.has(c.id));
+    const eventBytes = (rows: typeof candidates) => opts.eventFilter || opts.eventWindow
+      ? 1024 + rows.length * MAX_EVENT_INSPECTION_BYTES : 0;
     const fits = (rows: typeof candidates) => rows.length <= budget.available('candidates')
       && rows.every(c => sizes.get(c.id)! <= budget.profile.maxItemHydratedBytes)
-      && rows.reduce((n, c) => n + sizes.get(c.id)!, 1024) <= Math.min(opts.readBudgetBytes ?? Infinity, budget.available('hydratedBytes'));
+      && (!(opts.eventFilter || opts.eventWindow) || MAX_EVENT_INSPECTION_BYTES <= budget.profile.maxItemHydratedBytes)
+      && rows.reduce((n, c) => n + sizes.get(c.id)!, 1024) + eventBytes(rows)
+        <= Math.min(opts.readBudgetBytes ?? Infinity, budget.available('hydratedBytes'));
     if (!fits(candidates) || config.candidateLimit < limit) {
       candidates = candidates.slice(0, limit);
       reason = { status: 'fallback', reason: 'budget_exhausted' };
@@ -95,7 +100,7 @@ export async function rerankRecallPool(pool: pg.Pool, actor: string, input: Reca
     candidates = candidates.filter(c => versions.has(c.id));
     budget.consume({ candidates: candidates.length });
     const results = await hydrateRecallCandidates(client, candidates.map(c => c.id), input.query,
-      new Map(candidates.map(c => [c.id, c.score])), opts.scopeIds, opts.types, opts.readBudgetBytes, budget, true);
+      new Map(candidates.map(c => [c.id, c.score])), opts.scopeIds, opts.types, opts.readBudgetBytes, budget, true, opts.eventFilter, actor);
     return { results, versions };
   });
   if (admitted.results.length < 2 || reason) return { ...admitted, diagnostic: reason ?? { status: 'fallback', reason: 'capability_unavailable' } };
@@ -112,7 +117,8 @@ export async function rerankRecallPool(pool: pg.Pool, actor: string, input: Reca
     finalBytes = bytes + 65_536;
   }
   catch { return { ...admitted, diagnostic: { status: 'fallback', reason: 'budget_exhausted' } }; }
-  const outcome = await runReranking(config, budget, Object.freeze({ query: input.query, candidates }), authorize, finalBytes, { signal, onWork: options.onWork });
+  const outcome = await runReranking(config, budget, Object.freeze({ query: input.query, candidates,
+    ...(opts.eventWindow ? { eventWindow: Object.freeze({ ...opts.eventWindow }) } : {}) }), authorize, finalBytes, { signal, onWork: options.onWork });
   if (outcome.status === 'fallback') return { ...admitted, diagnostic: outcome };
   return { ...admitted, diagnostic: { status: 'used' }, results: admitted.results
     .map((result, i) => ({ ...result, rerankScore: outcome.scores.get(`c${i}`)!, fusionRank: i }))

@@ -3,6 +3,7 @@ import { parseArgs } from 'node:util';
 import { ApiClient, CliError } from './http.js';
 import { readConfigFile, resolveConfig, type FileConfig } from './config.js';
 import { humanText, jsonDocument, table, terminalDocument } from './output.js';
+import { parseEventAnnotation, parseEventWindow } from '../temporal/model.js';
 
 const MAX_INPUT_BYTES = 1024 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -158,6 +159,14 @@ function emit(deps: CliDependencies, json: boolean, value: unknown, human: strin
   deps.stdout(json ? jsonDocument(value) : human);
 }
 
+function temporalOption(value: string | undefined, name: string, annotation = false): unknown {
+  if (value === undefined) return undefined;
+  try {
+    if (Buffer.byteLength(value,'utf8') > 8192) throw new Error();
+    return annotation ? parseEventAnnotation(JSON.parse(value)) : parseEventWindow(JSON.parse(value));
+  } catch { throw new CliError(`${name} must be valid structured event JSON`, 2); }
+}
+
 function parseSince(value: string, now: Date): string {
   const relative = /^([1-9]\d{0,3})h$/.exec(value);
   if (relative) return new Date(now.getTime() - Number(relative[1]) * 3_600_000).toISOString();
@@ -174,6 +183,7 @@ async function commandCapture(args: string[], client: ApiClient, deps: CliDepend
     body: { type: 'string' }, 'body-file': { type: 'string' }, tags: { type: 'string' },
     source: { type: 'string', default: 'manual' }, 'source-ref': { type: 'string' },
     metadata: { type: 'string' },
+    'event-annotation': { type: 'string' },
   } });
   if (positionals.length) throw new CliError('capture does not accept positional arguments', 2);
   if (values.body !== undefined && values['body-file'] !== undefined) {
@@ -212,6 +222,7 @@ async function commandCapture(args: string[], client: ApiClient, deps: CliDepend
     source: values.source,
     ...(values['source-ref'] ? { sourceRef: values['source-ref'] } : {}),
     ...(metadata ? { metadata } : {}),
+    ...(values['event-annotation'] !== undefined ? { eventAnnotation: temporalOption(values['event-annotation'],'--event-annotation',true) } : {}),
   });
   emit(deps, values.json, result, `Captured ${humanText(result.id)}\n`);
 }
@@ -219,12 +230,15 @@ async function commandCapture(args: string[], client: ApiClient, deps: CliDepend
 async function commandRecall(args: string[], client: ApiClient, deps: CliDependencies) {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: {
     ...commonOptions, scopes: { type: 'string' }, types: { type: 'string' }, limit: { type: 'string' },
+    'event-filter': { type: 'string' }, 'event-window': { type: 'string' },
   } });
   if (positionals.length !== 1) throw new CliError('recall requires one query argument', 2);
   const types = csv(values.types);
   if (types?.some((type) => !MEMORY_TYPES.has(type))) throw new CliError('Invalid memory type filter', 2);
   const result = await client.json('POST', '/recall', {
     query: positionals[0], ...(csv(values.scopes) ? { scopes: csv(values.scopes) } : {}),
+    ...(values['event-filter'] !== undefined ? { eventFilter: temporalOption(values['event-filter'],'--event-filter') } : {}),
+    ...(values['event-window'] !== undefined ? { eventWindow: temporalOption(values['event-window'],'--event-window') } : {}),
     ...(types ? { types } : {}), ...(integer(values.limit, '--limit', 1, 100) ? { limit: integer(values.limit, '--limit', 1, 100) } : {}),
   });
   emit(deps, values.json, result, table(

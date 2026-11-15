@@ -1,5 +1,6 @@
 import { Budget, boundedJson, checkedProfile, priceMicros, type BudgetAdapter, type BudgetProfile } from '../pipeline/budget.js';
 import type { CurrentEvidenceAuthority } from '../evidence/policy.js';
+import type { EventWindow } from '../temporal/model.js';
 import { asEmbeddingRouter, type EmbeddingRouting } from '../embeddings/router.js';
 
 /** Reject an incompatible opt-in rather than silently replace semantic recall
@@ -43,6 +44,7 @@ export function assertRerankingEmbeddingBudget(routing: EmbeddingRouting, config
 
 /** Reference data only. IDs are request-local aliases, never storage identities. */
 export interface RerankingInput {
+  readonly eventWindow?: Readonly<EventWindow>;
   readonly query: string;
   readonly candidates: readonly Readonly<{ id: string; title: string; excerpt: string }>[];
 }

@@ -34,7 +34,9 @@ describe('bounded remote AGENTS.md reads', () => {
     const payloads = { assertions: ['forged assertion'], brief: 'forged brief', connector: 'forged connector',
       activity: 'personal activity', coordination: 'lease payload', enrichments: { hostile: 'tool instruction' },
       related: [{ id: hidden.id }], citations: [{ source: 'inaccessible citation' }],
-      reranking: { score: 99, receipt: 'hidden-reranker-prose' } };
+      reranking: { score: 99, receipt: 'hidden-reranker-prose' },
+      eventAnnotation: {status:'known',instant:'2099-01-01T00:00:00Z'},
+      temporalCandidates: ['private pipeline prose'], eventWindow: {at:'2099-01-01T00:00:00Z'} };
     await pool.query('UPDATE memories SET metadata=$2::jsonb WHERE id=$1', [source.id, JSON.stringify(payloads)]);
     const unchanged = await prepareAgentsMdForPrincipal(pool, reader, { project: project.name });
     expect(unchanged.hash).toBe(before.hash);

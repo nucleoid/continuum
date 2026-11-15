@@ -3,8 +3,10 @@ import type pg from 'pg';
 import { z } from 'zod';
 import type { EmbeddingRouting } from '../../embeddings/router.js';
 import { decisionHistoryForPrincipal, supersedeForPrincipal } from '../../services/supersede.js';
+import { eventAnnotationSchema } from '../../temporal/model.js';
 
 const supersedeSchema = z.object({
+  eventAnnotation: eventAnnotationSchema.optional(),
   supersededId: z.string().uuid(),
   title: z.string().min(1).max(500),
   body: z.string().min(1),
@@ -33,6 +35,7 @@ export function supersedeRouter(pool: pg.Pool, embeddingRouting: EmbeddingRoutin
       scopeId: result.successor.scopeId,
       predecessorState: result.predecessor.state,
       embedded: result.embedded,
+      ...(result.successor.event ? { event: result.successor.event } : {}),
       ...(result.embedErrorCode ? { embeddingErrorCode: result.embedErrorCode } : {}),
     });
   });

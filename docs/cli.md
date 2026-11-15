@@ -129,6 +129,19 @@ recommended path.
 
 ## Commands
 
+Capture accepts `--event-annotation '<JSON>'`; recall accepts independent
+`--event-filter '<JSON>'` and `--event-window '<JSON>'`. These structured flags
+use the REST camelCase contract and validate before sending. For example:
+
+```text
+continuum recall "deployment" --event-filter '{"from":"2026-02-01T00:00:00Z","to":"2026-03-01T00:00:00Z","includeUnknown":true}' --json
+continuum capture --scope project:booking-engine --type decision --title "Scheduled migration" --body "Source wording" --event-annotation '{"status":"known","assertion":"asserted","precision":"day","value":"2026-12-01","timezone":"Pacific/Auckland"}'
+```
+
+See [event time](event-time.md) for half-open boundaries, explicit uncertainty,
+current event-as-of authority and additive inspection fields. No provider runs to
+normalize manual input. CLI JSON preserves safe structured event output.
+
 ```text
 continuum capture --scope project:booking-engine --type fact --title "Retry limit" --body "Three attempts"
 cat notes.md | continuum capture --scope user:me --type context --title "Session notes"

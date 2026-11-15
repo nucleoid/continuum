@@ -13,8 +13,10 @@ import {
 } from '../storage/supersede.js';
 import { record as recordAudit, recordRead as recordReadAudit } from '../audit/log.js';
 import { normalizeTags } from './tag-vocabularies.js';
+import { parseEventAnnotation, type EventAnnotationInput } from '../temporal/model.js';
 
 export interface SupersedeInput {
+  eventAnnotation?: EventAnnotationInput;
   supersededId: string; title: string; body: string; tags?: string[]; source?: string;
   sourceRef?: string; metadata?: Record<string, unknown>;
 }
@@ -161,6 +163,7 @@ export async function supersedeForPrincipal(
   input: SupersedeInput, auditMetadata: Record<string, unknown> = {},
   allowedSource?: string,
   readBudgetBytes?: number,
+  validateResult?: (result: SupersedeResult) => void,
 ): Promise<SupersedeResult> {
   try {
     const source = input.source ?? 'manual';
@@ -168,11 +171,13 @@ export async function supersedeForPrincipal(
       throw new ServiceError('FORBIDDEN', 'credential is not allowed for this source');
     }
     validateCaptureContent({ ...input, source });
+    if (input.eventAnnotation !== undefined) parseEventAnnotation(input.eventAnnotation);
     const tags = normalizeTags(input.tags);
     let result;
     try {
       result = await supersedeDecision(pool, {
         ...input, tags, source, principalId: principal.id, auditMetadata, readBudgetBytes,
+        validateResult: validateResult ? value => validateResult({ ...value, embedded:false, embedErrorCode:'EMBEDDING_FAILED' }) : undefined,
       });
     } catch (error) {
       if (error instanceof SupersedeStorageError) throw mapStorageError(error);

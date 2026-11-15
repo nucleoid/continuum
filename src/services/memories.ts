@@ -10,6 +10,8 @@ import {
 import type { MemoryState, MemoryType, Principal } from '../types.js';
 import { asServiceError, ServiceError } from './errors.js';
 import { parseScopeString } from './scopes.js';
+import { eventMatches, parseEventWindow, type EventWindowInput } from '../temporal/model.js';
+import { readEventAnnotations } from '../storage/temporal.js';
 
 export const DEFAULT_MEMORY_LIST_LIMIT = 50;
 export const MAX_MEMORY_LIST_LIMIT = 100;
@@ -22,6 +24,7 @@ const MEMORY_TYPES = new Set<MemoryType>([
 const MEMORY_STATES = new Set<MemoryState>(['live', 'stale', 'archived', 'promoted']);
 
 export interface ListMemoriesInput {
+  eventFilter?: EventWindowInput;
   scope?: string;
   type?: MemoryType;
   state?: MemoryState;
@@ -68,6 +71,8 @@ export async function getMemoryForPrincipal(
     if (!recordValue) {
       throw new ServiceError('MEMORY_NOT_FOUND', 'Memory not found');
     }
+    const event = (await readEventAnnotations(client,principal.id,[memoryId],true,readBudgetBytes)).get(memoryId);
+    if (event?.version) recordValue.memory.event = event;
     if (readBudgetBytes !== undefined) requireReadBudget(Buffer.byteLength(JSON.stringify(recordValue), 'utf8') + 1024, readBudgetBytes);
     validateResult?.(recordValue);
     await recordRead(client, {
@@ -119,11 +124,22 @@ export async function listMemoriesForPrincipal(
       throw new ServiceError('INVALID_INPUT', 'Invalid memory type');
     }
     const scope = canonicalScope(input.scope);
+    const eventFilter = input.eventFilter === undefined ? undefined : parseEventWindow(input.eventFilter);
     client = await pool.connect();
     await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
-    const items = await listReadableMemories(client, principal.id, {
+    let items = await listReadableMemories(client, principal.id, {
       scope, type: input.type, state, limit, offset,
+      eventFilter,
     }, readBudgetBytes);
+    const events = await readEventAnnotations(client,principal.id,items.map(item => item.memory.id),true,readBudgetBytes,undefined,eventFilter !== undefined);
+    if (eventFilter) items = items.filter(item => {
+      const event = events.get(item.memory.id);
+      return event !== null && event !== undefined && eventMatches(event.annotation,eventFilter);
+    });
+    for (const item of items) {
+      const event = events.get(item.memory.id);
+      if (event && (event.version || input.eventFilter)) item.memory.event = event;
+    }
     if (readBudgetBytes !== undefined) requireReadBudget(Buffer.byteLength(JSON.stringify({ items, limit, offset }), 'utf8') + 1024, readBudgetBytes);
     validateResult?.({ items, limit, offset });
     await recordRead(client, {

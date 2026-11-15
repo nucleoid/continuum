@@ -86,6 +86,9 @@ try {
     'migrations/0088_embedding_provider_scan_index_rebuild.sql',
     'migrations/0090_standup_activity.sql',
     'migrations/0094_extraction.sql',
+    'migrations/0095_memory_event_annotations.sql',
+    'docs/event-time.md',
+    'dist/temporal/model.js',
     'scripts/grant-extraction-worker-role.sql',
     'docs/extraction.md',
     'dist/extraction/model.js',
@@ -169,6 +172,17 @@ try {
     }
   }
   const { pathToFileURL } = await import('node:url');
+  const { runCli } = await import(pathToFileURL(join(installedRoot,'dist/cli/index.js')).href);
+  let temporalRequests=0;
+  const temporalExit=await runCli(['recall','signal','--event-filter','{"at":"2026-02-01T00:00:00Z"}','--json'], {
+    env:{CONTINUUM_API_URL:'https://example.test',CONTINUUM_TOKEN:'synthetic-package-only'},readConfig:async()=>null,
+    stdout:()=>{},stderr:()=>{},fetch:async(_url,request)=>{
+      const input=JSON.parse(request.body);
+      if(input.eventFilter?.at!=='2026-02-01T00:00:00.000Z'||input.eventFilter.includeUnknown!==false) throw new Error('Installed temporal flags changed');
+      temporalRequests++;return Response.json({results:[]});
+    },
+  });
+  if(temporalExit!==0||temporalRequests!==1) throw new Error('Installed temporal CLI did not execute its structured contract');
   const { runMigrations } = await import(
     pathToFileURL(join(installedRoot, 'dist', 'storage', 'migrator.js')).href
   );

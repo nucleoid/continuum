@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import type { CaptureInput, Memory, Principal, Scope } from '../types.js';
 import { asEmbeddingRouter, type EmbeddingRouting } from '../embeddings/router.js';
-import { createMemory, updateMemoryMetadata } from '../storage/memories.js';
+import { createMemoryWithEvent, updateMemoryMetadata } from '../storage/memories.js';
 import { getScope, getScopeByRef } from '../storage/scopes.js';
 import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
 import { assertEmbeddingVectorDimension } from '../storage/schema.js';
@@ -22,6 +22,7 @@ import { normalizeTags, validateTagsForScopeKind } from './tag-vocabularies.js';
 import { memoryEmbeddingText } from '../embeddings/text.js';
 import { captureExtractionStatus } from './extraction.js';
 import type { ExtractionStatus } from '../extraction/model.js';
+import { parseEventAnnotation } from '../temporal/model.js';
 
 export interface CaptureResult {
   memory: Memory;
@@ -33,6 +34,7 @@ export interface CaptureResult {
 }
 
 export interface CaptureOptions {
+  validateResult?: (result: CaptureResult) => void;
   readBudgetBytes?: number;
   relationThreshold?: number;
 }
@@ -74,6 +76,7 @@ export function validateCaptureContent(input: Pick<CaptureInput,
 
 function normalizeCapture(input: CaptureInput): string[] {
   validateCaptureContent(input);
+  if (input.eventAnnotation !== undefined) parseEventAnnotation(input.eventAnnotation);
   validateScopeRef(input.scope);
   return normalizeTags(input.tags);
 }
@@ -104,7 +107,7 @@ export async function captureOne(
   const { scope, tags } = await prepareCaptureWrite(client, principal, input);
 
   const route = asEmbeddingRouter(embeddingRouting).resolve(input.scope);
-  const memory = await createMemory(client, {
+  const memory = await createMemoryWithEvent(client, {
     scopeId: scope.id,
     scopeKind: scope.kind,
     type: input.type,
@@ -115,7 +118,7 @@ export async function captureOne(
     sourceRef: input.sourceRef ?? null,
     tags,
     metadata: { ...input.metadata, related: [] },
-  });
+  }, input.eventAnnotation);
 
   await recordAudit(client, {
     principalId: principal.id,
@@ -228,10 +231,11 @@ export async function embedCapturedMemory(
     if (!relationErrorCode) {
       await client.query('SAVEPOINT ingest_relations');
       try {
-        memory = await updateMemoryMetadata(client, memory.id, {
+        const updatedMemory = await updateMemoryMetadata(client, memory.id, {
           ...memory.metadata,
           related,
         });
+        memory = { ...updatedMemory, ...(memory.event ? {event:memory.event} : {}) };
         await client.query('RELEASE SAVEPOINT ingest_relations');
       } catch {
         await client.query('ROLLBACK TO SAVEPOINT ingest_relations');
@@ -348,7 +352,7 @@ export async function captureMemory(
       const prepared = await prepareCaptureWrite(client, principal, input);
       const authorizedScope = prepared.scope;
 
-      let memory = await createMemory(client, {
+      let memory = await createMemoryWithEvent(client, {
         id: memoryId,
         scopeId: authorizedScope.id,
         scopeKind: authorizedScope.kind,
@@ -360,7 +364,7 @@ export async function captureMemory(
         sourceRef: input.sourceRef ?? null,
         tags: prepared.tags,
         metadata: { ...input.metadata, related: [] },
-      });
+      }, input.eventAnnotation);
 
       let embedded = false;
       if (embeddingProvider && embeddingVector) {
@@ -389,7 +393,7 @@ export async function captureMemory(
             related,
           });
           await client.query('RELEASE SAVEPOINT capture_relations');
-          memory = updatedMemory;
+          memory = { ...updatedMemory, ...(memory.event ? { event: memory.event } : {}) };
         } catch {
           await client.query('ROLLBACK TO SAVEPOINT capture_relations');
           await client.query('RELEASE SAVEPOINT capture_relations');
@@ -398,6 +402,10 @@ export async function captureMemory(
         }
       }
 
+      const extraction = await captureExtractionStatus(client, principal.id, memory.id);
+      const result: CaptureResult = { memory, embedded, related: embedded ? related : [], extraction,
+        ...(embedErrorCode ? { embedErrorCode } : {}), ...(relationErrorCode ? { relationErrorCode } : {}) };
+      options.validateResult?.(result);
       await recordAudit(client, {
         principalId: principal.id,
         action: 'write',
@@ -422,16 +430,8 @@ export async function captureMemory(
           ...auditMetadata,
         },
       });
-      const extraction = await captureExtractionStatus(client, principal.id, memory.id);
       await client.query('COMMIT');
-      return {
-        memory,
-        embedded,
-        related: embedded ? related : [],
-        extraction,
-        ...(embedErrorCode ? { embedErrorCode } : {}),
-        ...(relationErrorCode ? { relationErrorCode } : {}),
-      };
+      return result;
     } catch (error) {
       try {
         await client.query('ROLLBACK');

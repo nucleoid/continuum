@@ -1,0 +1,94 @@
+{
+  "version": "event-time-v1",
+  "synthetic": true,
+  "seed": 25,
+  "predecessorSource": "0b010e4e2decaf7886be61b3fd2f5fea146e0d0e",
+  "modes": [
+    "baseline",
+    "hard",
+    "include-unknown",
+    "hint"
+  ],
+  "finalLimit": 10,
+  "maximumCandidatesPerArm": 50,
+  "maximumArtifactBytes": 1048576,
+  "setupDeadlineMs": 120000,
+  "workDeadlineMs": 120000,
+  "qualification": "Synthetic mechanisms only; no model, cross-head performance or normalized-storage qualification",
+  "cases": [
+    {
+      "id": "ingestion-lag",
+      "event": {
+        "status": "known",
+        "assertion": "asserted",
+        "precision": "instant",
+        "instant": "2026-02-01T00:00:00Z"
+      },
+      "ingestedAt": "2026-10-01T00:00:00Z",
+      "knownMatch": true
+    },
+    {
+      "id": "partial-month",
+      "event": {
+        "status": "known",
+        "assertion": "asserted",
+        "precision": "month",
+        "value": "2026-02",
+        "timezone": "Z"
+      },
+      "knownMatch": true
+    },
+    {
+      "id": "historical-unknown",
+      "event": null,
+      "knownMatch": false
+    },
+    {
+      "id": "future-event",
+      "event": {
+        "status": "known",
+        "assertion": "asserted",
+        "precision": "instant",
+        "instant": "2099-02-01T00:00:00Z"
+      },
+      "at": "2099-02-01T00:00:00Z",
+      "knownMatch": true
+    },
+    {
+      "id": "conflicting-dates",
+      "event": {
+        "status": "ambiguous",
+        "candidates": [
+          {
+            "notation": "February 1"
+          },
+          {
+            "notation": "March 1"
+          }
+        ]
+      },
+      "knownMatch": false
+    },
+    {
+      "id": "mentioned-date",
+      "event": {
+        "status": "known",
+        "assertion": "mentioned",
+        "precision": "instant",
+        "instant": "2026-02-01T00:00:00Z"
+      },
+      "knownMatch": false
+    },
+    {
+      "id": "superseded",
+      "event": {
+        "status": "known",
+        "assertion": "asserted",
+        "precision": "instant",
+        "instant": "2026-02-01T00:00:00Z"
+      },
+      "archived": true,
+      "knownMatch": false
+    }
+  ]
+}
