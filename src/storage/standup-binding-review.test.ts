@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { quoteStandupIdentifier, standupProducerFixture } from '../standup/test-helpers.js';
+import { quoteStandupIdentifier, standupConsumerFixture as standupProducerFixture } from '../standup/test-helpers.js';
 
 for (const historical of [false, true]) {
   it(`keeps a producer namespace bound to its original source family ${historical ? 'after revocation' : 'while active'}`, async () => {

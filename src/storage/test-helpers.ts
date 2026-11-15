@@ -104,6 +104,22 @@ export async function makeTestPool(): Promise<pg.Pool> {
 }
 
 export async function resetData(pool: pg.Pool): Promise<void> {
+  if (pool instanceof pg.Client || typeof (pool as unknown as pg.PoolClient).release === 'function') {
+    throw new TypeError('Fixture reset requires an owned Pool');
+  }
+  const client = await pool.connect();
+  let discard = false;
+  try {
+    await client.query('BEGIN');
+    await resetDataOnClient(client);
+    await client.query('COMMIT');
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch { discard = true; }
+    throw error;
+  } finally { client.release(discard); }
+}
+
+async function resetDataOnClient(pool: pg.PoolClient): Promise<void> {
   await pool.query(`
     ALTER TABLE principal_user_scope_approvals
       DISABLE TRIGGER preserve_user_scope_approval_truncate;
@@ -118,6 +134,7 @@ export async function resetData(pool: pg.Pool): Promise<void> {
     ALTER TABLE coordination_operator_events
       DISABLE TRIGGER preserve_coordination_operator_event_truncate;
   `);
+  let truncated = false;
   try {
     await pool.query(`
       TRUNCATE TABLE
@@ -162,8 +179,9 @@ export async function resetData(pool: pg.Pool): Promise<void> {
         principals
       RESTART IDENTITY CASCADE
     `);
+    truncated = true;
   } finally {
-    await pool.query(`
+    if (truncated) await pool.query(`
       ALTER TABLE principal_user_scope_approvals
         ENABLE TRIGGER preserve_user_scope_approval_truncate;
       ALTER TABLE principal_offboarding_events

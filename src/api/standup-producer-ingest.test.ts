@@ -3,7 +3,7 @@ import request from 'supertest';
 import { expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { standupProducerFixture } from '../standup/test-helpers.js';
+import { standupConsumerFixture as standupProducerFixture } from '../standup/test-helpers.js';
 import { getPrincipal } from '../storage/principals.js';
 import { createScope } from '../storage/scopes.js';
 import { addMembership, removeMembership } from '../storage/memberships.js';
