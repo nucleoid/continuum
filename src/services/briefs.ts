@@ -17,8 +17,8 @@ function safe(error: unknown): never {
   if (error instanceof ServiceError) throw error;
   if (error instanceof BudgetError || (error as { code?: string }).code === '54000') throw new ServiceError('PAYLOAD_TOO_LARGE', 'Brief result exceeds the response limit');
   const code = (error as { code?: string }).code;
-  if (code === '42501') throw new ServiceError('FORBIDDEN', 'Brief unavailable');
-  if (code === '23514' || code === 'P0002') throw new ServiceError('CONFLICT', 'Brief current policy or original allowance unavailable');
+  if (code === '42501' || code === 'P0002') throw new ServiceError('FORBIDDEN', 'Brief unavailable');
+  if (code === '23514') throw new ServiceError('CONFLICT', 'Brief current policy or original allowance unavailable');
   throw new ServiceError('DEPENDENCY_UNAVAILABLE', 'Brief dependency unavailable');
 }
 async function operation(pool: pg.Pool, principal: Principal, sql: string, values: unknown[], options: BriefOptions = {}, read = true) {

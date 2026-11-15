@@ -37,6 +37,13 @@ and the required read audit, within the same transaction. Unknown/withheld are
 not proof of absence. Old permissions, a version author, a saved UUID, a source
 prefix, a caller GUC or `SET ROLE` confer no processing or reader authority.
 
+The processed watermark and scope counters remain internal; the wire `watermark`
+is null. `fresh` reports current admitted dependencies and configuration, not
+absence of newer unprocessed evidence. Coverage describes the recorded cutoff.
+An automatic inventory check with identical authorized inputs does not invoke
+synthesis or create a visible version/history event. Excluded private changes
+therefore cannot change a reader's freshness or reveal generation counts.
+
 Synthesis never receives previous generated prose as evidence. Claims require
 exact selected version citations and quotes. Structured output rejects unsupported
 fields, duplicate claims, unsupported labels and conflicts with fewer than two

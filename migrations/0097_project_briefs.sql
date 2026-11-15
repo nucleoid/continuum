@@ -329,7 +329,8 @@ BEGIN
     ORDER BY def.id LIMIT 1 FOR UPDATE OF def SKIP LOCKED;
   IF d.id IS NOT NULL THEN
     frontier_value:=continuum_brief_frontier(d.scope_id);
-    PERFORM continuum_brief_enqueue(d.id,'repair:'||encode(sha256(convert_to(frontier_value::text,'UTF8')),'hex'),'delta',FALSE,TRUE);
+    PERFORM continuum_brief_enqueue(d.id,'repair:'||encode(sha256(convert_to(jsonb_build_object('frontier',frontier_value,'config',d.generation,
+      'profile',(SELECT generation FROM brief_profiles WHERE id=d.profile),'head',d.head)::text,'UTF8')),'hex'),'delta',FALSE,TRUE);
   END IF;
   SELECT r.* INTO j FROM brief_runs r JOIN brief_definitions def ON def.id=r.definition_id JOIN brief_worker_bindings binding ON binding.scope_id=def.scope_id AND binding.profile=def.profile
     JOIN pg_roles role ON role.oid=binding.role_oid AND role.rolname=binding.role_name
@@ -696,14 +697,24 @@ CREATE TABLE brief_contract_functions(signature TEXT PRIMARY KEY,body_hash TEXT 
 REVOKE ALL ON brief_contract_functions FROM PUBLIC;
 CREATE FUNCTION continuum_brief_is_ready() RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER AS $$
   SELECT continuum_connector_is_ready() AND EXISTS(SELECT 1 FROM brief_contract_functions)
-    AND NOT EXISTS(SELECT 1 FROM brief_contract_functions c LEFT JOIN pg_proc f ON f.oid=to_regprocedure(c.signature)
+    AND NOT EXISTS(SELECT 1 FROM (SELECT * FROM brief_contract_functions UNION ALL SELECT * FROM evidence_contract_functions
+      UNION ALL SELECT * FROM extraction_contract_functions UNION ALL SELECT * FROM memory_event_contract_functions
+      UNION ALL SELECT * FROM connector_contract_functions) c LEFT JOIN pg_proc f ON f.oid=to_regprocedure(c.signature)
       WHERE f.oid IS NULL OR encode(sha256(convert_to(f.prosrc,'UTF8')),'hex')<>c.body_hash OR f.prosecdef<>c.definer OR f.provolatile<>c.volatility
         OR f.proowner<>(SELECT relowner FROM pg_class WHERE oid='memories'::regclass)
         OR NOT COALESCE(f.proconfig @> ARRAY[format('search_path=pg_catalog, %I, pg_temp',(SELECT n.nspname FROM pg_namespace n JOIN pg_class m ON m.relnamespace=n.oid WHERE m.oid='memories'::regclass))],FALSE)
         OR EXISTS(SELECT 1 FROM aclexplode(COALESCE(f.proacl,acldefault('f',f.proowner))) a WHERE a.grantee=0 AND a.privilege_type='EXECUTE'))
-    AND (SELECT count(*) FROM pg_trigger WHERE (tgrelid,tgname) IN (('memories'::regclass,'brief_memory_changed'),('evidence_roots'::regclass,'brief_root_changed'),
-      ('evidence_payloads'::regclass,'brief_payload_erased'),('brief_runs'::regclass,'brief_run_identity'),('brief_versions'::regclass,'brief_version_immutable'),
-      ('brief_dispatch_receipts'::regclass,'brief_dispatch_immutable'),('memory_event_current'::regclass,'brief_event_changed')) AND tgenabled='O' AND NOT tgisinternal)=7;
+    AND NOT EXISTS(SELECT 1 FROM (VALUES
+      ('memories'::regclass,'brief_memory_changed','continuum_brief_source_changed()'::regprocedure,29),
+      ('evidence_roots'::regclass,'brief_root_changed','continuum_brief_source_changed()'::regprocedure,21),
+      ('evidence_payloads'::regclass,'brief_payload_erased','continuum_brief_payload_erased()'::regprocedure,9),
+      ('brief_runs'::regclass,'brief_run_identity','continuum_brief_identity()'::regprocedure,19),
+      ('brief_versions'::regclass,'brief_version_immutable','continuum_evidence_immutable()'::regprocedure,27),
+      ('brief_dispatch_receipts'::regclass,'brief_dispatch_immutable','continuum_evidence_immutable()'::regprocedure,27),
+      ('memory_event_current'::regclass,'brief_event_changed','continuum_brief_event_changed()'::regprocedure,21)) expected(relation,name,function_id,type)
+      LEFT JOIN pg_trigger t ON t.tgrelid=expected.relation AND t.tgname=expected.name
+      WHERE t.oid IS NULL OR t.tgenabled<>'O' OR t.tgisinternal OR t.tgfoid<>expected.function_id OR t.tgtype<>expected.type
+        OR t.tgnargs<>0 OR t.tgqual IS NOT NULL OR t.tgattr::text<>'');
 $$;
 DO $$
 DECLARE schema_name TEXT:=current_schema(); f RECORD; signature TEXT; definition TEXT; revised TEXT; r RECORD;

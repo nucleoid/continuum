@@ -50,5 +50,8 @@ it('gives APP serving but no raw/worker/operator brief capabilities and catches 
     await requireBriefsReady(f.app);
     await f.owner.query('ALTER TABLE evidence_payloads DISABLE TRIGGER brief_payload_erased');
     await expect(requireBriefsReady(f.app)).rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE' });
+    await f.owner.query('ALTER TABLE evidence_payloads ENABLE TRIGGER brief_payload_erased');
+    await f.owner.query('CREATE OR REPLACE TRIGGER brief_payload_erased AFTER DELETE ON evidence_payloads FOR EACH ROW EXECUTE FUNCTION continuum_evidence_immutable()');
+    await expect(requireBriefsReady(f.app)).rejects.toMatchObject({ code: 'DEPENDENCY_UNAVAILABLE' });
   });
 },120000);
