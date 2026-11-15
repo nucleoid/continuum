@@ -116,7 +116,8 @@ it.each(['body', 'related-only'] as const)('keeps a %s memory update from blocki
       const erased = await erase;
       console.log('actual memory writer root outcomes', { kind, writeError: (writeError as { code?: string } | undefined)?.code,
         erasureError: (erased.error as { code?: string } | undefined)?.code });
-      expect(writeError).toMatchObject({ code: '55P03' }); expect(erased.error).toBeUndefined();
+      expect(writeError).toMatchObject({ code: '55P03', where: expect.stringContaining('continuum_embedding_source_fence') });
+      expect(erased.error).toBeUndefined();
       expect((await f.owner.query('SELECT title,body,metadata FROM memories WHERE id=$1', [captured.memory.id])).rows).toEqual(before);
       expect((await f.owner.query('SELECT 1 FROM evidence_payloads WHERE version_id=$1', [version])).rowCount).toBe(0);
       expect((await f.owner.query('SELECT state FROM evidence_state WHERE version_id=$1', [version])).rows).toEqual([{ state: 'erased' }]);

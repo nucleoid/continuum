@@ -181,6 +181,12 @@ $$;
 CREATE FUNCTION continuum_embedding_source_fence() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
 DECLARE source_id UUID; changed BOOLEAN; at TIMESTAMPTZ:=clock_timestamp();
 BEGIN
+  -- The published AFTER memory fence always locks its own canonical root,
+  -- including canonical-unchanged metadata. Acquire it without waiting before
+  -- any derived mutation, so an erasure root callback can finish instead.
+  IF TG_OP<>'INSERT' THEN
+    PERFORM id FROM evidence_roots WHERE source_memory_id=OLD.id FOR UPDATE NOWAIT;
+  END IF;
   source_id:=CASE WHEN TG_OP='DELETE' THEN OLD.id ELSE NEW.id END;
   IF TG_OP='UPDATE' THEN
     changed:=(OLD.title,OLD.body,OLD.scope_id,OLD.state) IS DISTINCT FROM (NEW.title,NEW.body,NEW.scope_id,NEW.state)
