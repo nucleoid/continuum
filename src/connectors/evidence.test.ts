@@ -1,8 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { RepositoryEvidenceRegistry } from './registry.js';
 import { validateRepositoryEvidence } from './evidence.js';
+import { EvidencePayloadRegistry } from '../evidence/model.js';
 
 describe('source-neutral repository evidence boundary', () => {
+  it('admits explicit managed connector payload owners instead of legacy memory copies', () => {
+    const owners = new EvidencePayloadRegistry();
+    expect(() => owners.register('connector-evidence' as never, () => true)).not.toThrow();
+    expect(() => owners.register('connector-receipt' as never, () => true)).not.toThrow();
+  });
   it('defaults empty and rejects duplicate or contributed connector identities', () => {
     const registry = new RepositoryEvidenceRegistry();
     expect(registry.ids()).toEqual([]);
