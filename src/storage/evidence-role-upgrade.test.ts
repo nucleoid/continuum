@@ -31,6 +31,7 @@ it('upgrades real APP/OP/SYNC profiles without raw payload grants and refuses tr
       ...Object.entries(variables).flatMap(([k,v])=>['-v',`${k}=${v}`]),'-f',join(process.cwd(),'scripts',file)],{timeout:30000,stdio:'pipe'});
     for(const role of roles){ await maintenance.query(`CREATE ROLE "${role}" LOGIN PASSWORD '${password}'`);created.push(role); }
     grant('grant-application-role.sql',{continuum_app_role:roles[0]});
+    grant('grant-application-role.sql',{continuum_app_role:roles[1]});
     grant('grant-operator-role.sql',{continuum_operator_role:roles[1],continuum_principal_id:admin.id});
     grant('grant-sync-role.sql',{continuum_sync_role:roles[2],continuum_principal_id:service.id});
     // An independent, already reviewed extension is preserved by name-based
