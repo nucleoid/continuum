@@ -61,9 +61,9 @@ it('first enrollment cannot drain a source transaction whose writes predate its 
       await writer.query('BEGIN');
       const delayed = await createMemory(writer, { scopeId: project.id, scopeKind: 'project', authorId: actor.id,
         type: 'decision', title: 'Already rooted before enrollment', body: 'DELAYED-PREENROLLMENT-SOURCE', source: 'manual' });
-      await writer.query('SELECT continuum_evidence_source($1,$2)', [actor.id, delayed.id]);
-      expect((await writer.query('SELECT count(*)::int AS n FROM evidence_roots WHERE source_memory_id=$1', [delayed.id])).rows[0].n).toBe(1);
-      expect((await writer.query('SELECT count(*)::int AS n FROM brief_scope_epochs')).rows[0].n).toBe(0);
+      const adopted = (await writer.query('SELECT continuum_evidence_source($1,$2) AS version', [actor.id, delayed.id])).rows[0].version;
+      expect(adopted).toMatch(/^[0-9a-f-]{36}$/);
+      expect((await f.owner.query('SELECT count(*)::int AS n FROM brief_scope_epochs')).rows[0].n).toBe(0);
       configuring = settle(f.app.query('SELECT continuum_brief_configure($1,$2,$3,TRUE) AS result',
         [actor.id, project.id, profile.id]));
       void configuring.then(() => { configureDone = true; });
@@ -118,6 +118,8 @@ it('first enrollment cannot drain a source transaction whose writes predate its 
         observer.release(); observer = undefined;
       } else outcome = await processBrief(workerPool, randomUUID(), profile);
       expect(writerCommitted).toBe(true);
+      expect((await f.owner.query('SELECT current_version FROM evidence_roots WHERE source_memory_id=$1', [delayed.id])).rows)
+        .toEqual([{ current_version: adopted }]);
       expect(['progress', 'processed']).toContain(outcome);
       if (outcome === 'progress') {
         const accounting = async () => (await f.owner.query(`SELECT r.workflow_id,r.budget_owner,r.attempt_id,r.deadline_at,w.used
