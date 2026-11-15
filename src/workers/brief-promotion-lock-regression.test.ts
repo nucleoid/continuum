@@ -1,9 +1,11 @@
+import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { expect, it } from 'vitest';
 import { briefFixture } from '../briefs/test-helpers.js';
 import { addMembership } from '../storage/memberships.js';
 import { createMemory } from '../storage/memories.js';
 import { getScopeByRef } from '../storage/scopes.js';
+import { createPrincipal } from '../storage/principals.js';
 import { promoteMemoryWithAudit, type PromoteResult } from '../storage/promote.js';
 
 type Result = { value: PromoteResult; error?: never } | { value?: never; error: { code?: string; message: string } };
@@ -17,13 +19,23 @@ async function waiting(observer: pg.PoolClient, gate: number, pid: number): Prom
     AND database=(SELECT oid FROM pg_database WHERE datname=current_database())) AS value`, [gate, pid])).rows[0].value;
 }
 
-it('opposite project/org canonical APP promotions both commit with briefs enrolled', async () => {
+it.each([false, true])('opposite project/org APP promotions commit with distinct actors=%s', async differentActor => {
   await briefFixture(async f => {
     const org = (await getScopeByRef(f.owner, { kind: 'org', name: '' }))!;
     await addMembership(f.owner, f.actorId, org.id, 'admin');
+    // Distinct real principals are essential: existing hasExplicitRoleForMutation
+    // locks the joined principal FOR UPDATE, serializing a same-actor control.
+    const rightActor = differentActor
+      ? await createPrincipal(f.owner, { externalId: `promotion:${randomUUID()}`,
+        kind: 'user', displayName: 'Second promotion actor' })
+      : { id: f.actorId };
+    if (differentActor) {
+      await addMembership(f.owner, rightActor.id, org.id, 'writer');
+      await addMembership(f.owner, rightActor.id, f.projectId, 'writer');
+    }
     const first = await createMemory(f.app, { scopeId: f.projectId, scopeKind: 'project', authorId: f.actorId,
       type: 'decision', title: 'Project source', body: 'PROJECT-TO-ORG', source: 'manual' });
-    const second = await createMemory(f.app, { scopeId: org.id, scopeKind: 'org', authorId: f.actorId,
+    const second = await createMemory(f.app, { scopeId: org.id, scopeKind: 'org', authorId: rightActor.id,
       type: 'decision', title: 'Org source', body: 'ORG-TO-PROJECT', source: 'manual' });
     // The feature has enrolled exactly these project/org epoch rows. Do not seed
     // roots, epochs, counters or provenance with fabricated fixture mutations.
@@ -62,7 +74,7 @@ it('opposite project/org canonical APP promotions both commit with briefs enroll
         await new Promise(resolve => setTimeout(resolve, 10));
       }
       expect(entered, 'first canonical destination INSERT must complete before source UPDATE').toBe(true);
-      pending.push(settle(promoteMemoryWithAudit(right, f.actorId, second.id, { kind: 'project', name: f.projectName })));
+      pending.push(settle(promoteMemoryWithAudit(right, rightActor.id, second.id, { kind: 'project', name: f.projectName })));
       let secondAtGate = false, safelySerialized = false;
       for (let i = 0; i < 75; i++) {
         secondAtGate = await waiting(observer, gate, rightSession.pid);
