@@ -27,6 +27,50 @@ function deferred<T>() {
 }
 
 describe('durable embedding SQL, capture and worker integration', () => {
+
+it('records bounded capture ACK percentiles before any configured provider work', async () => {
+  await embeddingQueueFixture(async f => {
+    const samplesMs: number[] = [];
+    let released = false;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = () => { released = true; resolve(); }; });
+    vi.mocked(f.provider.embed).mockImplementation(async () => {
+      await gate; throw new Error('Capture ACK unexpectedly invoked the provider');
+    });
+    vi.mocked(f.adapter.invoke).mockImplementation(async () => {
+      await gate; throw new Error('Capture ACK unexpectedly dispatched the adapter');
+    });
+    const samples = (async () => {
+      for (let index = 0; index < 10; index++) {
+        const start = performance.now();
+        const captured = await captureMemory(f.app, f.router, f.principal, input(f, `ACK sample ${index}`));
+        samplesMs.push(performance.now() - start);
+        expect(captured).toMatchObject({ embedded: false, embeddingStatus: 'queued', related: [] });
+        expect(released).toBe(false);
+      }
+    })();
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    try {
+      // Fixture settlement guard only; no public ACK deadline or percentile SLA.
+      await Promise.race([samples, new Promise<never>((_, reject) => {
+        watchdog = setTimeout(() => reject(new Error('Capture ACK did not finish while provider gate remained closed')), 10_000);
+      })]);
+      expect(f.provider.embed).not.toHaveBeenCalled();
+      expect(f.adapter.invoke).not.toHaveBeenCalled();
+      const ordered = [...samplesMs].sort((a, b) => a - b);
+      console.info(JSON.stringify({ kind: 'synthetic-capture-ack-latency-v1', sampleCount: samplesMs.length,
+        samplesMs, p50Ms: ordered[Math.ceil(ordered.length * 0.50) - 1],
+        p95Ms: ordered[Math.ceil(ordered.length * 0.95) - 1], providerTimeoutMs: f.provider.timeoutMs,
+        providerCalls: 0, adapterCalls: 0, ackBeforeProviderRelease: !released,
+        normalizedPerformanceClaim: false }));
+    } finally {
+      clearTimeout(watchdog);
+      release();
+      await Promise.allSettled([samples]);
+    }
+  });
+}, 60_000);
+
   it('acknowledges once without provider I/O, replays concurrently and survives creator writer loss', async () => {
     await embeddingQueueFixture(async f => {
       expect((await f.worker.query('SELECT continuum_embedding_worker_config($1,$2,$3) AS ready', [f.target, f.policy, f.profile])).rows[0].ready).toBe(true);
