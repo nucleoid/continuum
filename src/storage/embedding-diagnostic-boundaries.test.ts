@@ -97,6 +97,7 @@ it('orders a real target rotation behind policy admission so the held APP transa
     const window = (await f.owner.query('SELECT window_policy FROM embedding_targets WHERE fingerprint=$1', [f.target.fingerprint])).rows[0].window_policy;
     const app = await f.app.connect(), operator = await f.operator.connect();
     let rotation: Promise<{ error?: unknown }> | undefined;
+    let appReleased = false;
     try {
       const appPid = (await app.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
       const operatorPid = (await operator.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
@@ -117,14 +118,15 @@ it('orders a real target rotation behind policy admission so the held APP transa
       expect(accepted).toMatchObject({ embedded: false, embeddingStatus: 'queued' });
       await app.query('COMMIT');
       const settled = await rotation; if (settled.error) throw settled.error;
+      app.release(); appReleased = true;
       expect(await readEmbeddingStatus(f.app, f.actorId, accepted.memory.id)).toMatchObject({ embedded: false, embeddingStatus: 'blocked_policy' });
       expect(await captureMemory(f.app, f.router, f.principal, input(f, 'Valid ACK after approved disable')))
         .toMatchObject({ embedded: false, embeddingStatus: 'blocked_policy' });
       expect(f.adapter.invoke).not.toHaveBeenCalled(); expect(f.provider.embed).not.toHaveBeenCalled();
     } finally {
-      await app.query('ROLLBACK');
+      if (!appReleased) { await app.query('ROLLBACK'); app.release(); }
       await rotation;
-      app.release(); operator.release();
+      operator.release();
     }
   });
 }, 60000);

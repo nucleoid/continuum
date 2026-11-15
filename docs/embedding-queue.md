@@ -196,7 +196,13 @@ ambiguous failures, further limited by the original profile and window. A
 diagnostic singleton becomes permanent only after explicit input rejection and
 a successful sibling in its actual split lineage under the same target, policy
 and credential generation. That evidence can survive a later approved window;
-it grants no new dispatch allowance. An all-failing tree remains retryable.
+it grants no new dispatch allowance. An untested sibling gets a bounded
+diagnostic chance before a failed singleton becomes provider-wide backoff.
+An all-failing tree still opens outage backoff and remains retryable. The
+64-diagnostic-dispatch ceiling counts server-owned probe lineage within each
+original workflow. An ordinary initial batch is separate; an inherited probe
+remains diagnostic after a later approved window even when that workflow has
+not dispatched before. Empty idle polls create no historical budget-window row.
 
 Finite window charges span endpoint/policy rotations of one provider identity.
 Retries within one approved window reuse the original workflow, owner, deadline

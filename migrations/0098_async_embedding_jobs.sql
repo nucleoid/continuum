@@ -127,6 +127,7 @@ CREATE TABLE embedding_cohorts(
   state TEXT NOT NULL DEFAULT 'attached' CHECK(state IN ('attached','reserved','dispatched','settled','complete','cancelled','abandoned')),
   reservation JSONB,retained_bytes BIGINT,hydrated_bytes BIGINT,settlement JSONB,
   diagnostic_ambiguous BOOLEAN NOT NULL DEFAULT FALSE,diagnostic_split BOOLEAN NOT NULL DEFAULT FALSE,
+  diagnostic_probe BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 CREATE INDEX embedding_cohorts_scope_idx ON embedding_cohorts(scope_id,id);
@@ -718,6 +719,15 @@ BEGIN
       -- this reconciliation item, including its generations and counters.
     END;
   END LOOP;
+  -- Empty polls never allocate unbounded historical window rows. This is a
+  -- metadata-only existence gate, not a replacement for locked admission below.
+  IF NOT EXISTS(SELECT 1 FROM embedding_jobs j JOIN memories m ON m.id=j.memory_id JOIN embedding_sources source ON source.memory_id=m.id
+    JOIN embedding_worker_bindings binding ON binding.scope_id=m.scope_id AND binding.target_fingerprint=t.fingerprint
+      AND binding.role_name=session_user AND binding.role_oid=(SELECT oid FROM pg_roles WHERE rolname=session_user) AND binding.enabled
+    JOIN principals worker_principal ON worker_principal.id=binding.principal_id AND worker_principal.kind='service' AND worker_principal.disabled_at IS NULL
+    WHERE j.target_fingerprint=t.fingerprint AND j.policy_generation=p.generation AND j.state IN ('queued','retry_wait')
+      AND j.available_at<=clock_timestamp() AND source.generation=j.source_generation AND NOT source.erased AND source.input_hash IS NOT NULL
+      AND continuum_embedding_route(m.scope_id)->>'target'=t.fingerprint AND continuum_embedding_source_policy(m.id,t.descriptor)) THEN RETURN NULL; END IF;
   start_value:=to_timestamp(floor(extract(epoch FROM clock_timestamp())/(t.window_policy->>'seconds')::bigint)*(t.window_policy->>'seconds')::bigint);
   INSERT INTO embedding_dispatch_windows(target_fingerprint,policy_generation,provider,dim,max_dispatches,max_input_bytes,max_tokens,max_cost_micros,starts_at,ends_at)
     VALUES(t.fingerprint,p.generation,t.provider,t.dim,(t.window_policy->>'dispatches')::bigint,(t.window_policy->>'inputBytes')::bigint,
@@ -746,7 +756,9 @@ BEGIN
           AND (original_budget.used->>'retries')::bigint<(budget->'limits'->>'retries')::bigint
           AND (original_budget.used->>'candidates')::bigint<(budget->'limits'->>'candidates')::bigint
           AND (original_budget.used->>'hydratedBytes')::bigint<(budget->'limits'->>'hydratedBytes')::bigint
-          AND (NOT j.isolate_item OR ((SELECT count(*) FROM pipeline_budget_attempts WHERE workflow_id=original_budget.id)<=64
+          AND (NOT j.isolate_item OR ((SELECT count(*) FROM pipeline_budget_attempts attempt JOIN embedding_cohorts probe
+              ON probe.workflow_id=attempt.workflow_id AND probe.attempt_id=attempt.attempt_id
+              WHERE attempt.workflow_id=original_budget.id AND probe.diagnostic_probe)<64
             AND (SELECT count(*) FROM embedding_cohorts WHERE workflow_id=original_budget.id AND diagnostic_ambiguous)<8))))
     ORDER BY j.available_at,j.id LIMIT batch FOR UPDATE OF m SKIP LOCKED LOOP
     IF cardinality(selected)>0 AND (probe_group_value IS DISTINCT FROM item.probe_group OR privacy_scopes IS DISTINCT FROM item.privacy_scopes) THEN CONTINUE; END IF;
@@ -781,9 +793,9 @@ BEGIN
   END IF;
   SELECT * INTO STRICT original FROM pipeline_budget_workflows WHERE id=original_workflow FOR UPDATE;
   INSERT INTO embedding_cohorts(owner,scope_id,policy_generation,target_fingerprint,login_oid,binding_generation,principal_id,credential_generation,
-    workflow_id,attempt_id,attempt_owner,attempt_generation,window_id,lease_until,deadline_at,profile)
+    workflow_id,attempt_id,attempt_owner,attempt_generation,window_id,lease_until,deadline_at,profile,diagnostic_probe)
     VALUES(worker,target_scope,p.generation,t.fingerprint,b.role_oid,b.generation,b.principal_id,control.credential_generation,
-      original_workflow,gen_random_uuid(),original_owner,original_generation,w.id,clock_timestamp()+interval '30 seconds',original.deadline_at,budget) RETURNING * INTO c;
+      original_workflow,gen_random_uuid(),original_owner,original_generation,w.id,clock_timestamp()+interval '30 seconds',original.deadline_at,budget,probe_group_value IS NOT NULL) RETURNING * INTO c;
   UPDATE embedding_jobs SET state='processing',cohort_id=c.id,lease_owner=worker,lease_generation=lease_generation+1,
     lease_until=c.lease_until,attempts=attempts+1,current_window=w.id,workflow_id=c.workflow_id,budget_owner=c.attempt_owner,budget_generation=c.attempt_generation WHERE id=ANY(selected);
   INSERT INTO embedding_cohort_jobs SELECT c.id,id,lease_generation FROM embedding_jobs WHERE id=ANY(selected);
@@ -1021,7 +1033,7 @@ BEGIN
 END $$;
 CREATE FUNCTION continuum_embedding_fail(cohort UUID,worker UUID,epoch BIGINT,failure JSONB) RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER AS $$
 DECLARE c embedding_cohorts%ROWTYPE; t embedding_targets%ROWTYPE; failures_value BIGINT; delay_value BIGINT; permanent BOOLEAN;
-  code_value TEXT:=failure->>'code';action_value TEXT:=failure->>'action';count_value INTEGER; left_group UUID; right_group UUID; provider_failure BOOLEAN;
+  code_value TEXT:=failure->>'code';action_value TEXT:=failure->>'action';count_value INTEGER; left_group UUID; right_group UUID; provider_failure BOOLEAN; pending_control BOOLEAN;
 BEGIN
   IF code_value IS NULL OR code_value NOT IN ('EMBEDDING_ITEM_FAILED','EMBEDDING_INPUT_TOO_LARGE','EMBEDDING_TIMEOUT','EMBEDDING_NETWORK','EMBEDDING_AUTH',
     'EMBEDDING_RATE_LIMIT','EMBEDDING_SERVER','EMBEDDING_INVALID_RESPONSE','EMBEDDING_FAILED','EMBEDDING_STORAGE','EMBEDDING_BUDGET','EMBEDDING_POLICY','EMBEDDING_CANCELLED')
@@ -1060,6 +1072,23 @@ BEGIN
         WHERE subject.job_id IN(SELECT job_id FROM embedding_cohort_jobs WHERE cohort_id=cohort)
           AND parent.diagnostic_split AND parent.target_fingerprint=c.target_fingerprint
           AND parent.policy_generation=c.policy_generation AND parent.credential_generation=c.credential_generation));
+  -- A first failed singleton cannot declare a provider outage before an
+  -- untested sibling in the same actual split lineage receives its diagnostic
+  -- chance. Once every leaf failed, ordinary outage backoff remains mandatory.
+  pending_control:=code_value='EMBEDDING_ITEM_FAILED' AND action_value='isolate_item' AND count_value=1 AND NOT permanent
+    AND EXISTS(SELECT 1 FROM embedding_cohort_jobs subject JOIN embedding_cohorts parent ON parent.id=subject.cohort_id
+      JOIN embedding_cohort_jobs sibling ON sibling.cohort_id=parent.id AND sibling.job_id<>subject.job_id
+      JOIN embedding_jobs sibling_job ON sibling_job.id=sibling.job_id
+      JOIN embedding_sources sibling_source ON sibling_source.memory_id=sibling_job.memory_id
+      WHERE subject.job_id IN(SELECT job_id FROM embedding_cohort_jobs WHERE cohort_id=cohort)
+        AND parent.diagnostic_split AND parent.target_fingerprint=c.target_fingerprint AND parent.policy_generation=c.policy_generation
+        AND parent.credential_generation=c.credential_generation AND sibling_job.state IN ('queued','retry_wait')
+        AND sibling_job.target_fingerprint=c.target_fingerprint AND sibling_job.policy_generation=c.policy_generation
+        AND sibling_source.generation=sibling_job.source_generation AND NOT sibling_source.erased
+        AND NOT EXISTS(SELECT 1 FROM embedding_cohort_jobs tried JOIN embedding_cohorts diagnostic ON diagnostic.id=tried.cohort_id
+          WHERE tried.job_id=sibling.job_id AND diagnostic.diagnostic_ambiguous AND diagnostic.created_at>parent.created_at
+            AND diagnostic.target_fingerprint=c.target_fingerprint AND diagnostic.policy_generation=c.policy_generation
+            AND diagnostic.credential_generation=c.credential_generation));
   IF action_value='isolate_item' AND count_value>1 THEN
     left_group:=gen_random_uuid();right_group:=gen_random_uuid();
     WITH halves AS (SELECT id,row_number() OVER(ORDER BY id) position FROM embedding_jobs WHERE cohort_id=cohort AND state='processing')
@@ -1075,12 +1104,12 @@ BEGIN
     diagnostic_ambiguous=(action_value='retry' AND code_value IN
     ('EMBEDDING_FAILED','EMBEDDING_INVALID_RESPONSE','EMBEDDING_SERVER')) OR (action_value='isolate_item' AND count_value=1 AND NOT permanent) WHERE id=cohort;
   UPDATE embedding_provider_control SET cohort_id=NULL,
-    failures=CASE WHEN credential_generation<>c.credential_generation OR permanent OR (action_value='isolate_item' AND count_value>1) THEN failures ELSE failures_value END,
+    failures=CASE WHEN credential_generation<>c.credential_generation OR permanent OR pending_control OR (action_value='isolate_item' AND count_value>1) THEN failures ELSE failures_value END,
     state=CASE WHEN credential_generation<>c.credential_generation THEN state
       WHEN NOT provider_failure THEN CASE WHEN state='half_open' THEN 'open' ELSE state END WHEN action_value='park_provider' THEN 'parked'
-      WHEN permanent OR (action_value='isolate_item' AND count_value>1) THEN 'closed' ELSE 'open' END,
+      WHEN permanent OR pending_control OR (action_value='isolate_item' AND count_value>1) THEN 'closed' ELSE 'open' END,
     next_probe_at=CASE WHEN credential_generation<>c.credential_generation OR NOT provider_failure THEN next_probe_at
-      WHEN permanent OR (action_value='isolate_item' AND count_value>1) THEN clock_timestamp() ELSE clock_timestamp()+delay_value*interval '1 millisecond' END
+      WHEN permanent OR pending_control OR (action_value='isolate_item' AND count_value>1) THEN clock_timestamp() ELSE clock_timestamp()+delay_value*interval '1 millisecond' END
     WHERE provider=t.provider AND dim=t.dim AND cohort_id=cohort;
   INSERT INTO audit_log(principal_id,action,scope_id,metadata) VALUES(c.principal_id,'write',c.scope_id,
     jsonb_build_object('operation','embedding_transition','status',CASE WHEN permanent THEN 'permanent_failure' ELSE 'retry_wait' END,'errorCode',code_value));
