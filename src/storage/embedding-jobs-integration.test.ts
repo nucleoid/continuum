@@ -240,6 +240,35 @@ describe('durable embedding SQL, capture and worker integration', () => {
     }, { windowSeconds: 86400 });
   }, 60000);
 
+  it('requires explicit original-owner exit recovery and settles unknown reservations without refunding charges', async () => {
+    await embeddingQueueFixture(async f => {
+      await captureMemory(f.app, f.router, f.principal, input(f));
+      const store = new SqlEmbeddingJobStore(f.worker);
+      const claim = (await store.claim(f.target, f.policy, randomUUID(), 1, f.profile))!;
+      await store.hydrate(claim, 4194304);
+      expect(await store.attempt(claim).reserve(amounts({ calls: 1, inputBytes: 1000, contextTokens: 1000, outputBytes: 4096 }), 5096)).toBe(true);
+      expect(await store.attempt(claim).dispatch()).toBe(true);
+      const recover = (owner: string, confirmation: string) => f.operator.query(
+        'SELECT continuum_operator_recover_embedding($1,$2,$3,$4) AS result', [f.adminId, claim.id, owner, confirmation]);
+      await expect(recover(claim.owner, 'lease expired')).rejects.toMatchObject({ code: '23514' });
+      await expect(recover(claim.owner, 'CONFIRMED ORIGINAL PROCESS EXIT')).rejects.toMatchObject({ code: '23514' });
+      // No provider was invoked. This fixture advances only the lease clock;
+      // the operator's external process-exit assertion remains explicit.
+      await f.owner.query(`UPDATE embedding_cohorts SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1`, [claim.id]);
+      await expect(recover(randomUUID(), 'CONFIRMED ORIGINAL PROCESS EXIT')).rejects.toMatchObject({ code: '23514' });
+      const window = (await f.owner.query('SELECT * FROM embedding_dispatch_windows')).rows[0];
+      const used = (await f.owner.query('SELECT used FROM pipeline_budget_workflows WHERE id=$1', [claim.workflowId])).rows[0].used;
+      expect((await recover(claim.owner, 'CONFIRMED ORIGINAL PROCESS EXIT')).rows[0].result).toEqual({ recovered: true, renewed: false });
+      expect((await recover(claim.owner, 'CONFIRMED ORIGINAL PROCESS EXIT')).rows[0].result).toEqual({ recovered: false, renewed: false });
+      expect((await f.owner.query('SELECT * FROM embedding_dispatch_windows')).rows[0]).toEqual(window);
+      expect((await f.owner.query('SELECT used FROM pipeline_budget_workflows WHERE id=$1', [claim.workflowId])).rows[0].used).toEqual(used);
+      expect((await f.owner.query('SELECT state,settlement FROM pipeline_budget_attempts WHERE workflow_id=$1', [claim.workflowId])).rows[0])
+        .toEqual({ state: 'settled', settlement: { provenance: 'unknown' } });
+      expect((await f.owner.query(`SELECT count(*)::int AS n FROM audit_log WHERE metadata->>'operation'='embedding_process_exit_reconciled'`)).rows[0].n).toBe(1);
+      expect(f.adapter.invoke).not.toHaveBeenCalled();
+    }, { windowSeconds: 86400 });
+  }, 60000);
+
   it('retains unknown original charges across rollover and admits later capacity only after original settlement', async () => {
     await embeddingQueueFixture(async f => {
       const phase = Number((await f.owner.query(`SELECT mod(extract(epoch FROM clock_timestamp())*1000,2000) AS phase`)).rows[0].phase);
