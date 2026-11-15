@@ -124,7 +124,9 @@ export async function processEmbeddingJobs(store: EmbeddingJobStore, target: Emb
         code: outcome.reason === 'policy_denied' ? 'EMBEDDING_POLICY'
           : outcome.reason === 'cancelled' ? 'EMBEDDING_CANCELLED'
           : outcome.reason === 'deadline' ? 'EMBEDDING_TIMEOUT'
-          : outcome.reason === 'invalid_response' ? 'EMBEDDING_INVALID_RESPONSE' : 'EMBEDDING_BUDGET', action: 'retry' };
+          : outcome.reason === 'invalid_response' ? 'EMBEDDING_INVALID_RESPONSE'
+          : outcome.reason === 'provider_failed' || outcome.reason === 'stale_attempt' ? 'EMBEDDING_STORAGE'
+          : outcome.reason === 'budget_exhausted' ? 'EMBEDDING_BUDGET' : 'EMBEDDING_POLICY', action: 'retry' };
       // isolate_item instructs SQL to schedule durable half groups sharing
       // the original window/workflow. It never poisons every member of a batch.
       await fail(failure);

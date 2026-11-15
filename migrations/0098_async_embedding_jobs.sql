@@ -170,12 +170,12 @@ CREATE FUNCTION continuum_embedding_route(target_scope UUID) RETURNS JSONB LANGU
     FROM scopes s CROSS JOIN embedding_policy p WHERE s.id=target_scope AND p.singleton;
 $$;
 CREATE FUNCTION continuum_embedding_source_fence() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
-DECLARE source_id UUID; changed BOOLEAN;
+DECLARE source_id UUID; changed BOOLEAN; at TIMESTAMPTZ:=clock_timestamp();
 BEGIN
   source_id:=CASE WHEN TG_OP='DELETE' THEN OLD.id ELSE NEW.id END;
   IF TG_OP='UPDATE' THEN
-    changed:=(OLD.title,OLD.body,OLD.scope_id,OLD.type,OLD.tags,OLD.author_id,OLD.source,OLD.source_ref,OLD.state,OLD.expires_at,OLD.metadata-'related')
-      IS DISTINCT FROM (NEW.title,NEW.body,NEW.scope_id,NEW.type,NEW.tags,NEW.author_id,NEW.source,NEW.source_ref,NEW.state,NEW.expires_at,NEW.metadata-'related');
+    changed:=(OLD.title,OLD.body,OLD.scope_id,OLD.state) IS DISTINCT FROM (NEW.title,NEW.body,NEW.scope_id,NEW.state)
+      OR (OLD.expires_at IS NOT NULL AND OLD.expires_at<=at) IS DISTINCT FROM (NEW.expires_at IS NOT NULL AND NEW.expires_at<=at);
     IF NOT changed THEN RETURN NEW; END IF;
   END IF;
   IF TG_OP='DELETE' THEN
@@ -214,7 +214,7 @@ BEGIN
   INSERT INTO embedding_source_scopes SELECT memory,unnest(scopes_value) ON CONFLICT DO NOTHING;
 END $$;
 CREATE FUNCTION continuum_embedding_evidence_fence() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
-DECLARE memory UUID; status_value TEXT;
+DECLARE memory UUID; status_value TEXT; current_generation BIGINT; target_value JSONB; retained INTEGER:=0;
 BEGIN
   IF TG_TABLE_NAME='evidence_roots' THEN
     IF NEW.source_memory_id IS NOT NULL THEN PERFORM continuum_embedding_enroll_lineage(NEW.source_memory_id); END IF;
@@ -228,12 +228,29 @@ BEGIN
   IF memory IS NULL THEN RETURN NEW; END IF;
   PERFORM id FROM memories WHERE id=memory FOR UPDATE;
   status_value:=CASE WHEN continuum_embedding_source_eligible(memory) THEN 'superseded' ELSE 'cancelled' END;
-  UPDATE embedding_sources SET generation=generation+1,status=status_value,current_target=NULL WHERE memory_id=memory AND NOT erased;
+  UPDATE embedding_sources SET generation=generation+1,status=status_value,current_target=NULL WHERE memory_id=memory AND NOT erased
+    RETURNING generation INTO current_generation;
   UPDATE embedding_jobs SET state=status_value,lease_owner=NULL,lease_until=NULL,lease_generation=lease_generation+1
     WHERE memory_id=memory AND state IN ('queued','processing','retry_wait','blocked_policy');
   UPDATE pipeline_budget_workflows w SET cancelled=TRUE,generation=w.generation+1 FROM embedding_cohorts c
     WHERE c.workflow_id=w.id AND NOT w.cancelled AND EXISTS(SELECT 1 FROM embedding_cohort_jobs cj JOIN embedding_jobs j ON j.id=cj.job_id WHERE cj.cohort_id=c.id AND j.memory_id=memory);
-  DELETE FROM memory_embeddings WHERE memory_id=memory;
+  -- A fresh evidence generation fences every old in-flight admission. An exact
+  -- already-stored same-input vector can survive an eligible metadata/verify
+  -- transition without inventing a new provider result or completion receipt.
+  SELECT t.descriptor INTO target_value FROM memories m JOIN embedding_targets t
+    ON t.fingerprint=continuum_embedding_route(m.scope_id)->>'target' AND t.enabled WHERE m.id=memory;
+  IF target_value IS NOT NULL AND continuum_embedding_source_policy(memory,target_value) THEN
+    UPDATE memory_embeddings e SET source_generation=current_generation
+      FROM embedding_sources s,memories m,embedding_vector_spaces v
+      WHERE e.memory_id=memory AND s.memory_id=memory AND m.id=memory AND NOT s.erased
+        AND s.input_hash=encode(sha256(convert_to(m.title||E'\n\n'||m.body,'UTF8')),'hex')
+        AND e.source_generation=current_generation-1 AND v.provider=e.provider AND v.dim=e.dim
+        AND e.space_fingerprint=v.space_fingerprint AND v.space_fingerprint=target_value->>'spaceFingerprint'
+        AND e.provider=target_value->'space'->>'provider' AND e.dim=(target_value->'space'->>'dim')::integer;
+    GET DIAGNOSTICS retained=ROW_COUNT;
+  END IF;
+  DELETE FROM memory_embeddings WHERE memory_id=memory AND source_generation IS DISTINCT FROM current_generation;
+  IF retained>0 THEN UPDATE embedding_sources SET status='ready',current_target=target_value->>'fingerprint' WHERE memory_id=memory; END IF;
   RETURN NEW;
 END $$;
 CREATE TRIGGER embedding_evidence_root_fence AFTER UPDATE ON evidence_roots FOR EACH ROW EXECUTE FUNCTION continuum_embedding_evidence_fence();
@@ -254,7 +271,9 @@ BEGIN
   END IF;
   RETURN CASE WHEN TG_OP='DELETE' THEN OLD ELSE NEW END;
 END $$;
-CREATE TRIGGER embedding_job_admission BEFORE INSERT OR UPDATE OR DELETE ON embedding_jobs FOR EACH ROW EXECUTE FUNCTION continuum_embedding_job_admission();
+-- AFTER counts only a row actually inserted, including ON CONFLICT DO NOTHING.
+-- Quota rejection still rolls the complete source/audit/job transaction back.
+CREATE TRIGGER embedding_job_admission AFTER INSERT OR UPDATE OR DELETE ON embedding_jobs FOR EACH ROW EXECUTE FUNCTION continuum_embedding_job_admission();
 
 CREATE FUNCTION continuum_embedding_source_policy(memory UUID,target JSONB) RETURNS BOOLEAN LANGUAGE plpgsql VOLATILE SECURITY DEFINER AS $$
 DECLARE root RECORD;
@@ -493,6 +512,9 @@ BEGIN
   END LOOP;
   IF (window_policy->>'seconds')::bigint NOT BETWEEN 1 AND 86400 OR (window_policy->>'dispatches')::bigint NOT BETWEEN 1 AND 100000
     OR (window_policy->>'inputBytes')::bigint<1 OR (window_policy->>'tokens')::bigint<1 THEN RAISE check_violation USING MESSAGE='Invalid embedding window bound'; END IF;
+  -- Serving writers and claims lock policy before target. Keep OP changes in
+  -- the same order so target edits cannot deadlock an admitted capture.
+  PERFORM singleton FROM embedding_policy WHERE singleton FOR UPDATE;
   INSERT INTO embedding_vector_spaces VALUES(target->'space'->>'provider',768,target->>'spaceFingerprint',target->'space') ON CONFLICT DO NOTHING;
   SELECT * INTO STRICT registered FROM embedding_vector_spaces WHERE provider=target->'space'->>'provider' AND dim=768 FOR SHARE;
   IF registered.descriptor IS DISTINCT FROM target->'space' OR registered.space_fingerprint IS DISTINCT FROM target->>'spaceFingerprint' THEN
@@ -645,12 +667,15 @@ BEGIN
   FOR item IN SELECT m.id FROM memories m JOIN embedding_sources source ON source.memory_id=m.id
     JOIN embedding_worker_bindings binding ON binding.scope_id=m.scope_id AND binding.target_fingerprint=t.fingerprint
       AND binding.role_name=session_user AND binding.enabled AND binding.role_oid=(SELECT oid FROM pg_roles WHERE rolname=session_user)
+    JOIN principals worker_principal ON worker_principal.id=binding.principal_id AND worker_principal.kind='service' AND worker_principal.disabled_at IS NULL
     WHERE source.status IN ('queued','processing','retry_wait','blocked_policy','superseded') AND NOT source.erased
       AND continuum_embedding_source_eligible(m.id) AND continuum_embedding_route(m.scope_id)->>'target'=t.fingerprint
+      AND continuum_embedding_source_policy(m.id,t.descriptor)
       AND EXISTS(SELECT 1 FROM embedding_jobs prior WHERE prior.memory_id=m.id)
       AND NOT EXISTS(SELECT 1 FROM embedding_jobs current_job WHERE current_job.memory_id=m.id AND current_job.source_generation=source.generation
         AND current_job.target_fingerprint=t.fingerprint AND current_job.policy_generation=p.generation)
     ORDER BY m.id LIMIT batch FOR UPDATE OF m SKIP LOCKED LOOP
+    BEGIN
     b:=continuum_embedding_binding((SELECT scope_id FROM memories WHERE id=item.id),t.fingerprint);
     IF NOT continuum_embedding_source_policy(item.id,t.descriptor) THEN CONTINUE; END IF;
     UPDATE pipeline_budget_workflows workflow SET cancelled=TRUE,generation=workflow.generation+1 FROM embedding_cohorts old_claim JOIN embedding_cohort_jobs membership ON membership.cohort_id=old_claim.id
@@ -660,6 +685,11 @@ BEGIN
     UPDATE embedding_sources SET generation=generation+1,current_target=t.fingerprint,status='queued' WHERE memory_id=item.id;
     INSERT INTO embedding_jobs(memory_id,scope_id,source_generation,target_fingerprint,policy_generation,state)
       SELECT m.id,m.scope_id,source.generation,t.fingerprint,p.generation,'queued' FROM memories m JOIN embedding_sources source ON source.memory_id=m.id WHERE m.id=item.id;
+    EXCEPTION WHEN SQLSTATE 'P0001' THEN
+      IF SQLERRM<>'EMBEDDING_QUEUE_QUOTA_EXCEEDED' THEN RAISE; END IF;
+      -- A full queue must still drain existing admitted work. Roll back only
+      -- this reconciliation item, including its generations and counters.
+    END;
   END LOOP;
   start_value:=to_timestamp(floor(extract(epoch FROM clock_timestamp())/(t.window_policy->>'seconds')::bigint)*(t.window_policy->>'seconds')::bigint);
   INSERT INTO embedding_dispatch_windows(target_fingerprint,policy_generation,provider,dim,max_dispatches,max_input_bytes,max_tokens,max_cost_micros,starts_at,ends_at)
@@ -675,9 +705,11 @@ BEGIN
     FROM embedding_jobs j JOIN memories m ON m.id=j.memory_id JOIN embedding_sources s ON s.memory_id=m.id
     JOIN embedding_worker_bindings binding ON binding.scope_id=m.scope_id AND binding.target_fingerprint=t.fingerprint
       AND binding.role_name=session_user AND binding.enabled AND binding.role_oid=(SELECT oid FROM pg_roles WHERE rolname=session_user)
+    JOIN principals worker_principal ON worker_principal.id=binding.principal_id AND worker_principal.kind='service' AND worker_principal.disabled_at IS NULL
     WHERE j.target_fingerprint=t.fingerprint AND j.policy_generation=p.generation AND j.state IN ('queued','retry_wait')
       AND j.available_at<=clock_timestamp() AND s.generation=j.source_generation AND NOT s.erased AND s.input_hash IS NOT NULL AND continuum_embedding_source_eligible(m.id)
       AND continuum_embedding_route(m.scope_id)->>'target'=t.fingerprint
+      AND continuum_embedding_source_policy(m.id,t.descriptor)
       AND (j.current_window IS DISTINCT FROM w.id OR EXISTS(SELECT 1 FROM pipeline_budget_workflows original_budget
         WHERE original_budget.id=j.workflow_id AND original_budget.owner=j.budget_owner AND original_budget.generation=j.budget_generation
           AND NOT original_budget.cancelled AND original_budget.profile=budget AND original_budget.deadline_at>clock_timestamp() AND original_budget.active=0
@@ -846,9 +878,8 @@ BEGIN
     IF admission IS NULL OR admission->>'generation' IS DISTINCT FROM item.source_generation::text THEN RETURN FALSE; END IF;
     IF NOT continuum_embedding_vector_is_current(item.memory_id,t.provider,t.dim)
       AND NOT continuum_embedding_apply_vector(item.memory_id,vector_json::text,admission) THEN RETURN FALSE; END IF;
-    -- The queue never replaces unrelated concurrent metadata with a snapshot.
-    -- No relation candidate is accepted from a worker-supplied JSON object.
-    UPDATE memories SET metadata=jsonb_set(metadata,'{related}','[]'::jsonb,TRUE),updated_at=clock_timestamp() WHERE id=item.memory_id;
+    -- Derived completion changes neither source freshness nor the current
+    -- server-owned relation metadata. Workers supply only qualified vectors.
     INSERT INTO embedding_completions(job_id) VALUES(item.id) ON CONFLICT DO NOTHING;
     IF FOUND THEN
       INSERT INTO audit_log(principal_id,action,memory_id,scope_id,metadata) VALUES(c.principal_id,'write',item.memory_id,item.scope_id,
@@ -864,7 +895,7 @@ BEGIN
 END $$;
 CREATE FUNCTION continuum_embedding_fail(cohort UUID,worker UUID,epoch BIGINT,failure JSONB) RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER AS $$
 DECLARE c embedding_cohorts%ROWTYPE; t embedding_targets%ROWTYPE; failures_value BIGINT; delay_value BIGINT; permanent BOOLEAN;
-  code_value TEXT:=failure->>'code';action_value TEXT:=failure->>'action';count_value INTEGER; left_group UUID; right_group UUID;
+  code_value TEXT:=failure->>'code';action_value TEXT:=failure->>'action';count_value INTEGER; left_group UUID; right_group UUID; provider_failure BOOLEAN;
 BEGIN
   IF code_value IS NULL OR code_value NOT IN ('EMBEDDING_ITEM_FAILED','EMBEDDING_INPUT_TOO_LARGE','EMBEDDING_TIMEOUT','EMBEDDING_NETWORK','EMBEDDING_AUTH',
     'EMBEDDING_RATE_LIMIT','EMBEDDING_SERVER','EMBEDDING_INVALID_RESPONSE','EMBEDDING_FAILED','EMBEDDING_STORAGE','EMBEDDING_BUDGET','EMBEDDING_POLICY','EMBEDDING_CANCELLED')
@@ -875,7 +906,8 @@ BEGIN
   INSERT INTO embedding_transition_receipts VALUES(cohort,'failure') ON CONFLICT DO NOTHING;
   IF NOT FOUND THEN RETURN FALSE; END IF;
   SELECT * INTO STRICT t FROM embedding_targets WHERE fingerprint=c.target_fingerprint;
-  SELECT failures+1 INTO failures_value FROM embedding_provider_control WHERE provider=t.provider AND dim=t.dim FOR UPDATE;
+  provider_failure:=code_value NOT IN ('EMBEDDING_STORAGE','EMBEDDING_BUDGET','EMBEDDING_POLICY','EMBEDDING_CANCELLED');
+  SELECT failures+CASE WHEN provider_failure THEN 1 ELSE 0 END INTO failures_value FROM embedding_provider_control WHERE provider=t.provider AND dim=t.dim FOR UPDATE;
   delay_value:=greatest(1000,least(300000,floor(1000*power(2,least(failures_value-1,20))*(0.5+random()/2))::bigint));
   IF failure ? 'retryAfterMs' THEN
     IF jsonb_typeof(failure->'retryAfterMs')<>'number' OR failure->>'retryAfterMs'!~'^(0|[1-9][0-9]*)$' THEN RAISE check_violation USING MESSAGE='Invalid embedding retry delay'; END IF;
@@ -884,8 +916,9 @@ BEGIN
   SELECT count(*) INTO count_value FROM embedding_cohort_jobs cj JOIN embedding_jobs j ON j.id=cj.job_id WHERE cj.cohort_id=cohort AND j.state='processing';
   IF c.state IN ('reserved','dispatched') THEN
     UPDATE embedding_jobs SET failure_code=code_value,available_at=clock_timestamp()+delay_value*interval '1 millisecond' WHERE cohort_id=cohort AND state='processing';
-    UPDATE embedding_provider_control SET failures=failures_value,state=CASE WHEN action_value='park_provider' THEN 'parked' ELSE 'open' END,
-      next_probe_at=clock_timestamp()+delay_value*interval '1 millisecond' WHERE provider=t.provider AND dim=t.dim AND credential_generation=c.credential_generation;
+    UPDATE embedding_provider_control SET failures=failures_value,state=CASE WHEN NOT provider_failure THEN state WHEN action_value='park_provider' THEN 'parked' ELSE 'open' END,
+      next_probe_at=CASE WHEN provider_failure THEN clock_timestamp()+delay_value*interval '1 millisecond' ELSE next_probe_at END
+      WHERE provider=t.provider AND dim=t.dim AND credential_generation=c.credential_generation;
     INSERT INTO audit_log(principal_id,action,scope_id,metadata) VALUES(c.principal_id,'write',c.scope_id,
       jsonb_build_object('operation','embedding_transition','status','retry_wait','errorCode',code_value,'settlementPending',TRUE));
     RETURN TRUE;
@@ -911,9 +944,11 @@ BEGIN
     ('EMBEDDING_FAILED','EMBEDDING_INVALID_RESPONSE','EMBEDDING_SERVER')) OR (action_value='isolate_item' AND count_value=1 AND NOT permanent) WHERE id=cohort;
   UPDATE embedding_provider_control SET cohort_id=NULL,
     failures=CASE WHEN credential_generation<>c.credential_generation OR permanent OR (action_value='isolate_item' AND count_value>1) THEN failures ELSE failures_value END,
-    state=CASE WHEN credential_generation<>c.credential_generation THEN state WHEN action_value='park_provider' THEN 'parked'
+    state=CASE WHEN credential_generation<>c.credential_generation THEN state
+      WHEN NOT provider_failure THEN CASE WHEN state='half_open' THEN 'open' ELSE state END WHEN action_value='park_provider' THEN 'parked'
       WHEN permanent OR (action_value='isolate_item' AND count_value>1) THEN 'closed' ELSE 'open' END,
-    next_probe_at=CASE WHEN credential_generation<>c.credential_generation THEN next_probe_at ELSE clock_timestamp()+delay_value*interval '1 millisecond' END
+    next_probe_at=CASE WHEN credential_generation<>c.credential_generation OR NOT provider_failure THEN next_probe_at
+      WHEN permanent OR (action_value='isolate_item' AND count_value>1) THEN clock_timestamp() ELSE clock_timestamp()+delay_value*interval '1 millisecond' END
     WHERE provider=t.provider AND dim=t.dim AND cohort_id=cohort;
   INSERT INTO audit_log(principal_id,action,scope_id,metadata) VALUES(c.principal_id,'write',c.scope_id,
     jsonb_build_object('operation','embedding_transition','status',CASE WHEN permanent THEN 'permanent_failure' ELSE 'retry_wait' END,'errorCode',code_value));

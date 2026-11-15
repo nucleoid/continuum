@@ -25,6 +25,16 @@ routes, receipts, candidates, provider responses or raw failure text.
 | `cancelled` | Source lifecycle/privacy or an explicit operator cancellation fenced work. |
 | `superseded` | A newer source/target eligibility generation replaces this work. |
 
+Accepted pending work is bounded to 10,000 active jobs per scope and 100,000
+across the installation. Queued, processing, retry-wait and policy-blocked jobs
+all count, including blocked work without an approved target. Saturation rolls
+back the new source, required audit, job and optional replay receipt together
+with a typed embedding admission quota error. Acknowledged pending work is not
+evicted to accept another write. Replay guarantees have a separate per-principal
+receipt limit. Once a permitted route, approved target/policy and worker binding
+are available, bounded reconciliation can adopt accepted blocked work. It does
+not permit hosted fallback or enqueue the historical corpus.
+
 ## Replay
 
 Use optional REST `Idempotency-Key`, MCP `idempotency_key`, or CLI
@@ -135,12 +145,12 @@ seconds; renewal never extends the original accounting deadline.
 
 Provider calls run outside transactions. Current source generation, routing,
 residency, expiry, disabled owned-scope state and lease ownership gate hydration,
-dispatch and apply. Successful vector, server-owned `related` merge, one completion
+dispatch and apply. Successful vector, one completion
 identity, required audit and ready state commit together. A current vector already
 supplied by backfill reconciles without overwriting it. Backfill's own repair
-audits remain distinct. Completion never replaces unrelated metadata with an old
-snapshot. The current queue accepts no worker-supplied relation candidates and
-retains an empty advisory list.
+audits remain distinct. Completion changes neither source freshness nor current
+server-owned `related` metadata. The current queue accepts no worker-supplied
+relation candidates; it does not compute new advisory relations after capture.
 
 ## Outages, ambiguity and privacy
 
