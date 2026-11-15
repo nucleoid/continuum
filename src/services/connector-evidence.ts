@@ -50,15 +50,25 @@ function currentPolicy(actor: string, mapping: RepositoryMapping, proof: Reposit
 }
 async function probe(pool: pg.Pool, actor: string, mapping: RepositoryMapping,
   adapter: BudgetAdapter<RepositoryPermissionRequest, RepositoryAuthority>, options: ConnectorEvidenceOptions, attemptId: string,
-  admission: { candidates?: number; hydratedBytes?: number } = {}): Promise<
+  admission: { candidates?: number; hydratedBytes?: number; outputBytes?: number } = {}): Promise<
     { proof: RepositoryAuthority; checkedAt: number } | { outcome: ConnectorOutcome }> {
   const checkedAt = mapping.now; // Conservative database time BEFORE serialization/remote work.
   let admitted = false;
-  options.budget.consume(admission);
+  const { outputBytes: deliveryBytes = 0, ...metadataAdmission } = admission;
+  options.budget.consume(metadataAdmission);
+  if (deliveryBytes > options.budget.available('outputBytes')) throw new BudgetError();
   const durable = pipelineAttempt(pool, { id: options.execution.workflowId, attemptId, owner: options.execution.workerId, generation: options.execution.generation });
   const result = await runBudgetedStage(options.budget, adapter, { repository: mapping.repository, principalId: actor }, {
     signal: options.signal, onWork: options.onWork,
-    durable: { ...durable, reserve: (requested, retained) => durable.reserve(amounts({ ...requested, ...admission }), retained) },
+    durable: { ...durable,
+      reserve: (requested, retained) => durable.reserve(amounts({ ...requested, ...metadataAdmission,
+        outputBytes: requested.outputBytes + deliveryBytes }), retained + deliveryBytes),
+      // Publication happens after this probe settles. Keep the whole bounded
+      // delivery allowance, including on failure, rather than refunding an
+      // original workflow before its final serialization/transaction completes.
+      settle: (actual, provenance) => durable.settle(actual.outputBytes === undefined ? actual
+        : { ...actual, outputBytes: actual.outputBytes + deliveryBytes }, provenance),
+    },
     authorize: async () => {
       if (!sameMapping(mapping, await repositoryMapping(pool, actor, mapping.id))) return false;
       if (admitted) return true;
@@ -117,10 +127,11 @@ async function executeQuery(pool: pg.Pool, actor: string, mappingId: string,
       } });
     if (queried.status !== 'complete') return fail(stageReason(queried.reason));
     if (!validateRepositoryEvidence(queried.value, input)) return fail('unavailable');
-    const content = boundedJson(queried.value, REPOSITORY_EVIDENCE_LIMITS.responseBytes);
+    const content = boundedJson(queried.value, Math.min(REPOSITORY_EVIDENCE_LIMITS.responseBytes, session.query.responseBodyBytes));
     const latest = await repositoryMapping(pool, actor, mapping.id);
     if (!sameMapping(mapping, latest)) return fail('denied');
-    const final = await probe(pool, actor, latest, session.permission, options, options.execution.deliveryAttempt);
+    const final = await probe(pool, actor, latest, session.permission, options, options.execution.deliveryAttempt,
+      { outputBytes: Buffer.byteLength(content) + REPOSITORY_EVIDENCE_LIMITS.receiptBytes + 512 });
     if (!('proof' in final)) return fail(final.outcome);
     if (final.proof.commit !== first.proof.commit || final.proof.indexWatermark !== first.proof.indexWatermark
       || queried.value.items.some(item => (item.commit !== null && item.commit !== final.proof.commit)
@@ -181,7 +192,9 @@ export async function readConnectorEvidence(pool: pg.Pool, actor: string, versio
       const session = connector.open(options.authorizationContext);
       if (!zeroPrice(session.permission) || (mapping.residency === 'local-only' && (!session.permission.local || provider?.locality === 'hosted'))) return null;
       const result = await probe(pool, actor, mapping, session.permission, options, attempt,
-        permits.length === 0 ? { candidates: 1, hydratedBytes: admittedBytes } : {});
+        // A returned string can grow sixfold under JSON escaping. Reserve this
+        // before hydration without loading source text to measure it first.
+        permits.length === 0 ? { candidates: 1, hydratedBytes: admittedBytes, outputBytes: admittedBytes * 6 + 2 } : {});
       if (!('proof' in result)) return null;
       permits.push({ runId: dependency.runId, generation: mapping.generation, checkedAt: result.checkedAt,
         validUntil: result.checkedAt + result.proof.validForMs, commit: result.proof.commit, indexWatermark: result.proof.indexWatermark });

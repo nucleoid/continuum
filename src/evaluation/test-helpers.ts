@@ -577,8 +577,8 @@ function fixtureUuid(value: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 const GRANT_HASHES: Record<string, string> = {
-  'grant-application-role.sql': '18b4c8af821fefa9c137fda16a7eec2531d46b4ebbc4d82aac3e7d16980e955f',
-  'grant-operator-role.sql': '19c9fe7f9ee03b7a5a109f8ba7637273d752be7e7cfc519416f53a6e4125ff7b',
+  'grant-application-role.sql': '33650cde6178b5ec0ba90af5485f747b785acd0bb587ee0ca875d2c9bc004a9f',
+  'grant-operator-role.sql': '250885a0910987ad42a46ab6dd675b2214d9b24d0af82768db9f273ce2255091',
   'grant-sync-role.sql': '35c77a918abbc297d5c1e1fd89902bc99e29ac086147edd5cc973b1879c538c3',
 };
 /** Reviewed standalone SQL emulation, not a general-purpose psql interpreter. */

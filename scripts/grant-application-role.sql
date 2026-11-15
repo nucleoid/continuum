@@ -356,6 +356,7 @@ BEGIN
       schema_name,schema_name,schema_name,schema_name,schema_name,schema_name,schema_name,target_role);
   END IF;
   IF to_regclass(format('%I.connector_query_runs',schema_name)) IS NOT NULL THEN
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.continuum_operator_connector_mapping(UUID,UUID,UUID,TEXT,TEXT,TEXT,TEXT,BOOLEAN),%I.continuum_operator_scrub_connector_scope(UUID,UUID,UUID,INTEGER) FROM %I',schema_name,schema_name,target_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_connector_mapping(UUID,UUID),%I.continuum_connector_admission(UUID,UUID,BIGINT,TEXT),%I.continuum_connector_start(UUID,UUID,UUID,BIGINT,UUID,UUID,BIGINT,UUID,UUID,UUID),%I.continuum_connector_permit(UUID,UUID,BIGINT,TIMESTAMPTZ,TIMESTAMPTZ,TEXT,TEXT),%I.continuum_connector_finish(UUID,UUID,JSONB,TEXT),%I.continuum_connector_fail(UUID,UUID,TEXT),%I.continuum_connector_dependencies(UUID,UUID),%I.continuum_connector_is_ready() TO %I',schema_name,schema_name,schema_name,schema_name,schema_name,schema_name,schema_name,schema_name,target_role);
   END IF;
   IF to_regclass(format('%I.evidence_roots',schema_name)) IS NOT NULL THEN

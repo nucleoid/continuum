@@ -53,6 +53,14 @@ also consume the caller's output budget. An eventual REST or MCP consumer must
 explicitly budget its actual camelCase or snake_case serialized frame; no new
 wire route or mechanical field-name translation is supplied here.
 
+Durable output accounting includes a conservative final library-envelope
+allowance in the original delivery-probe attempt, not just upstream response
+bytes. Managed reads reserve their complete JSON string's worst-case escaping
+bound before hydration. That allowance is retained even when later publication
+fails; retries cannot recover it by constructing a fresh local budget. Tight
+caller profiles may therefore abstain although a particular smaller frame
+would fit. This is bounded reservation accounting, not measured remote billing.
+
 Only zero-price `local-zero-v1` schedules are admitted. This is a capability for
 qualified synthetic/local or independently approved zero-price transports, not
 a claim that a hosted service is free. No paid probe or paid content stage is
