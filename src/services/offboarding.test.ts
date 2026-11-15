@@ -1154,20 +1154,22 @@ describe('offboarding and erasure', () => {
     let embeddingStarted!: () => void;
     const started = new Promise<void>((resolve) => { embeddingStarted = resolve; });
     const release = new Promise<void>((resolve) => { releaseEmbedding = resolve; });
-    const provider: EmbeddingProvider = {
+    const provider = withSyntheticTargetForTest<EmbeddingProvider>({
       id: 'blocking-test', dim: 768,
       async embed() {
         embeddingStarted();
         await release;
         return [Array(768).fill(0)];
       },
-    };
+    });
+    await registerEmbeddingTargetForTest(pool, provider, [value.personal.id, value.shared.id]);
     const recall = recallForPrincipal(pool, provider, value.target, {
       query: 'Private body', limit: 10,
     });
-    await started;
-    await offboardPrincipal(pool, value.admin, value.target.id);
-    releaseEmbedding();
+    try {
+      await started;
+      await offboardPrincipal(pool, value.admin, value.target.id);
+    } finally { releaseEmbedding(); }
     await expect(recall).rejects.toMatchObject({ code: 'INTERNAL' });
     expect((await pool.query(
       `SELECT count(*)::int AS count FROM audit_log
@@ -1177,10 +1179,14 @@ describe('offboarding and erasure', () => {
 
   it('leaves an exact redacted clean state and durable evidence outside audit retention', async () => {
     const value = await fixture();
+    expect((await pool.query('SELECT count(*)::int AS n FROM memory_embeddings WHERE memory_id=$1', [value.personalMemory.id])).rows[0].n).toBe(1);
     await pool.query(
       `UPDATE memories SET expires_at = now(), last_verified = now() WHERE id = $1`,
       [value.personalMemory.id],
     );
+    // Expiry is now an immediate vector-generation fence. Offboarding counts
+    // only vectors still present when its own erasure begins.
+    expect((await pool.query('SELECT count(*)::int AS n FROM memory_embeddings WHERE memory_id=$1', [value.personalMemory.id])).rows[0].n).toBe(0);
     const result = await offboardPrincipal(pool, value.admin, value.target.id);
     expect((await pool.query(
       `SELECT type, title, body, metadata, tags, source, source_ref, state,
@@ -1201,7 +1207,7 @@ describe('offboarding and erasure', () => {
          FROM principal_offboarding_events WHERE principal_id = $1 ORDER BY id`,
       [value.target.id],
     )).rows[0];
-    expect(durable).toMatchObject({ memories: 1, embeddings: 1, memberships: 1 });
+    expect(durable).toMatchObject({ memories: 1, embeddings: 0, memberships: 1 });
     expect(durable.evidence).toMatchObject({ memberPrincipalIds: [] });
     expect((await pool.query(
       `SELECT metadata->>'phase' AS phase FROM coordination_operator_events
@@ -1214,7 +1220,7 @@ describe('offboarding and erasure', () => {
     const retry = await offboardPrincipal(pool, value.admin, value.target.id);
     expect(retry.alreadyOffboarded).toBe(true);
     expect(retry.originalOffboarding).toMatchObject({
-      memories: 1, embeddings: 1, memberships: 1,
+      memories: 1, embeddings: 0, memberships: 1,
     });
     expect((await pool.query(
       `SELECT metadata->>'phase' AS phase FROM coordination_operator_events

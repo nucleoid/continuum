@@ -1923,6 +1923,10 @@ describe('pgvector rollout remediation', () => {
       await expect(legacySecondHits()).resolves.toEqual([{ id: secondIds.memory, distance: 0 }]);
 
       await runMigrations(secondOwner, await fullMigrationDirectory());
+      // These legacy pre-0080 profiles now use current vector admission. Apply
+      // the checked current capability grants before exercising that API.
+      await grantApplicationRole(firstOwner, firstSchema, firstAppRole);
+      await grantApplicationRole(secondOwner, secondSchema, secondAppRole);
       const firstRuntime = migrationPool(url, firstSchema, firstAppRole);
       const currentProvider = withSyntheticTargetForTest({ id: 'test:shared-provider', dim: 768 });
       for (const [tenantOwner, runtime, ids] of [[firstOwner, firstRuntime, firstIds], [secondOwner, secondRuntime, secondIds]] as const) {

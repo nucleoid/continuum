@@ -416,7 +416,8 @@ BEGIN
   SELECT * INTO receipt FROM embedding_capture_receipts WHERE principal_id=actor AND scope_id=target_scope AND key_hash=key_digest AND operation='capture.v1' FOR UPDATE;
   IF FOUND THEN
     IF receipt.payload_digest IS DISTINCT FROM payload_hash THEN RAISE EXCEPTION USING ERRCODE='P0001',MESSAGE='EMBEDDING_CAPTURE_CONFLICT'; END IF;
-    IF NOT EXISTS(SELECT 1 FROM memories WHERE id=receipt.memory_id AND source=source_name AND scope_id=target_scope)
+    IF NOT EXISTS(SELECT 1 FROM memories WHERE id=receipt.memory_id AND source=source_name AND scope_id=target_scope
+        AND state='live' AND (expires_at IS NULL OR expires_at>clock_timestamp()))
       OR continuum_embedding_status(actor,receipt.memory_id) IS NULL THEN RAISE insufficient_privilege USING MESSAGE='Capture replay unavailable'; END IF;
     RETURN receipt.memory_id;
   END IF;
@@ -972,13 +973,14 @@ CREATE FUNCTION continuum_embedding_scope_is_erased(target_scope UUID) RETURNS B
     AND NOT EXISTS(SELECT 1 FROM memory_embeddings e WHERE e.memory_id IN (SELECT continuum_embedding_scope_memories(target_scope)));
 $$;
 CREATE FUNCTION continuum_operator_scrub_embedding_scope(actor UUID,subject UUID,target_scope UUID,page_limit INTEGER) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
-DECLARE item RECORD; processed INTEGER:=0; clean BOOLEAN;
+DECLARE item RECORD; processed INTEGER:=0; clean BOOLEAN; run principal_offboarding_runs%ROWTYPE;
 BEGIN
   PERFORM continuum_evidence_require_operator(actor);
   PERFORM * FROM continuum_operator_coordination_scope_privacy_state(actor,target_scope);
   IF page_limit IS NULL OR page_limit NOT BETWEEN 1 AND 1000 OR NOT EXISTS(SELECT 1 FROM principal_user_scopes WHERE principal_id=subject AND scope_id=target_scope)
     OR NOT EXISTS(SELECT 1 FROM principal_offboarding_runs WHERE principal_id=subject AND scope_id=target_scope) THEN
     RAISE insufficient_privilege USING MESSAGE='Embedding erasure requires approved lifecycle'; END IF;
+  SELECT * INTO STRICT run FROM principal_offboarding_runs WHERE principal_id=subject AND scope_id=target_scope FOR SHARE;
   FOR item IN SELECT m.id FROM memories m LEFT JOIN embedding_sources s ON s.memory_id=m.id
     WHERE m.id IN (SELECT continuum_embedding_scope_memories(target_scope)) AND (s.input_hash IS NOT NULL OR s.current_target IS NOT NULL OR NOT s.erased
       OR EXISTS(SELECT 1 FROM memory_embeddings WHERE memory_id=m.id)
@@ -1002,8 +1004,11 @@ BEGIN
   UPDATE embedding_worker_bindings SET enabled=FALSE,generation=gen_random_uuid() WHERE scope_id=target_scope AND enabled;
   DELETE FROM embedding_receipt_admission WHERE principal_id=subject;
   clean:=continuum_embedding_scope_is_erased(target_scope);
+  -- Reuse the protected approval-bound lifecycle receipt. An ordinary scoped
+  -- audit is correctly forbidden once the owned scope has been fenced.
   IF processed>0 THEN INSERT INTO audit_log(principal_id,action,scope_id,metadata) VALUES(actor,'archive',target_scope,
-    jsonb_build_object('operation','embedding_privacy_scrub','processed',processed)); END IF;
+    jsonb_build_object('operation','principal_evidence_privacy_repaired','principal_id',subject,'run_id',run.run_id,
+      'approval_id',run.approval_id::text,'acknowledged_evidence_hash',run.approval_evidence_hash,'rows_processed',processed)); END IF;
   RETURN jsonb_build_object('complete',clean,'processed',processed,'batch_full',NOT clean AND processed>=page_limit);
 END $$;
 ALTER FUNCTION continuum_offboarding_lifecycle_state_is_erased(UUID) RENAME TO continuum_offboarding_lifecycle_state_is_erased_pre_embedding;
