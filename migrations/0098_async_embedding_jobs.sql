@@ -128,6 +128,12 @@ CREATE TABLE embedding_cohorts(
   reservation JSONB,retained_bytes BIGINT,hydrated_bytes BIGINT,settlement JSONB,
   diagnostic_ambiguous BOOLEAN NOT NULL DEFAULT FALSE,diagnostic_split BOOLEAN NOT NULL DEFAULT FALSE,
   diagnostic_probe BOOLEAN NOT NULL DEFAULT FALSE,
+  relation_prepare_id UUID,relation_prepare_status TEXT CHECK(relation_prepare_status IN ('prepared','budget','native_unavailable','query_unavailable')),
+  relation_candidates BIGINT NOT NULL DEFAULT 0 CHECK(relation_candidates>=0),
+  relation_hydrated_bytes BIGINT NOT NULL DEFAULT 0 CHECK(relation_hydrated_bytes>=0),
+  relation_output_bytes BIGINT NOT NULL DEFAULT 0 CHECK(relation_output_bytes>=0),
+  relation_storage_bytes BIGINT NOT NULL DEFAULT 0 CHECK(relation_storage_bytes>=0),
+  CHECK((relation_prepare_id IS NULL)=(relation_prepare_status IS NULL)),
   created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 CREATE INDEX embedding_cohorts_scope_idx ON embedding_cohorts(scope_id,id);
@@ -879,6 +885,13 @@ BEGIN
   END IF;
   c:=continuum_embedding_gate(cohort,worker,epoch);
   IF c.id IS NULL THEN RETURN FALSE; END IF;
+  IF phase='prepare_relations' THEN
+    IF jsonb_typeof(value) IS DISTINCT FROM 'object' THEN RAISE check_violation USING MESSAGE='Invalid embedding relation preparation'; END IF;
+    IF NOT(value ?& ARRAY['prepareId','vectors']) OR (SELECT count(*) FROM jsonb_object_keys(value))<>2
+      OR jsonb_typeof(value->'prepareId') IS DISTINCT FROM 'string' OR value->>'prepareId'!~'^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' THEN
+      RAISE check_violation USING MESSAGE='Invalid embedding relation preparation'; END IF;
+    RETURN continuum_embedding_prepare_relations(cohort,(value->>'prepareId')::uuid,value->'vectors');
+  END IF;
   IF phase='reserve' THEN
     IF c.state<>'attached' OR NOT continuum_pipeline_valid_amounts(value) OR retained IS NULL OR retained<0 THEN RETURN FALSE; END IF;
     SELECT * INTO STRICT t FROM embedding_targets WHERE fingerprint=c.target_fingerprint;
@@ -911,28 +924,35 @@ BEGIN
     collation_namespace,collation_name) INTO result USING value,whitespace;
   RETURN result;
 END $$;
-CREATE FUNCTION continuum_embedding_probe_relations(cohort UUID,memory UUID,target JSONB,vector_text TEXT) RETURNS TEXT LANGUAGE plpgsql SECURITY DEFINER AS $$
-DECLARE c embedding_cohorts%ROWTYPE; original pipeline_budget_workflows%ROWTYPE; threshold_value DOUBLE PRECISION;
-  provider_namespace NAME; collation_namespace NAME; collation_name NAME; incoming RECORD; candidate RECORD;
-  candidates JSONB:='[]'; relations JSONB:='[]'; current_related JSONB; merged JSONB;
-  input_bytes BIGINT; total_bytes BIGINT; candidate_count INTEGER; output_allowance BIGINT;
-  normalized_title TEXT; normalized_body TEXT; relation_value TEXT;
+CREATE FUNCTION continuum_embedding_relation_collation() RETURNS OID LANGUAGE sql STABLE SECURITY DEFINER AS $$
+  SELECT coll.oid FROM pg_collation coll JOIN pg_namespace n ON n.oid=coll.collnamespace
+    WHERE getdatabaseencoding()='UTF8' AND to_regprocedure('pg_catalog.normalize(text,text)') IS NOT NULL
+      AND n.nspname='pg_catalog' AND coll.collprovider='i' AND coll.colliculocale='en-US'
+      AND pg_collation_actual_version(coll.oid) IS NOT DISTINCT FROM coll.collversion ORDER BY coll.collname LIMIT 1;
+$$;
+CREATE FUNCTION continuum_embedding_validate_vectors(cohort UUID,vectors JSONB) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE item RECORD; vector_json JSONB; count_value INTEGER;
+BEGIN
+  IF jsonb_typeof(vectors) IS DISTINCT FROM 'array' THEN RAISE check_violation USING MESSAGE='Invalid embedding response'; END IF;
+  IF jsonb_array_length(vectors)>32 OR octet_length(vectors::text)>2097152 THEN RAISE check_violation USING MESSAGE='Invalid embedding response'; END IF;
+  SELECT count(*) INTO count_value FROM embedding_cohort_jobs cj JOIN embedding_jobs j ON j.id=cj.job_id WHERE cj.cohort_id=cohort AND j.state='processing';
+  IF jsonb_array_length(vectors)<>count_value OR (SELECT count(DISTINCT value->>'id') FROM jsonb_array_elements(vectors))<>count_value THEN
+    RAISE check_violation USING MESSAGE='Invalid embedding response'; END IF;
+  FOR item IN SELECT j.id FROM embedding_cohort_jobs cj JOIN embedding_jobs j ON j.id=cj.job_id WHERE cj.cohort_id=cohort AND j.state='processing' LOOP
+    SELECT value->'vector' INTO vector_json FROM jsonb_array_elements(vectors) WHERE value->>'id'=item.id::text;
+    IF jsonb_typeof(vector_json) IS DISTINCT FROM 'array' THEN RAISE check_violation USING MESSAGE='Invalid embedding response'; END IF;
+    IF jsonb_array_length(vector_json)<>768 OR EXISTS(SELECT 1 FROM jsonb_array_elements(vector_json) n
+      WHERE jsonb_typeof(n)<>'number' OR abs(n::text::numeric)>3.4028234663852886e38) THEN
+      RAISE check_violation USING MESSAGE='Invalid embedding response'; END IF;
+  END LOOP;
+END $$;
+CREATE FUNCTION continuum_embedding_relation_metadata(cohort UUID,memory UUID,target JSONB,vector_text TEXT,threshold_value DOUBLE PRECISION)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE c embedding_cohorts%ROWTYPE; provider_namespace NAME; candidates JSONB;
 BEGIN
   SELECT * INTO STRICT c FROM embedding_cohorts WHERE id=cohort;
-  SELECT relation_threshold INTO threshold_value FROM embedding_sources WHERE memory_id=memory;
-  IF threshold_value IS NULL THEN RETURN 'not_configured'; END IF;
-  IF c.deadline_at<=clock_timestamp() THEN RETURN 'deadline'; END IF;
-  -- Resolve only actual catalog ICU en-US with matching installed version.
-  -- Native capability absence declines the probe and never disables vectors.
-  SELECT n.nspname,coll.collname INTO collation_namespace,collation_name FROM pg_collation coll JOIN pg_namespace n ON n.oid=coll.collnamespace
-    WHERE n.nspname='pg_catalog' AND coll.collprovider='i' AND coll.colliculocale='en-US'
-      AND pg_collation_actual_version(coll.oid) IS NOT DISTINCT FROM coll.collversion ORDER BY coll.collname LIMIT 1;
-  IF getdatabaseencoding()<>'UTF8' OR collation_name IS NULL OR to_regprocedure('pg_catalog.normalize(text,text)') IS NULL THEN RETURN 'native_unavailable'; END IF;
   SELECT n.nspname INTO STRICT provider_namespace FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname='vector';
-  BEGIN
-    -- Metadata and vector distance only, with current privacy/policy before
-    -- LIMIT. Shared memory locks fence every candidate vector/body mutation.
-    EXECUTE format('WITH ranked AS MATERIALIZED (
+  EXECUTE format('WITH ranked AS MATERIALIZED (
       SELECT m.id,octet_length(m.title)::bigint+octet_length(m.body)::bigint+4096 bytes,
         e.embedding OPERATOR(%I.<=>) $1::%I.vector distance
       FROM memories m JOIN memory_embeddings e ON e.memory_id=m.id
@@ -945,8 +965,87 @@ BEGIN
       SELECT COALESCE(jsonb_agg(jsonb_build_object(''id'',id,''bytes'',bytes,''distance'',distance) ORDER BY distance,id),''[]''::jsonb) FROM ranked',
       provider_namespace,provider_namespace,provider_namespace,provider_namespace,provider_namespace,provider_namespace)
       INTO candidates USING vector_text,c.scope_id,target->'space'->>'provider',target->>'spaceFingerprint',cohort,threshold_value;
-  EXCEPTION WHEN lock_not_available OR deadlock_detected THEN RETURN 'query_unavailable';
-  END;
+  RETURN candidates;
+END $$;
+-- The trusted SQL store commits this numeric read debit before exactly one
+-- apply call. No source text or candidate identity is returned to the worker.
+CREATE FUNCTION continuum_embedding_prepare_relations(cohort UUID,preparation UUID,vectors JSONB) RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE c embedding_cohorts%ROWTYPE; t embedding_targets%ROWTYPE; original pipeline_budget_workflows%ROWTYPE;
+  item RECORD; candidates JSONB; count_value INTEGER; bytes BIGINT;
+  total_candidates BIGINT:=0; total_bytes BIGINT:=0; total_output BIGINT:=0; status_value TEXT:='prepared';
+BEGIN
+  SELECT * INTO STRICT c FROM embedding_cohorts WHERE id=cohort FOR UPDATE;
+  IF c.state<>'settled' OR c.settlement IS NULL OR preparation IS NULL OR preparation=c.relation_prepare_id THEN RETURN FALSE; END IF;
+  PERFORM continuum_embedding_validate_vectors(cohort,vectors);
+  SELECT * INTO STRICT t FROM embedding_targets WHERE fingerprint=c.target_fingerprint AND enabled FOR SHARE;
+  IF continuum_embedding_relation_collation() IS NULL THEN status_value:='native_unavailable'; END IF;
+  IF status_value='prepared' THEN
+    BEGIN
+      FOR item IN SELECT j.id,j.memory_id,source.relation_threshold,octet_length(m.title)::bigint+octet_length(m.body)::bigint+4096 bytes,
+          m.metadata->'related' related
+        FROM embedding_cohort_jobs cj JOIN embedding_jobs j ON j.id=cj.job_id JOIN memories m ON m.id=j.memory_id
+        JOIN embedding_sources source ON source.memory_id=m.id WHERE cj.cohort_id=cohort AND j.state='processing' ORDER BY j.id LOOP
+        IF item.relation_threshold IS NULL OR jsonb_typeof(item.related) IS DISTINCT FROM 'array' THEN CONTINUE; END IF;
+        IF jsonb_array_length(item.related)>=5 THEN CONTINUE; END IF;
+        candidates:=continuum_embedding_relation_metadata(cohort,item.memory_id,t.descriptor,
+          (SELECT (value->'vector')::text FROM jsonb_array_elements(vectors) WHERE value->>'id'=item.id::text),item.relation_threshold);
+        count_value:=jsonb_array_length(candidates);
+        IF count_value=0 THEN CONTINUE; END IF;
+        IF item.bytes>(c.profile->>'maxItemHydratedBytes')::bigint OR EXISTS(SELECT 1 FROM jsonb_array_elements(candidates)
+          WHERE (value->>'bytes')::bigint>(c.profile->>'maxItemHydratedBytes')::bigint) THEN status_value:='budget';EXIT; END IF;
+        SELECT item.bytes+sum((value->>'bytes')::bigint) INTO bytes FROM jsonb_array_elements(candidates);
+        total_bytes:=total_bytes+bytes;total_candidates:=total_candidates+count_value+1;total_output:=total_output+count_value*512;
+      END LOOP;
+    EXCEPTION WHEN lock_not_available OR deadlock_detected THEN status_value:='query_unavailable';
+    END;
+  END IF;
+  -- Match evidence's root-before-workflow cancellation order, then repeat all
+  -- original accounting identities/deadline after bounded metadata selection.
+  SELECT * INTO STRICT original FROM pipeline_budget_workflows WHERE id=c.workflow_id FOR UPDATE;
+  IF original.owner IS DISTINCT FROM c.attempt_owner OR original.generation IS DISTINCT FROM c.attempt_generation OR original.cancelled
+    OR original.deadline_at<=clock_timestamp() OR c.deadline_at<=clock_timestamp() OR original.profile IS DISTINCT FROM c.profile
+    OR t.profile IS DISTINCT FROM c.profile OR original.active<>0 THEN RETURN FALSE; END IF;
+  PERFORM attempt_id FROM pipeline_budget_attempts WHERE workflow_id=c.workflow_id AND attempt_id=c.attempt_id
+    AND owner=c.attempt_owner AND generation=c.attempt_generation AND state='settled' AND settlement=c.settlement FOR SHARE;
+  IF NOT FOUND THEN RETURN FALSE; END IF;
+  IF total_bytes>(c.profile->'limits'->>'hydratedBytes')::bigint-(original.used->>'hydratedBytes')::bigint
+    OR total_candidates>(c.profile->'limits'->>'candidates')::bigint-(original.used->>'candidates')::bigint
+    OR total_output>(c.profile->'limits'->>'outputBytes')::bigint-(original.used->>'outputBytes')::bigint
+    OR total_output>(c.profile->'limits'->>'storageBytes')::bigint-(original.used->>'storageBytes')::bigint THEN status_value:='budget'; END IF;
+  IF status_value<>'prepared' THEN total_candidates:=0;total_bytes:=0;total_output:=0; END IF;
+  -- Even optional decline replaces the previous identity and invalidates its
+  -- numeric allowance. A legitimate retry always performs a fresh precommit.
+  UPDATE embedding_cohorts SET relation_prepare_id=preparation,relation_prepare_status=status_value,
+    relation_candidates=total_candidates,relation_hydrated_bytes=total_bytes,relation_output_bytes=total_output,relation_storage_bytes=total_output WHERE id=cohort;
+  IF total_candidates>0 THEN
+    UPDATE pipeline_budget_workflows SET used=jsonb_set(jsonb_set(jsonb_set(jsonb_set(used,
+      ARRAY['hydratedBytes'],to_jsonb((used->>'hydratedBytes')::bigint+total_bytes)),
+      ARRAY['candidates'],to_jsonb((used->>'candidates')::bigint+total_candidates)),
+      ARRAY['outputBytes'],to_jsonb((used->>'outputBytes')::bigint+total_output)),
+      ARRAY['storageBytes'],to_jsonb((used->>'storageBytes')::bigint+total_output)) WHERE id=c.workflow_id;
+  END IF;
+  RETURN TRUE;
+END $$;
+CREATE FUNCTION continuum_embedding_probe_relations(cohort UUID,memory UUID,target JSONB,vector_text TEXT) RETURNS TEXT LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE c embedding_cohorts%ROWTYPE; original pipeline_budget_workflows%ROWTYPE; threshold_value DOUBLE PRECISION;
+  collation_namespace NAME; collation_name NAME; incoming RECORD; candidate RECORD;
+  candidates JSONB:='[]'; relations JSONB:='[]'; current_related JSONB; merged JSONB;
+  input_bytes BIGINT; total_bytes BIGINT; candidate_count INTEGER; output_allowance BIGINT;
+  normalized_title TEXT; normalized_body TEXT; relation_value TEXT;
+BEGIN
+  SELECT * INTO STRICT c FROM embedding_cohorts WHERE id=cohort;
+  SELECT relation_threshold INTO threshold_value FROM embedding_sources WHERE memory_id=memory;
+  IF threshold_value IS NULL THEN RETURN 'not_configured'; END IF;
+  IF c.relation_prepare_status IS DISTINCT FROM 'prepared' THEN RETURN COALESCE(c.relation_prepare_status,'not_prepared'); END IF;
+  IF c.deadline_at<=clock_timestamp() THEN RETURN 'deadline'; END IF;
+  -- Resolve only actual catalog ICU en-US with matching installed version.
+  -- Native capability absence declines the probe and never disables vectors.
+  SELECT n.nspname,coll.collname INTO collation_namespace,collation_name FROM pg_collation coll JOIN pg_namespace n ON n.oid=coll.collnamespace
+    WHERE coll.oid=continuum_embedding_relation_collation();
+  IF collation_name IS NULL THEN RETURN 'native_unavailable'; END IF;
+  BEGIN
+    candidates:=continuum_embedding_relation_metadata(cohort,memory,target,vector_text,threshold_value);
+  EXCEPTION WHEN lock_not_available OR deadlock_detected THEN RETURN 'query_unavailable'; END;
   candidate_count:=jsonb_array_length(candidates);
   IF candidate_count=0 THEN RETURN 'none'; END IF;
   SELECT octet_length(title)::bigint+octet_length(body)::bigint+4096,metadata->'related' INTO input_bytes,current_related FROM memories WHERE id=memory;
@@ -959,17 +1058,13 @@ BEGIN
     OR original.deadline_at<=clock_timestamp() OR original.profile IS DISTINCT FROM c.profile THEN RETURN 'deadline'; END IF;
   IF input_bytes>(c.profile->>'maxItemHydratedBytes')::bigint OR EXISTS(SELECT 1 FROM jsonb_array_elements(candidates)
       WHERE (value->>'bytes')::bigint>(c.profile->>'maxItemHydratedBytes')::bigint)
-    OR total_bytes>(c.profile->'limits'->>'hydratedBytes')::bigint-(original.used->>'hydratedBytes')::bigint
-    OR candidate_count+1>(c.profile->'limits'->>'candidates')::bigint-(original.used->>'candidates')::bigint
-    OR output_allowance>(c.profile->'limits'->>'outputBytes')::bigint-(original.used->>'outputBytes')::bigint
-    OR output_allowance>(c.profile->'limits'->>'storageBytes')::bigint-(original.used->>'storageBytes')::bigint THEN RETURN 'budget'; END IF;
-  -- Charge the original workflow before either incoming or candidate text is
-  -- hydrated. Conservative bounded output/storage charges are never refunded.
-  UPDATE pipeline_budget_workflows SET used=jsonb_set(jsonb_set(jsonb_set(jsonb_set(used,
-    ARRAY['hydratedBytes'],to_jsonb((used->>'hydratedBytes')::bigint+total_bytes)),
-    ARRAY['candidates'],to_jsonb((used->>'candidates')::bigint+candidate_count+1)),
-    ARRAY['outputBytes'],to_jsonb((used->>'outputBytes')::bigint+output_allowance)),
-    ARRAY['storageBytes'],to_jsonb((used->>'storageBytes')::bigint+output_allowance)) WHERE id=c.workflow_id;
+    OR total_bytes>c.relation_hydrated_bytes OR candidate_count+1>c.relation_candidates
+    OR output_allowance>c.relation_output_bytes OR output_allowance>c.relation_storage_bytes THEN RETURN 'budget'; END IF;
+  -- Prepaid in the previous committed store operation. Decrement ONE aggregate
+  -- allowance across all sources before text, never reset a full cap per job.
+  UPDATE embedding_cohorts SET relation_candidates=relation_candidates-candidate_count-1,
+    relation_hydrated_bytes=relation_hydrated_bytes-total_bytes,relation_output_bytes=relation_output_bytes-output_allowance,
+    relation_storage_bytes=relation_storage_bytes-output_allowance WHERE id=cohort;
   BEGIN
     SELECT type,title,body INTO STRICT incoming FROM memories WHERE id=memory;
     normalized_title:=continuum_embedding_normalize_relation(incoming.title,collation_namespace,collation_name);
@@ -1000,19 +1095,17 @@ BEGIN
   RETURN 'computed';
 END $$;
 CREATE FUNCTION continuum_embedding_apply(cohort UUID,worker UUID,epoch BIGINT,vectors JSONB) RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER AS $$
-DECLARE c embedding_cohorts%ROWTYPE; t embedding_targets%ROWTYPE; item RECORD; vector_json JSONB; admission JSONB; count_value INTEGER; relation_status TEXT;
+DECLARE c embedding_cohorts%ROWTYPE; t embedding_targets%ROWTYPE; item RECORD; vector_json JSONB; admission JSONB; relation_status TEXT;
 BEGIN
   c:=continuum_embedding_gate(cohort,worker,epoch);
-  IF c.id IS NULL OR c.state<>'settled' OR c.settlement IS NULL OR jsonb_typeof(vectors) IS DISTINCT FROM 'array'
-    OR jsonb_array_length(vectors)>32 OR octet_length(vectors::text)>2097152 THEN RETURN FALSE; END IF;
-  SELECT count(*) INTO count_value FROM embedding_cohort_jobs cj JOIN embedding_jobs j ON j.id=cj.job_id WHERE cj.cohort_id=cohort AND j.state='processing';
-  IF jsonb_array_length(vectors)<>count_value OR (SELECT count(DISTINCT value->>'id') FROM jsonb_array_elements(vectors))<>count_value THEN RETURN FALSE; END IF;
+  IF c.id IS NULL OR c.state<>'settled' OR c.settlement IS NULL OR jsonb_typeof(vectors) IS DISTINCT FROM 'object' THEN RETURN FALSE; END IF;
+  IF NOT(vectors ?& ARRAY['prepareId','vectors']) OR (SELECT count(*) FROM jsonb_object_keys(vectors))<>2
+    OR c.relation_prepare_id IS NULL OR vectors->>'prepareId' IS DISTINCT FROM c.relation_prepare_id::text THEN RETURN FALSE; END IF;
+  vectors:=vectors->'vectors';
+  PERFORM continuum_embedding_validate_vectors(cohort,vectors);
   SELECT * INTO STRICT t FROM embedding_targets WHERE fingerprint=c.target_fingerprint;
   FOR item IN SELECT j.* FROM embedding_cohort_jobs cj JOIN embedding_jobs j ON j.id=cj.job_id WHERE cj.cohort_id=cohort AND j.state='processing' ORDER BY j.id LOOP
     SELECT value->'vector' INTO vector_json FROM jsonb_array_elements(vectors) WHERE value->>'id'=item.id::text;
-    IF jsonb_typeof(vector_json) IS DISTINCT FROM 'array' OR jsonb_array_length(vector_json)<>768 OR EXISTS(
-      SELECT 1 FROM jsonb_array_elements(vector_json) n WHERE jsonb_typeof(n)<>'number' OR abs(n::text::numeric)>3.4028234663852886e38) THEN
-      RAISE check_violation USING MESSAGE='Invalid embedding response'; END IF;
     admission:=continuum_embedding_admit_vector(item.memory_id,t.descriptor);
     IF admission IS NULL OR admission->>'generation' IS DISTINCT FROM item.source_generation::text THEN RETURN FALSE; END IF;
     IF NOT continuum_embedding_vector_is_current(item.memory_id,t.provider,t.dim)
@@ -1139,7 +1232,8 @@ BEGIN
       WHERE cj.cohort_id=c.id AND j.memory_id=memory) AND (c.scope_id IS NOT NULL OR c.target_fingerprint IS NOT NULL OR c.principal_id IS NOT NULL)
     ORDER BY c.id LIMIT page_limit FOR UPDATE SKIP LOCKED LOOP
     UPDATE pipeline_budget_workflows SET cancelled=TRUE,generation=generation+1 WHERE id=item.workflow_id AND NOT cancelled;
-    UPDATE embedding_cohorts SET scope_id=NULL,target_fingerprint=NULL,principal_id=NULL,state='cancelled',lease_until=clock_timestamp() WHERE id=item.id;
+    UPDATE embedding_cohorts SET scope_id=NULL,target_fingerprint=NULL,principal_id=NULL,state='cancelled',lease_until=clock_timestamp(),
+      relation_prepare_id=NULL,relation_prepare_status=NULL,relation_candidates=0,relation_hydrated_bytes=0,relation_output_bytes=0,relation_storage_bytes=0 WHERE id=item.id;
   END LOOP;
   FOR item IN SELECT id FROM embedding_jobs WHERE memory_id=memory ORDER BY id LIMIT page_limit FOR UPDATE SKIP LOCKED LOOP
     UPDATE embedding_jobs SET state='cancelled',memory_id=NULL,scope_id=NULL,source_generation=NULL,target_fingerprint=NULL,policy_generation=NULL,
@@ -1193,7 +1287,8 @@ BEGIN
       OR EXISTS(SELECT 1 FROM pipeline_budget_workflows w WHERE w.id=c.workflow_id AND NOT w.cancelled))
     ORDER BY c.id LIMIT page_limit FOR UPDATE OF c SKIP LOCKED LOOP
     UPDATE pipeline_budget_workflows SET cancelled=TRUE,generation=generation+1 WHERE id=item.workflow_id AND NOT cancelled;
-    UPDATE embedding_cohorts SET scope_id=NULL,target_fingerprint=NULL,principal_id=NULL,state='cancelled',lease_until=clock_timestamp() WHERE id=item.id;processed:=processed+1;
+    UPDATE embedding_cohorts SET scope_id=NULL,target_fingerprint=NULL,principal_id=NULL,state='cancelled',lease_until=clock_timestamp(),
+      relation_prepare_id=NULL,relation_prepare_status=NULL,relation_candidates=0,relation_hydrated_bytes=0,relation_output_bytes=0,relation_storage_bytes=0 WHERE id=item.id;processed:=processed+1;
   END LOOP;
   FOR item IN SELECT r.id FROM embedding_capture_receipts r WHERE r.scope_id=target_scope
       AND (r.key_hash IS NOT NULL OR r.payload_digest IS NOT NULL OR r.principal_id IS NOT NULL OR r.memory_id IS NOT NULL)

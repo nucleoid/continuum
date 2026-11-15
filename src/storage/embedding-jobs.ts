@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { evidenceTransaction } from './evidence.js';
 import { checkedProfile, type BudgetProfile, type DurableAttempt } from '../pipeline/budget.js';
@@ -108,8 +109,17 @@ export class SqlEmbeddingJobStore implements EmbeddingJobStore {
       catch (error) { if (this.transient(error)) remember(value); throw error; }
     } };
   }
-  apply(claim: EmbeddingJobClaim, vectors: Array<{ id: string; vector: number[] }>): Promise<boolean> {
-    return this.operation('SELECT continuum_embedding_apply($1,$2,$3,$4) AS result', [...this.fence(claim), JSON.stringify(vectors)]);
+  async apply(claim: EmbeddingJobClaim, vectors: Array<{ id: string; vector: number[] }>): Promise<boolean> {
+    const fence = this.fence(claim);
+    const original = [claim.workflowId, claim.attemptId, claim.attemptOwner, claim.attemptGeneration];
+    // Snapshot once. Each method call owns a fresh durable preparation, even
+    // after publication/audit rollback. operation() never transparently retries.
+    const payload = JSON.stringify({ prepareId: randomUUID(), vectors });
+    const prepared = await this.operation<boolean>('SELECT continuum_embedding_attempt($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) AS result',
+      [...fence, ...original, 'prepare_relations', payload, 0]);
+    if (!prepared) return false;
+    // Preparation has COMMITTED before the one publication transaction starts.
+    return this.operation('SELECT continuum_embedding_apply($1,$2,$3,$4) AS result', [...fence, payload]);
   }
   fail(claim: EmbeddingJobClaim, failure: EmbeddingAttemptFailure): Promise<boolean> {
     // Project only the closed safe taxonomy; never serialize error objects.

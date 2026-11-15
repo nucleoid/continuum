@@ -21,6 +21,38 @@ const claim: EmbeddingJobClaim = { id: 'claim', owner: 'current-owner', generati
   jobs: [{ id: 'job', memoryId: 'memory', sourceGeneration: '5', leaseGeneration: '6' }] };
 
 describe('planned embedding SQL adapter', () => {
+  it('commits a fresh original-attempt read debit before exactly one publication per apply call', async () => {
+    const f = connection();
+    const vectors = [{ id: 'job', vector: [1] }]; // SQL-port shape only; PG integration validates768.
+    expect(await f.store.apply(claim, vectors)).toBe(true);
+    expect(await f.store.apply(claim, vectors)).toBe(true);
+    const preparations = f.statements.filter(row => row.sql.includes('continuum_embedding_attempt'));
+    const publications = f.statements.filter(row => row.sql.includes('continuum_embedding_apply'));
+    expect(preparations).toHaveLength(2); expect(publications).toHaveLength(2);
+    for (let i = 0; i < 2; i++) {
+      expect(preparations[i].values.slice(0, 8)).toEqual(['claim', 'current-owner', '9', 'original-workflow', 'original-attempt', 'original-owner', 3, 'prepare_relations']);
+      const payload = JSON.parse(preparations[i].values[8] as string);
+      expect(payload).toMatchObject({ prepareId: expect.any(String), vectors });
+      expect(publications[i].values).toEqual(['claim', 'current-owner', '9', preparations[i].values[8]]);
+      const start = f.statements.indexOf(preparations[i]), end = f.statements.indexOf(publications[i]);
+      expect(f.statements.slice(start + 1, end).filter(row => row.sql === 'COMMIT')).toHaveLength(1);
+    }
+    expect(JSON.parse(preparations[0].values[8] as string).prepareId).not.toBe(JSON.parse(preparations[1].values[8] as string).prepareId);
+  });
+  it('never publishes when preparation is denied or its COMMIT acknowledgement fails', async () => {
+    const denied = connection(false);
+    expect(await denied.store.apply(claim, [])).toBe(false);
+    expect(denied.statements.some(row => row.sql.includes('continuum_embedding_apply'))).toBe(false);
+    const failed = connection();
+    failed.client.query.mockImplementation(async (sql: string, values: unknown[] = []) => {
+      failed.statements.push({ sql, values });
+      if (sql === 'COMMIT') throw Object.assign(new Error('Synthetic ambiguous preparation COMMIT'), { code: '08006' });
+      return { rows: [{ result: true }] };
+    });
+    await expect(failed.store.apply(claim, [])).rejects.toMatchObject({ code: '08006' });
+    expect(failed.statements.some(row => row.sql.includes('continuum_embedding_apply'))).toBe(false);
+  });
+
   it('owns and releases each bounded transaction before returning', async () => {
     const f = connection();
     await f.store.authorize(claim);

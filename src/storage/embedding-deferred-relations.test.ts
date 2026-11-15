@@ -314,3 +314,34 @@ it('retains two failed relation-read debits across audit rollback and declines a
     } finally { await f.owner.query('DROP TRIGGER IF EXISTS relation_read_debit_fault ON audit_log'); }
   });
 }, 120000);
+
+
+it('declines optional reads when their complete cohort aggregate cannot fit the original allowance', async () => {
+  await projectFixture(async f => {
+    await publish(f, input(f, 'Aggregate current candidate', 'C'.repeat(6000)), near());
+    const tight = { ...f.profile, maxItemHydratedBytes: 12000, limits: { ...f.profile.limits, hydratedBytes: 20000 } };
+    const admin = (await getPrincipal(f.owner, f.adminId))!;
+    await configureEmbeddingTarget(f.operator, admin, f.target, tight,
+      { seconds: 60, dispatches: 64, inputBytes: 16777216, tokens: 16777216, spendMicros: 0, rateSchedule: tight.rateSchedule }, true);
+    f.profile = tight; f.origin.profile = tight; await f.route();
+    const captures = [];
+    for (let i = 0; i < 2; i++) {
+      const incoming = input(f, `Aggregate incoming ${i}`, 'Small aggregate source'); f.vectors.set(memoryEmbeddingText(incoming), unit());
+      captures.push(await captureMemory(f.app, f.router, f.principal, incoming));
+    }
+    expect(await run(f)).toBe('processed');
+    for (const capture of captures) {
+      expect(await readEmbeddingStatus(f.app, f.actorId, capture.memory.id)).toMatchObject({ embedded: true, embeddingStatus: 'ready' });
+      expect(await relations(f, capture.memory.id)).toEqual([]);
+    }
+    const budgets = (await f.owner.query(`SELECT DISTINCT c.workflow_id,w.used FROM embedding_cohorts c
+      JOIN pipeline_budget_workflows w ON w.id=c.workflow_id JOIN embedding_cohort_jobs cj ON cj.cohort_id=c.id
+      JOIN embedding_jobs j ON j.id=cj.job_id WHERE j.memory_id=ANY($1::uuid[])`, [captures.map(capture => capture.memory.id)])).rows;
+    expect(budgets).toHaveLength(1);
+    expect(budgets[0].used.hydratedBytes).toBeLessThan(20000); expect(budgets[0].used).toMatchObject({ candidates: 2, calls: 1 });
+    expect((await f.owner.query(`SELECT metadata->>'relationsStatus' AS status FROM audit_log
+      WHERE memory_id=ANY($1::uuid[]) AND metadata->>'operation'='embedding_completed'`, [captures.map(capture => capture.memory.id)])).rows)
+      .toEqual([{ status: 'budget' }, { status: 'budget' }]);
+    expect(f.adapter.invoke).toHaveBeenCalledTimes(2);
+  });
+}, 120000);

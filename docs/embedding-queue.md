@@ -180,6 +180,16 @@ equivalence is not promised. Missing native capability, remaining budget, curren
 candidates or bounded SQL availability may decline this optional probe while the
 vector completes and current relation metadata survives. The required completion
 audit records bounded `relationsStatus` reasons, without candidate IDs or bodies.
+The configured SQL store first commits a metadata-only numeric read reservation
+against the original workflow, then executes exactly one atomic apply. Preparation
+checks the entire cohort aggregate; optional work declines if it cannot fit.
+Required audit failure, publication rollback and process exit do not refund that
+committed debit. Every later apply call prepares anew, including a declined call
+that invalidates earlier allowances. Provider settlement and its original attempt
+remain separate; relation preparation never dispatches a provider again. These
+budget guarantees require the configured trusted worker/store and its autocommit
+composition, as provider accounting does. Raw SQL capabilities are not a separate
+authenticated budget service.
 An audit failure rolls vector, relations and ready state back together. The outer
 SQL statement deadline is never consumed as an optional decline: it aborts apply
 and leaves truthful retry state rather than publishing a late vector.
