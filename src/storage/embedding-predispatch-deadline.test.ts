@@ -16,9 +16,14 @@ function deferred() {
 }
 
 it('does not mark a provider outage when the real SQL authorization wait outlives the pre-invocation stage deadline', async () => {
+  const started = performance.now();
+  const phase = (name: string) => console.log('embedding predispatch deadline phase', { name, elapsedMs: Math.round(performance.now() - started) });
+  phase('fixture-start');
   await embeddingQueueFixture(async f => {
+    phase('fixture-ready');
     await captureMemory(f.app, f.router, f.principal, { scope: { kind: f.scope.kind, name: f.scope.name },
       type: 'fact', title: 'Predispatch SQL wait', body: 'Synthetic deadline source.', source: 'manual' });
+    phase('source-queued');
     const store = new SqlEmbeddingJobStore(f.worker), originalAttempt = store.attempt.bind(store);
     // Separate existing owner connection holds one actual row lock. No owner query
     // is issued through f.owner while its sole connection is held below.
@@ -30,10 +35,11 @@ it('does not mark a provider outage when the real SQL authorization wait outlive
       const actual = originalAttempt(claim);
       return { ...actual, reserve: async (amount, retained) => {
         const reserved = await actual.reserve(amount, retained); // Real SQL COMMIT before blocking authorize.
+        phase('reserve-returned');
         if (reserved) {
           await blocker.query('BEGIN'); open = true;
           await blocker.query('SELECT provider FROM embedding_provider_control WHERE provider=$1 AND dim=768 FOR UPDATE', [f.provider.id]);
-          locked.resolve();
+          phase('owner-lock-held'); locked.resolve();
         }
         return reserved;
       } };
@@ -48,15 +54,18 @@ it('does not mark a provider outage when the real SQL authorization wait outlive
       await new Promise(resolve => setTimeout(resolve, profile.stageMs + 150));
     } finally {
       if (open) await blocker.query('ROLLBACK');
-      blocker.release();
+      blocker.release(); phase('owner-lock-released');
     }
-    expect(await running).toBe('unavailable');
-    await Promise.allSettled(tracked); // Original zero-use settlement must finish before final metadata inspection.
+    expect(await running).toBe('unavailable'); phase('run-finished');
+    phase('tracked-drain-start');
+    await Promise.allSettled(tracked); phase('tracked-drain-finished'); // Original zero-use settlement must finish before final metadata inspection.
     expect(f.adapter.invoke).not.toHaveBeenCalled();
     expect((await f.owner.query('SELECT state,failures FROM embedding_provider_control WHERE provider=$1', [f.provider.id])).rows)
       .toEqual([{ state: 'closed', failures: '0' }]);
     expect((await f.owner.query('SELECT 1 FROM memory_embeddings')).rows).toEqual([]);
+    phase('assertions-finished');
   }, { profile });
+  phase('fixture-disposed');
 }, 60000);
 
 it('still treats a real dispatched adapter timeout as a provider outage', async () => {

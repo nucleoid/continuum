@@ -241,15 +241,20 @@ it('does not consume a stricter SQL statement deadline as optional relation succ
       const invoke = vi.mocked(f.adapter.invoke).getMockImplementation()!;
       vi.mocked(f.adapter.invoke).mockImplementation(async (...args) => {
         const response = await invoke(...args);
-        // Acquire only after actual incoming dispatch, so this exercises the
-        // optional apply probe rather than earlier metadata availability gates.
+        // Root contention now declines without waiting. This owner-only payload
+        // table barrier instead forces the original SQL deadline during optional
+        // relation preparation after actual incoming dispatch. The incoming
+        // source has no evidence root, so failure/audit recording stays unblocked.
         await lock.query('BEGIN');
-        await lock.query('SELECT id FROM evidence_roots WHERE source_memory_id=$1 FOR UPDATE', [candidate.memory.id]);
+        await lock.query('LOCK TABLE evidence_payloads IN ACCESS EXCLUSIVE MODE');
         return response;
       });
+      const store = new SqlEmbeddingJobStore(f.worker), apply = vi.spyOn(store, 'apply');
       await f.worker.query("SET statement_timeout='200ms'");
-      const outcome = await run(f);
+      const outcome = await run(f, store);
       expect(f.adapter.invoke).toHaveBeenCalledTimes(2);
+      expect(apply).toHaveBeenCalledOnce();
+      await expect(apply.mock.results[0].value).rejects.toMatchObject({ code: '57014' });
       expect(outcome).toBe('unavailable');
     } finally {
       await lock.query('ROLLBACK'); lock.release();
