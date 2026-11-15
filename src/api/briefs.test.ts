@@ -77,7 +77,7 @@ it('shares bounded current/history/full/delta/dry-run services with explicit RES
         expect(JSON.stringify(tooLarge)).not.toContain('Source remains source');expect(await reads()).toBe(beforeFailure);
       } finally { await smallClient.close();await smallServer.close(); }
 
-      const key=Math.floor(Math.random()*1_000_000_000)+1,blocker=await f.owner.connect();
+      const key=Math.floor(Math.random()*1_000_000_000)+1;
       await f.owner.query(`CREATE FUNCTION test_brief_read_cancel_gate() RETURNS trigger LANGUAGE plpgsql AS $$
         BEGIN
           IF NEW.metadata->>'operation'='brief_read' THEN PERFORM pg_advisory_xact_lock(${key}::bigint); END IF;
@@ -85,6 +85,7 @@ it('shares bounded current/history/full/delta/dry-run services with explicit RES
         END $$;
         CREATE TRIGGER test_brief_read_cancel_gate BEFORE INSERT ON audit_log
           FOR EACH ROW EXECUTE FUNCTION test_brief_read_cancel_gate()`);
+      const blocker=await f.owner.connect();
       const controller=new AbortController();let pending: Promise<unknown> | undefined;
       let cancellationReceived!: () => void;
       const cancelledNotification=new Promise<void>(resolve => { cancellationReceived=resolve; });
