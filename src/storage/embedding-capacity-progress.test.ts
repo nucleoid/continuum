@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { embeddingQueueFixture } from '../embeddings/test-helpers.js';
 import { staticEmbeddingRouter } from '../embeddings/router.js';
+import { memoryEmbeddingText } from '../embeddings/text.js';
 import { captureMemory } from '../services/capture.js';
 import { processEmbeddingJobs } from '../workers/embedding-jobs.js';
 import { SqlEmbeddingJobStore } from './embedding-jobs.js';
@@ -68,4 +69,39 @@ it('filters a disabled binding principal before the prefix while another approve
     expect(claim?.jobs.map(job => job.memoryId)).toEqual([healthy.memory.id]);
     expect(f.adapter.invoke).not.toHaveBeenCalled();
   });
+}, 60000);
+
+it('stops before hydration when a real finite synthetic-priced window has retained its complete cost allowance', async () => {
+  await embeddingQueueFixture(async f => {
+    const firstInput = input(f, 'Priced source one');
+    const cost = Buffer.byteLength(JSON.stringify({ input: [memoryEmbeddingText(firstInput)] }));
+    const profile = { ...f.profile, rateSchedule: 'fixture-priced-v1', limits: { ...f.profile.limits, spendMicros: 1000000 } };
+    const provider = { ...f.provider, pipelineAdapter: { ...f.adapter,
+      price: { id: profile.rateSchedule, currency: 'USD', unitTokens: 1, inputMicros: 1, outputMicros: 0, reasoningMicros: 0 } } };
+    // Explicit OP-approved finite local synthetic pricing, never a paid probe.
+    await f.operator.query('SELECT continuum_operator_embedding_target($1,$2,$3,$4,TRUE)', [f.adminId, f.target, profile,
+      { seconds: 86400, dispatches: 64, inputBytes: 16777216, tokens: 16777216, spendMicros: cost, rateSchedule: profile.rateSchedule }]);
+    const policy = (await f.owner.query('SELECT generation::text AS generation,digest FROM embedding_policy WHERE singleton')).rows[0];
+    const router = Object.assign(staticEmbeddingRouter(provider), { queuePolicy: policy });
+    const store = new SqlEmbeddingJobStore(f.worker);
+    const hydrate = vi.spyOn(store, 'hydrate');
+    await captureMemory(f.app, router, f.principal, firstInput);
+    expect(f.adapter.invoke).not.toHaveBeenCalled();
+    expect(await processEmbeddingJobs(store, f.target, policy, provider, profile, randomUUID())).toBe('processed');
+    const window = (await f.owner.query('SELECT * FROM embedding_dispatch_windows')).rows[0];
+    expect(Number(window.cost_micros)).toBe(cost);
+    expect(Number(window.max_cost_micros)).toBe(cost);
+    const original = (await f.owner.query('SELECT id,used FROM pipeline_budget_workflows')).rows;
+    const cohorts = (await f.owner.query('SELECT count(*)::int AS n FROM embedding_cohorts')).rows[0].n;
+    hydrate.mockClear();
+    await captureMemory(f.app, router, f.principal, input(f, 'Priced source two'));
+    expect(await processEmbeddingJobs(store, f.target, policy, provider, profile, randomUUID())).toBe('idle');
+    expect(hydrate).not.toHaveBeenCalled();
+    expect(f.adapter.invoke).toHaveBeenCalledTimes(1);
+    expect((await f.owner.query('SELECT id,used FROM pipeline_budget_workflows')).rows).toEqual(original);
+    expect((await f.owner.query('SELECT count(*)::int AS n FROM embedding_cohorts')).rows[0].n).toBe(cohorts);
+    expect((await f.owner.query('SELECT * FROM embedding_dispatch_windows')).rows).toEqual([window]);
+    expect((await f.owner.query('SELECT state,failures FROM embedding_provider_control')).rows)
+      .toEqual([{ state: 'closed', failures: '0' }]);
+  }, { windowSeconds: 86400 });
 }, 60000);
