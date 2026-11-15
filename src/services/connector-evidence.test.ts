@@ -52,6 +52,8 @@ describe('explicit repository evidence pipeline', () => {
       const result = await queryConnectorEvidence(f.app, f.actorId, f.mappingId, request, options);
       expect(result.receipt.outcome).toBe('complete');
       expect(result.receipt.freshness).toBe('exact');
+      expect((await readBudgetWorkflow(f.app, options.execution.workflowId)).used.outputBytes)
+        .toBeGreaterThanOrEqual(options.budget.snapshot().used.outputBytes);
       expect(result.evidence?.items[0].text).toContain('untrusted source');
       expect(f.permissionCalls).toHaveBeenCalledTimes(2); expect(f.queryCalls).toHaveBeenCalledOnce();
       expect((await f.owner.query('SELECT kind FROM evidence_versions ORDER BY kind')).rows).toEqual([{ kind: 'connector-evidence' }, { kind: 'connector-receipt' }]);
@@ -63,6 +65,8 @@ describe('explicit repository evidence pipeline', () => {
       const read = await readConnectorEvidence(f.app, f.actorId, result.evidenceVersion!, readOptions, attempts);
       expect(read, JSON.stringify(readOptions.budget.report())).toContain('untrusted source');
       expect((await readBudgetWorkflow(f.app, readOptions.execution.workflowId)).used.hydratedBytes).toBe(Buffer.byteLength(read!));
+      expect((await readBudgetWorkflow(f.app, readOptions.execution.workflowId)).used.outputBytes)
+        .toBeGreaterThanOrEqual(readOptions.budget.snapshot().used.outputBytes);
       expect(await readConnectorEvidence(f.app, f.producerId, result.evidenceVersion!, await f.options(), attempts)).toBeNull();
       const repeated = await queryConnectorEvidence(f.app, f.actorId, f.mappingId, request, options);
       expect(repeated.receipt.outcome).toBe('budget'); expect(f.queryCalls).toHaveBeenCalledOnce();
