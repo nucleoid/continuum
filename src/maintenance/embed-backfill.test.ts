@@ -404,7 +404,7 @@ describe('embedding backfill', () => {
       return vectors.embed(texts);
     });
     const provider: EmbeddingProvider = {
-      id: `hosted:ambiguous-${_label}`, dim: 768, local: false, embed,
+      id: `hosted:ambiguous-${_label.replaceAll(' ', '-')}`, dim: 768, local: false, embed,
     };
 
     const report = await runConfiguredEmbeddingBackfill(pool, provider, { batchSize: 4, maxRows: 10 });
@@ -716,7 +716,7 @@ describe('embedding backfill', () => {
       const client = await originalConnect();
       const originalQuery = client.query.bind(client);
       const query = vi.spyOn(client, 'query').mockImplementation(async (...args: unknown[]) => {
-        if (String(args[0]).includes('INSERT INTO memory_embeddings')) {
+        if (String(args[0]).includes('SELECT continuum_embedding_apply_vector(')) {
           throw new Error('synthetic database write failure');
         }
         return originalQuery(...args as [never]);

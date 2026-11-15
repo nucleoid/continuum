@@ -4,6 +4,8 @@ import {
   vectorSearchMemoryIds,
   vectorSearchRelatedMemories,
   type MemoryEmbeddingAdmission,
+  admitMemoryEmbedding,
+  embeddingTargetIsCurrent,
 } from './embeddings.js';
 import type { Queryable } from './queryable.js';
 import { embeddingTarget } from '../embeddings/target.js';
@@ -13,6 +15,17 @@ const target = embeddingTarget({ space: { provider: 'ollama:model-b', model: 'mo
   endpoint: 'http://localhost:11434', local: true });
 const admission: MemoryEmbeddingAdmission = { memoryId: 'memory-id', generation: '1', inputHash: 'a'.repeat(64),
   target, policyGeneration: '1', policyDigest: 'b'.repeat(64) };
+
+describe('actual embedding provider locality', () => {
+  it('does not admit a local target for an explicitly remote provider before any SQL or provider I/O', async () => {
+    const db = queryable();
+    vi.mocked(db.query).mockResolvedValue({ rows: [{ current: true, admission }] } as never);
+    const provider = { id: target.space.provider, dim: 768, local: false, target };
+    expect(await embeddingTargetIsCurrent(db, provider, ['scope-id'])).toBe(false);
+    await expect(admitMemoryEmbedding(db, 'memory-id', provider)).rejects.toThrow(/descriptor/i);
+    expect(db.query).not.toHaveBeenCalled();
+  });
+});
 
 function queryable() {
   return { query: vi.fn() } as unknown as Queryable;

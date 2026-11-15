@@ -5,7 +5,7 @@ import { createMemoryWithEvent } from '../storage/memories.js';
 import { getScopeByRef } from '../storage/scopes.js';
 import { record as recordAudit } from '../audit/log.js';
 import { canWriteScopeForMutation } from './access.js';
-import { asServiceError, ServiceError } from './errors.js';
+import { asServiceError, dependencyUnavailable, ServiceError } from './errors.js';
 import { validateScopeRef } from './scopes.js';
 import { isCaptureSource } from '../capture/source.js';
 import {
@@ -145,7 +145,13 @@ export async function captureMemory(
   try {
     normalizeCapture(input);
     validateRelationThreshold(options.relationThreshold ?? DEFAULT_RELATION_THRESHOLD);
-    return await evidenceTransaction(pool, async client => {
+    // Preserve the owned-Pool checks while mapping acquisition failure only.
+    // SQL/audit/commit failures retain their existing internal-error contract.
+    const capturePool = new Proxy(pool, { get(target, property, receiver) {
+      if (property === 'connect') return () => target.connect().catch(error => { throw dependencyUnavailable(error); });
+      return Reflect.get(target, property, receiver);
+    } });
+    return await evidenceTransaction(capturePool, async client => {
       const scope = await getScopeByRef(client, input.scope);
       if (!scope) throw new ServiceError('SCOPE_NOT_FOUND', 'Scope not found');
       const receipt = options.idempotencyKey === undefined ? undefined

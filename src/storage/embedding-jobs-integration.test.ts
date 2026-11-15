@@ -181,6 +181,65 @@ describe('durable embedding SQL, capture and worker integration', () => {
     }, { windowSeconds: 86400, profile: { ...starterProfile, maxConcurrency: 1, overallMs: 1000, stageMs: 500 } });
   }, 60000);
 
+  it('audits real operator controls atomically and makes same-policy reconciliation a budget-preserving no-op', async () => {
+    await embeddingQueueFixture(async f => {
+      const accepted = await captureMemory(f.app, f.router, f.principal, input(f));
+      const control = async (operation: string) => (await f.operator.query(
+        'SELECT continuum_operator_embedding_control($1,$2,$3,10) AS result', [f.adminId, operation, f.target.fingerprint])).rows[0].result;
+      await f.owner.query(`CREATE FUNCTION queue_test_reject_control_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'Synthetic required operator audit failure'; END $$;
+        REVOKE ALL ON FUNCTION queue_test_reject_control_audit() FROM PUBLIC;
+        CREATE TRIGGER queue_test_reject_control_audit BEFORE INSERT ON audit_log FOR EACH ROW
+          WHEN (NEW.metadata->>'operation'='embedding_pause') EXECUTE FUNCTION queue_test_reject_control_audit()`);
+      try {
+        await expect(control('pause')).rejects.toThrow('Synthetic required operator audit failure');
+        expect((await f.owner.query('SELECT state FROM embedding_provider_control')).rows[0].state).toBe('open');
+      } finally {
+        await f.owner.query('DROP TRIGGER queue_test_reject_control_audit ON audit_log; DROP FUNCTION queue_test_reject_control_audit()');
+      }
+      const store = new SqlEmbeddingJobStore(f.worker);
+      await control('pause');
+      expect(await store.claim(f.target, f.policy, randomUUID(), 1, f.profile)).toBeNull();
+      await control('resume');
+      const claim = (await store.claim(f.target, f.policy, randomUUID(), 1, f.profile))!;
+      expect(claim).not.toBeNull();
+      await store.hydrate(claim, 4194304);
+      expect(await store.attempt(claim).reserve(amounts({ calls: 1, inputBytes: 1000, contextTokens: 1000, outputBytes: 4096 }), 5096)).toBe(true);
+      expect(await store.attempt(claim).dispatch()).toBe(true);
+      const leases = (await f.operator.query('SELECT continuum_operator_embedding_leases($1,$2,10) AS result', [f.adminId, f.target.fingerprint])).rows[0].result;
+      expect(JSON.stringify(leases)).toContain(claim.id);
+      await store.attempt(claim).settle({}, 'unknown');
+      expect(await store.fail(claim, { code: 'EMBEDDING_STORAGE', action: 'retry' })).toBe(true);
+      const snapshot = async () => ({
+        source: (await f.owner.query('SELECT * FROM embedding_sources WHERE memory_id=$1', [accepted.memory.id])).rows,
+        jobs: (await f.owner.query('SELECT * FROM embedding_jobs WHERE memory_id=$1 ORDER BY id', [accepted.memory.id])).rows,
+        workflows: (await f.owner.query('SELECT * FROM pipeline_budget_workflows ORDER BY id')).rows,
+        windows: (await f.owner.query('SELECT * FROM embedding_dispatch_windows ORDER BY id')).rows,
+        attempts: (await f.owner.query('SELECT * FROM pipeline_budget_attempts ORDER BY attempt_id')).rows,
+      });
+      const original = await snapshot();
+      expect(original.workflows[0].used.calls).toBe(1);
+      for (let repeat = 0; repeat < 3; repeat++) expect(await control('reconcile')).toMatchObject({ processed: 0 });
+      expect(await snapshot()).toEqual(original);
+      expect((await f.operator.query('SELECT continuum_operator_embedding_metrics($1) AS result', [f.adminId])).rows[0].result)
+        .toEqual(expect.arrayContaining([expect.objectContaining({ status: 'retry_wait', count: 1, attempts: 1 })]));
+      // A genuinely changed, explicitly approved profile policy may reconcile
+      // accepted work, while immutable old attempts/charges remain intact.
+      await f.operator.query('SELECT continuum_operator_embedding_target($1,$2,$3,$4,TRUE)', [f.adminId, f.target, f.profile,
+        { seconds: 86400, dispatches: 63, inputBytes: 16777216, tokens: 16777216, spendMicros: 0, rateSchedule: f.profile.rateSchedule }]);
+      expect(await control('reconcile')).toMatchObject({ processed: 1 });
+      const changed = await snapshot();
+      expect(changed.jobs).toHaveLength(2);
+      expect(changed.jobs.find(job => job.id === original.jobs[0].id)).toMatchObject({ state: 'superseded', workflow_id: claim.workflowId });
+      expect(changed.source[0].generation).toBe(String(Number(original.source[0].generation) + 1));
+      expect(changed.workflows[0]).toMatchObject({ cancelled: true, used: original.workflows[0].used });
+      expect(changed.windows).toEqual(original.windows);
+      expect(changed.attempts).toEqual(original.attempts);
+      expect(await control('reconcile')).toMatchObject({ processed: 0 });
+      expect(f.adapter.invoke).not.toHaveBeenCalled();
+    }, { windowSeconds: 86400 });
+  }, 60000);
+
   it('retains unknown original charges across rollover and admits later capacity only after original settlement', async () => {
     await embeddingQueueFixture(async f => {
       const phase = Number((await f.owner.query(`SELECT mod(extract(epoch FROM clock_timestamp())*1000,2000) AS phase`)).rows[0].phase);
