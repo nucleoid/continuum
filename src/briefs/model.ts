@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { boundedJson } from '../pipeline/budget.js';
 
@@ -40,14 +39,4 @@ export function validateBriefOutput(value: unknown, input: BriefInput): BriefOut
     seen.add(key);
   }
   return output;
-}
-/** Previous prose is used only for byte-preserving reconciliation, never input. */
-export function reconcileBlocks(output: BriefOutput, previous: readonly BriefBlock[], dirty: readonly BriefSection[]): BriefBlock[] {
-  const blocks = previous.filter(b => !dirty.includes(b.section));
-  for (const claim of output.claims) {
-    if (!dirty.includes(claim.section)) throw new TypeError('Unexpected brief section');
-    const id = createHash('sha256').update(JSON.stringify(claim)).digest('hex');
-    blocks.push(previous.find(b => b.id === id) ?? { ...claim, id });
-  }
-  return blocks.sort((a, b) => BRIEF_SECTIONS.indexOf(a.section) - BRIEF_SECTIONS.indexOf(b.section) || a.id.localeCompare(b.id));
 }

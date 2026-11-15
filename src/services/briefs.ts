@@ -3,7 +3,7 @@ import { z } from 'zod';
 import type { Principal } from '../types.js';
 import { Budget, BudgetError, starterProfile } from '../pipeline/budget.js';
 import { evidenceTransaction } from '../storage/evidence.js';
-import { ServiceError } from './errors.js';
+import { asServiceError,ServiceError } from './errors.js';
 
 export interface BriefOptions { signal?: AbortSignal; validateResult?: (value: Record<string, unknown>, budget: Budget) => void }
 const uuid = z.string().uuid();
@@ -15,7 +15,8 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
 }
 function safe(error: unknown): never {
   if (error instanceof ServiceError) throw error;
-  if (error instanceof BudgetError || (error as { code?: string }).code === '54000') throw new ServiceError('PAYLOAD_TOO_LARGE', 'Brief result exceeds the response limit');
+  if (error instanceof BudgetError) throw asServiceError(error);
+  if ((error as { code?: string }).code === '54000') throw new ServiceError('PAYLOAD_TOO_LARGE', 'Brief result exceeds the response limit');
   const code = (error as { code?: string }).code;
   if (code === '42501' || code === 'P0002') throw new ServiceError('FORBIDDEN', 'Brief unavailable');
   if (code === '23514') throw new ServiceError('CONFLICT', 'Brief current policy or original allowance unavailable');
@@ -46,12 +47,12 @@ async function operation(pool: pg.Pool, principal: Principal, sql: string, value
         if (value.result) await check(value.result as Record<string,unknown>);
       };
       await check(result);
-      if ((result.diff as { status?: string } | undefined)?.status === 'available') {
-        // Removed hashes belong to the previous view. Recheck both complete
-        // views after validation/audit, including an empty proposed version.
-        const diff=(await client.query<{ diff: { status?: string } | null }>(
-          "SELECT continuum_brief_result($1,$2)->'diff' AS diff",[principal.id,result.runId])).rows[0]?.diff;
-        if (diff?.status !== 'available') throw new ServiceError('CONFLICT','Brief current source authority unavailable');
+      if (read || result.result !== undefined) {
+        // Recheck the complete authorized projection after validation/audit.
+        // Inputs yielding no blocks still control freshness, cutoff and diff.
+        const current=(await client.query<{ result: Record<string,unknown> }>(read ? sql :
+          'SELECT continuum_brief_result($1,$2) AS result',read ? values : [principal.id,result.runId])).rows[0].result;
+        if (JSON.stringify(current)!==JSON.stringify(result)) throw new ServiceError('CONFLICT','Brief current source authority unavailable');
       }
       options.signal?.throwIfAborted(); budget.assertLive();
       return result;
