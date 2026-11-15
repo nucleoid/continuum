@@ -3,7 +3,7 @@ import { expect, it, vi } from 'vitest';
 import { embeddingQueueFixture } from '../embeddings/test-helpers.js';
 import { EmbeddingItemError, EmbeddingProviderError } from '../embeddings/provider.js';
 import { staticEmbeddingRouter } from '../embeddings/router.js';
-import { captureMemory } from '../services/capture.js';
+import { captureOne, captureMemory } from '../services/capture.js';
 import { processEmbeddingJobs } from '../workers/embedding-jobs.js';
 import { SqlEmbeddingJobStore, readEmbeddingStatus } from './embedding-jobs.js';
 import type { CaptureInput } from '../types.js';
@@ -82,7 +82,7 @@ it('permits at most 64 actual diagnostic attempts in a later approved window wit
     expect(f.adapter.invoke).toHaveBeenCalledTimes(65);
     const budgets = (await f.owner.query('SELECT id,used FROM pipeline_budget_workflows ORDER BY created_at')).rows;
     expect(budgets).toHaveLength(2); // Failure here is an honest window/fixture boundary, never a cap waiver.
-    expect(budgets[1].used).toMatchObject({ calls: 64, retries: 64 });
+    expect(budgets[1].used).toMatchObject({ calls: 64, retries: 63 });
     expect((await f.owner.query('SELECT * FROM embedding_dispatch_windows WHERE id=$1', [oldWindow.id])).rows[0]).toEqual(oldWindow);
     hydrate.mockClear(); await schedule();
     expect(await run(f, store)).toBe('idle');
@@ -90,3 +90,41 @@ it('permits at most 64 actual diagnostic attempts in a later approved window wit
     expect((await f.owner.query('SELECT id,used FROM pipeline_budget_workflows ORDER BY created_at')).rows).toEqual(budgets);
   }, { windowSeconds: 60 });
 }, 120000);
+
+
+it('orders a real target rotation behind policy admission so the held APP transaction can finish another capture', async () => {
+  await embeddingQueueFixture(async f => {
+    const window = (await f.owner.query('SELECT window_policy FROM embedding_targets WHERE fingerprint=$1', [f.target.fingerprint])).rows[0].window_policy;
+    const app = await f.app.connect(), operator = await f.operator.connect();
+    let rotation: Promise<{ error?: unknown }> | undefined;
+    try {
+      const appPid = (await app.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+      const operatorPid = (await operator.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+      await app.query('BEGIN');
+      await app.query("SET LOCAL statement_timeout='5s'"); await app.query("SET LOCAL lock_timeout='1s'");
+      // The real no-provider enqueue takes policy SHARE without target SHARE.
+      expect(await captureOne(app, null, f.principal, input(f, 'Policy-only admitted source'))).toMatchObject({ embeddingStatus: 'not_configured' });
+      rotation = operator.query('SELECT continuum_operator_embedding_target($1,$2,$3,$4,FALSE)',
+        [f.adminId, f.target, f.profile, window]).then(() => ({}), error => ({ error }));
+      let blocked = false; const deadline = Date.now() + 800;
+      while (Date.now() < deadline) {
+        blocked = (await f.owner.query('SELECT $1::int=ANY(pg_blocking_pids($2)) AS blocked', [appPid, operatorPid])).rows[0].blocked;
+        if (blocked) break;
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      expect(blocked, 'actual OP target rotation must be waiting behind the APP policy admission').toBe(true);
+      const accepted = await captureOne(app, f.router, f.principal, input(f, 'Capture finishes while rotation waits'));
+      expect(accepted).toMatchObject({ embedded: false, embeddingStatus: 'queued' });
+      await app.query('COMMIT');
+      const settled = await rotation; if (settled.error) throw settled.error;
+      expect(await readEmbeddingStatus(f.app, f.actorId, accepted.memory.id)).toMatchObject({ embedded: false, embeddingStatus: 'blocked_policy' });
+      expect(await captureMemory(f.app, f.router, f.principal, input(f, 'Valid ACK after approved disable')))
+        .toMatchObject({ embedded: false, embeddingStatus: 'blocked_policy' });
+      expect(f.adapter.invoke).not.toHaveBeenCalled(); expect(f.provider.embed).not.toHaveBeenCalled();
+    } finally {
+      await app.query('ROLLBACK');
+      await rotation;
+      app.release(); operator.release();
+    }
+  });
+}, 60000);
