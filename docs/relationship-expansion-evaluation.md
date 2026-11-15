@@ -91,7 +91,8 @@ errors. These fixture checks do not prove the locked database concurrency,
 physical erasure or provider-disclosure contracts of a future serving consumer.
 
 To reproduce the focused run, use a clean source checkpoint, an exclusive
-validation slot, the existing locked dependencies and a disposable
+validation slot, the existing locked dependencies, complete predecessor Git
+history and a disposable
 PostgreSQL 16/pgvector maintenance connection:
 
 ```powershell
