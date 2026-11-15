@@ -1217,7 +1217,13 @@ describe('offboarding and erasure', () => {
       { phase: 'started' }, { phase: 'completed' },
       { phase: 'started' }, { phase: 'completed' },
     ]);
-    await pool.query('DELETE FROM audit_log');
+    const protectedReceipts = (await pool.query(`SELECT id,metadata FROM audit_log
+      WHERE metadata->>'operation'='principal_evidence_privacy_repaired' ORDER BY id`)).rows;
+    expect(protectedReceipts.length).toBeGreaterThan(0);
+    await expect(pool.query(`DELETE FROM audit_log WHERE metadata->>'operation'='principal_evidence_privacy_repaired'`))
+      .rejects.toThrow(/privacy evidence is immutable/i);
+    await pool.query(`DELETE FROM audit_log WHERE metadata->>'operation' IS DISTINCT FROM 'principal_evidence_privacy_repaired'`);
+    expect((await pool.query(`SELECT id,metadata FROM audit_log ORDER BY id`)).rows).toEqual(protectedReceipts);
     const retry = await offboardPrincipal(pool, value.admin, value.target.id);
     expect(retry.alreadyOffboarded).toBe(true);
     expect(retry.originalOffboarding).toMatchObject({
