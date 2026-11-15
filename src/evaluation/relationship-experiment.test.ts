@@ -18,7 +18,7 @@ import { recallCandidates } from '../storage/recall.js';
 import { createMemory } from '../storage/memories.js';
 import { createScope } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
-import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
+import { admitMemoryEmbedding, storeMemoryEmbeddingVector } from '../storage/embeddings.js';
 
 const key = (ref: Reference) => `${ref.id}@${ref.version}`;
 const reference = z.object({ id: z.string().regex(/^[a-z0-9-]{1,80}$/), version: z.string().regex(/^[1-9][0-9]*$/) }).strict();
@@ -482,15 +482,26 @@ it('records paired typed-link/control diagnostics using the actual frozen #25 fi
   let failure: RunFailure | undefined;
   let unrecordedAttempt: { id: string; mode: Mode; repetition: number; budget: Budget } | undefined;
   try {
-    storage = await withEvaluationFixture(process.env.CONTINUUM_TEST_DATABASE_URL ?? 'postgres://continuum:continuum@localhost:5433/continuum', async ({ owner, app, actor, emptyStorage }) => {
+    storage = await withEvaluationFixture(process.env.CONTINUUM_TEST_DATABASE_URL ?? 'postgres://continuum:continuum@localhost:5433/continuum', async ({ owner, app, operator, actor, emptyStorage }) => {
       const scope = await createScope(owner, { kind: 'project', name: 'relationship-holdout' });
       await addMembership(owner, actor.id, scope.id, 'writer');
       const stub = new StubEmbeddingProvider(); const references = new Map<string, Reference>();
+      // Current schema prerequisites only. This explicitly approves the exact
+      // synthetic vector space through OP, without changing frozen measurements.
+      const vectorProfile = { ...starterProfile, maxConcurrency: 1 };
+      const target = stub.target;
+      if (!target) throw new Error('Synthetic fixture requires its explicit 768-dimensional target');
+      await operator.query('SELECT continuum_operator_embedding_target($1,$2,$3,$4,TRUE)', [actor.id, target, vectorProfile,
+        { seconds: 60, dispatches: 1024, inputBytes: 16777216, tokens: 16777216, spendMicros: 0, rateSchedule: vectorProfile.rateSchedule }]);
+      const routing = { default: { target: null, localOnly: false }, scopes: { [scope.id]: { target: target.fingerprint, localOnly: false } }, kinds: {} };
+      await operator.query('SELECT continuum_operator_embedding_policy($1,$2,$3)', [actor.id, routing, sha256(JSON.stringify(routing))]);
       for (const doc of documents) {
         phase.check(); const memory = await createMemory(app, { scopeId: scope.id, scopeKind: 'project', authorId: actor.id,
           title: doc.title, body: doc.body, type: 'decision', source: 'manual', sourceRef: key(doc) });
         references.set(memory.id, { id: doc.id, version: doc.version });
-        await storeMemoryEmbeddingVector(app, memory.id, (await stub.embed([`${doc.title}\n\n${doc.body}`]))[0], stub); setupCalls++;
+        const admission = await admitMemoryEmbedding(app, memory.id, stub);
+        if (!admission) throw new Error('Synthetic fixture lacks current original source admission');
+        expect(await storeMemoryEmbeddingVector(app, memory.id, (await stub.embed([`${doc.title}\n\n${doc.body}`]))[0], stub, admission)).toBe(true); setupCalls++;
       }
       phase.beginMeasured();
       for (const item of seededOrder(cases, relationshipGate.seed)) {
@@ -517,7 +528,7 @@ it('records paired typed-link/control diagnostics using the actual frozen #25 fi
                 return { value, response: value, usage: { provenance: 'measured', outputTokens: 0, reasoningTokens: 0, completionTokens: 0 } };
               } };
             const candidates = await recallCandidates(app, { query: item.query, scopeIds: [scope.id], actor: actor.id, limit: 10, budget,
-              embeddingProvider: { id: stub.id, dim: 768, local: true, pipelineAdapter: embedding, embed: stub.embed.bind(stub) } }, 100, true);
+              embeddingProvider: { id: stub.id, dim: 768, local: true, target, pipelineAdapter: embedding, embed: stub.embed.bind(stub) } }, 100, true);
             const pool = candidates.candidates.map(row => references.get(row.id)!);
             const base = pool.slice(0, limits.baselinePool);
             // Original independently authorized hybrid order is the optional-stage

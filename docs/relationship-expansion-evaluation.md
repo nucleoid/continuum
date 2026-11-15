@@ -117,6 +117,13 @@ Forced process termination can prevent final report creation; retain the process
 log as incomplete evidence. A repeated output path fails without replacing the
 earlier report.
 
+On the asynchronous embedding schema, fixture setup explicitly approves the
+synthetic descriptor and exact scope route through its bound OP session, then
+retains original source admission before preparing each vector through APP.
+These current schema prerequisites do not change the frozen corpus, ledger,
+profile, thresholds or historical result. A new run records its own current
+source identity and resource evidence; it cannot relabel the earlier measurement.
+
 One warmup and five observations run in seeded rotating interleaved mode order.
 Reports retain exact input hashes, source/checkpoint cleanliness, execution order,
 per-query scores, coverage, abstention, fallbacks, resource charges and topology
