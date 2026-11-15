@@ -424,6 +424,27 @@ BEGIN
     RAISE EXCEPTION USING ERRCODE='P0001',MESSAGE='EMBEDDING_RECEIPT_QUOTA_EXCEEDED'; END IF;
   RETURN NULL;
 END $$;
+-- Replay is a current source read. It must not require the writer-only capture
+-- path or create extraction work after an original creator loses writer access.
+CREATE FUNCTION continuum_embedding_replay_extraction(actor UUID,memory UUID) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE source_scope UUID; job extraction_runs%ROWTYPE;
+BEGIN
+  IF continuum_embedding_status(actor,memory) IS NULL THEN
+    RAISE insufficient_privilege USING MESSAGE='Capture replay unavailable'; END IF;
+  SELECT scope_id INTO source_scope FROM memories WHERE id=memory AND state='live'
+    AND (expires_at IS NULL OR expires_at>clock_timestamp()) FOR SHARE;
+  IF source_scope IS NULL THEN RAISE insufficient_privilege USING MESSAGE='Capture replay unavailable'; END IF;
+  SELECT * INTO job FROM extraction_runs WHERE memory_id=memory ORDER BY created_at DESC,id DESC LIMIT 1 FOR SHARE;
+  IF job.id IS NULL THEN RETURN jsonb_build_object('status','not-configured'); END IF;
+  IF NOT continuum_evidence_can_access(actor,source_scope,FALSE) THEN RETURN jsonb_build_object('status','skipped'); END IF;
+  IF job.source_version IS NOT NULL THEN
+    PERFORM continuum_evidence_lock(actor,ARRAY[job.source_version]);
+    IF NOT continuum_evidence_eligible(actor,job.source_version,NULL)
+      OR NOT EXISTS(SELECT 1 FROM evidence_roots WHERE source_memory_id=memory AND current_version=job.source_version) THEN
+      RETURN jsonb_build_object('status','skipped'); END IF;
+  END IF;
+  RETURN jsonb_build_object('status',job.state,'runId',job.id);
+END $$;
 CREATE FUNCTION continuum_embedding_receipt_finish(actor UUID,target_scope UUID,key_digest TEXT,payload_hash TEXT,memory UUID) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER AS $$
 BEGIN
   PERFORM principal_id FROM embedding_receipt_admission WHERE principal_id=actor FOR UPDATE;
@@ -1122,6 +1143,7 @@ END $$;
 CREATE FUNCTION continuum_embedding_app_signatures() RETURNS TEXT[] LANGUAGE sql IMMUTABLE AS $$ SELECT ARRAY[
   'continuum_embedding_enqueue(uuid,uuid,jsonb,jsonb,text)','continuum_embedding_status(uuid,uuid)',
   'continuum_embedding_receipt_begin(uuid,uuid,text,text,text)','continuum_embedding_receipt_finish(uuid,uuid,text,text,uuid)',
+  'continuum_embedding_replay_extraction(uuid,uuid)',
   'continuum_embedding_admit_vector(uuid,jsonb)','continuum_embedding_apply_vector(uuid,text,jsonb)',
   'continuum_embedding_vector_is_current(uuid,text,integer)','continuum_embedding_target_is_current(jsonb,uuid[])',
   'continuum_embedding_is_ready()']::text[] $$;

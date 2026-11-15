@@ -5,7 +5,7 @@ import { embeddingQueueFixture } from '../embeddings/test-helpers.js';
 import { embeddingTarget } from '../embeddings/target.js';
 import { captureMemory } from '../services/capture.js';
 import { getMemoryForPrincipal } from '../services/memories.js';
-import { offboardPrincipal } from '../services/offboarding.js';
+import { mapOwnedUserScope, offboardPrincipal } from '../services/offboarding.js';
 import { getPrincipal } from './principals.js';
 import { SqlEmbeddingJobStore, readEmbeddingStatus } from './embedding-jobs.js';
 import { admitMemoryEmbedding, storeMemoryEmbeddingVector } from './embeddings.js';
@@ -55,6 +55,8 @@ describe('durable embedding SQL, capture and worker integration', () => {
         expect(await readEmbeddingStatus(f.app, f.actorId, memory.id)).toMatchObject({ embeddingStatus: 'ready', embedded: true, attempts: 1 });
         const replay = await captureMemory(concurrent, f.router, f.principal, input(f), {}, { idempotencyKey: 'retained-capture-key' });
         expect(replay).toMatchObject({ replayed: true, embedded: true, embeddingStatus: 'ready' });
+        expect(replay.extraction).toEqual({ status: 'not-configured' });
+        expect((await f.owner.query('SELECT count(*)::int AS n FROM extraction_runs')).rows[0].n).toBe(0);
         await expect(captureMemory(concurrent, f.router, f.principal, input(f, 'No writer'), {}, { idempotencyKey: 'new-key' }))
           .rejects.toMatchObject({ code: 'FORBIDDEN' });
         expect((await f.owner.query('SELECT count(*)::int AS n FROM embedding_completions')).rows[0].n).toBe(1);
@@ -261,6 +263,7 @@ describe('durable embedding SQL, capture and worker integration', () => {
       const accepted = await captureMemory(f.app, f.router, f.principal, input(f), {}, { idempotencyKey: 'erase-this-key' });
       expect(await runWorker(f)).toBe('processed');
       const admin = (await getPrincipal(f.operator, f.adminId))!;
+      await mapOwnedUserScope(f.operator, admin, f.actorId, f.scopeId, true);
       let result = await offboardPrincipal(f.operator, admin, f.actorId, { confirmationScopeId: f.scopeId, batchSize: 100 });
       for (let iteration = 0; !result.complete && iteration < 10; iteration++) {
         result = await offboardPrincipal(f.operator, admin, f.actorId, { confirmationScopeId: f.scopeId, batchSize: 100 });

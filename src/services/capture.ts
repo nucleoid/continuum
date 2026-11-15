@@ -162,8 +162,10 @@ export async function captureMemory(
           if (!record || !status) throw new ServiceError('MEMORY_NOT_FOUND', 'Memory not found');
           const event = (await readEventAnnotations(client, principal.id, [existing], true, options.readBudgetBytes)).get(existing);
           if (event?.version) record.memory.event = event;
+          const extraction = (await client.query<{ result: ExtractionStatus }>(
+            'SELECT continuum_embedding_replay_extraction($1,$2) AS result', [principal.id, existing])).rows[0].result;
           result = { memory: record.memory, embedded: status.embedded, embeddingStatus: status.embeddingStatus,
-            related: [], replayed: true, extraction: await captureExtractionStatus(client, principal.id, existing) };
+            related: [], replayed: true, extraction };
           options.validateResult?.(result);
           await recordAudit(client, { principalId: principal.id, action: 'read', memoryId: existing, scopeId: scope.id,
             metadata: { ...auditMetadata, operation: 'capture_replay' } });
