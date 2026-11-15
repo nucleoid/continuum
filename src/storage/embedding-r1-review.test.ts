@@ -63,6 +63,25 @@ it('keeps an exact current vector through successful verification with unchanged
   });
 }, 60000);
 
+it('retains a same-input vector through current evidence verification while still erasing it on revocation', async () => {
+  await embeddingQueueFixture(async f => {
+    const accepted = await captureMemory(f.app, f.router, f.principal, input(f, 'Evidence-backed fact'));
+    await f.owner.query('SELECT continuum_evidence_source($1,$2)', [f.actorId, accepted.memory.id]);
+    expect(await processEmbeddingJobs(new SqlEmbeddingJobStore(f.worker), f.target, f.policy,
+      f.provider, f.profile, randomUUID())).toBe('processed');
+    const before = (await f.owner.query(`SELECT embedding::text AS vector,space_fingerprint
+      FROM memory_embeddings WHERE memory_id=$1`, [accepted.memory.id])).rows;
+    expect(before).toHaveLength(1);
+    await verifyMemoryWithAudit(f.app, f.actorId, accepted.memory.id, true);
+    expect((await f.owner.query(`SELECT embedding::text AS vector,space_fingerprint
+      FROM memory_embeddings WHERE memory_id=$1`, [accepted.memory.id])).rows).toEqual(before);
+    expect(await readEmbeddingStatus(f.app, f.actorId, accepted.memory.id)).toMatchObject({ embedded: true });
+    await f.owner.query('UPDATE evidence_roots SET revoked=TRUE WHERE source_memory_id=$1', [accepted.memory.id]);
+    expect((await f.owner.query('SELECT 1 FROM memory_embeddings WHERE memory_id=$1', [accepted.memory.id])).rows).toEqual([]);
+    expect(await readEmbeddingStatus(f.app, f.actorId, accepted.memory.id)).toMatchObject({ embedded: false });
+  });
+}, 60000);
+
 it.each(['EMBEDDING_STORAGE', 'EMBEDDING_BUDGET', 'EMBEDDING_POLICY', 'EMBEDDING_CANCELLED'] as const)(
   'does not classify %s as provider outage', async code => {
     await embeddingQueueFixture(async f => {
