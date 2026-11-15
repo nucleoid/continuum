@@ -164,3 +164,34 @@ describe('embedding worker preparation contract', () => {
     await vi.advanceTimersByTimeAsync(1);
   });
 });
+it('records worker cancellation before a cooperative adapter abort rejection', async () => {
+  const f = fixture('local:cooperative-worker-cancel');
+  const entered = deferred<void>();
+  const controller = new AbortController();
+  // Intentionally return the raw Promise. This is a valid cooperative adapter,
+  // not an error-shaped store mock or fake budget outcome. It exercises the
+  // actual stage abort listeners, Promise.race and worker classification.
+  vi.mocked(f.adapter.invoke).mockImplementation((_wire, options) => new Promise<never>((_resolve, reject) => {
+    const abort = () => reject(options.signal.reason ?? new Error('Embedding request aborted'));
+    if (options.signal.aborted) abort();
+    else options.signal.addEventListener('abort', abort, { once: true });
+    entered.resolve();
+  }));
+  const tracked: Promise<unknown>[] = [];
+  const running = processEmbeddingJobs(f.store, f.target, f.policy, f.provider, f.profile, 'worker', {
+    signal: controller.signal, onWork: work => tracked.push(work),
+  });
+  try {
+    await entered.promise;
+    controller.abort();
+    expect(await running).toBe('unavailable');
+    expect(f.adapter.invoke).toHaveBeenCalledOnce();
+    expect(f.store.fail).toHaveBeenLastCalledWith(f.claim, { code: 'EMBEDDING_CANCELLED', action: 'retry' });
+    expect(f.store.apply).not.toHaveBeenCalled();
+  } finally {
+    controller.abort();
+    await running;
+    await Promise.allSettled(tracked);
+  }
+});
+

@@ -15,6 +15,29 @@ function deferred() {
   return { resolve, promise };
 }
 
+it('does not count a cooperative worker cancellation as a provider outage', async () => {
+  await embeddingQueueFixture(async f => {
+    await captureMemory(f.app, f.router, f.principal, { scope: { kind: f.scope.kind, name: f.scope.name },
+      type: 'fact', title: 'Actual cooperative cancellation', body: 'Provider abort is not provider failure.', source: 'manual' });
+    const entered = deferred(), controller = new AbortController(), tracked: Promise<unknown>[] = [];
+    vi.mocked(f.adapter.invoke).mockImplementation((_wire, options) => new Promise<never>((_resolve, reject) => {
+      const abort = () => reject(options.signal.reason ?? new Error('Embedding request aborted'));
+      if (options.signal.aborted) abort(); else options.signal.addEventListener('abort', abort, { once: true });
+      entered.resolve();
+    }));
+    const running = processEmbeddingJobs(new SqlEmbeddingJobStore(f.worker), f.target, f.policy, f.provider, f.profile,
+      randomUUID(), { signal: controller.signal, onWork: work => tracked.push(work) });
+    try {
+      await entered.promise; controller.abort(); expect(await running).toBe('unavailable');
+      expect((await f.owner.query('SELECT state,failure_code FROM embedding_jobs')).rows)
+        .toEqual([{ state: 'retry_wait', failure_code: 'EMBEDDING_CANCELLED' }]);
+      expect((await f.owner.query('SELECT state,failures FROM embedding_provider_control')).rows)
+        .toEqual([{ state: 'closed', failures: '0' }]);
+      expect(f.adapter.invoke).toHaveBeenCalledOnce();
+    } finally { controller.abort(); await running; await Promise.allSettled(tracked); }
+  }, { profile });
+}, 60000);
+
 it('does not mark a provider outage when the real SQL authorization wait outlives the pre-invocation stage deadline', async () => {
   const started = performance.now();
   const phase = (name: string) => console.log('embedding predispatch deadline phase', { name, elapsedMs: Math.round(performance.now() - started) });
