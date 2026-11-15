@@ -15,6 +15,29 @@ import { readBudgetWorkflow } from '../storage/pipeline-budgets.js';
 
 const request = { evidenceClass: 'source-code' as const, query: 'synthetic source', commit: 'a'.repeat(40), maxResults: 2 };
 describe('explicit repository evidence pipeline', () => {
+  it('leaves the original pending query and outcome intact when a concurrent retry is rejected', async () => {
+    await connectorFixture(async f => {
+      let enter!: () => void,release!: () => void;
+      const entered=new Promise<void>(resolve=>{enter=resolve;});
+      const gate=new Promise<void>(resolve=>{release=resolve;});
+      const original=f.queryCalls.getMockImplementation()!;
+      f.queryCalls.mockImplementationOnce(async()=>{enter();await gate;return original();});
+      const options=await f.options();
+      const pending=queryConnectorEvidence(f.app,f.actorId,f.mappingId,request,options);
+      await entered;
+      let completed;
+      try {
+        const retry=await queryConnectorEvidence(f.app,f.actorId,f.mappingId,request,
+          {...options,budget:new Budget(starterProfile)});
+        expect(retry.receipt.outcome).toBe('budget');
+        expect((await f.owner.query('SELECT state,outcome FROM connector_query_runs WHERE id=$1',[options.execution.runId])).rows[0])
+          .toEqual({state:'pending',outcome:null});
+      } finally {release();completed=await pending;}
+      expect(completed.receipt.outcome).toBe('complete');
+      expect(f.queryCalls).toHaveBeenCalledOnce();
+      expect((await f.owner.query("SELECT count(*)::int AS n FROM audit_log WHERE metadata->>'operation'='connector_query_outcome'")).rows[0].n).toBe(0);
+    });
+  },120_000);
   it('rejects existing memory identities as connector authority roots before any upstream work', async () => {
     await connectorFixture(async f => {
       const source = await createMemory(f.owner, { scopeId: f.scopeId, scopeKind: 'user', authorId: f.actorId,

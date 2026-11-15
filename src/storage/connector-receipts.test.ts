@@ -1,10 +1,13 @@
 import { randomUUID } from 'node:crypto';
-import type pg from 'pg';
+import pg from 'pg';
+import { copyFile, mkdir, readdir, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { makeTestPool, resetData } from './test-helpers.js';
 import { createPrincipal } from './principals.js';
 import { createScope } from './scopes.js';
 import { addMembership } from './memberships.js';
+import { runMigrations } from './migrator.js';
 
 describe('connector durable admission', () => {
   let pool: pg.Pool;
@@ -28,4 +31,31 @@ describe('connector durable admission', () => {
     } finally {await client.query('ROLLBACK');client.release();}
     expect((await pool.query('SELECT continuum_connector_is_ready() AS ready')).rows[0].ready).toBe(true);
   });
+  it('refuses a connector upgrade over drifted predecessor integrity functions', async () => {
+    const suffix=randomUUID().replaceAll('-',''),schema=`connector_upgrade_${suffix}`;
+    const directory=join(process.cwd(),'.fire-off',schema);
+    const owner=new pg.Pool({connectionString:process.env.CONTINUUM_TEST_DATABASE_URL!,max:1,options:`-c search_path=${schema}`});
+    try {
+      await pool.query(`CREATE SCHEMA "${schema}"`);
+      await mkdir(directory,{recursive:true});
+      for(const name of await readdir(join(process.cwd(),'migrations'))) if(name.endsWith('.sql') && name<'0096')
+        await copyFile(join(process.cwd(),'migrations',name),join(directory,name));
+      await runMigrations(owner,directory);
+      expect((await owner.query('SELECT continuum_event_is_ready() AS ready')).rows[0].ready).toBe(true);
+      for(const signature of ['continuum_evidence_payload(uuid,uuid,text)','continuum_extraction_status(uuid,uuid,boolean)']) {
+        const definition=(await owner.query('SELECT pg_get_functiondef($1::regprocedure) AS body',[signature])).rows[0].body as string;
+        await owner.query(`ALTER FUNCTION ${signature} SECURITY INVOKER`);
+        expect((await owner.query('SELECT continuum_event_is_ready() AS ready')).rows[0].ready).toBe(false);
+        await expect(runMigrations(owner)).rejects.toThrow(/predecessor integrity/);
+        expect((await owner.query("SELECT to_regclass('connector_query_runs') AS relation")).rows[0].relation).toBeNull();
+        await owner.query(definition);
+      }
+      await runMigrations(owner);
+      expect((await owner.query('SELECT continuum_connector_is_ready() AS ready')).rows[0].ready).toBe(true);
+    } finally {
+      await owner.end();
+      await pool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+      await rm(directory,{recursive:true,force:true});
+    }
+  },120_000);
 });
