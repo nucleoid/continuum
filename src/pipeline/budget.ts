@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { BudgetReceipts, MAX_RECEIPT_BYTES, FAILURE_RECEIPT_BYTES, type BudgetReason, type UsageProvenance } from './receipts.js';
 
+/** Shared traversal bound for every incremental pipeline JSON serialization. */
+export const MAX_PIPELINE_JSON_NODES = 10_000;
+
 export const budgetDimensions = ['candidates', 'hydratedBytes', 'inputBytes', 'contextTokens',
   'outputBytes', 'outputTokens', 'reasoningTokens', 'completionTokens', 'calls', 'retries',
   'artifactBytes', 'storageBytes', 'spendMicros'] as const;
@@ -73,7 +76,7 @@ export function boundedJson(value: unknown, maxBytes: number): string {
   };
   const invalid = () => { throw new TypeError('Unsupported pipeline serialization'); };
   const visit = (item: unknown, depth: number): void => {
-    if (++nodes > 10_000 || depth > 32) throw new BudgetError();
+    if (++nodes > MAX_PIPELINE_JSON_NODES || depth > 32) throw new BudgetError();
     if (item === null) { append('null'); return; }
     if (typeof item === 'string') { quote(item); return; }
     if (typeof item === 'boolean' || (typeof item === 'number' && Number.isFinite(item))) { append(String(item)); return; }
@@ -96,7 +99,7 @@ export function boundedJson(value: unknown, maxBytes: number): string {
       append('{'); let first = true;
       for (const key in item) {
         if (!Object.hasOwn(item, key)) continue;
-        if (++nodes > 10_000) throw new BudgetError();
+        if (++nodes > MAX_PIPELINE_JSON_NODES) throw new BudgetError();
         const d = Object.getOwnPropertyDescriptor(item, key);
         if (!d || !('value' in d)) return invalid();
         if (!first) append(','); first = false;

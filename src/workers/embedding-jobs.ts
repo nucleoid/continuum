@@ -1,4 +1,4 @@
-import { Budget, budgetedStageUnavailable, checkedProfile, runBudgetedStage, type BudgetAdapter, type BudgetProfile } from '../pipeline/budget.js';
+import { MAX_PIPELINE_JSON_NODES, Budget, budgetedStageUnavailable, checkedProfile, runBudgetedStage, type BudgetAdapter, type BudgetProfile } from '../pipeline/budget.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
 import { classifyEmbeddingFailure } from '../embeddings/failure-policy.js';
 import { MEMORY_EMBEDDING_INPUT_TRANSFORM, type EmbeddingTarget } from '../embeddings/target.js';
@@ -11,6 +11,13 @@ export interface EmbeddingWorkerTarget { target: EmbeddingTarget; policy: Embedd
  * Replacement workers/configs in this process cannot bypass a hung provider. */
 const activeProviders = new Set<string>();
 
+// One array root plus one nested array and 768 numeric nodes per vector.
+// Adapters with extra envelopes or tighter byte caps must configure less.
+function workerBatchSize(provider: EmbeddingProvider): number {
+  return Math.min(embeddingBatchSize(provider.batchSize),
+    Math.floor((MAX_PIPELINE_JSON_NODES - 1) / (provider.dim + 1)));
+}
+
 export function checkedEmbeddingWorkerProfile(target: EmbeddingTarget, provider: EmbeddingProvider,
   input: BudgetProfile): Readonly<BudgetProfile> {
   const profile = checkedProfile(input), adapter = provider.pipelineAdapter;
@@ -22,7 +29,7 @@ export function checkedEmbeddingWorkerProfile(target: EmbeddingTarget, provider:
     || profile.limits.hydratedBytes > EMBEDDING_WORKER_DEFAULTS.hydrationBytes) {
     throw new TypeError('Embedding worker profile does not match the approved target');
   }
-  embeddingBatchSize(provider.batchSize);
+  workerBatchSize(provider);
   return profile;
 }
 
@@ -87,11 +94,11 @@ export async function processEmbeddingJobs(store: EmbeddingJobStore, target: Emb
   };
   try {
     const started = performance.now();
-    claim = await store.claim(target, policy, owner, embeddingBatchSize(provider.batchSize), profile);
+    claim = await store.claim(target, policy, owner, workerBatchSize(provider), profile);
     if (!claim) return 'idle';
     if (claim.owner !== owner || claim.target !== target.fingerprint || claim.policyGeneration !== policy.generation
       || claim.policyDigest !== policy.digest || !Number.isFinite(claim.remainingMs)
-      || claim.remainingMs <= 0 || claim.jobs.length < 1 || claim.jobs.length > embeddingBatchSize(provider.batchSize)) {
+      || claim.remainingMs <= 0 || claim.jobs.length < 1 || claim.jobs.length > workerBatchSize(provider)) {
       throw new TypeError('Invalid embedding claim');
     }
     const cutoff = started + claim.remainingMs;

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { starterProfile, type BudgetAdapter, type BudgetProfile } from '../pipeline/budget.js';
+import { MAX_PIPELINE_JSON_NODES, boundedJson, starterProfile, type BudgetAdapter, type BudgetProfile } from '../pipeline/budget.js';
 import { EmbeddingItemError, type EmbeddingProvider } from '../embeddings/provider.js';
 import { embeddingTarget, MEMORY_EMBEDDING_INPUT_TRANSFORM } from '../embeddings/target.js';
 import type { EmbeddingJobClaim, EmbeddingJobStore } from '../storage/embedding-jobs-model.js';
@@ -48,6 +48,15 @@ function fixture(id = 'local:worker-test') {
 afterEach(() => { vi.useRealTimers(); });
 
 describe('embedding worker preparation contract', () => {
+  it('caps configured 32-item claims before hydration at the unchanged shared JSON traversal allowance', async () => {
+    const f = fixture('local:bounded-numeric-vectors');
+    expect(await f.run()).toBe('processed');
+    const maximum = Math.floor((MAX_PIPELINE_JSON_NODES - 1) / (f.provider.dim + 1));
+    expect(maximum).toBeLessThan(f.provider.batchSize!);
+    expect(f.store.claim).toHaveBeenCalledWith(f.target, f.policy, 'worker', maximum, f.profile);
+    expect(() => boundedJson(Array.from({ length: maximum }, vector), 1024 * 1024)).not.toThrow();
+    expect(() => boundedJson(Array.from({ length: maximum + 1 }, vector), 1024 * 1024)).toThrow();
+  });
   it('reports pending original accounting as an unsuccessful shutdown', async () => {
     const f = fixture('local:accounting-shutdown');
     f.store.unsettledAccounting=()=>true;
