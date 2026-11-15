@@ -157,18 +157,54 @@ BEGIN
 END $$;
 
 -- Transactional row generations, never allocation-order MAX or timestamp cursors.
--- Only enrolled project/org scopes incur this work. An epoch lock serializes
--- commits, so a delayed lower-sequence writer cannot disappear behind a frontier.
+-- Only enrolled project/org scopes incur this work. Mutations advance committed
+-- epochs; readers compare tokens without holding epoch locks over source reads.
 CREATE FUNCTION continuum_brief_touch(target_scope UUID) RETURNS VOID LANGUAGE sql SECURITY DEFINER AS $$
   UPDATE brief_scope_epochs SET generation=generation+1 WHERE scope_id=target_scope;
 $$;
 CREATE FUNCTION continuum_brief_source_changed() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
 #variable_conflict use_column
+DECLARE changed_scope UUID; source_scope UUID; source_state TEXT; source_expiry TIMESTAMPTZ; destination UUID;
+  memory memories%ROWTYPE; upstream evidence_roots%ROWTYPE;
 BEGIN
   IF TG_TABLE_NAME='memories' THEN
-    IF TG_OP<>'INSERT' THEN PERFORM continuum_brief_touch(OLD.scope_id); END IF;
-    IF TG_OP<>'DELETE' AND (TG_OP='INSERT' OR NEW.scope_id IS DISTINCT FROM OLD.scope_id) THEN PERFORM continuum_brief_touch(NEW.scope_id); END IF;
+    IF TG_OP='INSERT' THEN PERFORM continuum_brief_touch(NEW.scope_id);
+    ELSIF TG_OP='DELETE' THEN PERFORM continuum_brief_touch(OLD.scope_id);
+    ELSIF continuum_evidence_canonical(OLD) IS DISTINCT FROM continuum_evidence_canonical(NEW)
+      OR (OLD.scope_id,OLD.state,OLD.expires_at,OLD.promoted_to_id,OLD.supersedes_id) IS DISTINCT FROM
+         (NEW.scope_id,NEW.state,NEW.expires_at,NEW.promoted_to_id,NEW.supersedes_id) THEN
+      FOR changed_scope IN SELECT DISTINCT value FROM unnest(ARRAY[OLD.scope_id,NEW.scope_id]) value ORDER BY value LOOP
+        PERFORM continuum_brief_touch(changed_scope);
+      END LOOP;
+    END IF;
   ELSE
+    IF NEW.source_memory_id IS NOT NULL AND NEW.id=NEW.source_memory_id THEN
+      -- Canonical source enrollment and snapshot pointers represent already
+      -- fenced memory data, not an independent change to the evidence stream.
+      IF TG_OP='INSERT' THEN
+        SELECT scope_id,state,expires_at,promoted_to_id INTO source_scope,source_state,source_expiry,destination
+          FROM memories WHERE id=NEW.source_memory_id;
+        IF NEW.generation=1 AND NEW.current_version IS NULL AND NOT NEW.revoked AND NEW.residency='any'
+          AND NEW.external_state='not-required' AND NEW.checked_at IS NULL AND NEW.valid_until IS NULL AND NEW.lineage_parent IS NULL
+          AND NEW.scope_id=source_scope AND NEW.expiry_ceiling IS NOT DISTINCT FROM source_expiry
+          AND NEW.promotion_destination IS NOT DISTINCT FROM (CASE WHEN source_state='promoted' THEN destination END) THEN RETURN NULL; END IF;
+      ELSE
+        IF (to_jsonb(OLD)-'current_version') IS NOT DISTINCT FROM (to_jsonb(NEW)-'current_version')
+          AND NEW.current_version IS NOT NULL AND EXISTS(SELECT 1 FROM evidence_versions v
+            JOIN evidence_closure c ON c.version_id=v.id AND c.root_id=NEW.id AND c.generation=NEW.generation
+            JOIN evidence_state s ON s.version_id=v.id AND s.state='active'
+            JOIN evidence_payloads p ON p.version_id=v.id
+            WHERE v.id=NEW.current_version AND v.root_id=NEW.id AND v.scope_id=NEW.scope_id AND v.kind='source-document-version') THEN RETURN NULL; END IF;
+        IF OLD.current_version IS NULL AND NEW.current_version IS NULL AND NEW.lineage_parent IS NOT NULL
+          AND (to_jsonb(OLD)-ARRAY['lineage_parent','expiry_ceiling']) IS NOT DISTINCT FROM (to_jsonb(NEW)-ARRAY['lineage_parent','expiry_ceiling']) THEN
+          SELECT * INTO memory FROM memories WHERE id=NEW.source_memory_id;
+          SELECT * INTO upstream FROM evidence_roots WHERE id=continuum_evidence_promotion_parent(memory);
+          IF upstream.id IS NOT NULL AND NEW.lineage_parent=upstream.current_version
+            AND (OLD.lineage_parent IS NULL OR EXISTS(SELECT 1 FROM evidence_versions WHERE id=OLD.lineage_parent AND root_id=upstream.id AND kind='source-document-version'))
+            AND NEW.expiry_ceiling IS NOT DISTINCT FROM least(OLD.expiry_ceiling,upstream.expiry_ceiling) THEN RETURN NULL; END IF;
+        END IF;
+      END IF;
+    END IF;
     IF NEW.source_memory_id IS NOT NULL OR EXISTS(SELECT 1 FROM evidence_versions WHERE id=NEW.current_version AND kind='extracted-assertion') THEN
       PERFORM continuum_brief_touch(NEW.scope_id);
     END IF;
@@ -188,7 +224,6 @@ CREATE FUNCTION continuum_brief_frontier(target_scope UUID) RETURNS JSONB LANGUA
 #variable_conflict use_column
 DECLARE result JSONB;
 BEGIN
-  PERFORM scope_id FROM brief_scope_epochs WHERE scope_id IN (target_scope,continuum_org_scope_id()) ORDER BY scope_id FOR SHARE;
   SELECT jsonb_object_agg(scope_id::text,generation) INTO result FROM brief_scope_epochs WHERE scope_id IN (target_scope,continuum_org_scope_id());
   RETURN result;
 END $$;
@@ -203,7 +238,7 @@ CREATE FUNCTION continuum_brief_enqueue(definition UUID,key TEXT,refresh_mode TE
 #variable_conflict use_column
 DECLARE d brief_definitions%ROWTYPE; p brief_profiles%ROWTYPE; r brief_runs%ROWTYPE;
 BEGIN
-  SELECT * INTO STRICT d FROM brief_definitions WHERE id=definition FOR UPDATE;
+  SELECT * INTO STRICT d FROM brief_definitions WHERE id=definition FOR SHARE;
   SELECT * INTO STRICT p FROM brief_profiles WHERE id=d.profile FOR SHARE;
   IF NOT d.enabled OR NOT p.enabled OR key IS NULL OR length(key)>128 OR refresh_mode IS NULL OR refresh_mode NOT IN ('full','delta') OR dry IS NULL THEN
     RAISE check_violation USING MESSAGE='Brief refresh unavailable'; END IF;
@@ -304,7 +339,7 @@ CREATE FUNCTION continuum_brief_gate(run_id UUID,worker UUID,epoch BIGINT,disclo
 DECLARE j brief_runs%ROWTYPE; d brief_definitions%ROWTYPE; b brief_worker_bindings%ROWTYPE; ids UUID[];
 BEGIN
   SELECT * INTO STRICT j FROM brief_runs WHERE id=run_id FOR UPDATE;
-  SELECT * INTO STRICT d FROM brief_definitions WHERE id=j.definition_id FOR UPDATE;
+  SELECT * INTO STRICT d FROM brief_definitions WHERE id=j.definition_id FOR SHARE;
   b:=continuum_brief_binding(d.scope_id,d.profile);
   SELECT array_append(COALESCE(array_agg(version_id ORDER BY version_id),'{}'),d.anchor_version) INTO ids FROM brief_run_inputs WHERE brief_run_inputs.run_id=j.id;
   PERFORM continuum_evidence_lock(b.principal_id,ids,d.scope_id);
@@ -335,7 +370,7 @@ CREATE FUNCTION continuum_brief_claim(profile_id TEXT,worker UUID,descriptor JSO
 #variable_conflict use_column
 DECLARE j brief_runs%ROWTYPE; d brief_definitions%ROWTYPE; b brief_worker_bindings%ROWTYPE; item RECORD; v UUID;
   n INTEGER:=0; probes INTEGER:=0; admitted INTEGER:=0; total INTEGER:=0; capacity INTEGER; phase INTEGER; after_id UUID;
-  bytes BIGINT:=0; added_bytes BIGINT:=0; metadata_bytes BIGINT:=0; frontier_value JSONB; dirty TEXT[];
+  bytes BIGINT:=0; added_bytes BIGINT:=0; metadata_bytes BIGINT:=0; frontier_value JSONB; cutoff_value TIMESTAMPTZ; dirty TEXT[];
   more BOOLEAN:=FALSE; stale RECORD; all_sections TEXT[]:=ARRAY['purpose','decisions','implementation','unknowns','coverage'];
 BEGIN
   PERFORM continuum_brief_assert_worker(session_user);
@@ -364,7 +399,7 @@ BEGIN
         OR h.config_generation<>def.generation OR h.profile_generation<>(SELECT generation FROM brief_profiles WHERE id=def.profile)
         OR EXISTS(SELECT 1 FROM brief_run_inputs i WHERE i.run_id=h.run_id AND NOT continuum_brief_audience(binding.principal_id,i.version_id,def.scope_id,NULL)))
       AND NOT EXISTS(SELECT 1 FROM brief_runs r WHERE r.definition_id=def.id AND r.state IN ('queued','running'))
-    ORDER BY def.id LIMIT 1 FOR UPDATE OF def SKIP LOCKED;
+    ORDER BY def.id LIMIT 1 FOR SHARE OF def SKIP LOCKED;
   IF d.id IS NOT NULL THEN
     frontier_value:=continuum_brief_frontier(d.scope_id);
     PERFORM continuum_brief_enqueue(d.id,'repair:'||encode(sha256(convert_to(jsonb_build_object('frontier',frontier_value,'config',d.generation,
@@ -380,17 +415,18 @@ BEGIN
   IF j.state='running' OR (j.deadline_at IS NOT NULL AND j.deadline_at<=clock_timestamp()) THEN
     UPDATE brief_runs SET state='unavailable',reason=CASE WHEN j.state='running' THEN 'ambiguous' ELSE 'deadline' END,
       owner=NULL,lease_until=NULL,generation=generation+1 WHERE id=j.id;
+    UPDATE pipeline_budget_workflows SET cancelled=TRUE,generation=generation+1 WHERE id=j.workflow_id AND NOT cancelled;
     RETURN jsonb_build_object('outcome','unavailable');
   END IF;
-  SELECT * INTO STRICT d FROM brief_definitions WHERE id=j.definition_id FOR UPDATE;
+  SELECT * INTO STRICT d FROM brief_definitions WHERE id=j.definition_id FOR SHARE;
   b:=continuum_brief_binding(d.scope_id,d.profile);
   PERFORM continuum_pipeline_create(j.workflow_id,j.budget_owner,j.descriptor->'budget');
   UPDATE brief_runs SET state='running',login_oid=b.role_oid,binding_generation=b.generation,owner=worker,generation=generation+1,
     lease_until=clock_timestamp()+interval '30 seconds',deadline_at=(SELECT deadline_at FROM pipeline_budget_workflows WHERE id=j.workflow_id)
     WHERE id=j.id RETURNING * INTO j;
   BEGIN
-    -- Pin committed scope rows BEFORE opening an inventory SELECT. Writers
-    -- cannot commit a newer enrolled source behind this page's recorded epoch.
+    -- Observe before the inventory SELECT, without epoch-to-source lock order.
+    -- The final comparison may not replace this token with a newer frontier.
     frontier_value:=continuum_brief_frontier(d.scope_id);
     IF NOT j.inventory_done THEN
       IF j.observed IS NOT NULL AND j.observed IS DISTINCT FROM frontier_value THEN
@@ -470,8 +506,20 @@ BEGIN
       -- newly admitted manifest payload allowance on each committed page too.
       SELECT COALESCE(sum(i.bytes),0) INTO added_bytes FROM brief_run_inputs i WHERE i.run_id=j.id;
       PERFORM continuum_brief_charge(j.workflow_id,jsonb_build_object('candidates',probes+admitted,'storageBytes',metadata_bytes+added_bytes));
+      -- Sample time before the fresh frontier snapshot. A later commit belongs
+      -- to a later cutoff and leaves a newer epoch for the next check.
+      cutoff_value:=clock_timestamp();
       frontier_value:=continuum_brief_frontier(d.scope_id);
-      UPDATE brief_runs SET inventory_phase=phase,inventory_after=after_id,observed=frontier_value,
+      IF j.observed IS DISTINCT FROM frontier_value THEN
+        IF j.inventory_restarts>=2 OR EXISTS(SELECT 1 FROM brief_run_attempts WHERE run_id=j.id) THEN
+          RAISE check_violation USING MESSAGE='Brief inventory changed'; END IF;
+        DELETE FROM brief_run_inputs WHERE run_id=j.id;
+        UPDATE brief_runs SET state='queued',owner=NULL,lease_until=NULL,inventory_phase=0,inventory_after=NULL,
+          inventory_done=FALSE,inventory_restarts=inventory_restarts+1,cutoff=NULL,observed=NULL,watermark=NULL,
+          next_attempt_at=clock_timestamp() WHERE id=j.id;
+        RETURN jsonb_build_object('outcome','progress');
+      END IF;
+      UPDATE brief_runs SET inventory_phase=phase,inventory_after=after_id,cutoff=cutoff_value,
         inventory_done=phase=3 OR total=63,truncated=phase<3 AND total=63,
         watermark=jsonb_build_object('cycle',inventory_restarts,'phase',phase,'after',after_id,'complete',phase=3,'frontier',frontier_value)
         WHERE id=j.id RETURNING * INTO j;
@@ -501,7 +549,9 @@ BEGIN
     UPDATE brief_runs SET sections=dirty WHERE id=j.id RETURNING * INTO j;
     PERFORM continuum_brief_gate(j.id,worker,j.generation,TRUE);
   EXCEPTION WHEN check_violation OR insufficient_privilege OR program_limit_exceeded THEN
-    UPDATE brief_runs SET state='unavailable',reason=CASE WHEN SQLSTATE='54000' THEN 'budget' ELSE 'policy' END,owner=NULL,lease_until=NULL WHERE id=j.id;
+    UPDATE brief_runs SET state='unavailable',reason=CASE WHEN SQLSTATE='54000' THEN 'budget' ELSE 'policy' END,
+      owner=NULL,lease_until=NULL,generation=generation+1 WHERE id=j.id;
+    UPDATE pipeline_budget_workflows SET cancelled=TRUE,generation=generation+1 WHERE id=j.workflow_id AND NOT cancelled;
     RETURN jsonb_build_object('outcome','unavailable');
   END;
   INSERT INTO audit_log(principal_id,action,scope_id,metadata) VALUES(b.principal_id,'write',d.scope_id,'{"operation":"brief_claimed"}');
@@ -569,6 +619,7 @@ BEGIN
   SELECT * INTO STRICT j FROM brief_runs WHERE id=run_id FOR UPDATE;
   -- Ambiguous commit replay returns the same logical result, never reapplies.
   IF j.state='complete' AND j.owner=worker AND j.generation=epoch AND j.login_oid=(SELECT oid FROM pg_roles WHERE rolname=session_user) THEN RETURN j.result_version; END IF;
+  PERFORM id FROM brief_definitions WHERE id=j.definition_id FOR UPDATE;
   j:=continuum_brief_gate(run_id,worker,epoch,FALSE);
   SELECT * INTO STRICT d FROM brief_definitions WHERE id=j.definition_id; b:=continuum_brief_binding(d.scope_id,d.profile);
   IF EXISTS(SELECT 1 FROM unnest(j.sections) section WHERE EXISTS(SELECT 1 FROM brief_run_inputs i WHERE i.run_id=j.id AND section=ANY(i.sections))
@@ -643,7 +694,7 @@ BEGIN
 END $$;
 CREATE FUNCTION continuum_brief_stop(run_id UUID,worker UUID,epoch BIGINT,failure TEXT) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER AS $$
 #variable_conflict use_column
-DECLARE j brief_runs%ROWTYPE; w pipeline_budget_workflows%ROWTYPE; delay_ms INTEGER;
+DECLARE j brief_runs%ROWTYPE; w pipeline_budget_workflows%ROWTYPE; delay_ms INTEGER; required_calls INTEGER;
 BEGIN
   SELECT * INTO STRICT j FROM brief_runs WHERE id=run_id FOR UPDATE;
   IF j.login_oid IS DISTINCT FROM (SELECT oid FROM pg_roles WHERE rolname=session_user) OR j.owner IS DISTINCT FROM worker OR j.generation IS DISTINCT FROM epoch THEN
@@ -652,12 +703,16 @@ BEGIN
   IF j.state='running' THEN
     SELECT * INTO STRICT w FROM pipeline_budget_workflows WHERE id=j.workflow_id FOR UPDATE;
     delay_ms:=least(4000,1000*(2^j.failures)::integer);
+    SELECT count(DISTINCT CASE WHEN j.descriptor->>'isolation'='whole-inputs-v1' THEN 0 ELSE continuum_brief_section_group(requested.section) END)
+      INTO required_calls FROM unnest(j.sections) requested(section)
+      WHERE EXISTS(SELECT 1 FROM brief_run_inputs i WHERE i.run_id=j.id AND requested.section=ANY(i.sections));
     -- Only a completed rejected provider promise, with every original attempt
     -- actually settled, may retry. Unknown usage retains its reserved maxima.
     IF failure='provider' AND j.failures<3 AND NOT w.cancelled AND w.generation=j.budget_generation AND w.owner=j.budget_owner
       AND w.active=0 AND w.deadline_at>clock_timestamp()+delay_ms*interval '1 millisecond'
-      AND (w.used->>'calls')::integer<(w.profile->'limits'->>'calls')::integer
-      AND (w.used->>'retries')::integer<(w.profile->'limits'->>'retries')::integer
+      AND required_calls>0
+      AND (w.profile->'limits'->>'calls')::integer-(w.used->>'calls')::integer>=required_calls
+      AND (w.profile->'limits'->>'retries')::integer-(w.used->>'retries')::integer>=required_calls
       AND EXISTS(SELECT 1 FROM brief_run_attempts WHERE run_id=j.id)
       AND NOT EXISTS(SELECT 1 FROM brief_run_attempts a LEFT JOIN pipeline_budget_attempts p ON p.workflow_id=j.workflow_id AND p.attempt_id=a.attempt_id
         WHERE a.run_id=j.id AND (p.attempt_id IS NULL OR p.state<>'settled')) THEN
