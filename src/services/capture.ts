@@ -146,7 +146,7 @@ export async function captureMemory(
     normalizeCapture(input);
     validateRelationThreshold(options.relationThreshold ?? DEFAULT_RELATION_THRESHOLD);
     // Preserve the owned-Pool checks while mapping acquisition failure only.
-    // SQL/audit/commit failures retain their existing internal-error contract.
+    // Bounded SQL waits map to dependency failure; other SQL/audit/commit faults stay internal.
     const capturePool = new Proxy(pool, { get(target, property, receiver) {
       if (property === 'connect') return () => target.connect().catch(error => { throw dependencyUnavailable(error); });
       return Reflect.get(target, property, receiver);
@@ -190,7 +190,10 @@ export async function captureMemory(
     if (message === 'EMBEDDING_QUEUE_QUOTA_EXCEEDED' || message === 'EMBEDDING_RECEIPT_QUOTA_EXCEEDED') {
       throw new ServiceError(message, 'Embedding admission quota is exhausted');
     }
-    if ((error as { code?: unknown })?.code === '42501') throw new ServiceError('FORBIDDEN', 'Capture replay unavailable');
+    if ((error as { code?: unknown })?.code === '42501'
+      && (message === 'Capture replay unavailable' || message === 'Embedding capture unavailable')) {
+      throw new ServiceError('FORBIDDEN', message, { cause: error });
+    }
     throw asServiceError(error);
   }
 }

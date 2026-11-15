@@ -61,6 +61,7 @@ export class ServiceError extends Error {
 
 export function asServiceError(error: unknown): ServiceError {
   const failure = error as { code?: unknown; message?: unknown } | null;
+  if (failure?.code === '55P03' || failure?.code === '57014') return dependencyUnavailable(error);
   if (failure?.code === 'P0001') {
     if (failure.message === 'EMBEDDING_QUEUE_QUOTA_EXCEEDED' || failure.message === 'EMBEDDING_RECEIPT_QUOTA_EXCEEDED') {
       return new ServiceError(failure.message, 'Embedding admission quota is exhausted');
