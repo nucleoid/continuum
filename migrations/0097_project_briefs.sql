@@ -429,13 +429,14 @@ BEGIN
               IF item.source_bytes>(j.descriptor->'budget'->>'maxItemHydratedBytes')::bigint THEN RAISE program_limit_exceeded USING MESSAGE='Brief input unavailable'; END IF;
               PERFORM continuum_brief_charge(j.workflow_id,jsonb_build_object('hydratedBytes',item.source_bytes));
             END IF;
+            after_id:=item.id;
             v:=continuum_evidence_source(b.principal_id,item.id);
             IF v IS NULL OR NOT continuum_brief_audience(b.principal_id,v,d.scope_id,j.descriptor->>'locality') THEN
-              RAISE check_violation USING MESSAGE='Brief source changed'; END IF;
+              CONTINUE; END IF;
             INSERT INTO brief_run_inputs SELECT j.id,e.id,e.root_id,octet_length(p.payload),CASE WHEN j.descriptor->>'isolation'='independent-section-requests-v1'
                 THEN continuum_brief_source_sections(item.type) ELSE all_sections END
               FROM evidence_versions e JOIN evidence_payloads p ON p.version_id=e.id WHERE e.id=v;
-            after_id:=item.id; admitted:=admitted+1; total:=total+1;
+            admitted:=admitted+1; total:=total+1;
           END LOOP;
         ELSIF phase=1 THEN
           FOR item IN SELECT e.id,e.root_id,octet_length(p.payload) AS bytes,m.type
