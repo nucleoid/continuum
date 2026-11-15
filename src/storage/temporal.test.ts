@@ -9,7 +9,7 @@ import { createMemory } from './memories.js';
 import { captureMemory } from '../services/capture.js';
 import { recallForPrincipal } from '../services/recall.js';
 import { supersedeForPrincipal } from '../services/supersede.js';
-import { promoteMemoryWithAudit } from './promote.js';
+import { promoteMemoryWithAudit, verifyMemory } from './promote.js';
 import { readEventAnnotations, writeEventAnnotation } from './temporal.js';
 import { parseEventAnnotation, parseEventWindow } from '../temporal/model.js';
 import { storeMemoryEmbeddingVector } from './embeddings.js';
@@ -18,6 +18,9 @@ import { recallAuthorityMetadata } from './recall-authority.js';
 import * as temporalStorage from './temporal.js';
 import { listMemoriesForPrincipal } from '../services/memories.js';
 import { Budget, starterProfile } from '../pipeline/budget.js';
+import { MEMORY_READ_BUDGET_BYTES_SQL } from './memory-reads.js';
+import { testReranking } from '../reranking/test-helpers.js';
+import { RetrievalEnricherRegistry } from '../extensions/retrieval.js';
 
 const annotation = (instant = '2026-02-01T00:00:00Z') => parseEventAnnotation({ status:'known', assertion:'asserted', precision:'instant', instant });
 const filter = parseEventWindow({ from:'2026-02-01T00:00:00Z', to:'2026-03-01T00:00:00Z' });
@@ -74,6 +77,64 @@ describe('event annotations and candidate admission', () => {
     expect((await readEventAnnotations(pool,f.actor.id,[good.memory.id])).get(good.memory.id)).toBeNull();
     await writeEventAnnotation(pool,f.actor.id,good.memory.id,annotation());
     expect((await recallForPrincipal(pool,null,f.actor,{query:'signal',eventFilter:filter})).results).toHaveLength(1);
+  });
+  it('keeps verified sources visible as unknown without reviving old annotation authority', async () => {
+    const f=await world(), good=await f.capture();
+    await verifyMemory(pool,f.actor.id,good.memory.id,false);
+    await verifyMemory(pool,f.actor.id,good.memory.id,true);
+    expect((await recallForPrincipal(pool,null,f.actor,{query:'signal'})).results.map(r=>r.memory.id)).toEqual([good.memory.id]);
+    for(const input of [{eventWindow:filter},{eventFilter:{...filter,includeUnknown:true}}]) {
+      const result=await recallForPrincipal(pool,null,f.actor,{query:'signal',...input});
+      expect(result.results.map(r=>r.memory.id)).toEqual([good.memory.id]);
+      expect(result.results[0].memory.event).toEqual({annotation:{status:'unknown'},version:null,sourceVersion:null});
+    }
+    expect((await listMemoriesForPrincipal(pool,f.actor,{eventFilter:{...filter,includeUnknown:true}})).items.map(r=>r.memory.id)).toEqual([good.memory.id]);
+    expect((await recall(pool,{actor:f.actor.id,query:'signal',scopeIds:[f.scope.id],limit:10,eventWindow:filter})).results.map(r=>r.memory.id)).toEqual([good.memory.id]);
+    expect((await recallForPrincipal(pool,null,f.actor,{query:'signal',eventFilter:filter})).results).toEqual([]);
+    await pool.query('DELETE FROM scope_memberships WHERE principal_id=$1 AND scope_id=$2',[f.actor.id,f.scope.id]);
+    expect((await recallForPrincipal(pool,null,f.actor,{query:'signal',eventWindow:filter})).results).toEqual([]);
+  });
+  it('does not charge optional temporal reads to ordinary reranked recall', async () => {
+    const f=await world();
+    for(let i=0;i<2;i++) await createMemory(pool,{scopeId:f.scope.id,scopeKind:'project',authorId:f.actor.id,type:'decision',title:'Signal',body:'Signal source',source:'manual'});
+    const bytes=Number((await pool.query(`SELECT sum(${MEMORY_READ_BUDGET_BYTES_SQL})::bigint AS bytes FROM memories m WHERE scope_id=$1`,[f.scope.id])).rows[0].bytes)+1024;
+    const t=testReranking(()=>1),config=t.config(),budget=new Budget(config.profile);
+    budget.consume({hydratedBytes:budget.available('hydratedBytes')-bytes-512});
+    const result=await recallForPrincipal(pool,null,f.actor,{query:'signal',limit:2},{},undefined,undefined,budget,config);
+    expect(result.results).toHaveLength(2);expect(t.adapter.invoke).toHaveBeenCalledOnce();
+    expect(budget.available('hydratedBytes')).toBe(512);
+  });
+  it('admits temporal delivery before spending a reranker call', async () => {
+    const f=await world();await f.capture();await f.capture();
+    const bytes=Number((await pool.query(`SELECT sum(${MEMORY_READ_BUDGET_BYTES_SQL})::bigint AS bytes FROM memories m WHERE scope_id=$1`,[f.scope.id])).rows[0].bytes)+1024;
+    const t=testReranking(()=>1),config=t.config(),budget=new Budget(config.profile);
+    budget.consume({hydratedBytes:budget.available('hydratedBytes')-bytes-512});
+    await expect(recallForPrincipal(pool,null,f.actor,{query:'signal',limit:2,eventWindow:filter},{},undefined,undefined,budget,config)).rejects.toThrow();
+    expect(t.adapter.invoke).not.toHaveBeenCalled();
+  });
+  it('selects hinted candidates before hydrating a bounded final page', async () => {
+    const f=await world();
+    for(let i=0;i<50;i++) await createMemory(pool,{scopeId:f.scope.id,scopeKind:'project',authorId:f.actor.id,type:'decision',title:'Signal',body:'Signal '+ 'x'.repeat(24000),source:'manual'});
+    const options={registry:new RetrievalEnricherRegistry(),options:{},readBudgetBytes:1024*1024};
+    expect((await recallForPrincipal(pool,null,f.actor,{query:'signal',limit:10},{},undefined,options)).results).toHaveLength(10);
+    expect((await recallForPrincipal(pool,null,f.actor,{query:'signal',limit:10,eventWindow:filter},{},undefined,options)).results).toHaveLength(10);
+    expect((await recall(pool,{actor:f.actor.id,query:'signal',scopeIds:[f.scope.id],limit:10,eventWindow:filter,readBudgetBytes:1024*1024})).results).toHaveLength(10);
+  });
+  it('uses the hint to select the overlapping member of a relevance tie', async () => {
+    const f=await world(),first=await f.capture(),second=await f.capture();
+    const sorted=[first.memory.id,second.memory.id].sort(),target=sorted[1];
+    await writeEventAnnotation(pool,f.actor.id,sorted[0],annotation('2025-01-01T00:00:00Z'));
+    const provider={id:'temporal-tie',dim:768,local:true,embed:async()=>[Array.from({length:768},(_,i)=>Number(i===0))]};
+    for(const id of sorted) await storeMemoryEmbeddingVector(pool,id,Array.from({length:768},(_,i)=>Number(i===(id===target?0:1))),provider);
+    const result=await recallForPrincipal(pool,provider,f.actor,{query:'signal',limit:1,eventWindow:filter});
+    expect(result.results.map(r=>r.memory.id)).toEqual([target]);
+  });
+  it('returns a bounded dependency failure on temporal authority lock contention', async () => {
+    const f=await world(),good=await f.capture(),held=await pool.connect();
+    try {
+      await held.query('BEGIN');await held.query('SELECT id FROM memories WHERE id=$1 FOR UPDATE',[good.memory.id]);
+      await expect(recallForPrincipal(pool,null,f.actor,{query:'signal',eventWindow:filter})).rejects.toMatchObject({code:'DEPENDENCY_UNAVAILABLE'});
+    } finally {await held.query('ROLLBACK');held.release();}
   });
   it('does not infer successor time and never revives a superseded decision', async () => {
     const f=await world(), predecessor=await f.capture(annotation('2099-01-01T00:00:00Z'));
