@@ -191,7 +191,8 @@ BEGIN
       AND (r.revoked OR r.generation<>c.generation OR NOT continuum_evidence_can_access(actor,r.scope_id,FALSE))) THEN RETURN NULL; END IF;
   IF EXISTS(SELECT 1 FROM evidence_closure c JOIN connector_query_runs q ON q.id=c.root_id WHERE c.version_id=version
     AND (q.actor IS DISTINCT FROM $1 OR q.state<>'complete' OR q.expires_at<=clock_timestamp())) THEN RETURN NULL; END IF;
-  SELECT jsonb_agg(jsonb_build_object('runId',q.id,'mapping',continuum_connector_mapping($1,q.mapping_id)) ORDER BY q.id)
+  SELECT jsonb_agg(jsonb_build_object('runId',q.id,'mapping',continuum_connector_mapping($1,q.mapping_id),
+    'bytes',(SELECT octet_length(payload) FROM evidence_payloads WHERE version_id=$2)) ORDER BY q.id)
     INTO result FROM evidence_closure c JOIN connector_query_runs q ON q.id=c.root_id WHERE c.version_id=version;
   RETURN result;
 END $$;

@@ -49,13 +49,16 @@ function currentPolicy(actor: string, mapping: RepositoryMapping, proof: Reposit
     provider: { locality: local ? 'local' : 'hosted', authority } }).providerDisclosure.decision === 'allow';
 }
 async function probe(pool: pg.Pool, actor: string, mapping: RepositoryMapping,
-  adapter: BudgetAdapter<RepositoryPermissionRequest, RepositoryAuthority>, options: ConnectorEvidenceOptions, attemptId: string): Promise<
+  adapter: BudgetAdapter<RepositoryPermissionRequest, RepositoryAuthority>, options: ConnectorEvidenceOptions, attemptId: string,
+  admission: { candidates?: number; hydratedBytes?: number } = {}): Promise<
     { proof: RepositoryAuthority; checkedAt: number } | { outcome: ConnectorOutcome }> {
   const checkedAt = mapping.now; // Conservative database time BEFORE serialization/remote work.
   let admitted = false;
+  options.budget.consume(admission);
+  const durable = pipelineAttempt(pool, { id: options.execution.workflowId, attemptId, owner: options.execution.workerId, generation: options.execution.generation });
   const result = await runBudgetedStage(options.budget, adapter, { repository: mapping.repository, principalId: actor }, {
     signal: options.signal, onWork: options.onWork,
-    durable: pipelineAttempt(pool, { id: options.execution.workflowId, attemptId, owner: options.execution.workerId, generation: options.execution.generation }),
+    durable: { ...durable, reserve: (requested, retained) => durable.reserve(amounts({ ...requested, ...admission }), retained) },
     authorize: async () => {
       if (!sameMapping(mapping, await repositoryMapping(pool, actor, mapping.id))) return false;
       if (admitted) return true;
@@ -167,6 +170,8 @@ export async function readConnectorEvidence(pool: pg.Pool, actor: string, versio
   try {
     const dependencies = await connectorDependencies(pool, actor, version);
     if (!dependencies?.length || dependencies.length > 64) return null;
+    const admittedBytes = dependencies[0].bytes;
+    if (!Number.isSafeInteger(admittedBytes) || admittedBytes < 0 || admittedBytes > options.budget.profile.maxItemHydratedBytes) return null;
     const permits: ConnectorPermit[] = [];
     for (const dependency of dependencies) {
       const mapping = dependency.mapping, attempt = attempts.get(dependency.runId);
@@ -175,23 +180,25 @@ export async function readConnectorEvidence(pool: pg.Pool, actor: string, versio
       if (!connector || connector.version !== mapping.connectorVersion) return null;
       const session = connector.open(options.authorizationContext);
       if (!zeroPrice(session.permission) || (mapping.residency === 'local-only' && (!session.permission.local || provider?.locality === 'hosted'))) return null;
-      const result = await probe(pool, actor, mapping, session.permission, options, attempt);
+      const result = await probe(pool, actor, mapping, session.permission, options, attempt,
+        permits.length === 0 ? { candidates: 1, hydratedBytes: admittedBytes } : {});
       if (!('proof' in result)) return null;
       permits.push({ runId: dependency.runId, generation: mapping.generation, checkedAt: result.checkedAt,
         validUntil: result.checkedAt + result.proof.validForMs, commit: result.proof.commit, indexWatermark: result.proof.indexWatermark });
     }
-    return await evidenceTransaction(pool, async client => {
+    const delivered = await evidenceTransaction(pool, async client => {
       for (const permit of permits) if (!await permitConnector(client, actor, permit)) return null;
       const envelope = await evidenceEnvelope(client, actor, version);
       if (!envelope) return null;
       const decision = decideManagedEvidence(actor, envelope, provider);
       if ((provider ? decision.providerDisclosure : decision.artifactRead).decision !== 'allow') return null;
-      if (envelope.bytes > options.budget.profile.maxItemHydratedBytes) return null;
-      options.budget.consume({ candidates: 1, hydratedBytes: envelope.bytes });
+      if (envelope.bytes > admittedBytes) return null;
       const result = await evidencePayload(client, actor, version, provider?.locality === 'hosted' ? 'hosted' : provider ? 'local' : null);
       options.budget.assertLive();
       if (result !== null) options.budget.serializeOutput(result);
       return result;
     });
+    options.budget.assertLive();
+    return delivered;
   } catch { return null; }
 }

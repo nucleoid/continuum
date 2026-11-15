@@ -34,7 +34,7 @@ export async function permitConnector(client: pg.PoolClient, actor: string, perm
 export async function finishConnectorRun(client: pg.PoolClient, actor: string, runId: string, receipt: ConnectorReceipt, content: string): Promise<{ receiptVersion: string; evidenceVersion: string }> {
   return (await client.query('SELECT continuum_connector_finish($1,$2,$3,$4) AS value', [actor, runId, receipt, content])).rows[0].value;
 }
-export async function connectorDependencies(pool: pg.Pool, actor: string, version: string): Promise<Array<{ runId: string; mapping: RepositoryMapping | null }> | null> {
+export async function connectorDependencies(pool: pg.Pool, actor: string, version: string): Promise<Array<{ runId: string; mapping: RepositoryMapping | null; bytes: number }> | null> {
   return evidenceTransaction(pool, async client =>
     (await client.query('SELECT continuum_connector_dependencies($1,$2) AS value', [actor, version])).rows[0].value);
 }

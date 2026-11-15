@@ -52,6 +52,8 @@ describe('explicit repository evidence pipeline', () => {
       expect((await connectorDependencies(f.app, f.actorId, result.evidenceVersion!))?.[0].mapping?.id).toBe(f.mappingId);
       const read = await readConnectorEvidence(f.app, f.actorId, result.evidenceVersion!, readOptions, attempts);
       expect(read, JSON.stringify(readOptions.budget.report())).toContain('untrusted source');
+      expect((await readBudgetWorkflow(f.app, readOptions.execution.workflowId)).used.hydratedBytes).toBe(Buffer.byteLength(read!));
+      expect(await readConnectorEvidence(f.app, f.producerId, result.evidenceVersion!, await f.options(), attempts)).toBeNull();
       const repeated = await queryConnectorEvidence(f.app, f.actorId, f.mappingId, request, options);
       expect(repeated.receipt.outcome).toBe('budget'); expect(f.queryCalls).toHaveBeenCalledOnce();
       const after = await prepareAgentsMdForPrincipal(f.app, actor, {});
@@ -80,6 +82,9 @@ describe('explicit repository evidence pipeline', () => {
       expect(failed.receipt.outcome).toBe('unavailable'); expect(JSON.stringify(failed)).not.toMatch(/password|token|private/);
       const unknown = await queryConnectorEvidence(f.app, f.actorId, f.mappingId, { ...request, commit: null }, await f.options());
       expect(unknown.receipt.outcome).toBe('complete');
+      f.proof.commit = null;
+      const unversioned = await queryConnectorEvidence(f.app, f.actorId, f.mappingId, { ...request, commit: null }, await f.options());
+      expect(unversioned.receipt.outcome).toBe('complete'); expect(unversioned.receipt.freshness).toBe('unknown');
       expect((await f.owner.query("SELECT count(*)::int AS n FROM connector_query_runs WHERE outcome='unavailable'")).rows[0].n).toBe(2);
     });
   }, 120_000);
