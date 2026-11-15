@@ -939,6 +939,7 @@ BEGIN
   IF candidate_count=0 THEN RETURN 'none'; END IF;
   SELECT octet_length(title)::bigint+octet_length(body)::bigint+4096,metadata->'related' INTO input_bytes,current_related FROM memories WHERE id=memory;
   IF jsonb_typeof(current_related) IS DISTINCT FROM 'array' THEN RETURN 'metadata_unavailable'; END IF;
+  IF jsonb_array_length(current_related)>=5 THEN RETURN 'metadata_full'; END IF;
   SELECT input_bytes+sum((value->>'bytes')::bigint) INTO total_bytes FROM jsonb_array_elements(candidates);
   output_allowance:=candidate_count*512;
   SELECT * INTO STRICT original FROM pipeline_budget_workflows WHERE id=c.workflow_id FOR UPDATE;
@@ -979,9 +980,9 @@ BEGIN
   -- Preserve unrelated current metadata, existing advisory entries and source
   -- freshness. The published evidence canonical form excludes only related.
   SELECT COALESCE(jsonb_agg(value ORDER BY position),'[]'::jsonb) INTO merged FROM (
-    SELECT value,position FROM (SELECT DISTINCT ON(value->>'id') value,position
+    SELECT value,position FROM (SELECT DISTINCT ON(COALESCE(value->>'id','existing:'||position::text)) value,position
       FROM jsonb_array_elements(current_related||relations) WITH ORDINALITY entry(value,position)
-      ORDER BY value->>'id',position) unique_entries ORDER BY position LIMIT 5) bounded_entries;
+      ORDER BY COALESCE(value->>'id','existing:'||position::text),position) unique_entries ORDER BY position LIMIT 5) bounded_entries;
   IF octet_length(merged::text)>octet_length(current_related::text)+output_allowance THEN RETURN 'budget'; END IF;
   UPDATE memories SET metadata=jsonb_set(metadata,ARRAY['related'],merged) WHERE id=memory;
   RETURN 'computed';
