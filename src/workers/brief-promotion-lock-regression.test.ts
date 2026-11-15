@@ -1,5 +1,3 @@
-// Draft for src/workers/brief-promotion-lock-regression.test.ts. Not executed.
-import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { expect, it } from 'vitest';
 import { briefFixture } from '../briefs/test-helpers.js';
