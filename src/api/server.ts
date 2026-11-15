@@ -43,7 +43,7 @@ import { supersedeRouter } from './routes/supersede.js';
 import { offboardingRouter } from './routes/offboarding.js';
 import { locksRouter } from './routes/locks.js';
 import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoordinationContractReady, requirePromotionOutboxReady, requireStandupReady } from '../storage/provider-lifecycle.js';
-import { requirePipelineBudgetsReady, requireEvidenceReady, requireExtractionReady, requireEventTimeReady, requireConnectorEvidenceReady } from '../storage/provider-lifecycle.js';
+import { requirePipelineBudgetsReady, requireEvidenceReady, requireExtractionReady, requireEventTimeReady, requireConnectorEvidenceReady, requireEmbeddingQueueReady } from '../storage/provider-lifecycle.js';
 import { tagVocabulariesRouter } from './routes/tag-vocabularies.js';
 import { getPrincipalByExternalId } from '../storage/principals.js';
 import { standupRouter } from './routes/standup.js';
@@ -442,6 +442,7 @@ async function main(): Promise<void> {
   await requireExtractionReady(pool, schemaOptions);
   await requireEventTimeReady(pool, schemaOptions);
   await requireConnectorEvidenceReady(pool, schemaOptions);
+  await requireEmbeddingQueueReady(pool, schemaOptions);
   const authMode = authModeFromEnv();
   warnOnDevAuthMode(authMode);
   const authenticator = createAuthenticator(
@@ -466,6 +467,7 @@ async function main(): Promise<void> {
     await requireExtractionReady(mcpHttpPool, schemaOptions);
     await requireEventTimeReady(mcpHttpPool, schemaOptions);
     await requireConnectorEvidenceReady(mcpHttpPool, schemaOptions);
+    await requireEmbeddingQueueReady(mcpHttpPool, schemaOptions);
   }
   const readiness = createReadinessState();
   const embeddingProvider = makeEmbeddingRouterFromEnv();
@@ -487,6 +489,7 @@ async function main(): Promise<void> {
     await requireExtractionReady(producer, schemaOptions);
     await requireEventTimeReady(producer, schemaOptions);
     await requireConnectorEvidenceReady(producer, schemaOptions);
+    await requireEmbeddingQueueReady(producer, schemaOptions);
     const principal = await getPrincipalByExternalId(pool, configured.principalExternalId);
     if (!principal) throw new Error('Configured standup producer principal is unavailable');
     requireProducerMatch(await producerContext(producer), principal.id, id as IngestPluginId);

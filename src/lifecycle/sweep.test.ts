@@ -4,7 +4,7 @@ import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { createPrincipal } from '../storage/principals.js';
 import { createScope } from '../storage/scopes.js';
 import { createMemory, getMemory } from '../storage/memories.js';
-import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
+import { seedEmbeddingVectorForTest } from '../embeddings/test-helpers.js';
 import { addMembership } from '../storage/memberships.js';
 import { mapOwnedUserScope } from '../services/offboarding.js';
 import { LIFECYCLE_PRINCIPAL_ID } from './principal.js';
@@ -48,8 +48,8 @@ describe('lifecycle sweeper', () => {
 
   async function seedEmbeddingBeforeExpiry(memoryId: string, expiresAt: Date): Promise<void> {
     await pool.query('UPDATE memories SET expires_at = NULL WHERE id = $1', [memoryId]);
-    await expect(storeMemoryEmbeddingVector(
-      pool, memoryId, new Array(768).fill(0), { id: 'stub', dim: 768 },
+    await expect(seedEmbeddingVectorForTest(
+      pool, pool, memoryId, new Array(768).fill(0), { id: 'stub', dim: 768 },
     )).resolves.toBe(true);
     await pool.query('UPDATE memories SET expires_at = $2 WHERE id = $1', [memoryId, expiresAt]);
   }

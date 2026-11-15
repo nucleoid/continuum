@@ -58,3 +58,11 @@ export * from './connectors/registry.js';
 export * from './connectors/engram.js';
 export * from './services/connector-evidence.js';
 export type { ConnectorExecution, RepositoryMapping } from './storage/connector-receipts.js';
+
+export * from './embeddings/target.js';
+export * from './embeddings/failure-policy.js';
+export * from './storage/embedding-jobs-model.js';
+export * from './storage/embedding-jobs.js';
+export * from './storage/embeddings.js';
+export * from './services/embedding-jobs.js';
+export * from './workers/embedding-jobs.js';

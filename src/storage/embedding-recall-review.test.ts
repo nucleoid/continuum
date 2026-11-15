@@ -4,25 +4,25 @@ import { makeTestPool, resetData } from './test-helpers.js';
 import { createPrincipal } from './principals.js';
 import { createScope } from './scopes.js';
 import { createMemory } from './memories.js';
-import { storeMemoryEmbeddingVector } from './embeddings.js';
+import { seedEmbeddingVectorForTest, withSyntheticTargetForTest } from '../embeddings/test-helpers.js';
 import { recall } from './recall.js';
 import type { Queryable } from './queryable.js';
 
 const vector = Array(768).fill(0.25) as number[];
-const provider = { id: 'test:recall-review', dim: 768, local: true,
-  embed: async (texts: string[]) => texts.map(() => vector) };
+const provider = withSyntheticTargetForTest({ id: 'test:recall-review', dim: 768, local: true,
+  embed: async (texts: string[]) => texts.map(() => vector) });
 
 describe('embedding recall review', () => {
   let pool: pg.Pool;
   beforeEach(async () => { pool ??= await makeTestPool(); await resetData(pool); }, 30_000);
   afterAll(async () => { await pool?.end(); });
 
-  async function seed(db: Queryable, label: string, body: string) {
+  async function seed(db: Queryable, label: string, body: string, selectedProvider = provider) {
     const author = await createPrincipal(db, { externalId: `recall-review:${label}`, kind: 'service', displayName: 'Author' });
     const scope = await createScope(db, { kind: 'project', name: label });
     const memory = await createMemory(db, { scopeId: scope.id, scopeKind: scope.kind,
       authorId: author.id, type: 'fact', title: 'Reference', body, source: 'manual' });
-    await storeMemoryEmbeddingVector(db, memory.id, vector, provider);
+    await seedEmbeddingVectorForTest(db, db, memory.id, vector, selectedProvider);
     return { memory, scope };
   }
 
@@ -53,7 +53,7 @@ describe('embedding recall review', () => {
       const client = await pool.connect();
       const observer = await pool.connect();
       const key = String(Date.now());
-      const second = { ...provider, id: `${provider.id}:second` };
+      const second = withSyntheticTargetForTest({ ...provider, id: `${provider.id}:second` });
       let released = false;
       const borrowed = new Proxy(client, { get(target, property) {
         if (property === 'release') return (destroy?: boolean) => {
@@ -77,9 +77,9 @@ describe('embedding recall review', () => {
         await client.query("SET LOCAL statement_timeout='1s'");
         await client.query('SELECT pg_catalog.pg_advisory_xact_lock($1::bigint)', [key]);
         const value = await seed(client, `two-groups-${failSecond}`, 'Uncommitted reference text');
-        await storeMemoryEmbeddingVector(client, value.memory.id, vector, second);
-        const result = await recall(borrowed, { query: 'semantic-only-probe', scopeIds: [value.scope.id], limit: 1,
-          embeddingGroups: [{ scopeIds: [value.scope.id], provider }, { scopeIds: [value.scope.id], provider: second }],
+        const other = await seed(client, `two-groups-secondary-${failSecond}`, 'Other uncommitted reference', second);
+        const result = await recall(borrowed, { query: 'semantic-only-probe', scopeIds: [value.scope.id, other.scope.id], limit: 1,
+          embeddingGroups: [{ scopeIds: [value.scope.id], provider }, { scopeIds: [other.scope.id], provider: second }],
           embeddingDeadlineMs: 500 });
         expect(result.diagnostics.vector).toBe(failSecond ? 'partial' : 'used');
         expect(result.diagnostics.groups.map((group) => group.status)).toEqual(failSecond ? ['used', 'failed'] : ['used', 'used']);
@@ -109,7 +109,7 @@ describe('embedding recall review', () => {
       const client = await pool.connect();
       const observer = await pool.connect();
       const key = String(Date.now());
-      const second = { ...provider, id: `${provider.id}:second` };
+      const second = withSyntheticTargetForTest({ ...provider, id: `${provider.id}:second` });
       let released = false;
       const borrowed = new Proxy(client, { get(target, property) {
         if (property === 'release') return (destroy?: boolean) => {
@@ -133,10 +133,10 @@ describe('embedding recall review', () => {
         await client.query("SET LOCAL statement_timeout='1s'");
         await client.query('SELECT pg_catalog.pg_advisory_xact_lock($1::bigint)', [key]);
         const value = await seed(client, `two-calls-${failSecond}`, 'Uncommitted reference text');
-        await storeMemoryEmbeddingVector(client, value.memory.id, vector, second);
+        const other = await seed(client, `two-calls-secondary-${failSecond}`, 'Other uncommitted reference', second);
         const results = await Promise.all([provider, second].map((selected) => recall(borrowed, {
-          query: 'semantic-only-probe', scopeIds: [value.scope.id], limit: 1,
-          embeddingGroups: [{ scopeIds: [value.scope.id], provider: selected }], embeddingDeadlineMs: 500,
+          query: 'semantic-only-probe', scopeIds: [value.scope.id, other.scope.id], limit: 1,
+          embeddingGroups: [{ scopeIds: [selected === provider ? value.scope.id : other.scope.id], provider: selected }], embeddingDeadlineMs: 500,
         })));
         expect(results.map((result) => result.diagnostics.vector)).toEqual(failSecond ? ['used', 'failed'] : ['used', 'used']);
         expect(released).toBe(false);

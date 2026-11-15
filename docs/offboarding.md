@@ -1381,3 +1381,5 @@ systems. Preserved shared memories intentionally retain stable author UUIDs and
 source metadata needed for shared provenance. For GitHub-derived shared
 memories, that metadata can include a mutable GitHub login; this documented
 shared-memory identity exception is not removed by personal-scope offboarding.
+
+The [embedding queue](embedding-queue.md) joins canonical approved privacy work. Bounded pages clear owned-source receipt digests, source hashes, route snapshots, active leases and every provider vector; retained source/cohort lineage keeps moved and locked residuals in actual completion proof. Cancellation is not physical erasure. Quiesce original sender processes for an in-process or strict egress cutoff; stored-state proof cannot retract disclosed bytes. Old offboarding/vector writers must remain drained during schema rollout.

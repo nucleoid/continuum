@@ -10,7 +10,7 @@ import {
 } from '../embeddings/router.js';
 import { memoryEmbeddingText } from '../embeddings/text.js';
 import { LIFECYCLE_PRINCIPAL_ID } from '../lifecycle/principal.js';
-import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
+import { storeMemoryEmbeddingVector, admitMemoryEmbedding, embeddingInputMatches, type MemoryEmbeddingAdmission } from '../storage/embeddings.js';
 import type { ScopeKind, ScopeRef } from '../types.js';
 
 const DEFAULT_BATCH_SIZE = 32;
@@ -29,6 +29,7 @@ interface CandidateRef {
 }
 
 interface Candidate {
+  admission: MemoryEmbeddingAdmission;
   id: string;
   title: string;
   body: string;
@@ -170,7 +171,7 @@ async function storeBatch(
   await client.query('BEGIN');
   try {
     for (let index = 0; index < items.length; index += 1) {
-      if (await storeMemoryEmbeddingVector(client, items[index]!.id, vectors[index]!, provider)) {
+      if (await storeMemoryEmbeddingVector(client, items[index]!.id, vectors[index]!, provider, items[index]!.admission)) {
         stored += 1;
         await client.query(
           `DELETE FROM embedding_backfill_failures
@@ -377,7 +378,7 @@ async function runProvider(
             AND m.scope_id = ANY($2::uuid[])
             AND NOT EXISTS (
               SELECT 1 FROM memory_embeddings e
-               WHERE e.memory_id = m.id AND e.provider = $3 AND e.dim = $4
+               WHERE e.memory_id = m.id AND e.provider = $3 AND e.dim = $4 AND continuum_embedding_vector_is_current(m.id,e.provider,e.dim)
             )
             AND NOT EXISTS (
               SELECT 1 FROM embedding_backfill_failures f
@@ -412,13 +413,15 @@ async function runProvider(
       deferredIds: Set<string>;
     }> => {
       if (refs.length === 0) return { items: [], oversizedIds: new Set(), deferredIds: new Set() };
+      if (!provider.target) throw new EmbeddingProviderError('EMBEDDING_FAILED', 'Embedding vector-space descriptor is unavailable', { diagnostic: false });
       const hydrated = await client.query<{
         id: string; title: string | null; body: string | null;
-        text_bytes: string; kind: ScopeKind; name: string;
+        text_bytes: string; kind: ScopeKind; name: string; admission: MemoryEmbeddingAdmission | null;
       }>(
         `WITH sizes AS MATERIALIZED (
-           SELECT m.id,octet_length(m.title)+octet_length(m.body) AS text_bytes,
-                s.kind, s.name
+           SELECT m.id,octet_length(m.title)+2+octet_length(m.body) AS text_bytes,
+                s.kind, s.name,CASE WHEN octet_length(m.title)::bigint+2+octet_length(m.body)::bigint<=$4
+                  THEN continuum_embedding_admit_vector(m.id,$5::jsonb) END AS admission
            FROM memories m
            JOIN scopes s ON s.id = m.scope_id
           WHERE m.id = ANY($1::uuid[])
@@ -426,7 +429,7 @@ async function runProvider(
             AND (m.expires_at IS NULL OR m.expires_at > pg_catalog.clock_timestamp())
             AND NOT EXISTS (
               SELECT 1 FROM memory_embeddings e
-               WHERE e.memory_id = m.id AND e.provider = $2 AND e.dim = $3
+               WHERE e.memory_id = m.id AND e.provider = $2 AND e.dim = $3 AND continuum_embedding_vector_is_current(m.id,e.provider,e.dim)
             )
             AND NOT EXISTS (
               SELECT 1 FROM embedding_backfill_failures f
@@ -437,11 +440,11 @@ async function runProvider(
            SELECT sizes.*,sum(CASE WHEN text_bytes<=$4 THEN text_bytes ELSE 0 END)
              OVER(ORDER BY id) AS running_bytes FROM sizes
          )
-         SELECT admitted.id,admitted.text_bytes,admitted.kind,admitted.name,
-           CASE WHEN admitted.text_bytes<=$4 AND running_bytes<=$4 THEN m.title END AS title,
-           CASE WHEN admitted.text_bytes<=$4 AND running_bytes<=$4 THEN m.body END AS body
+         SELECT admitted.id,admitted.text_bytes,admitted.kind,admitted.name,admitted.admission,
+           CASE WHEN admitted.admission IS NOT NULL AND admitted.text_bytes<=$4 AND running_bytes<=$4 THEN m.title END AS title,
+           CASE WHEN admitted.admission IS NOT NULL AND admitted.text_bytes<=$4 AND running_bytes<=$4 THEN m.body END AS body
            FROM admitted JOIN memories m ON m.id=admitted.id ORDER BY admitted.id`,
-        [refs.map((ref) => ref.id), provider.id, provider.dim, MAX_HYDRATED_TEXT_BYTES],
+        [refs.map((ref) => ref.id), provider.id, provider.dim, MAX_HYDRATED_TEXT_BYTES, provider.target],
       );
       const byId = new Map(hydrated.rows.map((row) => [row.id, row]));
       const oversizedIds = new Set(hydrated.rows
@@ -452,9 +455,9 @@ async function runProvider(
         .map((row) => row.id));
       const items = refs.flatMap((ref) => {
         const row = byId.get(ref.id);
-        if (!row || row.title === null || row.body === null) return [];
+        if (!row || !row.admission || row.title === null || row.body === null) return [];
         const candidate: Candidate = {
-          id: row.id, title: row.title, body: row.body,
+          id: row.id, title: row.title, body: row.body, admission: row.admission,
           scope: { kind: row.kind, name: row.name },
         };
         return sameProvider(router.resolve(candidate.scope).provider, provider)
@@ -481,7 +484,7 @@ async function runProvider(
       if (items.length === 0) return;
       const stored = await client.query<{ memory_id: string }>(
         `SELECT memory_id FROM memory_embeddings
-          WHERE memory_id = ANY($1::uuid[]) AND provider = $2 AND dim = $3`,
+          WHERE memory_id = ANY($1::uuid[]) AND provider = $2 AND dim = $3 AND continuum_embedding_vector_is_current(memory_id,provider,dim)`,
         [items.map((item) => item.id), provider.id, provider.dim],
       );
       const storedIds = new Set(stored.rows.map((row) => row.memory_id));
@@ -500,6 +503,14 @@ async function runProvider(
         let validVectors: number[][] = [];
         let invalidItems: Candidate[] = [];
         try {
+          for (const item of part) {
+            const current = await admitMemoryEmbedding(client, item.id, provider);
+            if (!current || current.generation !== item.admission.generation || current.policyGeneration !== item.admission.policyGeneration
+              || current.policyDigest !== item.admission.policyDigest || !embeddingInputMatches(current, memoryEmbeddingText(item))) {
+              activeBatchUnsafeIds?.add(item.id);
+              throw new EmbeddingProviderError('EMBEDDING_FAILED', 'Embedding source or policy changed', { diagnostic: false });
+            }
+          }
           vectors = await provider.embed(part.map(memoryEmbeddingText));
           if (!Array.isArray(vectors) || vectors.length !== part.length) {
             validateVectors(vectors, part.length, provider);
@@ -706,7 +717,7 @@ async function runProvider(
         id: string; text_bytes: string; kind: ScopeKind; name: string;
       }>(
         `SELECT m.id,
-                octet_length(m.title) + octet_length(m.body) AS text_bytes,
+                octet_length(m.title) + 2 + octet_length(m.body) AS text_bytes,
                 s.kind, s.name
            FROM memories m
            JOIN scopes s ON s.id = m.scope_id
@@ -717,7 +728,7 @@ async function runProvider(
             AND m.scope_id = ANY($4::uuid[])
             AND NOT EXISTS (
               SELECT 1 FROM memory_embeddings e
-               WHERE e.memory_id = m.id AND e.provider = $2 AND e.dim = $3
+               WHERE e.memory_id = m.id AND e.provider = $2 AND e.dim = $3 AND continuum_embedding_vector_is_current(m.id,e.provider,e.dim)
             )
             AND NOT EXISTS (
               SELECT 1 FROM embedding_backfill_failures f

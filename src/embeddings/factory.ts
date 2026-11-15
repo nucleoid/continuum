@@ -255,8 +255,18 @@ function instantiateProvider(
 export function makeEmbeddingRouterFromEnv(
   env: NodeJS.ProcessEnv = process.env,
 ): EmbeddingRouter {
+  const generation = env.CONTINUUM_EMBEDDING_POLICY_GENERATION;
+  const digest = env.CONTINUUM_EMBEDDING_POLICY_DIGEST;
+  if ((generation === undefined) !== (digest === undefined) || (generation !== undefined
+    && (!/^[1-9][0-9]{0,18}$/.test(generation) || BigInt(generation) > 9223372036854775807n || !/^[0-9a-f]{64}$/.test(digest!)))) {
+    throw new Error('Embedding policy requires a valid generation and SHA-256 digest');
+  }
+  const bindPolicy = (router: EmbeddingRouter): EmbeddingRouter => {
+    if (generation !== undefined) Object.defineProperty(router, 'queuePolicy', { value: Object.freeze({ generation, digest: digest! }) });
+    return router;
+  };
   const serialized = env.CONTINUUM_EMBEDDING_CONFIG;
-  if (!serialized) return staticEmbeddingRouter(makeEmbeddingProviderFromEnv(env));
+  if (!serialized) return bindPolicy(staticEmbeddingRouter(makeEmbeddingProviderFromEnv(env)));
   let parsed: unknown;
   try { parsed = JSON.parse(serialized); } catch {
     throw new Error('CONTINUUM_EMBEDDING_CONFIG must be valid JSON');
@@ -273,5 +283,5 @@ export function makeEmbeddingRouterFromEnv(
     definition.alias,
     instantiateProvider(definition, env),
   ] as const));
-  return new ScopeEmbeddingRouter(registry, routingConfig(config.routing));
+  return bindPolicy(new ScopeEmbeddingRouter(registry, routingConfig(config.routing)));
 }

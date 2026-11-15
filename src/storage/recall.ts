@@ -3,7 +3,7 @@ import pg from 'pg';
 import type { MemoryType, RecallResult } from '../types.js';
 import { embedWithBudget, type EmbeddingProvider } from '../embeddings/provider.js';
 import { BudgetError, type Budget } from '../pipeline/budget.js';
-import { vectorSearchMemoryIds } from './embeddings.js';
+import { vectorSearchMemoryIds, embeddingTargetIsCurrent } from './embeddings.js';
 import { assertEmbeddingVectorDimension } from './schema.js';
 import { MEMORY_COLUMNS, rowToMemory } from './memory-row.js';
 import type { Queryable } from './queryable.js';
@@ -154,18 +154,14 @@ async function connectBeforeDeadline(
 }
 
 async function boundedVectorSearch(
-  pool: Queryable,
-  deadlineAt: number,
-  queryVec: number[],
-  scopeIds: string[],
-  provider: EmbeddingProvider,
-  limit: number,
-  types: MemoryType[] | undefined,
-  signal: AbortSignal,
-  eventFilter?: EventWindow,
-  actor?: string,
-  stableOrder = false,
+  pool: Queryable, deadlineAt: number, queryVec: number[], scopeIds: string[], provider: EmbeddingProvider,
+  limit: number, types: MemoryType[] | undefined, signal: AbortSignal, eventFilter?: EventWindow, actor?: string, stableOrder = false,
 ): Promise<Array<{ id: string; distance: number }>> {
+  return boundedVectorOperation(pool, deadlineAt, signal, bounded =>
+    vectorSearchMemoryIds(bounded, queryVec, scopeIds, provider, limit, types, eventFilter, actor, stableOrder));
+}
+async function boundedVectorOperation<T>(pool: Queryable, deadlineAt: number, signal: AbortSignal,
+  run: (bounded: Queryable) => Promise<T>): Promise<T> {
   const remaining = () => {
     const ms = deadlineAt - Date.now();
     if (ms < 1 || signal.aborted) {
@@ -221,9 +217,7 @@ async function boundedVectorSearch(
       remaining();
       return client.query(sql, values);
     }) as Queryable['query'] };
-    const hits = await vectorSearchMemoryIds(
-      bounded, queryVec, scopeIds, provider, limit, types, eventFilter, actor, stableOrder,
-    );
+    const hits = await run(bounded);
     if (transactionStarted) {
       await client.query('COMMIT');
       transactionStarted = false;
@@ -441,14 +435,24 @@ export async function recallCandidates(
   });
   // Provider IO may overlap, but concurrent calls share a borrowed session's
   // transaction and savepoint stack. Retain only initiated SQL for cleanup.
-  const vectorSqlWork = new Set<Promise<Array<{ id: string; distance: number }>>>();
+  const vectorSqlWork = new Set<Promise<unknown>>();
   const tasks = groups.map(async (group): Promise<GroupResult> => {
     const work = (async (): Promise<GroupResult> => {
       let queryVec: number[];
       try {
+        const current = () => boundedVectorOperation(pool, deadlineAt, controller.signal,
+          bounded => embeddingTargetIsCurrent(bounded, group.provider, group.scopeIds));
+        const admission = borrowed ? queueBorrowedSql(pool, current) : current();
+        vectorSqlWork.add(admission);
+        let approved: boolean;
+        try { approved = await admission; } finally { vectorSqlWork.delete(admission); }
+        if (!approved) throw new EmbeddingProviderUnavailableError(undefined);
+        controller.signal.throwIfAborted();
+        if (Date.now() >= deadlineAt) throw new VectorSearchTimeoutError('Vector search deadline exceeded');
         [queryVec] = await embedWithBudget(group.provider, [opts.query], { signal: controller.signal, budget: opts.budget, onWork: opts.onEmbeddingWork });
         assertEmbeddingVectorDimension(queryVec, group.provider);
       } catch (error) {
+        if (error instanceof CallerVectorCleanupError) throw error;
         return {
           list: [],
           diagnostic: {

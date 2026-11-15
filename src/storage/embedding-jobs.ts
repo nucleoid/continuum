@@ -4,12 +4,29 @@ import { checkedProfile, type BudgetProfile, type DurableAttempt } from '../pipe
 import type { EmbeddingTarget } from '../embeddings/target.js';
 import type { EmbeddingAttemptFailure, EmbeddingJobClaim, EmbeddingJobHydration, EmbeddingJobStore, EmbeddingPolicyIdentity } from './embedding-jobs-model.js';
 import { EMBEDDING_WORKER_DEFAULTS } from './embedding-jobs-model.js';
+import type { EmbeddingStatus } from './embedding-jobs-model.js';
+import type { Queryable } from './queryable.js';
 
-/** Preparation adapter for the private embedding SQL proposal. These functions
- * DO NOT exist in the published schema. No stock runtime instantiates this
- * adapter; migration, readiness, LOGIN binding and exact grants are pending.
- * Every function is claim-scoped and must implement its current gates in SQL. */
+export interface EmbeddingInspection {
+  embeddingStatus: EmbeddingStatus;
+  embedded: boolean;
+  attempts: number;
+  acceptedAt: string | null;
+  completedAt: string | null;
+  nextAttemptAt: string | null;
+}
+export async function readEmbeddingStatus(client: Queryable, principalId: string, memoryId: string): Promise<EmbeddingInspection | null> {
+  return (await client.query<{ result: EmbeddingInspection | null }>(
+    'SELECT continuum_embedding_status($1,$2) AS result', [principalId, memoryId],
+  )).rows[0].result;
+}
+
+/** Narrow claim-scoped capabilities, available only to the approved actual
+ * worker LOGIN. Every call owns a bounded transaction and returns its client. */
 export class SqlEmbeddingJobStore implements EmbeddingJobStore {
+  private readonly settlements = new Map<string, { target: string; values: unknown[]; value: Record<string, unknown> }>();
+  private readonly settling = new Map<string, Promise<boolean>>();
+  unsettledAccounting(): boolean { return this.settlements.size > 0 || this.settling.size > 0; }
   constructor(private readonly pool: pg.Pool) {
     if (!Number.isInteger(pool.options.max) || pool.options.max! < 1 || pool.options.max! > 2
       || !Number.isInteger(pool.options.connectionTimeoutMillis) || pool.options.connectionTimeoutMillis! < 1
@@ -22,8 +39,33 @@ export class SqlEmbeddingJobStore implements EmbeddingJobStore {
       return result.rows[0].result;
     });
   }
-  claim(target: EmbeddingTarget, policy: EmbeddingPolicyIdentity, owner: string, batchSize: number, profile: Readonly<BudgetProfile>): Promise<EmbeddingJobClaim | null> {
+  private transient(error: unknown): boolean {
+    return ['08000','08003','08006','57P01','57P02','57P03','53300','57014','55P03','40P01','40001',
+      'ECONNRESET','ECONNREFUSED','ETIMEDOUT','EPIPE'].includes(String((error as { code?: unknown })?.code));
+  }
+  /** Metadata-only retry of an ORIGINAL settlement, never another provider call.
+   * A process crash still needs the documented proved-exit recovery boundary. */
+  private reconcileSettlement(target: string): Promise<boolean> {
+    const active = this.settling.get(target);
+    if (active) return active;
+    const next = [...this.settlements].find(([, entry]) => entry.target === target);
+    if (!next) return Promise.resolve(true);
+    const [id, entry] = next;
+    const work = (async () => {
+      try {
+        await this.operation<boolean>('SELECT continuum_embedding_attempt($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) AS result',
+          [...entry.values, 'settle', entry.value, 0]);
+        this.settlements.delete(id);
+        return true;
+      } catch { return false; }
+      finally { this.settling.delete(target); }
+    })();
+    this.settling.set(target, work);
+    return work;
+  }
+  async claim(target: EmbeddingTarget, policy: EmbeddingPolicyIdentity, owner: string, batchSize: number, profile: Readonly<BudgetProfile>): Promise<EmbeddingJobClaim | null> {
     if (!Number.isSafeInteger(batchSize) || batchSize < 1 || batchSize > 32) throw new TypeError('Invalid embedding claim bound');
+    if (!await this.reconcileSettlement(target.fingerprint)) return null;
     return this.operation('SELECT continuum_embedding_claim($1,$2,$3,$4,$5) AS result',
       [target, policy, owner, batchSize, checkedProfile(profile)]);
   }
@@ -42,10 +84,29 @@ export class SqlEmbeddingJobStore implements EmbeddingJobStore {
     // Snapshot original identities. Reclaim must not replace these fields on a
     // previously dispatched attempt or release its ambiguous reservations.
     const values = [...this.fence(claim), claim.workflowId, claim.attemptId, claim.attemptOwner, claim.attemptGeneration];
+    const target = claim.target, attemptId = claim.attemptId;
     const call = (phase: string, value: unknown = {}, retained = 0) => this.operation<boolean>(
       'SELECT continuum_embedding_attempt($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) AS result', [...values, phase, value, retained]);
-    return { reserve: (amount, retained) => call('reserve', amount, retained), dispatch: () => call('dispatch'),
-      settle: (actual, provenance = 'unknown') => call('settle', { ...actual, provenance }) };
+    const remember = (value: Record<string, unknown>) => {
+      if (!this.settlements.has(attemptId) && this.settlements.size >= 64) throw new Error('Embedding settlement retention is full');
+      this.settlements.set(attemptId, { target, values, value });
+    };
+    return { reserve: async (amount, retained) => {
+      try { return await call('reserve', amount, retained); }
+      catch (error) {
+        // The caller has not invoked any provider before reserve returns.
+        if (this.transient(error)) remember({ spendMicros: 0, outputBytes: 0, outputTokens: 0, reasoningTokens: 0, completionTokens: 0, provenance: 'measured' });
+        throw error;
+      }
+    }, dispatch: () => call('dispatch'), settle: async (actual, provenance = 'unknown') => {
+      const keys = Object.keys(actual);
+      if (!['measured','provider-reported','estimated','unknown'].includes(provenance)
+        || keys.some(key => !['spendMicros','outputBytes','outputTokens','reasoningTokens','completionTokens'].includes(key)
+          || !Number.isSafeInteger(actual[key as keyof typeof actual]) || actual[key as keyof typeof actual]! < 0)) throw new TypeError('Invalid embedding settlement');
+      const value = { ...actual, provenance };
+      try { const result = await call('settle', value); this.settlements.delete(attemptId); return result; }
+      catch (error) { if (this.transient(error)) remember(value); throw error; }
+    } };
   }
   apply(claim: EmbeddingJobClaim, vectors: Array<{ id: string; vector: number[] }>): Promise<boolean> {
     return this.operation('SELECT continuum_embedding_apply($1,$2,$3,$4) AS result', [...this.fence(claim), JSON.stringify(vectors)]);

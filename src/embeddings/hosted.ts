@@ -11,6 +11,7 @@ import {
   validateEmbeddingTimeout,
   withEmbeddingTimeout,
 } from './timeout.js';
+import { embeddingTarget, MEMORY_EMBEDDING_INPUT_TRANSFORM } from './target.js';
 
 export interface HostedOptions {
   apiKey: string;
@@ -109,6 +110,11 @@ export function validateVectors(items: unknown, count: number, dim: number): num
 }
 
 export abstract class HostedEmbeddingProvider implements EmbeddingProvider {
+  get target() {
+    return this.dim === 768 ? embeddingTarget({ space: { provider: this.id, model: this.model,
+      profile: `${this.httpProvider}-embeddings-v1`, dim: 768, inputTransform: MEMORY_EMBEDDING_INPUT_TRANSFORM },
+    endpoint: this.endpoint, local: this.local }) : undefined;
+  }
   abstract readonly id: string;
   abstract readonly httpProvider: 'openai' | 'voyage' | 'gemini';
   abstract embed(texts: string[], options?: EmbeddingCallOptions): Promise<number[][]>;

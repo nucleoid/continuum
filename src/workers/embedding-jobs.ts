@@ -6,6 +6,7 @@ import { memoryEmbeddingText } from '../embeddings/text.js';
 import { EMBEDDING_WORKER_DEFAULTS, embeddingBatchSize, type EmbeddingAttemptFailure, type EmbeddingJobClaim, type EmbeddingJobHydration, type EmbeddingJobStore, type EmbeddingPolicyIdentity } from '../storage/embedding-jobs-model.js';
 
 export type EmbeddingPollOutcome = 'idle' | 'unavailable' | 'processed';
+export interface EmbeddingWorkerTarget { target: EmbeddingTarget; policy: EmbeddingPolicyIdentity; provider: EmbeddingProvider; profile: BudgetProfile; }
 /** Retained until actual provider/accounting settlement, including after timeout.
  * Replacement workers/configs in this process cannot bypass a hung provider. */
 const activeProviders = new Set<string>();
@@ -14,6 +15,7 @@ export function checkedEmbeddingWorkerProfile(target: EmbeddingTarget, provider:
   input: BudgetProfile): Readonly<BudgetProfile> {
   const profile = checkedProfile(input), adapter = provider.pipelineAdapter;
   if (provider.id !== target.space.provider || provider.dim !== target.space.dim || provider.local !== target.local
+    || provider.target?.fingerprint !== target.fingerprint || provider.target.spaceFingerprint !== target.spaceFingerprint
     || target.space.inputTransform !== MEMORY_EMBEDDING_INPUT_TRANSFORM || !adapter
     || adapter.id !== provider.id || adapter.model !== target.space.model || adapter.profile !== target.space.profile
     || adapter.local !== target.local || profile.maxConcurrency !== 1
@@ -46,7 +48,7 @@ function validHydration(claim: EmbeddingJobClaim, data: EmbeddingJobHydration, m
 
 /** One bounded target pass, using an explicitly composed accounting adapter.
  * SQL owns authority, admission, circuit/window state and commit identities.
- * The port is not wired into capture or the published schema in this phase. */
+ * SQL grants only the approved actual worker LOGIN these capabilities. */
 export async function processEmbeddingJobs(store: EmbeddingJobStore, target: EmbeddingTarget, policy: EmbeddingPolicyIdentity, provider: EmbeddingProvider,
   input: BudgetProfile, owner: string, options: { signal?: AbortSignal; onWork?: (work: Promise<unknown>) => void } = {}): Promise<EmbeddingPollOutcome> {
   const profile = checkedEmbeddingWorkerProfile(target, provider, input);
@@ -123,7 +125,7 @@ export async function processEmbeddingJobs(store: EmbeddingJobStore, target: Emb
           : outcome.reason === 'cancelled' ? 'EMBEDDING_CANCELLED'
           : outcome.reason === 'deadline' ? 'EMBEDDING_TIMEOUT'
           : outcome.reason === 'invalid_response' ? 'EMBEDDING_INVALID_RESPONSE' : 'EMBEDDING_BUDGET', action: 'retry' };
-      // isolate_item instructs SQL to schedule bounded smaller groups sharing
+      // isolate_item instructs SQL to schedule durable half groups sharing
       // the original window/workflow. It never poisons every member of a batch.
       await fail(failure);
       return 'unavailable';
@@ -156,9 +158,10 @@ export class EmbeddingJobWorker {
   private readonly pending = new Set<Promise<unknown>>();
   private polling?: Promise<void>;
   private stopped = false;
+  private stopPromise?: Promise<{ settled: boolean }>;
   private next = 0;
   constructor(private readonly store: EmbeddingJobStore,
-    private readonly targets: ReadonlyArray<{ target: EmbeddingTarget; policy: EmbeddingPolicyIdentity; provider: EmbeddingProvider; profile: BudgetProfile }>,
+    private readonly targets: ReadonlyArray<EmbeddingWorkerTarget>,
     private readonly owner: string) {
     const ids = new Set<string>();
     for (const entry of targets) {
@@ -185,11 +188,15 @@ export class EmbeddingJobWorker {
     })().finally(() => { this.polling = undefined; });
     return this.polling;
   }
-  async stop(): Promise<{ settled: boolean }> {
+  stop(): Promise<{ settled: boolean }> {
+    return this.stopPromise ??= this.stopWork();
+  }
+  private async stopWork(): Promise<{ settled: boolean }> {
     this.stopped = true; this.controller.abort();
     let timer: NodeJS.Timeout | undefined;
     try {
-      const settled = (async () => { await this.polling; await Promise.allSettled([...this.pending]); return { settled: true }; })();
+      const settled = (async () => { await this.polling; await Promise.allSettled([...this.pending]);
+        return { settled: !this.store.unsettledAccounting?.() }; })();
       return await Promise.race([settled, new Promise<{ settled: boolean }>(resolve => {
         timer = setTimeout(() => resolve({ settled: false }), EMBEDDING_WORKER_DEFAULTS.shutdownMs);
       })]);

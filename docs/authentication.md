@@ -328,3 +328,5 @@ The API process can serve authenticated Streamable HTTP at `/mcp`, disabled by d
 ## Isolated UAT
 
 See [UAT deployment](uat-deployment.md), [client onboarding](uat-client-onboarding.md) and [Delivery Forge smoke](delivery-forge-uat.md). The optional Gemini adapter uses an explicit model-qualified 768-dimensional profile; only approved non-sensitive scopes may route to it. Local-only scopes never fall through to hosted providers. Guides and SDK fixtures do not establish live deployment, native-client isolation or owner acceptance. Keep private configuration and receipts outside tracked artifacts.
+
+Deferred embedding workers require a separately approved actual non-owner LOGIN, exact worker grant script and OP-installed principal/scope/target binding. A caller UUID, SET ROLE, GUC or original creator membership is not worker authority. Configuration/control requires the bound OP session and current manual org administrator in the same audited transaction. See [deferred embeddings](embedding-queue.md).

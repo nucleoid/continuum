@@ -1,11 +1,14 @@
 import { createHash } from 'node:crypto';
 import type { EmbeddingProvider } from './provider.js';
+import { embeddingTarget, MEMORY_EMBEDDING_INPUT_TRANSFORM } from './target.js';
 
 // Deterministic stub: derives a unit-length 768-d vector from the SHA-256 of
 // the input text. Same text => same vector; different texts => different.
 // For tests only. Do not use in production.
 export class StubEmbeddingProvider implements EmbeddingProvider {
   readonly id = 'stub:sha256';
+  readonly local = true;
+  get target() { return this.dim === 768 ? embeddingTarget({ space: { provider: this.id, model: 'sha256', profile: 'synthetic-sha256-v1', dim: 768, inputTransform: MEMORY_EMBEDDING_INPUT_TRANSFORM }, endpoint: 'http://fixture.invalid/sha256', local: true }) : undefined; }
   readonly dim: number;
 
   constructor(dim = 768) {

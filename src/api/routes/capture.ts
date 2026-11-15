@@ -46,13 +46,14 @@ export function captureRouter(
       principal,
       parsed.data,
       {},
-      { relationThreshold },
+      { relationThreshold, idempotencyKey: req.get('Idempotency-Key') },
     );
-    res.status(201).json({
+    res.status(result.replayed ? 200 : 201).json({
       id: result.memory.id,
       scopeId: result.memory.scopeId,
       expiresAt: result.memory.expiresAt,
       embedded: result.embedded,
+      embeddingStatus: result.embeddingStatus,
       related: result.related,
       extraction: result.extraction,
       ...(result.memory.event ? { event: result.memory.event } : {}),

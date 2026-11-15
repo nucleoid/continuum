@@ -25,7 +25,7 @@ function fixture(id = 'local:worker-test') {
     serialize: texts => ({ input: texts }),
     invoke: vi.fn(async () => { events.push('provider'); return { value: [vector()], response: [vector()] }; }),
   };
-  const provider: EmbeddingProvider = { id, dim: 768, local: true, batchSize: 32, pipelineAdapter: adapter,
+  const provider: EmbeddingProvider = { id, dim: 768, local: true, target, batchSize: 32, pipelineAdapter: adapter,
     embed: vi.fn(async () => { throw new Error('Use accounted dispatch only'); }) };
   const profile: BudgetProfile = { ...starterProfile, id: 'embedding-worker-test', maxConcurrency: 1 };
   const claim: EmbeddingJobClaim = { id: 'batch', owner: 'worker', generation: '4', target: target.fingerprint,
@@ -48,6 +48,14 @@ function fixture(id = 'local:worker-test') {
 afterEach(() => { vi.useRealTimers(); });
 
 describe('embedding worker preparation contract', () => {
+  it('reports pending original accounting as an unsuccessful shutdown', async () => {
+    const f = fixture('local:accounting-shutdown');
+    f.store.unsettledAccounting=()=>true;
+    const worker = new EmbeddingJobWorker(f.store, [{ target:f.target, policy:f.policy, provider:f.provider, profile:f.profile }], 'worker');
+    expect(await worker.stop()).toEqual({ settled:false });
+    expect(await worker.stop()).toEqual({ settled:false });
+    expect(f.adapter.invoke).not.toHaveBeenCalled();
+  });
   it('commits dispatch authority before provider work and settlement before atomic apply', async () => {
     const f = fixture();
     expect(await f.run()).toBe('processed');

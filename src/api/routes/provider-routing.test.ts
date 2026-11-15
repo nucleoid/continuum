@@ -6,13 +6,14 @@ import { EmbeddingRegistry, ScopeEmbeddingRouter } from '../../embeddings/router
 import { StubEmbeddingProvider } from '../../embeddings/stub.js';
 import { addMembership } from '../../storage/memberships.js';
 import { createPrincipal } from '../../storage/principals.js';
-import { createScope } from '../../storage/scopes.js';
+import { createScope, getScopeByRef } from '../../storage/scopes.js';
 import { makeTestPool, resetData } from '../../storage/test-helpers.js';
 import { createApp } from '../server.js';
 import { captureMemory } from '../../services/capture.js';
 import { promoteForPrincipal } from '../../services/lifecycle.js';
 import { supersedeForPrincipal } from '../../services/supersede.js';
 import { createMemory } from '../../storage/memories.js';
+import { registerEmbeddingTargetForTest, seedEmbeddingVectorForTest, withSyntheticTargetForTest } from '../../embeddings/test-helpers.js';
 
 describe('scope-pinned embedding routing', () => {
   let pool: pg.Pool;
@@ -36,7 +37,7 @@ describe('scope-pinned embedding routing', () => {
   }
 
   it('routes capture by scope and embeds recall once per provider group', async () => {
-    await seedActor();
+    const { team, project } = await seedActor();
     const localEmbed = vi.fn(async (texts: string[]) => vectors.embed(texts));
     const hostedEmbed = vi.fn(async (texts: string[]) => vectors.embed(texts));
     const local: EmbeddingProvider = {
@@ -55,6 +56,10 @@ describe('scope-pinned embedding routing', () => {
         ],
       },
     );
+    const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
+    await registerEmbeddingTargetForTest(pool, withSyntheticTargetForTest(hosted), [org.id]);
+    const policy = await registerEmbeddingTargetForTest(pool, withSyntheticTargetForTest(local), [team.id, project.id]);
+    Object.assign(router, { queuePolicy: policy });
     const app = createApp(pool, { embeddingProvider: router });
 
     for (const [kind, name] of [['team', 'payments'], ['project', 'shop']] as const) {
@@ -65,9 +70,13 @@ describe('scope-pinned embedding routing', () => {
           body: 'Material without query terms.', source: 'manual',
         });
       expect(response.status).toBe(201);
+      expect(response.body).toMatchObject({ embedded: false, embeddingStatus: 'queued', related: [] });
+      expect(localEmbed).not.toHaveBeenCalled();
+      await seedEmbeddingVectorForTest(pool, pool, response.body.id,
+        (await vectors.embed([`${kind} vector\n\nMaterial without query terms.`]))[0], local);
     }
     expect(hostedEmbed).not.toHaveBeenCalled();
-    expect(localEmbed).toHaveBeenCalledTimes(2);
+    expect(localEmbed).not.toHaveBeenCalled();
     localEmbed.mockClear();
     hostedEmbed.mockClear();
 
@@ -104,6 +113,7 @@ describe('scope-pinned embedding routing', () => {
       });
     expect(captured.status).toBe(201);
     expect(captured.body.embedded).toBe(false);
+    expect(captured.body.embeddingStatus).toBe('blocked_policy');
     expect(hostedEmbed).not.toHaveBeenCalled();
 
     const recalled = await request(app).post('/api/v0/recall')
@@ -121,6 +131,7 @@ describe('scope-pinned embedding routing', () => {
       id: 'ollama:down', dim: 768, local: true,
       async embed() { throw new Error('offline private detail'); },
     };
+    await registerEmbeddingTargetForTest(pool, withSyntheticTargetForTest(failing));
     const app = createApp(pool, { embeddingProvider: failing });
     const captured = await request(app).post('/api/v0/capture')
       .set('Authorization', 'Bearer entra:routing')
@@ -147,6 +158,9 @@ describe('scope-pinned embedding routing', () => {
       scope: { kind: 'project', name: 'shop' }, type: 'decision',
       title: 'Promotion boundary', body: 'Provider spaces stay scoped.', source: 'manual',
     });
+    await seedEmbeddingVectorForTest(pool, pool, source.memory.id,
+      (await vectors.embed(['Promotion boundary\n\nProvider spaces stay scoped.']))[0], hosted);
+    expect((await pool.query('SELECT 1 FROM memory_embeddings WHERE memory_id=$1', [source.memory.id])).rowCount).toBe(1);
 
     const promoted = await promoteForPrincipal(
       pool, principal, source.memory.id, { kind: 'team', name: 'payments' },
@@ -154,7 +168,7 @@ describe('scope-pinned embedding routing', () => {
     const { rows } = await pool.query(
       'SELECT memory_id, provider FROM memory_embeddings ORDER BY memory_id',
     );
-    expect(rows).toEqual([{ memory_id: source.memory.id, provider: hosted.id }]);
+    expect(rows).toEqual([]);
     expect(rows.some((row) => row.memory_id === promoted.destination.id)).toBe(false);
   });
 
@@ -180,6 +194,8 @@ describe('scope-pinned embedding routing', () => {
       title: 'Original route', body: 'Original decision.', authorId: principal.id,
       source: 'manual',
     });
+    await registerEmbeddingTargetForTest(pool, withSyntheticTargetForTest(hosted));
+    await registerEmbeddingTargetForTest(pool, withSyntheticTargetForTest(local), [project.id]);
 
     const result = await supersedeForPrincipal(pool, router, principal, {
       supersededId: predecessor.id, title: 'Routed head', body: 'Replacement decision.',

@@ -1,5 +1,5 @@
-import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import type pg from 'pg';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import pg from 'pg';
 import {
   EmbeddingItemError,
   EmbeddingProviderError,
@@ -7,10 +7,11 @@ import {
 } from '../embeddings/provider.js';
 import { OpenAIEmbeddingProvider, VoyageEmbeddingProvider } from '../embeddings/hosted.js';
 import { OllamaEmbeddingProvider } from '../embeddings/ollama.js';
-import { EmbeddingRegistry, ScopeEmbeddingRouter } from '../embeddings/router.js';
+import { asEmbeddingRouter, EmbeddingRegistry, ScopeEmbeddingRouter } from '../embeddings/router.js';
+import { registerEmbeddingTargetForTest, seedEmbeddingVectorForTest, withSyntheticTargetForTest } from '../embeddings/test-helpers.js';
 import { StubEmbeddingProvider } from '../embeddings/stub.js';
 import { createMemory } from '../storage/memories.js';
-import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
+import { admitMemoryEmbedding, storeMemoryEmbeddingVector } from '../storage/embeddings.js';
 import { createPrincipal } from '../storage/principals.js';
 import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
@@ -19,13 +20,33 @@ import { runEmbeddingBackfill } from './embed-backfill.js';
 
 describe('embedding backfill', () => {
   let pool: pg.Pool;
+  let fixtureOwner: pg.Pool;
   const vectors = new StubEmbeddingProvider();
 
   beforeEach(async () => {
     pool ??= await makeTestPool();
     await resetData(pool);
+    fixtureOwner = new pg.Pool({ ...pool.options, max: 1 });
   });
+  afterEach(async () => fixtureOwner?.end());
   afterAll(async () => pool?.end());
+
+  // Explicit owner-only fixture approval precedes each subject invocation. Its
+  // separate connection is outside injected APP/client faults. Only scope
+  // metadata is inspected; count/manual-failure tests still never hydrate bodies.
+  async function runConfiguredEmbeddingBackfill(connection: Parameters<typeof runEmbeddingBackfill>[0],
+    routing: Parameters<typeof runEmbeddingBackfill>[1], options: Parameters<typeof runEmbeddingBackfill>[2] = {}) {
+    const router = asEmbeddingRouter(routing);
+    const scopes = (await fixtureOwner.query<{ id: string; kind: 'org'|'team'|'project'|'user'|'role'; name: string }>(
+      'SELECT id,kind,name FROM scopes ORDER BY id')).rows;
+    for (const provider of router.providers()) {
+      if (provider.dim !== 768) continue;
+      const configured = withSyntheticTargetForTest(provider);
+      const selected = scopes.filter(scope => router.resolve(scope).provider === provider).map(scope => scope.id);
+      await registerEmbeddingTargetForTest(fixtureOwner, configured, selected);
+    }
+    return runEmbeddingBackfill(connection, routing, options);
+  }
 
   async function seed(scopeKind: 'team' | 'project', scopeName: string, titles: string[]) {
     const principal = await createPrincipal(pool, {
@@ -61,7 +82,7 @@ describe('embedding backfill', () => {
       },
     );
 
-    const report = await runEmbeddingBackfill(pool, router, { batchSize: 8, maxRows: 10 });
+    const report = await runConfiguredEmbeddingBackfill(pool, router, { batchSize: 8, maxRows: 10 });
 
     expect(report.embedded).toBe(2);
     expect(localEmbed.mock.calls.flatMap(([texts]) => texts).join(' ')).toContain('local only secret');
@@ -80,10 +101,10 @@ describe('embedding backfill', () => {
       embed: (texts) => vectors.embed(texts),
     };
 
-    const first = await runEmbeddingBackfill(pool, provider, { batchSize: 1, maxRows: 1 });
-    const second = await runEmbeddingBackfill(pool, provider, { batchSize: 1, maxRows: 1 });
-    await runEmbeddingBackfill(pool, provider, { batchSize: 8, maxRows: 10 });
-    const final = await runEmbeddingBackfill(pool, provider, { batchSize: 8, maxRows: 10 });
+    const first = await runConfiguredEmbeddingBackfill(pool, provider, { batchSize: 1, maxRows: 1 });
+    const second = await runConfiguredEmbeddingBackfill(pool, provider, { batchSize: 1, maxRows: 1 });
+    await runConfiguredEmbeddingBackfill(pool, provider, { batchSize: 8, maxRows: 10 });
+    const final = await runConfiguredEmbeddingBackfill(pool, provider, { batchSize: 8, maxRows: 10 });
 
     expect(first).toMatchObject({ embedded: 1, completed: false });
     expect(second).toMatchObject({ embedded: 1, completed: false });
@@ -102,9 +123,9 @@ describe('embedding backfill', () => {
       embed: (texts) => vectors.embed(texts),
     };
     const [oldVector] = await oldProvider.embed(['old']);
-    await storeMemoryEmbeddingVector(pool, memories[0]!.id, oldVector!, oldProvider);
+    await seedEmbeddingVectorForTest(fixtureOwner, pool, memories[0]!.id, oldVector!, oldProvider);
 
-    await runEmbeddingBackfill(pool, newProvider, { maxRows: 10 });
+    await runConfiguredEmbeddingBackfill(pool, newProvider, { maxRows: 10 });
 
     const rows = await pool.query(
       'SELECT provider FROM memory_embeddings WHERE memory_id = $1 ORDER BY provider',
@@ -123,7 +144,7 @@ describe('embedding backfill', () => {
       },
     };
 
-    const report = await runEmbeddingBackfill(pool, provider, { maxRows: 10 });
+    const report = await runConfiguredEmbeddingBackfill(pool, provider, { maxRows: 10 });
 
     expect(report).toMatchObject({ embedded: 0, failed: 0, completed: true });
     expect((await pool.query(
@@ -137,7 +158,9 @@ describe('embedding backfill', () => {
     const memoryId = memories[0]!.id;
     const lifecycle = await pool.connect();
     const writer = await pool.connect();
-    const provider = { id: 'ollama:archive-lock-race', dim: 768 };
+    const provider = withSyntheticTargetForTest({ id: 'ollama:archive-lock-race', dim: 768 });
+    await registerEmbeddingTargetForTest(fixtureOwner, provider, [memories[0]!.scopeId]);
+    const admission = (await admitMemoryEmbedding(writer, memoryId, provider))!;
     const vector = (await vectors.embed(['archive me']))[0]!;
     const lockKey = 34_065;
     const backend = await writer.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
@@ -166,7 +189,7 @@ describe('embedding backfill', () => {
         [memoryId],
       );
       await lifecycle.query('DELETE FROM memory_embeddings WHERE memory_id = $1', [memoryId]);
-      const write = storeMemoryEmbeddingVector(writer, memoryId, vector, provider);
+      const write = storeMemoryEmbeddingVector(writer, memoryId, vector, provider, admission);
       let waiting = false;
       for (let attempt = 0; attempt < 100 && !waiting; attempt += 1) {
         const activity = await pool.query<{ waiting: boolean }>(
@@ -209,7 +232,7 @@ describe('embedding backfill', () => {
       },
     };
 
-    const report = await runEmbeddingBackfill(pool, provider, { maxRows: 10 });
+    const report = await runConfiguredEmbeddingBackfill(pool, provider, { maxRows: 10 });
 
     expect(report).toMatchObject({ embedded: 0, failed: 0, completed: true });
     expect((await pool.query(
@@ -228,7 +251,7 @@ describe('embedding backfill', () => {
     const client = await pool.connect();
     await client.query('SELECT pg_advisory_lock(hashtextextended($1, 0))', [lockName]);
     try {
-      await expect(runEmbeddingBackfill(pool, provider, {
+      await expect(runConfiguredEmbeddingBackfill(pool, provider, {
         maxRows: 10, scope: { kind: 'project', name: 'locked' },
       }))
         .rejects.toThrow(/already running/i);
@@ -250,7 +273,7 @@ describe('embedding backfill', () => {
       },
     };
 
-    const report = await runEmbeddingBackfill(pool, provider, {
+    const report = await runConfiguredEmbeddingBackfill(pool, provider, {
       batchSize: 3, maxRows: 10,
     });
 
@@ -274,7 +297,7 @@ describe('embedding backfill', () => {
     const provider: EmbeddingProvider = {
       id: 'ollama:retained-poison-state', dim: 768, local: true, embed,
     };
-    const first = await runEmbeddingBackfill(pool, provider, { maxRows: 10 });
+    const first = await runConfiguredEmbeddingBackfill(pool, provider, { maxRows: 10 });
     expect(first).toMatchObject({ failed: 1, completed: true });
 
     const admin = await createPrincipal(pool, {
@@ -301,7 +324,7 @@ describe('embedding backfill', () => {
         WHERE metadata->>'operation' = 'embedding_backfill'`,
     )).rows[0].count).toBe(0);
 
-    const resumed = await runEmbeddingBackfill(pool, provider, { maxRows: 10 });
+    const resumed = await runConfiguredEmbeddingBackfill(pool, provider, { maxRows: 10 });
 
     expect(resumed).toMatchObject({ embedded: 0, failed: 0, completed: true });
     expect(embed).toHaveBeenCalledTimes(1);
@@ -317,14 +340,14 @@ describe('embedding backfill', () => {
     const provider: EmbeddingProvider = {
       id: 'ollama:controlled-poison-retry', dim: 768, local: true, embed,
     };
-    await runEmbeddingBackfill(pool, provider, { maxRows: 10 });
+    await runConfiguredEmbeddingBackfill(pool, provider, { maxRows: 10 });
     reject = false;
 
-    const suppressed = await runEmbeddingBackfill(pool, provider, { maxRows: 10 });
+    const suppressed = await runConfiguredEmbeddingBackfill(pool, provider, { maxRows: 10 });
     expect(suppressed).toMatchObject({ embedded: 0, failuresCleared: 0 });
     expect(embed).toHaveBeenCalledTimes(1);
 
-    const retried = await runEmbeddingBackfill(pool, provider, {
+    const retried = await runConfiguredEmbeddingBackfill(pool, provider, {
       providerId: provider.id, retryFailures: true, maxRows: 10,
     });
     expect(retried).toMatchObject({ embedded: 1, failed: 0, failuresCleared: 1, completed: true });
@@ -355,7 +378,7 @@ describe('embedding backfill', () => {
       apiKey: '***', model: 'model', dim: 768, fetchImpl,
     });
 
-    const report = await runEmbeddingBackfill(pool, provider, { batchSize: 4, maxRows: 10 });
+    const report = await runConfiguredEmbeddingBackfill(pool, provider, { batchSize: 4, maxRows: 10 });
 
     expect(report).toMatchObject({ embedded: 4, failed: 0, completed: true });
     expect(fetchImpl).toHaveBeenCalledTimes(3);
@@ -384,7 +407,7 @@ describe('embedding backfill', () => {
       id: `hosted:ambiguous-${_label}`, dim: 768, local: false, embed,
     };
 
-    const report = await runEmbeddingBackfill(pool, provider, { batchSize: 4, maxRows: 10 });
+    const report = await runConfiguredEmbeddingBackfill(pool, provider, { batchSize: 4, maxRows: 10 });
 
     expect(report).toMatchObject({ embedded: 3, failed: 0, completed: false });
     expect(report.unresolvedIds).toEqual([memories[1]!.id]);
@@ -403,7 +426,7 @@ describe('embedding backfill', () => {
     const provider: EmbeddingProvider = {
       id: 'hosted:ambiguous-outage', dim: 768, local: false, embed,
     };
-    const report = await runEmbeddingBackfill(pool, provider, { batchSize: 4, maxRows: 10 });
+    const report = await runConfiguredEmbeddingBackfill(pool, provider, { batchSize: 4, maxRows: 10 });
     expect(report).toMatchObject({ embedded: 0, failed: 0, completed: false });
     expect(report.providerReports).toEqual([
       expect.objectContaining({ provider: provider.id, errorCode: 'EMBEDDING_SERVER' }),
@@ -429,7 +452,7 @@ describe('embedding backfill', () => {
         rules: [{ match: { kind: 'team', name: 'failed-provider-scope' }, provider: 'failed' }],
       },
     );
-    const report = await runEmbeddingBackfill(pool, router, { maxRows: 10 });
+    const report = await runConfiguredEmbeddingBackfill(pool, router, { maxRows: 10 });
     expect(report).toMatchObject({ embedded: 1, completed: false });
     expect(report.providerReports).toEqual(expect.arrayContaining([
       expect.objectContaining({ provider: failed.id, errorCode: 'EMBEDDING_AUTH' }),
@@ -443,7 +466,7 @@ describe('embedding backfill', () => {
     const provider: EmbeddingProvider = {
       id: 'hosted:small-batches', dim: 768, local: false, batchSize: 2, embed,
     };
-    await runEmbeddingBackfill(pool, provider, { batchSize: 5, maxRows: 10 });
+    await runConfiguredEmbeddingBackfill(pool, provider, { batchSize: 5, maxRows: 10 });
     expect(embed.mock.calls.map(([texts]) => texts.length)).toEqual([2, 2, 1]);
   });
 
@@ -454,18 +477,18 @@ describe('embedding backfill', () => {
     const provider: EmbeddingProvider = {
       id: 'ollama:operator-escape', dim: 768, local: true, embed,
     };
-    const noWrap = await runEmbeddingBackfill(pool, provider, {
+    const noWrap = await runConfiguredEmbeddingBackfill(pool, provider, {
       providerId: provider.id, cursor: upper!.id, noWrap: true, maxRows: 10,
     });
     expect(noWrap).toMatchObject({ completed: true, embedded: 0 });
     expect(embed).not.toHaveBeenCalled();
 
-    const progressed = await runEmbeddingBackfill(pool, provider, {
+    const progressed = await runConfiguredEmbeddingBackfill(pool, provider, {
       providerId: provider.id, batchSize: 1, maxRows: 1,
     });
     expect(progressed).toMatchObject({ embedded: 1, completed: false, cursor: lower!.id });
 
-    const marked = await runEmbeddingBackfill(pool, provider, {
+    const marked = await runConfiguredEmbeddingBackfill(pool, provider, {
       providerId: provider.id, markFailed: upper!.id, maxRows: 10,
     });
     expect(marked).toMatchObject({ failed: 1, completed: false, cursor: lower!.id });
@@ -504,7 +527,7 @@ describe('embedding backfill', () => {
       [requested.id, requested.dim, 'project:mark-unrouted', savedCursor],
     );
 
-    const report = await runEmbeddingBackfill(pool, router, {
+    const report = await runConfiguredEmbeddingBackfill(pool, router, {
       providerId: requested.id,
       scope: { kind: 'project', name: 'mark-unrouted' },
       markFailed: memories[0]!.id,
@@ -537,7 +560,7 @@ describe('embedding backfill', () => {
       },
     };
 
-    const exhausted = await runEmbeddingBackfill(pool, provider, {
+    const exhausted = await runConfiguredEmbeddingBackfill(pool, provider, {
       batchSize: 3, maxRows: 10, maxErrors: 1,
     });
     expect(exhausted).toMatchObject({
@@ -556,7 +579,7 @@ describe('embedding backfill', () => {
     );
     expect(checkpoint.rows[0].cursor).toBe(memories[1]!.id);
 
-    const resumed = await runEmbeddingBackfill(pool, provider, {
+    const resumed = await runConfiguredEmbeddingBackfill(pool, provider, {
       batchSize: 3, maxRows: 10, maxErrors: 1,
     });
     expect(resumed.failed).toBe(0);
@@ -569,7 +592,7 @@ describe('embedding backfill', () => {
       [memories[1]!.id],
     )).rows[0].count).toBe(1);
 
-    const settled = await runEmbeddingBackfill(pool, provider, {
+    const settled = await runConfiguredEmbeddingBackfill(pool, provider, {
       batchSize: 3, maxRows: 10, maxErrors: 1,
     });
     expect(settled).toMatchObject({ embedded: 0, failed: 0, completed: true, cursor: null });
@@ -612,7 +635,7 @@ describe('embedding backfill', () => {
 
     const report = await (async () => {
       try {
-        return await runEmbeddingBackfill(pool, provider, { batchSize: 2, maxRows: 10 });
+        return await runConfiguredEmbeddingBackfill(pool, provider, { batchSize: 2, maxRows: 10 });
       } finally {
         restoreQuery();
         connect.mockRestore();
@@ -639,7 +662,7 @@ describe('embedding backfill', () => {
       [provider.id, provider.dim, upper!.id],
     );
 
-    const report = await runEmbeddingBackfill(pool, provider, {
+    const report = await runConfiguredEmbeddingBackfill(pool, provider, {
       providerId: provider.id, cursor: upper!.id, batchSize: 2, maxRows: 10,
     });
 
@@ -675,7 +698,7 @@ describe('embedding backfill', () => {
       return client;
     });
 
-    await expect(runEmbeddingBackfill(pool, provider, { maxRows: 10 }))
+    await expect(runConfiguredEmbeddingBackfill(pool, provider, { maxRows: 10 }))
       .resolves.toMatchObject({ embedded: 1 });
     expect(release).toHaveBeenCalledWith(true);
     connect.mockRestore();
@@ -704,7 +727,7 @@ describe('embedding backfill', () => {
 
     let report;
     try {
-      report = await runEmbeddingBackfill(pool, provider, { maxRows: 10 });
+      report = await runConfiguredEmbeddingBackfill(pool, provider, { maxRows: 10 });
     } finally {
       restoreQuery();
       connect.mockRestore();
@@ -760,7 +783,7 @@ describe('embedding backfill', () => {
       }) as typeof fetch;
       const provider = createProvider(fetchImpl);
 
-      const report = await runEmbeddingBackfill(pool, provider, {
+      const report = await runConfiguredEmbeddingBackfill(pool, provider, {
         batchSize: 4, maxRows: 10,
       });
 
@@ -798,7 +821,7 @@ describe('embedding backfill', () => {
       headers: { 'content-type': 'application/json' },
     })) as typeof fetch;
 
-    const report = await runEmbeddingBackfill(pool, createProvider(fetchImpl), {
+    const report = await runConfiguredEmbeddingBackfill(pool, createProvider(fetchImpl), {
       batchSize: 4, maxRows: 10,
     });
 
@@ -825,7 +848,7 @@ describe('embedding backfill', () => {
       id: 'ollama:outage', dim: 768, local: true, embed,
     };
 
-    const report = await runEmbeddingBackfill(pool, provider, {
+    const report = await runConfiguredEmbeddingBackfill(pool, provider, {
       batchSize: 4, maxRows: 10,
     });
 
@@ -846,7 +869,7 @@ describe('embedding backfill', () => {
       id: 'ollama:invalid-response', dim: 768, local: true, embed,
     };
 
-    const report = await runEmbeddingBackfill(pool, provider, { batchSize: 3, maxRows: 10 });
+    const report = await runConfiguredEmbeddingBackfill(pool, provider, { batchSize: 3, maxRows: 10 });
     expect(report).toMatchObject({ embedded: 0, failed: 0, completed: false });
     expect(report.providerReports[0]).toMatchObject({ errorCode: 'EMBEDDING_INVALID_RESPONSE' });
     expect(embed.mock.calls.length).toBeGreaterThan(1);
@@ -871,7 +894,7 @@ describe('embedding backfill', () => {
       id: 'voyage:diagnostic-token-limit', dim: 768, local: false, embed,
     };
 
-    const report = await runEmbeddingBackfill(pool, provider, { batchSize: 4, maxRows: 10 });
+    const report = await runConfiguredEmbeddingBackfill(pool, provider, { batchSize: 4, maxRows: 10 });
 
     expect(report).toMatchObject({ embedded: 3, failed: 1, completed: true });
     expect(report.errorCodes).toEqual([]);
@@ -890,7 +913,7 @@ describe('embedding backfill', () => {
       id: 'openai:transient-suspect', dim: 768, local: false, embed,
     };
 
-    const first = await runEmbeddingBackfill(pool, provider, { batchSize: 3, maxRows: 10 });
+    const first = await runConfiguredEmbeddingBackfill(pool, provider, { batchSize: 3, maxRows: 10 });
     expect(first).toMatchObject({ embedded: 2, failed: 0, completed: false });
     expect(first.unresolvedIds).toEqual([memories[1]!.id]);
     expect((await pool.query(
@@ -899,7 +922,7 @@ describe('embedding backfill', () => {
     )).rows).toEqual([{ disposition: 'suspect', reason: 'EMBEDDING_SERVER' }]);
 
     unhealthy = false;
-    const second = await runEmbeddingBackfill(pool, provider, { batchSize: 3, maxRows: 10 });
+    const second = await runConfiguredEmbeddingBackfill(pool, provider, { batchSize: 3, maxRows: 10 });
     expect(second).toMatchObject({ embedded: 1, failed: 0, completed: true });
     expect(second.unresolvedIds).toEqual([]);
     expect((await pool.query(
@@ -937,7 +960,7 @@ describe('embedding backfill', () => {
       },
     };
 
-    const first = await runEmbeddingBackfill(pool, provider, {
+    const first = await runConfiguredEmbeddingBackfill(pool, provider, {
       providerId: provider.id, cursor: ordered[0]!.id,
       noWrap: true, batchSize: 3, maxRows: 10,
     });
@@ -948,7 +971,7 @@ describe('embedding backfill', () => {
     });
 
     ambiguous = false;
-    const retry = await runEmbeddingBackfill(pool, provider, {
+    const retry = await runConfiguredEmbeddingBackfill(pool, provider, {
       providerId: provider.id, cursor: first.cursor!,
       noWrap: true, batchSize: 3, maxRows: 10,
     });
@@ -969,7 +992,7 @@ describe('embedding backfill', () => {
       id: 'ollama:single-ambiguous', dim: 768, local: true, embed,
     };
 
-    const report = await runEmbeddingBackfill(pool, provider, { batchSize: 1, maxRows: 10 });
+    const report = await runConfiguredEmbeddingBackfill(pool, provider, { batchSize: 1, maxRows: 10 });
 
     expect(report).toMatchObject({ embedded: 0, failed: 0, completed: false });
     expect(report.errorCodes).toEqual(['EMBEDDING_SERVER']);
@@ -996,7 +1019,7 @@ describe('embedding backfill', () => {
       id: 'ollama:partial-invalid', dim: 768, local: true, embed,
     };
 
-    const report = await runEmbeddingBackfill(pool, provider, { batchSize: 3, maxRows: 10 });
+    const report = await runConfiguredEmbeddingBackfill(pool, provider, { batchSize: 3, maxRows: 10 });
 
     expect(report).toMatchObject({ embedded: 3, failed: 0, completed: true });
     expect(embed.mock.calls.map(([texts]) => texts.length)).toEqual([3, 1]);
@@ -1022,7 +1045,7 @@ describe('embedding backfill', () => {
     const lockClient = await pool.connect();
     await lockClient.query('SELECT pg_advisory_lock(hashtextextended($1, 0))', [lockName]);
     try {
-      const report = await runEmbeddingBackfill(pool, router, { maxRows: 10 });
+      const report = await runConfiguredEmbeddingBackfill(pool, router, { maxRows: 10 });
       expect(report).toMatchObject({ embedded: 1, completed: false });
       expect(report.providerReports).toEqual(expect.arrayContaining([
         expect.objectContaining({ provider: lockedProvider.id, errorCode: 'BACKFILL_LOCK' }),
@@ -1041,8 +1064,8 @@ describe('embedding backfill', () => {
       id: 'ollama:preview', dim: 768, local: true, embed,
     };
 
-    const count = await runEmbeddingBackfill(pool, provider, { countOnly: true });
-    const dryRun = await runEmbeddingBackfill(pool, provider, { dryRun: true, maxRows: 1 });
+    const count = await runConfiguredEmbeddingBackfill(pool, provider, { countOnly: true });
+    const dryRun = await runConfiguredEmbeddingBackfill(pool, provider, { dryRun: true, maxRows: 1 });
 
     expect(count).toMatchObject({ eligible: 2, embedded: 0 });
     expect(dryRun).toMatchObject({ eligible: 1, embedded: 0 });
@@ -1059,7 +1082,7 @@ describe('embedding backfill', () => {
       id: 'hosted:bounded-brownout', dim: 768, local: false, embed,
     };
 
-    const report = await runEmbeddingBackfill(pool, provider, { batchSize: 32, maxRows: 32 });
+    const report = await runConfiguredEmbeddingBackfill(pool, provider, { batchSize: 32, maxRows: 32 });
 
     expect(report).toMatchObject({ completed: false, errorCodes: ['EMBEDDING_SERVER'] });
     expect(embed.mock.calls.length).toBeLessThanOrEqual(10);
@@ -1085,7 +1108,7 @@ describe('embedding backfill', () => {
       .filter((memory) => memory.id < firstPoison.id && !memory.title.includes('poison'))
       .map((memory) => ({ memory_id: memory.id }));
 
-    const report = await runEmbeddingBackfill(pool, provider, {
+    const report = await runConfiguredEmbeddingBackfill(pool, provider, {
       batchSize: 4, maxRows: 10, maxErrors: 1,
     });
 
@@ -1130,7 +1153,7 @@ describe('embedding backfill', () => {
       id: 'hosted:diagnostic-budget-ambiguous', dim: 768, local: false, embed,
     };
 
-    const report = await runEmbeddingBackfill(pool, provider, {
+    const report = await runConfiguredEmbeddingBackfill(pool, provider, {
       batchSize: 4, maxRows: 10, maxErrors: 1,
     });
 
@@ -1177,7 +1200,7 @@ describe('embedding backfill', () => {
       },
     };
 
-    const report = await runEmbeddingBackfill(pool, provider, {
+    const report = await runConfiguredEmbeddingBackfill(pool, provider, {
       batchSize: 4, maxRows: 10, maxErrors: 1,
     });
 
@@ -1214,7 +1237,7 @@ describe('embedding backfill', () => {
       id: 'hosted:diagnostic-partial-invalid', dim: 768, local: false, embed,
     };
 
-    const report = await runEmbeddingBackfill(pool, provider, { batchSize: 4, maxRows: 10 });
+    const report = await runConfiguredEmbeddingBackfill(pool, provider, { batchSize: 4, maxRows: 10 });
 
     expect(report).toMatchObject({ embedded: 4, failed: 0, completed: true });
     expect(report.errorCodes).toEqual([]);
@@ -1233,7 +1256,7 @@ describe('embedding backfill', () => {
       id: 'hosted:top-level-partial-invalid', dim: 768, local: false, embed,
     };
 
-    const report = await runEmbeddingBackfill(pool, provider, { batchSize: 3, maxRows: 10 });
+    const report = await runConfiguredEmbeddingBackfill(pool, provider, { batchSize: 3, maxRows: 10 });
 
     expect(report).toMatchObject({
       embedded: 2, failed: 0, completed: false,
@@ -1278,7 +1301,7 @@ describe('embedding backfill', () => {
       },
     };
 
-    const report = await runEmbeddingBackfill(pool, provider, { batchSize: 10, maxRows: 10 });
+    const report = await runConfiguredEmbeddingBackfill(pool, provider, { batchSize: 10, maxRows: 10 });
 
     expect(report.completed).toBe(false);
     expect((await pool.query(
@@ -1302,7 +1325,7 @@ describe('embedding backfill', () => {
       id: 'hosted:bounded-input-text', dim: 768, local: false, embed,
     };
 
-    const report = await runEmbeddingBackfill(pool, provider, { batchSize: 1000, maxRows: 10 });
+    const report = await runConfiguredEmbeddingBackfill(pool, provider, { batchSize: 1000, maxRows: 10 });
 
     expect(report).toMatchObject({ embedded: 0, failed: 2, completed: true });
     expect(embed).not.toHaveBeenCalled();
@@ -1332,7 +1355,7 @@ describe('embedding backfill', () => {
       connect: vi.fn(async () => ({ query, release: () => client.release() })),
     } as unknown as pg.Pool;
 
-    const report = await runEmbeddingBackfill(observedPool, provider, {
+    const report = await runConfiguredEmbeddingBackfill(observedPool, provider, {
       countOnly: true, batchSize: 1, maxRows: 1,
     });
 
@@ -1367,7 +1390,7 @@ describe('embedding backfill', () => {
       id: 'hosted:bounded-unresolved-report', dim: 768, local: false, embed,
     };
 
-    const report = await runEmbeddingBackfill(pool, provider, { batchSize: 2, maxRows: 52 });
+    const report = await runConfiguredEmbeddingBackfill(pool, provider, { batchSize: 2, maxRows: 52 });
 
     expect(report).toMatchObject({
       completed: false,

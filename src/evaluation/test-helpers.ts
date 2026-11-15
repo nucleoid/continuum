@@ -1,3 +1,4 @@
+import { starterProfile } from '../pipeline/budget.js';
 /** Source-checkout evaluation tooling. Deliberately excluded from the public package. */
 import { createHash, randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
@@ -13,7 +14,7 @@ import { createPrincipal } from '../storage/principals.js';
 import { createScope, getScopeByRef } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import { createMemory } from '../storage/memories.js';
-import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
+import { storeMemoryEmbeddingVector, admitMemoryEmbedding } from '../storage/embeddings.js';
 import { StubEmbeddingProvider } from '../embeddings/stub.js';
 import { recallForPrincipal } from '../services/recall.js';
 import { getMemoryForPrincipal } from '../services/memories.js';
@@ -577,8 +578,8 @@ function fixtureUuid(value: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 const GRANT_HASHES: Record<string, string> = {
-  'grant-application-role.sql': 'ae3846a0e6d9f84254fb80897d63f2dab2c7f90a832a06df4b612df6ebd32e96',
-  'grant-operator-role.sql': '6b7a2dc822f1f25335423ffc145404fdf88d750c6f2aa70324390e6d1a9d4f48',
+  'grant-application-role.sql': '014de09e47d4c0bfd6575b568f25a55e33e86c21021231406b97feab4dbaeb27',
+  'grant-operator-role.sql': 'da5e79effa06ac8cd27f8542d05ab88976f668961c9926b219cbf0cba7f7a8db',
   'grant-sync-role.sql': '35c77a918abbc297d5c1e1fd89902bc99e29ac086147edd5cc973b1879c538c3',
 };
 /** Reviewed standalone SQL emulation, not a general-purpose psql interpreter. */
@@ -703,6 +704,11 @@ export async function runBaseline(corpus: Corpus, databaseUrl: string, head: str
     const syncAllowed = (await sync.query("SELECT has_table_privilege(session_user,'memories','SELECT') AS allowed")).rows[0].allowed;
     if (syncAllowed) throw new Error('SYNC fixture may not read memory payloads');
     const stub = new StubEmbeddingProvider();
+    const vectorProfile = { ...starterProfile, maxConcurrency: 1 };
+    await operator.query('SELECT continuum_operator_embedding_target($1,$2,$3,$4,TRUE)', [actor.id, stub.target, vectorProfile,
+      { seconds: 60, dispatches: 1024, inputBytes: 16777216, tokens: 16777216, spendMicros: 0, rateSchedule: vectorProfile.rateSchedule }]);
+    await operator.query('SELECT continuum_operator_embedding_policy($1,$2,$3)', [actor.id,
+      { default: { target: stub.target!.fingerprint, localOnly: false }, scopes: {}, kinds: {} }, sha256('synthetic-embedding-routing-v1')]);
     type Seeded = { reader: Principal; scoped: Scope; denied: Scope; memories: Map<string, Memory>; references: Map<string, Reference> };
     const shared = new Map<string, Seeded>();
     const prepared = new Map<string, Seeded>();
@@ -720,7 +726,9 @@ export async function runBaseline(corpus: Corpus, databaseUrl: string, head: str
       await owner.query('UPDATE memories SET state=$1, created_at=$2, updated_at=$2 WHERE id=$3', [doc.state, corpus.manifest.clock, memory.id]);
       if (doc.state === 'live') {
         setupCalls++;
-        await storeMemoryEmbeddingVector(owner, memory.id, (await stub.embed([`${doc.title}\n\n${doc.body}`]))[0], stub);
+        const admission = await admitMemoryEmbedding(owner, memory.id, stub);
+        if (!admission) throw new Error('Synthetic embedding source admission failed');
+        await storeMemoryEmbeddingVector(owner, memory.id, (await stub.embed([`${doc.title}\n\n${doc.body}`]))[0], stub, admission);
       }
     };
     for (const split of ['development', 'holdout']) {

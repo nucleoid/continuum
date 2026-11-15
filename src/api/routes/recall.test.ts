@@ -10,6 +10,7 @@ import { createMemory } from '../../storage/memories.js';
 import type { EmbeddingProvider } from '../../embeddings/provider.js';
 import { EmbeddingRegistry, ScopeEmbeddingRouter } from '../../embeddings/router.js';
 import { OllamaEmbeddingProvider } from '../../embeddings/ollama.js';
+import { registerEmbeddingTargetForTest, withSyntheticTargetForTest } from '../../embeddings/test-helpers.js';
 
 describe('POST /api/v0/recall', () => {
   let pool: pg.Pool;
@@ -259,6 +260,7 @@ describe('POST /api/v0/recall', () => {
       async embed() { throw new Error(privateMessage); },
     };
     const logger = { info: vi.fn(), error: vi.fn() };
+    await registerEmbeddingTargetForTest(pool, withSyntheticTargetForTest(failingProvider));
     app = createApp(pool, { embeddingProvider: failingProvider, logger });
     await seedWorld();
 
@@ -330,9 +332,11 @@ describe('POST /api/v0/recall', () => {
         }),
       } as Response;
     });
-    app = createApp(pool, { embeddingProvider: new OllamaEmbeddingProvider({
+    const provider = new OllamaEmbeddingProvider({
       baseUrl: 'http://localhost:11434', model: 'm', dim: 768, timeoutMs: 20, fetchImpl,
-    }) });
+    });
+    await registerEmbeddingTargetForTest(pool, provider);
+    app = createApp(pool, { embeddingProvider: provider });
     await seedWorld();
 
     await request(app)

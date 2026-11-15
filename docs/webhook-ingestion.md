@@ -70,3 +70,5 @@ The non-owner runtime role needs the checked `ingest_deliveries`, capture,
 embedding, and audit privileges in `scripts/grant-application-role.sql`.
 Applying only an offboarding-specific subset is insufficient for webhook
 traffic; do not compensate with table ownership or broad schema privileges.
+
+Successful ingestion now commits its existing delivery reservation, trusted activity attribution, source/audit and durable embedding work together. It performs no post-commit best-effort provider dispatch. New 202 responses add per-memory embedding statuses; replay retains its existing delivery identity and does not enqueue twice. See [deferred embeddings](embedding-queue.md).

@@ -35,9 +35,8 @@ export function embeddingRetryAfterMs(value: string | null, nowMs: number): numb
 export function classifyEmbeddingFailure(error: unknown): EmbeddingFailure {
   if (isEmbeddingItemError(error)) return { code: 'EMBEDDING_ITEM_FAILED', action: 'isolate_item' };
   if (!(error instanceof EmbeddingProviderError)) return { code: 'EMBEDDING_FAILED', action: 'retry' };
-  const failure: EmbeddingFailure = { code: error.code, action: error.code === 'EMBEDDING_AUTH' ? 'park_provider' : 'retry' };
-  // provider.ts will expose this sanitized field in the integration phase.
-  const retry = (error as EmbeddingProviderError & { retryAfterMs?: unknown }).retryAfterMs;
+  const failure: EmbeddingFailure = { code: error.code, action: error.code === 'EMBEDDING_AUTH' || error.configuration === true ? 'park_provider' : 'retry' };
+  const retry = error.retryAfterMs;
   if (typeof retry === 'number' && Number.isSafeInteger(retry) && retry >= 0) {
     failure.retryAfterMs = Math.min(EMBEDDING_RETRY_MAX_MS, Math.max(EMBEDDING_RETRY_MIN_MS, retry));
   }

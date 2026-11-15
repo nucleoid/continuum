@@ -13,6 +13,8 @@ export type ServiceErrorCode =
   | 'IDEMPOTENCY_CONFLICT'
   | 'LEASE_LOST'
   | 'COORDINATION_QUOTA_EXCEEDED'
+  | 'EMBEDDING_QUEUE_QUOTA_EXCEEDED'
+  | 'EMBEDDING_RECEIPT_QUOTA_EXCEEDED'
   | 'FENCING_TOKEN_EXHAUSTED'
   | 'COORDINATION_TIMEOUT'
   | 'PAYLOAD_TOO_LARGE'
@@ -32,6 +34,8 @@ const STATUS_BY_CODE: Record<ServiceErrorCode, number> = {
   IDEMPOTENCY_CONFLICT: 409,
   LEASE_LOST: 409,
   COORDINATION_QUOTA_EXCEEDED: 409,
+  EMBEDDING_QUEUE_QUOTA_EXCEEDED: 409,
+  EMBEDDING_RECEIPT_QUOTA_EXCEEDED: 409,
   FENCING_TOKEN_EXHAUSTED: 409,
   COORDINATION_TIMEOUT: 503,
   PAYLOAD_TOO_LARGE: 413,
@@ -56,6 +60,13 @@ export class ServiceError extends Error {
 }
 
 export function asServiceError(error: unknown): ServiceError {
+  const failure = error as { code?: unknown; message?: unknown } | null;
+  if (failure?.code === 'P0001') {
+    if (failure.message === 'EMBEDDING_QUEUE_QUOTA_EXCEEDED' || failure.message === 'EMBEDDING_RECEIPT_QUOTA_EXCEEDED') {
+      return new ServiceError(failure.message, 'Embedding admission quota is exhausted');
+    }
+    if (failure.message === 'EMBEDDING_CAPTURE_CONFLICT') return new ServiceError('CONFLICT', 'Idempotency key conflicts with a different capture');
+  }
   if (error instanceof BudgetError) return new ServiceError(
     error.reason === 'budget_exhausted' ? 'PAYLOAD_TOO_LARGE' : 'DEPENDENCY_UNAVAILABLE',
     'Pipeline budget does not permit this result', { cause: error });

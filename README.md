@@ -71,10 +71,13 @@ The v0 PostgreSQL schema stores `vector(768)`, so
 dimensions while creating the configured provider instead of failing later
 during capture or recall.
 
-Vector recall uses only rows whose provider ID and dimension exactly match the
-active provider. Changing models therefore leaves existing embedding rows
-untouched and temporarily makes their memories full-text-only until they are
-re-embedded. Switching back to the old model makes those rows usable again.
+Vector recall requires the active provider/dimension, approved immutable model/profile
+space and current source generation. Historical unknown provenance is not inferred.
+Changing models preserves existing rows but does not make a different space
+compatible. Deliberately configured bounded backfill repairs missing current vectors.
+Capture now acknowledges durable source and queued work without provider I/O;
+see [deferred embeddings](./docs/embedding-queue.md) for explicit OP routing,
+worker prerequisites, status and optional 24-hour replay keys.
 Ollama uses the normalized, batch-capable `/api/embed` contract introduced in
 Ollama 0.3.4; older `/api/embeddings` installations are not normalized by
 Continuum and must be upgraded. Hosted providers use their native embeddings endpoint.

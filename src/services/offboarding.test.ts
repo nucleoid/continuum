@@ -4,7 +4,8 @@ import { promisify } from 'node:util';
 import type pg from 'pg';
 import { createAuthenticator } from '../api/auth.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
-import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
+import { admitMemoryEmbedding, storeMemoryEmbeddingVector } from '../storage/embeddings.js';
+import { registerEmbeddingTargetForTest, seedEmbeddingVectorForTest, withSyntheticTargetForTest } from '../embeddings/test-helpers.js';
 import { addMembership } from '../storage/memberships.js';
 import { createMemory } from '../storage/memories.js';
 import { selectGapCandidates } from '../storage/gaps.js';
@@ -75,8 +76,8 @@ describe('offboarding and erasure', () => {
       scopeId: shared.id, scopeKind: 'team', type: 'fact', title: 'Shared title',
       body: 'Shared body', authorId: target.id, source: 'manual',
     });
-    await storeMemoryEmbeddingVector(
-      pool, personalMemory.id, Array(768).fill(0), { id: 'test', dim: 768 },
+    await seedEmbeddingVectorForTest(
+      pool, pool, personalMemory.id, Array(768).fill(0), { id: 'test', dim: 768 },
     );
     return { admin, target, personal, shared, personalMemory, sharedMemory };
   }
@@ -396,7 +397,7 @@ describe('offboarding and erasure', () => {
       title: 'Restored private title', body: 'Restored private body',
       authorId: value.target.id, source: 'terminal-summary',
     });
-    await storeMemoryEmbeddingVector(pool, recaptured.id, Array(768).fill(1), { id: 'test', dim: 768 });
+    await seedEmbeddingVectorForTest(pool, pool, recaptured.id, Array(768).fill(1), { id: 'test', dim: 768 });
     const erasedAgain = await offboardPrincipal(pool, value.admin, value.target.id);
     expect(erasedAgain.alreadyOffboarded).toBe(false);
     expect((await pool.query(
@@ -450,13 +451,21 @@ describe('offboarding and erasure', () => {
         WHERE id = $1`,
       [canonical.id],
     );
-    await pool.query('ALTER TABLE memory_embeddings DISABLE TRIGGER require_embeddable_memory');
-    await pool.query(
-      `INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
-       VALUES ($1, 'test', 768, $3), ($2, 'test', 768, $3)`,
-      [dirty.id, canonical.id, `[${Array(768).fill(0).join(',')}]`],
-    );
-    await pool.query('ALTER TABLE memory_embeddings ENABLE TRIGGER require_embeddable_memory');
+    // Owner-only restored-corruption witness. These NULL-provenance rows are
+    // deliberately impossible through current APP writers; physical repair
+    // must still erase them after a historical restore or owner mistake.
+    await pool.query(`ALTER TABLE memory_embeddings DISABLE TRIGGER require_embeddable_memory;
+      ALTER TABLE memory_embeddings DISABLE TRIGGER embedding_vector_guard`);
+    try {
+      await pool.query(
+        `INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
+         VALUES ($1, 'test', 768, $3), ($2, 'test', 768, $3)`,
+        [dirty.id, canonical.id, `[${Array(768).fill(0).join(',')}]`],
+      );
+    } finally {
+      await pool.query(`ALTER TABLE memory_embeddings ENABLE TRIGGER embedding_vector_guard;
+        ALTER TABLE memory_embeddings ENABLE TRIGGER require_embeddable_memory`);
+    }
     const repaired = await offboardPrincipal(pool, value.admin, value.target.id);
     expect(repaired).toMatchObject({ alreadyOffboarded: false, liveMemories: 1, embeddings: 2 });
     expect((await pool.query('SELECT title, state FROM memories WHERE id = $1', [dirty.id])).rows[0])
@@ -1197,19 +1206,22 @@ describe('offboarding and erasure', () => {
       [value.personalMemory.id])).rows[0].count).toBe(1);
     const archiver = await pool.connect();
     const vector = Array(768).fill(1) as number[];
+    const provider = withSyntheticTargetForTest({ id: 'test', dim: 768 });
+    await registerEmbeddingTargetForTest(pool, provider, [value.personal.id]);
+    const admission = (await admitMemoryEmbedding(pool, value.personalMemory.id, provider))!;
     let lateEmbedding: Promise<boolean> | undefined;
     try {
       await archiver.query('BEGIN');
       await archiver.query(`UPDATE memories SET state = 'archived' WHERE id = $1`, [value.personalMemory.id]);
       lateEmbedding = storeMemoryEmbeddingVector(
-        pool, value.personalMemory.id, vector, { id: 'test', dim: 768 },
+        pool, value.personalMemory.id, vector, provider, admission,
       );
       void lateEmbedding.catch(() => undefined);
       await archiver.query('COMMIT');
       await expect(lateEmbedding).resolves.toBe(false);
       await expect(pool.query(`INSERT INTO memory_embeddings(memory_id,provider,dim,embedding)
         VALUES($1::uuid,'test',768,$2)`, [value.personalMemory.id, `[${vector.join(',')}]`]))
-        .rejects.toThrow(/embedding requires a live memory/i);
+        .rejects.toThrow(/embedding requires a live memory|Embedding source or vector space unavailable/i);
       expect((await pool.query(
         'SELECT count(*)::int AS count FROM memory_embeddings WHERE memory_id = $1',
         [value.personalMemory.id],

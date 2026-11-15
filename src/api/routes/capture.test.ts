@@ -9,6 +9,8 @@ import { addMembership } from '../../storage/memberships.js';
 import type { EmbeddingProvider } from '../../embeddings/provider.js';
 import { OllamaEmbeddingProvider } from '../../embeddings/ollama.js';
 import { captureSources } from '../../capture/source.js';
+import { registerEmbeddingTargetForTest, withSyntheticTargetForTest } from '../../embeddings/test-helpers.js';
+import { staticEmbeddingRouter } from '../../embeddings/router.js';
 
 describe('POST /api/v0/capture', () => {
   let pool: pg.Pool;
@@ -134,17 +136,19 @@ describe('POST /api/v0/capture', () => {
     expect(sideEffects.rows[0]).toEqual({ memories: 0, embeddings: 0, audits: 0 });
   });
 
-  it('commits memory and sanitized audit when the embedding provider fails', async () => {
+  it('commits queued memory and sanitized audit without invoking an offline embedding provider', async () => {
     const privateMessage = 'provider token private-provider-value';
     const provider: EmbeddingProvider = {
       id: 'test:failing',
       dim: 768,
-      async embed() {
+      embed: vi.fn(async () => {
         throw new Error(privateMessage);
-      },
+      }),
     };
-    app = createApp(pool, { embeddingProvider: provider });
-    await seedActor();
+    const { scope } = await seedActor();
+    const configured = withSyntheticTargetForTest(provider);
+    const policy = await registerEmbeddingTargetForTest(pool, configured, [scope.id]);
+    app = createApp(pool, { embeddingProvider: Object.assign(staticEmbeddingRouter(configured), { queuePolicy: policy }) });
 
     const res = await request(app)
       .post('/api/v0/capture')
@@ -163,6 +167,7 @@ describe('POST /api/v0/capture', () => {
       scopeId: expect.any(String),
       expiresAt: expect.any(String),
       embedded: false,
+      embeddingStatus: 'queued',
       related: [],
       extraction: { status: 'not-configured' },
     });
@@ -171,7 +176,11 @@ describe('POST /api/v0/capture', () => {
       'SELECT metadata::text AS metadata FROM audit_log WHERE memory_id = $1',
       [res.body.id],
     );
-    expect(rows[0].metadata).toContain('EMBEDDING_FAILED');
+    expect(rows[0].metadata).toContain('queued');
+    expect(rows[0].metadata).not.toContain('EMBEDDING_FAILED');
+    expect(provider.embed).not.toHaveBeenCalled();
+    expect((await pool.query('SELECT memory_id FROM embedding_jobs WHERE memory_id=$1', [res.body.id])).rows)
+      .toEqual([{ memory_id: res.body.id }]);
     expect(rows[0].metadata).not.toContain(privateMessage);
     expect(rows[0].metadata).not.toContain('private-rest-memory-text');
   });
@@ -179,10 +188,12 @@ describe('POST /api/v0/capture', () => {
   it('audits provider identity and outcome without captured content', async () => {
     const provider: EmbeddingProvider = {
       id: 'ollama:audit-safe', dim: 768, local: true,
-      async embed() { throw new Error('private captured body'); },
+      embed: vi.fn(async () => { throw new Error('private captured body'); }),
     };
-    app = createApp(pool, { embeddingProvider: provider });
-    await seedActor();
+    const { scope } = await seedActor();
+    const configured = withSyntheticTargetForTest(provider);
+    const policy = await registerEmbeddingTargetForTest(pool, configured, [scope.id]);
+    app = createApp(pool, { embeddingProvider: Object.assign(staticEmbeddingRouter(configured), { queuePolicy: policy }) });
 
     const res = await request(app)
       .post('/api/v0/capture')
@@ -196,13 +207,14 @@ describe('POST /api/v0/capture', () => {
       'SELECT metadata FROM audit_log WHERE memory_id = $1', [res.body.id],
     );
     expect(rows[0].metadata).toMatchObject({
-      embedding: { provider: 'ollama:audit-safe', dim: 768, status: 'failed' },
+      embedding: { provider: 'ollama:audit-safe', dim: 768, status: 'queued' },
     });
+    expect(provider.embed).not.toHaveBeenCalled();
     expect(JSON.stringify(rows[0].metadata)).not.toContain('private captured body');
     expect(JSON.stringify(rows[0].metadata)).not.toContain('private title');
   });
 
-  it('degrades capture promptly when Ollama stalls after response headers', async () => {
+  it('acknowledges queued capture without opening a stalled Ollama response', async () => {
     let observedSignal: AbortSignal | undefined;
     const fetchImpl = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
       observedSignal = init?.signal as AbortSignal;
@@ -213,19 +225,23 @@ describe('POST /api/v0/capture', () => {
         }),
       } as Response;
     });
-    app = createApp(pool, { embeddingProvider: new OllamaEmbeddingProvider({
+    const provider = new OllamaEmbeddingProvider({
       baseUrl: 'http://localhost:11434', model: 'm', dim: 768, timeoutMs: 20, fetchImpl,
-    }) });
-    await seedActor();
+    });
+    const { scope } = await seedActor();
+    const policy = await registerEmbeddingTargetForTest(pool, provider, [scope.id]);
+    app = createApp(pool, { embeddingProvider: Object.assign(staticEmbeddingRouter(provider), { queuePolicy: policy }) });
 
     await request(app)
       .post('/api/v0/capture')
       .set('Authorization', 'Bearer entra:user:capture')
       .send({ scope: { kind: 'team', name: 'payments' }, type: 'fact',
         title: 'stalled', body: 'private', source: 'manual' })
-      .expect(201);
+      .expect(201)
+      .expect((response) => expect(response.body).toMatchObject({ embeddingStatus: 'queued', embedded: false, related: [] }));
 
-    expect(observedSignal?.aborted).toBe(true);
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(observedSignal).toBeUndefined();
   });
 
   it('rejects writes to a scope that does not exist', async () => {

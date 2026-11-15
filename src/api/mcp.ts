@@ -18,7 +18,7 @@ import { getPool } from '../storage/pool.js';
 import { makeEmbeddingRouterFromEnv } from '../embeddings/factory.js';
 import { isDirectEntrypoint } from './entrypoint.js';
 import { applicationSchemaFromEnv, reconcilePgvectorProviderGrants, requireCoordinationContractReady, requirePromotionOutboxReady, requireStandupReady } from '../storage/provider-lifecycle.js';
-import { requirePipelineBudgetsReady, requireEvidenceReady, requireExtractionReady, requireEventTimeReady, requireConnectorEvidenceReady } from '../storage/provider-lifecycle.js';
+import { requirePipelineBudgetsReady, requireEvidenceReady, requireExtractionReady, requireEventTimeReady, requireConnectorEvidenceReady, requireEmbeddingQueueReady } from '../storage/provider-lifecycle.js';
 import { configureExtraction, extractionForPrincipal, retryExtraction } from '../services/extraction.js';
 import { accessibleScopes } from '../services/access.js';
 import { captureMemory, type CaptureResult } from '../services/capture.js';
@@ -125,6 +125,9 @@ function mcpMemory(record: MemoryReadRecord) {
   const { memory } = record;
   return {
     id: memory.id,
+    ...(record.embedding ? { embedding_status: record.embedding.embeddingStatus, embedded: record.embedding.embedded,
+      embedding: { attempts: record.embedding.attempts, accepted_at: record.embedding.acceptedAt,
+        completed_at: record.embedding.completedAt, next_attempt_at: record.embedding.nextAttemptAt } } : {}),
     ...(memory.event ? { event: mcpEvent(memory.event) } : {}),
     scope: record.scope,
     type: memory.type,
@@ -431,6 +434,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         tags: z.array(z.string()).optional(),
         metadata: z.record(z.unknown()).optional(),
         event_annotation: eventAnnotationSchema.optional(),
+        idempotency_key: z.string().optional(),
       },
     },
     async (args, extra) => {
@@ -445,6 +449,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         const project = (result: CaptureResult) => ({
           id: result.memory.id, scope: ref.kind === 'org' ? 'org' : `${ref.kind}:${ref.name}`,
           expires_at: result.memory.expiresAt, embedded: result.embedded, related: result.related, extraction: result.extraction,
+          embedding_status: result.embeddingStatus,
           ...(result.memory.event ? { event: mcpEvent(result.memory.event) } : {}),
         });
         const result = await captureMemory(
@@ -463,7 +468,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
             eventAnnotation: args.event_annotation,
           },
           { transport: 'mcp' },
-          { relationThreshold, readBudgetBytes: deps.readBudgetBytes,
+          { relationThreshold, readBudgetBytes: deps.readBudgetBytes, idempotencyKey: args.idempotency_key,
             validateResult: deps.readBudgetBytes === undefined ? undefined : value => {
               boundedJsonText({ jsonrpc:'2.0',id:extra.requestId,result:jsonResult(project(value)) },deps.readBudgetBytes!,false);
             } },
@@ -1011,6 +1016,7 @@ async function main(): Promise<void> {
   await requireExtractionReady(pool, schemaOptions);
   await requireEventTimeReady(pool, schemaOptions);
   await requireConnectorEvidenceReady(pool, schemaOptions);
+  await requireEmbeddingQueueReady(pool, schemaOptions);
   const authMode = authModeFromEnv();
   warnOnDevAuthMode(authMode);
   const authenticator = createAuthenticator(

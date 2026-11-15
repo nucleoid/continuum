@@ -814,9 +814,19 @@ async function scrubPromotionScope(client: pg.PoolClient, actorId: string, princ
         'SELECT continuum_operator_scrub_connector_scope($1,$2,$3,$4) AS privacy',
         [actorId, principalId, scopeId, Math.min(batchSize, 1_000)])).rows[0].privacy;
     }
-    return { complete: outbox.complete && activity.complete && evidence.complete && extraction.complete && connector.complete,
-      processed: outbox.processed + activity.processed + evidence.processed + extraction.processed + connector.processed,
-      batch_full: outbox.batch_full || activity.batch_full || evidence.batch_full || extraction.batch_full || connector.batch_full };
+    const embeddingSchema = await client.query<{ installed: boolean; available: boolean }>(
+      `SELECT pg_catalog.to_regclass('embedding_jobs') IS NOT NULL AS installed,
+        pg_catalog.to_regprocedure('continuum_operator_scrub_embedding_scope(uuid,uuid,uuid,integer)') IS NOT NULL AS available`);
+    let embedding = { complete: true, processed: 0, batch_full: false };
+    if (embeddingSchema.rows[0]?.installed) {
+      if (!embeddingSchema.rows[0].available) throw new ServiceError('DEPENDENCY_UNAVAILABLE', 'Embedding privacy migration is required');
+      embedding = (await client.query<{ privacy: typeof embedding }>(
+        'SELECT continuum_operator_scrub_embedding_scope($1,$2,$3,$4) AS privacy',
+        [actorId, principalId, scopeId, Math.min(batchSize, 1_000)])).rows[0].privacy;
+    }
+    return { complete: outbox.complete && activity.complete && evidence.complete && extraction.complete && connector.complete && embedding.complete,
+      processed: outbox.processed + activity.processed + evidence.processed + extraction.processed + connector.processed + embedding.processed,
+      batch_full: outbox.batch_full || activity.batch_full || evidence.batch_full || extraction.batch_full || connector.batch_full || embedding.batch_full };
 }
 
 const PRESERVED_AUDIT_OPERATIONS = [

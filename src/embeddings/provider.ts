@@ -1,7 +1,11 @@
 import { runBudgetedStage, type Budget, type BudgetAdapter } from '../pipeline/budget.js';
+import type { EmbeddingTarget } from './target.js';
+import { embeddingRetryAfterMs } from './failure-policy.js';
 
 export interface EmbeddingCallOptions { signal?: AbortSignal; budget?: Budget; onWork?: (settlement: Promise<unknown>) => void; }
 export interface EmbeddingProvider {
+  /** Explicit immutable vector-space and credential-free endpoint identity. */
+  readonly target?: EmbeddingTarget;
   /** Explicit opt-in adapter for complete request accounting. No built-in price/token guesses. */
   readonly pipelineAdapter?: BudgetAdapter<string[], number[][]>;
   readonly id: string;
@@ -51,15 +55,20 @@ export type EmbeddingProviderErrorCode =
 export class EmbeddingProviderError extends Error {
   readonly failureScope = 'provider';
   readonly diagnostic: boolean | undefined;
+  readonly retryAfterMs: number | undefined;
+  readonly configuration: boolean | undefined;
 
   constructor(
     readonly code: EmbeddingProviderErrorCode,
     message: string,
-    options: { cause?: unknown; diagnostic?: boolean } = {},
+    options: { cause?: unknown; diagnostic?: boolean; retryAfterMs?: number; configuration?: boolean } = {},
   ) {
     super(message, options);
     this.name = 'EmbeddingProviderError';
     this.diagnostic = options.diagnostic;
+    this.configuration = options.configuration;
+    this.retryAfterMs = Number.isSafeInteger(options.retryAfterMs) && options.retryAfterMs! >= 0
+      ? Math.min(300_000, Math.max(1000, options.retryAfterMs!)) : undefined;
   }
 }
 
@@ -232,6 +241,8 @@ export async function embeddingProviderHttpError(
     code,
     `Embedding provider request failed with status ${status}`,
     {
+      retryAfterMs: embeddingRetryAfterMs(response.headers.get('retry-after'), Date.now()),
+      configuration: isExplicitProviderFailure(body),
       diagnostic: status >= 500
         || (ITEM_HTTP_STATUSES.has(status) && !isExplicitProviderFailure(body)),
     },

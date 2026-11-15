@@ -37,8 +37,11 @@ export class ApiClient {
     this.maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
   }
 
-  async json(method: string, path: string, body?: unknown): Promise<any> {
-    const text = await this.request(method, path, body);
+  async json(method: string, path: string, body?: unknown, idempotencyKey?: string): Promise<any> {
+    if (idempotencyKey !== undefined && !/^[\x21-\x7e]{1,128}$/.test(idempotencyKey)) {
+      throw new CliError('Idempotency key must contain 1 to 128 visible ASCII characters', 2);
+    }
+    const text = await this.request(method, path, body, idempotencyKey);
     try { return JSON.parse(text); } catch { throw new CliError('Server returned invalid JSON', 5); }
   }
 
@@ -46,7 +49,7 @@ export class ApiClient {
     return this.request(method, path);
   }
 
-  private async request(method: string, path: string, body?: unknown): Promise<string> {
+  private async request(method: string, path: string, body?: unknown, idempotencyKey?: string): Promise<string> {
     const serialized = body === undefined ? undefined : JSON.stringify(body);
     if (serialized !== undefined && Buffer.byteLength(serialized) > MAX_REQUEST_BYTES) {
       throw new CliError('Request body exceeds 1 MiB', 2);
@@ -68,6 +71,7 @@ export class ApiClient {
           headers: {
             authorization: `Bearer ${this.options.token}`,
             accept: 'application/json, text/markdown',
+            ...(idempotencyKey === undefined ? {} : { 'Idempotency-Key': idempotencyKey }),
             ...(serialized === undefined ? {} : { 'content-type': 'application/json' }),
           },
           ...(serialized === undefined ? {} : { body: serialized }),

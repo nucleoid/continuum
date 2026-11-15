@@ -38,10 +38,12 @@ export interface EmbeddingJobHydration {
 export type EmbeddingAttemptFailure = EmbeddingFailure | { code: 'EMBEDDING_STORAGE' | 'EMBEDDING_BUDGET'
   | 'EMBEDDING_POLICY' | 'EMBEDDING_CANCELLED'; action: 'retry' };
 
-/** Planned narrow bound-LOGIN SQL capability port. None of these methods is an
+/** Narrow bound-LOGIN SQL capability port. None of these methods is an
  * authenticated service API. Implementations must release DB clients before
  * provider work, use fresh DB time, and perform current gates in SQL. */
 export interface EmbeddingJobStore {
+  /** Local metadata-only accounting debt still blocks truthful clean shutdown. */
+  unsettledAccounting?(): boolean;
   claim(target: EmbeddingTarget, policy: EmbeddingPolicyIdentity, owner: string, batchSize: number, profile: Readonly<BudgetProfile>): Promise<EmbeddingJobClaim | null>;
   hydrate(claim: EmbeddingJobClaim, maxBytes: number): Promise<EmbeddingJobHydration>;
   renew(claim: EmbeddingJobClaim): Promise<boolean>;

@@ -8,6 +8,8 @@ import { createScope } from '../storage/scopes.js';
 import { makeTestPool, resetData } from '../storage/test-helpers.js';
 import { decisionHistoryForPrincipal, supersedeForPrincipal } from './supersede.js';
 import { StubEmbeddingProvider } from '../embeddings/stub.js';
+import { registerEmbeddingTargetForTest, withSyntheticTargetForTest } from '../embeddings/test-helpers.js';
+import type { EmbeddingProvider } from '../embeddings/provider.js';
 import { storeMemoryEmbedding } from '../storage/embeddings.js';
 import { EmbeddingRegistry, ScopeEmbeddingRouter } from '../embeddings/router.js';
 
@@ -15,6 +17,12 @@ describe('decision history service', () => {
   let pool: pg.Pool;
   let reader: Awaited<ReturnType<typeof createPrincipal>>;
   let author: Awaited<ReturnType<typeof createPrincipal>>;
+
+  async function approvedProvider<T extends EmbeddingProvider>(provider: T) {
+    const configured = withSyntheticTargetForTest(provider);
+    await registerEmbeddingTargetForTest(pool, configured);
+    return configured;
+  }
 
   beforeEach(async () => {
     pool ??= await makeTestPool();
@@ -140,13 +148,14 @@ describe('decision history service', () => {
       scopeId: scope.id, scopeKind: scope.kind, type: 'decision', title: 'Original',
       body: 'Original body', authorId: author.id, source: 'manual',
     });
-    await storeMemoryEmbedding(pool, predecessor.id, 'original vector', new StubEmbeddingProvider());
+    expect(await storeMemoryEmbedding(pool, predecessor.id, `${predecessor.title}\n\n${predecessor.body}`,
+      await approvedProvider(new StubEmbeddingProvider()))).toBe(true);
     const provider = {
       id: 'failing-provider', dim: 768,
       async embed(): Promise<number[][]> { throw new Error('deterministic provider failure'); },
     };
 
-    const result = await supersedeForPrincipal(pool, provider, author, {
+    const result = await supersedeForPrincipal(pool, await approvedProvider(provider), author, {
       supersededId: predecessor.id, title: 'Replacement', body: 'Replacement body',
     });
 
@@ -191,7 +200,7 @@ describe('decision history service', () => {
         return [Array(768).fill(0) as number[]];
       },
     };
-    const pending = supersedeForPrincipal(pool, provider, author, {
+    const pending = supersedeForPrincipal(pool, await approvedProvider(provider), author, {
       supersededId: predecessor.id, title: 'Archived successor', body: 'No vector should survive',
     });
     await embedStarted;
@@ -236,7 +245,7 @@ describe('decision history service', () => {
       query: pool.query.bind(pool),
     } as unknown as pg.Pool;
 
-    const result = await supersedeForPrincipal(postCommitUnavailable, provider, author, {
+    const result = await supersedeForPrincipal(postCommitUnavailable, await approvedProvider(provider), author, {
       supersededId: predecessor.id, title: 'Replacement', body: 'Replacement body',
     });
 
@@ -266,7 +275,7 @@ describe('decision history service', () => {
       },
     } as unknown as pg.Pool;
 
-    const result = await supersedeForPrincipal(auditUnavailable, provider, author, {
+    const result = await supersedeForPrincipal(auditUnavailable, await approvedProvider(provider), author, {
       supersededId: predecessor.id, title: 'Replacement', body: 'Replacement body',
     });
 
@@ -304,7 +313,7 @@ describe('decision history service', () => {
 
     const result = await supersedeForPrincipal(
       auditUnavailable,
-      new StubEmbeddingProvider(),
+      await approvedProvider(new StubEmbeddingProvider()),
       author,
       { supersededId: predecessor.id, title: 'Replacement', body: 'Replacement body' },
     );

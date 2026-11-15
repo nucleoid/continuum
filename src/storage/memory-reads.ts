@@ -5,8 +5,9 @@ import { ServiceError } from '../services/errors.js';
 import { BudgetError, type Budget } from '../pipeline/budget.js';
 import type { EventWindow } from '../temporal/model.js';
 import { eventPredicate } from './temporal.js';
+import type { EmbeddingInspection } from './embedding-jobs.js';
 
-export interface MemoryReadRecord { memory: Memory; scope: string; authorDisplayName: string; }
+export interface MemoryReadRecord { memory: Memory; scope: string; authorDisplayName: string; embedding?: EmbeddingInspection; }
 export interface ListMemoryFilter { scope?: string; type?: MemoryType; state: MemoryState; limit: number; offset: number; eventFilter?: EventWindow; }
 interface MemoryReadRow extends Record<string, unknown> { scope_label: string; author_display_name: string; }
 function rowToMemoryReadRecord(row: MemoryReadRow): MemoryReadRecord {

@@ -121,6 +121,9 @@ export async function resetData(pool: pg.Pool): Promise<void> {
   try {
     await pool.query(`
       TRUNCATE TABLE
+        embedding_recoveries,embedding_transition_receipts,embedding_completions,embedding_cohort_scopes,embedding_cohort_jobs,embedding_cohorts,
+        embedding_worker_bindings,embedding_dispatch_windows,embedding_provider_control,embedding_capture_receipts,embedding_jobs,
+        embedding_source_scopes,embedding_sources,embedding_scope_admission,embedding_receipt_admission,embedding_targets,embedding_policy,embedding_vector_spaces,
         coordination_operation_receipts,
         coordination_operator_events,
         coordination_scope_privacy_progress,
@@ -180,6 +183,7 @@ export async function resetData(pool: pg.Pool): Promise<void> {
   }
 
   await pool.query("UPDATE promotion_webhook_registry SET webhook_ids='{}'::text[] WHERE singleton");
+  await pool.query('UPDATE embedding_admission SET active=0 WHERE singleton');
 
   // All business rows are gone, so no prior repair cursor or pending phase
   // belongs to the next test. These are the completed states for empty data.

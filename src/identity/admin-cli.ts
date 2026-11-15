@@ -8,6 +8,7 @@ import {
 import type { MembershipRole } from '../types.js';
 import { cliFailure } from './cli-errors.js';
 import { ServiceError } from '../services/errors.js';
+import { runEmbeddingAdmin } from '../cli/embedding-admin.js';
 import {
   listCoordinationPrivacyRepairPage, listIncompleteOffboardingRuns, mapOwnedUserScope,
   offboardPrincipal, repairCoordinationPrivacy,
@@ -21,7 +22,9 @@ async function main(): Promise<void> {
   try {
     const actor = await getPrincipalByExternalId(pool, actorExternalId);
     if (!actor) throw new Error('admin actor is unknown');
-    if (operation === 'bind-group') {
+    if (operation?.startsWith('embedding-')) {
+      process.stdout.write(`${JSON.stringify({ operation, result: await runEmbeddingAdmin(pool, actor, operation, args) })}\n`);
+    } else if (operation === 'bind-group') {
       const [groupId, scopeId, bindingRole, displayName] = args;
       if (!groupId || !scopeId || !bindingRole) {
         throw new Error('usage: bind-group <group-id> <scope-id> <reader|writer|admin> [display-name]');

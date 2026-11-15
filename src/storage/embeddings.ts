@@ -5,6 +5,37 @@ import type { Queryable } from './queryable.js';
 import { assertEmbeddingVectorDimension } from './schema.js';
 import type { EventWindow } from '../temporal/model.js';
 import { eventPredicate } from './temporal.js';
+import { createHash } from 'node:crypto';
+import type { EmbeddingTarget } from '../embeddings/target.js';
+
+export interface MemoryEmbeddingAdmission {
+  memoryId: string;
+  generation: string;
+  inputHash: string;
+  target: EmbeddingTarget;
+  policyGeneration: string;
+  policyDigest: string;
+}
+/** Metadata admission before hydration/provider I/O. Never refresh this identity
+ * after a provider response, even when the source appears live again. */
+export async function admitMemoryEmbedding(pool: Queryable, memoryId: string,
+  provider: Pick<EmbeddingProvider, 'id' | 'dim' | 'target'>): Promise<MemoryEmbeddingAdmission | null> {
+  if (!provider.target || provider.target.space.provider !== provider.id || provider.target.space.dim !== provider.dim) {
+    throw new Error('Embedding vector-space descriptor is unavailable');
+  }
+  return (await pool.query<{ admission: MemoryEmbeddingAdmission | null }>(
+    'SELECT continuum_embedding_admit_vector($1,$2) AS admission', [memoryId, provider.target],
+  )).rows[0].admission;
+}
+export function embeddingInputMatches(admission: MemoryEmbeddingAdmission, text: string): boolean {
+  return createHash('sha256').update(text).digest('hex') === admission.inputHash;
+}
+export async function embeddingTargetIsCurrent(pool: Queryable,
+  provider: Pick<EmbeddingProvider, 'id' | 'dim' | 'target'>, scopeIds: string[]): Promise<boolean> {
+  if (!provider.target || provider.target.space.provider !== provider.id || provider.target.space.dim !== provider.dim) return false;
+  return (await pool.query<{ current: boolean }>('SELECT continuum_embedding_target_is_current($1,$2) AS current',
+    [provider.target, scopeIds])).rows[0].current === true;
+}
 
 function toPgVector(v: number[]): string {
   return `[${v.join(',')}]`;
@@ -35,8 +66,10 @@ export async function storeMemoryEmbedding(
   text: string,
   provider: EmbeddingProvider,
 ): Promise<boolean> {
+  const admission = await admitMemoryEmbedding(pool, memoryId, provider);
+  if (!admission || !embeddingInputMatches(admission, text)) return false;
   const [vector] = await provider.embed([text]);
-  return storeMemoryEmbeddingVector(pool, memoryId, vector, provider);
+  return storeMemoryEmbeddingVector(pool, memoryId, vector, provider, admission);
 }
 
 export async function storeMemoryEmbeddingVector(
@@ -44,32 +77,20 @@ export async function storeMemoryEmbeddingVector(
   memoryId: string,
   vector: number[],
   provider: Pick<EmbeddingProvider, 'id' | 'dim'>,
+  admission: MemoryEmbeddingAdmission,
 ): Promise<boolean> {
   assertEmbeddingVectorDimension(vector, provider);
-  const { vectorType } = await vectorSqlNames(pool);
-  const result = await pool.query(
-    `WITH locked_memory AS MATERIALIZED (
-       SELECT m.id,m.state,m.expires_at FROM memories m WHERE m.id=$1::uuid FOR UPDATE OF m
-     )
-     INSERT INTO memory_embeddings (memory_id, provider, dim, embedding)
-     SELECT m.id, $2::text, $3::integer, $4::${vectorType}
-       FROM locked_memory m
-      WHERE m.state = 'live'
-        AND (m.expires_at IS NULL OR m.expires_at > pg_catalog.clock_timestamp())
-     ON CONFLICT (memory_id, provider, dim) DO UPDATE
-       SET embedding = EXCLUDED.embedding,
-           embedded_at = pg_catalog.clock_timestamp()
-     RETURNING memory_id`,
-    [memoryId, provider.id, provider.dim, toPgVector(vector)],
-  );
-  return (result.rowCount ?? result.rows.length) > 0;
+  if (!admission || admission.memoryId !== memoryId || admission.target.space.provider !== provider.id
+    || admission.target.space.dim !== provider.dim) throw new TypeError('Original embedding source admission is required');
+  return (await pool.query<{ stored: boolean }>('SELECT continuum_embedding_apply_vector($1,$2,$3) AS stored',
+    [memoryId, toPgVector(vector), admission])).rows[0].stored;
 }
 
 export async function vectorSearchMemoryIds(
   pool: Queryable,
   queryVector: number[],
   scopeIds: string[],
-  provider: Pick<EmbeddingProvider, 'id' | 'dim'>,
+  provider: Pick<EmbeddingProvider, 'id' | 'dim' | 'target'>,
   limit: number,
   types?: MemoryType[],
   eventFilter?: EventWindow,
@@ -78,6 +99,7 @@ export async function vectorSearchMemoryIds(
 ): Promise<Array<{ id: string; distance: number }>> {
   if (scopeIds.length === 0) return [];
   assertEmbeddingVectorDimension(queryVector, provider);
+  if (!await embeddingTargetIsCurrent(pool, provider, scopeIds)) return [];
   const params: unknown[] = [
     toPgVector(queryVector),
     scopeIds,
@@ -99,6 +121,7 @@ export async function vectorSearchMemoryIds(
          FROM memory_embeddings e
          JOIN memories m ON m.id = e.memory_id
         WHERE e.provider = $3 AND e.dim = $4
+          AND continuum_embedding_vector_is_current(m.id,e.provider,e.dim)
           AND m.scope_id = ANY($2::uuid[])
           AND m.state = 'live'
           AND (m.expires_at IS NULL OR m.expires_at > pg_catalog.clock_timestamp())
@@ -126,17 +149,18 @@ export async function vectorSearchRelatedMemories(
   pool: Queryable,
   queryVector: number[],
   scopeIds: string[],
-  provider: Pick<EmbeddingProvider, 'id' | 'dim'>,
+  provider: Pick<EmbeddingProvider, 'id' | 'dim' | 'target'>,
   options: { threshold: number; excludeMemoryId: string; limit: number; readBudgetBytes?: number },
 ): Promise<RelatedMemorySearchHit[]> {
   if (scopeIds.length === 0) return [];
   assertEmbeddingVectorDimension(queryVector, provider);
+  if (!await embeddingTargetIsCurrent(pool, provider, scopeIds)) return [];
   const { distanceOperator, vectorType } = await vectorSqlNames(pool);
   if (options.readBudgetBytes !== undefined) {
     const metadataSql = `WITH provider_embeddings AS MATERIALIZED (
        SELECT m.id AS memory_id, e.embedding FROM memory_embeddings e
          JOIN memories m ON m.id=e.memory_id
-        WHERE e.provider=$3 AND e.dim=$4 AND m.scope_id=ANY($2::uuid[])
+        WHERE e.provider=$3 AND e.dim=$4 AND continuum_embedding_vector_is_current(m.id,e.provider,e.dim) AND m.scope_id=ANY($2::uuid[])
           AND m.state='live' AND (m.expires_at IS NULL OR m.expires_at>pg_catalog.clock_timestamp())
           AND m.id<>$5::uuid
      ), ranked AS MATERIALIZED (
@@ -162,6 +186,7 @@ export async function vectorSearchRelatedMemories(
          FROM memory_embeddings e
          JOIN memories m ON m.id = e.memory_id
         WHERE e.provider = $3 AND e.dim = $4
+          AND continuum_embedding_vector_is_current(m.id,e.provider,e.dim)
           AND m.scope_id = ANY($2::uuid[])
           AND m.state = 'live'
           AND (m.expires_at IS NULL OR m.expires_at > pg_catalog.clock_timestamp())

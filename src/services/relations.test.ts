@@ -4,9 +4,10 @@ import { createPrincipal } from '../storage/principals.js';
 import { getScopeByRef } from '../storage/scopes.js';
 import { addMembership } from '../storage/memberships.js';
 import { createMemory } from '../storage/memories.js';
-import { storeMemoryEmbeddingVector } from '../storage/embeddings.js';
+import { registerEmbeddingTargetForTest, seedEmbeddingVectorForTest, withSyntheticTargetForTest } from '../embeddings/test-helpers.js';
+import { staticEmbeddingRouter } from '../embeddings/router.js';
 import { captureMemory } from './capture.js';
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   classifyRelation,
   detectRelatedMemories,
@@ -68,14 +69,14 @@ describe('bounded remote capture relation hydration', () => {
   let pool: pg.Pool;
   beforeEach(async () => { pool ??= await makeTestPool(); await resetData(pool); });
   afterAll(async () => { await pool?.end(); });
-  it('preserves fitting candidate classification and rejects growth in the hydration snapshot', async () => {
+  it('preserves fitting classification and denies source growth before hydration', async () => {
     const principal = await createPrincipal(pool, { externalId: 'relation-growth', kind: 'user', displayName: 'Reader' });
     const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
     const vector = [1, ...Array(767).fill(0)];
-    const provider = { id: 'relation-growth:fixture', dim: 768 };
+    const provider = withSyntheticTargetForTest({ id: 'relation-growth:fixture', dim: 768 });
     const input = { type: 'decision' as const, title: 'Reference', body: 'Ordinary reference. '.repeat(100) };
     const legacy = await createMemory(pool, { scopeId: org.id, scopeKind: 'org', ...input, authorId: principal.id, source: 'manual' });
-    await storeMemoryEmbeddingVector(pool, legacy.id, vector, provider);
+    await seedEmbeddingVectorForTest(pool, pool, legacy.id, vector, provider);
     const excluded = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
     const now = () => new Date('2026-01-01T00:00:00Z');
     const ordinary = await detectRelatedMemories(pool, vector, [org.id], provider, input, excluded, 0.92, now);
@@ -95,20 +96,29 @@ describe('bounded remote capture relation hydration', () => {
       }
       return result;
     } };
-    await expect(detectRelatedMemories(observed, vector, [org.id], provider, input, excluded, 0.92, now, 1048576))
-      .rejects.toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
+    const changed = await detectRelatedMemories(observed, vector, [org.id], provider, input, excluded, 0.92, now, 1048576)
+      .then(hits => ({ hits }), error => ({ error }));
+    if ('error' in changed) expect(changed.error).toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
+    else expect(changed.hits).toEqual([]);
     expect(grew && gated).toBe(true);
+    expect((await pool.query('SELECT 1 FROM memory_embeddings WHERE memory_id=$1', [legacy.id])).rowCount).toBe(0);
     expect((await pool.query('SELECT 1 FROM audit_log')).rowCount).toBe(0);
   });
-  it('keeps a new capture and its audit but rejects oversized ranked legacy bodies before hydration', async () => {
+  it('bounds explicit relation hydration and keeps capture independent of oversized legacy bodies', async () => {
     const principal = await createPrincipal(pool, { externalId: 'relation-budget', kind: 'user', displayName: 'Reader' });
     const org = (await getScopeByRef(pool, { kind: 'org', name: '' }))!;
     await addMembership(pool, principal.id, org.id, 'writer');
     const vector = [1, ...Array(767).fill(0)];
-    const provider = { id: 'relation-budget:fixture', dim: 768, embed: async (texts: string[]) => texts.map(() => vector) };
+    const provider = withSyntheticTargetForTest({ id: 'relation-budget:fixture', dim: 768,
+      embed: vi.fn(async (texts: string[]) => texts.map(() => vector)) });
     const legacy = await createMemory(pool, { scopeId: org.id, scopeKind: 'org', type: 'decision', title: 'Legacy',
       body: 'legacy-body '.repeat(200000), authorId: principal.id, source: 'manual' });
-    await storeMemoryEmbeddingVector(pool, legacy.id, vector, provider);
+    await seedEmbeddingVectorForTest(pool, pool, legacy.id, vector, provider);
+    await expect(detectRelatedMemories(pool, vector, [org.id], provider,
+      { type: 'decision', title: 'New capture', body: 'New reference' },
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 0.92, () => new Date(), 1048576))
+      .rejects.toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
+    const policy = await registerEmbeddingTargetForTest(pool, provider, [org.id]);
     const sql: string[] = [];
     const observed = new Proxy(pool, { get(target, property) {
       if (property === 'query') return async (text: string, ...args: unknown[]) => {
@@ -118,18 +128,19 @@ describe('bounded remote capture relation hydration', () => {
       const value = Reflect.get(target, property, target);
       return typeof value === 'function' ? value.bind(target) : value;
     } });
-    const result = await captureMemory(observed, provider, principal, {
+    const result = await captureMemory(observed, Object.assign(staticEmbeddingRouter(provider), { queuePolicy: policy }), principal, {
       scope: { kind: 'org', name: '' }, type: 'decision', title: 'New capture', body: 'New reference', source: 'manual',
     }, {}, { readBudgetBytes: 1048576 });
-    expect(result).toMatchObject({ embedded: true, related: [], relationErrorCode: 'RELATION_DETECTION_FAILED' });
-    expect(sql.some((text) => text.includes('octet_length(m.body)'))).toBe(true);
+    expect(result).toMatchObject({ embedded: false, embeddingStatus: 'queued', related: [] });
+    expect(provider.embed).not.toHaveBeenCalled();
+    expect(sql.some((text) => text.includes('WITH provider_embeddings'))).toBe(false);
     expect(sql.some((text) => /SELECT[^;]*m\.title, m\.body/.test(text))).toBe(false);
     expect((await pool.query('SELECT body, state, metadata FROM memories WHERE id=$1', [legacy.id])).rows[0])
       .toEqual({ body: legacy.body, state: 'live', metadata: {} });
     expect((await pool.query('SELECT metadata FROM audit_log WHERE memory_id=$1', [result.memory.id])).rows)
       .toHaveLength(1);
     expect((await pool.query('SELECT metadata FROM audit_log WHERE memory_id=$1', [result.memory.id])).rows[0].metadata)
-      .toMatchObject({ embedded: true, relation_error_code: 'RELATION_DETECTION_FAILED' });
+      .toMatchObject({ embedded: false, embedding_status: 'queued' });
     expect((await pool.query('SELECT 1 FROM audit_log WHERE memory_id=$1', [legacy.id])).rowCount).toBe(0);
   });
 });

@@ -9,6 +9,7 @@ import { addMembership } from '../../storage/memberships.js';
 import { createMemory } from '../../storage/memories.js';
 import { StubEmbeddingProvider } from '../../embeddings/stub.js';
 import { storeMemoryEmbedding } from '../../storage/embeddings.js';
+import { registerEmbeddingTargetForTest } from '../../embeddings/test-helpers.js';
 
 describe('decision supersession REST API', () => {
   let pool: pg.Pool;
@@ -139,7 +140,8 @@ describe('decision supersession REST API', () => {
 
   it('removes the archived embedding and embeds the new head after commit', async () => {
     const provider = new StubEmbeddingProvider();
-    await storeMemoryEmbedding(pool, decisionId, 'old embedding', provider);
+    await registerEmbeddingTargetForTest(pool, provider, [scopeId]);
+    expect(await storeMemoryEmbedding(pool, decisionId, 'Use REST\n\nOriginal decision body', provider)).toBe(true);
     const response = await request(createApp(pool, { embeddingProvider: provider }))
       .post('/api/v0/supersede').set('Authorization', `Bearer ${token}`)
       .send({ supersededId: decisionId, title: 'Embedded head', body: 'New embedding body' });

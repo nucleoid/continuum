@@ -120,7 +120,13 @@ SELECT set_config('continuum.operator_grant_target', :'continuum_operator_role',
 DO $provider_profile$
 DECLARE schema_name TEXT := current_setting('continuum.operator_grant_schema');
         target_role NAME := current_setting('continuum.operator_grant_target')::name;
+        signature TEXT;
 BEGIN
+  IF to_regclass(format('%I.embedding_jobs',schema_name)) IS NOT NULL THEN
+    FOR signature IN EXECUTE format('SELECT unnest(%I.continuum_embedding_app_signatures() || %I.continuum_embedding_operator_signatures())',schema_name,schema_name) LOOP
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.%s TO %I',schema_name,signature,target_role);
+    END LOOP;
+  END IF;
   IF to_regclass(format('%I.extraction_profiles',schema_name)) IS NOT NULL THEN
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_operator_install_extractor(UUID,JSONB,BOOLEAN),%I.continuum_operator_bind_extraction_worker(UUID,NAME,UUID,UUID,TEXT,BOOLEAN),%I.continuum_operator_scrub_extraction_scope(UUID,UUID,UUID,INTEGER) TO %I',schema_name,schema_name,schema_name,target_role);
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.continuum_operator_recover_extraction(UUID,UUID,UUID,TEXT) TO %I',schema_name,target_role);

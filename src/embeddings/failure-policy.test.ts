@@ -16,6 +16,12 @@ describe('embedding failure policy', () => {
     expect(classifyEmbeddingFailure(new EmbeddingProviderError('EMBEDDING_AUTH', 'secret')).action).toBe('park_provider');
     expect(classifyEmbeddingFailure(new EmbeddingProviderError('EMBEDDING_INVALID_RESPONSE', 'secret')).action).toBe('retry');
   });
+  it('parks explicit configuration failure without retaining response text', async () => {
+    const error = await embeddingProviderHttpError(new Response(JSON.stringify({ error: { code:'invalid_model', message:'private model details' } }),
+      { status:400, headers:{'retry-after':'2'} }), 'openai');
+    expect(classifyEmbeddingFailure(error)).toEqual({ code:'EMBEDDING_FAILED', action:'park_provider', retryAfterMs:2000 });
+    expect(JSON.stringify(classifyEmbeddingFailure(error))).not.toContain('private');
+  });
   it('parses numeric/date Retry-After and bounds invalid/extreme/past values', () => {
     const now = Date.parse('2026-11-15T00:00:00Z');
     expect(embeddingRetryAfterMs('2', now)).toBe(2000);

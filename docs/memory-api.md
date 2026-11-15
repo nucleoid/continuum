@@ -106,3 +106,5 @@ database availability or required audit success. See
 [embedding-backfill.md](./embedding-backfill.md) for provider configuration and
 bounded maintenance. Point fetch and browse do not call an embedding provider
 or return this recall diagnostic object.
+
+Capture adds REST `embeddingStatus` and MCP `embedding_status` without provider I/O on acknowledgement. Initial `related` is empty; `embedded` indicates an exact current vector. Single-memory fetch adds bounded embedding attempts/timestamps after current read authorization; browse/recall expose no queue internals. Optional normalized cross-transport capture replay uses a retained key and current read/source checks. See [deferred embeddings](embedding-queue.md).
