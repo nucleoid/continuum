@@ -19,4 +19,13 @@ describe('connector durable admission', () => {
     expect(result.rows[0].value).toBeNull();
     expect((await pool.query('SELECT continuum_connector_is_ready() AS ready')).rows[0].ready).toBe(true);
   });
+  it('refuses readiness when a guarded definer loses its trusted search path', async () => {
+    const client=await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('ALTER FUNCTION continuum_connector_mapping(uuid,uuid) RESET search_path');
+      expect((await client.query('SELECT continuum_connector_is_ready() AS ready')).rows[0].ready).toBe(false);
+    } finally {await client.query('ROLLBACK');client.release();}
+    expect((await pool.query('SELECT continuum_connector_is_ready() AS ready')).rows[0].ready).toBe(true);
+  });
 });
