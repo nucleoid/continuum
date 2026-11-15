@@ -143,13 +143,14 @@ describe('offboarding and erasure', () => {
 
   it('accepts only the exact canonical audit marker without retaining extra fields', async () => {
     const marker={redacted:'principal_offboarding'};
-    const values=[marker,{...marker,secret:'private'},null,{},['private'],
-      {operation:'api_key_issued',key_id:'synthetic-key',service_principal_id:'synthetic-principal',secret:'private'}];
-    for(const value of values) {
-      const result=(await pool.query(`SELECT continuum_offboarding_expected_audit_metadata($1::jsonb) AS current,
-        continuum_offboarding_expected_audit_metadata_pre_connector($1::jsonb) AS original`,[JSON.stringify(value)])).rows[0];
-      expect(result.current).toEqual(result.original);
-      expect(JSON.stringify(result.current)).not.toContain('private');
+    const key={operation:'api_key_issued',key_id:'synthetic-key',service_principal_id:'synthetic-principal'};
+    const cases=[[marker,marker],[{...marker,secret:'private'},marker],[null,marker],[{},marker],[['private'],marker],
+      [{...key,secret:'private'},key]];
+    for(const [value,expected] of cases) {
+      const result=(await pool.query('SELECT continuum_offboarding_expected_audit_metadata($1::jsonb) AS value',
+        [JSON.stringify(value)])).rows[0].value;
+      expect(result).toEqual(expected);
+      expect(JSON.stringify(result)).not.toContain('private');
     }
     expect((await pool.query('SELECT continuum_offboarding_expected_audit_metadata($1::jsonb) AS value',
       [JSON.stringify({...marker,secret:'private'})])).rows[0].value).toEqual(marker);

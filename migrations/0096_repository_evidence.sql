@@ -232,14 +232,18 @@ BEGIN
     jsonb_build_object('operation','connector_privacy_scrub','processed',processed)); END IF;
   RETURN jsonb_build_object('complete',clean,'processed',processed,'batch_full',NOT clean AND processed>=page_limit);
 END $$;
--- Completed canonical redactions need no repeated execution of the original
--- multi-branch metadata policy. Exact equality rejects markers with extra data.
-ALTER FUNCTION continuum_offboarding_expected_audit_metadata(JSONB)
-  RENAME TO continuum_offboarding_expected_audit_metadata_pre_connector;
-CREATE FUNCTION continuum_offboarding_expected_audit_metadata(audit_metadata JSONB) RETURNS JSONB LANGUAGE sql IMMUTABLE AS $$
-  SELECT CASE WHEN audit_metadata='{"redacted":"principal_offboarding"}'::jsonb THEN audit_metadata
-    ELSE continuum_offboarding_expected_audit_metadata_pre_connector(audit_metadata) END;
-$$;
+-- Keep the original verifier and all of its properties in place. Exact empty
+-- or canonical metadata needs no repeated multi-branch policy evaluation.
+DO $$ DECLARE definition TEXT; anchor TEXT:='SELECT CASE';
+BEGIN
+  definition:=pg_get_functiondef('continuum_offboarding_expected_audit_metadata(jsonb)'::regprocedure);
+  IF length(definition)-length(replace(definition,anchor,''))<>length(anchor) THEN
+    RAISE EXCEPTION 'unable to extend canonical audit verification';
+  END IF;
+  EXECUTE replace(definition,anchor,$fast$SELECT CASE
+    WHEN audit_metadata IN ('{}'::jsonb,'{"redacted":"principal_offboarding"}'::jsonb)
+      THEN '{"redacted":"principal_offboarding"}'::jsonb$fast$);
+END $$;
 ALTER FUNCTION continuum_offboarding_lifecycle_state_is_erased(UUID) RENAME TO continuum_offboarding_lifecycle_state_is_erased_pre_connector;
 CREATE FUNCTION continuum_offboarding_lifecycle_state_is_erased(target_run UUID) RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER AS $$
   SELECT continuum_offboarding_lifecycle_state_is_erased_pre_connector(target_run) AND EXISTS(SELECT 1 FROM principal_offboarding_runs
@@ -253,7 +257,7 @@ CREATE FUNCTION continuum_connector_is_ready() RETURNS BOOLEAN LANGUAGE sql STAB
     AND NOT EXISTS(SELECT 1 FROM connector_contract_functions c LEFT JOIN pg_proc f ON f.oid=to_regprocedure(c.signature)
       WHERE f.oid IS NULL OR encode(sha256(convert_to(f.prosrc,'UTF8')),'hex')<>c.body_hash OR f.prosecdef<>c.definer OR f.provolatile<>c.volatility
       OR f.proowner<>(SELECT relowner FROM pg_class WHERE oid='memories'::regclass)
-      OR NOT(f.proconfig @> ARRAY[format('search_path=pg_catalog, %I, pg_temp',(SELECT n.nspname FROM pg_namespace n JOIN pg_class m ON m.relnamespace=n.oid WHERE m.oid='memories'::regclass))])
+      OR NOT COALESCE(f.proconfig @> ARRAY[format('search_path=pg_catalog, %I, pg_temp',(SELECT n.nspname FROM pg_namespace n JOIN pg_class m ON m.relnamespace=n.oid WHERE m.oid='memories'::regclass))],FALSE)
       OR EXISTS(SELECT 1 FROM aclexplode(COALESCE(f.proacl,acldefault('f',f.proowner))) acl WHERE acl.grantee=0 AND acl.privilege_type='EXECUTE'));
 $$;
 DO $$
@@ -269,7 +273,7 @@ BEGIN
     AND (proname LIKE 'continuum_connector_%' OR proname LIKE 'continuum_operator_connector_%'
       OR proname IN ('continuum_operator_scrub_connector_scope','continuum_evidence_eligible','continuum_evidence_eligible_pre_connector',
         'continuum_offboarding_lifecycle_state_is_erased','continuum_offboarding_lifecycle_state_is_erased_pre_connector',
-        'continuum_offboarding_expected_audit_metadata','continuum_offboarding_expected_audit_metadata_pre_connector')) LOOP
+        'continuum_offboarding_expected_audit_metadata')) LOOP
     EXECUTE format('ALTER FUNCTION %s SET search_path=pg_catalog,%I,pg_temp',f.signature,schema_name);
     EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC',f.signature);
   END LOOP;
@@ -306,4 +310,4 @@ INSERT INTO connector_contract_functions SELECT oid::regprocedure::text,encode(s
     AND (proname LIKE 'continuum_connector_%' OR proname LIKE 'continuum_operator_connector_%'
       OR proname IN ('continuum_operator_scrub_connector_scope','continuum_evidence_eligible','continuum_evidence_eligible_pre_connector',
         'continuum_offboarding_lifecycle_state_is_erased','continuum_offboarding_lifecycle_state_is_erased_pre_connector',
-        'continuum_offboarding_expected_audit_metadata','continuum_offboarding_expected_audit_metadata_pre_connector'));
+        'continuum_offboarding_expected_audit_metadata'));
