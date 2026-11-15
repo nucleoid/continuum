@@ -93,15 +93,25 @@ it('does not buy a second paid automatic attempt for identical failed inputs aft
     const calls = state.calls, ledger = await originalLedger(f, failed.id), charges = await paid(f);
     const frontier = async () => (await f.owner.query('SELECT continuum_brief_frontier($1) AS value', [f.projectId])).rows[0].value;
     const originalFrontier = await frontier();
-    await excludedOrgWrite(f);
-    expect(await frontier()).not.toEqual(originalFrontier); // Real coarse frontier moved.
     const inputsBeforeProbe = state.inputDigests.at(-1);
-    for (let poll = 0; poll < 3; poll++) await drive(f);
-    // Historical a6 re-enters the callback with the exact failed input digest.
-    // The fixed path may charge/cancel a finite metadata probe, never dispatch it.
-    expect(state.inputDigests.slice(calls).every(digest => digest === inputsBeforeProbe)).toBe(true);
-    expect(state.calls, 'excluded frontier changes must not buy replacement provider work').toBe(calls);
-    expect(await paid(f)).toEqual(charges);
+    for (let excludedWrite = 0; excludedWrite < 2; excludedWrite++) {
+      await excludedOrgWrite(f);
+      expect(await frontier()).not.toEqual(originalFrontier); // Actual coarse frontier moved.
+      for (let poll = 0; poll < 3; poll++) await drive(f);
+      // Historical a6 repeats the exact failed provider input. A duplicate
+      // metadata probe must itself remember that set without a paid receipt.
+      expect(state.inputDigests.slice(calls).every(digest => digest === inputsBeforeProbe)).toBe(true);
+      expect(state.calls, 'excluded frontier changes must not buy replacement provider work').toBe(calls);
+      expect(await paid(f)).toEqual(charges);
+    }
+    const automatic = (await f.owner.query(`SELECT j.id,j.state,j.inventory_done,w.cancelled,
+      (SELECT count(*)::int FROM brief_run_attempts WHERE run_id=j.id) AS attempts
+      FROM brief_runs j JOIN pipeline_budget_workflows w ON w.id=j.workflow_id
+      WHERE j.definition_id=$1 AND j.automatic`, [f.definitionId])).rows;
+    expect(automatic.length).toBeLessThanOrEqual(3); // Failed run plus at most one probe per new frontier.
+    for (const probe of automatic.filter(row => row.id !== failed.id)) {
+      expect(probe).toMatchObject({ state: 'unavailable', inventory_done: true, cancelled: true, attempts: 0 });
+    }
     expect(await originalLedger(f, failed.id)).toEqual(ledger); // No reset/refund/identity change.
     expect((await briefForPrincipal(f.app, actor, f.projectName)).blocks).toEqual(before.blocks);
   }, profile);
