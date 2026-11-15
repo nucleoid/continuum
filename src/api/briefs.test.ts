@@ -40,6 +40,10 @@ it('shares bounded current/history/full/delta/dry-run services with explicit RES
       expect((await request(app).get('/api/v0/briefs').query({ project: f.projectName }).set('Authorization',auth)).body.version).toBe(read.body.version);
       expect((await request(app).get('/api/v0/briefs').query({ project: f.projectName,sourceIds: 'forged' }).set('Authorization',auth)).status).toBe(400);
       expect((await request(app).get(`/api/v0/briefs/${f.definitionId}/versions`).query({ limit: 11 }).set('Authorization',auth)).status).toBe(400);
+      const absentHistory=await request(app).get(`/api/v0/briefs/${randomUUID()}/versions`).set('Authorization',auth);
+      const absentProject=await request(app).get('/api/v0/briefs').query({ project: `absent-${randomUUID()}` }).set('Authorization',auth);
+      expect(absentHistory.status).toBe(403);expect(absentProject.status).toBe(absentHistory.status);
+      expect(absentProject.body.code).toBe(absentHistory.body.code);
       expect((await request(app).post('/api/v0/briefs/refresh').set('Authorization',auth)
         .send({ project: f.projectName,mode: 'full',dryRun: false,idempotencyKey: 'bad',evidence: ['forged'] })).status).toBe(400);
     } finally { await client.close();await server.close(); }
